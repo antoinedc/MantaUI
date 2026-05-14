@@ -5,7 +5,7 @@ import {
   useState,
 } from "react";
 import { useStore, type WindowStatusUI } from "./store";
-import type { Project } from "../shared/types";
+import type { Project, WorktreeInfo } from "../shared/types";
 
 const COLLAPSE_KEY = "bui:collapsed-projects";
 
@@ -49,6 +49,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectCwd, setNewProjectCwd] = useState("~");
+  // When the user's cwd resolves to a git repo with >1 worktree, we pause
+  // creation and ask whether to fan out into one session per worktree.
+  const [detectedWorktrees, setDetectedWorktrees] = useState<WorktreeInfo[] | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const [newSessionFor, setNewSessionFor] = useState<string | null>(null);
   const [newSessionName, setNewSessionName] = useState("");
@@ -93,22 +97,86 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       return next;
     });
 
-  const createProject = async () => {
+  // Window name for a worktree: branch (stripped of refs/heads/), else dir basename.
+  const worktreeName = (w: WorktreeInfo): string =>
+    w.branch || w.path.split("/").filter(Boolean).pop() || "wt";
+
+  const resetNewProjectForm = () => {
+    setNewProjectName("");
+    setNewProjectCwd("~");
+    setNewProjectOpen(false);
+    setDetectedWorktrees(null);
+    setCreating(false);
+  };
+
+  // mode === "auto": probe for worktrees; if >1, switch to confirm UI and bail.
+  // mode === "all":  create one window per detected worktree.
+  // mode === "single": create one window at the user's typed cwd.
+  const createProject = async (mode: "auto" | "all" | "single" = "auto") => {
+    if (creating) return;
     const name = newProjectName.trim();
     if (!name) return;
+    const cwd = newProjectCwd.trim() || "~";
+
+    if (mode === "auto") {
+      setCreating(true);
+      try {
+        const wts = await window.api.gitListWorktrees(cwd);
+        if (wts.length > 1) {
+          setDetectedWorktrees(wts);
+          setCreating(false);
+          return;
+        }
+      } catch {
+        // probe failure (no git, network, etc.) → fall through to single
+      }
+      // <=1 worktree found, just create normally
+      try {
+        await window.api.tmuxNewSession({ name, cwd, windowName: "default" });
+        resetNewProjectForm();
+        await refresh();
+        setActive(name);
+      } catch (e) {
+        showError(e);
+        setCreating(false);
+      }
+      return;
+    }
+
+    setCreating(true);
     try {
-      await window.api.tmuxNewSession({
-        name,
-        cwd: newProjectCwd.trim() || "~",
-        windowName: "default",
-      });
-      setNewProjectName("");
-      setNewProjectCwd("~");
-      setNewProjectOpen(false);
+      if (mode === "all" && detectedWorktrees && detectedWorktrees.length > 1) {
+        // First worktree → tmux session's initial window. The rest are added
+        // as additional windows. Each window's cwd is the worktree's own path,
+        // not the user-typed cwd, so each one starts in its own checkout.
+        const [first, ...rest] = detectedWorktrees;
+        await window.api.tmuxNewSession({
+          name,
+          cwd: first.path,
+          windowName: worktreeName(first),
+        });
+        for (const w of rest) {
+          try {
+            await window.api.tmuxNewWindow({
+              sessionName: name,
+              windowName: worktreeName(w),
+              cwd: w.path,
+            });
+          } catch (e) {
+            // Surface but keep going — partial fan-out is better than aborting
+            // with the session already created.
+            showError(e);
+          }
+        }
+      } else {
+        await window.api.tmuxNewSession({ name, cwd, windowName: "default" });
+      }
+      resetNewProjectForm();
       await refresh();
       setActive(name);
     } catch (e) {
       showError(e);
+      setCreating(false);
     }
   };
 
@@ -237,35 +305,78 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             value={newProjectName}
             onChange={(e) => setNewProjectName(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") createProject();
-              else if (e.key === "Escape") setNewProjectOpen(false);
+              if (e.key === "Enter" && !detectedWorktrees) createProject("auto");
+              else if (e.key === "Escape") resetNewProjectForm();
             }}
-            className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded focus:outline-none focus:border-accent"
+            disabled={!!detectedWorktrees || creating}
+            className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded focus:outline-none focus:border-accent disabled:opacity-60"
           />
           <input
             placeholder="Default cwd (e.g. ~/code/foo)"
             value={newProjectCwd}
             onChange={(e) => setNewProjectCwd(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") createProject();
-              else if (e.key === "Escape") setNewProjectOpen(false);
+              if (e.key === "Enter" && !detectedWorktrees) createProject("auto");
+              else if (e.key === "Escape") resetNewProjectForm();
             }}
-            className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded focus:outline-none focus:border-accent"
+            disabled={!!detectedWorktrees || creating}
+            className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded focus:outline-none focus:border-accent disabled:opacity-60"
           />
-          <div className="flex gap-2">
-            <button
-              onClick={createProject}
-              className="text-xs px-2 py-1 bg-accent text-bg rounded hover:opacity-90"
-            >
-              Create
-            </button>
-            <button
-              onClick={() => setNewProjectOpen(false)}
-              className="text-xs px-2 py-1 text-text-muted hover:text-text"
-            >
-              Cancel
-            </button>
-          </div>
+          {detectedWorktrees ? (
+            <div className="space-y-2">
+              <div className="text-xs text-text-muted">
+                Detected {detectedWorktrees.length} git worktrees. Open a session for each?
+              </div>
+              <ul className="text-[11px] text-text-faint space-y-0.5 max-h-32 overflow-y-auto">
+                {detectedWorktrees.map((w) => (
+                  <li key={w.path} className="truncate">
+                    <span className="text-text-muted">{worktreeName(w)}</span>
+                    <span className="text-text-faint"> — {w.path}</span>
+                  </li>
+                ))}
+              </ul>
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  onClick={() => createProject("all")}
+                  disabled={creating}
+                  className="text-xs px-2 py-1 bg-accent text-bg rounded hover:opacity-90 disabled:opacity-50"
+                >
+                  Yes, one per worktree
+                </button>
+                <button
+                  onClick={() => createProject("single")}
+                  disabled={creating}
+                  className="text-xs px-2 py-1 border border-border text-text-muted hover:text-text rounded disabled:opacity-50"
+                >
+                  Just main
+                </button>
+                <button
+                  onClick={resetNewProjectForm}
+                  disabled={creating}
+                  className="text-xs px-2 py-1 text-text-muted hover:text-text"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <button
+                onClick={() => createProject("auto")}
+                disabled={creating}
+                className="text-xs px-2 py-1 bg-accent text-bg rounded hover:opacity-90 disabled:opacity-50"
+              >
+                {creating ? "Checking…" : "Create"}
+              </button>
+              <button
+                onClick={resetNewProjectForm}
+                disabled={creating}
+                className="text-xs px-2 py-1 text-text-muted hover:text-text"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
         </div>
       )}
 

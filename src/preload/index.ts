@@ -9,6 +9,7 @@ import {
   type TransportInfo,
   type TmuxConfigStatus,
   type WindowStatus,
+  type WorktreeInfo,
 } from "../shared/types.js";
 
 const api = {
@@ -39,6 +40,9 @@ const api = {
     ipcRenderer.invoke(IPC.tmuxKillWindow, input),
   tmuxSelectWindow: (input: { sessionName: string; windowIndex: number }): Promise<void> =>
     ipcRenderer.invoke(IPC.tmuxSelectWindow, input),
+
+  gitListWorktrees: (cwd: string): Promise<WorktreeInfo[]> =>
+    ipcRenderer.invoke(IPC.gitListWorktrees, cwd),
 
   tmuxConfigStatus: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxConfigStatus),
   tmuxSetupConfig: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxSetupConfig),

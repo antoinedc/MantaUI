@@ -56,6 +56,16 @@ export type TmuxConfigStatus = {
   backupExists: boolean; // ~/.tmux.conf.pre-bui exists (restore is possible)
 };
 
+// One entry per `git worktree list --porcelain` block, run from the user's
+// chosen project cwd. Empty array if the cwd isn't inside a git repo.
+export type WorktreeInfo = {
+  path: string;            // absolute path on the remote
+  head: string;            // commit sha
+  branch: string | null;   // short ref name (e.g. "main", "feature/foo"); null if detached/bare
+  bare: boolean;
+  detached: boolean;
+};
+
 // ----- IPC inputs -----
 
 export type SpawnOptions = {
@@ -95,6 +105,9 @@ export const IPC = {
   tmuxKillSession: "tmux:kill-session",
   tmuxKillWindow: "tmux:kill-window",
   tmuxSelectWindow: "tmux:select-window",
+
+  // Git: detect worktrees under a cwd (for auto-populating sessions on project create)
+  gitListWorktrees: "git:list-worktrees",
 
   // Remote tmux config management
   tmuxConfigStatus: "tmux:config-status",

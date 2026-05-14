@@ -13,6 +13,7 @@ import {
   type SpawnOptions,
   type TmuxSession,
   type TmuxWindow,
+  type WorktreeInfo,
 } from "../shared/types.js";
 import { info as transportInfo } from "./transport.js";
 
@@ -454,6 +455,51 @@ function scpUpload(
       else reject(new Error(`scp exited ${code}: ${stderr.trim() || "upload failed"}`));
     });
   });
+}
+
+// ===== Git worktrees =====
+//
+// `git worktree list --porcelain` from inside any worktree returns the full
+// list (one block per worktree, blocks separated by blank lines). We run it
+// via `cd` so `~` expands on the remote shell, and swallow non-zero exits
+// (non-repo, no git, missing dir) — caller treats empty list as "nothing to
+// auto-detect, proceed with one window".
+
+export async function listWorktrees(
+  config: AppConfig,
+  cwd: string,
+): Promise<WorktreeInfo[]> {
+  if (!config.host) return [];
+  if (!cwd.trim()) return [];
+  const cmd =
+    `cd ${pathQuote(cwd)} 2>/dev/null && ` +
+    `git worktree list --porcelain 2>/dev/null || true`;
+  const { stdout } = await runSshOnce(config, cmd).catch(() => ({ stdout: "" }));
+  return parseWorktreePorcelain(stdout);
+}
+
+function parseWorktreePorcelain(out: string): WorktreeInfo[] {
+  const result: WorktreeInfo[] = [];
+  for (const block of out.split(/\n\n+/)) {
+    if (!block.trim()) continue;
+    let path = "";
+    let head = "";
+    let branch: string | null = null;
+    let bare = false;
+    let detached = false;
+    for (const line of block.split("\n")) {
+      if (line.startsWith("worktree ")) path = line.slice(9);
+      else if (line.startsWith("HEAD ")) head = line.slice(5);
+      else if (line.startsWith("branch ")) {
+        const ref = line.slice(7);
+        branch = ref.startsWith("refs/heads/") ? ref.slice(11) : ref;
+      } else if (line === "bare") bare = true;
+      else if (line === "detached") detached = true;
+    }
+    if (!path) continue;
+    result.push({ path, head, branch, bare, detached });
+  }
+  return result;
 }
 
 export async function remoteDirExists(config: AppConfig, cwd: string): Promise<boolean> {

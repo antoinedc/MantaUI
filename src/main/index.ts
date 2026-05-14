@@ -5,6 +5,7 @@ import { loadConfig, saveConfig } from "./config.js";
 import {
   killAll,
   killPty,
+  listWorktrees,
   remoteDirExists,
   resizePty,
   spawnPty,
@@ -299,6 +300,10 @@ function registerHandlers(): void {
   );
 
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));
+
+  ipcMain.handle(IPC.gitListWorktrees, (_e, cwd: string) =>
+    listWorktrees(config, cwd),
+  );
 
   // Remote tmux config management
   ipcMain.handle(IPC.tmuxConfigStatus, () => tmuxConfigStatus(config));
