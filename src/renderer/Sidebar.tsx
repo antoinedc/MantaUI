@@ -97,9 +97,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       return next;
     });
 
-  // Window name for a worktree: branch (stripped of refs/heads/), else dir basename.
+  // Window name for a worktree: dir basename (matches how users name worktree
+  // folders — e.g. `ethernal`, `ethernal-feature`). Branch is the fallback.
   const worktreeName = (w: WorktreeInfo): string =>
-    w.branch || w.path.split("/").filter(Boolean).pop() || "wt";
+    w.path.split("/").filter(Boolean).pop() || w.branch || "wt";
 
   const resetNewProjectForm = () => {
     setNewProjectName("");
