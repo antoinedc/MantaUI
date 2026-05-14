@@ -109,6 +109,9 @@ export const IPC = {
   // Git: detect worktrees under a cwd (for auto-populating sessions on project create)
   gitListWorktrees: "git:list-worktrees",
 
+  // Directory autocomplete: given a partial path, list matching subdirectories
+  fsListDirs: "fs:list-dirs",
+
   // Remote tmux config management
   tmuxConfigStatus: "tmux:config-status",
   tmuxSetupConfig: "tmux:setup-config",     // backup user config, install bui's

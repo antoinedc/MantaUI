@@ -44,6 +44,9 @@ const api = {
   gitListWorktrees: (cwd: string): Promise<WorktreeInfo[]> =>
     ipcRenderer.invoke(IPC.gitListWorktrees, cwd),
 
+  fsListDirs: (partial: string): Promise<string[]> =>
+    ipcRenderer.invoke(IPC.fsListDirs, partial),
+
   tmuxConfigStatus: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxConfigStatus),
   tmuxSetupConfig: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxSetupConfig),
   tmuxRestoreConfig: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxRestoreConfig),

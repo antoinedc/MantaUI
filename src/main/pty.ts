@@ -502,6 +502,38 @@ function parseWorktreePorcelain(out: string): WorktreeInfo[] {
   return result;
 }
 
+// ===== Directory autocomplete =====
+//
+// `ls -1Ap <parent>` lists entries with `/` appended to directories. We keep
+// only those, filter by the typed prefix, and prepend the parent so callers
+// get full paths back. Bash on the remote handles `~` / `$HOME` expansion
+// because pathQuote rewrites `~` to `$HOME`.
+//
+// Caller passes a "partial path"; we split on the last `/`. Anything without
+// a slash returns [] (don't speculatively crawl `/`).
+
+export async function listPathCompletions(
+  config: AppConfig,
+  partial: string,
+): Promise<string[]> {
+  if (!config.host) return [];
+  let lookup = partial.trim();
+  if (!lookup) return [];
+  if (lookup === "~") lookup = "~/";
+  const m = /^(.*\/)([^/]*)$/.exec(lookup);
+  if (!m) return [];
+  const [, parent, prefix] = m;
+  const cmd = `ls -1Ap ${pathQuote(parent)} 2>/dev/null | grep '/$' || true`;
+  const { stdout } = await runSshOnce(config, cmd).catch(() => ({ stdout: "" }));
+  return stdout
+    .split("\n")
+    .map((s) => s.replace(/\/$/, ""))
+    .filter((name) => name && (!prefix || name.startsWith(prefix)))
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, 20)
+    .map((name) => parent + name);
+}
+
 export async function remoteDirExists(config: AppConfig, cwd: string): Promise<boolean> {
   try {
     await runSshOnce(config, `test -d ${pathQuote(cwd)}`);

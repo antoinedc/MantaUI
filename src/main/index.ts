@@ -5,6 +5,7 @@ import { loadConfig, saveConfig } from "./config.js";
 import {
   killAll,
   killPty,
+  listPathCompletions,
   listWorktrees,
   remoteDirExists,
   resizePty,
@@ -303,6 +304,10 @@ function registerHandlers(): void {
 
   ipcMain.handle(IPC.gitListWorktrees, (_e, cwd: string) =>
     listWorktrees(config, cwd),
+  );
+
+  ipcMain.handle(IPC.fsListDirs, (_e, partial: string) =>
+    listPathCompletions(config, partial),
   );
 
   // Remote tmux config management

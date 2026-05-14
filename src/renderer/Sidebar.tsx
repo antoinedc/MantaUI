@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useRef,
   useState,
 } from "react";
 import { useStore, type WindowStatusUI } from "./store";
@@ -49,6 +50,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectCwd, setNewProjectCwd] = useState("~");
+  // Inline ghost-text completion for the cwd field. Holds the FULL suggested
+  // path; we show only the tail past the typed prefix as muted overlay text.
+  const [cwdSuggestion, setCwdSuggestion] = useState<string | null>(null);
+  const cwdDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   // When the user's cwd resolves to a git repo with >1 worktree, we pause
   // creation and ask whether to fan out into one session per worktree.
   const [detectedWorktrees, setDetectedWorktrees] = useState<WorktreeInfo[] | null>(null);
@@ -108,6 +113,62 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     setNewProjectOpen(false);
     setDetectedWorktrees(null);
     setCreating(false);
+    setCwdSuggestion(null);
+    if (cwdDebounce.current) clearTimeout(cwdDebounce.current);
+  };
+
+  // Shell-style tab-complete: when there's exactly one match, suggest its
+  // full path plus `/` so the next probe can descend into it. When multiple
+  // candidates share a prefix longer than what's typed, suggest the longest
+  // common prefix (LCP) — never commit to one of the ambiguous siblings.
+  const refreshCwdSuggestion = (value: string) => {
+    if (cwdDebounce.current) clearTimeout(cwdDebounce.current);
+    if (!value) {
+      setCwdSuggestion(null);
+      return;
+    }
+    cwdDebounce.current = setTimeout(async () => {
+      try {
+        const matches = (await window.api.fsListDirs(value)).filter((m) =>
+          m.startsWith(value),
+        );
+        if (matches.length === 0) {
+          setCwdSuggestion(null);
+          return;
+        }
+        if (matches.length === 1) {
+          // Append `/` so further Tab can descend into the matched directory.
+          setCwdSuggestion(matches[0] + "/");
+          return;
+        }
+        const lcp = matches.reduce((acc, m) => {
+          let i = 0;
+          while (i < acc.length && i < m.length && acc[i] === m[i]) i++;
+          return acc.slice(0, i);
+        });
+        setCwdSuggestion(lcp.length > value.length ? lcp : null);
+      } catch {
+        setCwdSuggestion(null);
+      }
+    }, 80);
+  };
+
+  const onCwdChange = (value: string) => {
+    setNewProjectCwd(value);
+    refreshCwdSuggestion(value);
+  };
+
+  // Accept current suggestion: replace the input value with the full match.
+  // Returns true if anything was accepted (so the caller can preventDefault).
+  const acceptCwdSuggestion = (): boolean => {
+    if (!cwdSuggestion || !cwdSuggestion.startsWith(newProjectCwd)) return false;
+    if (cwdSuggestion === newProjectCwd) return false;
+    setNewProjectCwd(cwdSuggestion);
+    setCwdSuggestion(null);
+    // Re-probe under the newly accepted path so successive Tabs keep descending
+    // / disambiguating, the way shell completion does.
+    refreshCwdSuggestion(cwdSuggestion);
+    return true;
   };
 
   // mode === "auto": probe for worktrees; if >1, switch to confirm UI and bail.
@@ -312,17 +373,58 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             disabled={!!detectedWorktrees || creating}
             className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded focus:outline-none focus:border-accent disabled:opacity-60"
           />
-          <input
-            placeholder="Default cwd (e.g. ~/code/foo)"
-            value={newProjectCwd}
-            onChange={(e) => setNewProjectCwd(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !detectedWorktrees) createProject("auto");
-              else if (e.key === "Escape") resetNewProjectForm();
-            }}
-            disabled={!!detectedWorktrees || creating}
-            className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded focus:outline-none focus:border-accent disabled:opacity-60"
-          />
+          {/* Wrapper holds the background + border so the input can be
+              transparent — that lets the ghost-text overlay show through
+              underneath. */}
+          <div
+            className={`relative w-full bg-bg-soft border border-border rounded focus-within:border-accent ${
+              !!detectedWorktrees || creating ? "opacity-60" : ""
+            }`}
+          >
+            {cwdSuggestion && cwdSuggestion.startsWith(newProjectCwd) && (
+              <div
+                aria-hidden
+                className="absolute inset-0 px-2 py-1 text-xs flex items-center pointer-events-none whitespace-pre overflow-hidden font-mono"
+              >
+                <span className="invisible">{newProjectCwd}</span>
+                <span className="text-text-faint">
+                  {cwdSuggestion.slice(newProjectCwd.length)}
+                </span>
+              </div>
+            )}
+            <input
+              placeholder="Default cwd (e.g. ~/code/foo)"
+              value={newProjectCwd}
+              onChange={(e) => onCwdChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Tab" && cwdSuggestion) {
+                  e.preventDefault();
+                  acceptCwdSuggestion();
+                  return;
+                }
+                if (e.key === "ArrowRight" && cwdSuggestion) {
+                  const el = e.currentTarget;
+                  if (
+                    el.selectionStart === el.value.length &&
+                    el.selectionEnd === el.value.length
+                  ) {
+                    e.preventDefault();
+                    acceptCwdSuggestion();
+                    return;
+                  }
+                }
+                if (e.key === "Enter" && !detectedWorktrees) createProject("auto");
+                else if (e.key === "Escape") {
+                  if (cwdSuggestion) setCwdSuggestion(null);
+                  else resetNewProjectForm();
+                }
+              }}
+              disabled={!!detectedWorktrees || creating}
+              spellCheck={false}
+              autoComplete="off"
+              className="relative w-full bg-transparent border-0 px-2 py-1 text-xs rounded focus:outline-none font-mono"
+            />
+          </div>
           {detectedWorktrees ? (
             <div className="space-y-2">
               <div className="text-xs text-text-muted">
