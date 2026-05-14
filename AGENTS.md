@@ -135,6 +135,41 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   the textarea side, and manually `ptyWrite("\x1b\r")` — the same sequence
   iTerm2's `/terminal-setup` sends. Don't drop the `preventDefault()`.
 
+## New-project dialog (`Sidebar.tsx`)
+
+Two helpers run against the entered `defaultCwd` over the warm
+ControlMaster socket, both in `src/main/pty.ts`:
+
+- **`listWorktrees(cwd)`** — `cd <cwd> && git worktree list --porcelain`.
+  If >1 worktree, the dialog pauses to show "Detected N git worktrees.
+  Open a session for each?" with Yes / Just main. On Yes, the first
+  worktree becomes the tmux session's initial window; the rest are added
+  as new windows. Each window's `cwd` is the worktree's own path.
+- **`listPathCompletions(cwd)`** — `ls -1Ap <parent> | grep '/$'`.
+  Powers the shell-style ghost-text autocomplete in the cwd input.
+
+Locked decisions for these flows:
+
+- **Window names use the worktree directory basename**, not the branch.
+  Antoine's worktree folders are already named meaningfully
+  (`ethernal`, `ethernal-marketing`); branch names lose that context.
+  See `worktreeName()` in `Sidebar.tsx`. Don't "fix" this back to branch.
+- **Autocomplete is shell-LCP, not first-match.** Single match → suggest
+  full path + `/` (so the next Tab descends). Multiple matches with a
+  longer common prefix → suggest the LCP only (never commit to one
+  ambiguous sibling). No suggestion when typed is already the LCP. The
+  reducer is in `refreshCwdSuggestion()`.
+- **Ghost-text rendering trick**: the wrapper `<div>` carries the
+  background + border, the `<input>` is `bg-transparent`, and an
+  absolute-positioned overlay sits between them with the typed prefix in
+  `invisible` and the suggestion tail in `text-text-faint`. Both input
+  and overlay use `font-mono` so the invisible prefix and the muted
+  tail align character-for-character with the caret. If you change the
+  font on one, change both — or alignment drifts a pixel per character.
+- The fan-out flow only fires on project create. There's no live
+  re-sync if worktrees come and go later (same scope as the "live
+  refresh polling" roadmap item).
+
 ## Per-window activity poller (`src/main/status.ts`)
 
 Drives the blue/amber dot in the sidebar. Polls every 2s via one SSH call
