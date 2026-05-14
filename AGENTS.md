@@ -26,6 +26,7 @@ pick up new `window.api` methods. If you add an IPC channel and don't see it
 on `window.api`, you didn't restart.
 
 Local git repo (initialized 2026-05-14); user rsyncs / pulls to a Mac to run.
+Commit as you go — `git log` is the cross-session audit trail. No remote yet.
 
 ## Keybindings
 
