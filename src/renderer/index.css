@@ -1,0 +1,35 @@
+@import "@xterm/xterm/css/xterm.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+
+.titlebar-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* xterm tweaks */
+.xterm-viewport {
+  background-color: transparent !important;
+}
+.xterm .xterm-screen {
+  padding: 8px 12px;
+}
+.xterm-cursor-layer { outline: none; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2a2e38; border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3f4d; }

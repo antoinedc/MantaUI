@@ -1,0 +1,198 @@
+import { useEffect, useRef, useState } from "react";
+import { Sidebar, type SidebarHandle } from "./Sidebar";
+import { Terminal } from "./Terminal";
+import { Settings } from "./Settings";
+import { useStore, flatSessions } from "./store";
+
+export function App() {
+  const {
+    loaded,
+    host,
+    projects,
+    activeProjectName,
+    activeWindowByProject,
+    transport,
+    setActive,
+    refresh,
+    applyStatusBatch,
+  } = useStore();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const sidebarRef = useRef<SidebarHandle>(null);
+
+  // Track which projects we've ever activated — so we mount Terminal lazily
+  // and keep them mounted (each holds an SSH PTY).
+  const visited = useRef<Set<string>>(new Set());
+  if (activeProjectName) visited.current.add(activeProjectName);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!window.api.onStatusEvent) return;
+    const off = window.api.onStatusEvent(applyStatusBatch);
+    return off;
+  }, [applyStatusBatch]);
+
+  // Without this, dropping a file anywhere outside the terminal area causes
+  // Chromium to navigate the renderer to the file:// URL.
+  useEffect(() => {
+    const swallow = (e: DragEvent) => {
+      if (Array.from(e.dataTransfer?.types ?? []).includes("Files"))
+        e.preventDefault();
+    };
+    window.addEventListener("dragover", swallow);
+    window.addEventListener("drop", swallow);
+    return () => {
+      window.removeEventListener("dragover", swallow);
+      window.removeEventListener("drop", swallow);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (loaded && !host) setSettingsOpen(true);
+  }, [loaded, host]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const meta = e.metaKey || e.ctrlKey;
+      if (!meta) return;
+
+      if (e.key === "," && !e.shiftKey && !e.altKey) {
+        setSettingsOpen(true);
+        e.preventDefault();
+        return;
+      }
+      // Option+Cmd+Up/Down = step through (project, window) tuples in sidebar
+      // order, wrapping around at both ends.
+      if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+        const flat = flatSessions(projects);
+        if (flat.length === 0) return;
+        const curIdx = activeProjectName
+          ? flat.findIndex(
+              (f) =>
+                f.project.tmuxSession === activeProjectName &&
+                f.window.index === activeWindowByProject[activeProjectName],
+            )
+          : -1;
+        const dir = e.key === "ArrowDown" ? 1 : -1;
+        const nextIdx =
+          curIdx < 0
+            ? dir === 1 ? 0 : flat.length - 1
+            : (curIdx + dir + flat.length) % flat.length;
+        const target = flat[nextIdx];
+        if (target && nextIdx !== curIdx) {
+          setActive(target.project.tmuxSession, target.window.index);
+          window.api
+            .tmuxSelectWindow({
+              sessionName: target.project.tmuxSession,
+              windowIndex: target.window.index,
+            })
+            .catch(() => {});
+        }
+        e.preventDefault();
+        return;
+      }
+      // Cmd+N = new workspace (project)
+      if ((e.key === "n" || e.key === "N") && !e.shiftKey && !e.altKey) {
+        sidebarRef.current?.openNewProject();
+        e.preventDefault();
+        return;
+      }
+      // Cmd+T = new session in active project
+      if ((e.key === "t" || e.key === "T") && !e.shiftKey && !e.altKey) {
+        sidebarRef.current?.openNewSessionInActive();
+        e.preventDefault();
+        return;
+      }
+      // Cmd+1..9 = jump to nth (project, window) tuple in sidebar order
+      if (/^[1-9]$/.test(e.key) && !e.altKey) {
+        const idx = parseInt(e.key, 10) - 1;
+        const flat = flatSessions(projects);
+        const target = flat[idx];
+        if (target) {
+          setActive(target.project.tmuxSession, target.window.index);
+          // Also tell tmux to switch the window so the PTY follows.
+          window.api
+            .tmuxSelectWindow({
+              sessionName: target.project.tmuxSession,
+              windowIndex: target.window.index,
+            })
+            .catch(() => {});
+          e.preventDefault();
+        }
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [projects, activeProjectName, activeWindowByProject, setActive]);
+
+  const activeWinName = activeProjectName
+    ? projects
+        .find((p) => p.tmuxSession === activeProjectName)
+        ?.windows.find((w) => w.index === activeWindowByProject[activeProjectName])?.name
+    : null;
+
+  return (
+    <div className="h-full w-full flex bg-bg text-text">
+      <Sidebar ref={sidebarRef} onOpenSettings={() => setSettingsOpen(true)} />
+      <main className="flex-1 flex flex-col min-w-0">
+        <div className="titlebar-drag h-10 border-b border-border flex items-center px-3 gap-2">
+          <div className="text-xs text-text-muted">
+            {host ? host : "Not configured"}
+            {activeProjectName && (
+              <span className="ml-2 text-text-faint">
+                · {activeProjectName}
+                {activeWinName && ` / ${activeWinName}`}
+              </span>
+            )}
+          </div>
+          {transport && (
+            <span
+              className={`titlebar-no-drag text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider ${
+                transport.effective === "mosh"
+                  ? "bg-green-500/15 text-green-400"
+                  : "bg-bg-soft text-text-faint"
+              }`}
+              title={
+                transport.effective === "mosh"
+                  ? "Using mosh — survives wifi drops & sleep"
+                  : `Using ssh${
+                      !transport.moshLocal ? " (no mosh on Mac — `brew install mosh`)" : ""
+                    }${!transport.moshRemote ? " (no mosh-server on remote)" : ""}`
+              }
+            >
+              {transport.effective}
+            </span>
+          )}
+        </div>
+        <div className="flex-1 relative">
+          {projects.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-text-faint text-sm">
+              {host
+                ? "Create a project (⌘N) to start."
+                : "Open Settings to configure your remote host."}
+            </div>
+          ) : (
+            // Render one Terminal per VISITED project (lazy, but kept mounted)
+            [...visited.current].map((projName) => (
+              <div
+                key={projName}
+                className="absolute inset-0"
+                style={{
+                  display: projName === activeProjectName ? "block" : "none",
+                }}
+              >
+                <Terminal
+                  projectName={projName}
+                  active={projName === activeProjectName}
+                />
+              </div>
+            ))
+          )}
+        </div>
+      </main>
+      {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+    </div>
+  );
+}
