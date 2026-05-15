@@ -1058,8 +1058,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   // on only one panel being visible at a time via App.tsx display:none).
   useEffect(() => {
     const off = window.api.onScreenshotDetected((ev) => {
-      // Only react if bui is the focused app and this panel is displayed.
-      if (document.hidden) return;
       setScreenshotToast(ev);
     });
     return off;

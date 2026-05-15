@@ -231,6 +231,7 @@ function startScreenshotDetector(): void {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const fp = clipboardImageFingerprint();
     if (fp && fp !== lastFingerprint) {
+      console.log("[screenshot] clipboard image changed, fingerprint:", fp);
       lastFingerprint = fp;
       mainWindow.webContents.send(IPC.screenshotDetected, { source: "clipboard" });
     }
@@ -238,11 +239,16 @@ function startScreenshotDetector(): void {
 
   // --- Desktop folder watcher ---
   const desktop = join(homedir(), "Desktop");
+  console.log("[screenshot] watching Desktop:", desktop);
   try {
     screenshotDesktopWatcher = fsWatch(desktop, (event, filename) => {
+      console.log("[screenshot] fs.watch event:", event, filename);
       if (!mainWindow || mainWindow.isDestroyed()) return;
       if (event !== "rename" || !filename) return;
-      if (!SCREENSHOT_RE.test(basename(filename))) return;
+      if (!SCREENSHOT_RE.test(basename(filename))) {
+        console.log("[screenshot] filename doesn't match pattern, skipping");
+        return;
+      }
       const fullPath = join(desktop, filename);
       // Small delay — fs.watch fires on the rename (inode creation) before
       // the file is fully written. 300ms is enough for a PNG flush.
