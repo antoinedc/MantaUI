@@ -39,7 +39,7 @@ type Attachment = {
   mime: string;
   status: "uploading" | "ready" | "error";
   errorMsg?: string;
-  source: "drop" | "mention";       // "drop" = scp'd to ~/.bui-uploads, "mention" = path from /find/file
+  source: "drop" | "paste" | "mention"; // "drop"/"paste" = scp'd to ~/.bui-uploads, "mention" = path from /find/file
 };
 
 // Agent mention emitted by @-mention typeahead. We track the inserted slice
@@ -987,6 +987,56 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
+  // ===== Clipboard paste (screenshots) =====
+  //
+  // When the user pastes into the textarea, check for image/* items in the
+  // clipboard. If found, upload them via uploadBuffer (bytes → temp file →
+  // scp) and add chips exactly like drag-drop. Text items are left to the
+  // browser default (inserted into the textarea as-is).
+  const onPaste = useCallback(
+    async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (!tmuxSession) return;
+      const items = Array.from(e.clipboardData.items);
+      const imageItems = items.filter((item) => item.type.startsWith("image/"));
+      if (imageItems.length === 0) return;
+      // Prevent the browser from pasting anything for this event — image data
+      // in a textarea would just be lost anyway, but be explicit.
+      e.preventDefault();
+
+      for (const item of imageItems) {
+        const blob = item.getAsFile();
+        if (!blob) continue;
+        const mime = item.type; // e.g. "image/png"
+        const ext = mime.split("/")[1] ?? "png";
+        const filename = `screenshot-${Date.now()}.${ext}`;
+        const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+        setAttachments((prev) => [
+          ...prev,
+          { id, filename, mime, status: "uploading", source: "paste" } as Attachment,
+        ]);
+
+        try {
+          const arrayBuffer = await blob.arrayBuffer();
+          const remotePath = await window.api.uploadBuffer({
+            projectName: tmuxSession,
+            filename,
+            buffer: arrayBuffer,
+          });
+          setAttachments((prev) =>
+            prev.map((a) => (a.id === id ? { ...a, status: "ready", remotePath } : a)),
+          );
+        } catch (err) {
+          const msg = String((err as Error)?.message ?? err);
+          setAttachments((prev) =>
+            prev.map((a) => (a.id === id ? { ...a, status: "error", errorMsg: msg } : a)),
+          );
+        }
+      }
+    },
+    [tmuxSession],
+  );
+
   // Panel-level drag handlers. We listen on the chat container; the body of
   // the panel paints a dotted overlay while dragHover is true. App.tsx
   // already suppresses default drag/drop on the window so the renderer
@@ -1590,6 +1640,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         onTypeaheadCancel={() => setTypeahead(null)}
         onHistoryUp={() => navigateHistory(-1)}
         onHistoryDown={() => navigateHistory(1)}
+        onPaste={onPaste}
       />
     </div>
   );
@@ -2231,6 +2282,7 @@ function InputArea({
   onTypeaheadCancel,
   onHistoryUp,
   onHistoryDown,
+  onPaste,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -2260,6 +2312,7 @@ function InputArea({
   onTypeaheadCancel: () => void;
   onHistoryUp: () => void;
   onHistoryDown: () => void;
+  onPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
 }) {
   // Persistent context usage — shown next to the model name in the footer
   // whenever the session has had at least one assistant turn (tokens > 0).
@@ -2352,6 +2405,7 @@ function InputArea({
               abort();
             }
           }}
+          onPaste={onPaste}
           placeholder={running ? "" : "Try something…  (@ files · / commands · tab insert · ⏎ send)"}
           rows={1}
           spellCheck={false}

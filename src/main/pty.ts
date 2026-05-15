@@ -2,7 +2,7 @@ import { spawn as ptySpawnNative, type IPty } from "node-pty";
 import { spawn as cpSpawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join as pathJoin, basename as pathBasename } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { shell } from "electron";
 import { BrowserWindow } from "electron";
@@ -457,6 +457,34 @@ export async function uploadFiles(
   await runSshOnce(config, `mkdir -p ${shellQuote(remoteDir)}`);
   await scpUpload(config, localPaths, remoteDir);
   return localPaths.map((p) => `${remoteDir}/${pathBasename(p)}`);
+}
+
+// Clipboard-paste upload: caller passes raw bytes (e.g. a PNG from the Mac
+// clipboard). We write them to a local temp file, scp the temp file to the
+// same ~/.bui-uploads/<session>/<ts>/<filename> layout as uploadFiles, then
+// delete the temp file. Returns the single remote absolute path.
+export async function uploadBuffer(
+  config: AppConfig,
+  projectName: string,
+  filename: string,
+  buffer: Buffer,
+): Promise<string> {
+  if (!config.host) throw new Error("No host configured");
+  const tmpPath = pathJoin(tmpdir(), `bui-paste-${Date.now()}-${filename}`);
+  writeFileSync(tmpPath, buffer);
+  try {
+    const results = await uploadFiles(config, projectName, [tmpPath]);
+    // uploadFiles names the remote file after the local basename, which is the
+    // bui-paste-... name. Rename it to the original filename on the remote.
+    const uploadedPath = results[0];
+    if (!uploadedPath) throw new Error("Upload returned no path");
+    const remoteDir = uploadedPath.replace(/\/[^/]+$/, "");
+    const remotePath = `${remoteDir}/${filename}`;
+    await runSshOnce(config, `mv ${shellQuote(uploadedPath)} ${shellQuote(remotePath)}`);
+    return remotePath;
+  } finally {
+    try { unlinkSync(tmpPath); } catch { /* ignore */ }
+  }
 }
 
 // Click-to-peek: scp a remote file into a per-host cache dir and open it with

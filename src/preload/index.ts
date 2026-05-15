@@ -70,6 +70,8 @@ const api = {
 
   uploadFiles: (input: { projectName: string; localPaths: string[] }): Promise<string[]> =>
     ipcRenderer.invoke(IPC.uploadFiles, input),
+  uploadBuffer: (input: { projectName: string; filename: string; buffer: ArrayBuffer }): Promise<string> =>
+    ipcRenderer.invoke(IPC.uploadBuffer, input),
   // Electron 31+ removed File.path; webUtils.getPathForFile is the replacement.
   // Returns "" for files that don't have an OS path (e.g. dragged from a webpage).
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),

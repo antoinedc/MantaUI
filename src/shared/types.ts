@@ -136,6 +136,9 @@ export const IPC = {
 
   // Drag-and-drop file upload to a per-session remote tmp dir
   uploadFiles: "upload:files",
+  // Clipboard-paste upload: send raw bytes from the renderer (e.g. a PNG from
+  // the system clipboard) → main writes a temp file → scp to remote.
+  uploadBuffer: "upload:buffer",
 
   // Click-to-peek: pull a remote file local + open in default app
   peekRemoteFile: "peek:remote-file",

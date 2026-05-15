@@ -23,6 +23,7 @@ import {
   tmuxSelectWindow,
   tmuxSetupConfig,
   uploadFiles,
+  uploadBuffer,
   cleanupUploads,
   peekRemoteFile,
   writePty,
@@ -404,6 +405,12 @@ function registerHandlers(): void {
     IPC.uploadFiles,
     (_e, input: { projectName: string; localPaths: string[] }) =>
       uploadFiles(config, input.projectName, input.localPaths),
+  );
+
+  ipcMain.handle(
+    IPC.uploadBuffer,
+    (_e, input: { projectName: string; filename: string; buffer: ArrayBuffer }) =>
+      uploadBuffer(config, input.projectName, input.filename, Buffer.from(input.buffer)),
   );
 
   ipcMain.handle(IPC.peekRemoteFile, (_e, remotePath: string) =>
