@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
+import { ChatPanel } from "./ChatPanel";
 import { Settings } from "./Settings";
 import { useStore, flatSessions } from "./store";
 
@@ -23,6 +24,19 @@ export function App() {
   // and keep them mounted (each holds an SSH PTY).
   const visited = useRef<Set<string>>(new Set());
   if (activeProjectName) visited.current.add(activeProjectName);
+
+  // Same pattern for chat-mode windows: mount a ChatPanel for each opencode
+  // session we've ever opened, keep it mounted so scroll position + in-flight
+  // streaming state are preserved when switching back.
+  const visitedChats = useRef<Set<string>>(new Set());
+  // Active chat session id (set if active window is chat-mode, else null).
+  const activeWin = activeProjectName
+    ? projects
+        .find((p) => p.tmuxSession === activeProjectName)
+        ?.windows.find((w) => w.index === activeWindowByProject[activeProjectName])
+    : null;
+  const activeChatSessionId = activeWin?.opencodeSessionId ?? null;
+  if (activeChatSessionId) visitedChats.current.add(activeChatSessionId);
 
   useEffect(() => {
     refresh();
@@ -174,21 +188,59 @@ export function App() {
                 : "Open Settings to configure your remote host."}
             </div>
           ) : (
-            // Render one Terminal per VISITED project (lazy, but kept mounted)
-            [...visited.current].map((projName) => (
-              <div
-                key={projName}
-                className="absolute inset-0"
-                style={{
-                  display: projName === activeProjectName ? "block" : "none",
-                }}
-              >
-                <Terminal
-                  projectName={projName}
-                  active={projName === activeProjectName}
-                />
-              </div>
-            ))
+            <>
+              {/* Terminals (claude-TUI windows): one per visited project, kept */}
+              {/* mounted. Hidden when the active window is chat-mode. */}
+              {[...visited.current].map((projName) => {
+                const projectActive = projName === activeProjectName;
+                const visible = projectActive && !activeChatSessionId;
+                return (
+                  <div
+                    key={`pty:${projName}`}
+                    className="absolute inset-0"
+                    style={{ display: visible ? "block" : "none" }}
+                  >
+                    <Terminal projectName={projName} active={projectActive} />
+                  </div>
+                );
+              })}
+              {/* Chat panels (opencode chat-mode windows): one per visited */}
+              {/* session id, only the active one is visible. */}
+              {[...visitedChats.current].map((sid) => {
+                // Find the tmux window that owns this session id. May be null
+                // if the window was killed remotely but bui still has the
+                // panel mounted — fork/delete buttons gracefully no-op then.
+                // Prefer paneCurrentPath (always absolute, from tmux) over
+                // p.defaultCwd (might be a literal "~/..." that opencode's
+                // /find/file etc don't expand).
+                let owner: { tmuxSession: string; windowIndex: number; cwd: string } | null = null;
+                for (const p of projects) {
+                  const w = p.windows.find((x) => x.opencodeSessionId === sid);
+                  if (w) {
+                    owner = {
+                      tmuxSession: p.tmuxSession,
+                      windowIndex: w.index,
+                      cwd: w.paneCurrentPath || p.defaultCwd,
+                    };
+                    break;
+                  }
+                }
+                return (
+                  <div
+                    key={`chat:${sid}`}
+                    className="absolute inset-0"
+                    style={{ display: sid === activeChatSessionId ? "block" : "none" }}
+                  >
+                    <ChatPanel
+                      sessionId={sid}
+                      tmuxSession={owner?.tmuxSession ?? null}
+                      windowIndex={owner?.windowIndex ?? null}
+                      cwd={owner?.cwd ?? ""}
+                    />
+                  </div>
+                );
+              })}
+            </>
           )}
         </div>
       </main>

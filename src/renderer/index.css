@@ -28,6 +28,16 @@ html, body, #root {
 }
 .xterm-cursor-layer { outline: none; }
 
+/* Terminal-style blinking cursor for the chat running indicator. Hard on/off
+   (step-start), not a smooth fade — matches a real tty cursor. */
+@keyframes blink-cursor {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.blink-cursor {
+  animation: blink-cursor 1s step-start infinite;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -61,7 +61,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
   const [newSessionFor, setNewSessionFor] = useState<string | null>(null);
   const [newSessionName, setNewSessionName] = useState("");
-  const [newSessionCwd, setNewSessionCwd] = useState("");
+  const [newSessionChatMode, setNewSessionChatMode] = useState(false);
+
+  // Project-create chat-mode toggle. When true, every window we spawn for the
+  // new project (single-window OR worktree fan-out) opens as a chat-mode
+  // window pinned to its own opencode session.
+  const [newProjectChatMode, setNewProjectChatMode] = useState(false);
 
   const [confirmDeleteFor, setConfirmDeleteFor] = useState<
     | { kind: "session"; project: string; index: number; name: string }
@@ -85,7 +90,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       if (activeProjectName) {
         setNewSessionFor(activeProjectName);
         setNewSessionName("");
-        setNewSessionCwd("");
         setCollapsed((prev) => {
           const next = new Set(prev);
           next.delete(activeProjectName);
@@ -110,6 +114,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const resetNewProjectForm = () => {
     setNewProjectName("");
     setNewProjectCwd("~");
+    setNewProjectChatMode(false);
     setNewProjectOpen(false);
     setDetectedWorktrees(null);
     setCreating(false);
@@ -194,7 +199,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       }
       // <=1 worktree found, just create normally
       try {
-        await window.api.tmuxNewSession({ name, cwd, windowName: "default" });
+        await window.api.tmuxNewSession({
+          name,
+          cwd,
+          windowName: "default",
+          chatMode: newProjectChatMode,
+        });
         resetNewProjectForm();
         await refresh();
         setActive(name);
@@ -216,6 +226,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           name,
           cwd: first.path,
           windowName: worktreeName(first),
+          chatMode: newProjectChatMode,
         });
         for (const w of rest) {
           try {
@@ -223,6 +234,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               sessionName: name,
               windowName: worktreeName(w),
               cwd: w.path,
+              chatMode: newProjectChatMode,
             });
           } catch (e) {
             // Surface but keep going — partial fan-out is better than aborting
@@ -231,7 +243,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           }
         }
       } else {
-        await window.api.tmuxNewSession({ name, cwd, windowName: "default" });
+        await window.api.tmuxNewSession({
+          name,
+          cwd,
+          windowName: "default",
+          chatMode: newProjectChatMode,
+        });
       }
       resetNewProjectForm();
       await refresh();
@@ -245,7 +262,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const startNewSession = (projectName: string) => {
     setNewSessionFor(projectName);
     setNewSessionName("");
-    setNewSessionCwd("");
+    setNewSessionChatMode(false);
     setCollapsed((prev) => {
       const next = new Set(prev);
       next.delete(projectName);
@@ -257,17 +274,31 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     if (!newSessionFor) return;
     const windowName = newSessionName.trim() || "session";
     try {
+      // No cwd override — new windows inherit their cwd from the project's
+      // stored defaultCwd. The user already chose a path when they created
+      // the project; needing to retype it for every window was confusing
+      // and led to silent fall-through to ~ when left blank.
       const projects = await window.api.tmuxNewWindow({
         sessionName: newSessionFor,
         windowName,
-        cwd: newSessionCwd.trim() || undefined,
+        chatMode: newSessionChatMode,
       });
       setNewSessionFor(null);
       await refresh();
       // Activate the new window (it'll be at the highest index in this session)
       const proj = projects.find((p) => p.tmuxSession === newSessionFor);
       const w = proj?.windows.find((x) => x.name === windowName);
-      if (w) setActive(newSessionFor, w.index);
+      if (w) {
+        setActive(newSessionFor, w.index);
+        try {
+          await window.api.tmuxSelectWindow({
+            sessionName: newSessionFor,
+            windowIndex: w.index,
+          });
+        } catch (e) {
+          showError(e);
+        }
+      }
     } catch (e) {
       showError(e);
     }
@@ -463,21 +494,32 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               </div>
             </div>
           ) : (
-            <div className="flex gap-2">
-              <button
-                onClick={() => createProject("auto")}
-                disabled={creating}
-                className="text-xs px-2 py-1 bg-accent text-bg rounded hover:opacity-90 disabled:opacity-50"
-              >
-                {creating ? "Checking…" : "Create"}
-              </button>
-              <button
-                onClick={resetNewProjectForm}
-                disabled={creating}
-                className="text-xs px-2 py-1 text-text-muted hover:text-text"
-              >
-                Cancel
-              </button>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={newProjectChatMode}
+                  onChange={(e) => setNewProjectChatMode(e.target.checked)}
+                  className="accent-accent"
+                />
+                <span>chat mode (opencode)</span>
+              </label>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => createProject("auto")}
+                  disabled={creating}
+                  className="text-xs px-2 py-1 bg-accent text-bg rounded hover:opacity-90 disabled:opacity-50"
+                >
+                  {creating ? "Checking…" : "Create"}
+                </button>
+                <button
+                  onClick={resetNewProjectForm}
+                  disabled={creating}
+                  className="text-xs px-2 py-1 text-text-muted hover:text-text"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -663,16 +705,15 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                         }}
                         className="w-full bg-bg-soft border border-border px-2 py-0.5 text-xs rounded focus:outline-none focus:border-accent"
                       />
-                      <input
-                        placeholder="cwd override (optional)"
-                        value={newSessionCwd}
-                        onChange={(e) => setNewSessionCwd(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") createSession();
-                          else if (e.key === "Escape") setNewSessionFor(null);
-                        }}
-                        className="w-full bg-bg-soft border border-border px-2 py-0.5 text-xs rounded focus:outline-none focus:border-accent"
-                      />
+                      <label className="flex items-center gap-2 text-[11px] text-text-muted cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={newSessionChatMode}
+                          onChange={(e) => setNewSessionChatMode(e.target.checked)}
+                          className="accent-accent"
+                        />
+                        <span>chat mode (opencode)</span>
+                      </label>
                       <div className="flex gap-2">
                         <button
                           onClick={createSession}

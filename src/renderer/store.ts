@@ -30,6 +30,7 @@ type State = {
   identityFile?: string;
   transportPreference: "auto" | "mosh" | "ssh";
   uploadCleanupHours: number;
+  chatAutoAllow: boolean;
   transport: TransportInfo | null;
   tmuxConfig: TmuxConfigStatus | null;
   projects: Project[];
@@ -45,6 +46,7 @@ type State = {
   applyProjects: (projects: Project[]) => void;
   applyConfig: (c: AppConfig) => void;
   applyStatusBatch: (batch: WindowStatus[]) => void;
+  setChatAutoAllow: (v: boolean) => Promise<void>;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -54,6 +56,7 @@ export const useStore = create<State>((set, get) => ({
   identityFile: undefined,
   transportPreference: "auto",
   uploadCleanupHours: 1,
+  chatAutoAllow: false,
   transport: null,
   tmuxConfig: null,
   projects: [],
@@ -119,7 +122,15 @@ export const useStore = create<State>((set, get) => ({
       identityFile: c.identityFile,
       transportPreference: c.transport ?? "auto",
       uploadCleanupHours: c.uploadCleanupHours ?? 1,
+      chatAutoAllow: c.chatAutoAllow ?? false,
     }),
+
+  setChatAutoAllow: async (v) => {
+    set({ chatAutoAllow: v });
+    const next = await window.api.configUpdate({ chatAutoAllow: v });
+    // Reconcile with what main actually saved (handles error/reject paths).
+    set({ chatAutoAllow: next.chatAutoAllow ?? false });
+  },
 
   applyStatusBatch: (batch) =>
     set((prev) => {
