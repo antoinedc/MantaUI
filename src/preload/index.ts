@@ -2,6 +2,13 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import {
   IPC,
   type AppConfig,
+  type OpencodeAgent,
+  type OpencodeCommand,
+  type OpencodeEvent,
+  type OpencodeMessage,
+  type OpencodeModel,
+  type OpencodeSessionListItem,
+  type PermissionRequest,
   type Project,
   type ProjectMeta,
   type SpawnOptions,
@@ -11,6 +18,13 @@ import {
   type WindowStatus,
   type WorktreeInfo,
 } from "../shared/types.js";
+
+type PromptModel = { providerID: string; modelID: string; variant?: string };
+type PromptAttachment = { remotePath: string; mime: string; filename?: string };
+type PromptAgentMention = {
+  name: string;
+  source: { value: string; start: number; end: number };
+};
 
 const api = {
   configGet: (): Promise<AppConfig> => ipcRenderer.invoke(IPC.configGet),
@@ -26,9 +40,9 @@ const api = {
 
   // tmux operations on the remote
   tmuxList: (): Promise<Project[]> => ipcRenderer.invoke(IPC.tmuxList),
-  tmuxNewSession: (input: { name: string; cwd: string; windowName?: string }): Promise<Project[]> =>
+  tmuxNewSession: (input: { name: string; cwd: string; windowName?: string; chatMode?: boolean }): Promise<Project[]> =>
     ipcRenderer.invoke(IPC.tmuxNewSession, input),
-  tmuxNewWindow: (input: { sessionName: string; windowName: string; cwd?: string }): Promise<Project[]> =>
+  tmuxNewWindow: (input: { sessionName: string; windowName: string; cwd?: string; chatMode?: boolean }): Promise<Project[]> =>
     ipcRenderer.invoke(IPC.tmuxNewWindow, input),
   tmuxRenameSession: (input: { oldName: string; newName: string }): Promise<Project[]> =>
     ipcRenderer.invoke(IPC.tmuxRenameSession, input),
@@ -85,6 +99,93 @@ const api = {
       ipcRenderer.removeListener(IPC.statusEvent, listener);
     };
   },
+
+  // opencode chat-mode bridges.
+  opencodeMessages: (sessionId: string): Promise<OpencodeMessage[]> =>
+    ipcRenderer.invoke(IPC.opencodeMessages, sessionId),
+  onOpencodeEvent: (cb: (ev: OpencodeEvent) => void): (() => void) => {
+    const listener = (_: unknown, ev: OpencodeEvent) => cb(ev);
+    ipcRenderer.on(IPC.opencodeEvent, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC.opencodeEvent, listener);
+    };
+  },
+  opencodePrompt: (
+    sessionId: string,
+    text: string,
+    model?: PromptModel,
+    attachments?: PromptAttachment[],
+    mentions?: PromptAgentMention[],
+  ): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodePrompt, {
+      sessionId,
+      text,
+      model,
+      attachments,
+      mentions,
+    }),
+  opencodeAbort: (sessionId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodeAbort, sessionId),
+  opencodePermissions: (): Promise<PermissionRequest[]> =>
+    ipcRenderer.invoke(IPC.opencodePermissions),
+  opencodePermissionReply: (
+    requestId: string,
+    reply: "once" | "always" | "reject",
+  ): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply }),
+
+  // Model picker.
+  opencodeModels: (): Promise<OpencodeModel[]> =>
+    ipcRenderer.invoke(IPC.opencodeModels),
+  opencodeDefaultModel: (): Promise<{ providerID: string; modelID: string } | null> =>
+    ipcRenderer.invoke(IPC.opencodeDefaultModel),
+
+  // Session management.
+  opencodeListSessions: (directory?: string): Promise<OpencodeSessionListItem[]> =>
+    ipcRenderer.invoke(IPC.opencodeListSessions, directory),
+  opencodeForkSession: (input: {
+    sessionId: string;
+    sessionName: string;
+    windowName: string;
+    cwd: string;
+    messageID?: string;
+  }): Promise<{ newSessionId: string; projects: Project[] }> =>
+    ipcRenderer.invoke(IPC.opencodeForkSession, input),
+  opencodeCompactSession: (sessionId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodeCompactSession, sessionId),
+  opencodeDeleteSession: (input: {
+    sessionId: string;
+    sessionName: string;
+    windowIndex: number;
+  }): Promise<Project[]> =>
+    ipcRenderer.invoke(IPC.opencodeDeleteSession, input),
+
+  // Typeahead sources.
+  opencodeCommands: (): Promise<OpencodeCommand[]> =>
+    ipcRenderer.invoke(IPC.opencodeCommands),
+  opencodeAgents: (): Promise<OpencodeAgent[]> =>
+    ipcRenderer.invoke(IPC.opencodeAgents),
+  opencodeFindFiles: (input: { query: string; directory: string }): Promise<string[]> =>
+    ipcRenderer.invoke(IPC.opencodeFindFiles, input),
+
+  // Slash-command execution.
+  opencodeRunCommand: (input: {
+    sessionId: string;
+    command: string;
+    arguments: string;
+    model?: PromptModel;
+    attachments?: PromptAttachment[];
+  }): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodeRunCommand, input),
+
+  // /clear: create new opencode session in same dir, re-stamp tmux window.
+  opencodeClearSession: (input: {
+    sessionName: string;
+    windowIndex: number;
+    cwd: string;
+    title: string;
+  }): Promise<{ newSessionId: string; projects: Project[] }> =>
+    ipcRenderer.invoke(IPC.opencodeClearSession, input),
 };
 
 contextBridge.exposeInMainWorld("api", api);
