@@ -3,6 +3,10 @@
 bui is an Electron desktop client for remote `claude` over `ssh`+`tmux`. Pipeline:
 **xterm.js (renderer)** ↔ **node-pty (main)** ↔ **ssh/mosh** ↔ **tmux** ↔ **claude**.
 
+A secondary mobile/web front-end (`src/server/`) runs on the Linux box itself
+and exposes the same tmux server over HTTP+WS. See the "Mobile / web client"
+section below.
+
 See `README.md` for user-facing intro and `HANDOFF.md` for the most recent
 session-state snapshot.
 
@@ -12,6 +16,8 @@ session-state snapshot.
 - `src/renderer/` — React + xterm.js. `Terminal.tsx` is the only place that
   owns an xterm instance.
 - `src/preload/` — typed `window.api` bridge.
+- `src/server/` — standalone Node HTTP+WS server + plain-JS web client for
+  mobile access. Runs **on the Linux box**, not the Mac. No build step.
 
 ## Build / run
 
@@ -19,6 +25,7 @@ session-state snapshot.
 npm install
 npm run typecheck
 npm run dev      # main-process AND preload changes need a full Ctrl+C + restart
+npm run mobile   # mobile/web server on $BUI_MOBILE_HOST:$BUI_MOBILE_PORT (default 0.0.0.0:8787)
 ```
 
 The preload bundle is built once at dev-server start; renderer HMR alone won't
@@ -76,6 +83,42 @@ the quoting rule is "shell command yes, scp path no".
 empty session dirs. Threshold is `uploadCleanupHours` in config (default 1,
 `0` disables). Sweep runs once at app load + every hour after; worst-case
 staleness ≈ `uploadCleanupHours + 1h`.
+
+## Mobile / web client (`src/server/`)
+
+Second front-end alongside the Electron app. A small Node HTTP+WS server runs
+**on the Linux box itself** (the box that hosts tmux), serving a touch-friendly
+single-page client. No ssh/mosh hop — tmux and node-pty live in the same
+process. Use case: get to your sessions from a phone with nothing installed
+on the device.
+
+`index.mjs` is plain JS (no TS, no bundler) so `node` runs it directly. The
+client UI is hand-written HTML + JS in `public/{index.html,app.js}`; vendored
+`xterm` and `addon-fit` are served straight out of `node_modules/` at
+`/vendor/*`. If this grows past a screen of state, add a build step — for
+now the lack of one is the point.
+
+**No auth in v1.** Anyone who can reach the port gets shell-attach to every
+tmux session running as this user. Default bind is `0.0.0.0:8787` — fine on
+a LAN or behind Tailscale, **catastrophic** on a public-IP box. For internet
+access, bind to `127.0.0.1` (`BUI_MOBILE_HOST=127.0.0.1`) and front it with
+`cloudflared tunnel --url http://127.0.0.1:8787 --protocol http2`. The
+`--protocol http2` flag matters here: QUIC handshake fails on this box
+("control stream encountered a failure" loop), HTTP/2 connects cleanly.
+
+**WS protocol** (`/pty?session=NAME&window=N&cols=&rows=`): client→server
+text frames are JSON `{type:"data",data}` or `{type:"resize",cols,rows}`;
+server→client frames are raw PTY output. One node-pty per connection,
+killed on socket close. Session name is regex-restricted to
+`[A-Za-z0-9._-]+` before being passed to `tmux attach-session -t`.
+
+**Upload endpoint** (`POST /api/upload?session=NAME`) takes raw bytes in the
+body plus headers `X-Filename` (URL-encoded basename) and `X-Batch-Id`
+(millis). Files land in `$HOME/.bui-uploads/<session>/<batch>/<file>` — the
+**same layout as the Electron drag-drop path**, so the existing hourly
+cleanup applies whenever the Electron app is running against this same box.
+No multipart parser on purpose. The client types the returned path into the
+active PTY at the cursor (single-quoted only if it contains shell-meta).
 
 ## Mouse mode — design decision, do not re-litigate
 
