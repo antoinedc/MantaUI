@@ -67,6 +67,16 @@ const api = {
 
   clipboardWriteText: (text: string): Promise<void> =>
     ipcRenderer.invoke(IPC.clipboardWriteText, text),
+  clipboardReadImage: (): Promise<ArrayBuffer | null> =>
+    ipcRenderer.invoke(IPC.clipboardReadImage),
+
+  onScreenshotDetected: (
+    cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
+  ): (() => void) => {
+    const listener = (_: unknown, ev: { source: "clipboard" | "file"; path?: string }) => cb(ev);
+    ipcRenderer.on(IPC.screenshotDetected, listener);
+    return () => ipcRenderer.removeListener(IPC.screenshotDetected, listener);
+  },
 
   uploadFiles: (input: { projectName: string; localPaths: string[] }): Promise<string[]> =>
     ipcRenderer.invoke(IPC.uploadFiles, input),

@@ -331,6 +331,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   // Whether the panel is currently being dragged over with files (for the
   // big "drop to attach" overlay).
   const [dragHover, setDragHover] = useState(false);
+  // Screenshot detection toast. Set to the detection payload when main detects
+  // a new clipboard image or a new screenshot file on the Desktop. Cleared
+  // when the user accepts, dismisses, or sends the next message.
+  const [screenshotToast, setScreenshotToast] = useState<{
+    source: "clipboard" | "file";
+    path?: string;
+  } | null>(null);
   // Typeahead popup state + result caches. Commands and agents are fetched
   // lazily on first @/ and reused; file searches re-issue per-keystroke.
   const [typeahead, setTypeahead] = useState<TypeaheadState | null>(null);
@@ -561,6 +568,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
       return;
     }
     setSendError(null);
+    setScreenshotToast(null);
     setRunning(true); // optimistic — session.status will confirm
     setInput("");
 
@@ -1036,6 +1044,73 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     },
     [tmuxSession],
   );
+
+  // ===== Screenshot detection =====
+  //
+  // Main pushes screenshotDetected when the clipboard gains a new image or a
+  // new Screenshot file appears on the Desktop. We show a small toast above
+  // the input. "Add" uploads the image (clipboard bytes or file path) and
+  // creates a chip exactly like drag-drop. "Dismiss" clears silently.
+  // Only show the toast when this ChatPanel is the active/visible one — the
+  // event fires globally so all mounted panels receive it; we use a simple
+  // "is my session the active one?" heuristic (visible prop would be cleaner
+  // but we don't have it; instead we check document.visibilityState and rely
+  // on only one panel being visible at a time via App.tsx display:none).
+  useEffect(() => {
+    const off = window.api.onScreenshotDetected((ev) => {
+      // Only react if bui is the focused app and this panel is displayed.
+      if (document.hidden) return;
+      setScreenshotToast(ev);
+    });
+    return off;
+  }, []);
+
+  // Accept: upload the screenshot and create a chip.
+  const acceptScreenshot = useCallback(async () => {
+    const toast = screenshotToast;
+    setScreenshotToast(null);
+    if (!tmuxSession || !toast) return;
+
+    const mime = "image/png";
+    const filename = toast.path
+      ? toast.path.split("/").pop() ?? "screenshot.png"
+      : `screenshot-${Date.now()}.png`;
+    const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+    setAttachments((prev) => [
+      ...prev,
+      { id, filename, mime, status: "uploading", source: "paste" } as Attachment,
+    ]);
+
+    try {
+      let remotePath: string;
+      if (toast.source === "file" && toast.path) {
+        // Desktop watcher: we have a local Mac path — use uploadFiles directly.
+        const results = await window.api.uploadFiles({
+          projectName: tmuxSession,
+          localPaths: [toast.path],
+        });
+        remotePath = results[0] ?? "";
+      } else {
+        // Clipboard: read bytes from main then uploadBuffer.
+        const buf = await window.api.clipboardReadImage();
+        if (!buf) throw new Error("Clipboard image vanished");
+        remotePath = await window.api.uploadBuffer({
+          projectName: tmuxSession,
+          filename,
+          buffer: buf,
+        });
+      }
+      setAttachments((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, status: "ready", remotePath } : a)),
+      );
+    } catch (err) {
+      const msg = String((err as Error)?.message ?? err);
+      setAttachments((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, status: "error", errorMsg: msg } : a)),
+      );
+    }
+  }, [screenshotToast, tmuxSession]);
 
   // Panel-level drag handlers. We listen on the chat container; the body of
   // the panel paints a dotted overlay while dragHover is true. App.tsx
@@ -1549,6 +1624,31 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
           <button
             onClick={() => setSendError(null)}
             className="text-red-300 hover:text-red-200 leading-none px-1"
+            title="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Screenshot detection toast. Appears when main detects a new clipboard */}
+      {/* image or a new Screenshot file on the Desktop. */}
+      {screenshotToast && (
+        <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-[12px] text-text-muted flex items-center gap-2">
+          <span className="flex-1 truncate">
+            {screenshotToast.source === "file" && screenshotToast.path
+              ? `Screenshot: ${screenshotToast.path.split("/").pop()}`
+              : "Screenshot in clipboard"}
+          </span>
+          <button
+            onClick={() => void acceptScreenshot()}
+            className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium"
+          >
+            Add to chat
+          </button>
+          <button
+            onClick={() => setScreenshotToast(null)}
+            className="shrink-0 text-text-faint hover:text-text leading-none"
             title="Dismiss"
           >
             ×

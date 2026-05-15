@@ -133,6 +133,9 @@ export const IPC = {
 
   // Clipboard (OSC 52 from remote → Mac system clipboard via Electron main)
   clipboardWriteText: "clipboard:write-text",
+  // Read the current clipboard image as PNG ArrayBuffer (null if no image).
+  // Called on demand after a screenshotDetected event — not polled.
+  clipboardReadImage: "clipboard:read-image",
 
   // Drag-and-drop file upload to a per-session remote tmp dir
   uploadFiles: "upload:files",
@@ -157,6 +160,12 @@ export const IPC = {
 
   // Per-window activity status, pushed every ~2s from a remote pane-capture poll
   statusEvent: "status:event",
+
+  // Screenshot detection: main → renderer push when a new screenshot is
+  // detected (clipboard image or new file on Desktop). Renderer shows a
+  // "Add to chat?" toast. Payload: { source: "clipboard"|"file", path?: string }
+  // path is only set for file-based detections (Desktop watcher).
+  screenshotDetected: "screenshot:detected",
 
   // ---- opencode chat-mode ----
   // Fetch full transcript for a session id (one-shot HTTP call on the remote).
