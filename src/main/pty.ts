@@ -16,6 +16,12 @@ import {
   type WorktreeInfo,
 } from "../shared/types.js";
 import { info as transportInfo } from "./transport.js";
+import {
+  ensureRunning as ensureOpencodeRunning,
+  createSession as createOpencodeSession,
+  BUI_OPENCODE_TMUX_SESSION,
+  OPENCODE_SID_OPT,
+} from "./opencode.js";
 
 // ===== ssh helpers =====
 
@@ -96,14 +102,33 @@ function pathQuote(s: string): string {
 //     which claude treats as prompt history). Native parity > custom UX.
 
 const REMOTE_CLAUDE_CMD =
-  `bash -lc 'claude || (printf "\\n[claude exited %d — press any key to close]" $?; read -n1)'`;
+  `bash -lc 'claude; code=$?; printf "\\n[claude exited %d — dropping into shell]\\n" $code; exec bash -i'`;
+
+// Chat-mode windows don't run a TUI — bui renders its own React panel into
+// the slot. The tmux pane just holds the window alive so the existing
+// project/window model still works. `sleep infinity` exits cleanly when the
+// window is killed (no zombies) and consumes no CPU.
+const REMOTE_CHAT_HOLDER_CMD = `bash -c 'exec sleep infinity'`;
 
 // Per-window options applied to OUR rendered windows only — never `-g`.
-function perWindowOptsCmd(target: string): string {
-  return [
+// `opencodeSessionId` is set for chat-mode windows; stamping it as a tmux
+// user-option lets tmuxList recover it later (survives renames, server restarts).
+//
+// IMPORTANT: tmux `set-option` defaults to SESSION scope even when the target
+// is `sess:window`. Use `set-window-option` (or `set-option -w`) for true
+// window-scoped user-options — otherwise every window in the same tmux
+// session inherits the option value via `#{@bui-session-id}` lookups.
+function perWindowOptsCmd(target: string, opencodeSessionId?: string): string {
+  const ops = [
     `set-window-option -t ${shellQuote(target)} status off`,
     `set-window-option -t ${shellQuote(target)} aggressive-resize on`,
-  ].join(" \\; ");
+  ];
+  if (opencodeSessionId) {
+    ops.push(
+      `set-window-option -t ${shellQuote(target)} ${OPENCODE_SID_OPT} ${shellQuote(opencodeSessionId)}`,
+    );
+  }
+  return ops.join(" \\; ");
 }
 
 // Field separator: a literal TAB (0x09). tmux ESCAPES every non-printable
@@ -117,7 +142,12 @@ const FS = "	";
 export async function tmuxList(config: AppConfig): Promise<TmuxSession[]> {
   if (!config.host) return [];
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
-  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}`;
+  // 6th column is `@bui-session-id` — set on chat-mode windows when bui
+  // creates them. Empty for claude-TUI windows. Presence of this id is the
+  // signal that the renderer should show ChatPanel instead of Terminal.
+  const winFmt =
+    `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}` +
+    `#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{${OPENCODE_SID_OPT}}`;
   const paneFmt = `#{session_name}${FS}#{pane_current_command}`;
 
   // Don't swallow stderr — if tmux is broken on the remote we want to know.
@@ -141,13 +171,16 @@ export async function tmuxList(config: AppConfig): Promise<TmuxSession[]> {
     if (!line) continue;
     const parts = line.split(FS);
     if (parts.length < 5) continue;
-    const [sessionName, idxStr, name, activeStr, paneCurrentPath] = parts;
+    const [sessionName, idxStr, name, activeStr, paneCurrentPath, sidRaw] = parts;
+    // Hide bui's internal opencode server session from the sidebar.
+    if (sessionName === BUI_OPENCODE_TMUX_SESSION) continue;
     const arr = winsBySession.get(sessionName) ?? [];
     arr.push({
       index: Number(idxStr),
       name,
       active: activeStr === "1",
       paneCurrentPath,
+      opencodeSessionId: sidRaw ? sidRaw : null,
     });
     winsBySession.set(sessionName, arr);
   }
@@ -158,6 +191,7 @@ export async function tmuxList(config: AppConfig): Promise<TmuxSession[]> {
     const parts = line.split(FS);
     if (parts.length < 2) continue;
     const [name, attachedStr] = parts;
+    if (name === BUI_OPENCODE_TMUX_SESSION) continue;
     sessions.push({
       name,
       attached: attachedStr === "1",
@@ -167,17 +201,50 @@ export async function tmuxList(config: AppConfig): Promise<TmuxSession[]> {
   return sessions.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// Resolve `~` and `~/foo` to absolute paths via the remote shell — opencode's
+// session.create wants an absolute directory. Tilde forms work for tmux's -c.
+async function expandRemotePath(config: AppConfig, p: string): Promise<string> {
+  if (p && !p.startsWith("~") && p.startsWith("/")) return p;
+  const { stdout } = await runSshOnce(
+    config,
+    `cd ${pathQuote(p || "~")} && pwd`,
+  );
+  return stdout.trim() || p;
+}
+
+// For chat-mode: create opencode session via HTTP, return its id. For claude
+// mode this is a no-op. Centralised here so the per-window/per-session paths
+// stay aligned. When `existingSessionId` is provided, skip creation and stamp
+// that id onto the tmux window — used by the fork flow where the new opencode
+// session already exists.
+async function maybeCreateChatSession(
+  config: AppConfig,
+  chatMode: boolean,
+  cwd: string,
+  title: string,
+  existingSessionId?: string,
+): Promise<string | null> {
+  if (!chatMode) return null;
+  if (existingSessionId) return existingSessionId;
+  await ensureOpencodeRunning(config);
+  const absoluteCwd = await expandRemotePath(config, cwd);
+  const sess = await createOpencodeSession(config, absoluteCwd, title);
+  return sess.id;
+}
+
 export async function tmuxNewSession(
   config: AppConfig,
   name: string,
   cwd: string,
   windowName: string = "default",
+  chatMode: boolean = false,
 ): Promise<void> {
-  // Detached create + per-window opts in one round trip.
+  const sid = await maybeCreateChatSession(config, chatMode, cwd, `${name} / ${windowName}`);
+  const launchCmd = chatMode ? REMOTE_CHAT_HOLDER_CMD : REMOTE_CLAUDE_CMD;
   const cmd =
     `tmux new-session -d -s ${shellQuote(name)} -n ${shellQuote(windowName)} ` +
-    `-c ${pathQuote(cwd)} ${shellQuote(REMOTE_CLAUDE_CMD)} \\; ` +
-    perWindowOptsCmd(`${name}:${windowName}`);
+    `-c ${pathQuote(cwd)} ${shellQuote(launchCmd)} \\; ` +
+    perWindowOptsCmd(`${name}:${windowName}`, sid ?? undefined);
   await runSshOnce(config, cmd);
 }
 
@@ -186,12 +253,22 @@ export async function tmuxNewWindow(
   sessionName: string,
   windowName: string,
   cwd: string,
+  chatMode: boolean = false,
+  existingSessionId?: string,
 ): Promise<void> {
+  const sid = await maybeCreateChatSession(
+    config,
+    chatMode,
+    cwd,
+    `${sessionName} / ${windowName}`,
+    existingSessionId,
+  );
+  const launchCmd = chatMode ? REMOTE_CHAT_HOLDER_CMD : REMOTE_CLAUDE_CMD;
   const target = `${sessionName}:${windowName}`;
   const cmd =
     `tmux new-window -t ${shellQuote(sessionName)} -n ${shellQuote(windowName)} ` +
-    `-c ${pathQuote(cwd)} ${shellQuote(REMOTE_CLAUDE_CMD)} \\; ` +
-    perWindowOptsCmd(target);
+    `-c ${pathQuote(cwd)} ${shellQuote(launchCmd)} \\; ` +
+    perWindowOptsCmd(target, sid ?? undefined);
   await runSshOnce(config, cmd);
 }
 
@@ -241,6 +318,23 @@ export async function tmuxSelectWindow(
   await runSshOnce(
     config,
     `tmux select-window -t ${shellQuote(`${sessionName}:${windowIndex}`)}`,
+  );
+}
+
+// Replace the @bui-session-id user-option on a chat-mode tmux window. Used by
+// /clear which creates a new opencode session in place and needs the existing
+// window to point at the new id (so the renderer reload sees a different
+// session and unmounts/remounts ChatPanel).
+export async function tmuxRestampSessionId(
+  config: AppConfig,
+  sessionName: string,
+  windowIndex: number,
+  sessionId: string,
+): Promise<void> {
+  const target = `${sessionName}:${windowIndex}`;
+  await runSshOnce(
+    config,
+    `tmux set-window-option -t ${shellQuote(target)} ${OPENCODE_SID_OPT} ${shellQuote(sessionId)}`,
   );
 }
 
@@ -556,7 +650,11 @@ export async function spawnPty(
   config: AppConfig,
   opts: SpawnOptions,
 ): Promise<void> {
-  if (ptys.has(opts.projectName)) killPty(opts.projectName);
+  // If a pty already exists for this project, do NOT tear it down — the
+  // disconnect+respawn was creating the [disconnected from X: 0] noise on
+  // every window click. The renderer should call tmuxSelectWindow to switch
+  // windows; the underlying mosh/ssh stays connected.
+  if (ptys.has(opts.projectName)) return;
 
   // No per-session option overrides — bui's setup writes the options it
   // needs into the user's ~/.tmux.conf instead. Just attach.
