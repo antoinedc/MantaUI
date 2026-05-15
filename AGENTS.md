@@ -13,8 +13,10 @@ session-state snapshot.
 ## Layout
 
 - `src/main/` — Electron main: pty, transport, tmux primitives, config, IPC.
+  - `opencode.ts` — HTTP client + SSH tunnel mgmt for chat-mode windows.
+  - `index.ts` — IPC handlers, opencode SSE bus, screenshot detector.
 - `src/renderer/` — React + xterm.js. `Terminal.tsx` is the only place that
-  owns an xterm instance.
+  owns an xterm instance. `ChatPanel.tsx` is the entire chat-mode UI (~3400 LoC).
 - `src/preload/` — typed `window.api` bridge.
 - `src/server/` — standalone Node HTTP+WS server + plain-JS web client for
   mobile access. Runs **on the Linux box**, not the Mac. No build step.
@@ -241,3 +243,75 @@ If the indicator goes dark across all windows after a Claude update, dump
 compare against the regexes. The bottom of an alt-screen has the spinner
 ~10 lines above the input box, so a naive tail-line check misses it; the
 regex matches anywhere in the captured body.
+
+## Chat-mode windows
+
+A second window type alongside the claude-TUI window. A tmux window running
+`sleep infinity` (holder pane) with bui's own React `ChatPanel` overlaid on
+top, talking to an opencode session over HTTP+SSH tunnel.
+
+**Recognition**: presence of `@bui-session-id` tmux user-option on the window
+is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
+
+**Architecture**:
+- opencode runs in tmux session `bui-opencode` on the Linux box, port 4096,
+  bound to 127.0.0.1. Mac connects via SSH `-L 14096:127.0.0.1:4096`.
+- Renderer never talks to opencode directly — only via `window.api.*`.
+- Main owns ONE long-lived SSE stream (`/event`) and fans events to the renderer.
+  ChatPanel filters by sessionID.
+- Anthropic auth via `opencode-claude-auth@latest` plugin in
+  `~/.config/opencode/opencode.jsonc` (Claude Max sub, `~/.claude/.credentials.json`).
+
+**Key files**:
+
+| File | What |
+|---|---|
+| `src/main/opencode.ts` | HTTP client, SSE consumer, ssh tunnel mgmt |
+| `src/main/index.ts` | IPC handlers, opencode SSE bus, screenshot detector |
+| `src/main/pty.ts` | `tmuxRestampSessionId`, `tmuxNewChatWindow` |
+| `src/renderer/ChatPanel.tsx` | entire chat UI (~3400 LoC), intentionally monolithic |
+| `src/renderer/App.tsx` | mounts ChatPanels keyed by session id |
+
+**AppConfig additions**: `opencodePort` (default 14096), `chatAutoAllow`
+(auto-reply "always" to all permission requests — like `--dangerously-skip-permissions`).
+
+**Gotchas**:
+- Sessions persist FileParts forever. A bad-mime FilePart (e.g. `application/json`)
+  in history causes every subsequent Anthropic call to fail. Fix:
+  `DELETE /session/{sid}/message/{mid}/part/{pid}` on each offender.
+- `/api/model` leaks `apiKey` — never forward it. Use `/provider` instead
+  (already done in `opencode.ts`).
+- Mobile path (`src/server/index.mjs`) is NOT shimmed for any of the chat-mode
+  IPCs. Whoever lands mobile needs to add those shims.
+
+## File upload paths (chat-mode)
+
+Three upload paths all land in `~/.bui-uploads/<session>/<ts>/` on the remote:
+
+1. **Drag-drop** — `image/*`, PDF, audio, video → FilePart chip.
+   Everything else → `@<abs-path>` text appended to textarea.
+2. **Paste** (`⌘V` in chat input) — intercepts `image/*` clipboard items,
+   calls `uploadBuffer` IPC (bytes → Mac tmpfile → scp). Same chip as drag-drop.
+3. **Screenshot detector** — two parallel paths in `main/index.ts`:
+   - *Clipboard poller* (500ms): fingerprints clipboard via `availableFormats()`
+     + image size. Fires on `⌘⇧Control+3/4`. Pushes `screenshotDetected` IPC.
+   - *Desktop watcher* (`fs.watch ~/Desktop`): matches
+     `Screenshot YYYY-MM-DD at HH.MM.SS.png`. Fires on `⌘⇧3/4`. 300ms settle
+     delay before pushing.
+   ChatPanel shows a toast: "Screenshot in clipboard" / "Screenshot: <name>"
+   with "Add to chat" (uploads + chip) and "×" dismiss.
+   **Do NOT add `document.hidden` check** — bui loses focus during the screenshot
+   gesture so the event would always be dropped.
+
+`uploadBuffer` in `pty.ts`: writes `ArrayBuffer` to Mac tmpfile, calls
+`uploadFiles`, `mv` on remote to restore original filename, deletes tmpfile.
+
+## Suggested next moves (as of 2026-05-15)
+
+- **Mobile responsive layout** — biggest remaining item. ChatPanel already uses
+  only `window.api.*`; main work is sidebar-as-drawer + touch targets + IPC
+  shims in `src/server/index.mjs`.
+- **Tests** — none for chat UI yet.
+- **Global model preference** — currently per-session in localStorage.
+- **Remove debug logs** from screenshot detector once confirmed stable
+  (`[screenshot]` prefixed `console.log` calls in `main/index.ts`).
