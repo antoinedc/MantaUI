@@ -13,7 +13,8 @@
     "postinstall": "electron-rebuild -f -w node-pty || true",
     "mobile": "node src/server/index.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:mobile": "vite build --config electron.vite.config.mobile.ts"
   },
   "dependencies": {
     "node-pty": "^1.0.0",
