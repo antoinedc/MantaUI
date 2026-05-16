@@ -3,6 +3,8 @@
   "appName": "bui",
   "webDir": "www",
   "server": {
+    "androidScheme": "http",
+    "cleartext": true,
     "allowNavigation": [
       "*"
     ]

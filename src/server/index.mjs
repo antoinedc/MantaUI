@@ -177,6 +177,17 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   const path = url.pathname;
 
+  // The Capacitor shell loads from http://localhost and calls this server
+  // cross-origin. Allow any origin (the server is the user's own box) and
+  // answer CORS preflight so the mobile WebView's fetch() isn't blocked.
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Filename");
+  if (req.method === "OPTIONS") {
+    res.writeHead(204).end();
+    return;
+  }
+
   if (req.method === "GET" && (path === "/" || path === "/index.html")) {
     return serveFile(res, join(PUBLIC_DIR, "index.html"));
   }

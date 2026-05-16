@@ -21,9 +21,13 @@ const KEY_SEQ = {
 
 const SERVER_KEY = "bui_server";
 
+// Default server for a fresh install. User can override it in Settings;
+// once they save a value it's persisted and takes precedence.
+const DEFAULT_SERVER = "http://157.90.224.92:8787";
+
 function getServer() {
   const v = localStorage.getItem(SERVER_KEY);
-  return v ? v.replace(/\/+$/, "") : "";
+  return (v ? v.replace(/\/+$/, "") : DEFAULT_SERVER);
 }
 
 function setServer(v) {
