@@ -372,6 +372,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   const [stepTokens, setStepTokens] = useState<
     (TokenUsage & { cost: number }) | null
   >(null);
+  // Live todo list from todo.updated events. Preferred over the transcript-
+  // scraped activeTodos when non-null so the ActiveTodos card reflects the
+  // running tool's state immediately. Cleared on session change.
+  const [liveTodos, setLiveTodos] = useState<
+    Array<{ content: string; status: string; priority: string }> | null
+  >(null);
   // Server-reported retry status (rate-limited, transient failure, etc).
   // session.status with type:"retry" carries an attempt counter + an action
   // describing what the user can do. Surfaces above RunningIndicator while
@@ -398,6 +404,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     setMessageQueue([]);
     setStepTokens(null);
     setRetryInfo(null);
+    setLiveTodos(null);
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
@@ -600,6 +607,25 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         if (props.finish === "max_tokens") {
           setSendError((prev) =>
             prev ?? "Response truncated — model hit output limit",
+          );
+        }
+      }
+
+      // Live TodoWrite mirror — opencode fires todo.updated whenever the
+      // tool stores a new list. The transcript-scraped activeTodos lags by
+      // one re-fetch cycle and only sees the final state; this gives us the
+      // intermediate ticks (e.g. one task flipping to in_progress).
+      if (ev.type === "todo.updated") {
+        const todos = props.todos as
+          | Array<{ content?: unknown; status?: unknown; priority?: unknown }>
+          | undefined;
+        if (Array.isArray(todos)) {
+          setLiveTodos(
+            todos.map((t) => ({
+              content: String(t.content ?? ""),
+              status: String(t.status ?? "pending"),
+              priority: String(t.priority ?? ""),
+            })),
           );
         }
       }
@@ -1730,7 +1756,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   // either the running indicator (while a turn is live) or the final turn's
   // duration footer (when idle). Walks back through ALL messages, not just
   // the current turn, so the list persists across turns that don't update it.
-  const activeTodos = useMemo(() => {
+  // Item 4: liveTodos (from todo.updated SSE) wins when set so the card
+  // reflects in-flight ticks without waiting for the message re-fetch.
+  const activeTodos = useMemo<Array<Record<string, unknown>> | null>(() => {
+    if (liveTodos && liveTodos.length > 0) {
+      return liveTodos as unknown as Array<Record<string, unknown>>;
+    }
     if (!messages) return null;
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
@@ -1746,7 +1777,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
       }
     }
     return null;
-  }, [messages]);
+  }, [messages, liveTodos]);
 
   // Turn boundary metadata: which assistant messages are the FINAL one of
   // their turn (i.e., immediately followed by a user message or end-of-list),
