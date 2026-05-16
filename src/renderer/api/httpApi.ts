@@ -29,7 +29,8 @@ async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
       body: JSON.stringify({ args }),
     },
   );
-  const json = await res.json();
+  let json: { result?: unknown; error?: string } = {};
+  try { json = await res.json(); } catch { /* non-JSON body (proxy/HTML error) */ }
   if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
   return json.result as T;
 }
@@ -151,7 +152,8 @@ export const httpApi: Api = {
       },
       body: buffer,
     });
-    const json = (await res.json()) as { path?: string; error?: string };
+    let json: { path?: string; error?: string } = {};
+    try { json = (await res.json()) as { path?: string; error?: string }; } catch { /* non-JSON body (proxy/HTML error) */ }
     if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
     return json.path ?? "";
   },
