@@ -12,7 +12,6 @@ export function App() {
     projects,
     activeProjectName,
     activeWindowByProject,
-    transport,
     setActive,
     refresh,
     applyStatusBatch,

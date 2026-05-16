@@ -28,6 +28,14 @@ import type {
   PermissionRequest,
 } from "../shared/types";
 import { useStore } from "./store";
+import {
+  ASSUMED_CONTEXT_TOKENS,
+  formatTokens,
+  formatDuration,
+  ctxStageColor,
+  filterCommands,
+  dedupeAgainstBuiltins,
+} from "./chatUtils";
 
 // In-flight attachments tracked alongside the textarea content. Each chip
 // rendered above the input maps to one entry; `status` drives the chip
@@ -215,12 +223,8 @@ function writeSavedModel(sessionId: string, m: ModelSelection | null): void {
 // brand the chat panel without touching the rest of bui's blue accent.
 const CLAUDE_ORANGE = "#d97757";
 
-// Hardcoded context-window size for the % bar. Every current Claude model
-// (Sonnet 4.6, Opus 4.7, Haiku 4.5, etc) has a 200k token window. opencode's
-// /api/model doesn't expose this so we approximate; users with the 1M-context
-// variants will see the bar fill faster than reality, which is at worst
-// pessimistic — better that than the inverse.
-const ASSUMED_CONTEXT_TOKENS = 200_000;
+// ASSUMED_CONTEXT_TOKENS, formatTokens, formatDuration, ctxStageColor,
+// filterCommands, dedupeAgainstBuiltins are imported from ./chatUtils.
 
 type TokenUsage = {
   total?: number;
@@ -268,17 +272,6 @@ function pastVerbFor(messageId: string): string {
   let h = 0;
   for (let i = 0; i < messageId.length; i++) h = (h * 31 + messageId.charCodeAt(i)) | 0;
   return SPINNER_VERBS_PAST[Math.abs(h) % SPINNER_VERBS_PAST.length];
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return "<1s";
-  const totalSec = Math.round(ms / 1000);
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = totalSec % 60;
-  if (h > 0) return `${h}h ${m}m ${s}s`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
 }
 
 type Props = {
@@ -348,8 +341,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   // Prompt history: when textarea has focus and typeahead is closed, Up/Down
   // cycle through previously-submitted prompts (terminal-style). The index
   // is internal to navigateHistory's setter — never read elsewhere, so the
-  // setter is all we keep.
+  // setter is all we keep. draftInput saves whatever the user was typing
+  // before they entered history mode so it can be restored on Down past end.
   const [, setHistoryIdx] = useState<number | null>(null);
+  const draftInput = useRef<string>("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Pinned-to-bottom auto-scroll: true while the viewport is near the bottom.
@@ -526,12 +521,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
 
   // Going from idle → running (just sent a message): force pin to bottom so
   // the user sees their own message and the live spinner appear.
+  // Only fires on the false→true edge; does NOT re-pin on every streaming
+  // update (that would yank the viewport while the user is reading history).
+  const wasRunning = useRef(false);
   useEffect(() => {
-    if (running) {
+    if (running && !wasRunning.current) {
       pinnedToBottom.current = true;
       const el = scrollRef.current;
       if (el) el.scrollTop = el.scrollHeight;
     }
+    wasRunning.current = running;
   }, [running]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
@@ -546,13 +545,19 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  // Textarea auto-resize up to a 6-line cap.
+  // Textarea auto-resize up to a 6-line cap. After resizing, if the scroll
+  // container is pinned to bottom we re-scroll so the input growing pushes
+  // the chat content up rather than sliding over it.
   const resizeInput = useCallback(() => {
     const el = inputRef.current;
     if (!el) return;
     el.style.height = "auto";
     const cap = 6 * 20;
     el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
+    if (pinnedToBottom.current) {
+      const sc = scrollRef.current;
+      if (sc) sc.scrollTop = sc.scrollHeight;
+    }
   }, []);
   useEffect(() => {
     resizeInput();
@@ -1257,27 +1262,23 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
       // bui builtins first — they're always available even when the opencode
       // /command response hasn't loaded yet, and the user expects /clear /help
       // to "just work" before learning the rest of the surface.
-      const builtins = BUI_BUILTIN_COMMANDS.filter((c) =>
-        q ? c.name.toLowerCase().includes(q) : true,
+      const builtins = filterCommands(BUI_BUILTIN_COMMANDS, q).map((c) => ({
+        kind: "command" as const,
+        key: c.name,
+        primary: `/${c.name}`,
+        secondary: c.description,
+      }));
+      // Drop opencode rows that collide with a builtin name so we don't
+      // show two `/clear` entries if a user has defined one.
+      const ocRows = dedupeAgainstBuiltins(
+        filterCommands(commands ?? [], q),
+        BUI_BUILTIN_NAMES,
       ).map((c) => ({
         kind: "command" as const,
         key: c.name,
         primary: `/${c.name}`,
         secondary: c.description,
       }));
-      const ocCommands = (commands ?? []).filter((c) =>
-        q ? c.name.toLowerCase().includes(q) : true,
-      );
-      // Drop opencode rows that collide with a builtin name so we don't
-      // show two `/clear` entries if a user has defined one.
-      const ocRows = ocCommands
-        .filter((c) => !BUI_BUILTIN_NAMES.has(c.name))
-        .map((c) => ({
-          kind: "command" as const,
-          key: c.name,
-          primary: `/${c.name}`,
-          secondary: c.description,
-        }));
       return [...builtins, ...ocRows].slice(0, 12);
     }
     if (typeahead.mode === "agent") {
@@ -1390,17 +1391,23 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         // dir === -1 means UP (older), +1 means DOWN (newer).
         let next: number | null;
         if (cur == null) {
-          // Entering history mode. UP → last (most recent) entry. DOWN no-op
-          // (can't go newer than the empty draft).
-          if (dir === -1) next = promptHistory.length - 1;
-          else return cur;
+          // Entering history mode — save the current draft so we can restore
+          // it when the user presses Down past the newest entry.
+          if (dir === -1) {
+            draftInput.current = inputRef.current?.value ?? "";
+            next = promptHistory.length - 1;
+          } else {
+            // Already at newest — no-op.
+            return cur;
+          }
         } else {
           const candidate = cur + dir;
           if (candidate < 0) next = 0;
           else if (candidate >= promptHistory.length) next = null;
           else next = candidate;
         }
-        const value = next == null ? "" : promptHistory[next];
+        // null means "back to draft" (past the newest entry).
+        const value = next == null ? draftInput.current : promptHistory[next];
         setInput(value);
         setTypeahead(null);
         // Place caret at end after React commits the new value.
@@ -1422,6 +1429,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   const updateInputWithHistoryReset = useCallback(
     (next: string) => {
       setHistoryIdx(null);
+      draftInput.current = next;
       updateInput(next);
     },
     [updateInput],
@@ -1609,7 +1617,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
 
       {running && (
         <>
-          <RunningIndicator tokens={latestTokens} />
+          <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
           {activeTodos && <ActiveTodos todos={activeTodos} />}
         </>
       )}
@@ -1754,7 +1762,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
 //   3. Elapsed-seconds counter ticks every second
 // If all three stall, the user knows it's genuinely stuck — not just slow.
 
-function RunningIndicator({ tokens }: { tokens: TokenUsage | null }) {
+function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | null; atBottom: boolean }) {
   // Tick once per second to drive the elapsed-time re-render.
   const [, setTick] = useState(0);
   const startRef = useRef<number>(Date.now());
@@ -1771,22 +1779,14 @@ function RunningIndicator({ tokens }: { tokens: TokenUsage | null }) {
 
   const elapsedMs = Date.now() - startRef.current;
 
-  // Context tokens drive only the bar below (already visualized; the
-  // textual % was redundant). Output tokens feed the `↓ N tokens` readout.
-  const ctxTokens =
-    tokens != null ? tokens.input + (tokens.cache?.read ?? 0) : 0;
   const outTokens = tokens != null ? tokens.output + tokens.reasoning : 0;
-  const ctxPct = Math.min(
-    100,
-    Math.round((ctxTokens / ASSUMED_CONTEXT_TOKENS) * 100),
-  );
 
   // pt-0 + pb-3: the scroll container above already has pb-3 (12px), so
   // dropping the indicator's top padding gives 12px between the last
   // message and the ✻ glyph. pb-3 matches it on the other side (12px
   // between context bar / ✻ line and the input divider).
   return (
-    <div className="shrink-0 px-4 pt-0 pb-3 text-xs space-y-1">
+    <div className={`shrink-0 px-4 pb-3 text-xs ${atBottom ? "pt-0" : "pt-1"}`}>
       <div>
         <span style={{ color: CLAUDE_ORANGE }}>
           <span className="inline-block animate-pulse">✻</span>{" "}
@@ -1797,20 +1797,6 @@ function RunningIndicator({ tokens }: { tokens: TokenUsage | null }) {
           {outTokens > 0 && <> · ↓ {formatTokens(outTokens)}</>})
         </span>
       </div>
-      {/* Thin proportional fill — visualizes ctxPct under the indicator. */}
-      {/* Uses the same staged-color helper as the footer's ContextBar. */}
-      {ctxTokens > 0 && (
-        <div className="h-[2px] bg-bg-soft rounded overflow-hidden">
-          <div
-            className="h-full transition-[width] duration-300"
-            style={{
-              width: `${ctxPct}%`,
-              backgroundColor: ctxStageColor(ctxPct),
-              opacity: 0.85,
-            }}
-          />
-        </div>
-      )}
     </div>
   );
 }
@@ -1896,23 +1882,11 @@ function formatFileDiff(additions: number, deletions: number): React.ReactNode {
   return null;
 }
 
-function formatTokens(n: number): string {
-  if (n < 1000) return `${n} tokens`;
-  if (n < 100_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k tokens`;
-  return `${Math.round(n / 1000)}k tokens`;
-}
-
 // ===== Context bar =====
 //
 // Chunky horizontal bar with a dotted "empty" pattern and a solid filled
 // portion. Color staged by usage: green → yellow → orange → red.
 // Matches the Claude TUI style.
-function ctxStageColor(pct: number): string {
-  if (pct < 50) return "#22c55e"; // green-500
-  if (pct < 75) return "#eab308"; // yellow-500
-  if (pct < 90) return "#f97316"; // orange-500
-  return "#ef4444"; // red-500
-}
 
 function ContextBar({ pct, tooltip }: { pct: number; tooltip?: string }) {
   const fill = ctxStageColor(pct);
@@ -2485,17 +2459,27 @@ function InputArea({
               else submit();
               return;
             }
-            // Prompt history when typeahead is closed. Bare Up/Down only —
-            // modified arrows fall through to default cursor movement so
-            // selection within multi-line drafts still works.
+            // Prompt history when typeahead is closed. Only navigate history
+            // when the caret is already on the first line (Up) or last line
+            // (Down) — otherwise let the cursor move within the multiline text.
             if (e.key === "ArrowUp" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-              e.preventDefault();
-              onHistoryUp();
+              const el = e.currentTarget;
+              const textBefore = el.value.slice(0, el.selectionStart ?? 0);
+              const onFirstLine = !textBefore.includes("\n");
+              if (onFirstLine) {
+                e.preventDefault();
+                onHistoryUp();
+              }
               return;
             }
             if (e.key === "ArrowDown" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-              e.preventDefault();
-              onHistoryDown();
+              const el = e.currentTarget;
+              const textAfter = el.value.slice(el.selectionEnd ?? el.value.length);
+              const onLastLine = !textAfter.includes("\n");
+              if (onLastLine) {
+                e.preventDefault();
+                onHistoryDown();
+              }
               return;
             }
             if (e.key === "Escape" && running) {
@@ -2529,7 +2513,14 @@ function InputArea({
           {ctxTokens > 0 && (
             <ContextBar
               pct={ctxPct}
-              tooltip={`${ctxTokens.toLocaleString()} / ${ASSUMED_CONTEXT_TOKENS.toLocaleString()} tokens`}
+              tooltip={[
+                `${ctxTokens.toLocaleString()} / ${ASSUMED_CONTEXT_TOKENS.toLocaleString()} tokens`,
+                tokens?.cache?.write
+                  ? `${tokens.cache.write.toLocaleString()} cache write tokens — billed again on next cold turn`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join("\n")}
             />
           )}
         </span>
