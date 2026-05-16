@@ -9,6 +9,7 @@ import {
   type OpencodeModel,
   type OpencodeSessionListItem,
   type PermissionRequest,
+  type QuestionRequest,
   type Project,
   type ProjectMeta,
   type SpawnOptions,
@@ -145,6 +146,14 @@ const api = {
     reply: "once" | "always" | "reject",
   ): Promise<void> =>
     ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply }),
+
+  // Question tool — v2 API only.
+  opencodeQuestions: (): Promise<QuestionRequest[]> =>
+    ipcRenderer.invoke(IPC.opencodeQuestions),
+  opencodeQuestionReply: (requestId: string, answers: string[][]): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers }),
+  opencodeQuestionReject: (requestId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId }),
 
   // Model picker.
   opencodeModels: (): Promise<OpencodeModel[]> =>

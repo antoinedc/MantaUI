@@ -331,6 +331,69 @@ export async function replyPermission(
   }
 }
 
+// ===== Question flow =====
+//
+// When Claude invokes the Question tool, opencode emits question.asked and
+// blocks. The user picks options; we POST to /question/{id}/reply to unblock.
+// API is v2-only. Events: question.asked, question.replied, question.rejected.
+
+export type QuestionOption = { label: string; description: string };
+export type QuestionInfo = {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiple?: boolean;
+  custom?: boolean;
+};
+export type QuestionRequest = {
+  id: string;
+  sessionID: string;
+  questions: QuestionInfo[];
+  tool?: { messageID: string; callID: string };
+};
+
+export async function listQuestions(
+  config: AppConfig,
+): Promise<QuestionRequest[]> {
+  await ensureForward(config);
+  const res = await fetch(apiUrl(config, "/question"));
+  if (!res.ok) {
+    throw new Error(`opencode listQuestions ${res.status}: ${await res.text()}`);
+  }
+  return (await res.json()) as QuestionRequest[];
+}
+
+// answers is one string[] per QuestionInfo — the selected option labels (or
+// the user's free-text input when custom is true).
+export async function replyQuestion(
+  config: AppConfig,
+  requestId: string,
+  answers: string[][],
+): Promise<void> {
+  await ensureForward(config);
+  const url = apiUrl(config, `/question/${encodeURIComponent(requestId)}/reply`);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ answers }),
+  });
+  if (!res.ok) {
+    throw new Error(`opencode replyQuestion ${res.status}: ${await res.text()}`);
+  }
+}
+
+export async function rejectQuestion(
+  config: AppConfig,
+  requestId: string,
+): Promise<void> {
+  await ensureForward(config);
+  const url = apiUrl(config, `/question/${encodeURIComponent(requestId)}/reject`);
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) {
+    throw new Error(`opencode rejectQuestion ${res.status}: ${await res.text()}`);
+  }
+}
+
 // ===== Model list =====
 //
 // Two sources we care about:

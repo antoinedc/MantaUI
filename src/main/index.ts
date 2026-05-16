@@ -39,6 +39,9 @@ import {
   abortSession as opencodeAbortSession,
   listPermissions as opencodeListPermissions,
   replyPermission as opencodeReplyPermission,
+  listQuestions as opencodeListQuestions,
+  replyQuestion as opencodeReplyQuestion,
+  rejectQuestion as opencodeRejectQuestion,
   invalidateForward as invalidateOpencodeForward,
   teardownForward as teardownOpencodeForward,
   listModels as opencodeListModels,
@@ -586,6 +589,22 @@ function registerHandlers(): void {
     IPC.opencodePermissionReply,
     (_e, input: { requestId: string; reply: "once" | "always" | "reject" }) =>
       opencodeReplyPermission(config, input.requestId, input.reply),
+  );
+
+  // Question tool. Returns the full list; renderer filters by sessionID.
+  // No chatAutoAllow auto-handling — questions need explicit user choice.
+  ipcMain.handle(IPC.opencodeQuestions, () =>
+    opencodeListQuestions(config),
+  );
+  ipcMain.handle(
+    IPC.opencodeQuestionReply,
+    (_e, input: { requestId: string; answers: string[][] }) =>
+      opencodeReplyQuestion(config, input.requestId, input.answers),
+  );
+  ipcMain.handle(
+    IPC.opencodeQuestionReject,
+    (_e, input: { requestId: string }) =>
+      opencodeRejectQuestion(config, input.requestId),
   );
 
   // Model picker. Strip-and-forward — opencode embeds apiKey in the wire

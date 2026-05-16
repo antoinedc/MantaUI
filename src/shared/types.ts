@@ -181,6 +181,11 @@ export const IPC = {
   // Permission approval flow — tools like Write/Edit/Bash pause until a reply.
   opencodePermissions: "opencode:permissions",
   opencodePermissionReply: "opencode:permission-reply",
+  // Question tool flow — Claude asks structured multiple-choice questions.
+  // v2 API only: GET /question, POST /question/{id}/reply, POST /question/{id}/reject.
+  opencodeQuestions: "opencode:questions",
+  opencodeQuestionReply: "opencode:question-reply",
+  opencodeQuestionReject: "opencode:question-reject",
   // Model picker: list available models on the remote opencode server (with
   // provider secrets stripped before forwarding).
   opencodeModels: "opencode:models",
@@ -317,5 +322,22 @@ export type PermissionRequest = {
   patterns?: string[];
   always?: string[];
   metadata?: Record<string, unknown>;
+  tool?: { messageID: string; callID: string };
+};
+
+// Question tool — Claude asks the user structured multiple-choice questions
+// mid-task. v2 API only. Events: question.asked, question.replied, question.rejected.
+export type QuestionOption = { label: string; description: string };
+export type QuestionInfo = {
+  question: string;   // full question text
+  header: string;     // short label (max 30 chars)
+  options: QuestionOption[];
+  multiple?: boolean; // allow multi-select
+  custom?: boolean;   // allow free-text answer
+};
+export type QuestionRequest = {
+  id: string;
+  sessionID: string;
+  questions: QuestionInfo[];
   tool?: { messageID: string; callID: string };
 };

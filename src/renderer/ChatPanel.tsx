@@ -26,6 +26,7 @@ import type {
   OpencodeModel,
   OpencodePart,
   PermissionRequest,
+  QuestionRequest,
 } from "../shared/types";
 import { useStore } from "./store";
 import {
@@ -293,6 +294,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   // Pending permission requests for THIS session. Polled on mount and refreshed
   // on permission.asked / permission.replied events.
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
+  // Pending question requests for THIS session. Polled on mount and refreshed
+  // on question.asked / question.replied / question.rejected events.
+  const [questions, setQuestions] = useState<QuestionRequest[]>([]);
   // Reasoning ("Thinking…") visibility — hidden by default to keep the
   // transcript focused on results. Ctrl+O toggles like Claude Code's TUI.
   const [showThinking, setShowThinking] = useState(false);
@@ -302,10 +306,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   const [running, setRunning] = useState(false);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
-  // A message queued while the AI was still running. Sent automatically as
-  // soon as running flips to false. Shown below the RunningIndicator while
-  // waiting, moves into the transcript once dispatched.
-  const [queuedMessage, setQueuedMessage] = useState<string | null>(null);
+  // Messages queued while the AI was still running. Sent automatically one
+  // at a time as running flips to false. Shown below the RunningIndicator
+  // while waiting; each moves into the transcript once dispatched.
+  const [messageQueue, setMessageQueue] = useState<string[]>([]);
   // Available models + server default (pre-fetched on mount, not lazy — so
   // the footer can show a meaningful model name before the first response,
   // and clicking the picker doesn't flash a "Loading…" row). Selection is
@@ -368,12 +372,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     setMessages(null);
     setError(null);
     setPermissions([]);
+    setQuestions([]);
     setModelOverride(readSavedModel(sessionId));
     setAttachments([]);
     setAgentMentions([]);
     setTypeahead(null);
     setSystemNotice(null);
-    setQueuedMessage(null);
+    setMessageQueue([]);
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
@@ -392,6 +397,15 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         }
       })
       .catch(() => { /* non-fatal */ });
+    // Pull current pending questions (v2 API — may return 404 on older servers).
+    window.api
+      .opencodeQuestions()
+      .then((all) => {
+        if (!cancelled) {
+          setQuestions(all.filter((q) => q.sessionID === sessionId));
+        }
+      })
+      .catch(() => { /* non-fatal — v2-only endpoint */ });
     return () => {
       cancelled = true;
     };
@@ -405,6 +419,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         setPermissions(all.filter((p) => p.sessionID === sessionId)),
       )
       .catch(() => { /* keep last-known */ });
+  }, [sessionId]);
+
+  // Refresh question list. Called on any question event.
+  const refreshQuestions = useCallback(() => {
+    window.api
+      .opencodeQuestions()
+      .then((all) =>
+        setQuestions(all.filter((q) => q.sessionID === sessionId)),
+      )
+      .catch(() => { /* keep last-known — v2-only endpoint */ });
   }, [sessionId]);
 
   // Subscribe to the global opencode event stream; filter by sessionID.
@@ -483,6 +507,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         scheduleRefetch();
       }
 
+      // Drain the queue between tool calls — send the next queued message as
+      // soon as a tool part completes, rather than waiting for session.idle.
+      if (
+        ev.type === "message.part.updated" &&
+        props.type === "tool" &&
+        (props.state as Record<string, unknown> | undefined)?.status === "completed" &&
+        messageQueueRef.current.length > 0
+      ) {
+        sendQueuedRef.current();
+      }
+
       // Permission lifecycle — refresh the inline approval list so the card
       // appears/disappears in real time as opencode requests/closes them.
       if (ev.type === "permission.asked" || ev.type === "permission.replied") {
@@ -490,6 +525,19 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         // permission.replied implies the matching tool just unstuck — pull
         // the canonical message state so the ToolPart re-renders as running.
         if (ev.type === "permission.replied") scheduleRefetch();
+      }
+
+      // Question lifecycle — refresh the inline question list so the card
+      // appears/disappears in real time as opencode requests/closes them.
+      if (
+        ev.type === "question.asked" ||
+        ev.type === "question.replied" ||
+        ev.type === "question.rejected"
+      ) {
+        refreshQuestions();
+        if (ev.type === "question.replied" || ev.type === "question.rejected") {
+          scheduleRefetch();
+        }
       }
     });
 
@@ -577,10 +625,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
       setSendError("Wait for attachments to finish uploading.");
       return;
     }
-    // If the AI is already running, queue the message instead of aborting.
-    // The queued message is sent automatically when running flips to false.
+    // If the AI is already running, push to the queue instead of aborting.
+    // Items are sent automatically one at a time as running flips to false.
     if (running) {
-      setQueuedMessage(text);
+      setMessageQueue((q) => [...q, text]);
       setInput("");
       return;
     }
@@ -758,16 +806,53 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   const submitRef = useRef<() => void>(() => {});
   submitRef.current = submit;
 
-  // When the AI finishes and there's a queued message, send it automatically.
-  // We restore the text into `input` and defer one tick so the state update
-  // propagates before submit() reads `input` via its closure.
+  // Always-current mirror of messageQueue for use inside the SSE handler
+  // (effects capture a stale closure; a ref stays live).
+  const messageQueueRef = useRef<string[]>([]);
+  messageQueueRef.current = messageQueue;
+
+  // Pops the front of the queue and fires it directly to opencode without
+  // going through submit(). Used by the SSE handler to drain between tool
+  // calls — submit()'s `running` guard would block it there.
+  const sendQueuedRef = useRef<() => void>(() => {});
+  sendQueuedRef.current = () => {
+    const q = messageQueueRef.current;
+    if (q.length === 0) return;
+    const [next, ...rest] = q;
+    setMessageQueue(rest);
+    const optimisticUserId = `optimistic-user-${Date.now()}`;
+    setMessages((prev) => [
+      ...(prev ?? []),
+      {
+        info: {
+          id: optimisticUserId,
+          sessionID: sessionId,
+          role: "user",
+          time: { created: Date.now() },
+        },
+        parts: [{ id: `${optimisticUserId}-text`, messageID: optimisticUserId, type: "text", text: next }],
+      },
+    ]);
+    window.api
+      .opencodePrompt(sessionId, next, modelOverride ?? undefined, [], undefined)
+      .catch((e: unknown) => {
+        setSendError(String((e as Error)?.message ?? e));
+        setMessages((prev) =>
+          prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
+        );
+      });
+  };
+
+  // When the AI finishes and there are queued messages, send the next one
+  // automatically. We pop the front item, restore it into `input`, and defer
+  // one tick so the state update propagates before submit() reads `input`.
   useEffect(() => {
-    if (running || !queuedMessage) return;
-    const text = queuedMessage;
-    setQueuedMessage(null);
-    setInput(text);
+    if (running || messageQueue.length === 0) return;
+    const [next, ...rest] = messageQueue;
+    setMessageQueue(rest);
+    setInput(next);
     setTimeout(() => submitRef.current(), 0);
-  }, [running, queuedMessage]);
+  }, [running, messageQueue]);
 
   const abort = useCallback(async () => {
     try {
@@ -791,6 +876,35 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
       }
     },
     [refreshPermissions],
+  );
+
+  const replyQuestion = useCallback(
+    async (requestId: string, answers: string[][]) => {
+      // Optimistically drop so the card disappears immediately.
+      setQuestions((prev) => prev.filter((q) => q.id !== requestId));
+      try {
+        await window.api.opencodeQuestionReply(requestId, answers);
+      } catch (e) {
+        setSendError(String((e as Error)?.message ?? e));
+        // Re-pull on failure so the card comes back if reply didn't land.
+        refreshQuestions();
+      }
+    },
+    [refreshQuestions],
+  );
+
+  const rejectQuestion = useCallback(
+    async (requestId: string) => {
+      // Optimistically drop so the card disappears immediately.
+      setQuestions((prev) => prev.filter((q) => q.id !== requestId));
+      try {
+        await window.api.opencodeQuestionReject(requestId);
+      } catch (e) {
+        setSendError(String((e as Error)?.message ?? e));
+        refreshQuestions();
+      }
+    },
+    [refreshQuestions],
   );
 
   // Pre-fetch models + default on session mount so the footer shows the
@@ -1632,6 +1746,21 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         </div>
       </div>
 
+      {/* Pending question cards. Shown above permissions + running indicator */}
+      {/* so they're hard to miss — tool execution blocks until answered. */}
+      {questions.length > 0 && (
+        <div className="shrink-0 px-4 pt-2 space-y-2">
+          {questions.map((q) => (
+            <QuestionCard
+              key={q.id}
+              request={q}
+              onReply={(answers) => replyQuestion(q.id, answers)}
+              onReject={() => rejectQuestion(q.id)}
+            />
+          ))}
+        </div>
+      )}
+
       {/* Pending permission cards. Shown above the running indicator/input */}
       {/* so they're hard to miss — tool execution pauses until reply. */}
       {permissions.length > 0 && (
@@ -1650,17 +1779,21 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         <>
           <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
           {activeTodos && <ActiveTodos todos={activeTodos} />}
-          {queuedMessage && (
-            <div className="shrink-0 px-4 pb-2 text-[13px] text-text-faint font-mono">
-              <span className="select-none">⏎ </span>
-              <span className="italic">{queuedMessage}</span>
-              <button
-                onClick={() => setQueuedMessage(null)}
-                className="ml-2 text-text-faint hover:text-text leading-none align-middle"
-                title="Cancel queued message"
-              >
-                ×
-              </button>
+          {messageQueue.length > 0 && (
+            <div className="shrink-0 px-4 pb-2 flex flex-col gap-0.5">
+              {messageQueue.map((msg, i) => (
+                <div key={i} className="text-[13px] text-text-faint font-mono flex items-baseline gap-1">
+                  <span className="select-none shrink-0">⏎ </span>
+                  <span className="italic flex-1 truncate">{msg}</span>
+                  <button
+                    onClick={() => setMessageQueue((q) => q.filter((_, j) => j !== i))}
+                    className="ml-1 text-text-faint hover:text-text leading-none shrink-0"
+                    title="Remove from queue"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
             </div>
           )}
         </>
@@ -1790,6 +1923,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         onTypeaheadCancel={() => setTypeahead(null)}
         onHistoryUp={() => navigateHistory(-1)}
         onHistoryDown={() => navigateHistory(1)}
+        onQueuePop={() => {
+          setMessageQueue((q) => {
+            if (q.length === 0) return q;
+            const last = q[q.length - 1];
+            setInput(last);
+            requestAnimationFrame(() => {
+              const el = inputRef.current;
+              if (!el) return;
+              el.focus();
+              el.setSelectionRange(last.length, last.length);
+            });
+            return q.slice(0, -1);
+          });
+        }}
         onPaste={onPaste}
       />
     </div>
@@ -2367,6 +2514,151 @@ function PermissionCard({
   );
 }
 
+// ===== Question card =====
+//
+// Rendered when Claude invokes the Question tool mid-task. Each QuestionRequest
+// may contain multiple QuestionInfo entries; we render one block per question.
+// The user selects option(s) and hits Submit — or clicks × to reject the whole
+// request (Claude receives an error and may handle it gracefully).
+
+function QuestionCard({
+  request,
+  onReply,
+  onReject,
+}: {
+  request: QuestionRequest;
+  onReply: (answers: string[][]) => void;
+  onReject: () => void;
+}) {
+  // One Set<string> per question tracks selected option labels.
+  const [selected, setSelected] = useState<Set<string>[]>(() =>
+    request.questions.map(() => new Set<string>()),
+  );
+  // One custom text value per question (only used when info.custom is true).
+  const [customValues, setCustomValues] = useState<string[]>(() =>
+    request.questions.map(() => ""),
+  );
+
+  function toggleOption(qIdx: number, label: string, multiple: boolean) {
+    setSelected((prev) => {
+      const next = prev.map((s) => new Set(s));
+      if (multiple) {
+        if (next[qIdx].has(label)) next[qIdx].delete(label);
+        else next[qIdx].add(label);
+      } else {
+        next[qIdx] = new Set([label]);
+      }
+      return next;
+    });
+  }
+
+  function handleSubmit() {
+    const answers = request.questions.map((info, i) => {
+      const sel = Array.from(selected[i]);
+      // If nothing was selected but custom text was entered, send that.
+      if (sel.length === 0 && info.custom && customValues[i].trim()) {
+        return [customValues[i].trim()];
+      }
+      return sel;
+    });
+    onReply(answers);
+  }
+
+  // Disable submit if any question has no selection AND no custom text.
+  const canSubmit = request.questions.every((info, i) => {
+    if (selected[i].size > 0) return true;
+    if (info.custom && customValues[i].trim()) return true;
+    return false;
+  });
+
+  return (
+    <div
+      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+    >
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ color: CLAUDE_ORANGE }}>?</span>
+        <span className="text-text font-medium">Question</span>
+        <button
+          onClick={onReject}
+          className="ml-auto text-text-faint hover:text-text leading-none"
+          title="Reject / dismiss"
+        >
+          ×
+        </button>
+      </div>
+
+      <div className="space-y-3">
+        {request.questions.map((info, qIdx) => (
+          <div key={qIdx}>
+            {/* Header as a short label, question as the full body */}
+            <div className="text-text-muted mb-0.5 font-medium">{info.header}</div>
+            <div className="text-text mb-1.5 leading-snug">{info.question}</div>
+
+            {/* Option buttons */}
+            <div className="flex flex-wrap gap-1.5">
+              {info.options.map((opt) => {
+                const isSelected = selected[qIdx].has(opt.label);
+                return (
+                  <button
+                    key={opt.label}
+                    onClick={() => toggleOption(qIdx, opt.label, info.multiple ?? false)}
+                    title={opt.description}
+                    className={[
+                      "px-2 py-0.5 rounded border text-[12px] transition-colors",
+                      isSelected
+                        ? "text-bg border-transparent"
+                        : "text-text border-border-strong hover:bg-bg-soft",
+                    ].join(" ")}
+                    style={isSelected ? { backgroundColor: CLAUDE_ORANGE } : undefined}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Free-text input when custom is true */}
+            {info.custom && (
+              <input
+                type="text"
+                placeholder="Or type your own answer…"
+                value={customValues[qIdx]}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setCustomValues((prev) => {
+                    const next = [...prev];
+                    next[qIdx] = v;
+                    return next;
+                  });
+                }}
+                className="mt-1.5 w-full rounded border border-border bg-transparent px-2 py-0.5 text-[12px] text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
+              />
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-2 flex justify-end gap-2">
+        <button
+          onClick={onReject}
+          className="px-2 py-0.5 rounded text-text-faint hover:text-text border border-border"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleSubmit}
+          disabled={!canSubmit}
+          className="px-2 py-0.5 rounded text-bg disabled:opacity-40"
+          style={{ backgroundColor: CLAUDE_ORANGE }}
+        >
+          Submit
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ===== Input area =====
 
 function InputArea({
@@ -2398,6 +2690,7 @@ function InputArea({
   onTypeaheadCancel,
   onHistoryUp,
   onHistoryDown,
+  onQueuePop,
   onPaste,
 }: {
   input: string;
@@ -2428,6 +2721,7 @@ function InputArea({
   onTypeaheadCancel: () => void;
   onHistoryUp: () => void;
   onHistoryDown: () => void;
+  onQueuePop: () => void;
   onPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
 }) {
   // Persistent context usage — shown next to the model name in the footer
@@ -2504,13 +2798,19 @@ function InputArea({
             // Prompt history when typeahead is closed. Only navigate history
             // when the caret is already on the first line (Up) or last line
             // (Down) — otherwise let the cursor move within the multiline text.
+            // While running, Up on an empty-or-first-line input pops the last
+            // queued message back into the input so it can be edited/removed.
             if (e.key === "ArrowUp" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
               const el = e.currentTarget;
               const textBefore = el.value.slice(0, el.selectionStart ?? 0);
               const onFirstLine = !textBefore.includes("\n");
               if (onFirstLine) {
                 e.preventDefault();
-                onHistoryUp();
+                if (running && el.value.trim() === "") {
+                  onQueuePop();
+                } else {
+                  onHistoryUp();
+                }
               }
               return;
             }
