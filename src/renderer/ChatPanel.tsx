@@ -2987,7 +2987,7 @@ function QuestionCard({
 
       <hr className="my-2 mx-2 border-border" />
 
-      <div className="mt-2 flex justify-start gap-2">
+      <div className="mt-2 flex justify-end gap-2">
         <button
           onClick={onReject}
           className="px-2 py-0.5 rounded text-text-faint hover:text-text border border-border"
