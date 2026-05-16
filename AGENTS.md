@@ -16,7 +16,10 @@ session-state snapshot.
   - `opencode.ts` — HTTP client + SSH tunnel mgmt for chat-mode windows.
   - `index.ts` — IPC handlers, opencode SSE bus, screenshot detector.
 - `src/renderer/` — React + xterm.js. `Terminal.tsx` is the only place that
-  owns an xterm instance. `ChatPanel.tsx` is the entire chat-mode UI (~3400 LoC).
+  owns an xterm instance. `ChatPanel.tsx` is the entire chat-mode UI (~3500 LoC).
+  - `chatUtils.ts` — pure utility functions extracted for testability (`formatTokens`,
+    `formatDuration`, `ctxStageColor`, `filterCommands`, `dedupeAgainstBuiltins`).
+    Import from here; don't redeclare them inline in ChatPanel.
 - `src/preload/` — typed `window.api` bridge.
 - `src/server/` — standalone Node HTTP+WS server + plain-JS web client for
   mobile access. Runs **on the Linux box**, not the Mac. No build step.
@@ -26,6 +29,8 @@ session-state snapshot.
 ```
 npm install
 npm run typecheck
+npm test              # vitest run (pure logic unit tests)
+npm run test:watch    # vitest watch mode
 npm run dev      # main-process AND preload changes need a full Ctrl+C + restart
 npm run mobile   # mobile/web server on $BUI_MOBILE_HOST:$BUI_MOBILE_PORT (default 0.0.0.0:8787)
 ```
@@ -310,12 +315,23 @@ Three upload paths all land in `~/.bui-uploads/<session>/<ts>/` on the remote:
 `uploadBuffer` in `pty.ts`: writes `ArrayBuffer` to Mac tmpfile, calls
 `uploadFiles`, `mv` on remote to restore original filename, deletes tmpfile.
 
-## Suggested next moves (as of 2026-05-15)
+## Testing
+
+Unit tests live in `src/renderer/chatUtils.test.ts` (Vitest). They cover pure
+utility functions only — no DOM, no Electron mocking. Run with `npm test`.
+When adding logic to `ChatPanel.tsx` that can be expressed as a pure function,
+extract it to `chatUtils.ts` and add a test there.
+
+## Custom opencode commands
+
+Global commands (`~/.claude/commands/*.md`) are symlinked into
+`~/.config/opencode/commands/` so opencode's `/command` API picks them up.
+When adding a new command file: `ln -sf ~/.claude/commands/<name>.md ~/.config/opencode/commands/`
+then restart the `bui-opencode` tmux session for opencode to reload.
+
+## Suggested next moves (as of 2026-05-16)
 
 - **Mobile responsive layout** — biggest remaining item. ChatPanel already uses
   only `window.api.*`; main work is sidebar-as-drawer + touch targets + IPC
   shims in `src/server/index.mjs`.
-- **Tests** — none for chat UI yet.
 - **Global model preference** — currently per-session in localStorage.
-- **Remove debug logs** from screenshot detector once confirmed stable
-  (`[screenshot]` prefixed `console.log` calls in `main/index.ts`).
