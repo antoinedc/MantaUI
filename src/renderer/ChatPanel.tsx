@@ -302,6 +302,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   const [running, setRunning] = useState(false);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
+  // A message queued while the AI was still running. Sent automatically as
+  // soon as running flips to false. Shown below the RunningIndicator while
+  // waiting, moves into the transcript once dispatched.
+  const [queuedMessage, setQueuedMessage] = useState<string | null>(null);
   // Available models + server default (pre-fetched on mount, not lazy — so
   // the footer can show a meaningful model name before the first response,
   // and clicking the picker doesn't flash a "Loading…" row). Selection is
@@ -369,6 +373,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     setAgentMentions([]);
     setTypeahead(null);
     setSystemNotice(null);
+    setQueuedMessage(null);
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
@@ -565,11 +570,18 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
 
   const submit = useCallback(async () => {
     const text = input.trim();
-    if (!text || running) return;
+    if (!text) return;
     // Block submit while any attachment is still uploading — easy to forget
     // a file is mid-transfer when the input is short.
     if (attachments.some((a) => a.status === "uploading")) {
       setSendError("Wait for attachments to finish uploading.");
+      return;
+    }
+    // If the AI is already running, queue the message instead of aborting.
+    // The queued message is sent automatically when running flips to false.
+    if (running) {
+      setQueuedMessage(text);
+      setInput("");
       return;
     }
     setSendError(null);
@@ -739,6 +751,23 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
       );
     }
   }, [input, running, sessionId, modelOverride, attachments, agentMentions, commands]);
+
+  // Always-current ref to submit — lets the queued-message effect call the
+  // latest version without adding submit to the effect's dependency array
+  // (which would re-arm the effect on every keystroke).
+  const submitRef = useRef<() => void>(() => {});
+  submitRef.current = submit;
+
+  // When the AI finishes and there's a queued message, send it automatically.
+  // We restore the text into `input` and defer one tick so the state update
+  // propagates before submit() reads `input` via its closure.
+  useEffect(() => {
+    if (running || !queuedMessage) return;
+    const text = queuedMessage;
+    setQueuedMessage(null);
+    setInput(text);
+    setTimeout(() => submitRef.current(), 0);
+  }, [running, queuedMessage]);
 
   const abort = useCallback(async () => {
     try {
@@ -1621,6 +1650,19 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         <>
           <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
           {activeTodos && <ActiveTodos todos={activeTodos} />}
+          {queuedMessage && (
+            <div className="shrink-0 px-4 pb-2 text-[13px] text-text-faint font-mono">
+              <span className="select-none">⏎ </span>
+              <span className="italic">{queuedMessage}</span>
+              <button
+                onClick={() => setQueuedMessage(null)}
+                className="ml-2 text-text-faint hover:text-text leading-none align-middle"
+                title="Cancel queued message"
+              >
+                ×
+              </button>
+            </div>
+          )}
         </>
       )}
 
@@ -2442,8 +2484,7 @@ function InputArea({
                 e.preventDefault();
                 if (typeaheadExactMatch) {
                   onTypeaheadCancel();
-                  if (running) abort();
-                  else submit();
+                  submit();
                 } else {
                   onTypeaheadConfirm();
                 }
@@ -2457,8 +2498,7 @@ function InputArea({
             }
             if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
               e.preventDefault();
-              if (running) abort();
-              else submit();
+              submit();
               return;
             }
             // Prompt history when typeahead is closed. Only navigate history
@@ -2490,7 +2530,7 @@ function InputArea({
             }
           }}
           onPaste={onPaste}
-          placeholder={running ? "" : "Try something…  (@ files · / commands · tab insert · ⏎ send)"}
+          placeholder={running ? "Queue a message…  (⏎ to queue · Esc to stop)" : "Try something…  (@ files · / commands · tab insert · ⏎ send)"}
           rows={1}
           spellCheck={false}
           className="flex-1 resize-none bg-transparent text-text text-[13px] focus:outline-none placeholder:text-text-faint font-mono"
