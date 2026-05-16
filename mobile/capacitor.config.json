@@ -1,0 +1,10 @@
+{
+  "appId": "com.antoinedc.bui",
+  "appName": "bui",
+  "webDir": "www",
+  "server": {
+    "allowNavigation": [
+      "*"
+    ]
+  }
+}
