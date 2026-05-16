@@ -278,7 +278,7 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 | `src/main/opencode.ts` | HTTP client, SSE consumer, ssh tunnel mgmt |
 | `src/main/index.ts` | IPC handlers, opencode SSE bus, screenshot detector |
 | `src/main/pty.ts` | `tmuxRestampSessionId`, `tmuxNewChatWindow` |
-| `src/renderer/ChatPanel.tsx` | entire chat UI (~3700 LoC), intentionally monolithic |
+| `src/renderer/ChatPanel.tsx` | entire chat UI (~4150 LoC), intentionally monolithic |
 | `src/renderer/App.tsx` | mounts ChatPanels keyed by session id |
 
 **AppConfig additions**: `opencodePort` (default 14096), `chatAutoAllow`
@@ -291,13 +291,58 @@ explicit user choice.
 - `POST /question/{id}/reply` — body `{answers: string[][]}` (one array of selected
   option labels per question)
 - `POST /question/{id}/reject` — dismiss without answering
-- SSE events: `question.asked`, `question.replied`, `question.rejected`
+- `GET /vcs?directory=<cwd>` — `{branch?, default_branch?}` for the session cwd.
+  Initial value for the `⎇ <branch>` footer (the SSE event below only fires on
+  change). Exposed as `window.api.opencodeVcsBranch(directory)` —
+  `opencode:vcs-branch` IPC.
+- SSE events consumed in ChatPanel's `onOpencodeEvent` handler beyond the
+  basics (`session.idle/status/error/compacted`, `message.part.*`, `permission.*`,
+  `question.*`):
+  - `session.next.step.ended` — live token/cost snapshot. `stepTokens` state
+    is preferred over the transcript-scraped `latestTokens` so the footer
+    ctx bar updates between tool calls, not just on re-fetch. `finish ===
+    "max_tokens"` also pre-seeds `sendError` with a truncation message
+    (without clobbering a more-specific `session.error`).
+  - `session.next.compaction.{started,delta,ended}` — drives the inline
+    `CompactionCard` above the running indicator. `.ended` holds the
+    "Compacted" confirmation for 2.5s then clears (the `session.compacted`
+    refetch has landed by then).
+  - `todo.updated` — `liveTodos` state, preferred over transcript-scraped
+    `activeTodos`. Lets the `ActiveTodos` card flip items between
+    in_progress/completed live.
+  - `vcs.branch.updated` — keeps the footer's branch indicator current.
+    Properties have no `sessionID` so the early sessionID filter at the top
+    of `onOpencodeEvent` short-circuits (undefined → falsy).
+  - `session.status` with `type === "retry"` — drives the `RetryCard` above
+    the running indicator with `attempt`, `message`, and an optional
+    `action {title, message, label, link?}`. Cleared on next `busy`/`idle`.
 
 The `QuestionCard` component (bottom of `ChatPanel.tsx`) renders above
 `PermissionCard`. Each card shows question header + body text, clickable option
 buttons (toggleable multi-select when `multiple:true`), optional free-text input
 (`custom:true`), and Submit / Cancel. Submit is disabled until every question in
 the request has at least one selection or custom text.
+
+**Pattern: live-event state preferred over transcript-derived `useMemo`.**
+The transcript only refreshes on the 300ms debounced refetch — a long tool
+roundtrip leaves footers and cards stale until the next part arrives.
+Several `useMemo` selectors over `messages` now check a "live" state first
+and fall back to the message scan:
+- `latestTokens` prefers `stepTokens` (from `session.next.step.ended`)
+- `activeTodos` prefers `liveTodos` (from `todo.updated`)
+- `branch` is pure state (initial fetch + `vcs.branch.updated`)
+When adding a new live-event consumer in ChatPanel, follow the same shape:
+`useState` reset on session change, set in the SSE handler, consumed via a
+`liveX ?? transcript-derived` selector. Don't try to mutate messages
+in-place — the canonical refetch will overwrite you.
+
+**Typed `session.error` names.** The `session.error` handler switches on
+`err.name` to prepend a context-appropriate prefix before the raw message:
+`ProviderAuthError` → "Auth error: …", `ContextOverflowError` → "Context
+full — try /compact: …", `MessageOutputLengthError` → "Response truncated
+(hit output limit)", `StructuredOutputError`, `ApiError`. Add new branches
+when opencode introduces new error class names; unknown names fall through
+to the raw message.
 
 **Gotchas**:
 - Sessions persist FileParts forever. A bad-mime FilePart (e.g. `application/json`)
@@ -307,6 +352,11 @@ the request has at least one selection or custom text.
   (already done in `opencode.ts`).
 - The `/question` endpoint returns 404 on older opencode servers (pre-v2). The
   fetch in ChatPanel is wrapped in `.catch(() => {})` — non-fatal.
+- `GET /vcs` returns 200 with `{branch: null}` for non-git cwds. Coalesce to
+  `null` in the renderer; don't treat as error.
+- `vcs.branch.updated` events carry no `sessionID` — they pass the
+  per-session filter by accident. Acceptable: there's only one branch per
+  cwd, but be aware if you ever scope event handling more strictly.
 - Mobile path (`src/server/index.mjs`) is NOT shimmed for any of the chat-mode
   IPCs (permissions, questions, etc.). Whoever lands mobile needs to add those shims.
 
@@ -348,8 +398,12 @@ then restart the `bui-opencode` tmux session for opencode to reload.
 
 ## Suggested next moves (as of 2026-05-16)
 
-- **Mobile responsive layout** — biggest remaining item. ChatPanel already uses
-  only `window.api.*`; main work is sidebar-as-drawer + touch targets + IPC
-  shims in `src/server/index.mjs` for permissions, questions, and other
-  chat-mode channels.
+- **Subagent / Task tool rendering in chat-mode.** Today a `task` tool part
+  falls through to the generic `default:` branch of `ToolBody` — just a
+  `<pre>` of `state.output`, no live child activity, no nesting. The v2 SDK
+  exposes `session.created` with `parentID` and `session.next.tool.*` events;
+  enough to render Claude Code-style inline `⎿ ● Read(...)` child rows. Would
+  need a per-session debounce map (the 300ms refetch debounce assumes one
+  session id), and the early sessionID filter at the top of `onOpencodeEvent`
+  would have to allow known-child ids through.
 - **Global model preference** — currently per-session in localStorage.
