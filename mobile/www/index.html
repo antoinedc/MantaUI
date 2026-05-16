@@ -82,7 +82,7 @@
         border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
         font: inherit; margin-bottom: 12px; }
       .settings-card input:focus { outline: none; border-color: var(--accent); }
-      .settings-card button { width: 100%; background: var(--accent); color: #000;
+      #server-save { width: 100%; background: var(--accent); color: #000;
         border-color: var(--accent); font-weight: 600; }
       .settings-err { color: var(--danger); font-size: 13px; margin: -4px 0 12px; }
       .list-header-actions { display: flex; gap: 8px; }
@@ -93,7 +93,7 @@
     <div id="settings" class="settings-view">
       <div class="settings-card">
         <h1>bui</h1>
-        <p class="settings-sub">Enter the address of your bui server.</p>
+        <label for="server-url" class="settings-sub">Enter the address of your bui server.</label>
         <input
           id="server-url"
           type="url"
