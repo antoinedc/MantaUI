@@ -63,7 +63,8 @@ bef638b chat-mode: mobile/web server (src/server/)
 - Antoine's prefs: terse, MVP over polish, no time estimates, no global
   tmux config changes, no mocks in tests.
 - Always `npm run typecheck` before declaring done. Dev server is Linux;
-  tested on Mac via rsync.
+  tested on Mac. Both sides are git clones of
+  `git@github.com:antoinedc/better-ui.git` — push/pull, no rsync.
 
 ## Suggested next moves
 

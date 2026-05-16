@@ -34,8 +34,12 @@ The preload bundle is built once at dev-server start; renderer HMR alone won't
 pick up new `window.api` methods. If you add an IPC channel and don't see it
 on `window.api`, you didn't restart.
 
-Local git repo (initialized 2026-05-14); user rsyncs / pulls to a Mac to run.
-Commit as you go — `git log` is the cross-session audit trail. No remote yet.
+Git-synced (since 2026-05-16). Single source of truth:
+`git@github.com:antoinedc/better-ui.git` (private). Both the remote dev box
+(`dev@157.90.224.92:/home/dev/projects/better-ui`) and the Mac are clones
+tracking `origin/main`. **No more rsync** — push from whichever side you
+worked on, `git pull` on the other before starting. Commit as you go;
+`git log` is the cross-session audit trail.
 
 ## Keybindings
 
