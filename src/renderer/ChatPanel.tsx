@@ -365,6 +365,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   // Delta events apply inline so streams feel live; everything else (new parts,
   // tool state transitions, etc.) just retriggers the canonical fetch.
   const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Live step token/cost snapshot from session.next.step.ended. Updates the
+  // footer's ctx bar / running indicator without waiting for the next message
+  // re-fetch. Cleared on session change. Preferred over the transcript-derived
+  // latestTokens when set.
+  const [stepTokens, setStepTokens] = useState<
+    (TokenUsage & { cost: number }) | null
+  >(null);
 
   // Initial load + reload whenever sessionId changes.
   useEffect(() => {
@@ -379,6 +386,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     setTypeahead(null);
     setSystemNotice(null);
     setMessageQueue([]);
+    setStepTokens(null);
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
@@ -518,6 +526,35 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         }
         setSendError(msg);
         setRunning(false);
+      }
+
+      // Live token/cost snapshot at every step boundary. The transcript-
+      // derived latestTokens lags by one re-fetch cycle (we only refetch on
+      // message.part.updated / .updated), so the footer goes stale during a
+      // long tool roundtrip. step.ended fires after each reasoning/tool step
+      // with the cumulative usage — feed it straight into stepTokens.
+      if (ev.type === "session.next.step.ended") {
+        const tokens = props.tokens as TokenUsage | undefined;
+        const cost = typeof props.cost === "number" ? props.cost : 0;
+        if (tokens) {
+          setStepTokens({
+            input: tokens.input ?? 0,
+            output: tokens.output ?? 0,
+            reasoning: tokens.reasoning ?? 0,
+            cache: {
+              read: tokens.cache?.read ?? 0,
+              write: tokens.cache?.write ?? 0,
+            },
+            cost,
+          });
+        }
+        // Surface output-limit truncation as a soft error, but don't clobber
+        // a more specific session.error that may have already fired (item 1).
+        if (props.finish === "max_tokens") {
+          setSendError((prev) =>
+            prev ?? "Response truncated — model hit output limit",
+          );
+        }
       }
 
       if (
@@ -1617,7 +1654,18 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   // Latest assistant message's token usage — drives the running indicator's
   // `↑ N tokens · X% ctx` readout. Updates live as message parts stream in
   // (the refetch on message.part.updated reads fresh tokens from opencode).
-  const latestTokens = useMemo(() => {
+  // session.next.step.ended (item 2) feeds stepTokens on every step boundary
+  // and we prefer it here so the footer reflects the latest snapshot without
+  // waiting for a re-fetch cycle.
+  const latestTokens = useMemo<TokenUsage | null>(() => {
+    if (stepTokens) {
+      return {
+        input: stepTokens.input,
+        output: stepTokens.output,
+        reasoning: stepTokens.reasoning,
+        cache: stepTokens.cache,
+      };
+    }
     if (!messages) return null;
     for (let i = messages.length - 1; i >= 0; i--) {
       const info = messages[i].info;
@@ -1629,7 +1677,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
       }
     }
     return null;
-  }, [messages]);
+  }, [messages, stepTokens]);
 
   // Most recent TodoWrite call from anywhere in the session — pinned under
   // either the running indicator (while a turn is live) or the final turn's
