@@ -372,6 +372,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   const [stepTokens, setStepTokens] = useState<
     (TokenUsage & { cost: number }) | null
   >(null);
+  // Server-reported retry status (rate-limited, transient failure, etc).
+  // session.status with type:"retry" carries an attempt counter + an action
+  // describing what the user can do. Surfaces above RunningIndicator while
+  // running stays true; cleared by busy/idle/session-change.
+  const [retryInfo, setRetryInfo] = useState<{
+    attempt: number;
+    message: string;
+    next: number;
+    action?: { title: string; message: string; label: string; link?: string };
+  } | null>(null);
 
   // Initial load + reload whenever sessionId changes.
   useEffect(() => {
@@ -387,6 +397,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     setSystemNotice(null);
     setMessageQueue([]);
     setStepTokens(null);
+    setRetryInfo(null);
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
@@ -489,9 +500,45 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         setRunning(false);
       }
       if (ev.type === "session.status") {
-        const status = (props.status as { type?: string } | undefined)?.type;
-        if (status === "busy" || status === "retry") setRunning(true);
-        else if (status === "idle") setRunning(false);
+        const status = props.status as
+          | {
+              type?: string;
+              attempt?: number;
+              message?: string;
+              next?: number;
+              action?: {
+                reason?: string;
+                provider?: string;
+                title?: string;
+                message?: string;
+                label?: string;
+                link?: string;
+              };
+            }
+          | undefined;
+        const type = status?.type;
+        if (type === "busy" || type === "retry") setRunning(true);
+        else if (type === "idle") setRunning(false);
+        // Retry is a transient state between busy attempts — surface attempt
+        // count + actionable hint so the user knows the AI hasn't stalled.
+        if (type === "retry") {
+          setRetryInfo({
+            attempt: status?.attempt ?? 0,
+            message: status?.message ?? "",
+            next: status?.next ?? 0,
+            action:
+              status?.action
+                ? {
+                    title: status.action.title ?? "",
+                    message: status.action.message ?? "",
+                    label: status.action.label ?? "",
+                    link: status.action.link,
+                  }
+                : undefined,
+          });
+        } else if (type === "busy" || type === "idle") {
+          setRetryInfo(null);
+        }
       }
 
       // Server-side prompt failure (model not found, provider down, etc).
@@ -1847,6 +1894,15 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         </div>
       )}
 
+      {/* Retry status — surfaces session.status "retry" so the user can */}
+      {/* see WHY the spinner is still spinning (rate limit, transient API */}
+      {/* failure, etc) instead of assuming the AI is stalled. */}
+      {retryInfo && (
+        <div className="shrink-0 px-4 pt-2">
+          <RetryCard info={retryInfo} />
+        </div>
+      )}
+
       {running && (
         <>
           <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
@@ -2515,6 +2571,56 @@ function TypeaheadPopup({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// ===== Retry card =====
+//
+// Rendered while session.status reports a "retry" attempt — opencode is
+// re-trying the underlying model call (rate limit, 5xx, etc) and surfaces an
+// action describing what the user can do (e.g. "Switch model"). Without
+// this the running indicator just sits there silently.
+
+function RetryCard({
+  info,
+}: {
+  info: {
+    attempt: number;
+    message: string;
+    next: number;
+    action?: { title: string; message: string; label: string; link?: string };
+  };
+}) {
+  const headline = info.action?.title || `Retrying… (attempt ${info.attempt})`;
+  const body = info.action?.message || info.message;
+  return (
+    <div
+      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color: CLAUDE_ORANGE }}>↻</span>
+        <span className="text-text">{headline}</span>
+        {info.attempt > 0 && (
+          <span className="text-text-faint">· attempt {info.attempt}</span>
+        )}
+      </div>
+      {body && (
+        <div className="text-text-muted break-words mb-1">{body}</div>
+      )}
+      {info.action?.link && (
+        <div>
+          <a
+            href={info.action.link}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="inline-block px-2 py-0.5 rounded border border-border-strong text-text hover:bg-bg-soft"
+          >
+            {info.action.label || "Open"}
+          </a>
+        </div>
+      )}
     </div>
   );
 }
