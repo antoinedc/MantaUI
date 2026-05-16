@@ -437,3 +437,24 @@ if (getServer()) {
 } else {
   showSettings();
 }
+
+// ---------- android hardware back ----------
+// Capacitor's default Back behavior exits the app. Instead: close the
+// terminal if open, dismiss settings (when a server is already saved),
+// otherwise let the app exit. Plugin is only present in the native shell;
+// guard so the plain browser/dev case is unaffected.
+(function wireHardwareBack() {
+  const Cap = window.Capacitor;
+  const App = Cap && Cap.Plugins && Cap.Plugins.App;
+  if (!App || !App.addListener) return;
+  App.addListener("backButton", () => {
+    if ($term.classList.contains("active")) {
+      closeTerm();
+    } else if ($settings.classList.contains("active")) {
+      if (getServer()) hideSettings();
+      else App.exitApp();
+    } else {
+      App.exitApp();
+    }
+  });
+})();
