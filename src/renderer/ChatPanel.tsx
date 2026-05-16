@@ -372,6 +372,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   const [stepTokens, setStepTokens] = useState<
     (TokenUsage & { cost: number }) | null
   >(null);
+  // Live compaction streaming state. session.next.compaction.{started,delta,
+  // ended} fire while opencode summarizes the transcript to free context;
+  // without surfacing them the user sees nothing until session.compacted
+  // refetches the full transcript. `phase` flips to "done" on .ended so we
+  // can show a brief "Compacted" confirmation before clearing.
+  const [compactionState, setCompactionState] = useState<{
+    reason: string;
+    text: string;
+    phase: "running" | "done";
+  } | null>(null);
+  const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Live todo list from todo.updated events. Preferred over the transcript-
   // scraped activeTodos when non-null so the ActiveTodos card reflects the
   // running tool's state immediately. Cleared on session change.
@@ -405,6 +416,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     setStepTokens(null);
     setRetryInfo(null);
     setLiveTodos(null);
+    setCompactionState(null);
+    if (compactionClearTimer.current) {
+      clearTimeout(compactionClearTimer.current);
+      compactionClearTimer.current = null;
+    }
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
@@ -611,6 +627,43 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         }
       }
 
+      // Live compaction progress. Without surfacing these events the user
+      // fires /compact, sees nothing for several seconds, then the
+      // transcript abruptly shrinks. .started → "Compacting…", .delta
+      // appends fragments of the summary, .ended sets the final text and
+      // we hold the "Compacted" confirmation briefly before clearing (the
+      // session.compacted re-fetch will already have updated the transcript).
+      if (ev.type === "session.next.compaction.started") {
+        if (compactionClearTimer.current) {
+          clearTimeout(compactionClearTimer.current);
+          compactionClearTimer.current = null;
+        }
+        setCompactionState({
+          reason: String(props.reason ?? ""),
+          text: "",
+          phase: "running",
+        });
+      }
+      if (ev.type === "session.next.compaction.delta") {
+        const frag = String(props.text ?? "");
+        setCompactionState((prev) =>
+          prev ? { ...prev, text: prev.text + frag } : prev,
+        );
+      }
+      if (ev.type === "session.next.compaction.ended") {
+        const finalText = String(props.text ?? "");
+        setCompactionState((prev) =>
+          prev
+            ? { ...prev, text: finalText || prev.text, phase: "done" }
+            : { reason: "", text: finalText, phase: "done" },
+        );
+        if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
+        compactionClearTimer.current = setTimeout(() => {
+          setCompactionState(null);
+          compactionClearTimer.current = null;
+        }, 2500);
+      }
+
       // Live TodoWrite mirror — opencode fires todo.updated whenever the
       // tool stores a new list. The transcript-scraped activeTodos lags by
       // one re-fetch cycle and only sees the final state; this gives us the
@@ -678,6 +731,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     return () => {
       off();
       if (refetchTimer.current) clearTimeout(refetchTimer.current);
+      if (compactionClearTimer.current) {
+        clearTimeout(compactionClearTimer.current);
+        compactionClearTimer.current = null;
+      }
     };
   }, [sessionId]);
 
@@ -1934,6 +1991,15 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         </div>
       )}
 
+      {/* Live compaction progress. Streams the summary as it's produced and */}
+      {/* flips to a brief "Compacted" confirmation after .ended; clears on */}
+      {/* a timer (session.compacted refetch has already landed by then). */}
+      {compactionState && (
+        <div className="shrink-0 px-4 pt-2">
+          <CompactionCard state={compactionState} />
+        </div>
+      )}
+
       {running && (
         <>
           <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
@@ -2651,6 +2717,52 @@ function RetryCard({
             {info.action.label || "Open"}
           </a>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ===== Compaction card =====
+//
+// Rendered while session.next.compaction.* events stream in. "running" shows
+// the live-built summary fragment; "done" shows the first line of the final
+// summary for a beat before the parent clears state.
+
+function CompactionCard({
+  state,
+}: {
+  state: { reason: string; text: string; phase: "running" | "done" };
+}) {
+  const isRunning = state.phase === "running";
+  const firstLine = state.text.split("\n").find((s) => s.trim()) ?? "";
+  return (
+    <div
+      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color: CLAUDE_ORANGE }}>
+          <span className={isRunning ? "inline-block animate-pulse" : "inline-block"}>
+            ✻
+          </span>
+        </span>
+        <span className="text-text">
+          {isRunning ? "Compacting…" : "Compacted"}
+        </span>
+        {state.reason && (
+          <span className="text-text-faint">· {state.reason}</span>
+        )}
+      </div>
+      {isRunning ? (
+        state.text && (
+          <div className="text-text-muted break-words whitespace-pre-wrap line-clamp-3 font-mono">
+            {state.text}
+          </div>
+        )
+      ) : (
+        firstLine && (
+          <div className="text-text-muted break-words font-mono">{firstLine}</div>
+        )
       )}
     </div>
   );
