@@ -70,14 +70,52 @@
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; z-index: 10; }
       .upload-status.err { border-color: var(--danger); color: var(--danger); }
 
+      /* ---- settings view ---- */
+      .settings-view { display: none; min-height: 100dvh; align-items: center;
+        justify-content: center; padding: 24px; }
+      .settings-view.active { display: flex; }
+      .settings-card { width: 100%; max-width: 420px; background: var(--bg-elev);
+        border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+      .settings-card h1 { margin: 0 0 4px; font-size: 22px; }
+      .settings-sub { margin: 0 0 16px; color: var(--fg-dim); font-size: 14px; }
+      .settings-card input { width: 100%; background: var(--bg); color: var(--fg);
+        border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
+        font: inherit; margin-bottom: 12px; }
+      .settings-card input:focus { outline: none; border-color: var(--accent); }
+      .settings-card button { width: 100%; background: var(--accent); color: #000;
+        border-color: var(--accent); font-weight: 600; }
+      .settings-err { color: var(--danger); font-size: 13px; margin: -4px 0 12px; }
+      .list-header-actions { display: flex; gap: 8px; }
       .list-view.hidden { display: none; }
     </style>
   </head>
   <body>
+    <div id="settings" class="settings-view">
+      <div class="settings-card">
+        <h1>bui</h1>
+        <p class="settings-sub">Enter the address of your bui server.</p>
+        <input
+          id="server-url"
+          type="url"
+          inputmode="url"
+          autocomplete="url"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
+          placeholder="http://myserver:8787"
+        />
+        <div id="server-err" class="settings-err" hidden></div>
+        <button id="server-save">Connect</button>
+      </div>
+    </div>
+
     <div id="list" class="list-view">
       <div class="list-header">
         <h1>bui</h1>
-        <button id="refresh" aria-label="Refresh">&#8635;</button>
+        <div class="list-header-actions">
+          <button id="settings-open" aria-label="Server settings">&#9881;</button>
+          <button id="refresh" aria-label="Refresh">&#8635;</button>
+        </div>
       </div>
       <div id="sessions"></div>
     </div>
