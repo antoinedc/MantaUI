@@ -146,6 +146,7 @@ let ctrlArmed = false;
 let currentSession = null;
 
 function openTerm(session, windowIdx, windowName) {
+  if (!getServer()) { showSettings(); return; }
   $list.classList.add("hidden");
   $term.classList.add("active");
   $termTitle.textContent = `${session} · ${windowIdx}: ${windowName}`;
@@ -174,10 +175,12 @@ function openTerm(session, windowIdx, windowName) {
   if (ta) {
     ta.setAttribute("autocorrect", "off");
     ta.setAttribute("autocapitalize", "off");
-    ta.setAttribute("spellcheck", "false");
-    $termHost.addEventListener("touchend", () => {
+    ta.spellcheck = false;
+    const onTouch = () => {
       try { ta.focus({ preventScroll: true }); } catch { ta.focus(); }
-    });
+    };
+    $termHost.addEventListener("touchend", onTouch);
+    $term._onTouch = onTouch;
   }
 
   const cols = term.cols;
@@ -250,6 +253,10 @@ function closeTerm() {
       window.visualViewport.removeEventListener("resize", $term._onResize);
     }
     $term._onResize = null;
+  }
+  if ($term._onTouch) {
+    $termHost.removeEventListener("touchend", $term._onTouch);
+    $term._onTouch = null;
   }
   setCtrlArmed(false);
   currentSession = null;
@@ -392,10 +399,10 @@ const $serverSave = document.getElementById("server-save");
 const $settingsOpen = document.getElementById("settings-open");
 
 function showSettings() {
+  if (ws || term) closeTerm();
   $serverUrl.value = getServer();
   $serverErr.hidden = true;
   $list.classList.add("hidden");
-  $term.classList.remove("active");
   $settings.classList.add("active");
   setTimeout(() => $serverUrl.focus(), 50);
 }
