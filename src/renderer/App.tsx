@@ -161,24 +161,7 @@ export function App() {
               </span>
             )}
           </div>
-          {transport && (
-            <span
-              className={`titlebar-no-drag text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider ${
-                transport.effective === "mosh"
-                  ? "bg-green-500/15 text-green-400"
-                  : "bg-bg-soft text-text-faint"
-              }`}
-              title={
-                transport.effective === "mosh"
-                  ? "Using mosh — survives wifi drops & sleep"
-                  : `Using ssh${
-                      !transport.moshLocal ? " (no mosh on Mac — `brew install mosh`)" : ""
-                    }${!transport.moshRemote ? " (no mosh-server on remote)" : ""}`
-              }
-            >
-              {transport.effective}
-            </span>
-          )}
+
         </div>
         <div className="flex-1 relative">
           {projects.length === 0 ? (

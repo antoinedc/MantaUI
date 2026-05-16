@@ -28,7 +28,6 @@
 // the wire. No OPENCODE_SERVER_PASSWORD configured.
 
 import { spawn as cpSpawn } from "node:child_process";
-import { tmpdir } from "node:os";
 import { join as pathJoin } from "node:path";
 import { runSshOnce } from "./pty.js";
 import type {
@@ -85,7 +84,9 @@ export async function ensureRunning(config: AppConfig): Promise<void> {
 // We attach `-L localPort:127.0.0.1:REMOTE_PORT` to the SAME ControlMaster
 // connection pty.ts uses, via `ssh -O forward`. Cancel is symmetric.
 
-const CONTROL_PATH = pathJoin(tmpdir(), "bui-cm-%C");
+// Must match pty.ts's CONTROL_PATH exactly so we share its ControlMaster.
+// `/tmp` (not tmpdir()) because macOS tmpdir() overflows the sun_path limit.
+const CONTROL_PATH = pathJoin("/tmp", "bui-cm-%C");
 
 function controlArgs(config: AppConfig): string[] {
   const args = [
@@ -115,11 +116,21 @@ function sshControl(config: AppConfig, op: string, extra: string[] = []): Promis
 
 let forwarded = false;
 
+// Probe + rebuild on every call. A cached "we already forwarded once" boolean
+// lies after wifi drops, laptop sleep, or remote sshd restart — the master
+// socket is gone but the flag still says up, and every fetch lands on a dead
+// port. `ssh -O check` is ~1ms when the master is alive; we eat that cost to
+// keep the path self-healing. `-O forward` is idempotent (sshControl treats
+// "already forwarded" as success).
 export async function ensureForward(config: AppConfig): Promise<void> {
-  if (forwarded) return;
-  // ControlMaster doesn't exist until the first ssh runs against it. The
-  // no-op `true` boots it via the same path runSshOnce uses elsewhere.
-  await runSshOnce(config, "true");
+  try {
+    await sshControl(config, "check");
+  } catch {
+    // ControlMaster is gone (or never existed). Boot it via the same path
+    // runSshOnce uses elsewhere.
+    forwarded = false;
+    await runSshOnce(config, "true");
+  }
   const spec = `${localPort(config)}:127.0.0.1:${REMOTE_PORT}`;
   await sshControl(config, "forward", ["-L", spec]);
   forwarded = true;

@@ -35,10 +35,12 @@ function sshTarget(config: AppConfig): string {
 // master and subsequent calls are sub-50ms — critical for the on-mouseup
 // clipboard fetch where latency is user-visible.
 //
-// The ControlPath socket has a ~104-byte limit; %C is a 16-char hash.
-// `bui-cm-` + 16 hex = 23 chars under tmpdir, which fits comfortably even on
-// macOS (`/var/folders/.../T/`).
-const CONTROL_PATH = pathJoin(tmpdir(), "bui-cm-%C");
+// The ControlPath socket has a ~104-byte sun_path limit; %C is a 16-char hash
+// and ssh appends a ~17-char random suffix while establishing the master.
+// macOS `tmpdir()` is `/var/folders/<...>/T/` (~50 chars) which blows the
+// limit, so anchor the socket in a short fixed dir instead.
+const CONTROL_DIR = "/tmp";
+const CONTROL_PATH = pathJoin(CONTROL_DIR, "bui-cm-%C");
 
 function sshBaseArgs(config: AppConfig): string[] {
   const args: string[] = [
