@@ -278,11 +278,26 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 | `src/main/opencode.ts` | HTTP client, SSE consumer, ssh tunnel mgmt |
 | `src/main/index.ts` | IPC handlers, opencode SSE bus, screenshot detector |
 | `src/main/pty.ts` | `tmuxRestampSessionId`, `tmuxNewChatWindow` |
-| `src/renderer/ChatPanel.tsx` | entire chat UI (~3400 LoC), intentionally monolithic |
+| `src/renderer/ChatPanel.tsx` | entire chat UI (~3700 LoC), intentionally monolithic |
 | `src/renderer/App.tsx` | mounts ChatPanels keyed by session id |
 
 **AppConfig additions**: `opencodePort` (default 14096), `chatAutoAllow`
 (auto-reply "always" to all permission requests — like `--dangerously-skip-permissions`).
+`chatAutoAllow` does NOT apply to Question tool requests — those always need
+explicit user choice.
+
+**v2-only endpoints** (used alongside the v1 base):
+- `GET /question` — list pending Question tool requests
+- `POST /question/{id}/reply` — body `{answers: string[][]}` (one array of selected
+  option labels per question)
+- `POST /question/{id}/reject` — dismiss without answering
+- SSE events: `question.asked`, `question.replied`, `question.rejected`
+
+The `QuestionCard` component (bottom of `ChatPanel.tsx`) renders above
+`PermissionCard`. Each card shows question header + body text, clickable option
+buttons (toggleable multi-select when `multiple:true`), optional free-text input
+(`custom:true`), and Submit / Cancel. Submit is disabled until every question in
+the request has at least one selection or custom text.
 
 **Gotchas**:
 - Sessions persist FileParts forever. A bad-mime FilePart (e.g. `application/json`)
@@ -290,8 +305,10 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
   `DELETE /session/{sid}/message/{mid}/part/{pid}` on each offender.
 - `/api/model` leaks `apiKey` — never forward it. Use `/provider` instead
   (already done in `opencode.ts`).
+- The `/question` endpoint returns 404 on older opencode servers (pre-v2). The
+  fetch in ChatPanel is wrapped in `.catch(() => {})` — non-fatal.
 - Mobile path (`src/server/index.mjs`) is NOT shimmed for any of the chat-mode
-  IPCs. Whoever lands mobile needs to add those shims.
+  IPCs (permissions, questions, etc.). Whoever lands mobile needs to add those shims.
 
 ## File upload paths (chat-mode)
 
@@ -333,5 +350,6 @@ then restart the `bui-opencode` tmux session for opencode to reload.
 
 - **Mobile responsive layout** — biggest remaining item. ChatPanel already uses
   only `window.api.*`; main work is sidebar-as-drawer + touch targets + IPC
-  shims in `src/server/index.mjs`.
+  shims in `src/server/index.mjs` for permissions, questions, and other
+  chat-mode channels.
 - **Global model preference** — currently per-session in localStorage.
