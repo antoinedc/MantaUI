@@ -372,6 +372,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   const [stepTokens, setStepTokens] = useState<
     (TokenUsage & { cost: number }) | null
   >(null);
+  // Current VCS branch for this session's cwd. Initial value is fetched on
+  // mount (the SSE `vcs.branch.updated` event only fires on change); kept
+  // current via that event after that. Rendered as `⎇ <branch>` left of the
+  // model picker in InputArea's footer when non-null.
+  const [branch, setBranch] = useState<string | null>(null);
   // Live compaction streaming state. session.next.compaction.{started,delta,
   // ended} fire while opencode summarizes the transcript to free context;
   // without surfacing them the user sees nothing until session.compacted
@@ -421,6 +426,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
       clearTimeout(compactionClearTimer.current);
       compactionClearTimer.current = null;
     }
+    setBranch(null);
+    // Initial branch fetch — SSE only fires on change, so without this the
+    // footer stays blank until the user switches branches in their terminal.
+    // Non-fatal on 404 / non-git dirs.
+    window.api
+      .opencodeVcsBranch(cwd)
+      .then((b) => {
+        if (!cancelled) setBranch(b);
+      })
+      .catch(() => { /* non-fatal — pre-v2 server or non-git cwd */ });
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
@@ -451,7 +466,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, cwd]);
 
   // Refresh permissions list. Called on any permission event.
   const refreshPermissions = useCallback(() => {
@@ -662,6 +677,15 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
           setCompactionState(null);
           compactionClearTimer.current = null;
         }, 2500);
+      }
+
+      // Branch indicator — vcs.branch.updated has no sessionID so it bypasses
+      // the early filter at the top of the handler. opencode emits one event
+      // per worker on every branch change; for the chat footer we just want
+      // the latest value (`branch?` is unset when the dir leaves a git repo).
+      if (ev.type === "vcs.branch.updated") {
+        const b = props.branch;
+        setBranch(typeof b === "string" ? b : null);
       }
 
       // Live TodoWrite mirror — opencode fires todo.updated whenever the
@@ -2114,6 +2138,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         submit={submit}
         abort={abort}
         running={running}
+        branch={branch}
         modelLabel={modelLabel}
         showThinking={showThinking}
         chatAutoAllow={chatAutoAllow}
@@ -2989,6 +3014,7 @@ function InputArea({
   submit,
   abort,
   running,
+  branch,
   modelLabel,
   showThinking,
   chatAutoAllow,
@@ -3020,6 +3046,7 @@ function InputArea({
   submit: () => void;
   abort: () => void;
   running: boolean;
+  branch: string | null;
   modelLabel: string | null;
   showThinking: boolean;
   chatAutoAllow: boolean;
@@ -3165,6 +3192,14 @@ function InputArea({
       {/* overflow:hidden which clips the model picker's absolute dropdown. */}
       <div className="px-4 py-2 flex items-center justify-between gap-3">
         <span className="flex items-center gap-3 min-w-0">
+          {branch && (
+            <span
+              className="text-text-faint shrink-0 truncate max-w-[160px]"
+              title={`Current branch: ${branch}`}
+            >
+              ⎇ {branch}
+            </span>
+          )}
           <ModelPicker
             modelLabel={modelLabel}
             models={models}

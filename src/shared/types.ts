@@ -191,6 +191,10 @@ export const IPC = {
   opencodeModels: "opencode:models",
   // What opencode would use if prompt_async were called without a model.
   opencodeDefaultModel: "opencode:default-model",
+  // Current VCS branch for a working directory. SSE `vcs.branch.updated`
+  // only fires on change, so the chat footer fetches the initial value on
+  // mount via this channel.
+  opencodeVcsBranch: "opencode:vcs-branch",
   // Session management: list/fork/compact/delete.
   opencodeListSessions: "opencode:list-sessions",
   opencodeForkSession: "opencode:fork-session",     // returns new sessionId

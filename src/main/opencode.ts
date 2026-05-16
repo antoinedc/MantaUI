@@ -431,6 +431,27 @@ export async function getDefaultModel(
   return null;
 }
 
+// Current VCS branch for a working directory. Backs the chat footer's
+// "⎇ <branch>" indicator. The SSE event `vcs.branch.updated` only fires on
+// change, so the renderer fetches the initial value on mount via this IPC.
+// `/vcs` returns 200 with an empty body for non-git directories — we coalesce
+// undefined to null so the renderer can use `branch ?? null` everywhere.
+export async function getVcsBranch(
+  config: AppConfig,
+  directory?: string,
+): Promise<string | null> {
+  await ensureForward(config);
+  const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
+  const res = await fetch(apiUrl(config, `/vcs${qs}`));
+  if (!res.ok) return null;
+  try {
+    const data = (await res.json()) as { branch?: string };
+    return data.branch ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // Only include models from CONNECTED providers (`/provider.connected`).
 // `/api/model` lists Anthropic-via-OAuth + others, but those routes don't
 // actually serve prompts — opencode rejects them with "Model not found"

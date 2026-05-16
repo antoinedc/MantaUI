@@ -46,6 +46,7 @@ import {
   teardownForward as teardownOpencodeForward,
   listModels as opencodeListModels,
   getDefaultModel as opencodeGetDefaultModel,
+  getVcsBranch as opencodeGetVcsBranch,
   listSessions as opencodeListSessions,
   forkSession as opencodeForkSession,
   compactSession as opencodeCompactSession,
@@ -611,6 +612,9 @@ function registerHandlers(): void {
   // response; opencode.listModels redacts before this leaves main.
   ipcMain.handle(IPC.opencodeModels, () => opencodeListModels(config));
   ipcMain.handle(IPC.opencodeDefaultModel, () => opencodeGetDefaultModel(config));
+  ipcMain.handle(IPC.opencodeVcsBranch, (_e, directory?: string) =>
+    opencodeGetVcsBranch(config, directory),
+  );
 
   // Session management: list/fork/compact/delete. Fork additionally creates a
   // bui tmux window pointing at the new session so the user sees it appear.

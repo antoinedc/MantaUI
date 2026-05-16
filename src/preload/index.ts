@@ -160,6 +160,8 @@ const api = {
     ipcRenderer.invoke(IPC.opencodeModels),
   opencodeDefaultModel: (): Promise<{ providerID: string; modelID: string } | null> =>
     ipcRenderer.invoke(IPC.opencodeDefaultModel),
+  opencodeVcsBranch: (directory?: string): Promise<string | null> =>
+    ipcRenderer.invoke(IPC.opencodeVcsBranch, directory),
 
   // Session management.
   opencodeListSessions: (directory?: string): Promise<OpencodeSessionListItem[]> =>
