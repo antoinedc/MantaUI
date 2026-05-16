@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { pipeline } from "node:stream/promises";
 import { WebSocketServer } from "ws";
 import { spawn as ptySpawn } from "node-pty";
+import { listProjects } from "./tmux.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -22,52 +23,6 @@ const PUBLIC_DIR = join(__dirname, "public");
 
 const PORT = Number(process.env.BUI_MOBILE_PORT ?? 8787);
 const HOST = process.env.BUI_MOBILE_HOST ?? "0.0.0.0";
-
-// ---------- tmux helpers (local exec, no ssh) ----------
-
-const FS = "\t"; // tmux passes tabs through verbatim; everything else gets escaped
-
-function run(cmd, args) {
-  return new Promise((resolve, reject) => {
-    const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    p.stdout.on("data", (b) => (stdout += b.toString()));
-    p.stderr.on("data", (b) => (stderr += b.toString()));
-    p.on("error", reject);
-    p.on("exit", (code) => {
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${cmd} exited ${code}: ${stderr.trim() || stdout.trim()}`));
-    });
-  });
-}
-
-async function listProjects() {
-  // Tolerate "no server running" (exit 1) by swallowing failure.
-  const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
-  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}`;
-  const sess = await run("tmux", ["list-sessions", "-F", sessFmt]).catch(() => ({ stdout: "" }));
-  const wins = await run("tmux", ["list-windows", "-a", "-F", winFmt]).catch(() => ({ stdout: "" }));
-
-  const sessions = new Map();
-  for (const line of sess.stdout.split("\n").filter(Boolean)) {
-    const [name, attached] = line.split(FS);
-    sessions.set(name, { tmuxSession: name, attached: attached === "1", windows: [], defaultCwd: "~" });
-  }
-  for (const line of wins.stdout.split("\n").filter(Boolean)) {
-    const [sname, idx, wname, active, path] = line.split(FS);
-    const s = sessions.get(sname);
-    if (!s) continue;
-    s.windows.push({
-      index: Number(idx),
-      name: wname,
-      active: active === "1",
-      paneCurrentPath: path,
-    });
-    if (s.windows.length === 1) s.defaultCwd = path;
-  }
-  return [...sessions.values()];
-}
 
 // ---------- static file serving ----------
 
