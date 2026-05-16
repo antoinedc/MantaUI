@@ -488,10 +488,34 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
 
       // Server-side prompt failure (model not found, provider down, etc).
       // Without surfacing this the renderer just sits at "running" forever
-      // and the user thinks the AI isn't replying.
+      // and the user thinks the AI isn't replying. opencode v2 names the
+      // error class on `err.name`; prepend a context-appropriate prefix so
+      // the user can tell auth failures from context overflows at a glance.
       if (ev.type === "session.error") {
         const err = (props.error as { data?: { message?: string }; name?: string } | undefined);
-        const msg = err?.data?.message ?? err?.name ?? "Unknown server error";
+        const raw = err?.data?.message ?? err?.name ?? "Unknown server error";
+        let msg: string;
+        switch (err?.name) {
+          case "ProviderAuthError":
+            msg = `Auth error: ${raw}`;
+            break;
+          case "ContextOverflowError":
+            msg = `Context full — try /compact: ${raw}`;
+            break;
+          case "MessageOutputLengthError":
+            msg = "Response truncated (hit output limit)";
+            break;
+          case "StructuredOutputError":
+            msg = `Structured output failed: ${raw}`;
+            break;
+          case "ApiError":
+            msg = `API error: ${raw}`;
+            break;
+          default:
+            // MessageAbortedError, UnknownError, and anything we don't have a
+            // specific phrasing for falls through to the raw message.
+            msg = raw;
+        }
         setSendError(msg);
         setRunning(false);
       }
