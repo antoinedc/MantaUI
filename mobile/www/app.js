@@ -14,6 +14,41 @@ const KEY_SEQ = {
   left: ESC + "[D",
 };
 
+// ---------- server config ----------
+// In the browser the server is location.host. In the Capacitor shell the
+// user enters their bui server address; we persist it and derive every
+// fetch()/WebSocket URL from it.
+
+const SERVER_KEY = "bui_server";
+
+function getServer() {
+  const v = localStorage.getItem(SERVER_KEY);
+  return v ? v.replace(/\/+$/, "") : "";
+}
+
+function setServer(v) {
+  localStorage.setItem(SERVER_KEY, v.replace(/\/+$/, ""));
+}
+
+// Absolute http(s) URL for a server-relative API path.
+function apiUrl(path) {
+  return getServer() + path;
+}
+
+// ws:// or wss:// origin derived from the saved server base.
+function wsBase() {
+  return getServer().replace(/^http/, "ws");
+}
+
+function normalizeServer(raw) {
+  const s = (raw || "").trim().replace(/\/+$/, "");
+  if (!s) return null;
+  let u;
+  try { u = new URL(s); } catch { return null; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  return s;
+}
+
 // ---------- list view ----------
 
 const $list = document.getElementById("list");
@@ -23,7 +58,7 @@ const $refresh = document.getElementById("refresh");
 async function loadSessions() {
   $sessions.innerHTML = '<div class="empty">Loading...</div>';
   try {
-    const res = await fetch("/api/projects");
+    const res = await fetch(apiUrl("/api/projects"));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const projects = await res.json();
     renderSessions(projects);
@@ -132,10 +167,22 @@ function openTerm(session, windowIdx, windowName) {
   term.open($termHost);
   fit.fit();
 
+  // iOS WKWebView: the virtual keyboard won't show on tap unless we focus
+  // the hidden textarea synchronously from a touch handler. Also disable
+  // autocorrect/capitalize on it so terminal input isn't mangled.
+  const ta = term._core && term._core.textarea;
+  if (ta) {
+    ta.setAttribute("autocorrect", "off");
+    ta.setAttribute("autocapitalize", "off");
+    ta.setAttribute("spellcheck", "false");
+    $termHost.addEventListener("touchend", () => {
+      try { ta.focus({ preventScroll: true }); } catch { ta.focus(); }
+    });
+  }
+
   const cols = term.cols;
   const rows = term.rows;
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${proto}://${location.host}/pty?session=${encodeURIComponent(session)}` +
+  const url = `${wsBase()}/pty?session=${encodeURIComponent(session)}` +
     `&window=${windowIdx}&cols=${cols}&rows=${rows}`;
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
@@ -165,6 +212,17 @@ function openTerm(session, windowIdx, windowName) {
   const onResize = () => {
     if (!fit || !ws) return;
     try {
+      // When the iOS keyboard opens, visualViewport shrinks. Resize the
+      // terminal host to the visible area minus the fixed bars so the
+      // prompt isn't hidden behind the keyboard.
+      if (window.visualViewport) {
+        const bar = document.querySelector(".term-bar");
+        const keys = document.querySelector(".term-keys");
+        const h = window.visualViewport.height
+          - (bar ? bar.offsetHeight : 0)
+          - (keys ? keys.offsetHeight : 0);
+        if (h > 0) $termHost.style.height = h + "px";
+      }
       fit.fit();
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
@@ -195,6 +253,7 @@ function closeTerm() {
   }
   setCtrlArmed(false);
   currentSession = null;
+  $termHost.style.height = "";
   $term.classList.remove("active");
   $list.classList.remove("hidden");
 }
@@ -282,7 +341,7 @@ $uploadInput.addEventListener("change", async () => {
 
   for (const f of files) {
     try {
-      const url = `/api/upload?session=${encodeURIComponent(currentSession)}`;
+      const url = apiUrl(`/api/upload?session=${encodeURIComponent(currentSession)}`);
       const res = await fetch(url, {
         method: "POST",
         headers: {
@@ -324,6 +383,50 @@ function quoteIfNeeded(p) {
   return "'" + p.replace(/'/g, `'\\''`) + "'";
 }
 
+// ---------- settings screen ----------
+
+const $settings = document.getElementById("settings");
+const $serverUrl = document.getElementById("server-url");
+const $serverErr = document.getElementById("server-err");
+const $serverSave = document.getElementById("server-save");
+const $settingsOpen = document.getElementById("settings-open");
+
+function showSettings() {
+  $serverUrl.value = getServer();
+  $serverErr.hidden = true;
+  $list.classList.add("hidden");
+  $term.classList.remove("active");
+  $settings.classList.add("active");
+  setTimeout(() => $serverUrl.focus(), 50);
+}
+
+function hideSettings() {
+  $settings.classList.remove("active");
+  $list.classList.remove("hidden");
+}
+
+$serverSave.addEventListener("click", () => {
+  const norm = normalizeServer($serverUrl.value);
+  if (!norm) {
+    $serverErr.textContent = "Enter a valid http:// or https:// URL.";
+    $serverErr.hidden = false;
+    return;
+  }
+  setServer(norm);
+  hideSettings();
+  loadSessions();
+});
+
+$serverUrl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $serverSave.click();
+});
+
+$settingsOpen.addEventListener("click", showSettings);
+
 // ---------- boot ----------
 
-loadSessions();
+if (getServer()) {
+  loadSessions();
+} else {
+  showSettings();
+}
