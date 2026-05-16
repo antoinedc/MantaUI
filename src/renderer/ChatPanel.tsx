@@ -2942,7 +2942,7 @@ function QuestionCard({
             <div className="text-text mb-1.5 leading-snug">{info.question}</div>
 
             {/* Option buttons */}
-            <div className="flex flex-wrap gap-1.5">
+            <div className="mt-0.5 flex flex-wrap gap-1.5">
               {info.options.map((opt) => {
                 const isSelected = selected[qIdx].has(opt.label);
                 return (
@@ -2985,7 +2985,9 @@ function QuestionCard({
         ))}
       </div>
 
-      <div className="mt-2 flex justify-end gap-2">
+      <hr className="my-2 mx-2 border-border" />
+
+      <div className="mt-2 flex justify-start gap-2">
         <button
           onClick={onReject}
           className="px-2 py-0.5 rounded text-text-faint hover:text-text border border-border"
