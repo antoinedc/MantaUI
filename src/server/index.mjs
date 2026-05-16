@@ -15,11 +15,16 @@ import { homedir } from "node:os";
 import { pipeline } from "node:stream/promises";
 import { WebSocketServer } from "ws";
 import { spawn as ptySpawn } from "node-pty";
-import { listProjects } from "./tmux.mjs";
+import * as tmux from "./tmux.mjs";
+import { createBus, handleEventsRequest } from "./events.mjs";
+import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
 const PUBLIC_DIR = join(__dirname, "public");
+
+const bus = createBus();
+const rpcHandlers = buildHandlers({ tmux });
 
 const PORT = Number(process.env.BUI_MOBILE_PORT ?? 8787);
 const HOST = process.env.BUI_MOBILE_HOST ?? "0.0.0.0";
@@ -143,13 +148,21 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "GET" && path === "/events") {
+    return handleEventsRequest(bus, req, res);
+  }
+  if (req.method === "POST" && path.startsWith("/rpc/")) {
+    const channel = decodeURIComponent(path.slice("/rpc/".length));
+    return handleRpcRequest(rpcHandlers, channel, req, res);
+  }
+
   if (req.method === "GET" && (path === "/" || path === "/index.html")) {
     return serveFile(res, join(PUBLIC_DIR, "index.html"));
   }
 
   if (req.method === "GET" && path === "/api/projects") {
     try {
-      const projects = await listProjects();
+      const projects = await tmux.listProjects();
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(projects));
     } catch (e) {
