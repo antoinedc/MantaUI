@@ -3365,7 +3365,7 @@ function MessageRow({
         // assistant bullet column (x=16 inside the padding). 16 - 8 = 8 from
         // edge ≈ midway between sidebar and bullet. mt-3 adds breathing room
         // above so it doesn't crowd the last assistant part.
-        <div className="-ml-[8px] mt-3 text-[13px] text-text-muted">
+        <div className="-ml-[8px] mt-3 -mb-3 text-[13px] text-text-muted">
           <span style={{ color: CLAUDE_ORANGE }}>✻</span>{" "}
           {pastVerbFor(msg.info.id)} for {formatDuration(turnDurationMs)}
         </div>
