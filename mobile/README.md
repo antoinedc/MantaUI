@@ -45,6 +45,8 @@ For a signed release: Android Studio → Build → Generate Signed Bundle/APK.
 
 ## iOS — deferred steps (run on a Mac with Xcode.app)
 
+Run the `npm` commands below from `mobile/`.
+
 1. Install Xcode.app from the App Store and `sudo gem install cocoapods`.
 2. `npm run sync:ios`
 3. `npm run ios` (opens Xcode).
