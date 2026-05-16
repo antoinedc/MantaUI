@@ -6,8 +6,8 @@ export function run(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
-    p.stdout.on("data", (b) => (stdout += b));
-    p.stderr.on("data", (b) => (stderr += b));
+    p.stdout.on("data", (b) => (stdout += b.toString()));
+    p.stderr.on("data", (b) => (stderr += b.toString()));
     p.on("error", reject);
     p.on("exit", (code) =>
       code === 0 ? resolve({ stdout, stderr })
@@ -16,30 +16,25 @@ export function run(cmd, args) {
 }
 
 export function parseSessions(sessStdout, winStdout) {
-  const attached = new Map();
+  // Phase 1: build ordered session map from list-sessions output.
+  const sessions = new Map();
   for (const line of sessStdout.split("\n").filter(Boolean)) {
     const [name, att] = line.split(FS);
-    attached.set(name, att === "1");
+    sessions.set(name, { tmuxSession: name, attached: att === "1", windows: [] });
   }
-  const bySession = new Map();
+  // Phase 2: join windows into their session. Skip orphan window lines.
   for (const line of winStdout.split("\n").filter(Boolean)) {
     const [session, index, wname, active, pane] = line.split(FS);
-    if (!bySession.has(session)) bySession.set(session, []);
-    bySession.get(session).push({
+    if (!sessions.has(session)) continue; // defensive: orphan
+    sessions.get(session).windows.push({
       index: Number(index), name: wname,
       active: active === "1", paneCurrentPath: pane,
     });
   }
-  const out = [];
-  for (const [name, windows] of bySession) {
-    out.push({
-      tmuxSession: name,
-      defaultCwd: windows[0]?.paneCurrentPath ?? "~",
-      windows,
-      attached: attached.get(name) ?? false,
-    });
-  }
-  return out;
+  return Array.from(sessions.values()).map((s) => ({
+    ...s,
+    defaultCwd: s.windows[0]?.paneCurrentPath ?? "~",
+  }));
 }
 
 export async function listProjects() {
@@ -76,6 +71,7 @@ export async function killWindow({ sessionName, windowIndex }) {
   await run("tmux", ["kill-window", "-t", `${sessionName}:${windowIndex}`]).catch(() => {});
   return listProjects();
 }
+// Propagates errors (unlike the fail-open inline select-window in index.mjs).
 export async function selectWindow({ sessionName, windowIndex }) {
   await run("tmux", ["select-window", "-t", `${sessionName}:${windowIndex}`]);
 }
