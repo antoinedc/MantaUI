@@ -1575,6 +1575,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
         ref={scrollRef}
         className="flex-1 overflow-y-auto px-4 py-3"
       >
+        <div className="flex flex-col justify-end min-h-full">
         {messages.length === 0 ? (
           <div className="text-text-faint">
             <span style={{ color: CLAUDE_ORANGE }}>✻</span>{" "}
@@ -1599,6 +1600,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
             })}
           </div>
         )}
+        </div>
       </div>
 
       {/* Pending permission cards. Shown above the running indicator/input */}
