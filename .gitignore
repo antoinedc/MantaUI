@@ -7,3 +7,6 @@ dist/
 
 # Claude Code worktrees / local state
 .claude/
+
+# Brainstorming visual companion artifacts
+.superpowers/
