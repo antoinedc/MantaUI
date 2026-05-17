@@ -153,7 +153,10 @@ shell (`SessionListScreen` → `SessionScreen`) that reuses `ChatPanel` /
 `Terminal` unchanged. CSS is `.mobile`-scoped (`mobile/mobile.css`) so it
 never matches the desktop tree. Desktop `App.tsx`/`Sidebar.tsx` are untouched.
 Session owner→props mapping is the tested `resolveSessionOwner()` in
-`store.ts`.
+`store.ts`. Safe-area/home-indicator inset is applied on the mobile-owned
+`.mobile-body` wrapper + its absolute child — **not** on ChatPanel internals
+(those selectors would require editing a desktop-invariant file and silently
+match nothing).
 
 ## Mouse mode — design decision, do not re-litigate
 
