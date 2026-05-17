@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseStatus, countSubagents } from "./status.mjs";
+import { parseStatus, countSubagents, MARK } from "./status.mjs";
 
 // ----------------------------------------------------------------------------
 // countSubagents — pure helper
@@ -41,8 +41,6 @@ test("countSubagents ignores plain ⎿ Running lines without a preceding Task", 
 // ----------------------------------------------------------------------------
 // parseStatus — parses tmux capture-pane output batched with MARK sentinels
 // ----------------------------------------------------------------------------
-
-const MARK = "__BUI_PANE__";
 
 function mkStdout(entries) {
   // Simulates the shell loop output:
