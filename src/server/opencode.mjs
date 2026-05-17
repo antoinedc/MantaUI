@@ -30,17 +30,6 @@ export function parseSseFrame(line) {
 }
 
 // ---------------------------------------------------------------------------
-// Internal fetch helper
-// ---------------------------------------------------------------------------
-
-async function j(path, init) {
-  const res = await fetch(apiUrl(path), init);
-  if (!res.ok) throw new Error(`opencode ${path} -> HTTP ${res.status}: ${await res.text()}`);
-  const t = await res.text();
-  return t ? JSON.parse(t) : null;
-}
-
-// ---------------------------------------------------------------------------
 // Session CRUD
 // ---------------------------------------------------------------------------
 
@@ -436,24 +425,27 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
 // ---------------------------------------------------------------------------
 
 /**
- * Open a long-lived SSE connection to /event.
- * Calls onEvent(parsedObject) for each received event.
- * Self-restarts on disconnect with a 1.5s delay.
- * Returns a stop() function.
+ * Opens a long-lived SSE connection to opencode's /event endpoint.
+ * Calls onEvent(parsedObject) for each parsed event frame.
+ * Auto-reconnects on drop with a 1.5 s delay.
  *
- * SSE framing: events are separated by blank lines (\n\n). Multiple data:
- * lines per event are concatenated (mirrors opencode.ts's gen() function).
+ * Returns stop() which:
+ *   - sets stopped = true so the loop exits after the current iteration, AND
+ *   - immediately aborts the in-flight fetch via AbortController so
+ *     reader.read() unblocks right away (no connection leak on teardown).
  *
  * @param {(event: object) => void} onEvent
  * @returns {() => void} stop
  */
 export function subscribeEvents(onEvent) {
   let stopped = false;
+  let currentController = null;
 
   (async function loop() {
     while (!stopped) {
+      const controller = new AbortController();
+      currentController = controller;
       try {
-        const controller = new AbortController();
         const res = await fetch(apiUrl("/event"), {
           signal: controller.signal,
           headers: { accept: "text/event-stream" },
@@ -491,14 +483,14 @@ export function subscribeEvents(onEvent) {
           }
         } finally {
           try { reader.releaseLock(); } catch { /* already released */ }
-          if (!stopped) controller.abort();
+          controller.abort(); // always abort to release the connection
         }
       } catch {
-        /* reconnect */
+        /* reconnect on error or AbortError from stop() */
       }
       if (!stopped) await new Promise((r) => setTimeout(r, 1500));
     }
   })();
 
-  return () => { stopped = true; };
+  return () => { stopped = true; currentController?.abort(); };
 }
