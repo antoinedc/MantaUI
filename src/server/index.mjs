@@ -23,7 +23,10 @@ import { startStatusPoller } from "./status.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
-const PUBLIC_DIR = join(__dirname, "public");
+// The web client is the React renderer built by `npm run build:mobile` into
+// mobile/www/ (index.html + hashed /assets/* + PWA manifest/icons). The old
+// vanilla src/server/public/ client was removed 2026-05-17.
+const PUBLIC_DIR = join(PROJECT_ROOT, "mobile", "www");
 
 const bus = createBus();
 const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
@@ -97,16 +100,7 @@ const MIME = {
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
   ".png": "image/png",
-};
-
-// Vendor files we serve out of node_modules. Keys are the public URL path
-// under /vendor/, values are the on-disk path under node_modules.
-const VENDOR = {
-  "xterm.js": "@xterm/xterm/lib/xterm.js",
-  "xterm.js.map": "@xterm/xterm/lib/xterm.js.map",
-  "xterm.css": "@xterm/xterm/css/xterm.css",
-  "addon-fit.js": "@xterm/addon-fit/lib/addon-fit.js",
-  "addon-fit.js.map": "@xterm/addon-fit/lib/addon-fit.js.map",
+  ".webmanifest": "application/manifest+json",
 };
 
 async function serveFile(res, filePath, fallbackStatus = 404) {
@@ -229,27 +223,28 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === "GET" && path.startsWith("/vendor/")) {
-    const name = path.slice("/vendor/".length);
-    const rel = VENDOR[name];
-    if (!rel) {
-      res.writeHead(404).end("not found");
-      return;
-    }
-    return serveFile(res, join(PROJECT_ROOT, "node_modules", rel));
-  }
-
-  if (req.method === "GET" && path.startsWith("/static/")) {
-    const target = safeJoin(PUBLIC_DIR, path.slice("/static/".length));
-    if (!target) {
-      res.writeHead(403).end("forbidden");
-      return;
-    }
-    return serveFile(res, target);
-  }
-
   if (req.method === "POST" && path === "/api/upload") {
     return handleUpload(req, res, url);
+  }
+
+  // Static fallback for the React + PWA bundle in mobile/www/. All backend
+  // routes (/events, /rpc/*, /api/*, /pty WS) were matched above, so this
+  // only ever sees client asset / SPA-route requests. An existing file
+  // (hashed /assets/*, /manifest.webmanifest, /icons/*) is served with its
+  // MIME; anything else falls back to index.html so client-side routing /
+  // deep links work. safeJoin() blocks path traversal.
+  if (req.method === "GET") {
+    const target = safeJoin(PUBLIC_DIR, decodeURIComponent(path));
+    if (target) {
+      try {
+        if ((await stat(target)).isFile()) {
+          return serveFile(res, target);
+        }
+      } catch {
+        // not an existing file → fall through to SPA index
+      }
+    }
+    return serveFile(res, join(PUBLIC_DIR, "index.html"));
   }
 
   res.writeHead(404, { "content-type": "text/plain" });
