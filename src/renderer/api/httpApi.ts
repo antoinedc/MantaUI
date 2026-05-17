@@ -61,7 +61,13 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   screenshot: new Set(),
 };
 
-let es: EventSource | null = null;
+// The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
+// PWAs can't reliably receive EventSource, but WebSockets work there (the
+// /pty WS already tunnels fine in the installed PWA). Server exposes the
+// same {kind,payload} envelope on a /events WS.
+let es: WebSocket | null = null;
+// WS has no built-in auto-reconnect (EventSource did). Track a backoff timer.
+let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ---------------------------------------------------------------------------
 // Reconnect-resync state.
@@ -115,61 +121,82 @@ function fireResync() {
   }, 0);
 }
 
-// (Re)create the shared EventSource. Idempotent: a stream that is OPEN or
-// CONNECTING is left alone; only a missing or CLOSED one is (re)opened, so
-// normal reconnect flapping isn't disturbed. Handlers are unchanged from the
-// original implementation. Listeners live in the module `listeners` map (not
-// bound to the EventSource instance), so swapping `es` is transparent to
-// every on() consumer.
+// WS URL: same origin as serverBase(), http→ws / https→wss. Same-origin so
+// it rides the same (Cloudflare) tunnel the page came from — the /pty WS
+// proves WS tunnels reliably here, including in the iOS standalone PWA.
+function wsUrl(): string {
+  return serverBase().replace(/^http/, "ws") + "/events";
+}
+
+// (Re)create the shared events WebSocket. Idempotent: a socket that is OPEN
+// or CONNECTING is left alone; only a missing/CLOSING/CLOSED one is
+// (re)opened. Listeners live in the module `listeners` map (not bound to the
+// socket), so swapping `es` is transparent to every on() consumer. The
+// {kind,payload} frame is byte-identical to the old SSE envelope, so the
+// dispatch body is unchanged.
 function openStream() {
-  if (es && es.readyState !== EventSource.CLOSED) return;
+  if (es && (es.readyState === WebSocket.OPEN || es.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
   if (es) {
     try { es.close(); } catch { /* already dead */ }
   }
-  es = new EventSource(`${serverBase()}/events`);
+  es = new WebSocket(wsUrl());
   es.onmessage = (m) => {
     try {
-      const { kind, payload } = JSON.parse(m.data) as {
+      const { kind, payload } = JSON.parse(m.data as string) as {
         kind: Kind;
         payload: unknown;
       };
       const set = listeners[kind];
       if (set) for (const fn of set) fn(payload);
     } catch {
-      // keep-alive comment or malformed line — ignore
+      // non-JSON / control frame — ignore
     }
   };
-  es.onerror = () => {
-    // EventSource will auto-reconnect; mark that a drop occurred so the
-    // next onopen knows it's a reconnect (not the initial connect).
+  const drop = () => {
+    // WebSocket has NO built-in auto-reconnect (EventSource did). Mark the
+    // drop and schedule an explicit reconnect with light backoff, but only
+    // while something is listening (no point reconnecting to a dead box if
+    // nothing consumes events).
     _hadError = true;
+    if (_reconnectTimer) return;
+    const anyListeners = Object.values(listeners).some((s) => s.size > 0);
+    if (!anyListeners) return;
+    _reconnectTimer = setTimeout(() => {
+      _reconnectTimer = null;
+      openStream();
+    }, 1500);
   };
+  es.onerror = drop;
+  es.onclose = drop;
   es.onopen = () => {
     if (_hadError) {
-      // This is a reconnect after a drop — fire the resync.
+      // Reconnect after a drop — refetch state that may have changed while
+      // disconnected (existing resync path, unchanged).
       _hadError = false;
       fireResync();
     }
-    // else: initial connect — do nothing (initial load already fetches).
+    // else: initial connect — initial load already fetches.
   };
 }
 
-// iOS suspends an installed standalone PWA when backgrounded / screen-locked
-// / idle. It kills the SSE connection but, in standalone mode, often does
-// NOT fire onerror and does NOT resume the browser's auto-reconnect on
-// resume — the EventSource is left CLOSED with no event ever firing, so the
-// app "opens once then goes static". Watch the lifecycle: on return to
-// foreground (visibilitychange→visible) or bfcache restore (pageshow), if
-// the stream is dead, reopen it. We set _hadError so the fresh onopen drives
-// fireResync() through the existing path (single resync trigger — do NOT
-// also call fireResync() here or state refetches twice).
+// iOS suspends an installed standalone PWA when backgrounded / screen-locked.
+// It kills the connection and (in standalone) often fires nothing on resume,
+// leaving the socket dead with no events — app "opens once then goes static".
+// On return to foreground (visibilitychange→visible) or bfcache restore
+// (pageshow), if the socket isn't live, reopen it. _hadError makes the fresh
+// onopen drive fireResync() (single resync trigger — don't also call it here).
 let _resumeWatchdogInstalled = false;
 function installResumeWatchdog() {
   if (_resumeWatchdogInstalled) return;
   _resumeWatchdogInstalled = true;
   const recover = () => {
     if (document.visibilityState !== "visible") return;
-    if (!es || es.readyState === EventSource.CLOSED) {
+    const live =
+      es && (es.readyState === WebSocket.OPEN || es.readyState === WebSocket.CONNECTING);
+    if (!live) {
       _hadError = true; // make the next onopen fire the resync
       openStream();
     }

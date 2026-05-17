@@ -17,7 +17,7 @@ import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
-import { createBus, handleEventsRequest } from "./events.mjs";
+import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 
@@ -262,11 +262,17 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-  if (url.pathname !== "/pty") {
-    socket.destroy();
+  if (url.pathname === "/events") {
+    // Live event stream over WS (SSE alternative for iOS standalone PWAs,
+    // which can't reliably receive EventSource). Same bus + envelope.
+    wss.handleUpgrade(req, socket, head, (ws) => attachEventsWs(bus, ws));
     return;
   }
-  wss.handleUpgrade(req, socket, head, (ws) => attachPty(ws, url));
+  if (url.pathname === "/pty") {
+    wss.handleUpgrade(req, socket, head, (ws) => attachPty(ws, url));
+    return;
+  }
+  socket.destroy();
 });
 
 function attachPty(ws, url) {

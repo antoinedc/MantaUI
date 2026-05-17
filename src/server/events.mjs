@@ -34,3 +34,26 @@ export function handleEventsRequest(bus, req, res) {
   ka.unref(); // Don't keep the Node process alive for keep-alive pings alone
   req.on("close", () => { clearInterval(ka); off(); });
 }
+
+// Attach to a WebSocket (the /events upgrade path). Same `bus`, same
+// {kind,payload} envelope as SSE — one JSON text frame per event, so the
+// client demux is identical. This exists because iOS standalone PWAs can't
+// reliably receive SSE/EventSource (works in Safari proper), whereas
+// WebSockets work there — proven by the /pty WS already tunneling fine in
+// the installed PWA. SSE (handleEventsRequest) is kept for other consumers.
+export function attachEventsWs(bus, ws) {
+  const off = bus.subscribe((evt) => {
+    if (ws.readyState === 1 /* OPEN */) {
+      try { ws.send(JSON.stringify(evt)); } catch { /* peer gone */ }
+    }
+  });
+  // Heartbeat: keeps intermediaries (Cloudflare tunnel) from idling the
+  // socket and lets the client notice a half-open connection.
+  const ka = setInterval(() => {
+    try { ws.ping?.(); } catch { /* closing */ }
+  }, 15000);
+  ka.unref();
+  const cleanup = () => { clearInterval(ka); off(); };
+  ws.on("close", cleanup);
+  ws.on("error", cleanup);
+}
