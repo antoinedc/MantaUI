@@ -19,6 +19,7 @@ import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
 import { createBus, handleEventsRequest } from "./events.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
+import { startStatusPoller } from "./status.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -26,6 +27,11 @@ const PUBLIC_DIR = join(__dirname, "public");
 
 const bus = createBus();
 const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
+
+// Periodically capture every tmux pane and push WindowStatus[] batches so the
+// mobile sidebar's activity/attention dots work (parity with desktop status.ts).
+// eslint-disable-next-line no-unused-vars
+const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
 
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.
