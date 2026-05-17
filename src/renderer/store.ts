@@ -43,6 +43,8 @@ type State = {
   // Global default model for new/cleared sessions. Set in Settings, persisted
   // to config.json. null = let opencode pick its default.
   defaultModel: { providerID: string; modelID: string } | null;
+  // User-added skill registry URLs (written to remote opencode.jsonc on save).
+  skillRegistryUrls: string[];
   transport: TransportInfo | null;
   tmuxConfig: TmuxConfigStatus | null;
   projects: Project[];
@@ -73,6 +75,7 @@ export const useStore = create<State>((set, get) => ({
   uploadCleanupHours: 1,
   chatAutoAllow: false,
   defaultModel: null,
+  skillRegistryUrls: [],
   transport: null,
   tmuxConfig: null,
   projects: [],
@@ -141,6 +144,7 @@ export const useStore = create<State>((set, get) => ({
       uploadCleanupHours: c.uploadCleanupHours ?? 1,
       chatAutoAllow: c.chatAutoAllow ?? false,
       defaultModel: c.defaultModel ?? null,
+      skillRegistryUrls: c.skillRegistryUrls ?? [],
     }),
 
   setChatAutoAllow: async (v) => {

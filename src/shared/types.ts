@@ -31,6 +31,11 @@ export type AppConfig = {
   // this setting use the same shape. When absent, opencode picks its own
   // default (the first connected provider's default model).
   defaultModel?: { providerID: string; modelID: string };
+  // Extra skill registry URLs written to the remote opencode.jsonc as
+  // skills.urls. The default registry (https://antoinedc.github.io/bui-skills)
+  // is always prepended by the binary once the upstream PR lands; these are
+  // user-added extras. Empty array = no user-added registries.
+  skillRegistryUrls?: string[];
 };
 
 export type TransportInfo = {

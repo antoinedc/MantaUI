@@ -10,6 +10,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     transportPreference,
     uploadCleanupHours,
     defaultModel,
+    skillRegistryUrls,
     transport,
     tmuxConfig,
     refresh,
@@ -25,6 +26,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [selectedModel, setSelectedModel] = useState<{ providerID: string; modelID: string } | null>(
     defaultModel ?? null,
   );
+  // Skill registry URLs
+  const [registryUrls, setRegistryUrls] = useState<string[]>(skillRegistryUrls ?? []);
+  const [newRegistryUrl, setNewRegistryUrl] = useState("");
 
   useEffect(() => {
     setH(host);
@@ -33,7 +37,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setTp(transportPreference);
     setUch(String(uploadCleanupHours));
     setSelectedModel(defaultModel ?? null);
-  }, [host, user, identityFile, transportPreference, uploadCleanupHours, defaultModel]);
+    setRegistryUrls(skillRegistryUrls ?? []);
+  }, [host, user, identityFile, transportPreference, uploadCleanupHours, defaultModel, skillRegistryUrls]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -52,9 +57,21 @@ export function Settings({ onClose }: { onClose: () => void }) {
       transport: tp,
       uploadCleanupHours: Number.isFinite(hoursNum) && hoursNum >= 0 ? hoursNum : 1,
       defaultModel: selectedModel ?? undefined,
+      skillRegistryUrls: registryUrls,
     });
     await refresh();
     onClose();
+  };
+
+  const addRegistryUrl = () => {
+    const url = newRegistryUrl.trim();
+    if (!url || registryUrls.includes(url)) return;
+    setRegistryUrls([...registryUrls, url]);
+    setNewRegistryUrl("");
+  };
+
+  const removeRegistryUrl = (url: string) => {
+    setRegistryUrls(registryUrls.filter((u) => u !== url));
   };
 
   const restore = async () => {
@@ -223,6 +240,48 @@ export function Settings({ onClose }: { onClose: () => void }) {
           >
             {restoring ? "Restoring…" : "Restore previous tmux config"}
           </button>
+        </div>
+
+        <div className="space-y-2 pt-2 border-t border-border">
+          <label className="block text-xs uppercase tracking-wider text-text-muted">
+            Skill registries
+          </label>
+          <div className="text-xs text-text-faint">
+            Extra skill registry URLs fetched by opencode on startup. The default bui registry is
+            always included. Add your own to surface additional skills in the AI's toolset.
+          </div>
+          <div className="space-y-1">
+            {registryUrls.map((url) => (
+              <div key={url} className="flex items-center gap-2">
+                <code className="flex-1 text-xs bg-bg-soft border border-border rounded px-2 py-1 text-text-muted truncate">
+                  {url}
+                </code>
+                <button
+                  onClick={() => removeRegistryUrl(url)}
+                  className="text-xs text-text-faint hover:text-text px-1"
+                  title="Remove"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <input
+              placeholder="https://example.com/skills"
+              value={newRegistryUrl}
+              onChange={(e) => setNewRegistryUrl(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addRegistryUrl()}
+              className="flex-1 bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+            />
+            <button
+              onClick={addRegistryUrl}
+              disabled={!newRegistryUrl.trim()}
+              className="px-3 py-1.5 text-sm bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Add
+            </button>
+          </div>
         </div>
 
         <div className="text-xs text-text-faint">

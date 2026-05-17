@@ -29,6 +29,7 @@ import {
   cleanupUploads,
   peekRemoteFile,
   writePty,
+  runSshOnce,
 } from "./pty.js";
 import { info as transportInfo, invalidate as invalidateTransport } from "./transport.js";
 import { startStatusPoller, stopStatusPoller } from "./status.js";
@@ -366,7 +367,7 @@ async function listProjects(): Promise<Project[]> {
 function registerHandlers(): void {
   ipcMain.handle(IPC.configGet, () => config);
 
-  ipcMain.handle(IPC.configUpdate, (_e, patch: Partial<AppConfig>) => {
+  ipcMain.handle(IPC.configUpdate, async (_e, patch: Partial<AppConfig>) => {
     // Host or identity change → re-detect transport, drop the cached "forward
     // is up" flag, restart pollers/bus against the new target.
     if ("host" in patch || "user" in patch || "identityFile" in patch) {
@@ -386,6 +387,43 @@ function registerHandlers(): void {
       "uploadCleanupHours" in patch
     ) {
       scheduleUploadCleanup();
+    }
+    // Skill registry URLs → write skills.urls into remote opencode.jsonc so
+    // opencode picks them up on next startup. We read the existing file first
+    // to preserve all other settings, then patch only the skills.urls key.
+    if ("skillRegistryUrls" in patch && next.host) {
+      try {
+        const urls = next.skillRegistryUrls ?? [];
+        // Read current remote config (may not exist yet — that's fine)
+        const readResult = await runSshOnce(
+          next,
+          `cat ~/.config/opencode/opencode.jsonc 2>/dev/null || echo '{}'`,
+        );
+        let existing: Record<string, unknown> = {};
+        try {
+          // Strip JSONC comments before parsing (simple single-line // strip)
+          const stripped = readResult.stdout.replace(/\/\/[^\n]*/g, "");
+          existing = JSON.parse(stripped);
+        } catch {
+          // Unparseable — start fresh, preserving the file's plugin entry at least
+        }
+        // Merge: patch only skills.urls; keep everything else untouched
+        const merged = {
+          ...existing,
+          skills: {
+            ...(typeof existing.skills === "object" && existing.skills !== null ? existing.skills as Record<string, unknown> : {}),
+            urls,
+          },
+        };
+        const content = JSON.stringify(merged, null, 2);
+        await runSshOnce(
+          next,
+          `mkdir -p ~/.config/opencode && printf '%s' ${JSON.stringify(content)} > ~/.config/opencode/opencode.jsonc`,
+        );
+      } catch (e) {
+        // Non-fatal — user can still add URLs manually
+        console.error("Failed to write skill registry URLs to remote opencode.jsonc:", e);
+      }
     }
     return next;
   });
