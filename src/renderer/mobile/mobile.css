@@ -29,9 +29,6 @@
 .mobile-screen--list-behind {
   transform: translateX(-22%);
 }
-.mobile-screen--session-offscreen {
-  transform: translateX(100%);
-}
 
 /* Touch-sized session rows: the desktop sidebar rows were py-0.5 (~6px) and
    broke automated tapping. Mobile rows are >=48px. */
@@ -74,22 +71,26 @@
   justify-content: center;
 }
 
-/* Reused ChatPanel/Terminal fill the body region below the mobile header. */
+/* Reused ChatPanel/Terminal fill the body region below the mobile header.
+   The bottom safe-area inset (home indicator / gesture bar) is applied here
+   on the mobile-owned wrapper rather than inside ChatPanel (a desktop file we
+   must not touch). Padding alone won't move the absolutely-positioned child,
+   so the child's `bottom` is also inset below so the reused ChatPanel/Terminal
+   viewport ends above the gesture area and its bottom-anchored input/last line
+   isn't obscured by the system home indicator. The on-screen keyboard itself
+   is handled separately by the Capacitor WebView viewport resize. */
 .mobile-body {
   flex: 1;
   position: relative;
   min-height: 0;
+  padding-bottom: max(env(safe-area-inset-bottom), 8px);
 }
 .mobile-body > * {
   position: absolute;
-  inset: 0;
-}
-
-/* Keyboard-aware composer: keep ChatPanel's input above the on-screen
-   keyboard. ChatPanel's footer is its last flex child; pad for safe area. */
-.mobile .chat-input-area,
-.mobile [data-chat-input] {
-  padding-bottom: max(env(safe-area-inset-bottom), 8px);
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: max(env(safe-area-inset-bottom), 0px);
 }
 
 /* Bottom-sheet for session actions (fork/compact/delete/rename). */
