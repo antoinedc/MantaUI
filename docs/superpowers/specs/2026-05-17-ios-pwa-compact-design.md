@@ -134,3 +134,44 @@ app are untouched. The injected apple/manifest tags are inert on desktop
 - Splash screens, custom install-prompt UX
 - iOS standalone navigation quirk handling beyond status-bar inset
 - Any Android / Capacitor / desktop change
+
+## On-device install checklist (manual)
+
+Performed once by a human with an iPhone — cannot be automated from the dev box.
+
+1. On the Linux box:
+   `BUI_MOBILE_HOST=127.0.0.1 npm run mobile`
+   then in another shell:
+   `cloudflared tunnel --url http://127.0.0.1:8787 --protocol http2`
+   Note the printed `https://<random>.trycloudflare.com` URL.
+2. On the iPhone, open that HTTPS URL in **Safari** (not Chrome — only
+   Safari can install PWAs on iOS).
+3. Confirm the bui session list renders over the tunnel.
+4. Share button → **Add to Home Screen**. Confirm the icon preview is the
+   bui icon and the title shows **bui**.
+5. Tap Add. Launch the new home-screen icon.
+6. Verify: launches **fullscreen / standalone** (no Safari address bar or
+   toolbar); the bui mobile shell renders; the top header is NOT clipped
+   under the iOS status bar / notch (safe-area inset working).
+7. Verify chat + terminal work over the tunnel from the installed app.
+
+If step 6 shows the header clipped under the status bar: that is a
+`.mobile`-scoped safe-area CSS fix in `src/renderer/mobile/mobile.css`
+(same pattern as the prior mobile work) — NOT a manifest change. File as
+a follow-up; it is explicitly a known edge case in this design.
+
+## Implementation outcome (2026-05-17)
+
+Executed via subagent-driven development. Commits on `main`:
+`b3e9ba5` (icons) → `fb7ebd4` (manifest) → `3dbccd5` (index.html tags) →
+`80218c0` (mobile bundle rebuild) → `37b2ec8` (added standards
+`mobile-web-app-capable` alongside `apple-` after a browser deprecation
+warning; console then clean).
+
+Dev-box-verifiable checks all passed: manifest served 200 as
+`application/manifest+json` with `display=standalone start_url=.
+icons=2`; both icons 200 at 180/512; all PWA tags resolve in a real
+browser; **zero CSP violations / manifest fetch errors**; desktop
+Electron build still green with no desktop source modified. The only
+unverified step is the manual on-device checklist above (needs an iPhone
++ a cloudflare tunnel session).
