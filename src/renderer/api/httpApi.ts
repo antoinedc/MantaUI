@@ -95,10 +95,10 @@ function fireResync() {
     if (set.size === 0) return; // no listeners yet — nothing to do
     // Synthetic event 1: triggers refreshPermissions() + scheduleRefetch()
     const ev1: OpencodeEvent = { type: "permission.replied", properties: {} };
-    for (const fn of set) fn(ev1);
+    for (const fn of set) { try { fn(ev1); } catch { /* listener error — ignore, see onmessage */ } }
     // Synthetic event 2: triggers refreshQuestions()
     const ev2: OpencodeEvent = { type: "question.asked", properties: {} };
-    for (const fn of set) fn(ev2);
+    for (const fn of set) { try { fn(ev2); } catch { /* listener error — ignore */ } }
   }, 0);
 }
 
