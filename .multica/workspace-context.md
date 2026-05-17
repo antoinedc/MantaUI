@@ -66,6 +66,16 @@ Both must pass. Report results when completing an issue.
   method requires a full `Ctrl+C` + restart of `npm run dev`.
 - **Shift+Enter → newline**: `attachCustomKeyEventHandler` in `Terminal.tsx` sends
   `\x1b\r`. Do not drop the `preventDefault()`.
+- **Mobile-native shell** (`src/renderer/mobile/`, rendered when `window.api`
+  is absent) reuses `ChatPanel`/`Terminal` unchanged. **Never edit
+  `ChatPanel.tsx`/`Terminal.tsx`/`App.tsx`/`Sidebar.tsx` for a mobile need** —
+  desktop must not regress. Reshape only via `.mobile`-scoped CSS in
+  `src/renderer/mobile/mobile.css`, targeted structurally (no semantic class
+  hooks — Tailwind only): `.mobile-body > div` is the ChatPanel root,
+  `> div:last-child` the composer; match rows via `[class*="..."]` + child
+  position. Verify on-device: `cd mobile && npm run apk` → `adb install -r`
+  → screenshot (WebView is opaque to uiautomator). Full pattern in AGENTS.md
+  "Mobile-native shell".
 
 ## Commit conventions
 
