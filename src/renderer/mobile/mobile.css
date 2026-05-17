@@ -1,0 +1,124 @@
+/* All rules scoped under .mobile (set by MobileApp's root div) so they can
+   reshape the reused ChatPanel/Terminal internals WITHOUT ever matching in
+   the desktop <App/> tree. Do not add an unscoped selector to this file. */
+
+.mobile {
+  height: 100dvh;
+  width: 100vw;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+/* Drill-down stack: two screens slide horizontally. */
+.mobile-stack {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+.mobile-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0e0f12;
+  transition: transform 220ms ease;
+  will-change: transform;
+}
+.mobile-screen--list-behind {
+  transform: translateX(-22%);
+}
+.mobile-screen--session-offscreen {
+  transform: translateX(100%);
+}
+
+/* Touch-sized session rows: the desktop sidebar rows were py-0.5 (~6px) and
+   broke automated tapping. Mobile rows are >=48px. */
+.mobile-row {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  margin: 0 8px 6px;
+  border-radius: 12px;
+  background: #15171c;
+  border: 1px solid transparent;
+}
+.mobile-row:active {
+  border-color: #383c47;
+  background: #1b1e25;
+}
+.mobile-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.mobile-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #262932;
+  flex: none;
+}
+.mobile-tap {
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Reused ChatPanel/Terminal fill the body region below the mobile header. */
+.mobile-body {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+}
+.mobile-body > * {
+  position: absolute;
+  inset: 0;
+}
+
+/* Keyboard-aware composer: keep ChatPanel's input above the on-screen
+   keyboard. ChatPanel's footer is its last flex child; pad for safe area. */
+.mobile .chat-input-area,
+.mobile [data-chat-input] {
+  padding-bottom: max(env(safe-area-inset-bottom), 8px);
+}
+
+/* Bottom-sheet for session actions (fork/compact/delete/rename). */
+.mobile-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: flex-end;
+  z-index: 50;
+}
+.mobile-sheet {
+  width: 100%;
+  background: #15171c;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  padding: 8px 8px max(env(safe-area-inset-bottom), 12px);
+}
+.mobile-sheet button {
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  border-radius: 10px;
+  color: #e6e7ea;
+  font-size: 15px;
+}
+.mobile-sheet button:active {
+  background: #1b1e25;
+}
+.mobile-sheet button.danger {
+  color: #f87171;
+}
