@@ -158,6 +158,22 @@ Session owner→props mapping is the tested `resolveSessionOwner()` in
 (those selectors would require editing a desktop-invariant file and silently
 match nothing).
 
+**Reshaping reused ChatPanel/Terminal internals on mobile:** the desktop
+composer footer is one non-wrapping flex row built for a wide panel; at
+phone width its children overlap. Fix is always `.mobile`-scoped CSS in
+`mobile/mobile.css` — never edit `ChatPanel.tsx`. ChatPanel has no semantic
+class hooks (Tailwind utilities only), so target structurally: ChatPanel is
+the lone `.mobile-body > div` (h-full flex-col); its composer is that div's
+`> div:last-child`; footer rows are matched via `div[class*="flex"]` /
+`[class*="justify-between"]` + child position. Established rules: composer
+rows `flex-wrap`; hide desktop keyboard-hint span + fork/compact/delete
+toolbar (`SessionToolbar` — actions live in the header `⋯` sheet on mobile);
+drop the context bar (`span[class*="w-24"]`, unique to ContextBar) but keep
+the stage-colored `%`; clamp the empty textarea placeholder to one line via
+`textarea:placeholder-shown` (reverts to `pre-wrap` once typed so
+`resizeInput` still owns height). Verify on-device: `cd mobile && npm run
+apk`, `adb install -r`, screenshot the composer.
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what
