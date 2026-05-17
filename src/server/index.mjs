@@ -8,15 +8,14 @@
 import { createServer } from "node:http";
 import { readFile, stat, mkdir } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
-import { spawn as cpSpawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize } from "node:path";
 import { homedir } from "node:os";
 import { pipeline } from "node:stream/promises";
 import { WebSocketServer } from "ws";
-import { spawn as ptySpawn } from "node-pty";
 import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
+import * as pty from "./pty.mjs";
 import { createBus, handleEventsRequest } from "./events.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 
@@ -25,7 +24,7 @@ const PROJECT_ROOT = join(__dirname, "..", "..");
 const PUBLIC_DIR = join(__dirname, "public");
 
 const bus = createBus();
-const rpcHandlers = buildHandlers({ tmux, oc });
+const rpcHandlers = buildHandlers({ tmux, oc, pty, bus });
 
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.
@@ -230,34 +229,22 @@ server.on("upgrade", (req, socket, head) => {
 function attachPty(ws, url) {
   const session = url.searchParams.get("session");
   const windowIdx = url.searchParams.get("window");
-  const cols = Math.max(20, Math.min(500, Number(url.searchParams.get("cols")) || 80));
-  const rows = Math.max(5, Math.min(200, Number(url.searchParams.get("rows")) || 24));
+  const cols = Number(url.searchParams.get("cols")) || 80;
+  const rows = Number(url.searchParams.get("rows")) || 24;
 
   if (!session || !/^[A-Za-z0-9._-]+$/.test(session)) {
     ws.close(1008, "bad session");
     return;
   }
 
-  // Pre-select the requested window so attach lands on it. Fail-open: if the
-  // select fails (window gone, session gone), the attach below will surface
-  // the real error to the user.
-  if (windowIdx != null && /^\d+$/.test(windowIdx)) {
-    cpSpawn("tmux", ["select-window", "-t", `${session}:${windowIdx}`], {
-      stdio: "ignore",
-    });
-  }
+  // Delegate to the shared spawn helper in pty.mjs.
+  // spawnRawPty handles window pre-select, clamping, env — behaviour unchanged.
+  const wsPty = pty.spawnRawPty({ session, windowIdx, cols, rows });
 
-  const pty = ptySpawn("tmux", ["attach-session", "-t", session], {
-    name: "xterm-256color",
-    cols,
-    rows,
-    env: { ...process.env, TERM: "xterm-256color" },
-  });
-
-  pty.onData((data) => {
+  wsPty.onData((data) => {
     if (ws.readyState === ws.OPEN) ws.send(data);
   });
-  pty.onExit(({ exitCode }) => {
+  wsPty.onExit(({ exitCode }) => {
     try {
       ws.close(1000, `pty exited ${exitCode}`);
     } catch {
@@ -273,17 +260,17 @@ function attachPty(ws, url) {
       return;
     }
     if (msg.type === "data" && typeof msg.data === "string") {
-      pty.write(msg.data);
+      wsPty.write(msg.data);
     } else if (msg.type === "resize") {
       const c = Number(msg.cols);
       const r = Number(msg.rows);
-      if (c > 0 && r > 0) pty.resize(c, r);
+      if (c > 0 && r > 0) wsPty.resize(c, r);
     }
   });
 
   ws.on("close", () => {
     try {
-      pty.kill();
+      wsPty.kill();
     } catch {
       /* already gone */
     }
