@@ -205,3 +205,4 @@ suites (per scope); existing `chatUtils.test.ts` must still pass.
 1. **Authentication / closing the open-port exposure** (highest priority).
 2. Offline mode.
 3. iOS build (scaffolded, deferred — needs Xcode/CocoaPods).
+4. **Mobile chat markdown links don't open** — openExternal stub + ChatPanel preventDefault defeats the native <a> fallback. Fix in httpApi.ts (omit openExternal so native link works) or implement via Capacitor Browser.

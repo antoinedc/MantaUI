@@ -8,7 +8,7 @@
 // are no-ops documented below.
 
 import { run } from "./tmux.mjs";
-import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";
+import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
@@ -35,6 +35,15 @@ import { join, dirname } from "node:path";
 // tmuxConfigStatus after boot.
 
 const CONFIG_PATH = join(homedir(), ".bui-mobile", "config.json");
+
+// atomicWrite — write to a temp file then rename over the target.
+// rename(2) is atomic on the same filesystem, so a crash mid-write
+// cannot leave the destination file truncated or empty.
+async function atomicWrite(path, data) {
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(tmp, data);
+  await rename(tmp, path);
+}
 
 const DEFAULT_CONFIG = {
   host: "localhost", // triggers store.refresh() to call tmuxList / transportInfo
@@ -70,7 +79,7 @@ async function getConfig() {
 
 async function saveConfig(cfg) {
   await mkdir(dirname(CONFIG_PATH), { recursive: true });
-  await writeFile(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf-8");
+  await atomicWrite(CONFIG_PATH, JSON.stringify(cfg, null, 2));
   _config = cfg;
 }
 
@@ -266,10 +275,10 @@ export async function tmuxSetupConfig() {
   if (!current.includes(BUI_BEGIN)) {
     // Backup original if not already backed up
     if (current && !existsSync(tmuxConfBak)) {
-      await writeFile(tmuxConfBak, current, "utf-8");
+      await atomicWrite(tmuxConfBak, current);
     }
-    // Append bui block
-    await writeFile(tmuxConf, current + BUI_BLOCK, "utf-8");
+    // Append bui block (full-file rewrite — atomic to avoid blank tmux.conf on crash)
+    await atomicWrite(tmuxConf, current + BUI_BLOCK);
     // Try to source it into the live tmux server (best-effort)
     await run("tmux", ["source-file", tmuxConf]).catch(() => {});
   }
@@ -282,11 +291,11 @@ export async function tmuxRestoreConfig() {
   const tmuxConfBak = join(homedir(), ".tmux.conf.pre-bui");
 
   if (existsSync(tmuxConfBak)) {
-    // Restore original backup
+    // Restore original backup (full-file rewrite — atomic to avoid blank tmux.conf on crash)
     const original = await readFile(tmuxConfBak, "utf-8");
-    await writeFile(tmuxConf, original, "utf-8");
+    await atomicWrite(tmuxConf, original);
   } else {
-    // Strip bui block in place
+    // Strip bui block in place (full-file rewrite — atomic)
     try {
       const content = await readFile(tmuxConf, "utf-8");
       // Remove from BUI_BEGIN line to BUI_END line (inclusive)
@@ -294,7 +303,7 @@ export async function tmuxRestoreConfig() {
         new RegExp(`\\n?${escapeRegex(BUI_BEGIN)}[\\s\\S]*?${escapeRegex(BUI_END)}\\n?`, "g"),
         "",
       );
-      await writeFile(tmuxConf, stripped, "utf-8");
+      await atomicWrite(tmuxConf, stripped);
     } catch { /* no config to restore */ }
   }
 
@@ -332,7 +341,11 @@ export async function clipboardReadImage() {
 // On mobile: the Capacitor app handles deep links / URL opening natively.
 // Links in ChatPanel are rendered as <a href> tags; this channel is only
 // called on explicit "open in browser" actions from Electron menus.
-// A no-op is safe — mobile users tap the link directly.
+// STUB: no server-side URL opener. KNOWN LIMITATION: because the shim still
+// defines openExternal, ChatPanel's link handler calls e.preventDefault() then
+// this no-op, so chat markdown links don't open on mobile. Proper fix is
+// shim-layer (httpApi omit openExternal so native <a target=_blank> works, or
+// Capacitor Browser.open). Tracked as a follow-up.
 export async function openExternal() {}
 
 // peekRemoteFile — on desktop: scp a remote file to a Mac tmp dir + open
