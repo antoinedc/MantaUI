@@ -24,3 +24,18 @@ test("parseSessions keeps a session that has no windows yet", () => {
   assert.equal(beta.defaultCwd, "~");
   assert.equal(out[0].tmuxSession, "alpha"); // list-sessions order preserved
 });
+
+test("parseSessions extracts opencodeSessionId from the 6th column (chat windows)", () => {
+  const sess = "Capo\t1";
+  // 6 columns now: session, index, name, active, pane, @bui-session-id
+  const wins =
+    "Capo\t1\tmain\t0\t/home/dev/projects/capo\t\n" +              // plain window: empty sid -> null
+    "Capo\t2\tchat\t1\t/home/dev/projects/capo\tses_1c9c9e6a2ffe"; // chat window: sid present
+  const out = parseSessions(sess, wins);
+  const cap = out.find((p) => p.tmuxSession === "Capo");
+  assert.ok(cap, "Capo session present");
+  const w1 = cap.windows.find((w) => w.index === 1);
+  const w2 = cap.windows.find((w) => w.index === 2);
+  assert.equal(w1.opencodeSessionId, null, "plain window -> null (not undefined, not empty string)");
+  assert.equal(w2.opencodeSessionId, "ses_1c9c9e6a2ffe", "chat window -> the session id");
+});

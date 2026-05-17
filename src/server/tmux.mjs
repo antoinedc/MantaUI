@@ -24,11 +24,13 @@ export function parseSessions(sessStdout, winStdout) {
   }
   // Phase 2: join windows into their session. Skip orphan window lines.
   for (const line of winStdout.split("\n").filter(Boolean)) {
-    const [session, index, wname, active, pane] = line.split(FS);
+    const parts = line.split(FS);
+    const [session, index, wname, active, pane, sidRaw] = parts;
     if (!sessions.has(session)) continue; // defensive: orphan
     sessions.get(session).windows.push({
       index: Number(index), name: wname,
       active: active === "1", paneCurrentPath: pane,
+      opencodeSessionId: sidRaw ? sidRaw : null,
     });
   }
   return Array.from(sessions.values()).map((s) => ({
@@ -39,7 +41,7 @@ export function parseSessions(sessStdout, winStdout) {
 
 export async function listProjects() {
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
-  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}`;
+  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@bui-session-id}`;
   const sess = await run("tmux", ["list-sessions", "-F", sessFmt]).catch(() => ({ stdout: "" }));
   const wins = await run("tmux", ["list-windows", "-a", "-F", winFmt]).catch(() => ({ stdout: "" }));
   return parseSessions(sess.stdout, wins.stdout);
