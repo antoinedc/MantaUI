@@ -26,6 +26,11 @@ export type AppConfig = {
   // so tool calls run without prompting. Closest analog to Claude Code's
   // --dangerously-skip-permissions. Off by default.
   chatAutoAllow?: boolean;
+  // Global default model for all new and cleared chat sessions. Stored as
+  // { providerID, modelID } so the per-session localStorage override and
+  // this setting use the same shape. When absent, opencode picks its own
+  // default (the first connected provider's default model).
+  defaultModel?: { providerID: string; modelID: string };
 };
 
 export type TransportInfo = {

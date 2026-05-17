@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore } from "./store";
+import type { OpencodeModel } from "../shared/types";
 
 export function Settings({ onClose }: { onClose: () => void }) {
   const {
@@ -8,6 +9,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     identityFile,
     transportPreference,
     uploadCleanupHours,
+    defaultModel,
     transport,
     tmuxConfig,
     refresh,
@@ -18,6 +20,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [tp, setTp] = useState<"auto" | "mosh" | "ssh">(transportPreference);
   const [uch, setUch] = useState<string>(String(uploadCleanupHours));
   const [restoring, setRestoring] = useState(false);
+  // Default model selection
+  const [models, setModels] = useState<OpencodeModel[] | null>(null);
+  const [selectedModel, setSelectedModel] = useState<{ providerID: string; modelID: string } | null>(
+    defaultModel ?? null,
+  );
 
   useEffect(() => {
     setH(host);
@@ -25,7 +32,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setK(identityFile ?? "");
     setTp(transportPreference);
     setUch(String(uploadCleanupHours));
-  }, [host, user, identityFile, transportPreference, uploadCleanupHours]);
+    setSelectedModel(defaultModel ?? null);
+  }, [host, user, identityFile, transportPreference, uploadCleanupHours, defaultModel]);
+
+  // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
+  useEffect(() => {
+    window.api
+      .opencodeModels()
+      .then((list) => setModels(list))
+      .catch(() => {});
+  }, []);
 
   const save = async () => {
     const hoursNum = Number(uch);
@@ -35,6 +51,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       identityFile: k.trim() || undefined,
       transport: tp,
       uploadCleanupHours: Number.isFinite(hoursNum) && hoursNum >= 0 ? hoursNum : 1,
+      defaultModel: selectedModel ?? undefined,
     });
     await refresh();
     onClose();
@@ -144,6 +161,36 @@ export function Settings({ onClose }: { onClose: () => void }) {
             Sweeps <code className="text-text-muted">~/.bui-uploads</code> on the remote, removing
             drag-and-drop batches older than this. <code className="text-text-muted">0</code>{" "}
             disables.
+          </div>
+        </div>
+
+        <div className="space-y-2 pt-2 border-t border-border">
+          <label className="block text-xs uppercase tracking-wider text-text-muted">
+            Default model
+          </label>
+          <select
+            value={selectedModel ? `${selectedModel.providerID}::${selectedModel.modelID}` : ""}
+            onChange={(e) => {
+              const val = e.target.value;
+              if (!val) {
+                setSelectedModel(null);
+              } else {
+                const [providerID, modelID] = val.split("::");
+                setSelectedModel({ providerID, modelID });
+              }
+            }}
+            className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+          >
+            <option value="">opencode default</option>
+            {models && models.map((m) => (
+              <option key={`${m.providerID}::${m.id}`} value={`${m.providerID}::${m.id}`}>
+                {m.name} ({m.providerID})
+              </option>
+            ))}
+          </select>
+          <div className="text-xs text-text-faint">
+            Applied to every new and cleared chat session. Can still be overridden per-session
+            with the model picker. "opencode default" lets the server decide.
           </div>
         </div>
 

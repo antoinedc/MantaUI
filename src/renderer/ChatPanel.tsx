@@ -293,6 +293,7 @@ type Props = {
 export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }: Props) {
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
+  const configDefaultModel = useStore((s) => s.defaultModel);
   const [messages, setMessages] = useState<OpencodeMessage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Pending permission requests for THIS session. Polled on mount and refreshed
@@ -324,7 +325,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     modelID: string;
   } | null>(null);
   const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
-    readSavedModel(sessionId),
+    readSavedModel(sessionId) ?? configDefaultModel ?? null,
   );
   // Pending attachments (chips above input) + agent @-mentions waiting to be
   // serialized into FilePart / AgentPart on next submit. Cleared on success.
@@ -414,7 +415,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setError(null);
     setPermissions([]);
     setQuestions([]);
-    setModelOverride(readSavedModel(sessionId));
+    setModelOverride(readSavedModel(sessionId) ?? configDefaultModel ?? null);
     setAttachments([]);
     setAgentMentions([]);
     setTypeahead(null);
@@ -902,12 +903,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             setSendError("Can't /clear — no owning tmux window.");
             return;
           }
-          await window.api.opencodeClearSession({
+          const cleared = await window.api.opencodeClearSession({
             sessionName: tmuxSession,
             windowIndex,
             cwd: cwd || "~",
             title: `${tmuxSession} / cleared`,
           });
+          // Carry the current model selection forward to the new session so
+          // the user doesn't have to re-pick it after every /clear.
+          if (cleared?.newSessionId && modelOverride) {
+            writeSavedModel(cleared.newSessionId, modelOverride);
+          }
           await refresh();
         } else if (cmdName === "fork") {
           await forkSession();

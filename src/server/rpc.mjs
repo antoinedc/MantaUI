@@ -70,7 +70,19 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // ---- tmux (8 channels, unchanged) ----
     "tmux:list": () => tmux.listProjects(),
     "tmux:new-session": (i) => tmux.newSession(i),
-    "tmux:new-window": (i) => tmux.newWindow(i),
+    // Resolve cwd: prefer explicit cwd in input, then fall back to the
+    // project's stored defaultCwd (set when the workspace was created).
+    // Without this, new chat windows opened in a workspace silently inherit
+    // tmux's default cwd (usually $HOME) instead of the workspace path.
+    "tmux:new-window": async (i) => {
+      let cwd = i.cwd;
+      if (!cwd) {
+        const cfg = await local.configGet();
+        const meta = cfg.projects?.find((p) => p.tmuxSession === i.sessionName);
+        cwd = meta?.defaultCwd;
+      }
+      return tmux.newWindow({ ...i, cwd });
+    },
     "tmux:rename-session": (i) => tmux.renameSession(i),
     "tmux:rename-window": (i) => tmux.renameWindow(i),
     "tmux:kill-session": (n) => tmux.killSession(n),
