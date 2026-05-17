@@ -93,6 +93,77 @@
   bottom: max(env(safe-area-inset-bottom), 0px);
 }
 
+/* --- Reused ChatPanel composer, reshaped for phone width ---
+   ChatPanel.tsx is a desktop file we must not edit (see header note + the
+   mobile-native-ui invariant). Its composer footer is a single non-wrapping
+   flex row built for a wide desktop panel: branch chip + model picker + ctx
+   bar + session toolbar + a physical-keyboard hint string. At phone width
+   those flex children don't fit and paint over each other.
+
+   ChatPanel root is the lone .mobile-body child (h-full flex-col); its LAST
+   flex child is the composer wrapper (`shrink-0`). We reshape that subtree
+   structurally — no class hooks exist (Tailwind utilities only), so we key
+   off child position, which is stable for this single-root component. */
+.mobile-body > div > div:last-child {
+  /* Composer wrapper: let its rows wrap instead of overflowing. */
+  display: flex;
+  flex-direction: column;
+}
+/* Every inner row of the composer (input row, meta footer, trust line) is
+   a flexbox. Allow wrapping + a small row-gap so nothing collides. */
+.mobile-body > div > div:last-child > div[class*="flex"] {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+/* The meta footer's trailing span is the desktop keyboard-hint text
+   ("ctrl+o · thinking off · shift+⏎ newline · ⏎ send" / "esc · interrupt").
+   ctrl+o / shift+⏎ are physical-keyboard shortcuts that don't exist on a
+   touch device — hide the hint entirely to declutter the footer. It's the
+   last <span> inside the footer row's right-hand <span> group. */
+.mobile-body
+  > div
+  > div:last-child
+  > div[class*="justify-between"]
+  > span:last-child
+  > span:last-child {
+  display: none;
+}
+
+/* Placeholder must stay on one line: the textarea is rows=1, but its long
+   placeholder ("Try something…  (@ files · / commands · …)") visually wraps
+   at phone width, inflating the input box. Clamp the EMPTY textarea to one
+   line with an ellipsis. Once the user types, :placeholder-shown drops and
+   the textarea wraps/auto-grows normally (ChatPanel's resizeInput owns the
+   typed height). */
+.mobile-body textarea:placeholder-shown {
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+/* Drop the dotted context-usage BAR on mobile but keep the % number.
+   ChatPanel's ContextBar renders [ <span.w-24 track> , <span.tabular-nums %> ].
+   The track is the only `w-24` element in the reused tree — hide just that;
+   the number span (still inline-styled with the stage color) stays. */
+.mobile-body span[class*="w-24"] {
+  display: none;
+}
+
+/* Hide the fork/compact/delete toolbar in the composer footer on mobile —
+   session actions live in the header ⋯ bottom-sheet (SessionScreen) on the
+   phone, so this desktop row is redundant and crowds the footer. It's the
+   FIRST <span> in the footer's right-hand group (sibling before the hint,
+   which we already hide above). SessionToolbar's span uses `gap-1`; the
+   group wrapper uses `gap-3` — match the toolbar by its gap-1 + text-[10px]. */
+.mobile-body
+  > div
+  > div:last-child
+  > div[class*="justify-between"]
+  > span:last-child
+  > span:first-child {
+  display: none;
+}
+
 /* Bottom-sheet for session actions (fork/compact/delete/rename). */
 .mobile-sheet-backdrop {
   position: absolute;
