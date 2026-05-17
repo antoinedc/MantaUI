@@ -74,8 +74,13 @@ export async function newWindowGetIndex(sessionName, windowName, cwd) {
     "-P", "-F", "#{window_index}",
     ...(cwd ? ["-c", cwd] : []),
   ]);
-  return Number(stdout.trim());
+  const idx = Number(stdout.trim());
+  if (!Number.isFinite(idx)) {
+    throw new Error(`tmux new-window returned unexpected index: ${JSON.stringify(stdout.trim())}`);
+  }
+  return idx;
 }
+
 export async function renameSession({ oldName, newName }) {
   await run("tmux", ["rename-session", "-t", oldName, newName]);
   return listProjects();
