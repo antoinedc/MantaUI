@@ -7,15 +7,66 @@ export async function dispatch(handlers, channel, args) {
   return fn(...args);
 }
 
-// Build the full handler map. Accepts { tmux, oc, pty, bus } where:
-//   tmux — src/server/tmux.mjs namespace
-//   oc   — src/server/opencode.mjs namespace
-//   pty  — src/server/pty.mjs namespace
-//   bus  — event bus created by createBus() in events.mjs
+// Build the full handler map. Accepts { tmux, oc, pty, bus, local } where:
+//   tmux  — src/server/tmux.mjs namespace
+//   oc    — src/server/opencode.mjs namespace
+//   pty   — src/server/pty.mjs namespace
+//   bus   — event bus created by createBus() in events.mjs
+//   local — src/server/local.mjs namespace (git/fs/config/clipboard stubs)
 // Channel key strings MUST match IPC.* values in src/shared/types.ts.
 // Arg shapes MUST match what src/preload/index.ts packs per channel.
-export function buildHandlers({ tmux, oc, pty, bus }) {
+export function buildHandlers({ tmux, oc, pty, bus, local }) {
   return {
+    // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
+
+    // preload: ipcRenderer.invoke(IPC.configGet)  → no args
+    "config:get": () => local.configGet(),
+
+    // preload: ipcRenderer.invoke(IPC.configUpdate, patch)  → args[0] = patch (Partial<AppConfig>)
+    "config:update": (patch) => local.configUpdate(patch),
+
+    // preload: ipcRenderer.invoke(IPC.projectMetaUpsert, meta)  → args[0] = meta (ProjectMeta)
+    "project:meta:upsert": (meta) => local.projectMetaUpsert(meta),
+
+    // preload: ipcRenderer.invoke(IPC.projectMetaDelete, tmuxSession)  → args[0] = tmuxSession (string)
+    "project:meta:delete": (tmuxSession) => local.projectMetaDelete(tmuxSession),
+
+    // preload: ipcRenderer.invoke(IPC.transportInfo)  → no args
+    "transport:info": () => local.transportInfo(),
+
+    // preload: ipcRenderer.invoke(IPC.gitListWorktrees, cwd)  → args[0] = cwd (string)
+    "git:list-worktrees": (cwd) => local.gitListWorktrees(cwd),
+
+    // preload: ipcRenderer.invoke(IPC.fsListDirs, partial)  → args[0] = partial (string)
+    "fs:list-dirs": (partial) => local.fsListDirs(partial),
+
+    // preload: ipcRenderer.invoke(IPC.clipboardWriteText, text)  → args[0] = text (string)
+    "clipboard:write-text": (text) => local.clipboardWriteText(text),
+
+    // preload: ipcRenderer.invoke(IPC.clipboardReadImage)  → no args
+    "clipboard:read-image": () => local.clipboardReadImage(),
+
+    // preload: ipcRenderer.invoke(IPC.openExternal, url)  → args[0] = url (string)
+    "shell:open-external": (url) => local.openExternal(url),
+
+    // preload: ipcRenderer.invoke(IPC.peekRemoteFile, remotePath)  → args[0] = remotePath (string)
+    "peek:remote-file": (remotePath) => local.peekRemoteFile(remotePath),
+
+    // preload: ipcRenderer.invoke(IPC.tmuxConfigStatus)  → no args
+    "tmux:config-status": () => local.tmuxConfigStatus(),
+
+    // preload: ipcRenderer.invoke(IPC.tmuxSetupConfig)  → no args
+    "tmux:setup-config": () => local.tmuxSetupConfig(),
+
+    // preload: ipcRenderer.invoke(IPC.tmuxRestoreConfig)  → no args
+    "tmux:restore-config": () => local.tmuxRestoreConfig(),
+
+    // preload: ipcRenderer.invoke(IPC.uploadFiles, { projectName, localPaths })
+    // → args[0] = { projectName, localPaths }
+    // Mobile stub: returns [] because localPaths are client-device paths unknown
+    // to the server. Mobile attachments use uploadBuffer (/api/upload) instead.
+    "upload:files": (input) => local.uploadFiles(input),
+
     // ---- tmux (8 channels, unchanged) ----
     "tmux:list": () => tmux.listProjects(),
     "tmux:new-session": (i) => tmux.newSession(i),
