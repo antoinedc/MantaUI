@@ -132,9 +132,26 @@ from a phone or browser with nothing installed on the device.
 enabled — mirrors `src/main/index.ts` opencodeBusLoop. Config file is
 `~/.bui-mobile/config.json`; atomic writes (temp-rename pattern).
 
-**No auth in v1.** Default bind `0.0.0.0:8787`. For internet access:
-`BUI_MOBILE_HOST=127.0.0.1` + `cloudflared tunnel --url http://127.0.0.1:8787 --protocol http2`
-(`--protocol http2` required — QUIC fails on this box).
+**No auth in v1.** Default bind `0.0.0.0:8787`. Internet access is now a
+**named Cloudflare tunnel on QUIC**, run by **systemd --user** on the box
+(`dev@157.90.224.92`), surviving reboots via `loginctl enable-linger dev`:
+
+- `~/.config/systemd/user/bui-server.service` → `node src/server/index.mjs`
+  (`BUI_MOBILE_HOST=127.0.0.1`, port 8787).
+- `~/.config/systemd/user/bui-tunnel.service` (`Requires=bui-server`) →
+  `cloudflared tunnel --config ~/.cloudflared/config.yml run bui`.
+- Permanent URL: **https://bui.useronda.com** (named tunnel
+  `6cdca2ea-…`, zone `useronda.com`). Stable across restarts — the iOS
+  PWA install stays valid.
+- Manage: `systemctl --user {status,restart} bui-tunnel bui-server`;
+  logs `journalctl --user -u bui-tunnel`.
+
+**QUIC, not http2.** The old `--protocol http2` quick-tunnel buffered SSE
+(`/events` connected but streamed zero bytes → UI never updated). The
+named tunnel uses `protocol: quic` in `~/.cloudflared/config.yml`, which
+streams SSE correctly (verified 2026-05-17, cloudflared 2026.5.0). The
+earlier "QUIC fails on this box" note was stale and is retired — do not
+reintroduce `--protocol http2`.
 
 **WS protocol** (`/pty?session=NAME&window=N&cols=&rows=`): unchanged.
 Client→server: `{type:"data",data}` or `{type:"resize",cols,rows}`.

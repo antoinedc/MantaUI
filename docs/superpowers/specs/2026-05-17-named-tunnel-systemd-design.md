@@ -99,3 +99,29 @@ specifically:
 - Renderer changes (same-origin base already shipped — works for any
   permanent hostname).
 - Desktop / Android.
+
+## Implementation outcome (2026-05-17)
+
+Resolved both spec unknowns favourably:
+- **Domain available after all.** `cloudflared tunnel login` required a
+  zone; the account has `useronda.com`. Used a clean hostname
+  **`bui.useronda.com`** (not the cfargotunnel UUID form).
+- **QUIC works.** The "QUIC fails on this box" AGENTS.md note was stale
+  (predated cloudflared 2026.5.0). `protocol: quic` in config.yml; SSE
+  streams correctly.
+
+Built: named tunnel `bui` (`6cdca2ea-96b6-4584-9d51-5537508b1d34`), DNS
+CNAME `bui.useronda.com` → tunnel, `~/.cloudflared/config.yml` (QUIC,
+ingress → 127.0.0.1:8787), two `systemd --user` units
+(`bui-server`, `bui-tunnel` with `Requires=`/`After=`), `enable-linger
+dev` (reboot survival, no root needed). Junk probe record
+`bui-test.invalid.useronda.com` — see cleanup note below.
+
+Verified end-to-end through https://bui.useronda.com: static 200,
+`/manifest.webmanifest` 200 application/manifest+json, **SSE streams
+`data:` within ~1.5s** (was 0 bytes/13s on http2), real browser shows
+app rendered + 6 SSE messages/10s (status + opencode kinds). Both
+services `active`; `Linger=yes`.
+
+Follow-up: delete the stray `bui-test.invalid.useronda.com` DNS record
+(created by the zone-probe; harmless but untidy).
