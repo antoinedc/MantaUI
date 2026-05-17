@@ -209,11 +209,22 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
 ## State
 
 - **Source of truth**: tmux on the remote. `tmux list-sessions` + `list-windows -a`.
-- **Local config** (`<userData>/config.json`): only `{host, user, identityFile, transport, projects[{tmuxSession, defaultCwd}]}`.
+- **Local config** (`<userData>/config.json`): `{host, user, identityFile, transport, projects[{tmuxSession, defaultCwd}], opencodePort, chatAutoAllow, defaultModel}`.
 - **No local sessions table.** Project = tmux session, app session = tmux window.
 
 ## Patterns worth knowing
 
+- **New window cwd inheritance** — desktop: `index.ts` `tmuxNewWindow` handler
+  resolves cwd as `input.cwd || project.defaultCwd || "~"`. Mobile server
+  (`rpc.mjs` `tmux:new-window`): does the same config lookup when `cwd` is
+  absent — without it, tmux silently inherits `$HOME`. Always pass or resolve
+  `defaultCwd`; never let the fallback reach tmux unchecked.
+- **Model persistence across sessions** — model selection is per-session in
+  `localStorage` (`bui:chat:<sessionId>:model`). On `/clear`, the handler
+  captures the returned `newSessionId` and copies the current override into
+  the new key before calling `refresh()`. `modelOverride` initial state falls
+  back to `AppConfig.defaultModel` (from store) when no localStorage entry
+  exists, so new sessions pick up the global default automatically.
 - **One PTY per active project**, kept mounted across renders. Switching
   between sessions inside a project uses `tmux select-window` over a
   side-channel ssh (no PTY reconnect).
@@ -327,7 +338,9 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 **AppConfig additions**: `opencodePort` (default 14096), `chatAutoAllow`
 (auto-reply "always" to all permission requests — like `--dangerously-skip-permissions`).
 `chatAutoAllow` does NOT apply to Question tool requests — those always need
-explicit user choice.
+explicit user choice. `defaultModel: { providerID, modelID }` — global default
+for all new and cleared sessions; settable in Settings; `null`/absent = opencode
+picks its own default.
 
 **v2-only endpoints** (used alongside the v1 base):
 - `GET /question` — list pending Question tool requests
@@ -486,7 +499,7 @@ Full CLI cheat sheet: `/home/dev/projects/shared/multica/setup.md`
   `session.created` with `parentID` + `session.next.tool.*` events for inline
   child rows. Needs per-session debounce map + allowing child session ids
   through the early sessionID filter in `onOpencodeEvent`.
-- **Global model preference** — currently per-session in localStorage.
+- **Global model preference** — `AppConfig.defaultModel` (Settings UI, persisted to `config.json`). New sessions and `/clear` fall back to this when no per-session localStorage entry exists. `/clear` also carries the current per-session override forward to the new session id before refresh.
 - **Live refresh polling** — sidebar updates only on bui's own actions.
 - **Command palette (⌘K)** — fuzzy switch + actions (~150 lines).
 - **Reconnect-on-drop UI** — SSH has no reconnect banner today.
