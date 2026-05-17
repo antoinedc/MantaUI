@@ -60,6 +60,10 @@ export function spawn(opts, onEvent) {
   if (!projectName) throw new Error("pty:spawn — projectName required");
 
   // Mirror desktop: if already exists, do not respawn (avoids disconnect noise).
+  // The incoming onEvent is intentionally dropped on this reuse path.
+  // Safe ONLY because every caller passes the same sink (bus.publish, a
+  // module singleton). If a future caller passes a per-client onEvent,
+  // this must be changed to re-point or multiplex the listener instead.
   if (ptys.has(projectName)) return;
 
   const pty = spawnRawPty({ session: projectName, cols, rows });
