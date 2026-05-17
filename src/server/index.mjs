@@ -31,10 +31,51 @@ const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
 // subscribed to /events receive live chat updates.
 // subscribeEvents reconnects silently on failure (opencode may not be up
 // yet at server start — that's fine, it retries with 1.5s backoff).
+//
+// Trust mode (mirrors src/main/index.ts opencodeBusLoop):
+// When a permission.asked event arrives and chatAutoAllow is true, we
+// auto-reply "always" and suppress the event (no permission card reaches
+// the client). Config is read live per event so toggling Trust takes
+// effect immediately. On any error in the auto-allow path we fall back
+// to publishing the event normally so the user can approve manually.
+//
+// subscribeEvents calls onEvent() synchronously (no await), so we wrap
+// the async trust-mode logic in an immediately-invoked async function
+// with .catch() to avoid unhandled rejection warnings if the async work
+// rejects — the pump loop itself is unaffected.
 // eslint-disable-next-line no-unused-vars
-const stopOpencodePump = oc.subscribeEvents((evt) =>
-  bus.publish({ kind: "opencode", payload: evt }),
-);
+const stopOpencodePump = oc.subscribeEvents((evt) => {
+  if (evt && evt.type === "permission.asked") {
+    (async () => {
+      try {
+        const cfg = await local.configGet();
+        if (cfg.chatAutoAllow) {
+          const permId = evt.properties?.id;
+          if (permId) {
+            try {
+              await oc.replyPermission({ requestId: permId, reply: "always" });
+            } catch (e) {
+              console.warn("[opencode-pump] auto-allow failed:", e?.message ?? e);
+              // Fall back: forward the event so the user can approve manually.
+              bus.publish({ kind: "opencode", payload: evt });
+            }
+            // Suppress: don't publish when auto-allow succeeded (mirrors desktop continue).
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn("[opencode-pump] trust-mode config read failed:", e?.message ?? e);
+        // Fall back: forward the event so the user can approve manually.
+      }
+      // chatAutoAllow is false, or permId was missing, or configGet threw — publish normally.
+      bus.publish({ kind: "opencode", payload: evt });
+    })().catch((e) => {
+      console.warn("[opencode-pump] unexpected error:", e?.message ?? e);
+    });
+    return;
+  }
+  bus.publish({ kind: "opencode", payload: evt });
+});
 
 const PORT = Number(process.env.BUI_MOBILE_PORT ?? 8787);
 const HOST = process.env.BUI_MOBILE_HOST ?? "0.0.0.0";
