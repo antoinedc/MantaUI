@@ -266,9 +266,16 @@ export async function tmuxNewWindow(
     existingSessionId,
   );
   const launchCmd = chatMode ? REMOTE_CHAT_HOLDER_CMD : REMOTE_CLAUDE_CMD;
+  // Use `-a -t session:{end}` to force insertion after the last existing
+  // window. Without `-a`, tmux picks the lowest unused index ≥ base-index,
+  // which can fail with "index N in use" if user-side hooks (e.g. a
+  // `after-new-window` hook in ~/.tmux.conf) re-target the insertion.
+  // `{end}` is tmux's "after the last window" target; combined with `-a`
+  // this is the canonical "append a new window" idiom and is deterministic
+  // regardless of holes from killed windows or `renumber-windows` setting.
   const target = `${sessionName}:${windowName}`;
   const cmd =
-    `tmux new-window -t ${shellQuote(sessionName)} -n ${shellQuote(windowName)} ` +
+    `tmux new-window -a -t ${shellQuote(`${sessionName}:{end}`)} -n ${shellQuote(windowName)} ` +
     `-c ${pathQuote(cwd)} ${shellQuote(launchCmd)} \\; ` +
     perWindowOptsCmd(target, sid ?? undefined);
   await runSshOnce(config, cmd);
