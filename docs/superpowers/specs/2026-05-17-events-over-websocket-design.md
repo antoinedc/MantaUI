@@ -121,3 +121,21 @@ switches to WS. Both read the same `bus`; no event semantics change.
 - Android (WebView SSE not reported broken; it also benefits from WS for
   free via the shared shim, but not the target).
 - Auth, service worker.
+
+## Implementation outcome (2026-05-17)
+
+Shipped `d291a6c`. Server: `attachEventsWs(bus, ws)` in events.mjs +
+`/events` branch in the upgrade handler (SSE `handleEventsRequest`
+kept; `/pty` untouched). Client: httpApi `EventSource`→`WebSocket`,
+same-origin `wss://…/events`, explicit 1.5s backoff reconnect (WS has
+no auto-reconnect), resume-watchdog + fireResync machinery retained.
+typecheck + 24 vitest + 23 node:test green. Deployed (bui-server
+restarted; tunnel untouched, both active).
+
+Verified live through https://bui.useronda.com: `wss://bui.useronda.com
+/events` connected, RECEIVED 6 msgs/9s (first 814ms, status+opencode);
+deployed bundle confirmed WebSocket-only (no EventSource). Mechanism +
+deployment proven through the real tunnel. On-device confirmation
+remains the user's manual step: open the INSTALLED PWA (not Safari),
+without backgrounding, trigger session activity → list/chat update
+live. This is the exact case SSE failed and WS must pass.
