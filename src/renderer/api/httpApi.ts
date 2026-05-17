@@ -115,8 +115,17 @@ function fireResync() {
   }, 0);
 }
 
-function ensureStream() {
-  if (es) return;
+// (Re)create the shared EventSource. Idempotent: a stream that is OPEN or
+// CONNECTING is left alone; only a missing or CLOSED one is (re)opened, so
+// normal reconnect flapping isn't disturbed. Handlers are unchanged from the
+// original implementation. Listeners live in the module `listeners` map (not
+// bound to the EventSource instance), so swapping `es` is transparent to
+// every on() consumer.
+function openStream() {
+  if (es && es.readyState !== EventSource.CLOSED) return;
+  if (es) {
+    try { es.close(); } catch { /* already dead */ }
+  }
   es = new EventSource(`${serverBase()}/events`);
   es.onmessage = (m) => {
     try {
@@ -143,6 +152,35 @@ function ensureStream() {
     }
     // else: initial connect — do nothing (initial load already fetches).
   };
+}
+
+// iOS suspends an installed standalone PWA when backgrounded / screen-locked
+// / idle. It kills the SSE connection but, in standalone mode, often does
+// NOT fire onerror and does NOT resume the browser's auto-reconnect on
+// resume — the EventSource is left CLOSED with no event ever firing, so the
+// app "opens once then goes static". Watch the lifecycle: on return to
+// foreground (visibilitychange→visible) or bfcache restore (pageshow), if
+// the stream is dead, reopen it. We set _hadError so the fresh onopen drives
+// fireResync() through the existing path (single resync trigger — do NOT
+// also call fireResync() here or state refetches twice).
+let _resumeWatchdogInstalled = false;
+function installResumeWatchdog() {
+  if (_resumeWatchdogInstalled) return;
+  _resumeWatchdogInstalled = true;
+  const recover = () => {
+    if (document.visibilityState !== "visible") return;
+    if (!es || es.readyState === EventSource.CLOSED) {
+      _hadError = true; // make the next onopen fire the resync
+      openStream();
+    }
+  };
+  document.addEventListener("visibilitychange", recover);
+  window.addEventListener("pageshow", recover);
+}
+
+function ensureStream() {
+  openStream();
+  installResumeWatchdog();
 }
 
 // The preload's `onX` methods return `() => Electron.IpcRenderer` because
