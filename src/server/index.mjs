@@ -16,6 +16,7 @@ import { pipeline } from "node:stream/promises";
 import { WebSocketServer } from "ws";
 import { spawn as ptySpawn } from "node-pty";
 import * as tmux from "./tmux.mjs";
+import * as oc from "./opencode.mjs";
 import { createBus, handleEventsRequest } from "./events.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 
@@ -24,7 +25,16 @@ const PROJECT_ROOT = join(__dirname, "..", "..");
 const PUBLIC_DIR = join(__dirname, "public");
 
 const bus = createBus();
-const rpcHandlers = buildHandlers({ tmux });
+const rpcHandlers = buildHandlers({ tmux, oc });
+
+// Forward every opencode SSE event into the bus so mobile clients
+// subscribed to /events receive live chat updates.
+// subscribeEvents reconnects silently on failure (opencode may not be up
+// yet at server start — that's fine, it retries with 1.5s backoff).
+// eslint-disable-next-line no-unused-vars
+const stopOpencodePump = oc.subscribeEvents((evt) =>
+  bus.publish({ kind: "opencode", payload: evt }),
+);
 
 const PORT = Number(process.env.BUI_MOBILE_PORT ?? 8787);
 const HOST = process.env.BUI_MOBILE_HOST ?? "0.0.0.0";

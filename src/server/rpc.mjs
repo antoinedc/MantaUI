@@ -7,10 +7,13 @@ export async function dispatch(handlers, channel, args) {
   return fn(...args);
 }
 
-// Build the full handler map. opencode/local handlers are added in later
-// slices; tmux + a no-op set are wired here.
-export function buildHandlers({ tmux }) {
+// Build the full handler map. Accepts { tmux, oc } where tmux is the
+// src/server/tmux.mjs namespace and oc is src/server/opencode.mjs.
+// Channel key strings MUST match IPC.* values in src/shared/types.ts.
+// Arg shapes MUST match what src/preload/index.ts packs per channel.
+export function buildHandlers({ tmux, oc }) {
   return {
+    // ---- tmux (8 channels, unchanged) ----
     "tmux:list": () => tmux.listProjects(),
     "tmux:new-session": (i) => tmux.newSession(i),
     "tmux:new-window": (i) => tmux.newWindow(i),
@@ -19,6 +22,116 @@ export function buildHandlers({ tmux }) {
     "tmux:kill-session": (n) => tmux.killSession(n),
     "tmux:kill-window": (i) => tmux.killWindow(i),
     "tmux:select-window": (i) => tmux.selectWindow(i),
+
+    // ---- opencode: simple pass-throughs ----
+
+    // preload: ipcRenderer.invoke(IPC.opencodeMessages, sessionId)
+    // → args[0] = sessionId (string)
+    "opencode:messages": (sessionId) => oc.listMessages(sessionId),
+
+    // preload: ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
+    // → args[0] = that object; opencode.mjs sendPrompt expects the same shape
+    "opencode:prompt": (input) => oc.sendPrompt(input),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeAbort, sessionId)
+    // → args[0] = sessionId (string)
+    "opencode:abort": (sessionId) => oc.abortSession(sessionId),
+
+    // preload: ipcRenderer.invoke(IPC.opencodePermissions)  → no args
+    "opencode:permissions": () => oc.listPermissions(),
+
+    // preload: ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply })
+    // → args[0] = { requestId, reply }; opencode.mjs replyPermission expects same shape
+    "opencode:permission-reply": (input) => oc.replyPermission(input),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeQuestions)  → no args
+    "opencode:questions": () => oc.listQuestions(),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers })
+    // → args[0] = { requestId, answers }; opencode.mjs replyQuestion expects same shape
+    "opencode:question-reply": (input) => oc.replyQuestion(input),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId })
+    // → args[0] = { requestId } (object); opencode.mjs rejectQuestion expects plain string
+    "opencode:question-reject": ({ requestId }) => oc.rejectQuestion(requestId),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeModels)  → no args
+    "opencode:models": () => oc.listModels(),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args
+    "opencode:default-model": () => oc.getDefaultModel(),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeVcsBranch, directory?)
+    // → args[0] = directory (string | undefined)
+    "opencode:vcs-branch": (directory) => oc.getVcsBranch(directory),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeListSessions, directory?)
+    // → args[0] = directory (string | undefined)
+    "opencode:list-sessions": (directory) => oc.listSessions(directory),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeCompactSession, sessionId)
+    // → args[0] = sessionId (string)
+    "opencode:compact-session": (sessionId) => oc.compactSession(sessionId),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeCommands)  → no args
+    "opencode:commands": () => oc.listCommands(),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeAgents)  → no args
+    "opencode:agents": () => oc.listAgents(),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeFindFiles, { query, directory })
+    // → args[0] = { query, directory }; opencode.mjs findFiles expects same shape
+    "opencode:find-files": (input) => oc.findFiles(input),
+
+    // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
+    // → args[0] = that object; opencode.mjs runCommand expects same shape
+    "opencode:run-command": (input) => oc.runCommand(input),
+
+    // ---- opencode: composite operations (mirror src/main/index.ts behavior) ----
+
+    // opencode:fork-session
+    // preload: ipcRenderer.invoke(IPC.opencodeForkSession, { sessionId, sessionName, windowName, cwd, messageID? })
+    // desktop behavior (src/main/index.ts):
+    //   1. opencodeForkSession(config, sessionId, messageID) → { id: newSessionId, ... }
+    //   2. tmuxNewWindow(config, sessionName, windowName, cwd, true, newSessionId)
+    //      (chatMode=true stamps @bui-session-id on the new window)
+    //   3. return { newSessionId: forked.id, projects: await listProjects() }
+    // mobile equivalent: oc.forkSession takes { sessionId, messageID }; then
+    // we create a tmux window getting its index back, stamp it, then listProjects.
+    "opencode:fork-session": async ({ sessionId, sessionName, windowName, cwd, messageID }) => {
+      const forked = await oc.forkSession({ sessionId, messageID });
+      const windowIndex = await tmux.newWindowGetIndex(sessionName, windowName, cwd);
+      await tmux.restampSessionId(sessionName, windowIndex, forked.id);
+      const projects = await tmux.listProjects();
+      return { newSessionId: forked.id, projects };
+    },
+
+    // opencode:clear-session
+    // preload: ipcRenderer.invoke(IPC.opencodeClearSession, { sessionName, windowIndex, cwd, title })
+    // desktop behavior (src/main/index.ts):
+    //   1. opencodeCreateSession(config, cwd, title) → { id: newSessionId, ... }
+    //   2. tmuxRestampSessionId(config, sessionName, windowIndex, newSessionId)
+    //   3. return { newSessionId: sess.id, projects: await listProjects() }
+    // mobile equivalent: oc.createSession({ directory, title }) then restamp.
+    "opencode:clear-session": async ({ sessionName, windowIndex, cwd, title }) => {
+      const sess = await oc.createSession({ directory: cwd, title });
+      await tmux.restampSessionId(sessionName, windowIndex, sess.id);
+      const projects = await tmux.listProjects();
+      return { newSessionId: sess.id, projects };
+    },
+
+    // opencode:delete-session
+    // preload: ipcRenderer.invoke(IPC.opencodeDeleteSession, { sessionId, sessionName, windowIndex })
+    // desktop behavior (src/main/index.ts):
+    //   1. opencodeDeleteSession(config, sessionId)
+    //   2. tmuxKillWindow(config, sessionName, windowIndex).catch(() => {})
+    //   3. return listProjects()
+    // mobile equivalent: oc.deleteSessionRaw(sessionId) then tmux.killWindow.
+    "opencode:delete-session": async ({ sessionId, sessionName, windowIndex }) => {
+      await oc.deleteSessionRaw(sessionId);
+      await tmux.killWindow({ sessionName, windowIndex }).catch(() => {});
+      return tmux.listProjects();
+    },
   };
 }
 
