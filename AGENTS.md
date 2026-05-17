@@ -21,18 +21,22 @@ session-state snapshot.
     `formatDuration`, `ctxStageColor`, `filterCommands`, `dedupeAgainstBuiltins`).
     Import from here; don't redeclare them inline in ChatPanel.
 - `src/preload/` — typed `window.api` bridge.
-- `src/server/` — standalone Node HTTP+WS server + plain-JS web client for
-  mobile access. Runs **on the Linux box**, not the Mac. No build step.
+- `src/server/` — Node HTTP+WS server for mobile/web access. Runs **on the
+  Linux box**, not the Mac. Serves the React renderer built by `build:mobile`.
+  Module tree: `index.mjs` (entry), `tmux.mjs`, `pty.mjs`, `opencode.mjs`,
+  `rpc.mjs`, `events.mjs`, `local.mjs`, `status.mjs`.
 
 ## Build / run
 
 ```
 npm install
 npm run typecheck
-npm test              # vitest run (pure logic unit tests)
-npm run test:watch    # vitest watch mode
-npm run dev      # main-process AND preload changes need a full Ctrl+C + restart
-npm run mobile   # mobile/web server on $BUI_MOBILE_HOST:$BUI_MOBILE_PORT (default 0.0.0.0:8787)
+npm test              # vitest (renderer) + node:test (src/server/*.test.mjs)
+npm run test:server   # node:test only (src/server/)
+npm run test:watch    # vitest watch mode (renderer only)
+npm run dev           # main-process AND preload changes need a full Ctrl+C + restart
+npm run mobile        # mobile/web server on $BUI_MOBILE_HOST:$BUI_MOBILE_PORT (default 0.0.0.0:8787)
+npm run build:mobile  # Vite build of renderer → mobile/www/ for Capacitor
 ```
 
 The preload bundle is built once at dev-server start; renderer HMR alone won't
@@ -97,39 +101,51 @@ staleness ≈ `uploadCleanupHours + 1h`.
 
 ## Mobile / web client (`src/server/`)
 
-Second front-end alongside the Electron app. A small Node HTTP+WS server runs
-**on the Linux box itself** (the box that hosts tmux), serving a touch-friendly
-single-page client. No ssh/mosh hop — tmux and node-pty live in the same
-process. Use case: get to your sessions from a phone with nothing installed
-on the device.
+Node HTTP+WS server that runs **on the Linux box** (no SSH hop). The client
+is the full React renderer (`src/renderer/`) built into `mobile/www/` via
+`npm run build:mobile` and served statically. Use case: full bui chat+terminal
+from a phone or browser with nothing installed on the device.
 
-`index.mjs` is plain JS (no TS, no bundler) so `node` runs it directly. The
-client UI is hand-written HTML + JS in `public/{index.html,app.js}`; vendored
-`xterm` and `addon-fit` are served straight out of `node_modules/` at
-`/vendor/*`. If this grows past a screen of state, add a build step — for
-now the lack of one is the point.
+**Server modules:**
+- `tmux.mjs` — tmux list/CRUD/config (pure, testable; `parseSessions` is
+  exported for tests)
+- `pty.mjs` — node-pty spawn registry keyed by projectName. `spawnRawPty`
+  used by the `/pty` WS path; `spawn` used by the RPC `pty:spawn` channel
+- `opencode.mjs` — opencode HTTP proxy to `127.0.0.1:4096` (no SSH layer).
+  `subscribeEvents` reconnects silently with 1.5s backoff
+- `events.mjs` — in-process `createBus()` + `GET /events` SSE endpoint
+- `rpc.mjs` — `POST /rpc/<channel>` dispatch; `buildHandlers({tmux,oc,pty,bus,local})`
+  maps all `window.api` channels
+- `local.mjs` — git worktrees, fs listing, JSON-file-backed config
+  (`~/.bui-mobile/config.json`). Desktop-only concepts (Mac clipboard, mosh,
+  scp peek) are documented no-ops
+- `status.mjs` — ports `src/main/status.ts` activity poller; same BUSY_RE /
+  subagent regexes, runs locally, publishes `WindowStatus[]` batches on bus
 
-**No auth in v1.** Anyone who can reach the port gets shell-attach to every
-tmux session running as this user. Default bind is `0.0.0.0:8787` — fine on
-a LAN or behind Tailscale, **catastrophic** on a public-IP box. For internet
-access, bind to `127.0.0.1` (`BUI_MOBILE_HOST=127.0.0.1`) and front it with
-`cloudflared tunnel --url http://127.0.0.1:8787 --protocol http2`. The
-`--protocol http2` flag matters here: QUIC handshake fails on this box
-("control stream encountered a failure" loop), HTTP/2 connects cleanly.
+**`window.api` shim** (`src/renderer/api/httpApi.ts`): implements the full
+`Api` contract over `/rpc` + `/events`. Installed in `main.tsx` only when
+`window.api` is absent (Electron preload not loaded). Server base read from
+`localStorage["bui_server"]`.
 
-**WS protocol** (`/pty?session=NAME&window=N&cols=&rows=`): client→server
-text frames are JSON `{type:"data",data}` or `{type:"resize",cols,rows}`;
-server→client frames are raw PTY output. One node-pty per connection,
-killed on socket close. Session name is regex-restricted to
-`[A-Za-z0-9._-]+` before being passed to `tmux attach-session -t`.
+**Trust mode (chatAutoAllow)**: the opencode pump in `index.mjs` reads
+`configGet()` per `permission.asked` event and auto-replies "always" when
+enabled — mirrors `src/main/index.ts` opencodeBusLoop. Config file is
+`~/.bui-mobile/config.json`; atomic writes (temp-rename pattern).
 
-**Upload endpoint** (`POST /api/upload?session=NAME`) takes raw bytes in the
-body plus headers `X-Filename` (URL-encoded basename) and `X-Batch-Id`
-(millis). Files land in `$HOME/.bui-uploads/<session>/<batch>/<file>` — the
-**same layout as the Electron drag-drop path**, so the existing hourly
-cleanup applies whenever the Electron app is running against this same box.
-No multipart parser on purpose. The client types the returned path into the
-active PTY at the cursor (single-quoted only if it contains shell-meta).
+**No auth in v1.** Default bind `0.0.0.0:8787`. For internet access:
+`BUI_MOBILE_HOST=127.0.0.1` + `cloudflared tunnel --url http://127.0.0.1:8787 --protocol http2`
+(`--protocol http2` required — QUIC fails on this box).
+
+**WS protocol** (`/pty?session=NAME&window=N&cols=&rows=`): unchanged.
+Client→server: `{type:"data",data}` or `{type:"resize",cols,rows}`.
+Server→client: raw PTY bytes.
+
+**Upload endpoint** (`POST /api/upload?session=NAME`): unchanged layout
+(`~/.bui-uploads/<session>/<batch>/<file>`).
+
+**Capacitor wrapper** (`mobile/`): Android APK + iOS scaffold. `npm run apk`
+in `mobile/` builds the debug APK. `mobile/sync-web.sh` runs `build:mobile`
+to refresh `mobile/www/`.
 
 ## Mouse mode — design decision, do not re-litigate
 
@@ -357,8 +373,6 @@ to the raw message.
 - `vcs.branch.updated` events carry no `sessionID` — they pass the
   per-session filter by accident. Acceptable: there's only one branch per
   cwd, but be aware if you ever scope event handling more strictly.
-- Mobile path (`src/server/index.mjs`) is NOT shimmed for any of the chat-mode
-  IPCs (permissions, questions, etc.). Whoever lands mobile needs to add those shims.
 
 ## File upload paths (chat-mode)
 
@@ -384,10 +398,18 @@ Three upload paths all land in `~/.bui-uploads/<session>/<ts>/` on the remote:
 
 ## Testing
 
-Unit tests live in `src/renderer/chatUtils.test.ts` (Vitest). They cover pure
-utility functions only — no DOM, no Electron mocking. Run with `npm test`.
-When adding logic to `ChatPanel.tsx` that can be expressed as a pure function,
-extract it to `chatUtils.ts` and add a test there.
+Two separate test suites — both run via `npm test`:
+
+**Renderer** (Vitest): `src/renderer/chatUtils.test.ts`. Pure utility
+functions only — no DOM, no Electron mocking. When adding logic to
+`ChatPanel.tsx` expressible as a pure function, extract to `chatUtils.ts`
+and add a test there. `vitest.config.ts` excludes `src/server/**`.
+
+**Server** (node:test): `src/server/*.test.mjs` — `tmux.test.mjs`,
+`events.test.mjs`, `rpc.test.mjs`, `opencode.test.mjs`, `local.test.mjs`,
+`status.test.mjs`. Run standalone with `npm run test:server`. Pure logic
+only — no live tmux or opencode. Add tests for any new pure-parseable logic
+in the server modules.
 
 ## Custom opencode commands
 
@@ -396,14 +418,14 @@ Global commands (`~/.claude/commands/*.md`) are symlinked into
 When adding a new command file: `ln -sf ~/.claude/commands/<name>.md ~/.config/opencode/commands/`
 then restart the `bui-opencode` tmux session for opencode to reload.
 
-## Suggested next moves (as of 2026-05-16)
+## Open work (as of 2026-05-17)
 
-- **Subagent / Task tool rendering in chat-mode.** Today a `task` tool part
-  falls through to the generic `default:` branch of `ToolBody` — just a
-  `<pre>` of `state.output`, no live child activity, no nesting. The v2 SDK
-  exposes `session.created` with `parentID` and `session.next.tool.*` events;
-  enough to render Claude Code-style inline `⎿ ● Read(...)` child rows. Would
-  need a per-session debounce map (the 300ms refetch debounce assumes one
-  session id), and the early sessionID filter at the top of `onOpencodeEvent`
-  would have to allow known-child ids through.
+- **Subagent / Task tool rendering in chat-mode.** `task` tool part falls
+  through to the generic `default:` branch of `ToolBody`. v2 SDK exposes
+  `session.created` with `parentID` + `session.next.tool.*` events for inline
+  child rows. Needs per-session debounce map + allowing child session ids
+  through the early sessionID filter in `onOpencodeEvent`.
 - **Global model preference** — currently per-session in localStorage.
+- **Live refresh polling** — sidebar updates only on bui's own actions.
+- **Command palette (⌘K)** — fuzzy switch + actions (~150 lines).
+- **Reconnect-on-drop UI** — SSH has no reconnect banner today.
