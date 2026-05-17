@@ -16,6 +16,7 @@ import { WebSocketServer } from "ws";
 import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
+import * as local from "./local.mjs";
 import { createBus, handleEventsRequest } from "./events.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 
@@ -24,7 +25,7 @@ const PROJECT_ROOT = join(__dirname, "..", "..");
 const PUBLIC_DIR = join(__dirname, "public");
 
 const bus = createBus();
-const rpcHandlers = buildHandlers({ tmux, oc, pty, bus });
+const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
 
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.
