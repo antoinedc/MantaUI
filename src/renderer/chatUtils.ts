@@ -1,6 +1,96 @@
 // Pure utility functions extracted from ChatPanel for testability.
 
+// Fallback context size used when the active model has no `limit.context`
+// (or no active model is known yet). 200k is the lowest common denominator
+// across Claude Sonnet 4.5 and older — generous enough that the bar
+// doesn't lie too aggressively in the dark, conservative enough that
+// the user is warned well before any actual provider would refuse.
 export const ASSUMED_CONTEXT_TOKENS = 200_000;
+
+// Resolve the effective context window in tokens for an active model. Reads
+// `limit.context` off the OpencodeModel (which mirrors the provider's real
+// window — e.g. 1_000_000 for Opus 4.7, 200_000 for Sonnet 4 / Haiku 4.5).
+// Falls back to ASSUMED_CONTEXT_TOKENS when unknown so the bar still moves
+// and is roughly meaningful before the first turn.
+//
+// Accepts the minimal `{ limit?: { context?: number } } | null` shape so
+// callers don't have to import OpencodeModel here.
+export function resolveContextLimit(
+  model: { limit?: { context?: number } } | null | undefined,
+): number {
+  const c = model?.limit?.context;
+  if (typeof c === "number" && Number.isFinite(c) && c > 0) return c;
+  return ASSUMED_CONTEXT_TOKENS;
+}
+
+// Classify a per-step finish reason emitted by opencode into the smallest
+// set the UI actually needs to act on. Opencode normalizes provider-native
+// values (Anthropic stop_reason, OpenAI finish_reason, Gemini finishReason)
+// into a single string. Returns null when the finish is benign (end of turn,
+// tool handoff, etc.) and no badge should be shown.
+//
+// - "output-cap"   → hit max_tokens / length (output cap). Retryable by
+//                    raising max output.
+// - "context-wall" → hit the model's own context window during generation.
+//                    User needs to /compact (or start a new session).
+// - "tool-cutoff"  → hit max_tokens MID tool_use block — the tool call JSON
+//                    is incomplete and the agent loop will choke on it.
+//                    Distinct because the fix is different (retry with
+//                    higher max output) AND silently fatal if missed.
+// - null           → not a truncation we care about.
+export type TruncationKind = "output-cap" | "context-wall" | "tool-cutoff";
+
+export function classifyFinish(
+  finish: string | null | undefined,
+  opts?: { lastPartIsToolUse?: boolean },
+): TruncationKind | null {
+  if (!finish) return null;
+  const f = finish.toLowerCase();
+
+  // Anthropic-native: explicit "I ran out of context window mid-generation".
+  if (f === "model_context_window_exceeded") return "context-wall";
+
+  // Output-cap family. Anthropic: "max_tokens". OpenAI: "length".
+  // Gemini: "MAX_TOKENS" (lowercased above). When the last assistant
+  // block was a tool_use, we know the JSON is half-written and the
+  // tool call is unusable — promote to "tool-cutoff" so the user gets
+  // a more specific message and we can offer a retry later.
+  if (f === "max_tokens" || f === "length") {
+    return opts?.lastPartIsToolUse ? "tool-cutoff" : "output-cap";
+  }
+
+  // Everything else ("end_turn", "stop", "tool_use", "tool_calls",
+  // "stop_sequence", "pause_turn", "refusal", etc.) is not a truncation.
+  return null;
+}
+
+// Human-readable description of a truncation. Returns { label, hint } so
+// the badge can render a short label and the tooltip a longer hint.
+export function describeTruncation(kind: TruncationKind): {
+  label: string;
+  hint: string;
+} {
+  switch (kind) {
+    case "output-cap":
+      return {
+        label: "truncated (output limit)",
+        hint:
+          "Response hit the per-turn output cap. Ask the model to continue, or raise the max output budget for this provider.",
+      };
+    case "context-wall":
+      return {
+        label: "truncated (context full)",
+        hint:
+          "Response hit the model's context window mid-generation. Run /compact to free space, or start a new session.",
+      };
+    case "tool-cutoff":
+      return {
+        label: "tool call cut off — retry needed",
+        hint:
+          "The model was emitting a tool call when it hit the output limit, so the call is incomplete and won't execute. Retry the turn (optionally with a higher max output).",
+      };
+  }
+}
 
 export function formatTokens(n: number): string {
   if (n < 1000) return `${n} tokens`;

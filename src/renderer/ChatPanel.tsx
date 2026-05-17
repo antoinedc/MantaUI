@@ -36,6 +36,10 @@ import {
   ctxStageColor,
   filterCommands,
   dedupeAgainstBuiltins,
+  resolveContextLimit,
+  classifyFinish,
+  describeTruncation,
+  type TruncationKind,
 } from "./chatUtils";
 
 // In-flight attachments tracked alongside the textarea content. Each chip
@@ -225,7 +229,8 @@ function writeSavedModel(sessionId: string, m: ModelSelection | null): void {
 const CLAUDE_ORANGE = "#d97757";
 
 // ASSUMED_CONTEXT_TOKENS, formatTokens, formatDuration, ctxStageColor,
-// filterCommands, dedupeAgainstBuiltins are imported from ./chatUtils.
+// filterCommands, dedupeAgainstBuiltins, resolveContextLimit,
+// classifyFinish, describeTruncation are imported from ./chatUtils.
 
 type TokenUsage = {
   total?: number;
@@ -407,6 +412,18 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     next: number;
     action?: { title: string; message: string; label: string; link?: string };
   } | null>(null);
+  // Per-message truncation kind, keyed by assistant messageID. Populated
+  // from `session.next.step.ended` whose `properties.finish` reveals why
+  // the step stopped. Most finishes are benign (end_turn, tool_use) and
+  // classifyFinish() returns null; only real truncations land here.
+  //
+  // Live-event pattern (matches stepTokens, liveTodos, retryInfo): the
+  // canonical message re-fetch at 716–727 doesn't carry per-step finish
+  // metadata back, so keeping a side map here avoids the badge flickering
+  // off whenever the transcript refetches.
+  const [finishByMessageId, setFinishByMessageId] = useState<
+    Map<string, TruncationKind>
+  >(() => new Map());
 
   // Initial load + reload whenever sessionId changes.
   useEffect(() => {
@@ -424,6 +441,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setStepTokens(null);
     setRetryInfo(null);
     setLiveTodos(null);
+    setFinishByMessageId(new Map());
     setCompactionState(null);
     if (compactionClearTimer.current) {
       clearTimeout(compactionClearTimer.current);
@@ -636,12 +654,55 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             cost,
           });
         }
-        // Surface output-limit truncation as a soft error, but don't clobber
-        // a more specific session.error that may have already fired (item 1).
-        if (props.finish === "max_tokens") {
-          setSendError((prev) =>
-            prev ?? "Response truncated — model hit output limit",
-          );
+        // Finish-reason inspection. Opencode normalizes provider-native
+        // stop_reason / finish_reason values into `properties.finish`.
+        // classifyFinish() returns null for benign finishes (end_turn,
+        // tool_use, etc.) so the badge map only grows on real truncations.
+        //
+        // For "max_tokens" we also peek at the last part of the assistant
+        // message to detect the silently-fatal mid-tool-call case: when the
+        // model was emitting a tool_use JSON block and got cut off, the
+        // call is incomplete and the agent loop would otherwise try to
+        // execute invalid JSON. Promoting it to "tool-cutoff" gives the
+        // user a distinct badge + clearer remediation.
+        const finishRaw =
+          typeof props.finish === "string" ? props.finish : null;
+        const stepMsgId =
+          typeof props.messageID === "string" ? props.messageID : null;
+        if (finishRaw && stepMsgId) {
+          // Find the message and check whether its last non-trivial part is
+          // an incomplete tool_use. We look at the current `messages` array
+          // via the setter closure to avoid stale-closure issues.
+          let lastPartIsToolUse = false;
+          setMessages((prevMsgs) => {
+            if (!prevMsgs) return prevMsgs;
+            const m = prevMsgs.find((mm) => mm.info.id === stepMsgId);
+            if (m) {
+              for (let i = m.parts.length - 1; i >= 0; i--) {
+                const p = m.parts[i];
+                if (p.type === "step-start" || p.type === "step-finish") continue;
+                lastPartIsToolUse = p.type === "tool";
+                break;
+              }
+            }
+            return prevMsgs;
+          });
+          const kind = classifyFinish(finishRaw, { lastPartIsToolUse });
+          if (kind) {
+            setFinishByMessageId((prev) => {
+              if (prev.get(stepMsgId) === kind) return prev;
+              const next = new Map(prev);
+              next.set(stepMsgId, kind);
+              return next;
+            });
+            // Also keep the legacy soft-banner so this change is additive:
+            // a per-message badge is more discoverable but the dismissable
+            // banner remains the loud signal for the active turn. Banner
+            // copy is now finish-aware. Don't clobber a more-specific
+            // session.error.
+            const desc = describeTruncation(kind);
+            setSendError((prev) => prev ?? `Response ${desc.label}`);
+          }
         }
       }
 
@@ -1965,6 +2026,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
                   persistentTodos={
                     isLastInTranscript && !running ? activeTodos : null
                   }
+                  truncation={finishByMessageId.get(m.info.id) ?? null}
                 />
               );
             })}
@@ -2144,6 +2206,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         models={models}
         modelOverride={modelOverride}
         defaultModel={defaultModel}
+        activeModel={activeModel}
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
         canFork={!!tmuxSession}
@@ -3022,6 +3085,7 @@ function InputArea({
   models,
   modelOverride,
   defaultModel,
+  activeModel,
   onOpenModels,
   onSelectModel,
   canFork,
@@ -3054,6 +3118,12 @@ function InputArea({
   models: OpencodeModel[] | null;
   modelOverride: ModelSelection | null;
   defaultModel: { providerID: string; modelID: string } | null;
+  // Active model resolved by the parent (modelOverride ?? defaultModel,
+  // looked up against `models`). Used to size the context bar against the
+  // real provider window (e.g. 1M for Opus 4.7) instead of the 200k
+  // fallback — without this the bar saturates at "100%" while the
+  // provider happily keeps serving requests, which is misleading.
+  activeModel: OpencodeModel | null;
   onOpenModels: () => void;
   onSelectModel: (m: ModelSelection | null) => void;
   canFork: boolean;
@@ -3075,12 +3145,15 @@ function InputArea({
   // whenever the session has had at least one assistant turn (tokens > 0).
   // The running indicator above shows the LIVE version while generating;
   // this one is the resting baseline.
+  //
+  // Denominator is the ACTIVE model's real context window when known
+  // (Opus 4.7 = 1M, Sonnet 4 = 200k, etc.) so the bar reflects what the
+  // provider will actually accept on the next request. Falls back to
+  // ASSUMED_CONTEXT_TOKENS (200k) when no model is selected yet.
   const ctxTokens =
     tokens != null ? tokens.input + (tokens.cache?.read ?? 0) : 0;
-  const ctxPct = Math.min(
-    100,
-    Math.round((ctxTokens / ASSUMED_CONTEXT_TOKENS) * 100),
-  );
+  const ctxLimit = resolveContextLimit(activeModel);
+  const ctxPct = Math.min(100, Math.round((ctxTokens / ctxLimit) * 100));
   return (
     <div className="shrink-0">
       {/* Error banner moved to ChatPanel scope (dismissable + closer to the */}
@@ -3211,7 +3284,20 @@ function InputArea({
             <ContextBar
               pct={ctxPct}
               tooltip={[
-                `${ctxTokens.toLocaleString()} / ${ASSUMED_CONTEXT_TOKENS.toLocaleString()} tokens`,
+                `${ctxTokens.toLocaleString()} / ${ctxLimit.toLocaleString()} tokens`,
+                activeModel
+                  ? `Model window: ${activeModel.name}`
+                  : `No active model — using ${ASSUMED_CONTEXT_TOKENS.toLocaleString()}-token fallback`,
+                // Action hint scales with how close we are to the wall.
+                // 100% on the real model limit means the next request will
+                // very likely truncate or hit `model_context_window_exceeded`
+                // — make the remediation explicit instead of letting the
+                // user discover it from a truncated reply.
+                ctxPct >= 100
+                  ? "Compact recommended — run /compact to free space"
+                  : ctxPct >= 90
+                    ? "Approaching limit — consider /compact soon"
+                    : null,
                 tokens?.cache?.write
                   ? `${tokens.cache.write.toLocaleString()} cache write tokens — billed again on next cold turn`
                   : null,
@@ -3269,6 +3355,7 @@ function MessageRow({
   showThinking,
   turnDurationMs,
   persistentTodos,
+  truncation,
 }: {
   msg: OpencodeMessage;
   showThinking: boolean;
@@ -3280,6 +3367,12 @@ function MessageRow({
   // running — renders the latest TodoWrite list permanently below the footer.
   // Same data ChatPanel pins under the running indicator while a turn is live.
   persistentTodos: Array<Record<string, unknown>> | null;
+  // Per-message truncation classification from finishByMessageId. Drives
+  // the "truncated" badge appended to the turn-duration footer (or as a
+  // standalone footer when there's no duration, e.g. mid-turn assistant
+  // messages within a multi-step turn that hit max_tokens). null = no
+  // truncation, no badge.
+  truncation: TruncationKind | null;
 }) {
   const isUser = msg.info.role === "user";
 
@@ -3356,15 +3449,45 @@ function MessageRow({
       {/* Turn-level duration footer — only on the FINAL assistant message */}
       {/* of a turn. -ml-[14px] breaks 14px out of the 16px px-4 padding, */}
       {/* leaving a 2px gap between the sidebar edge and the ✻ glyph. */}
-      {turnDurationMs != null && (
+      {/* Truncation badge piggy-backs onto the same line when both are set */}
+      {/* (most common case: end-of-turn truncation). For mid-turn step */}
+      {/* truncations there's no duration footer, so the badge renders on */}
+      {/* its own row using the same baseline style. */}
+      {(turnDurationMs != null || truncation != null) && (
         // -ml-[8px] places the ✻ glyph halfway between the panel's left edge
         // (where the transcript's px-4 padding starts at x=16) and the
         // assistant bullet column (x=16 inside the padding). 16 - 8 = 8 from
         // edge ≈ midway between sidebar and bullet. mt-3 adds breathing room
         // above so it doesn't crowd the last assistant part.
         <div className="-ml-[8px] mt-3 -mb-3 text-[13px] text-text-muted">
-          <span style={{ color: CLAUDE_ORANGE }}>✻</span>{" "}
-          {pastVerbFor(msg.info.id)} for {formatDuration(turnDurationMs)}
+          {turnDurationMs != null && (
+            <>
+              <span style={{ color: CLAUDE_ORANGE }}>✻</span>{" "}
+              {pastVerbFor(msg.info.id)} for {formatDuration(turnDurationMs)}
+            </>
+          )}
+          {truncation != null && (
+            <>
+              {turnDurationMs != null && (
+                <span className="text-text-faint mx-1.5">·</span>
+              )}
+              {/* File-chip-style pill tinted with CLAUDE_ORANGE — visually */}
+              {/* coherent with CompactionCard / RetryCard / QuestionCard, */}
+              {/* the existing "something needs your attention" color. */}
+              <span
+                className="rounded-md border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1"
+                style={{
+                  borderColor: CLAUDE_ORANGE + "55",
+                  backgroundColor: CLAUDE_ORANGE + "11",
+                  color: CLAUDE_ORANGE,
+                }}
+                title={describeTruncation(truncation).hint}
+              >
+                <span aria-hidden>⚠</span>
+                {describeTruncation(truncation).label}
+              </span>
+            </>
+          )}
         </div>
       )}
       {/* Persistent todo list — only on the LAST assistant message in the */}

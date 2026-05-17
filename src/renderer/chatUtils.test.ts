@@ -6,6 +6,9 @@ import {
   filterCommands,
   dedupeAgainstBuiltins,
   ASSUMED_CONTEXT_TOKENS,
+  resolveContextLimit,
+  classifyFinish,
+  describeTruncation,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -92,6 +95,125 @@ describe("ctxStageColor", () => {
 describe("ASSUMED_CONTEXT_TOKENS", () => {
   it("is 200k", () => {
     expect(ASSUMED_CONTEXT_TOKENS).toBe(200_000);
+  });
+});
+
+// ===== resolveContextLimit =====
+
+describe("resolveContextLimit", () => {
+  it("returns the model's real context limit when set", () => {
+    expect(resolveContextLimit({ limit: { context: 1_000_000 } })).toBe(
+      1_000_000,
+    );
+    expect(resolveContextLimit({ limit: { context: 200_000 } })).toBe(200_000);
+  });
+
+  it("falls back to the assumed default when model is null/undefined", () => {
+    expect(resolveContextLimit(null)).toBe(ASSUMED_CONTEXT_TOKENS);
+    expect(resolveContextLimit(undefined)).toBe(ASSUMED_CONTEXT_TOKENS);
+  });
+
+  it("falls back when limit or limit.context is missing", () => {
+    expect(resolveContextLimit({})).toBe(ASSUMED_CONTEXT_TOKENS);
+    expect(resolveContextLimit({ limit: {} })).toBe(ASSUMED_CONTEXT_TOKENS);
+  });
+
+  it("rejects non-positive, non-finite, and non-numeric values", () => {
+    expect(resolveContextLimit({ limit: { context: 0 } })).toBe(
+      ASSUMED_CONTEXT_TOKENS,
+    );
+    expect(resolveContextLimit({ limit: { context: -1 } })).toBe(
+      ASSUMED_CONTEXT_TOKENS,
+    );
+    expect(resolveContextLimit({ limit: { context: Infinity } })).toBe(
+      ASSUMED_CONTEXT_TOKENS,
+    );
+    expect(resolveContextLimit({ limit: { context: NaN } })).toBe(
+      ASSUMED_CONTEXT_TOKENS,
+    );
+  });
+});
+
+// ===== classifyFinish =====
+
+describe("classifyFinish", () => {
+  it("returns null for benign / non-truncation finishes", () => {
+    expect(classifyFinish("end_turn")).toBeNull();
+    expect(classifyFinish("stop")).toBeNull();
+    expect(classifyFinish("tool_use")).toBeNull();
+    expect(classifyFinish("tool_calls")).toBeNull();
+    expect(classifyFinish("stop_sequence")).toBeNull();
+    expect(classifyFinish("pause_turn")).toBeNull();
+    expect(classifyFinish("refusal")).toBeNull();
+  });
+
+  it("returns null for empty / missing finish", () => {
+    expect(classifyFinish(null)).toBeNull();
+    expect(classifyFinish(undefined)).toBeNull();
+    expect(classifyFinish("")).toBeNull();
+  });
+
+  it("classifies Anthropic-native context wall", () => {
+    expect(classifyFinish("model_context_window_exceeded")).toBe(
+      "context-wall",
+    );
+  });
+
+  it("classifies output-cap from Anthropic / OpenAI / Gemini", () => {
+    expect(classifyFinish("max_tokens")).toBe("output-cap"); // Anthropic
+    expect(classifyFinish("length")).toBe("output-cap"); // OpenAI
+    expect(classifyFinish("MAX_TOKENS")).toBe("output-cap"); // Gemini (case-insensitive)
+  });
+
+  it("promotes output-cap to tool-cutoff when last part is a tool_use", () => {
+    expect(classifyFinish("max_tokens", { lastPartIsToolUse: true })).toBe(
+      "tool-cutoff",
+    );
+    expect(classifyFinish("length", { lastPartIsToolUse: true })).toBe(
+      "tool-cutoff",
+    );
+  });
+
+  it("does NOT promote context-wall to tool-cutoff (different fix path)", () => {
+    // context-wall while tool_use is still distinct: compaction is the
+    // remedy, not raising max_tokens. Keep it as context-wall.
+    expect(
+      classifyFinish("model_context_window_exceeded", {
+        lastPartIsToolUse: true,
+      }),
+    ).toBe("context-wall");
+  });
+
+  it("ignores lastPartIsToolUse for non-truncation finishes", () => {
+    expect(classifyFinish("end_turn", { lastPartIsToolUse: true })).toBeNull();
+    expect(classifyFinish("tool_use", { lastPartIsToolUse: true })).toBeNull();
+  });
+});
+
+// ===== describeTruncation =====
+
+describe("describeTruncation", () => {
+  it("returns distinct label/hint for each kind", () => {
+    const a = describeTruncation("output-cap");
+    const b = describeTruncation("context-wall");
+    const c = describeTruncation("tool-cutoff");
+    // Distinct
+    expect(a.label).not.toBe(b.label);
+    expect(b.label).not.toBe(c.label);
+    expect(a.label).not.toBe(c.label);
+    // Non-empty
+    for (const d of [a, b, c]) {
+      expect(d.label.length).toBeGreaterThan(0);
+      expect(d.hint.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("context-wall hint recommends /compact", () => {
+    expect(describeTruncation("context-wall").hint).toMatch(/compact/i);
+  });
+
+  it("tool-cutoff label flags retry", () => {
+    expect(describeTruncation("tool-cutoff").label).toMatch(/retry/i);
   });
 });
 
