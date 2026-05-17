@@ -226,7 +226,7 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
 ## State
 
 - **Source of truth**: tmux on the remote. `tmux list-sessions` + `list-windows -a`.
-- **Local config** (`<userData>/config.json`): `{host, user, identityFile, transport, projects[{tmuxSession, defaultCwd}], opencodePort, chatAutoAllow, defaultModel}`.
+- **Local config** (`<userData>/config.json`): `{host, user, identityFile, transport, projects[{tmuxSession, defaultCwd}], opencodePort, chatAutoAllow, defaultModel, skillRegistryUrls}`.
 - **No local sessions table.** Project = tmux session, app session = tmux window.
 
 ## Patterns worth knowing
@@ -357,7 +357,14 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 `chatAutoAllow` does NOT apply to Question tool requests — those always need
 explicit user choice. `defaultModel: { providerID, modelID }` — global default
 for all new and cleared sessions; settable in Settings; `null`/absent = opencode
-picks its own default.
+picks its own default. `skillRegistryUrls: string[]` — extra opencode skill
+registry URLs (Settings UI). On save, the `configUpdate` handler reads remote
+`~/.config/opencode/opencode.jsonc`, deep-merges only the `skills.urls` key,
+and writes it back via `runSshOnce`. **Merge is JSONC-comment-stripped** (`//`
+single-line only) before `JSON.parse`; if it's unparseable we start from `{}`
+rather than corrupting other keys. The default registry
+(`https://antoinedc.github.io/bui-skills`) ships in the opencode binary once
+the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
 
 **v2-only endpoints** (used alongside the v1 base):
 - `GET /question` — list pending Question tool requests
