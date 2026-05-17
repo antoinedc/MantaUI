@@ -429,6 +429,40 @@ Global commands (`~/.claude/commands/*.md`) are symlinked into
 When adding a new command file: `ln -sf ~/.claude/commands/<name>.md ~/.config/opencode/commands/`
 then restart the `bui-opencode` tmux session for opencode to reload.
 
+## Work tracking (Multica)
+
+bui has a Multica workspace for structured issue dispatch to AI agents.
+
+- **Workspace**: https://multica.ai/better-ui (ID: `264c89bb-4659-4570-af7b-5f8daaf87985`)
+- **Agent**: `better-ui-dev` (ID: `87bf6d8f-5fd0-4fb6-8dd8-a5e7c36b0747`) — OpenCode runtime, covers the full codebase
+- **Skill**: `verify-build-better-ui` (ID: `95d4a528-3756-4ee0-a4e2-bf072e54399a`) — runs `npm run typecheck && npm test`
+
+**Source of truth**: `.multica/` directory in this repo. Edit files there, commit, then push to Cloud.
+
+```bash
+# Push updated agent instructions
+multica agent update 87bf6d8f-5fd0-4fb6-8dd8-a5e7c36b0747 \
+  --instructions "$(cat .multica/agents/better-ui-dev.md)"
+
+# Push updated skill
+multica skill update 95d4a528-3756-4ee0-a4e2-bf072e54399a \
+  --content "$(sed '/^---$/,/^---$/d' .multica/skills/verify-build/SKILL.md)"
+
+# Push updated workspace context
+multica workspace update 264c89bb-4659-4570-af7b-5f8daaf87985 \
+  --context-stdin < .multica/workspace-context.md
+
+# Create and assign an issue
+multica issue create --title "..." --description "..." --project <project-id> --priority medium
+multica issue assign <key> --to better-ui-dev
+
+# Check status
+multica daemon status
+multica runtime list
+```
+
+Full CLI cheat sheet: `/home/dev/projects/shared/multica/setup.md`
+
 ## Open work (as of 2026-05-17)
 
 - **Subagent / Task tool rendering in chat-mode.** `task` tool part falls
