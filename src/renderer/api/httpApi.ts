@@ -50,6 +50,58 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
 
 let es: EventSource | null = null;
 
+// ---------------------------------------------------------------------------
+// Reconnect-resync state.
+// ---------------------------------------------------------------------------
+
+// Set to true after the first onerror so we know the NEXT onopen is a
+// reconnect (not the initial connect).  Reset to false after firing the resync
+// so rapid flapping doesn't spam listeners — the next genuine reconnect after
+// another onerror will set it again.
+let _hadError = false;
+
+// Guard: only fire the resync once per reconnect event even if onopen somehow
+// fires multiple times in quick succession.
+let _resyncing = false;
+
+/**
+ * Fire two synthetic, side-effect-free OpencodeEvents so that every active
+ * ChatPanel refetches messages, permissions, AND questions after the SSE
+ * stream reconnects.
+ *
+ * Synthetic event 1 — "permission.replied"
+ *   ChatPanel handler (lines ~736-741): calls refreshPermissions() (→
+ *   opencodePermissions re-fetch) AND scheduleRefetch() (→ opencodeMessages
+ *   re-fetch, debounced 300 ms).  No state mutations; purely triggers fetches.
+ *
+ * Synthetic event 2 — "question.asked"
+ *   ChatPanel handler (lines ~745-753): calls refreshQuestions() (→
+ *   opencodeQuestions re-fetch).  No state mutations; purely triggers a fetch.
+ *
+ * Both events have no sessionID in properties so they pass the early
+ * `if (props.sessionID && props.sessionID !== sessionId) return` guard in
+ * every mounted ChatPanel, causing each panel to refetch for its own session.
+ *
+ * Neither event type mutates transcript state (no delta/part/id fields are
+ * processed for these types) — they only schedule fetch calls.
+ */
+function fireResync() {
+  if (_resyncing) return;
+  _resyncing = true;
+  // Use setTimeout(0) so we don't fire synchronously inside onopen.
+  setTimeout(() => {
+    _resyncing = false;
+    const set = listeners.opencode;
+    if (set.size === 0) return; // no listeners yet — nothing to do
+    // Synthetic event 1: triggers refreshPermissions() + scheduleRefetch()
+    const ev1: OpencodeEvent = { type: "permission.replied", properties: {} };
+    for (const fn of set) fn(ev1);
+    // Synthetic event 2: triggers refreshQuestions()
+    const ev2: OpencodeEvent = { type: "question.asked", properties: {} };
+    for (const fn of set) fn(ev2);
+  }, 0);
+}
+
 function ensureStream() {
   if (es) return;
   es = new EventSource(`${serverBase()}/events`);
@@ -66,7 +118,17 @@ function ensureStream() {
     }
   };
   es.onerror = () => {
-    // EventSource reconnects automatically — nothing to do
+    // EventSource will auto-reconnect; mark that a drop occurred so the
+    // next onopen knows it's a reconnect (not the initial connect).
+    _hadError = true;
+  };
+  es.onopen = () => {
+    if (_hadError) {
+      // This is a reconnect after a drop — fire the resync.
+      _hadError = false;
+      fireResync();
+    }
+    // else: initial connect — do nothing (initial load already fetches).
   };
 }
 
