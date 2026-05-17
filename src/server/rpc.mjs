@@ -7,11 +7,14 @@ export async function dispatch(handlers, channel, args) {
   return fn(...args);
 }
 
-// Build the full handler map. Accepts { tmux, oc } where tmux is the
-// src/server/tmux.mjs namespace and oc is src/server/opencode.mjs.
+// Build the full handler map. Accepts { tmux, oc, pty, bus } where:
+//   tmux — src/server/tmux.mjs namespace
+//   oc   — src/server/opencode.mjs namespace
+//   pty  — src/server/pty.mjs namespace
+//   bus  — event bus created by createBus() in events.mjs
 // Channel key strings MUST match IPC.* values in src/shared/types.ts.
 // Arg shapes MUST match what src/preload/index.ts packs per channel.
-export function buildHandlers({ tmux, oc }) {
+export function buildHandlers({ tmux, oc, pty, bus }) {
   return {
     // ---- tmux (8 channels, unchanged) ----
     "tmux:list": () => tmux.listProjects(),
@@ -132,6 +135,28 @@ export function buildHandlers({ tmux, oc }) {
       await tmux.killWindow({ sessionName, windowIndex }).catch(() => {});
       return tmux.listProjects();
     },
+
+    // ---- pty channels (4 channels) ----
+    //
+    // IPC.ptySpawn   = "pty:spawn"   preload: ipcRenderer.invoke(IPC.ptySpawn, opts)
+    //   → args[0] = SpawnOptions { projectName, cols, rows }
+    //   Side-effect: data/exit events flow to bus as { kind:"pty", payload: PtyEvent }
+    //   where PtyEvent = { kind:"data"|"exit", projectName, data? / code? }
+    //   (matches src/shared/types.ts PtyEvent and src/main/pty.ts emit shape)
+    "pty:spawn": (opts) =>
+      pty.spawn(opts, (e) => bus.publish({ kind: "pty", payload: e })),
+
+    // IPC.ptyWrite   = "pty:write"   preload: ipcRenderer.invoke(IPC.ptyWrite, projectName, data)
+    //   → args[0] = projectName, args[1] = data
+    "pty:write": (projectName, data) => pty.write(projectName, data),
+
+    // IPC.ptyResize  = "pty:resize"  preload: ipcRenderer.invoke(IPC.ptyResize, projectName, cols, rows)
+    //   → args[0] = projectName, args[1] = cols, args[2] = rows
+    "pty:resize": (projectName, cols, rows) => pty.resize(projectName, cols, rows),
+
+    // IPC.ptyKill    = "pty:kill"    preload: ipcRenderer.invoke(IPC.ptyKill, projectName)
+    //   → args[0] = projectName
+    "pty:kill": (projectName) => pty.kill(projectName),
   };
 }
 
