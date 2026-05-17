@@ -16,8 +16,17 @@ export function handleEventsRequest(bus, req, res) {
     "cache-control": "no-cache",
     connection: "keep-alive",
     "access-control-allow-origin": "*",
+    // Tell reverse proxies (Cloudflare tunnel, nginx) NOT to buffer this
+    // response. Without it the SSE stream is held proxy-side: the client's
+    // EventSource connects but receives zero bytes (works direct on the
+    // box, dead through the tunnel). This is the canonical SSE-behind-
+    // proxy directive.
+    "x-accel-buffering": "no",
   });
   res.write("retry: 2000\n\n");
+  // Flush the headers + retry preamble immediately so the proxy opens the
+  // downstream stream now rather than waiting for the first buffered chunk.
+  res.flushHeaders?.();
   const off = bus.subscribe((evt) => {
     res.write(`data: ${JSON.stringify(evt)}\n\n`);
   });
