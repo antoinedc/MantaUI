@@ -18,7 +18,8 @@ session-state snapshot.
 - `src/renderer/` — React + xterm.js. `Terminal.tsx` is the only place that
   owns an xterm instance. `ChatPanel.tsx` is the entire chat-mode UI (~3500 LoC).
   - `chatUtils.ts` — pure utility functions extracted for testability (`formatTokens`,
-    `formatDuration`, `ctxStageColor`, `filterCommands`, `dedupeAgainstBuiltins`).
+    `formatDuration`, `ctxStageColor`, `filterCommands`, `dedupeAgainstBuiltins`,
+    `resolveContextLimit`, `classifyFinish`, `describeTruncation`).
     Import from here; don't redeclare them inline in ChatPanel.
 - `src/preload/` — typed `window.api` bridge.
 - `src/server/` — Node HTTP+WS server for mobile/web access. Runs **on the
@@ -380,9 +381,19 @@ the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
   `question.*`):
   - `session.next.step.ended` — live token/cost snapshot. `stepTokens` state
     is preferred over the transcript-scraped `latestTokens` so the footer
-    ctx bar updates between tool calls, not just on re-fetch. `finish ===
-    "max_tokens"` also pre-seeds `sendError` with a truncation message
-    (without clobbering a more-specific `session.error`).
+    ctx bar updates between tool calls, not just on re-fetch. `properties.
+    finish` is classified via `classifyFinish()` into `"output-cap" |
+    "context-wall" | "tool-cutoff" | null` (covers Anthropic `max_tokens` /
+    `model_context_window_exceeded`, OpenAI `length`, Gemini `MAX_TOKENS`).
+    Non-null results land in `finishByMessageId: Map<messageID,
+    TruncationKind>` and render an inline orange `⚠ truncated (…)` pill
+    on the matching `MessageRow` next to the turn-duration footer.
+    `tool-cutoff` is promoted from `max_tokens` when the message's last
+    non-step part is a `tool` — silently-fatal case where the tool JSON is
+    incomplete; the badge tells the user a retry is needed. The legacy
+    `sendError` banner also fires (finish-aware copy via
+    `describeTruncation().label`), without clobbering a more-specific
+    `session.error`.
   - `session.next.compaction.{started,delta,ended}` — drives the inline
     `CompactionCard` above the running indicator. `.ended` holds the
     "Compacted" confirmation for 2.5s then clears (the `session.compacted`
@@ -411,10 +422,22 @@ and fall back to the message scan:
 - `latestTokens` prefers `stepTokens` (from `session.next.step.ended`)
 - `activeTodos` prefers `liveTodos` (from `todo.updated`)
 - `branch` is pure state (initial fetch + `vcs.branch.updated`)
+- `finishByMessageId` is pure state (from `session.next.step.ended`'s
+  `properties.finish`) — survives refetch because the canonical messages
+  payload doesn't carry per-step finish metadata.
 When adding a new live-event consumer in ChatPanel, follow the same shape:
 `useState` reset on session change, set in the SSE handler, consumed via a
 `liveX ?? transcript-derived` selector. Don't try to mutate messages
 in-place — the canonical refetch will overwrite you.
+
+**ContextBar denominator is the active model's real `limit.context`**, not
+a hardcoded 200k. `resolveContextLimit(activeModel)` reads
+`model.limit.context` (Opus 4.7 = 1M, Sonnet 4 = 200k) so the bar reflects
+what the provider will actually accept; falls back to `ASSUMED_CONTEXT_TOKENS`
+(200k) only when no model is selected yet. Tooltip at ≥90% surfaces
+"consider /compact soon"; at 100% says "Compact recommended". If you add
+a new place that shows ctx %, use the same helper — don't reintroduce the
+200k hardcode.
 
 **Typed `session.error` names.** The `session.error` handler switches on
 `err.name` to prepend a context-appropriate prefix before the raw message:
