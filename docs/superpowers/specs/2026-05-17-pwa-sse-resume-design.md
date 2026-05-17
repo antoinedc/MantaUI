@@ -104,3 +104,18 @@ callers (`on()` consumers keep working).
 - Server changes (SSE + tunnel already correct and verified).
 - Desktop / Android (shim unused on desktop; Android WebView lifecycle is
   different and not reported broken).
+
+## Implementation outcome (2026-05-17)
+
+Shipped commit `705111d`. `openStream()` (idempotent, CLOSED-only
+reopen) + resume watchdog (`visibilitychange`/`pageshow` → reopen if
+CLOSED → `_hadError`→`onopen`→`fireResync`). typecheck + 24 vitest + 23
+node:test green. Deployed to box (`705111d`, services active).
+
+Verified against live https://bui.useronda.com: baseline SSE 62 msgs
+OPEN; forced CLOSE → readyState 2; reopened stream resumed events in
+102ms (86 msgs); deployed bundle confirmed to contain the watchdog +
+openStream logic. Mechanism + deployment proven. True iOS standalone
+freeze cannot be simulated from desktop — on-device confirmation
+remains the manual step (open installed PWA, lock/background ~30s,
+reopen → live updates resume without manual reload).
