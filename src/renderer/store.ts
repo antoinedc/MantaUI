@@ -217,6 +217,34 @@ export function flatSessions(projects: Project[]): Array<{
   return out;
 }
 
+// (sessionId) -> the tmux window that owns it, plus the cwd ChatPanel needs.
+// Prefer paneCurrentPath (always an absolute path from tmux) over the
+// project's defaultCwd (may be a literal "~/..." opencode's /find/file
+// cannot expand). Returns null if no window carries this session id (window
+// killed remotely but a panel is still mounted) — callers no-op gracefully.
+export type SessionOwner = {
+  tmuxSession: string;
+  windowIndex: number;
+  cwd: string;
+};
+
+export function resolveSessionOwner(
+  projects: Project[],
+  sessionId: string,
+): SessionOwner | null {
+  for (const p of projects) {
+    const w = p.windows.find((x) => x.opencodeSessionId === sessionId);
+    if (w) {
+      return {
+        tmuxSession: p.tmuxSession,
+        windowIndex: w.index,
+        cwd: w.paneCurrentPath || p.defaultCwd,
+      };
+    }
+  }
+  return null;
+}
+
 function clearAttention(
   status: Record<string, Record<number, WindowStatusUI>>,
   session: string,
