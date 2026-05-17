@@ -10,3 +10,6 @@ dist/
 
 # Brainstorming visual companion artifacts
 .superpowers/
+
+# TypeScript incremental build info
+*.tsbuildinfo

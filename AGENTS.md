@@ -147,6 +147,14 @@ Server→client: raw PTY bytes.
 in `mobile/` builds the debug APK. `mobile/sync-web.sh` runs `build:mobile`
 to refresh `mobile/www/`.
 
+**Mobile-native shell** (`src/renderer/mobile/`): on the no-`window.api`
+branch `main.tsx` renders `<MobileApp/>` instead of `<App/>` — a drill-down
+shell (`SessionListScreen` → `SessionScreen`) that reuses `ChatPanel` /
+`Terminal` unchanged. CSS is `.mobile`-scoped (`mobile/mobile.css`) so it
+never matches the desktop tree. Desktop `App.tsx`/`Sidebar.tsx` are untouched.
+Session owner→props mapping is the tested `resolveSessionOwner()` in
+`store.ts`.
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what
@@ -429,3 +437,6 @@ then restart the `bui-opencode` tmux session for opencode to reload.
 - **Live refresh polling** — sidebar updates only on bui's own actions.
 - **Command palette (⌘K)** — fuzzy switch + actions (~150 lines).
 - **Reconnect-on-drop UI** — SSH has no reconnect banner today.
+- **Mobile create flow** — `+` on the mobile session list currently only
+  re-syncs; the new-session/new-project modal (desktop `Sidebar.tsx`) is not
+  yet lifted into a mobile sheet.
