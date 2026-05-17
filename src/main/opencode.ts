@@ -30,6 +30,11 @@
 import { spawn as cpSpawn } from "node:child_process";
 import { join as pathJoin } from "node:path";
 import { runSshOnce } from "./pty.js";
+import {
+  decideEviction,
+  isPortForwardingFailure,
+  parseLsofListeners,
+} from "./forwardHeal.js";
 import type {
   AppConfig,
   OpencodeMessage,
@@ -98,20 +103,120 @@ function controlArgs(config: AppConfig): string[] {
   return args;
 }
 
-function sshControl(config: AppConfig, op: string, extra: string[] = []): Promise<void> {
+type SshControlResult = { code: number | null; stderr: string };
+
+// Run `ssh -O <op>` and hand back the raw exit code + stderr instead of
+// throwing. The healing path needs the stderr text to tell a benign
+// "already forwarded" from a real "port forwarding failed".
+function runSshControl(
+  config: AppConfig,
+  op: string,
+  extra: string[] = [],
+): Promise<SshControlResult> {
   return new Promise((resolve, reject) => {
     const args = [...controlArgs(config), "-O", op, ...extra, sshTarget(config)];
     const p = cpSpawn("ssh", args, { stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
     p.stderr.on("data", (b) => (stderr += b.toString()));
     p.on("error", reject);
-    p.on("exit", (code) => {
-      if (code === 0) return resolve();
-      // "Forward already exists" is a normal idempotent case for `-O forward`.
-      if (/already forwarded/i.test(stderr)) return resolve();
-      reject(new Error(`ssh -O ${op} exited ${code}: ${stderr.trim()}`));
+    p.on("exit", (code) => resolve({ code, stderr }));
+  });
+}
+
+function sshControl(config: AppConfig, op: string, extra: string[] = []): Promise<void> {
+  return runSshControl(config, op, extra).then(({ code, stderr }) => {
+    if (code === 0) return;
+    // "Forward already exists" is a normal idempotent case for `-O forward`.
+    if (/already forwarded/i.test(stderr)) return;
+    throw new Error(`ssh -O ${op} exited ${code}: ${stderr.trim()}`);
+  });
+}
+
+// Ask ssh for its *effective* config and read back the expanded ControlPath
+// (the `%C` token resolved to a concrete /tmp/bui-cm-<hash>). This is the
+// socket the live master listens on; the orphan is any other bui socket.
+function resolveLiveSocket(config: AppConfig): Promise<string | null> {
+  return new Promise((resolve) => {
+    const args = [...controlArgs(config), "-G", sshTarget(config)];
+    const p = cpSpawn("ssh", args, { stdio: ["ignore", "pipe", "ignore"] });
+    let stdout = "";
+    p.stdout.on("data", (b) => (stdout += b.toString()));
+    p.on("error", () => resolve(null));
+    p.on("exit", () => {
+      const line = stdout
+        .split("\n")
+        .find((l) => l.toLowerCase().startsWith("controlpath "));
+      resolve(line ? line.slice("controlpath ".length).trim() : null);
     });
   });
+}
+
+function runCapture(cmd: string, args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    p.stdout.on("data", (b) => (out += b.toString()));
+    p.on("error", () => resolve(""));
+    p.on("exit", () => resolve(out));
+  });
+}
+
+// Evict a stale ControlMaster from a previous app run that is still holding
+// the local forward port (kept alive by ControlPersist). Returns true if it
+// took an action that warrants retrying the forward.
+async function evictStaleForwardHolder(config: AppConfig): Promise<boolean> {
+  const port = localPort(config);
+  const lsofOut = await runCapture("lsof", [
+    "-nP",
+    `-iTCP:${port}`,
+    "-sTCP:LISTEN",
+    "-F",
+    "pcn",
+  ]);
+  const holders = parseLsofListeners(lsofOut);
+  if (holders.length === 0) return false;
+
+  // Full command line per pid so decideEviction can read each ssh's
+  // `-o ControlPath=...` and match it against the live socket.
+  const psByPid = new Map<number, string>();
+  for (const h of holders) {
+    const ps = await runCapture("ps", ["-o", "command=", "-p", String(h.pid)]);
+    psByPid.set(h.pid, ps.trim());
+  }
+
+  const liveSocket = await resolveLiveSocket(config);
+  if (!liveSocket) return false;
+
+  const decision = decideEviction(holders, psByPid, liveSocket);
+  if (decision.action === "evict") {
+    // `ssh -O exit` on the ORPHAN's own socket (not our controlArgs path):
+    // graceful master shutdown, which closes its listeners and frees the
+    // port. Target the socket explicitly so we never touch the live master.
+    await new Promise<void>((r) =>
+      cpSpawn(
+        "ssh",
+        [
+          "-o",
+          `ControlPath=${decision.socketPath}`,
+          "-O",
+          "exit",
+          sshTarget(config),
+        ],
+        { stdio: "ignore" },
+      )
+        .on("exit", () => r())
+        .on("error", () => r()),
+    );
+    return true;
+  }
+  if (decision.action === "foreign") {
+    throw new Error(
+      `opencode local port ${port} is held by another process ` +
+        `(pid ${decision.pid}, ${decision.command}). Close it or set a ` +
+        `different opencodePort in settings.`,
+    );
+  }
+  return false;
 }
 
 let forwarded = false;
@@ -132,8 +237,33 @@ export async function ensureForward(config: AppConfig): Promise<void> {
     await runSshOnce(config, "true");
   }
   const spec = `${localPort(config)}:127.0.0.1:${REMOTE_PORT}`;
-  await sshControl(config, "forward", ["-L", spec]);
-  forwarded = true;
+  const first = await runSshControl(config, "forward", ["-L", spec]);
+  if (first.code === 0 || /already forwarded/i.test(first.stderr)) {
+    forwarded = true;
+    return;
+  }
+
+  // The forward was rejected. If it's specifically a port-binding failure,
+  // the usual cause is a stale ControlMaster from a previous app run still
+  // holding the port (ControlPersist outlives the killed instance). Evict
+  // that orphan and retry once. Any other failure is real — surface it.
+  if (isPortForwardingFailure(first.stderr)) {
+    const evicted = await evictStaleForwardHolder(config);
+    if (evicted) {
+      const retry = await runSshControl(config, "forward", ["-L", spec]);
+      if (retry.code === 0 || /already forwarded/i.test(retry.stderr)) {
+        forwarded = true;
+        return;
+      }
+      throw new Error(
+        `ssh -O forward exited ${retry.code} after evicting stale ` +
+          `master: ${retry.stderr.trim()}`,
+      );
+    }
+  }
+  throw new Error(
+    `ssh -O forward exited ${first.code}: ${first.stderr.trim()}`,
+  );
 }
 
 export async function teardownForward(config: AppConfig): Promise<void> {
