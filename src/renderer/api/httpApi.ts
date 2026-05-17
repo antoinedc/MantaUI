@@ -66,8 +66,11 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
 // /pty WS already tunnels fine in the installed PWA). Server exposes the
 // same {kind,payload} envelope on a /events WS.
 let es: WebSocket | null = null;
-// WS has no built-in auto-reconnect (EventSource did). Track a backoff timer.
+// WS has no built-in auto-reconnect (EventSource did). Track a backoff timer
+// and the current backoff delay (ms; doubles per failed attempt, capped,
+// reset to 0 on a healthy onopen).
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let _backoff = 0;
 
 // ---------------------------------------------------------------------------
 // Reconnect-resync state.
@@ -157,21 +160,30 @@ function openStream() {
   };
   const drop = () => {
     // WebSocket has NO built-in auto-reconnect (EventSource did). Mark the
-    // drop and schedule an explicit reconnect with light backoff, but only
-    // while something is listening (no point reconnecting to a dead box if
-    // nothing consumes events).
+    // drop and ALWAYS schedule an explicit reconnect with bounded backoff.
+    //
+    // We intentionally do NOT bail when `listeners` is momentarily empty.
+    // iOS standalone PWAs kill the first socket within seconds of a cold
+    // launch — frequently BEFORE React mounts and subscribes. An earlier
+    // "no listeners → give up" guard made that race permanent: the socket
+    // died pre-subscription, reconnect was abandoned, and the app stayed
+    // static forever (worked in Safari, which doesn't early-kill sockets).
+    // ensureStream() is only ever called from on() (i.e. while a listener
+    // is being added), so a listener will exist shortly; keep the socket
+    // alive so it's ready. _backoff caps the retry interval; onopen's
+    // _hadError path refetches whatever was missed.
     _hadError = true;
     if (_reconnectTimer) return;
-    const anyListeners = Object.values(listeners).some((s) => s.size > 0);
-    if (!anyListeners) return;
+    _backoff = Math.min(_backoff ? _backoff * 2 : 1000, 15000);
     _reconnectTimer = setTimeout(() => {
       _reconnectTimer = null;
       openStream();
-    }, 1500);
+    }, _backoff);
   };
   es.onerror = drop;
   es.onclose = drop;
   es.onopen = () => {
+    _backoff = 0; // healthy connection — reset backoff for any future drop
     if (_hadError) {
       // Reconnect after a drop — refetch state that may have changed while
       // disconnected (existing resync path, unchanged).
