@@ -7,13 +7,26 @@ import {
 import type { Api } from "../../preload/index.js";
 
 // ---------------------------------------------------------------------------
-// Server base URL — read from localStorage (set by the Settings screen) or
-// fall back to the default dev server.
+// Server base URL resolution (3 deployment contexts):
+//   1. localStorage["bui_server"] override (Settings screen / power users) —
+//      always wins. This is how the Capacitor APK points itself at the box.
+//   2. Page served over http(s) from a real host (tunnel / LAN / domain) →
+//      same-origin. Critical for the HTTPS cloudflare tunnel: hardcoding
+//      http://IP here gets blocked as Mixed Content from an https page.
+//      location.origin carries the page's own scheme, so no protocol skew.
+//   3. Otherwise (Capacitor http://localhost, file:) → dev-box fallback.
 // ---------------------------------------------------------------------------
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
 
 function serverBase(): string {
   const v = localStorage.getItem("bui_server");
-  return v ? v.replace(/\/+$/, "") : "http://157.90.224.92:8787";
+  if (v) return v.replace(/\/+$/, "");
+  const { protocol, hostname, origin } = window.location;
+  if ((protocol === "https:" || protocol === "http:") && !LOCAL_HOSTS.has(hostname)) {
+    return origin.replace(/\/+$/, "");
+  }
+  return "http://157.90.224.92:8787";
 }
 
 // ---------------------------------------------------------------------------
