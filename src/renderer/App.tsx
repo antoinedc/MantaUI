@@ -47,6 +47,17 @@ export function App() {
     return off;
   }, [applyStatusBatch]);
 
+  // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
+  // used to register its own listener, so a single detection fanned out into
+  // N toasts (one per mounted chat). Now the toast lives in the store, the
+  // active ChatPanel renders it, and accept/dismiss clear it globally.
+  useEffect(() => {
+    const off = window.api.onScreenshotDetected((ev) => {
+      useStore.getState().setScreenshotToast(ev);
+    });
+    return off;
+  }, []);
+
   // Without this, dropping a file anywhere outside the terminal area causes
   // Chromium to navigate the renderer to the file:// URL.
   useEffect(() => {
@@ -218,6 +229,7 @@ export function App() {
                       tmuxSession={owner?.tmuxSession ?? null}
                       windowIndex={owner?.windowIndex ?? null}
                       cwd={owner?.cwd ?? ""}
+                      isActive={sid === activeChatSessionId}
                     />
                   </div>
                 );

@@ -284,9 +284,13 @@ type Props = {
   tmuxSession: string | null;
   windowIndex: number | null;
   cwd: string;
+  // True when this panel is the currently-visible one. All ChatPanels stay
+  // mounted (display:none) so we need a prop to gate "global" UI like the
+  // screenshot detection toast — only the active panel should render it.
+  isActive: boolean;
 };
 
-export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
+export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }: Props) {
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
   const [messages, setMessages] = useState<OpencodeMessage[] | null>(null);
@@ -332,13 +336,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
   // Whether the panel is currently being dragged over with files (for the
   // big "drop to attach" overlay).
   const [dragHover, setDragHover] = useState(false);
-  // Screenshot detection toast. Set to the detection payload when main detects
-  // a new clipboard image or a new screenshot file on the Desktop. Cleared
-  // when the user accepts, dismisses, or sends the next message.
-  const [screenshotToast, setScreenshotToast] = useState<{
-    source: "clipboard" | "file";
-    path?: string;
-  } | null>(null);
+  // Screenshot detection toast — global, lives in the store. App.tsx owns
+  // the single ipcRenderer subscription; this panel reads + clears it.
+  // Only the active panel renders it (gated below by `isActive`).
+  const screenshotToast = useStore((s) => s.screenshotToast);
+  const setScreenshotToast = useStore((s) => s.setScreenshotToast);
   // Typeahead popup state + result caches. Commands and agents are fetched
   // lazily on first @/ and reused; file searches re-issue per-keystroke.
   const [typeahead, setTypeahead] = useState<TypeaheadState | null>(null);
@@ -1410,21 +1412,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
 
   // ===== Screenshot detection =====
   //
-  // Main pushes screenshotDetected when the clipboard gains a new image or a
-  // new Screenshot file appears on the Desktop. We show a small toast above
-  // the input. "Add" uploads the image (clipboard bytes or file path) and
-  // creates a chip exactly like drag-drop. "Dismiss" clears silently.
-  // Only show the toast when this ChatPanel is the active/visible one — the
-  // event fires globally so all mounted panels receive it; we use a simple
-  // "is my session the active one?" heuristic (visible prop would be cleaner
-  // but we don't have it; instead we check document.visibilityState and rely
-  // on only one panel being visible at a time via App.tsx display:none).
-  useEffect(() => {
-    const off = window.api.onScreenshotDetected((ev) => {
-      setScreenshotToast(ev);
-    });
-    return off;
-  }, []);
+  // Subscription lives in App.tsx — single global listener writes into the
+  // store's `screenshotToast`. Only the active panel renders the toast and
+  // can accept/dismiss it; acting clears the global state for everyone.
 
   // Accept: upload the screenshot and create a chip.
   const acceptScreenshot = useCallback(async () => {
@@ -2064,8 +2054,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd }: Props) {
       )}
 
       {/* Screenshot detection toast. Appears when main detects a new clipboard */}
-      {/* image or a new Screenshot file on the Desktop. */}
-      {screenshotToast && (
+      {/* image or a new Screenshot file on the Desktop. Only the active panel */}
+      {/* renders it — it lives in global store state, one instance app-wide. */}
+      {isActive && screenshotToast && (
         <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-[12px] text-text-muted flex items-center gap-2">
           <span className="flex-1 truncate">
             {screenshotToast.source === "file" && screenshotToast.path

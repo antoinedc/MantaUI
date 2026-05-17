@@ -23,6 +23,15 @@ export type WindowStatusUI = {
   attention: boolean;
 };
 
+// Global screenshot detection toast. Single instance app-wide — the active
+// ChatPanel renders it and "Add to chat" / dismiss clear it for everyone.
+// Subscription lives in App.tsx so we only register one ipcRenderer listener
+// regardless of how many ChatPanels are mounted.
+export type ScreenshotToast = {
+  source: "clipboard" | "file";
+  path?: string;
+};
+
 type State = {
   loaded: boolean;
   host: string;
@@ -38,6 +47,8 @@ type State = {
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
   // sessionName -> windowIndex -> status
   status: Record<string, Record<number, WindowStatusUI>>;
+  // Single global screenshot toast — see ScreenshotToast type comment.
+  screenshotToast: ScreenshotToast | null;
   // ----- derived selectors -----
   activeSession: () => ActiveSession | null;
   // ----- mutations -----
@@ -47,6 +58,7 @@ type State = {
   applyConfig: (c: AppConfig) => void;
   applyStatusBatch: (batch: WindowStatus[]) => void;
   setChatAutoAllow: (v: boolean) => Promise<void>;
+  setScreenshotToast: (t: ScreenshotToast | null) => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -63,6 +75,7 @@ export const useStore = create<State>((set, get) => ({
   activeProjectName: null,
   activeWindowByProject: {},
   status: {},
+  screenshotToast: null,
 
   activeSession: () => {
     const s = get();
@@ -131,6 +144,8 @@ export const useStore = create<State>((set, get) => ({
     // Reconcile with what main actually saved (handles error/reject paths).
     set({ chatAutoAllow: next.chatAutoAllow ?? false });
   },
+
+  setScreenshotToast: (t) => set({ screenshotToast: t }),
 
   applyStatusBatch: (batch) =>
     set((prev) => {
