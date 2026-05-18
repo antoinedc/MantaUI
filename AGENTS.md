@@ -236,15 +236,33 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
 - **New window / new chat-session cwd inheritance** — every code path that
   creates a tmux window or an opencode session resolves cwd to the project's
   stored `defaultCwd` when the renderer's input is empty OR the literal `"~"`.
-  Both substrings short-circuit the fallback: an empty cwd lets tmux silently
-  inherit `$HOME`, and opencode's `session.create` rejects tilde (needs an
-  absolute path) so `"~"` also collapses to `$HOME` server-side. Helper
-  `resolveProjectCwd(sessionName, inputCwd)` lives in `src/main/index.ts`
-  (desktop) and is duplicated inside `buildHandlers` in `src/server/rpc.mjs`
-  (mobile). Applied by: `tmux:new-window`, `opencode:clear-session`,
-  `opencode:fork-session`. **Renderer must pass `cwd ?? ""`**, NOT `cwd || "~"` —
-  the literal tilde would defeat the resolver. The matching server tests in
-  `src/server/rpc.test.mjs` cover empty / tilde / explicit-path inputs.
+  Helper `resolveProjectCwd(sessionName, inputCwd)` lives in
+  `src/main/index.ts` (desktop) and is duplicated inside `buildHandlers` in
+  `src/server/rpc.mjs` (mobile). Applied by: `tmux:new-window`,
+  `opencode:clear-session`, `opencode:fork-session`. **Renderer must pass
+  `cwd ?? ""`**, NOT `cwd || "~"` — the literal tilde would defeat the
+  resolver. Server tests in `src/server/rpc.test.mjs` cover empty / tilde /
+  explicit-path inputs.
+  - **GOTCHA — opencode does NOT reject a tilde dir; it silently corrupts
+    it.** `resolveProjectCwd` deliberately returns a possibly-tilde path
+    (`~/projects/x`) — it picks *which* cwd, not an absolute one. opencode's
+    `session.create` requires an absolute directory and resolves a
+    tilde-relative one against its OWN server process cwd (the remote
+    `$HOME`), persisting the corrupt `/home/<user>/~/projects/x` into session
+    metadata forever. Expansion is therefore mandatory at the **single
+    creation chokepoint**, NOT in `resolveProjectCwd`:
+    `createSession` expands a leading `~` itself — desktop
+    (`src/main/opencode.ts`) via the now-exported
+    `expandRemotePath` (remote `cd && pwd` over the SSH ControlMaster);
+    mobile (`src/server/opencode.mjs`) via `expandTilde` against the server
+    process's own `$HOME` (it runs on the opencode host). `forkSession` is
+    unaffected — it inherits the parent's directory from opencode and passes
+    no cwd. The new-window path (`pty.ts:maybeCreateChatSession`) expands
+    independently before `createSession`; that earlier expansion is now
+    redundant but harmless. Regression tests:
+    `createSession expands a leading ~ …` in `src/server/opencode.test.mjs`
+    (red/green verified). Do NOT "simplify" by moving expansion back into a
+    caller — the chokepoint is what makes the corruption unreachable.
 - **TodoWrite checklist auto-dismissal** — when every item in the pinned
   `ActiveTodos` is terminal (`completed` or `cancelled`) at the moment the
   user submits their next prompt, `todosDismissed` flips true and the card
@@ -359,6 +377,24 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
   ChatPanel filters by sessionID.
 - Anthropic auth via `opencode-claude-auth@latest` plugin in
   `~/.config/opencode/opencode.jsonc` (Claude Max sub, `~/.claude/.credentials.json`).
+
+**SSH `-L` forward self-heal (`src/main/forwardHeal.ts`)** — the
+`-L 14096:127.0.0.1:4096` forward is attached to the shared SSH
+ControlMaster (`/tmp/bui-cm-%C`, `ControlPersist=10m`). GOTCHA: killing
+the app and relaunching **within the 10-min persist window** leaves the
+old instance's ControlMaster *and its port-14096 forward* alive as an
+orphan. The new instance's `ensureForward` (`src/main/opencode.ts`) starts
+its own master (so `ssh -O check` passes) but `ssh -O forward` is rejected
+with `Port forwarding failed` because the orphan still binds 14096 —
+surfaces as `Error invoking remote method 'opencode:messages': ssh -O
+forward exited 255`. On a port-forwarding failure `ensureForward` now:
+identifies the port holder via `lsof`, and if it's one of *our* own
+`/tmp/bui-cm-*` sockets that is NOT the live master, `ssh -O exit`s that
+specific orphan socket and retries once. A non-ssh holder or a foreign ssh
+tunnel is reported, never killed. Decision logic is pure + unit-tested in
+`forwardHeal.ts` (`isPortForwardingFailure`, `parseLsofListeners`,
+`decideEviction`); the spawn glue stays thin in `opencode.ts`. This
+recurs on every kill-relaunch dev cycle — do not regress the heal path.
 
 **Key files**:
 
@@ -507,6 +543,30 @@ the global stream. The bus in `src/main/index.ts` therefore opens **one
 - On startup the bus opens the global stream, replays
   `knownSessionDirectories()`, and calls `opencodeListSessions(config)` to
   prime the cache from server-side sessions (recovers from restarts).
+- **GOTCHA — every cache write MUST go through `rememberSessionDirectory`,
+  never a bare `sessionDirectoryCache.set`.** Only `rememberSessionDirectory`
+  fires the `onSessionDirectoryAdded` listeners; a bare `.set` populates the
+  map but the bus never learns to open the scoped stream. This was the exact
+  "SSE broken in *existing* sessions, fine in new ones" bug:
+  `getSessionDirectoryQuery`'s lazy-fetch branch used a bare `.set`, so an
+  existing/restored session resolved on its first prompt never opened its
+  scoped stream and every response event vanished. Fixed in BOTH transports
+  (`src/main/opencode.ts` + `src/server/opencode.mjs` had the identical
+  bug). Regression test: `sendPrompt lazy-fetch notifies directory
+  listeners …` in `src/server/opencode.test.mjs` (red/green verified).
+- **Readiness gate (desktop)** — even with the listener firing, the scoped
+  stream opens asynchronously while the prompt POST is already in flight.
+  `setDirectoryReadyGate` (registered by the bus in `src/main/index.ts`) lets
+  `getSessionDirectoryQuery` await the scoped subscription being live before
+  the scoped POST goes out. Bounded at 5s — a wedged server degrades to
+  "send anyway", never freezes the prompt. Readiness re-arms on stream
+  disconnect so reconnect-window prompts wait for the new subscription.
+- **Success-path instrumentation** — the bus logs `[opencode-bus] stream
+  CONNECTED dir=…`, the open-stream set, and a sampled per-dir event trace
+  (event#0, then every 50th) to the dev log. The earlier `debug(...)` commits
+  only logged the main-process cwd path, not SSE success — "nothing prints"
+  was undiagnosable. Keep this; it's how you tell "events flowing for a dir"
+  from "silent" (the bug signature).
 
 Symptom you'll see if this breaks again: user message shows optimistically,
 assistant turn stays blank forever, no JS errors. The transcript
@@ -613,7 +673,7 @@ multica runtime list
 
 Full CLI cheat sheet: `/home/dev/projects/shared/multica/setup.md`
 
-## Open work (as of 2026-05-17)
+## Open work (as of 2026-05-18)
 
 - **Subagent / Task tool rendering in chat-mode.** `task` tool part falls
   through to the generic `default:` branch of `ToolBody`. v2 SDK exposes
