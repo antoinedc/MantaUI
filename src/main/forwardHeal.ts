@@ -142,36 +142,61 @@ export function decideEviction(
 // healthy idle stream, short enough that recovery is timely.
 export const STREAM_STALL_MS = 45_000;
 
+// `server.heartbeat` / `server.connected` are TRANSPORT keep-alives, not
+// application events. The half-dead ControlMaster keeps trickling these
+// through on an established stream while substantive frames
+// (message.part.delta, question.asked, todo.updated, …) and new connects
+// stall. A v1 watchdog that treated "any frame = alive" was therefore a
+// false-NEGATIVE for the real production failure: heartbeat-only traffic
+// during active work. We must track substantive frames separately.
+const TRANSPORT_FRAME_TYPES = new Set(["server.heartbeat", "server.connected"]);
+
+export function isSubstantiveFrame(type: string): boolean {
+  return !TRANSPORT_FRAME_TYPES.has(type);
+}
+
 export type StreamHealthInput = {
-  // Total frames received on this stream since it connected, INCLUDING
-  // server.connected and every server.heartbeat. The connect frame counts
-  // as 1, so a healthy-but-idle stream has framesSinceConnect growing via
-  // heartbeats; a stalled stream stays at 1.
+  // Total frames since connect, including transport keep-alives.
   framesSinceConnect: number;
   // ms since the stream's underlying fetch connected.
   msSinceConnect: number;
   // ms since the most recent frame of ANY type (heartbeat included).
-  // Infinity / very large when only the connect frame was ever seen.
+  // Catches a FULLY dead mux (not even keep-alives get through).
   msSinceLastFrame: number;
+  // ms since the most recent SUBSTANTIVE (non-keep-alive) frame, or since
+  // connect if none seen. Catches the HALF-dead mux: heartbeats still flow
+  // (msSinceLastFrame small) but real events have stopped.
+  msSinceLastSubstantiveFrame: number;
+  // True when the bus expects substantive events to be flowing — a prompt
+  // is in flight / the session is mid-turn. Only then is "heartbeats but
+  // no substantive frames" a stall; a genuinely idle session legitimately
+  // produces only heartbeats and MUST NOT be flagged (no false positive).
+  activeWork: boolean;
 };
 
-// Pure decision: is this SSE stream stalled (mux stopped pumping) and thus
-// in need of a forced ControlMaster eviction + reconnect?
+// Pure decision: is this SSE stream stalled and in need of a forced
+// ControlMaster eviction + reconnect?
 //
-// Stalled iff BOTH:
-//   - it has been connected long enough that a healthy stream would have
-//     emitted at least one heartbeat (msSinceConnect ≥ STREAM_STALL_MS), AND
-//   - no frame of any kind has arrived for that same window
-//     (msSinceLastFrame ≥ STREAM_STALL_MS).
-// The heartbeat is the liveness signal: any frame — including a heartbeat —
-// resets msSinceLastFrame and keeps the stream classified healthy. A stream
-// that legitimately has no app activity is therefore still healthy as long
-// as heartbeats flow; only true mux silence trips this.
+// Two distinct stall modes, both gated on "connected long enough that a
+// healthy stream would have produced traffic" (msSinceConnect ≥ stallMs):
+//
+//   A. FULLY dead mux — no frame of any kind for the window
+//      (msSinceLastFrame ≥ stallMs). Independent of activeWork.
+//   B. HALF dead mux — keep-alives still arrive (msSinceLastFrame small)
+//      but NO substantive frame for the window WHILE work is active
+//      (activeWork && msSinceLastSubstantiveFrame ≥ stallMs).
+//
+// An idle session (activeWork=false) with only heartbeats is HEALTHY —
+// that's the explicit no-false-positive guarantee. Mode B only triggers
+// when the session should be producing events but isn't.
 export function classifyStreamHealth(
   i: StreamHealthInput,
   stallMs: number = STREAM_STALL_MS,
 ): "healthy" | "stalled" {
   if (i.msSinceConnect < stallMs) return "healthy"; // too soon to judge
-  if (i.msSinceLastFrame >= stallMs) return "stalled";
+  if (i.msSinceLastFrame >= stallMs) return "stalled"; // mode A: fully dead
+  if (i.activeWork && i.msSinceLastSubstantiveFrame >= stallMs) {
+    return "stalled"; // mode B: half dead — heartbeats mask the stall
+  }
   return "healthy";
 }

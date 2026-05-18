@@ -58,6 +58,117 @@ function sshTarget(config: AppConfig): string {
   return config.user ? `${config.user}@${config.host}` : config.host;
 }
 
+// ===== Dedicated event-stream tunnel =====
+//
+// The SSE event stream rides its OWN `ssh -L -N` process, completely
+// separate from the shared ControlMaster the RPC/pty/-L-forward path uses.
+// Rationale (proven this session): a single ControlMaster multiplexing ~10
+// long-lived SSE streams + RPC + the forward goes half-dead after a network
+// transition — heartbeats trickle but substantive frames stall, and tearing
+// the master down to recover also disrupts RPC/pty. Isolating the event
+// transport means: (1) a degraded event tunnel can be killed + respawned
+// WITHOUT touching RPC/pty, and (2) recovery is a plain process restart
+// (fully verifiable on demand — see eventTunnelRestart), not ssh -O
+// surgery on a shared mux. NO ControlMaster here on purpose: a fresh
+// dedicated connection each time sidesteps the half-dead-mux failure mode
+// entirely for the stream that matters most.
+const EVENT_LOCAL_PORT = 14097;
+
+let eventTunnelProc: ReturnType<typeof cpSpawn> | null = null;
+let eventTunnelReady: Promise<void> | null = null;
+
+function spawnEventTunnel(config: AppConfig): Promise<void> {
+  if (eventTunnelReady) return eventTunnelReady;
+  eventTunnelReady = new Promise<void>((resolve, reject) => {
+    if (!config.host) {
+      reject(new Error("No host configured"));
+      return;
+    }
+    const args = [
+      "-o", "ExitOnForwardFailure=yes",
+      "-o", "ServerAliveInterval=15",
+      "-o", "ServerAliveCountMax=3",
+      // No ControlMaster/ControlPath: this is a standalone connection.
+      "-o", "ControlMaster=no",
+      "-o", "ControlPath=none",
+      "-N",
+      "-L", `${EVENT_LOCAL_PORT}:127.0.0.1:${REMOTE_PORT}`,
+    ];
+    if (config.identityFile) args.push("-i", config.identityFile);
+    args.push(sshTarget(config));
+    const p = cpSpawn("ssh", args, { stdio: ["ignore", "ignore", "pipe"] });
+    eventTunnelProc = p;
+    let settled = false;
+    let stderr = "";
+    p.stderr.on("data", (b) => (stderr += b.toString()));
+    p.on("error", (e) => {
+      if (!settled) { settled = true; eventTunnelReady = null; reject(e); }
+    });
+    p.on("exit", (code) => {
+      eventTunnelProc = null;
+      eventTunnelReady = null;
+      if (!settled) {
+        settled = true;
+        reject(
+          new Error(
+            `event tunnel ssh exited ${code} before ready: ${stderr.trim()}`,
+          ),
+        );
+      }
+    });
+    // `-N` never prints on success; the forward is usable within a moment of
+    // the TCP connect. Poll the local port until opencode answers, then
+    // resolve. Bounded so a wedged connect rejects instead of hanging.
+    void (async () => {
+      for (let i = 0; i < 40; i++) {
+        if (settled) return;
+        try {
+          const res = await fetch(
+            `http://127.0.0.1:${EVENT_LOCAL_PORT}/global/health`,
+            { signal: AbortSignal.timeout(1000) },
+          );
+          if (res.ok) { settled = true; resolve(); return; }
+        } catch { /* not up yet */ }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (!settled) {
+        settled = true;
+        eventTunnelReady = null;
+        try { p.kill(); } catch { /* already dead */ }
+        reject(new Error("event tunnel did not become ready within 10s"));
+      }
+    })();
+  });
+  return eventTunnelReady;
+}
+
+// Ensure the dedicated event tunnel is up. Idempotent: reuses a live one,
+// (re)spawns if absent. Called by subscribeEvents before each connect.
+export async function ensureEventTunnel(config: AppConfig): Promise<void> {
+  if (eventTunnelProc && eventTunnelReady) {
+    await eventTunnelReady;
+    return;
+  }
+  await spawnEventTunnel(config);
+}
+
+// Recovery primitive: kill the dedicated event tunnel so the next
+// subscribeEvents respawns a FRESH connection. Replaces the ControlMaster
+// eviction for the event path — no shared-mux collateral. Also the manual
+// degradation hook for verification (simulate a dead event transport).
+export function eventTunnelRestart(): void {
+  const p = eventTunnelProc;
+  eventTunnelProc = null;
+  eventTunnelReady = null;
+  if (p) {
+    try { p.kill("SIGKILL"); } catch { /* already dead */ }
+  }
+}
+
+export function teardownEventTunnel(): void {
+  eventTunnelRestart();
+}
+
 // ===== server lifecycle =====
 
 export async function ensureRunning(config: AppConfig): Promise<void> {
@@ -1065,12 +1176,15 @@ export async function subscribeEvents(
   config: AppConfig,
   directory?: string,
 ): Promise<EventStream> {
-  await ensureForward(config);
+  // Ride the DEDICATED event tunnel, not the shared ControlMaster forward.
+  // `?directory=` scoping is unchanged (it's a URL concern, separate from
+  // which connection carries the request).
+  await ensureEventTunnel(config);
   const controller = new AbortController();
   const path = directory
     ? `/event?directory=${encodeURIComponent(directory)}`
     : "/event";
-  const res = await fetch(apiUrl(config, path), {
+  const res = await fetch(`http://127.0.0.1:${EVENT_LOCAL_PORT}${path}`, {
     signal: controller.signal,
     headers: { accept: "text/event-stream" },
   });

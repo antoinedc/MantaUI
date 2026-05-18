@@ -50,6 +50,7 @@ import {
   getVcsBranch as opencodeGetVcsBranch,
   knownSessionDirectories,
   onSessionDirectoryAdded,
+  getSessionDirectorySync,
   setDirectoryReadyGate,
   listSessions as opencodeListSessions,
   forkSession as opencodeForkSession,
@@ -60,13 +61,15 @@ import {
   findFiles as opencodeFindFiles,
   runCommand as opencodeRunCommand,
   createSession as opencodeCreateSession,
-  forceEvictControlMaster as forceEvictOpencodeMaster,
+  eventTunnelRestart,
+  teardownEventTunnel,
   type PromptModel,
   type PromptAttachment,
   type PromptAgentMention,
 } from "./opencode.js";
 import {
   classifyStreamHealth,
+  isSubstantiveFrame,
   STREAM_STALL_MS,
 } from "./forwardHeal.js";
 import {
@@ -148,6 +151,34 @@ let unsubscribeDirAdded: (() => void) | null = null;
 type Ready = { promise: Promise<void>; resolve: () => void };
 const streamReady = new Map<string, Ready>();
 
+// Per-directory "active work" tracker, fed from opencode's own
+// session.status / session.idle events (authoritative — it's opencode's
+// state, not a timing heuristic). Read by the stall watchdog: only when a
+// directory has active work is "heartbeats but no substantive frames" a
+// stall (mode B); a genuinely idle directory legitimately sees heartbeats
+// only and must never be flagged. session.status also flows on the GLOBAL
+// stream, so this stays accurate even when a scoped stream is the one
+// stalling.
+const activeWorkByDir = new Map<string, boolean>();
+
+function noteSessionStatus(ev: { type: string; properties?: unknown }): void {
+  if (ev.type !== "session.status" && ev.type !== "session.idle") return;
+  const p = (ev.properties ?? {}) as {
+    sessionID?: unknown;
+    status?: { type?: unknown };
+  };
+  if (typeof p.sessionID !== "string") return;
+  const dir = getSessionDirectorySync(p.sessionID);
+  if (!dir) return;
+  if (ev.type === "session.idle") {
+    activeWorkByDir.set(dir, false);
+    return;
+  }
+  const t = p.status?.type;
+  if (t === "busy" || t === "retry") activeWorkByDir.set(dir, true);
+  else if (t === "idle") activeWorkByDir.set(dir, false);
+}
+
 function readyFor(directory: string): Ready {
   let r = streamReady.get(directory);
   if (!r) {
@@ -224,6 +255,9 @@ function stopOpencodeBus(): void {
   }
   opencodeStreams.clear();
   streamReady.clear();
+  activeWorkByDir.clear();
+  // Tear down the dedicated event tunnel — no consumers once the bus stops.
+  teardownEventTunnel();
 }
 
 function ensureOpencodeStream(directory: string): void {
@@ -275,33 +309,54 @@ function ensureOpencodeStream(directory: string): void {
         // reconnects through the fresh master ensureForward boots.
         const connectedAt = Date.now();
         let lastFrameAt = connectedAt;
+        let lastSubstantiveAt = connectedAt;
         let frames = 0;
         let stalledOut = false;
         watchdog = setInterval(() => {
           const now = Date.now();
+          // Active-work for THIS stream's directory. The global stream
+          // (directory === "") has no single dir; treat it as active if
+          // ANY directory has active work (its substantive frames are the
+          // union). Scoped streams read their own dir's state.
+          const activeWork = directory
+            ? activeWorkByDir.get(directory) === true
+            : [...activeWorkByDir.values()].some(Boolean);
           const health = classifyStreamHealth({
             framesSinceConnect: frames,
             msSinceConnect: now - connectedAt,
             msSinceLastFrame: now - lastFrameAt,
+            msSinceLastSubstantiveFrame: now - lastSubstantiveAt,
+            activeWork,
           });
           if (health === "stalled") {
             stalledOut = true;
+            const silentS = Math.round((now - lastFrameAt) / 1000);
+            const substS = Math.round((now - lastSubstantiveAt) / 1000);
             console.warn(
               `[opencode-bus] STALLED dir=${directory || "<global>"} ` +
-                `(no frames for ${Math.round((now - lastFrameAt) / 1000)}s ` +
-                `after connect) — evicting ControlMaster + reconnecting`,
+                `(no frames ${silentS}s / no substantive ${substS}s, ` +
+                `activeWork=${activeWork}) — restarting event tunnel + reconnecting`,
             );
-            // Tear the half-dead master down so the next loop iteration's
-            // ensureForward boots a healthy one, then end this stream.
-            void forceEvictOpencodeMaster(config).catch(() => {});
+            // The event stream rides its OWN dedicated ssh -L -N tunnel
+            // (isolated from the RPC ControlMaster). Kill it; the next
+            // subscribeEvents respawns a FRESH connection. RPC/pty are
+            // untouched — no shared-mux collateral.
+            eventTunnelRestart();
             try { stream.dispose(); } catch { /* already disposed */ }
           }
         }, Math.min(STREAM_STALL_MS, 10_000));
         let evCount = 0;
         for await (const ev of stream.iter) {
           if (stopped || opencodeBusStopped || stalledOut) break;
-          lastFrameAt = Date.now();
+          const nowFrame = Date.now();
+          lastFrameAt = nowFrame;
           frames++;
+          // Track substantive (non-keep-alive) frames separately so the
+          // watchdog can detect a HALF-dead mux (heartbeats flow, real
+          // events don't). Also feed opencode's own busy/idle state into
+          // the per-directory active-work tracker the watchdog consults.
+          if (isSubstantiveFrame(ev.type)) lastSubstantiveAt = nowFrame;
+          noteSessionStatus(ev);
           // Lightweight success-path trace: first event + every 50th, so the
           // log shows events ARE flowing for a dir (vs. silent = the bug)
           // without flooding on delta storms.

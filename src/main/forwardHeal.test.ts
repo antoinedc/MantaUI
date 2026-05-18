@@ -4,6 +4,7 @@ import {
   isPortForwardingFailure,
   parseLsofListeners,
   classifyStreamHealth,
+  isSubstantiveFrame,
   STREAM_STALL_MS,
 } from "./forwardHeal.js";
 
@@ -131,74 +132,148 @@ describe("decideEviction", () => {
   });
 });
 
+
+describe("isSubstantiveFrame", () => {
+  it("treats server.heartbeat / server.connected as transport (non-substantive)", () => {
+    expect(isSubstantiveFrame("server.heartbeat")).toBe(false);
+    expect(isSubstantiveFrame("server.connected")).toBe(false);
+  });
+  it("treats real events as substantive", () => {
+    for (const t of [
+      "message.part.delta",
+      "question.asked",
+      "todo.updated",
+      "session.status",
+      "session.idle",
+      "permission.asked",
+    ]) {
+      expect(isSubstantiveFrame(t)).toBe(true);
+    }
+  });
+});
+
 describe("classifyStreamHealth", () => {
   const S = STREAM_STALL_MS;
+  // Base = healthy idle: connected long ago, heartbeats flowing, no work.
+  const base = {
+    framesSinceConnect: 50,
+    msSinceConnect: S * 5,
+    msSinceLastFrame: 5_000, // recent heartbeat
+    msSinceLastSubstantiveFrame: S * 4, // no real events (idle)
+    activeWork: false,
+  };
 
-  it("REGRESSION: connected past the window with TOTAL frame silence → stalled", () => {
-    // The half-dead-ControlMaster bug: stream connected, got only the
-    // server.connected frame (frames=1), nothing since. Must be flagged so
-    // the bus evicts the master and reconnects.
+  it("mode A — TOTAL frame silence past the window → stalled (fully dead mux)", () => {
     expect(
       classifyStreamHealth({
+        ...base,
         framesSinceConnect: 1,
         msSinceConnect: S + 5_000,
         msSinceLastFrame: S + 5_000,
+        msSinceLastSubstantiveFrame: S + 5_000,
       }),
     ).toBe("stalled");
   });
 
-  it("idle-but-HEALTHY (heartbeats arriving) is NOT flagged — no false positive", () => {
-    // A genuinely idle session still gets server.heartbeat well within the
-    // window. msSinceLastFrame stays small even though no app events occur.
+  it("REGRESSION mode B — heartbeats flow but NO substantive frame while work active → stalled", () => {
+    // The exact production bug: half-dead mux keeps server.heartbeat
+    // trickling (msSinceLastFrame tiny) so the v1 watchdog saw "alive",
+    // but message.part.delta/question.asked stopped and a prompt is in
+    // flight. Must now be flagged.
     expect(
       classifyStreamHealth({
-        framesSinceConnect: 12, // connect + 11 heartbeats
-        msSinceConnect: S * 5,
-        msSinceLastFrame: 8_000, // last heartbeat 8s ago — healthy
+        framesSinceConnect: 40,
+        msSinceConnect: S * 3,
+        msSinceLastFrame: 6_000, // heartbeat 6s ago — looks alive
+        msSinceLastSubstantiveFrame: S + 10_000, // real events long gone
+        activeWork: true, // a prompt is running — events ARE expected
+      }),
+    ).toBe("stalled");
+  });
+
+  it("NO false positive — heartbeats only, NO active work (genuinely idle) → healthy", () => {
+    // Same frame pattern as mode B but the session is idle: heartbeat-only
+    // is correct here. This is the explicit guarantee that protects idle
+    // sessions from being killed.
+    expect(
+      classifyStreamHealth({
+        framesSinceConnect: 40,
+        msSinceConnect: S * 3,
+        msSinceLastFrame: 6_000,
+        msSinceLastSubstantiveFrame: S + 10_000,
+        activeWork: false,
       }),
     ).toBe("healthy");
   });
 
-  it("too soon after connect → healthy (can't judge before one heartbeat is due)", () => {
+  it("active work but a recent substantive frame → healthy", () => {
+    expect(
+      classifyStreamHealth({
+        ...base,
+        activeWork: true,
+        msSinceLastSubstantiveFrame: 3_000, // events flowing fine
+      }),
+    ).toBe("healthy");
+  });
+
+  it("too soon after connect → healthy even if nothing yet", () => {
     expect(
       classifyStreamHealth({
         framesSinceConnect: 1,
         msSinceConnect: S - 1,
         msSinceLastFrame: S - 1,
+        msSinceLastSubstantiveFrame: S - 1,
+        activeWork: true,
       }),
     ).toBe("healthy");
   });
 
-  it("boundary: silence exactly == stallMs and connected == stallMs → stalled", () => {
+  it("boundary — mode A silence exactly == stallMs → stalled", () => {
     expect(
       classifyStreamHealth({
         framesSinceConnect: 1,
         msSinceConnect: S,
         msSinceLastFrame: S,
+        msSinceLastSubstantiveFrame: S,
+        activeWork: false,
       }),
     ).toBe("stalled");
   });
 
-  it("recent frame after a long-lived connection → healthy", () => {
+  it("boundary — mode B substantive-gap exactly == stallMs with active work → stalled", () => {
     expect(
       classifyStreamHealth({
-        framesSinceConnect: 5000,
-        msSinceConnect: S * 100,
-        msSinceLastFrame: 200,
+        framesSinceConnect: 30,
+        msSinceConnect: S * 2,
+        msSinceLastFrame: 4_000,
+        msSinceLastSubstantiveFrame: S,
+        activeWork: true,
       }),
-    ).toBe("healthy");
+    ).toBe("stalled");
   });
 
   it("honors a custom stallMs", () => {
     expect(
       classifyStreamHealth(
-        { framesSinceConnect: 1, msSinceConnect: 2000, msSinceLastFrame: 2000 },
+        {
+          framesSinceConnect: 1,
+          msSinceConnect: 2000,
+          msSinceLastFrame: 2000,
+          msSinceLastSubstantiveFrame: 2000,
+          activeWork: false,
+        },
         1000,
       ),
     ).toBe("stalled");
     expect(
       classifyStreamHealth(
-        { framesSinceConnect: 1, msSinceConnect: 500, msSinceLastFrame: 500 },
+        {
+          framesSinceConnect: 1,
+          msSinceConnect: 500,
+          msSinceLastFrame: 500,
+          msSinceLastSubstantiveFrame: 500,
+          activeWork: true,
+        },
         1000,
       ),
     ).toBe("healthy");
