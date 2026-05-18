@@ -3830,7 +3830,7 @@ function ToolCall({ part, verbose }: { part: OpencodePart; verbose: boolean }) {
           )}
         </div>
       </div>
-      <div className="ml-4 mt-2">
+      <div className="ml-4 mt-0.5">
         <ToolBody tool={rawTool} state={state} diffText={diffText} verbose={verbose} />
       </div>
     </div>
