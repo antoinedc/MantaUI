@@ -29,7 +29,11 @@
 
 import { spawn as cpSpawn } from "node:child_process";
 import { join as pathJoin } from "node:path";
-import { runSshOnce, getBranch as getBranchSsh } from "./pty.js";
+import {
+  runSshOnce,
+  getBranch as getBranchSsh,
+  expandRemotePath,
+} from "./pty.js";
 import {
   decideEviction,
   isPortForwardingFailure,
@@ -420,7 +424,15 @@ export async function createSession(
   title: string,
 ): Promise<CreatedSession> {
   await ensureForward(config);
-  const url = apiUrl(config, `/session?directory=${encodeURIComponent(directory)}`);
+  // opencode requires an ABSOLUTE directory: given `~/projects/x` it resolves
+  // the tilde against its own server cwd ($HOME), persisting the corrupt
+  // `/home/dev/~/projects/x`. resolveProjectCwd-fed callers (/clear, /fork's
+  // window) pass tilde paths, so expand here at the single creation
+  // chokepoint rather than relying on every caller to remember.
+  const absDir = directory.startsWith("~")
+    ? await expandRemotePath(config, directory)
+    : directory;
+  const url = apiUrl(config, `/session?directory=${encodeURIComponent(absDir)}`);
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -431,8 +443,9 @@ export async function createSession(
   }
   const sess = (await res.json()) as CreatedSession;
   // Cache session.directory immediately. Prefer the server-confirmed value
-  // (handles symlink resolution / canonicalization); fall back to the input.
-  rememberSessionDirectory(sess.id, sess.directory ?? directory);
+  // (handles symlink resolution / canonicalization); fall back to the
+  // EXPANDED input (never the raw tilde — that's the bug we just fixed).
+  rememberSessionDirectory(sess.id, sess.directory ?? absDir);
   return sess;
 }
 

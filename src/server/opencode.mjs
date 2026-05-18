@@ -9,6 +9,7 @@
 // task comments on each function).
 
 import { spawn as cpSpawn } from "node:child_process";
+import { homedir } from "node:os";
 
 const REMOTE_PORT = 4096;
 
@@ -114,8 +115,23 @@ export function _onSessionDirectoryAdded(fn) {
  *  @param {{ directory: string, title?: string }} opts
  *  @returns {Promise<{ id: string, title: string, directory: string, projectID: string }>}
  */
+// opencode requires an ABSOLUTE directory: given `~/projects/x` it resolves
+// the tilde against its own server cwd ($HOME), persisting the corrupt
+// `/home/dev/~/projects/x`. resolveProjectCwd-fed callers (/clear) pass tilde
+// paths. The mobile server runs ON the opencode host, so a literal `~` /
+// `~/...` expands against this process's own $HOME. Mirrors the desktop fix
+// in src/main/opencode.ts:createSession.
+function expandTilde(p) {
+  if (typeof p !== "string" || !p.startsWith("~")) return p;
+  const home = homedir();
+  if (p === "~") return home;
+  if (p.startsWith("~/")) return home + "/" + p.slice(2);
+  return p; // ~user form — leave for the shell/opencode, not ours to guess
+}
+
 export async function createSession({ directory, title = "" }) {
-  const url = `/session?directory=${encodeURIComponent(directory)}`;
+  const absDir = expandTilde(directory);
+  const url = `/session?directory=${encodeURIComponent(absDir)}`;
   const res = await fetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -125,7 +141,8 @@ export async function createSession({ directory, title = "" }) {
     throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
   }
   const sess = await res.json();
-  rememberSessionDirectory(sess.id, sess.directory ?? directory);
+  // Fall back to the EXPANDED dir, never the raw tilde (the bug we fixed).
+  rememberSessionDirectory(sess.id, sess.directory ?? absDir);
   return sess;
 }
 

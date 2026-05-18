@@ -75,6 +75,78 @@ test("createSession primes directory cache; sendPrompt then appends ?directory="
   );
 });
 
+test("createSession expands a leading ~ before POSTing (no /home/$USER/~ corruption)", async () => {
+  // Regression: resolveProjectCwd (/clear, /fork) returns raw `~/projects/x`.
+  // createSession passed it straight to opencode, which resolves the tilde
+  // against its OWN server cwd ($HOME) and persists `/home/<user>/~/projects/x`.
+  // The fix expands `~` here at the creation chokepoint. Assert the POSTed
+  // ?directory= is the absolute home-expanded path and contains no literal `~`.
+  _resetSessionDirectoryCache();
+  const calls = [];
+  const home = (await import("node:os")).homedir();
+  await withMockFetch(
+    async (url, opts) => {
+      calls.push({ url: String(url), method: opts?.method ?? "GET" });
+      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+        // Echo back whatever directory we were sent so the test asserts on
+        // OUR input, not a server-canonicalized value.
+        const sent = decodeURIComponent(
+          String(url).split("?directory=")[1].split("&")[0],
+        );
+        return new Response(
+          JSON.stringify({ id: "ses_t", title: "t", directory: sent, projectID: "p" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await createSession({ directory: "~/projects/better-ui", title: "t" });
+    },
+  );
+  const create = calls.find((c) =>
+    c.url.startsWith("http://127.0.0.1:4096/session?directory="),
+  );
+  assert.ok(create, "expected a /session create call");
+  const sentDir = decodeURIComponent(
+    create.url.split("?directory=")[1].split("&")[0],
+  );
+  assert.equal(
+    sentDir,
+    `${home}/projects/better-ui`,
+    "createSession must expand ~ to an absolute path",
+  );
+  assert.ok(
+    !sentDir.includes("~"),
+    `directory still contains a literal tilde: ${sentDir}`,
+  );
+});
+
+test("createSession leaves an already-absolute directory untouched", async () => {
+  _resetSessionDirectoryCache();
+  const calls = [];
+  await withMockFetch(
+    async (url, opts) => {
+      calls.push(String(url));
+      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(
+          JSON.stringify({ id: "ses_a", title: "t", directory: "/srv/app", projectID: "p" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await createSession({ directory: "/srv/app", title: "t" });
+    },
+  );
+  const create = calls.find((u) =>
+    u.startsWith("http://127.0.0.1:4096/session?directory="),
+  );
+  const sentDir = decodeURIComponent(create.split("?directory=")[1].split("&")[0]);
+  assert.equal(sentDir, "/srv/app", "absolute dir must pass through unchanged");
+});
+
 test("runCommand carries ?directory= from cached session", async () => {
   _resetSessionDirectoryCache();
   const calls = [];

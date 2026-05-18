@@ -205,7 +205,11 @@ export async function tmuxList(config: AppConfig): Promise<TmuxSession[]> {
 
 // Resolve `~` and `~/foo` to absolute paths via the remote shell — opencode's
 // session.create wants an absolute directory. Tilde forms work for tmux's -c.
-async function expandRemotePath(config: AppConfig, p: string): Promise<string> {
+// Exported because opencode.ts:createSession must expand too: opencode
+// resolves a tilde-relative directory against its OWN remote cwd ($HOME),
+// silently persisting `/home/dev/~/projects/x`. Expanding at every
+// session-create boundary makes that corruption unreachable.
+export async function expandRemotePath(config: AppConfig, p: string): Promise<string> {
   if (p && !p.startsWith("~") && p.startsWith("/")) return p;
   const { stdout } = await runSshOnce(
     config,
