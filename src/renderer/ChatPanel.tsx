@@ -433,13 +433,14 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     Map<string, TruncationKind>
   >(() => new Map());
 
-  // Slash-command provenance, keyed by user messageID. Populated from
-  // opencode's `command.executed` SSE event (`{name, arguments, messageID}`).
-  // When set, the user-message renderer shows a collapsed `/name args` pill
-  // (with click-to-expand) instead of the full expanded template — otherwise
-  // invoking a skill dumps its entire body into the transcript.
-  // Live-event pattern same as finishByMessageId: kept as a side map because
-  // the canonical messages payload has no command-origin field.
+  // Slash-command provenance. `command.executed` SSE events are keyed by
+  // the ASSISTANT turn id opencode created for the command's response —
+  // not the user message holding the expanded template (which sits one
+  // position earlier in the transcript). The render-site resolver inside
+  // the messages.map call walks idx+1 to translate assistant-id → user-id
+  // and pass the collapsed `/name args` info to that user MessageRow.
+  // Live-event pattern same as finishByMessageId: kept as a side map
+  // because the canonical messages payload has no command-origin field.
   const [commandByMessageId, setCommandByMessageId] = useState<
     Map<string, { name: string; arguments: string }>
   >(() => new Map());
@@ -795,30 +796,19 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         }
       }
 
-      // Slash-command provenance. opencode emits this immediately after it
-      // creates the user message that holds the expanded template (skill
-      // body, /init body, etc.). We keep a side map messageID → {name, args}
-      // so MessageRow can collapse the verbose expansion into a `/name args`
-      // pill. Without this, invoking a large skill dumps the entire SKILL.md
-      // body into the transcript.
+      // Slash-command provenance. opencode emits this when it accepts a
+      // /command POST and creates the assistant turn that will hold the
+      // response. The event's `messageID` is the NEW ASSISTANT turn id, not
+      // the user message that holds the expanded template body — the user
+      // message sits immediately before it in the transcript. We key the
+      // map by assistant-id and resolve to the user-id at render time (see
+      // the messages.map(...) site where `cmdInfo` is computed via idx+1).
       if (ev.type === "command.executed") {
         const p = ev.properties as {
           name?: string;
           messageID?: string;
           arguments?: string;
-          sessionID?: string;
         };
-        // Diagnostic: log every command.executed reaching THIS panel so we
-        // can tell if (a) it's being processed and (b) the messageID matches
-        // the optimistic-replacement id from the canonical refetch.
-        // eslint-disable-next-line no-console
-        console.log("[cmd.executed]", {
-          panel: sessionId,
-          evSid: p.sessionID,
-          name: p.name,
-          messageID: p.messageID,
-          match: p.sessionID === sessionId,
-        });
         if (typeof p.messageID === "string" && typeof p.name === "string") {
           const messageID = p.messageID;
           const name = p.name;
@@ -826,8 +816,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           setCommandByMessageId((m) => {
             const next = new Map(m);
             next.set(messageID, { name, arguments: argumentsStr });
-            // eslint-disable-next-line no-console
-            console.log("[cmd.executed] map size now", next.size, "keys:", [...next.keys()]);
             return next;
           });
         }
@@ -2096,6 +2084,21 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             {messages.map((m, idx) => {
               const isLastInTranscript =
                 idx === messages.length - 1 && m.info.role === "assistant";
+              // command.executed.messageID points at the ASSISTANT turn the
+              // command kicked off (the new, initially-empty assistant
+              // message), not at the user message that holds the expanded
+              // template body. The expanded user message sits immediately
+              // before that assistant message. So for the current user row,
+              // we look at messages[idx+1] — if that's an assistant message
+              // whose id has a commandByMessageId entry, the expansion that
+              // produced it lives in THIS user row → collapse it.
+              const nextMsg = messages[idx + 1];
+              const cmdInfo =
+                m.info.role === "user" &&
+                nextMsg &&
+                nextMsg.info.role === "assistant"
+                  ? commandByMessageId.get(nextMsg.info.id) ?? null
+                  : null;
               return (
                 <MessageRow
                   key={m.info.id}
@@ -2106,7 +2109,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
                     isLastInTranscript && !running ? activeTodos : null
                   }
                   truncation={finishByMessageId.get(m.info.id) ?? null}
-                  commandInfo={commandByMessageId.get(m.info.id) ?? null}
+                  commandInfo={cmdInfo}
                 />
               );
             })}
@@ -3511,11 +3514,6 @@ function MessageRow({
   // FileParts attached to the message render as chips ABOVE the bar so
   // attached files stay visible alongside what the user said.
   if (isUser) {
-    // Diagnostic: log every user-row render with its id + whether commandInfo
-    // was provided. Should print a row with commandInfo!=null shortly after
-    // command.executed fires.
-    // eslint-disable-next-line no-console
-    console.log("[MessageRow user]", { id: msg.info.id, hasCmd: !!commandInfo, cmd: commandInfo });
     const text = msg.parts
       .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
       .map((p) => p.text ?? "")
