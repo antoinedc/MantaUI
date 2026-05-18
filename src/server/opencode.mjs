@@ -76,7 +76,14 @@ async function getSessionDirectoryQuery(sessionId) {
   if (!dir) {
     const fetched = await fetchSessionDirectory(sessionId);
     if (fetched) {
-      sessionDirectoryCache.set(sessionId, fetched);
+      // Route through rememberSessionDirectory (NOT a bare cache.set) so the
+      // directoryListeners fire and the SSE manager opens the scoped
+      // `/event?directory=` stream. Without this, an existing session
+      // resolved lazily on its first prompt never opens its stream, and
+      // opencode emits that prompt's events only on the scoped channel —
+      // they're lost and the session looks frozen. Mirrors the desktop fix
+      // in src/main/opencode.ts:getSessionDirectoryQuery.
+      rememberSessionDirectory(sessionId, fetched);
       dir = fetched;
     }
   }
@@ -86,6 +93,17 @@ async function getSessionDirectoryQuery(sessionId) {
 /** Test-only: reset cache between scenarios. */
 export function _resetSessionDirectoryCache() {
   sessionDirectoryCache.clear();
+}
+
+/**
+ * Test-only: register a directory listener (same set the SSE manager uses).
+ * Lets tests assert the lazy-fetch path actually notifies — the listener
+ * firing is what opens the scoped stream, and the bug was a bare cache.set
+ * that skipped it. Returns an unsubscribe fn.
+ */
+export function _onSessionDirectoryAdded(fn) {
+  directoryListeners.add(fn);
+  return () => directoryListeners.delete(fn);
 }
 
 // ---------------------------------------------------------------------------

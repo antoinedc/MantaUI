@@ -50,6 +50,7 @@ import {
   getVcsBranch as opencodeGetVcsBranch,
   knownSessionDirectories,
   onSessionDirectoryAdded,
+  setDirectoryReadyGate,
   listSessions as opencodeListSessions,
   forkSession as opencodeForkSession,
   compactSession as opencodeCompactSession,
@@ -135,6 +136,24 @@ let opencodeBusStopped = true;
 const opencodeStreams = new Map<string, () => void>(); // key: "" (global) or dir
 let unsubscribeDirAdded: (() => void) | null = null;
 
+// Per-directory readiness: resolves the first time a scoped stream's SSE
+// connection is established (opencodeSubscribeEvents returned a live stream).
+// setDirectoryReadyGate uses this so a scoped prompt waits for its
+// subscription before POSTing. Re-armed on each (re)connect attempt.
+type Ready = { promise: Promise<void>; resolve: () => void };
+const streamReady = new Map<string, Ready>();
+
+function readyFor(directory: string): Ready {
+  let r = streamReady.get(directory);
+  if (!r) {
+    let resolve!: () => void;
+    const promise = new Promise<void>((res) => (resolve = res));
+    r = { promise, resolve };
+    streamReady.set(directory, r);
+  }
+  return r;
+}
+
 function startOpencodeBus(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (!config.host) {
@@ -151,6 +170,32 @@ function startOpencodeBus(): void {
     });
   }
 
+  // Readiness gate: a scoped prompt (opencode.ts:getSessionDirectoryQuery)
+  // calls this after resolving its session directory. We open the scoped
+  // stream (idempotent) and block until its SSE subscription is live, so the
+  // POST can't out-race its own event channel. Bounded at 5s — a wedged
+  // server must not freeze the prompt; degrade to "send anyway" instead.
+  setDirectoryReadyGate(async (dir) => {
+    if (opencodeBusStopped || !dir) return;
+    ensureOpencodeStream(dir);
+    const ready = readyFor(dir).promise;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((res) => {
+      timer = setTimeout(() => {
+        console.warn(
+          `[opencode-bus] readiness gate TIMEOUT dir=${dir} ` +
+            `(sending prompt anyway; events may be delayed)`,
+        );
+        res();
+      }, 5000);
+    });
+    try {
+      await Promise.race([ready, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  });
+
   // Always run the global stream.
   ensureOpencodeStream("");
 
@@ -164,6 +209,7 @@ function startOpencodeBus(): void {
 
 function stopOpencodeBus(): void {
   opencodeBusStopped = true;
+  setDirectoryReadyGate(null);
   if (unsubscribeDirAdded) {
     try { unsubscribeDirAdded(); } catch { /* ignore */ }
     unsubscribeDirAdded = null;
@@ -172,6 +218,7 @@ function stopOpencodeBus(): void {
     try { stop(); } catch { /* ignore */ }
   }
   opencodeStreams.clear();
+  streamReady.clear();
 }
 
 function ensureOpencodeStream(directory: string): void {
@@ -202,8 +249,27 @@ function ensureOpencodeStream(directory: string): void {
         );
         activeDispose = stream.dispose;
         backoffMs = 500;
+        // Subscription is live: unblock any prompt waiting on this dir.
+        readyFor(directory).resolve();
+        console.log(
+          `[opencode-bus] stream CONNECTED dir=${directory || "<global>"} ` +
+            `(open streams: ${[...opencodeStreams.keys()]
+              .map((k) => k || "<global>")
+              .join(", ")})`,
+        );
+        let evCount = 0;
         for await (const ev of stream.iter) {
           if (stopped || opencodeBusStopped) break;
+          // Lightweight success-path trace: first event + every 50th, so the
+          // log shows events ARE flowing for a dir (vs. silent = the bug)
+          // without flooding on delta storms.
+          if (evCount === 0 || evCount % 50 === 0) {
+            console.log(
+              `[opencode-bus] event#${evCount} dir=${directory || "<global>"} ` +
+                `type=${ev.type}`,
+            );
+          }
+          evCount++;
 
           // Trust mode: auto-reply "always" to every permission.asked. The
           // card never reaches the renderer, so tools execute without
@@ -235,12 +301,17 @@ function ensureOpencodeStream(directory: string): void {
         );
       } finally {
         activeDispose = null;
+        // Stream dropped: re-arm readiness so a prompt issued during the
+        // reconnect window waits for the new subscription instead of racing
+        // a dead one. Drop the resolved promise; readyFor() makes a fresh.
+        streamReady.delete(directory);
       }
       if (stopped || opencodeBusStopped) break;
       await new Promise((r) => setTimeout(r, backoffMs));
       backoffMs = Math.min(backoffMs * 2, 8000);
     }
     opencodeStreams.delete(directory);
+    streamReady.delete(directory);
   })();
 }
 

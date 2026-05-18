@@ -340,6 +340,19 @@ export function knownSessionDirectories(): string[] {
   return Array.from(new Set(sessionDirectoryCache.values()));
 }
 
+// The event bus registers a readiness gate here. getSessionDirectoryQuery
+// awaits it after resolving a session's directory so a scoped POST never
+// goes out before the matching `/event?directory=` subscription is live —
+// otherwise opencode emits the response onto a stream with no subscriber and
+// the events are lost. No-op until the bus registers (e.g. host not set).
+let directoryReadyGate: ((directory: string) => Promise<void>) | null = null;
+
+export function setDirectoryReadyGate(
+  gate: ((directory: string) => Promise<void>) | null,
+): void {
+  directoryReadyGate = gate;
+}
+
 async function fetchSessionDirectory(
   config: AppConfig,
   sessionId: string,
@@ -366,8 +379,24 @@ async function getSessionDirectoryQuery(
   if (!dir) {
     const fetched = await fetchSessionDirectory(config, sessionId);
     if (fetched) {
-      sessionDirectoryCache.set(sessionId, fetched);
+      // Route through rememberSessionDirectory (NOT a bare cache.set) so the
+      // onSessionDirectoryAdded listeners fire. Without this, an existing
+      // session resolved lazily on its first prompt never triggers the event
+      // bus to open the `?directory=` scoped stream — and opencode emits that
+      // prompt's response events ONLY on that scoped stream, so they vanish
+      // and the session looks frozen (SSE "broken in existing sessions").
+      rememberSessionDirectory(sessionId, fetched);
       dir = fetched;
+    }
+  }
+  if (dir && directoryReadyGate) {
+    // Block until the bus confirms the scoped SSE subscription for this
+    // directory is open. Bounded inside the gate; failure must not wedge
+    // the prompt, so swallow and proceed (degrades to old behavior).
+    try {
+      await directoryReadyGate(dir);
+    } catch {
+      /* gate failed — proceed unscoped-safe rather than hang the prompt */
     }
   }
   return dir ? `?directory=${encodeURIComponent(dir)}` : "";

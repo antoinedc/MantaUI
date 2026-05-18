@@ -9,6 +9,7 @@ import {
   forkSession,
   compactSession,
   _resetSessionDirectoryCache,
+  _onSessionDirectoryAdded,
 } from "./opencode.mjs";
 
 test("apiUrl targets local opencode port 4096", () => {
@@ -128,6 +129,44 @@ test("sendPrompt lazy-fetches directory via GET /session/{id} on cache miss", as
   assert.ok(lookup, "expected lazy GET /session/{id}");
   const prompt = calls.find((c) => c.url.includes("/prompt_async"));
   assert.ok(prompt && prompt.url.includes("directory=%2Frestored%2Fdir"), `prompt URL: ${prompt?.url}`);
+});
+
+test("sendPrompt lazy-fetch notifies directory listeners (opens scoped SSE stream)", async () => {
+  // Regression: the lazy-fetch branch used a bare sessionDirectoryCache.set,
+  // skipping rememberSessionDirectory — so directoryListeners never fired and
+  // the scoped /event?directory= stream for an existing session was never
+  // opened. opencode then emitted that prompt's response events onto a stream
+  // with no subscriber: SSE "broken in existing sessions". This asserts the
+  // listener now fires with the resolved directory.
+  _resetSessionDirectoryCache();
+  const notified = [];
+  const unsub = _onSessionDirectoryAdded((dir) => notified.push(dir));
+  try {
+    await withMockFetch(
+      async (url, opts) => {
+        if (
+          String(url) === "http://127.0.0.1:4096/session/ses_existing" &&
+          (opts?.method ?? "GET") === "GET"
+        ) {
+          return new Response(
+            JSON.stringify({ id: "ses_existing", directory: "/proj/worktree" }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(null, { status: 204 });
+      },
+      async () => {
+        await sendPrompt({ sessionId: "ses_existing", text: "hi" });
+      },
+    );
+  } finally {
+    unsub();
+  }
+  assert.deepEqual(
+    notified,
+    ["/proj/worktree"],
+    "lazy-fetch must notify directory listeners exactly once with the resolved dir",
+  );
 });
 
 test("sendPrompt omits ?directory= when session is unknown (best-effort)", async () => {
