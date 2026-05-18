@@ -40,6 +40,7 @@ import {
   classifyFinish,
   describeTruncation,
   allTodosTerminal,
+  selectActiveTodos,
   detectCommandFromText,
   type TruncationKind,
 } from "./chatUtils";
@@ -1993,25 +1994,35 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // suppress the card until opencode writes a fresh list — see the send
   // handler and the todo.updated branch in onOpencodeEvent.
   const activeTodos = useMemo<Array<Record<string, unknown>> | null>(() => {
-    if (todosDismissed) return null;
-    if (liveTodos && liveTodos.length > 0) {
-      return liveTodos as unknown as Array<Record<string, unknown>>;
-    }
-    if (!messages) return null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      for (let j = m.parts.length - 1; j >= 0; j--) {
-        const p = m.parts[j];
-        if (p.type === "tool" && (p as Record<string, unknown>).tool === "todowrite") {
-          const state = (p as Record<string, unknown>).state as
-            | { input?: { todos?: Array<Record<string, unknown>> } }
-            | undefined;
-          const todos = state?.input?.todos;
-          if (Array.isArray(todos) && todos.length > 0) return todos;
+    // Transcript fallback: most recent non-empty TodoWrite input. Only used
+    // when no live todo.updated has been seen (liveTodos == null). The
+    // live-vs-transcript-vs-dismissed precedence — including the critical
+    // "empty live list = explicitly cleared, hide the card" rule — lives in
+    // the pure, tested selectActiveTodos (chatUtils.ts).
+    let transcriptTodos: Array<Record<string, unknown>> | null = null;
+    if (messages) {
+      outer: for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        for (let j = m.parts.length - 1; j >= 0; j--) {
+          const p = m.parts[j];
+          if (p.type === "tool" && (p as Record<string, unknown>).tool === "todowrite") {
+            const state = (p as Record<string, unknown>).state as
+              | { input?: { todos?: Array<Record<string, unknown>> } }
+              | undefined;
+            const todos = state?.input?.todos;
+            if (Array.isArray(todos) && todos.length > 0) {
+              transcriptTodos = todos;
+              break outer;
+            }
+          }
         }
       }
     }
-    return null;
+    return selectActiveTodos(
+      liveTodos as Array<Record<string, unknown>> | null,
+      transcriptTodos,
+      todosDismissed,
+    );
   }, [messages, liveTodos, todosDismissed]);
 
   // Turn boundary metadata: which assistant messages are the FINAL one of

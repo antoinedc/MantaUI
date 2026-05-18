@@ -166,6 +166,39 @@ export function allTodosTerminal(todos: Array<Record<string, unknown>>): boolean
   return todos.length > 0 && todos.every(isTerminalTodo);
 }
 
+/**
+ * Decide which todo list the ActiveTodos card should render, or null to hide.
+ *
+ * Precedence (highest first):
+ *  1. `dismissed` (user submitted with an all-terminal list) → null.
+ *  2. `liveTodos` is authoritative WHEN PRESENT. opencode fires `todo.updated`
+ *     with the full list every time TodoWrite runs — including an **empty
+ *     array when the model clears the list**. An empty live list therefore
+ *     means "explicitly cleared", NOT "no data": return null. Only a
+ *     `null`/`undefined` liveTodos (no todo.updated seen this session) falls
+ *     through to the transcript.
+ *  3. Transcript fallback: the most recent non-empty TodoWrite tool input,
+ *     for sessions restored before any live event arrived.
+ *
+ * The bug this fixes: the old inline selector gated the live path on
+ * `liveTodos.length > 0`, so an empty live list fell through to (3) and the
+ * transcript scan resurfaced the PRIOR non-empty list — the card never
+ * cleared. `liveTodos` being a non-null array (even `[]`) is the signal.
+ */
+export function selectActiveTodos(
+  liveTodos: Array<Record<string, unknown>> | null | undefined,
+  transcriptTodos: Array<Record<string, unknown>> | null | undefined,
+  dismissed: boolean,
+): Array<Record<string, unknown>> | null {
+  if (dismissed) return null;
+  if (liveTodos != null) {
+    // Present (even if empty) = authoritative. Empty = cleared = hide.
+    return liveTodos.length > 0 ? liveTodos : null;
+  }
+  if (transcriptTodos && transcriptTodos.length > 0) return transcriptTodos;
+  return null;
+}
+
 // === Slash-command provenance ===
 //
 // opencode injects a command's `template` into the transcript verbatim as a

@@ -11,6 +11,7 @@ import {
   describeTruncation,
   isTerminalTodo,
   allTodosTerminal,
+  selectActiveTodos,
   commandPrefixKey,
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
@@ -342,6 +343,47 @@ describe("allTodosTerminal", () => {
 
   it("returns false for empty lists (nothing to dismiss)", () => {
     expect(allTodosTerminal([])).toBe(false);
+  });
+});
+
+// ===== selectActiveTodos =====
+
+describe("selectActiveTodos", () => {
+  const list = [{ content: "a", status: "pending" }];
+  const older = [{ content: "old", status: "pending" }];
+
+  it("REGRESSION: empty live list clears the card even when the transcript still has a non-empty TodoWrite", () => {
+    // The exact bug: model calls TodoWrite([]) to clear. todo.updated fires
+    // with todos:[] → liveTodos=[]. The transcript still holds the prior
+    // non-empty list. Old selector gated on liveTodos.length>0, fell through
+    // to the transcript, and re-pinned the stale list. Empty live list is
+    // authoritative "cleared" → must return null.
+    expect(selectActiveTodos([], older, false)).toBeNull();
+  });
+
+  it("uses live list when present and non-empty (wins over transcript)", () => {
+    expect(selectActiveTodos(list, older, false)).toBe(list);
+  });
+
+  it("falls back to transcript ONLY when no live event seen (liveTodos null)", () => {
+    expect(selectActiveTodos(null, older, false)).toBe(older);
+    expect(selectActiveTodos(undefined, older, false)).toBe(older);
+  });
+
+  it("returns null when dismissed, regardless of live or transcript", () => {
+    expect(selectActiveTodos(list, older, true)).toBeNull();
+    expect(selectActiveTodos(null, older, true)).toBeNull();
+  });
+
+  it("returns null when nothing is available", () => {
+    expect(selectActiveTodos(null, null, false)).toBeNull();
+    expect(selectActiveTodos(null, [], false)).toBeNull();
+  });
+
+  it("empty live list beats dismissed=false AND a non-empty transcript (full bug matrix)", () => {
+    // Belt-and-suspenders: even with dismissed false and a populated
+    // transcript, an empty live list must hide the card.
+    expect(selectActiveTodos([], [{ status: "completed" }], false)).toBeNull();
   });
 });
 
