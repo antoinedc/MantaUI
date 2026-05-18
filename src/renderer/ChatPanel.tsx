@@ -806,7 +806,19 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           name?: string;
           messageID?: string;
           arguments?: string;
+          sessionID?: string;
         };
+        // Diagnostic: log every command.executed reaching THIS panel so we
+        // can tell if (a) it's being processed and (b) the messageID matches
+        // the optimistic-replacement id from the canonical refetch.
+        // eslint-disable-next-line no-console
+        console.log("[cmd.executed]", {
+          panel: sessionId,
+          evSid: p.sessionID,
+          name: p.name,
+          messageID: p.messageID,
+          match: p.sessionID === sessionId,
+        });
         if (typeof p.messageID === "string" && typeof p.name === "string") {
           const messageID = p.messageID;
           const name = p.name;
@@ -814,6 +826,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           setCommandByMessageId((m) => {
             const next = new Map(m);
             next.set(messageID, { name, arguments: argumentsStr });
+            // eslint-disable-next-line no-console
+            console.log("[cmd.executed] map size now", next.size, "keys:", [...next.keys()]);
             return next;
           });
         }
@@ -3497,6 +3511,11 @@ function MessageRow({
   // FileParts attached to the message render as chips ABOVE the bar so
   // attached files stay visible alongside what the user said.
   if (isUser) {
+    // Diagnostic: log every user-row render with its id + whether commandInfo
+    // was provided. Should print a row with commandInfo!=null shortly after
+    // command.executed fires.
+    // eslint-disable-next-line no-console
+    console.log("[MessageRow user]", { id: msg.info.id, hasCmd: !!commandInfo, cmd: commandInfo });
     const text = msg.parts
       .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
       .map((p) => p.text ?? "")
