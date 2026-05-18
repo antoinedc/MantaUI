@@ -276,6 +276,11 @@ export type OpencodeEvent = {
 };
 
 // Slash command exposed by opencode (`/init`, user-defined templates, etc.).
+// `template` is the raw prompt body opencode injects as the user message when
+// the command runs (with `$ARGUMENTS` / `$1` etc. substituted at run time).
+// Used by ChatPanel to detect command-origin user messages retroactively
+// (the live `command.executed` event only tags messages created during this
+// panel's lifetime; older transcripts have no live-event provenance).
 export type OpencodeCommand = {
   name: string;
   description?: string;
@@ -283,6 +288,7 @@ export type OpencodeCommand = {
   argumentHint?: string;
   agent?: string;
   model?: string;
+  template?: string;
 };
 
 // Agent definition exposed by opencode (build/plan/general-purpose + user

@@ -40,6 +40,7 @@ import {
   classifyFinish,
   describeTruncation,
   allTodosTerminal,
+  detectCommandFromText,
   type TruncationKind,
 } from "./chatUtils";
 
@@ -487,6 +488,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       .catch((e) => {
         if (!cancelled) setError(String(e?.message ?? e));
       });
+    // Eagerly fetch the command list (with templates) so the renderer can
+    // detect historical /command-origin user messages and collapse them on
+    // first render. Without this, only commands invoked DURING this panel's
+    // lifetime get tagged (via live `command.executed` events). The fetch
+    // is cheap and the list is cached in `commands` state.
+    window.api
+      .opencodeCommands()
+      .then((c) => {
+        if (!cancelled) setCommands(c);
+      })
+      .catch(() => { /* non-fatal */ });
     // Pull current pending permissions (e.g. a tool that was waiting from a
     // previous bui session before we mounted).
     window.api
@@ -2084,21 +2096,37 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             {messages.map((m, idx) => {
               const isLastInTranscript =
                 idx === messages.length - 1 && m.info.role === "assistant";
-              // command.executed.messageID points at the ASSISTANT turn the
-              // command kicked off (the new, initially-empty assistant
-              // message), not at the user message that holds the expanded
-              // template body. The expanded user message sits immediately
-              // before that assistant message. So for the current user row,
-              // we look at messages[idx+1] — if that's an assistant message
-              // whose id has a commandByMessageId entry, the expansion that
-              // produced it lives in THIS user row → collapse it.
-              const nextMsg = messages[idx + 1];
-              const cmdInfo =
-                m.info.role === "user" &&
-                nextMsg &&
-                nextMsg.info.role === "assistant"
-                  ? commandByMessageId.get(nextMsg.info.id) ?? null
-                  : null;
+              // Slash-command provenance resolution — two paths:
+              //
+              // (1) Live: `command.executed.messageID` points at the
+              //     ASSISTANT turn the command kicked off (the new,
+              //     initially-empty assistant message), not the user
+              //     message holding the expanded template. The expanded
+              //     user message sits at messages[idx], the assistant at
+              //     messages[idx+1]. If the next message's id is in the
+              //     live map, use that.
+              // (2) Historical: live events only fire for commands invoked
+              //     during this panel's lifetime. For older transcripts,
+              //     detect command-origin by matching the user-message
+              //     text against the static prefix of every known command
+              //     template (see detectCommandFromText). When a match
+              //     hits we don't have the run-time `arguments` string —
+              //     just the name. That's fine for the collapsed pill.
+              let cmdInfo: { name: string; arguments: string } | null = null;
+              if (m.info.role === "user") {
+                const nextMsg = messages[idx + 1];
+                if (nextMsg && nextMsg.info.role === "assistant") {
+                  cmdInfo = commandByMessageId.get(nextMsg.info.id) ?? null;
+                }
+                if (!cmdInfo && commands && commands.length > 0) {
+                  const userText = m.parts
+                    .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
+                    .map((p) => p.text ?? "")
+                    .join("\n");
+                  const detected = detectCommandFromText(userText, commands);
+                  if (detected) cmdInfo = { name: detected, arguments: "" };
+                }
+              }
               return (
                 <MessageRow
                   key={m.info.id}

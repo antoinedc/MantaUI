@@ -11,6 +11,9 @@ import {
   describeTruncation,
   isTerminalTodo,
   allTodosTerminal,
+  commandPrefixKey,
+  detectCommandFromText,
+  MIN_COMMAND_PREFIX_LEN,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -339,5 +342,103 @@ describe("allTodosTerminal", () => {
 
   it("returns false for empty lists (nothing to dismiss)", () => {
     expect(allTodosTerminal([])).toBe(false);
+  });
+});
+
+// ===== commandPrefixKey =====
+
+describe("commandPrefixKey", () => {
+  it("returns the full template when there are no placeholders", () => {
+    const tpl = "# Refactor\n\nDo a refactoring session, no args.";
+    expect(commandPrefixKey(tpl)).toBe(tpl);
+  });
+
+  it("truncates at the first $ARGUMENTS placeholder", () => {
+    const tpl = "Create a component named $ARGUMENTS with TypeScript.";
+    expect(commandPrefixKey(tpl)).toBe("Create a component named");
+  });
+
+  it("truncates at the first $N positional placeholder", () => {
+    const tpl = "Create a file named $1 in $2 with content $3.";
+    expect(commandPrefixKey(tpl)).toBe("Create a file named");
+  });
+
+  it("returns null for templates shorter than MIN_COMMAND_PREFIX_LEN", () => {
+    // Even with a long template, if the prefix before the first $ is short,
+    // it would generate too many false positives. Reject.
+    expect(commandPrefixKey("$1 do thing")).toBeNull();
+    expect(commandPrefixKey("Run $1 do thing")).toBeNull(); // "Run" < 12
+  });
+
+  it("strips trailing whitespace from the prefix", () => {
+    const tpl = "Some prefix here   $ARGUMENTS more stuff";
+    expect(commandPrefixKey(tpl)).toBe("Some prefix here");
+  });
+
+  it("handles non-string input defensively", () => {
+    expect(commandPrefixKey(undefined as unknown as string)).toBeNull();
+  });
+
+  it("treats sentinel length correctly", () => {
+    // Exactly MIN_COMMAND_PREFIX_LEN chars → accepted.
+    const exact = "a".repeat(MIN_COMMAND_PREFIX_LEN);
+    expect(commandPrefixKey(exact)).toBe(exact);
+    // One char shorter → rejected.
+    expect(commandPrefixKey("a".repeat(MIN_COMMAND_PREFIX_LEN - 1))).toBeNull();
+  });
+});
+
+// ===== detectCommandFromText =====
+
+describe("detectCommandFromText", () => {
+  const commands = [
+    { name: "refactor", template: "# Refactor\n\nYou are doing a focused refactoring session." },
+    { name: "deploy", template: "# Deploy\n\nDeploy the project to production using ./scripts/deploy.sh." },
+    { name: "component", template: "Create a new React component named $ARGUMENTS with TypeScript." },
+    { name: "short", template: "$1 foo" }, // prefix too short, ignored
+  ];
+
+  it("returns null for empty / missing text", () => {
+    expect(detectCommandFromText("", commands)).toBeNull();
+    expect(detectCommandFromText(undefined as unknown as string, commands)).toBeNull();
+  });
+
+  it("returns null when no command matches", () => {
+    expect(detectCommandFromText("Just a plain user prompt.", commands)).toBeNull();
+  });
+
+  it("matches a no-argument command on full template equality", () => {
+    expect(detectCommandFromText(commands[0].template!, commands)).toBe("refactor");
+  });
+
+  it("matches a placeholder command on its static prefix", () => {
+    expect(
+      detectCommandFromText("Create a new React component named Button with TypeScript.", commands),
+    ).toBe("component");
+  });
+
+  it("ignores commands whose prefix is too short", () => {
+    // The "short" command has a sub-MIN_COMMAND_PREFIX_LEN prefix and must
+    // not match arbitrary user prompts that happen to start similarly.
+    expect(detectCommandFromText("any text whatsoever", commands)).toBeNull();
+  });
+
+  it("picks the longest matching prefix when multiple commands would match", () => {
+    const overlap = [
+      { name: "general", template: "# Header line that is long enough." },
+      { name: "specific", template: "# Header line that is long enough. With more detail here." },
+    ];
+    // Text matches both prefixes; the more specific one wins.
+    const text = "# Header line that is long enough. With more detail here. and trailing text";
+    expect(detectCommandFromText(text, overlap)).toBe("specific");
+  });
+
+  it("returns null for empty commands list", () => {
+    expect(detectCommandFromText("# Refactor\n\nYou are doing...", [])).toBeNull();
+  });
+
+  it("skips commands without a template", () => {
+    const noTemplate = [{ name: "x" }, { name: "refactor", template: commands[0].template }];
+    expect(detectCommandFromText(commands[0].template!, noTemplate)).toBe("refactor");
   });
 });

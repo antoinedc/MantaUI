@@ -351,6 +351,7 @@ export async function listCommands() {
     argumentHint: typeof c.argumentHint === "string" ? c.argumentHint : undefined,
     agent: typeof c.agent === "string" ? c.agent : undefined,
     model: typeof c.model === "string" ? c.model : undefined,
+    template: typeof c.template === "string" ? c.template : undefined,
   }));
 }
 

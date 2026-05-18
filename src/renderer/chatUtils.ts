@@ -165,3 +165,64 @@ export function isTerminalTodo(t: Record<string, unknown>): boolean {
 export function allTodosTerminal(todos: Array<Record<string, unknown>>): boolean {
   return todos.length > 0 && todos.every(isTerminalTodo);
 }
+
+// === Slash-command provenance ===
+//
+// opencode injects a command's `template` into the transcript verbatim as a
+// user message (with `$ARGUMENTS` / `$1`...`$9` substituted before injection).
+// The canonical messages payload carries no flag identifying these messages
+// as command-origin — only the live `command.executed` SSE event tags them,
+// and only for commands invoked during the current panel session.
+//
+// `commandPrefixKey(template)` returns the longest static prefix of a command
+// template (the substring before the first $-placeholder). At render time the
+// renderer matches user-message text against this prefix to detect historical
+// command invocations without needing the live event.
+//
+// We require a meaningful minimum length so trivial templates ("$1") don't
+// match every short user message.
+export const MIN_COMMAND_PREFIX_LEN = 12;
+
+export function commandPrefixKey(template: string): string | null {
+  if (typeof template !== "string") return null;
+  // Find the first $-placeholder. `$1..$9` and `$ARGUMENTS` both start with $;
+  // a `$` followed by anything that isn't a word char (e.g. `$5,000`) is NOT a
+  // placeholder, but templates almost never have such literals — and even if
+  // they do, treating them as a placeholder boundary just makes the prefix
+  // shorter, never wrong.
+  const dollarIdx = template.search(/\$(?:[1-9]|ARGUMENTS|[A-Z_]+)/);
+  const prefix = dollarIdx >= 0 ? template.slice(0, dollarIdx) : template;
+  // Strip trailing whitespace so we don't accidentally fail to match when
+  // opencode substitutes a placeholder that abuts non-whitespace.
+  const trimmed = prefix.replace(/\s+$/, "");
+  if (trimmed.length < MIN_COMMAND_PREFIX_LEN) return null;
+  return trimmed;
+}
+
+/**
+ * Detect which command, if any, produced a given user-message text. Returns
+ * the command name on hit, null on miss. O(commands) per call — caller is
+ * expected to memoize over the messages list.
+ *
+ * Match strategy: the message text must start with the command's static
+ * prefix (template up to the first $-placeholder). Ties broken by longest
+ * prefix (most specific match wins).
+ */
+export function detectCommandFromText(
+  text: string,
+  commands: Array<{ name: string; template?: string }>,
+): string | null {
+  if (!text) return null;
+  let best: { name: string; len: number } | null = null;
+  for (const c of commands) {
+    if (!c.template) continue;
+    const prefix = commandPrefixKey(c.template);
+    if (!prefix) continue;
+    if (text.startsWith(prefix)) {
+      if (!best || prefix.length > best.len) {
+        best = { name: c.name, len: prefix.length };
+      }
+    }
+  }
+  return best?.name ?? null;
+}
