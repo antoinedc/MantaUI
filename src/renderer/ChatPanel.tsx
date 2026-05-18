@@ -39,6 +39,7 @@ import {
   resolveContextLimit,
   classifyFinish,
   describeTruncation,
+  allTodosTerminal,
   type TruncationKind,
 } from "./chatUtils";
 
@@ -402,6 +403,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const [liveTodos, setLiveTodos] = useState<
     Array<{ content: string; status: string; priority: string }> | null
   >(null);
+  // User has acknowledged a fully-completed todo list by submitting their
+  // next prompt — hide it from the transcript until opencode emits a new
+  // todowrite (via `todo.updated`). Without this the green-check checklist
+  // stays pinned at the bottom of every subsequent turn, which clutters the
+  // panel and reads as "still active work" when it's actually done. Reset on
+  // session change and on any incoming todo.updated event (see SSE handler).
+  const [todosDismissed, setTodosDismissed] = useState(false);
   // Server-reported retry status (rate-limited, transient failure, etc).
   // session.status with type:"retry" carries an attempt counter + an action
   // describing what the user can do. Surfaces above RunningIndicator while
@@ -441,6 +449,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setStepTokens(null);
     setRetryInfo(null);
     setLiveTodos(null);
+    setTodosDismissed(false);
     setFinishByMessageId(new Map());
     setCompactionState(null);
     if (compactionClearTimer.current) {
@@ -768,6 +777,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
               priority: String(t.priority ?? ""),
             })),
           );
+          // New activity from the model — clear any prior user dismissal so
+          // the refreshed list (even if itself fully completed) is shown.
+          setTodosDismissed(false);
         }
       }
 
@@ -915,6 +927,14 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setScreenshotToast(null);
     setRunning(true); // optimistic — session.status will confirm
     setInput("");
+    // If the pinned todo list is fully terminal (every item completed or
+    // cancelled), the user has acknowledged the previous turn's work by
+    // starting a new one — hide the stale checklist until opencode writes a
+    // fresh list. todo.updated resets this so a follow-up TodoWrite still
+    // surfaces normally.
+    if (activeTodos && allTodosTerminal(activeTodos)) {
+      setTodosDismissed(true);
+    }
 
     // Optimistic transcript append — show the user's message NOW so they
     // see their input land in the conversation while the server is still
@@ -1901,7 +1921,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // the current turn, so the list persists across turns that don't update it.
   // Item 4: liveTodos (from todo.updated SSE) wins when set so the card
   // reflects in-flight ticks without waiting for the message re-fetch.
+  // When todosDismissed is set (user submitted with all items terminal),
+  // suppress the card until opencode writes a fresh list — see the send
+  // handler and the todo.updated branch in onOpencodeEvent.
   const activeTodos = useMemo<Array<Record<string, unknown>> | null>(() => {
+    if (todosDismissed) return null;
     if (liveTodos && liveTodos.length > 0) {
       return liveTodos as unknown as Array<Record<string, unknown>>;
     }
@@ -1920,7 +1944,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       }
     }
     return null;
-  }, [messages, liveTodos]);
+  }, [messages, liveTodos, todosDismissed]);
 
   // Turn boundary metadata: which assistant messages are the FINAL one of
   // their turn (i.e., immediately followed by a user message or end-of-list),

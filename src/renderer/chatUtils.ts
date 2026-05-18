@@ -144,3 +144,24 @@ export function dedupeAgainstBuiltins<T extends TypeaheadCommandRow>(
 ): T[] {
   return commands.filter((c) => !builtinNames.has(c.name));
 }
+
+/**
+ * True when a todo item is in a terminal state (completed or cancelled).
+ * Both liveTodos (from todo.updated SSE) and transcript-scraped TodoWrite
+ * inputs surface a free-form `status` string; opencode's canonical terminal
+ * values are "completed" and "cancelled". Anything else (pending,
+ * in_progress, blocked, …) keeps the list visible in the chat panel.
+ */
+export function isTerminalTodo(t: Record<string, unknown>): boolean {
+  const s = String(t.status ?? "").toLowerCase();
+  return s === "completed" || s === "cancelled";
+}
+
+/**
+ * True when every todo in a list is terminal AND the list is non-empty —
+ * the trigger condition for hiding the ActiveTodos card after the user
+ * submits their next prompt. Empty lists return false (no work to dismiss).
+ */
+export function allTodosTerminal(todos: Array<Record<string, unknown>>): boolean {
+  return todos.length > 0 && todos.every(isTerminalTodo);
+}

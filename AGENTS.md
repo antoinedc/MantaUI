@@ -237,6 +237,15 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   (`rpc.mjs` `tmux:new-window`): does the same config lookup when `cwd` is
   absent — without it, tmux silently inherits `$HOME`. Always pass or resolve
   `defaultCwd`; never let the fallback reach tmux unchecked.
+- **TodoWrite checklist auto-dismissal** — when every item in the pinned
+  `ActiveTodos` is terminal (`completed` or `cancelled`) at the moment the
+  user submits their next prompt, `todosDismissed` flips true and the card
+  hides until opencode emits a fresh `todo.updated`. Without this, finished
+  checklists stayed pinned forever and read as "still active work". The
+  `allTodosTerminal()` predicate lives in `chatUtils.ts` (tested); the
+  dismissal state is local to `ChatPanel`. Reset triggers: session change,
+  any incoming `todo.updated`. Do NOT clear on idle/`session.idle` —
+  the user keeps the visual confirmation right up to their next turn.
 - **Model persistence across sessions** — model selection is per-session in
   `localStorage` (`bui:chat:<sessionId>:model`). On `/clear`, the handler
   captures the returned `newSessionId` and copies the current override into
@@ -404,6 +413,8 @@ the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
   - `vcs.branch.updated` — keeps the footer's branch indicator current.
     Properties have no `sessionID` so the early sessionID filter at the top
     of `onOpencodeEvent` short-circuits (undefined → falsy).
+  - On `todo.updated`, `todosDismissed` is reset to `false` so a fresh
+    TodoWrite resurfaces the card even if the prior list was user-dismissed.
   - `session.status` with `type === "retry"` — drives the `RetryCard` above
     the running indicator with `attempt`, `message`, and an optional
     `action {title, message, label, link?}`. Cleared on next `busy`/`idle`.

@@ -9,6 +9,8 @@ import {
   resolveContextLimit,
   classifyFinish,
   describeTruncation,
+  isTerminalTodo,
+  allTodosTerminal,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -283,5 +285,59 @@ describe("dedupeAgainstBuiltins", () => {
   it("returns empty array when all commands collide", () => {
     const opencode = [{ name: "clear" }, { name: "help" }];
     expect(dedupeAgainstBuiltins(opencode, builtins)).toEqual([]);
+  });
+});
+
+// ===== isTerminalTodo / allTodosTerminal =====
+
+describe("isTerminalTodo", () => {
+  it("treats completed as terminal", () => {
+    expect(isTerminalTodo({ status: "completed" })).toBe(true);
+  });
+
+  it("treats cancelled as terminal", () => {
+    expect(isTerminalTodo({ status: "cancelled" })).toBe(true);
+  });
+
+  it("is case-insensitive (status strings from older opencode may vary)", () => {
+    expect(isTerminalTodo({ status: "Completed" })).toBe(true);
+    expect(isTerminalTodo({ status: "CANCELLED" })).toBe(true);
+  });
+
+  it("returns false for non-terminal statuses", () => {
+    expect(isTerminalTodo({ status: "pending" })).toBe(false);
+    expect(isTerminalTodo({ status: "in_progress" })).toBe(false);
+    expect(isTerminalTodo({ status: "blocked" })).toBe(false);
+  });
+
+  it("returns false when status is missing or unexpected", () => {
+    expect(isTerminalTodo({})).toBe(false);
+    expect(isTerminalTodo({ status: null })).toBe(false);
+    expect(isTerminalTodo({ status: 42 })).toBe(false);
+  });
+});
+
+describe("allTodosTerminal", () => {
+  it("returns true when every item is completed or cancelled", () => {
+    expect(
+      allTodosTerminal([
+        { status: "completed" },
+        { status: "cancelled" },
+        { status: "completed" },
+      ]),
+    ).toBe(true);
+  });
+
+  it("returns false when any item is non-terminal", () => {
+    expect(
+      allTodosTerminal([
+        { status: "completed" },
+        { status: "in_progress" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("returns false for empty lists (nothing to dismiss)", () => {
+    expect(allTodosTerminal([])).toBe(false);
   });
 });
