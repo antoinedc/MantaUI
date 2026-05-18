@@ -283,73 +283,6 @@ function apiUrl(config: AppConfig, path: string): string {
   return `http://127.0.0.1:${localPort(config)}${path}`;
 }
 
-// ===== Per-session project-directory scope =====
-//
-// opencode's tool execution (Bash, Read, Grep, etc.) runs from the SERVER
-// process's cwd, NOT from the session record's `directory` field. To make
-// tools execute inside the project worktree, every session-mutating request
-// must carry `?directory=<absolute-worktree-path>` — opencode then scopes
-// the project context for that request and tools run from there. This is
-// opencode's documented contract (see issue #25561, closed not-planned —
-// the directory query param IS the channel).
-//
-// We cache session→directory locally so each prompt/command POST doesn't
-// require an extra GET /session lookup. Populated when bui creates a
-// session (we know the directory we asked for) and lazily-filled via
-// fetchSessionDirectory on miss (e.g. sessions created in a previous bui
-// run that are still alive on the server).
-const sessionDirectoryCache = new Map<string, string>();
-
-function rememberSessionDirectory(sessionId: string, directory: string | undefined | null): void {
-  if (sessionId && typeof directory === "string" && directory.length > 0) {
-    sessionDirectoryCache.set(sessionId, directory);
-  }
-}
-
-async function fetchSessionDirectory(
-  config: AppConfig,
-  sessionId: string,
-): Promise<string | null> {
-  await ensureForward(config);
-  try {
-    const res = await fetch(apiUrl(config, `/session/${encodeURIComponent(sessionId)}`));
-    if (!res.ok) return null;
-    const body = (await res.json()) as { directory?: unknown };
-    return typeof body.directory === "string" ? body.directory : null;
-  } catch {
-    return null;
-  }
-}
-
-// Returns "?directory=<encoded>" (or "" if we can't resolve a directory).
-// Pure-builder; pair with getSessionDirectoryQuery for the async resolve.
-function sessionDirectoryQuery(directory: string | null | undefined): string {
-  if (!directory) return "";
-  return `?directory=${encodeURIComponent(directory)}`;
-}
-
-// Look up (and lazily populate) the per-session directory, then return the
-// query-string fragment opencode needs to scope tools to the project worktree.
-async function getSessionDirectoryQuery(
-  config: AppConfig,
-  sessionId: string,
-): Promise<string> {
-  let dir = sessionDirectoryCache.get(sessionId);
-  if (!dir) {
-    const fetched = await fetchSessionDirectory(config, sessionId);
-    if (fetched) {
-      sessionDirectoryCache.set(sessionId, fetched);
-      dir = fetched;
-    }
-  }
-  return sessionDirectoryQuery(dir);
-}
-
-// Test-only: clear cache between scenarios. Not exported in public API.
-export function _resetSessionDirectoryCache(): void {
-  sessionDirectoryCache.clear();
-}
-
 export type CreatedSession = {
   id: string;
   title: string;
@@ -372,12 +305,7 @@ export async function createSession(
   if (!res.ok) {
     throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
   }
-  const sess = (await res.json()) as CreatedSession;
-  // Cache directory locally so every subsequent prompt/command POST on
-  // this session is scoped to the right project worktree without an
-  // extra GET round-trip.
-  rememberSessionDirectory(sess.id, sess.directory ?? directory);
-  return sess;
+  return (await res.json()) as CreatedSession;
 }
 
 // Fetch the full transcript for a session. Phase 1 renders the result as-is;
@@ -434,10 +362,13 @@ export async function sendPrompt(
   mentions?: PromptAgentMention[],
 ): Promise<void> {
   await ensureForward(config);
-  // Tools (Bash, Read, etc.) execute from the directory query param's
-  // worktree, NOT from session.directory metadata. See sessionDirectoryCache.
-  const dirQ = await getSessionDirectoryQuery(config, sessionId);
-  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/prompt_async${dirQ}`);
+  // NOTE: do NOT append ?directory= here. opencode's /event SSE stream is
+  // project-scoped: a prompt POSTed with ?directory= emits its events on the
+  // scoped channel, and the global /event subscription bui uses sees nothing
+  // (assistant text never streams to the renderer). Tools then run from the
+  // server's startup cwd, not the session worktree — accepted tradeoff until
+  // we move event subscription to per-project scoped streams.
+  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/prompt_async`);
   const parts: Array<Record<string, unknown>> = [];
   if (attachments) {
     for (const a of attachments) {
@@ -811,10 +742,9 @@ export async function runCommand(
   model?: PromptModel,
 ): Promise<void> {
   await ensureForward(config);
-  // Same rationale as sendPrompt: opencode tool execution honors the
-  // ?directory= query param, not session.directory metadata.
-  const dirQ = await getSessionDirectoryQuery(config, sessionId);
-  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/command${dirQ}`);
+  // NOTE: no ?directory= — see sendPrompt for why (would silence the SSE
+  // event stream the renderer subscribes to).
+  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/command`);
   const parts: Array<Record<string, unknown>> = [];
   if (attachments) {
     for (const a of attachments) {
@@ -873,8 +803,8 @@ export async function forkSession(
   messageID?: string,
 ): Promise<CreatedSession> {
   await ensureForward(config);
-  const dirQ = await getSessionDirectoryQuery(config, sessionId);
-  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/fork${dirQ}`);
+  // No ?directory= — see sendPrompt note.
+  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/fork`);
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -883,11 +813,7 @@ export async function forkSession(
   if (!res.ok) {
     throw new Error(`opencode forkSession ${res.status}: ${await res.text()}`);
   }
-  const sess = (await res.json()) as CreatedSession;
-  // The fork inherits the parent session's directory; cache it for the
-  // new session id so its tools also get the project scope on day one.
-  rememberSessionDirectory(sess.id, sess.directory);
-  return sess;
+  return (await res.json()) as CreatedSession;
 }
 
 // Compact: v2 endpoint summarizes the session in-place, freeing context. The
@@ -895,8 +821,8 @@ export async function forkSession(
 // path picks up the new transcript automatically.
 export async function compactSession(config: AppConfig, sessionId: string): Promise<void> {
   await ensureForward(config);
-  const dirQ = await getSessionDirectoryQuery(config, sessionId);
-  const url = apiUrl(config, `/api/session/${encodeURIComponent(sessionId)}/compact${dirQ}`);
+  // No ?directory= — see sendPrompt note.
+  const url = apiUrl(config, `/api/session/${encodeURIComponent(sessionId)}/compact`);
   const res = await fetch(url, { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode compactSession ${res.status}: ${await res.text()}`);
@@ -907,9 +833,6 @@ export async function compactSession(config: AppConfig, sessionId: string): Prom
 // responsible for tearing down the matching tmux window separately.
 export async function deleteSession(config: AppConfig, sessionId: string): Promise<void> {
   await ensureForward(config);
-  // No directory scoping needed for DELETE — the session id is unique
-  // server-wide. Drop the cache entry though.
-  sessionDirectoryCache.delete(sessionId);
   const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}`);
   const res = await fetch(url, { method: "DELETE" });
   if (!res.ok) {

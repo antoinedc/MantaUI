@@ -15,48 +15,6 @@ export function apiUrl(path) {
   return `http://127.0.0.1:${REMOTE_PORT}${path}`;
 }
 
-// ===== Per-session project-directory scope =====
-//
-// opencode's tool execution (Bash, Read, Grep, etc.) runs from the SERVER
-// process cwd, NOT from session.directory metadata. To scope tools to the
-// project worktree, every session-mutating request must carry
-// ?directory=<absolute-worktree-path>. Mirrors src/main/opencode.ts.
-const sessionDirectoryCache = new Map();
-
-function rememberSessionDirectory(sessionId, directory) {
-  if (sessionId && typeof directory === "string" && directory.length > 0) {
-    sessionDirectoryCache.set(sessionId, directory);
-  }
-}
-
-async function fetchSessionDirectory(sessionId) {
-  try {
-    const res = await fetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
-    if (!res.ok) return null;
-    const body = await res.json();
-    return typeof body.directory === "string" ? body.directory : null;
-  } catch {
-    return null;
-  }
-}
-
-async function getSessionDirectoryQuery(sessionId) {
-  let dir = sessionDirectoryCache.get(sessionId);
-  if (!dir) {
-    const fetched = await fetchSessionDirectory(sessionId);
-    if (fetched) {
-      sessionDirectoryCache.set(sessionId, fetched);
-      dir = fetched;
-    }
-  }
-  return dir ? `?directory=${encodeURIComponent(dir)}` : "";
-}
-
-/** Test-only: clear cache between scenarios. */
-export function _resetSessionDirectoryCache() {
-  sessionDirectoryCache.clear();
-}
-
 /**
  * Parse a single SSE text line into a JS object.
  * Returns null for comment lines (": …") and non-data lines.
@@ -89,9 +47,7 @@ export async function createSession({ directory, title = "" }) {
   if (!res.ok) {
     throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
   }
-  const sess = await res.json();
-  rememberSessionDirectory(sess.id, sess.directory ?? directory);
-  return sess;
+  return res.json();
 }
 
 /** Fetch the full message transcript for a session.
@@ -113,9 +69,13 @@ export async function listMessages(sessionId) {
  * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }> }} opts
  */
 export async function sendPrompt({ sessionId, text, model, attachments, mentions }) {
-  // Tool execution honors ?directory=… not session.directory metadata.
-  const dirQ = await getSessionDirectoryQuery(sessionId);
-  const url = `/session/${encodeURIComponent(sessionId)}/prompt_async${dirQ}`;
+  // NOTE: do NOT append ?directory= here — opencode's /event SSE stream is
+  // project-scoped. A prompt POSTed with ?directory= emits its events on
+  // the scoped channel, and the global /event subscription this server uses
+  // (subscribeEvents below) sees nothing, so the renderer never gets the
+  // assistant text. Tools then run from the server's startup cwd. Accepted
+  // tradeoff until /event subscription itself becomes per-project.
+  const url = `/session/${encodeURIComponent(sessionId)}/prompt_async`;
   const parts = [];
   if (attachments) {
     for (const a of attachments) {
@@ -178,8 +138,8 @@ export async function listSessions(directory) {
  * @param {{ sessionId: string, messageID?: string }} opts
  */
 export async function forkSession({ sessionId, messageID }) {
-  const dirQ = await getSessionDirectoryQuery(sessionId);
-  const url = `/session/${encodeURIComponent(sessionId)}/fork${dirQ}`;
+  // No ?directory= — see sendPrompt note.
+  const url = `/session/${encodeURIComponent(sessionId)}/fork`;
   const res = await fetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -188,17 +148,15 @@ export async function forkSession({ sessionId, messageID }) {
   if (!res.ok) {
     throw new Error(`opencode forkSession ${res.status}: ${await res.text()}`);
   }
-  const sess = await res.json();
-  rememberSessionDirectory(sess.id, sess.directory);
-  return sess;
+  return res.json();
 }
 
 /** Summarize a session in-place to free context (v2 compact endpoint).
  *  @param {string} sessionId
  */
 export async function compactSession(sessionId) {
-  const dirQ = await getSessionDirectoryQuery(sessionId);
-  const url = `/api/session/${encodeURIComponent(sessionId)}/compact${dirQ}`;
+  // No ?directory= — see sendPrompt note.
+  const url = `/api/session/${encodeURIComponent(sessionId)}/compact`;
   const res = await fetch(apiUrl(url), { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode compactSession ${res.status}: ${await res.text()}`);
@@ -210,8 +168,6 @@ export async function compactSession(sessionId) {
  *  @param {string} sessionId
  */
 export async function deleteSessionRaw(sessionId) {
-  // Session id is server-unique; no directory scope needed for DELETE.
-  sessionDirectoryCache.delete(sessionId);
   const url = `/session/${encodeURIComponent(sessionId)}`;
   const res = await fetch(apiUrl(url), { method: "DELETE" });
   if (!res.ok) {
@@ -446,8 +402,8 @@ export async function findFiles({ query, directory }) {
  * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string } }} opts
  */
 export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model }) {
-  const dirQ = await getSessionDirectoryQuery(sessionId);
-  const url = `/session/${encodeURIComponent(sessionId)}/command${dirQ}`;
+  // No ?directory= — see sendPrompt note.
+  const url = `/session/${encodeURIComponent(sessionId)}/command`;
   const parts = [];
   if (attachments) {
     for (const a of attachments) {

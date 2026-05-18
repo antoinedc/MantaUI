@@ -478,23 +478,18 @@ when opencode introduces new error class names; unknown names fall through
 to the raw message.
 
 **Gotchas**:
-- **opencode tool execution honors `?directory=` query param, NOT
-  `session.directory` metadata.** Bash/Read/Grep run from the SERVER
-  process's startup cwd unless every request carries `?directory=<worktree>`
-  scoping it to the project. Without scoping, every session — regardless
-  of which project it was created for — runs tools from wherever
-  `bui-opencode` was started (typically `$HOME`). Empirical: posting to
-  `/session/{id}/prompt_async?directory=/home/dev/projects/better-ui` makes
-  `Bash(pwd)` return that directory; same POST without the query returns
-  `/home/dev`. Confirmed not-planned upstream: opencode issue #25561 (no
-  separate cwd channel; `?directory=` IS the channel). Implementation in
-  `src/main/opencode.ts` keeps a `sessionDirectoryCache: Map<sessionId, dir>`
-  populated by `createSession`/`forkSession` (we know the directory there)
-  and lazily by `GET /session/{id}` on cache miss. `sendPrompt`, `runCommand`,
-  `forkSession`, `compactSession` append `?directory=…` from the cache.
-  Mirrored in `src/server/opencode.mjs`. If you add a new session-mutating
-  call, route it through `getSessionDirectoryQuery(sessionId)` — every
-  POST/PUT/DELETE on `/session/{id}/...` accepts the query param.
+- **Do NOT append `?directory=` to `prompt_async` / `command` / `fork` /
+  `compact`.** opencode's `/event` SSE stream is project-scoped: a POST
+  with `?directory=` emits its message/session events on the scoped
+  channel only, and bui's global `/event` subscription (`subscribeEvents`)
+  sees nothing — assistant text never reaches the renderer, even though
+  opencode persists the messages normally. Symptom: user message shows
+  optimistically, assistant turn stays blank forever, no JS errors.
+  The "scope tools to worktree" idea (commit 7f9512f, reverted) is
+  blocked on us first moving event subscription to per-project scoped
+  streams. Until then, opencode tools run from `bui-opencode`'s startup
+  cwd — accepted regression. `createSession` and `listSessions` keep
+  their `?directory=` (those don't share the broken event channel).
 - Sessions persist FileParts forever. A bad-mime FilePart (e.g. `application/json`)
   in history causes every subsequent Anthropic call to fail. Fix:
   `DELETE /session/{sid}/message/{mid}/part/{pid}` on each offender.
