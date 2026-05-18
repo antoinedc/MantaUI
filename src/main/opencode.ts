@@ -281,6 +281,27 @@ export function invalidateForward(): void {
   forwarded = false;
 }
 
+// Force-evict OUR OWN live ControlMaster, then mark the forward stale.
+//
+// `evictStaleForwardHolder` only fires on a port-bind failure and only
+// targets *orphan* sockets (a different master than the live one). It has
+// no answer for the half-dead-master case: the master we are actively
+// using passes `ssh -O check` and still services short calls, but has
+// stopped pumping long-lived SSE streams (see classifyStreamHealth in
+// forwardHeal.ts). The only recovery is to tear that master down so the
+// next ensureForward() boots a fresh one.
+//
+// `ssh -O exit` here uses controlArgs() → ControlPath=/tmp/bui-cm-%C, i.e.
+// it targets the master for THIS config's connection (the one we use), not
+// an orphan. Best-effort: if the socket is already gone, the next
+// ensureForward() rebuilds anyway.
+export async function forceEvictControlMaster(
+  config: AppConfig,
+): Promise<void> {
+  await runSshControl(config, "exit").catch(() => {});
+  forwarded = false;
+}
+
 // ===== HTTP client =====
 
 function apiUrl(config: AppConfig, path: string): string {

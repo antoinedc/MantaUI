@@ -60,10 +60,15 @@ import {
   findFiles as opencodeFindFiles,
   runCommand as opencodeRunCommand,
   createSession as opencodeCreateSession,
+  forceEvictControlMaster as forceEvictOpencodeMaster,
   type PromptModel,
   type PromptAttachment,
   type PromptAgentMention,
 } from "./opencode.js";
+import {
+  classifyStreamHealth,
+  STREAM_STALL_MS,
+} from "./forwardHeal.js";
 import {
   IPC,
   type AppConfig,
@@ -242,6 +247,8 @@ function ensureOpencodeStream(directory: string): void {
         await new Promise((r) => setTimeout(r, 2000));
         continue;
       }
+      // Hoisted so the finally can always clear it even if subscribe throws.
+      let watchdog: ReturnType<typeof setInterval> | null = null;
       try {
         const stream = await opencodeSubscribeEvents(
           config,
@@ -257,9 +264,44 @@ function ensureOpencodeStream(directory: string): void {
               .map((k) => k || "<global>")
               .join(", ")})`,
         );
+        // Stalled-stream watchdog. A half-dead ControlMaster (post sleep /
+        // wifi change) lets this fetch CONNECT and deliver the first
+        // `server.connected` frame, then stops pumping — no heartbeats, no
+        // events. `ssh -O check` still passes so ensureForward can't see it.
+        // We watch frame arrival here: if classifyStreamHealth says stalled
+        // (connected long enough for ≥1 heartbeat, but total frame silence),
+        // force-evict our ControlMaster and dispose the stream. The dispose
+        // ends the `for await`, and the existing finally→backoff→loop then
+        // reconnects through the fresh master ensureForward boots.
+        const connectedAt = Date.now();
+        let lastFrameAt = connectedAt;
+        let frames = 0;
+        let stalledOut = false;
+        watchdog = setInterval(() => {
+          const now = Date.now();
+          const health = classifyStreamHealth({
+            framesSinceConnect: frames,
+            msSinceConnect: now - connectedAt,
+            msSinceLastFrame: now - lastFrameAt,
+          });
+          if (health === "stalled") {
+            stalledOut = true;
+            console.warn(
+              `[opencode-bus] STALLED dir=${directory || "<global>"} ` +
+                `(no frames for ${Math.round((now - lastFrameAt) / 1000)}s ` +
+                `after connect) — evicting ControlMaster + reconnecting`,
+            );
+            // Tear the half-dead master down so the next loop iteration's
+            // ensureForward boots a healthy one, then end this stream.
+            void forceEvictOpencodeMaster(config).catch(() => {});
+            try { stream.dispose(); } catch { /* already disposed */ }
+          }
+        }, Math.min(STREAM_STALL_MS, 10_000));
         let evCount = 0;
         for await (const ev of stream.iter) {
-          if (stopped || opencodeBusStopped) break;
+          if (stopped || opencodeBusStopped || stalledOut) break;
+          lastFrameAt = Date.now();
+          frames++;
           // Lightweight success-path trace: first event + every 50th, so the
           // log shows events ARE flowing for a dir (vs. silent = the bug)
           // without flooding on delta storms.
@@ -301,6 +343,7 @@ function ensureOpencodeStream(directory: string): void {
         );
       } finally {
         activeDispose = null;
+        if (watchdog) clearInterval(watchdog);
         // Stream dropped: re-arm readiness so a prompt issued during the
         // reconnect window waits for the new subscription instead of racing
         // a dead one. Drop the resolved promise; readyFor() makes a fresh.

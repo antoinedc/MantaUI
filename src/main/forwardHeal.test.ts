@@ -3,6 +3,8 @@ import {
   decideEviction,
   isPortForwardingFailure,
   parseLsofListeners,
+  classifyStreamHealth,
+  STREAM_STALL_MS,
 } from "./forwardHeal.js";
 
 describe("isPortForwardingFailure", () => {
@@ -126,5 +128,79 @@ describe("decideEviction", () => {
       pid: 74831,
       command: "ssh",
     });
+  });
+});
+
+describe("classifyStreamHealth", () => {
+  const S = STREAM_STALL_MS;
+
+  it("REGRESSION: connected past the window with TOTAL frame silence → stalled", () => {
+    // The half-dead-ControlMaster bug: stream connected, got only the
+    // server.connected frame (frames=1), nothing since. Must be flagged so
+    // the bus evicts the master and reconnects.
+    expect(
+      classifyStreamHealth({
+        framesSinceConnect: 1,
+        msSinceConnect: S + 5_000,
+        msSinceLastFrame: S + 5_000,
+      }),
+    ).toBe("stalled");
+  });
+
+  it("idle-but-HEALTHY (heartbeats arriving) is NOT flagged — no false positive", () => {
+    // A genuinely idle session still gets server.heartbeat well within the
+    // window. msSinceLastFrame stays small even though no app events occur.
+    expect(
+      classifyStreamHealth({
+        framesSinceConnect: 12, // connect + 11 heartbeats
+        msSinceConnect: S * 5,
+        msSinceLastFrame: 8_000, // last heartbeat 8s ago — healthy
+      }),
+    ).toBe("healthy");
+  });
+
+  it("too soon after connect → healthy (can't judge before one heartbeat is due)", () => {
+    expect(
+      classifyStreamHealth({
+        framesSinceConnect: 1,
+        msSinceConnect: S - 1,
+        msSinceLastFrame: S - 1,
+      }),
+    ).toBe("healthy");
+  });
+
+  it("boundary: silence exactly == stallMs and connected == stallMs → stalled", () => {
+    expect(
+      classifyStreamHealth({
+        framesSinceConnect: 1,
+        msSinceConnect: S,
+        msSinceLastFrame: S,
+      }),
+    ).toBe("stalled");
+  });
+
+  it("recent frame after a long-lived connection → healthy", () => {
+    expect(
+      classifyStreamHealth({
+        framesSinceConnect: 5000,
+        msSinceConnect: S * 100,
+        msSinceLastFrame: 200,
+      }),
+    ).toBe("healthy");
+  });
+
+  it("honors a custom stallMs", () => {
+    expect(
+      classifyStreamHealth(
+        { framesSinceConnect: 1, msSinceConnect: 2000, msSinceLastFrame: 2000 },
+        1000,
+      ),
+    ).toBe("stalled");
+    expect(
+      classifyStreamHealth(
+        { framesSinceConnect: 1, msSinceConnect: 500, msSinceLastFrame: 500 },
+        1000,
+      ),
+    ).toBe("healthy");
   });
 });

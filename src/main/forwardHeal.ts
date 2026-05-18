@@ -115,3 +115,63 @@ export function decideEviction(
   }
   return { action: "none" };
 }
+
+// ===== Stalled-stream detection =====
+//
+// Second ControlMaster failure mode (distinct from the orphan above): the
+// shared master goes HALF-DEAD after a network transition (laptop sleep,
+// wifi change). `ssh -O check` still passes — the control socket answers —
+// and short request/response calls complete in their first burst, so
+// GET /question and POST /prompt keep working. But long-lived SSE streams
+// receive only the initial `server.connected` frame and then the mux stops
+// pumping data. Result: questions, live message deltas, and todo updates
+// silently stop reaching the renderer while the app otherwise looks fine.
+//
+// `evictStaleForwardHolder` cannot catch this — there is no port-bind
+// failure; the forward "succeeds". Detection must instead watch the event
+// stream itself: opencode sends `server.connected` on connect and then
+// `server.heartbeat` periodically (well under a minute) on a HEALTHY
+// stream, even when the session is idle. So "connected, but zero further
+// frames of ANY type for a window comfortably longer than the heartbeat
+// interval" is an unambiguous stall — a genuinely idle-but-healthy stream
+// still produces heartbeats and is never flagged.
+
+// How long after connect we tolerate total frame silence before declaring
+// the stream stalled. opencode's heartbeat cadence is ~tens of seconds;
+// 45s is several heartbeats — long enough to never false-positive on a
+// healthy idle stream, short enough that recovery is timely.
+export const STREAM_STALL_MS = 45_000;
+
+export type StreamHealthInput = {
+  // Total frames received on this stream since it connected, INCLUDING
+  // server.connected and every server.heartbeat. The connect frame counts
+  // as 1, so a healthy-but-idle stream has framesSinceConnect growing via
+  // heartbeats; a stalled stream stays at 1.
+  framesSinceConnect: number;
+  // ms since the stream's underlying fetch connected.
+  msSinceConnect: number;
+  // ms since the most recent frame of ANY type (heartbeat included).
+  // Infinity / very large when only the connect frame was ever seen.
+  msSinceLastFrame: number;
+};
+
+// Pure decision: is this SSE stream stalled (mux stopped pumping) and thus
+// in need of a forced ControlMaster eviction + reconnect?
+//
+// Stalled iff BOTH:
+//   - it has been connected long enough that a healthy stream would have
+//     emitted at least one heartbeat (msSinceConnect ≥ STREAM_STALL_MS), AND
+//   - no frame of any kind has arrived for that same window
+//     (msSinceLastFrame ≥ STREAM_STALL_MS).
+// The heartbeat is the liveness signal: any frame — including a heartbeat —
+// resets msSinceLastFrame and keeps the stream classified healthy. A stream
+// that legitimately has no app activity is therefore still healthy as long
+// as heartbeats flow; only true mux silence trips this.
+export function classifyStreamHealth(
+  i: StreamHealthInput,
+  stallMs: number = STREAM_STALL_MS,
+): "healthy" | "stalled" {
+  if (i.msSinceConnect < stallMs) return "healthy"; // too soon to judge
+  if (i.msSinceLastFrame >= stallMs) return "stalled";
+  return "healthy";
+}
