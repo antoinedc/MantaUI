@@ -32,6 +32,63 @@ export function parseSseFrame(line) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-session project-directory scope
+// ---------------------------------------------------------------------------
+//
+// opencode's tool execution runs from the server's startup cwd, NOT from
+// session.directory metadata. To make tools execute in the project worktree,
+// every session-mutating POST must carry `?directory=<absolute-worktree-path>`.
+// opencode's `/event` SSE stream is ALSO scoped by `?directory=`: events from
+// a scoped POST land only on the matching scoped stream. The bus below
+// (subscribeEvents) opens one subscription per directory we know about so
+// every project's events flow back into the renderer.
+//
+// We cache session→directory locally so each prompt/command POST doesn't
+// require an extra GET /session lookup.
+
+const sessionDirectoryCache = new Map();
+const directoryListeners = new Set(); // notified on new directory
+
+function rememberSessionDirectory(sessionId, directory) {
+  if (!sessionId || typeof directory !== "string" || directory.length === 0) return;
+  const prev = sessionDirectoryCache.get(sessionId);
+  sessionDirectoryCache.set(sessionId, directory);
+  if (prev !== directory) {
+    for (const fn of directoryListeners) {
+      try { fn(directory); } catch { /* ignore listener error */ }
+    }
+  }
+}
+
+async function fetchSessionDirectory(sessionId) {
+  try {
+    const res = await fetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
+    if (!res.ok) return null;
+    const body = await res.json();
+    return typeof body?.directory === "string" ? body.directory : null;
+  } catch {
+    return null;
+  }
+}
+
+async function getSessionDirectoryQuery(sessionId) {
+  let dir = sessionDirectoryCache.get(sessionId);
+  if (!dir) {
+    const fetched = await fetchSessionDirectory(sessionId);
+    if (fetched) {
+      sessionDirectoryCache.set(sessionId, fetched);
+      dir = fetched;
+    }
+  }
+  return dir ? `?directory=${encodeURIComponent(dir)}` : "";
+}
+
+/** Test-only: reset cache between scenarios. */
+export function _resetSessionDirectoryCache() {
+  sessionDirectoryCache.clear();
+}
+
+// ---------------------------------------------------------------------------
 // Session CRUD
 // ---------------------------------------------------------------------------
 
@@ -49,7 +106,9 @@ export async function createSession({ directory, title = "" }) {
   if (!res.ok) {
     throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
   }
-  return res.json();
+  const sess = await res.json();
+  rememberSessionDirectory(sess.id, sess.directory ?? directory);
+  return sess;
 }
 
 /** Fetch the full message transcript for a session.
@@ -71,13 +130,11 @@ export async function listMessages(sessionId) {
  * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }> }} opts
  */
 export async function sendPrompt({ sessionId, text, model, attachments, mentions }) {
-  // NOTE: do NOT append ?directory= here — opencode's /event SSE stream is
-  // project-scoped. A prompt POSTed with ?directory= emits its events on
-  // the scoped channel, and the global /event subscription this server uses
-  // (subscribeEvents below) sees nothing, so the renderer never gets the
-  // assistant text. Tools then run from the server's startup cwd. Accepted
-  // tradeoff until /event subscription itself becomes per-project.
-  const url = `/session/${encodeURIComponent(sessionId)}/prompt_async`;
+  // Scope tools + events to the session's worktree. The matching per-directory
+  // subscription in subscribeEvents below ensures the events still reach
+  // listeners (the global /event subscription wouldn't see them otherwise).
+  const dirQ = await getSessionDirectoryQuery(sessionId);
+  const url = `/session/${encodeURIComponent(sessionId)}/prompt_async${dirQ}`;
   const parts = [];
   if (attachments) {
     for (const a of attachments) {
@@ -140,8 +197,8 @@ export async function listSessions(directory) {
  * @param {{ sessionId: string, messageID?: string }} opts
  */
 export async function forkSession({ sessionId, messageID }) {
-  // No ?directory= — see sendPrompt note.
-  const url = `/session/${encodeURIComponent(sessionId)}/fork`;
+  const dirQ = await getSessionDirectoryQuery(sessionId);
+  const url = `/session/${encodeURIComponent(sessionId)}/fork${dirQ}`;
   const res = await fetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -150,15 +207,17 @@ export async function forkSession({ sessionId, messageID }) {
   if (!res.ok) {
     throw new Error(`opencode forkSession ${res.status}: ${await res.text()}`);
   }
-  return res.json();
+  const sess = await res.json();
+  rememberSessionDirectory(sess.id, sess.directory);
+  return sess;
 }
 
 /** Summarize a session in-place to free context (v2 compact endpoint).
  *  @param {string} sessionId
  */
 export async function compactSession(sessionId) {
-  // No ?directory= — see sendPrompt note.
-  const url = `/api/session/${encodeURIComponent(sessionId)}/compact`;
+  const dirQ = await getSessionDirectoryQuery(sessionId);
+  const url = `/api/session/${encodeURIComponent(sessionId)}/compact${dirQ}`;
   const res = await fetch(apiUrl(url), { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode compactSession ${res.status}: ${await res.text()}`);
@@ -170,6 +229,7 @@ export async function compactSession(sessionId) {
  *  @param {string} sessionId
  */
 export async function deleteSessionRaw(sessionId) {
+  sessionDirectoryCache.delete(sessionId);
   const url = `/session/${encodeURIComponent(sessionId)}`;
   const res = await fetch(apiUrl(url), { method: "DELETE" });
   if (!res.ok) {
@@ -416,8 +476,8 @@ export async function findFiles({ query, directory }) {
  * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string } }} opts
  */
 export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model }) {
-  // No ?directory= — see sendPrompt note.
-  const url = `/session/${encodeURIComponent(sessionId)}/command`;
+  const dirQ = await getSessionDirectoryQuery(sessionId);
+  const url = `/session/${encodeURIComponent(sessionId)}/command${dirQ}`;
   const parts = [];
   if (attachments) {
     for (const a of attachments) {
@@ -448,29 +508,23 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
 // SSE event subscription
 // ---------------------------------------------------------------------------
 
-/**
- * Opens a long-lived SSE connection to opencode's /event endpoint.
- * Calls onEvent(parsedObject) for each parsed event frame.
- * Auto-reconnects on drop with a 1.5 s delay.
- *
- * Returns stop() which:
- *   - sets stopped = true so the loop exits after the current iteration, AND
- *   - immediately aborts the in-flight fetch via AbortController so
- *     reader.read() unblocks right away (no connection leak on teardown).
- *
- * @param {(event: object) => void} onEvent
- * @returns {() => void} stop
- */
-export function subscribeEvents(onEvent) {
+// One long-lived SSE connection to opencode's /event endpoint, optionally
+// scoped to a project `?directory=`. Auto-reconnects on drop with 1.5 s
+// delay; returns stop() that flips stopped=true AND aborts the in-flight
+// fetch so reader.read() unblocks immediately.
+function openEventStream(onEvent, directory) {
   let stopped = false;
   let currentController = null;
+  const path = directory
+    ? `/event?directory=${encodeURIComponent(directory)}`
+    : "/event";
 
   (async function loop() {
     while (!stopped) {
       const controller = new AbortController();
       currentController = controller;
       try {
-        const res = await fetch(apiUrl("/event"), {
+        const res = await fetch(apiUrl(path), {
           signal: controller.signal,
           headers: { accept: "text/event-stream" },
         });
@@ -517,4 +571,63 @@ export function subscribeEvents(onEvent) {
   })();
 
   return () => { stopped = true; currentController?.abort(); };
+}
+
+/**
+ * Subscribe to opencode events across ALL project directories.
+ *
+ * opencode's `/event` is project-scoped: a POST with `?directory=X` emits
+ * its events on the stream subscribed to `?directory=X` only. To catch
+ * everything we open the global stream PLUS one stream per directory we've
+ * seen (via createSession / forkSession / listSessions). Newly-discovered
+ * directories auto-spawn a stream via the directoryListeners hook.
+ *
+ * Bootstrap: we call listSessions() once on subscribe so existing sessions
+ * (from a previous server restart) have their directories cached and a
+ * stream opened.
+ *
+ * @param {(event: object) => void} onEvent
+ * @returns {() => void} stop
+ */
+export function subscribeEvents(onEvent) {
+  const streams = new Map(); // key: "" (global) or directory string
+  let stopped = false;
+
+  const openFor = (key, dir) => {
+    if (streams.has(key)) return;
+    streams.set(key, openEventStream(onEvent, dir));
+  };
+
+  // Global stream catches non-scoped events (server.heartbeat, vcs.branch.updated,
+  // and any future event that opencode emits without a directory).
+  openFor("", undefined);
+
+  // Auto-open scoped streams for newly-discovered directories.
+  const listener = (dir) => {
+    if (stopped || !dir) return;
+    openFor(dir, dir);
+  };
+  directoryListeners.add(listener);
+
+  // Prime the cache from existing sessions so server-restart scenarios pick
+  // up streams for in-flight directories without needing a new session.
+  (async () => {
+    try {
+      const sessions = await listSessions();
+      for (const s of sessions || []) {
+        if (s?.id && typeof s?.directory === "string") {
+          rememberSessionDirectory(s.id, s.directory);
+        }
+      }
+    } catch { /* non-fatal: bootstrap is best-effort */ }
+  })();
+
+  return () => {
+    stopped = true;
+    directoryListeners.delete(listener);
+    for (const stop of streams.values()) {
+      try { stop(); } catch { /* ignore */ }
+    }
+    streams.clear();
+  };
 }

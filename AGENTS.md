@@ -491,19 +491,35 @@ full — try /compact: …", `MessageOutputLengthError` → "Response truncated
 when opencode introduces new error class names; unknown names fall through
 to the raw message.
 
-**Gotchas**:
-- **Do NOT append `?directory=` to `prompt_async` / `command` / `fork` /
-  `compact`.** opencode's `/event` SSE stream is project-scoped: a POST
-  with `?directory=` emits its message/session events on the scoped
-  channel only, and bui's global `/event` subscription (`subscribeEvents`)
-  sees nothing — assistant text never reaches the renderer, even though
-  opencode persists the messages normally. Symptom: user message shows
-  optimistically, assistant turn stays blank forever, no JS errors.
-  The "scope tools to worktree" idea (commit 7f9512f, reverted) is
-  blocked on us first moving event subscription to per-project scoped
-  streams. Until then, opencode tools run from `bui-opencode`'s startup
-  cwd — accepted regression. `createSession` and `listSessions` keep
-  their `?directory=` (those don't share the broken event channel).
+**Per-project SSE scope** — every session-mutating POST
+(`prompt_async`, `command`, `fork`, `compact`) carries
+`?directory=<session.directory>` so opencode runs tools inside the project
+worktree. opencode's `/event` stream is ALSO scoped by `?directory=`: events
+from a scoped POST land only on the matching scoped subscription, NOT on
+the global stream. The bus in `src/main/index.ts` therefore opens **one
+`/event` stream per directory** in addition to the global stream:
+
+- `sessionDirectoryCache` in `src/main/opencode.ts` maps `sessionId →
+  directory`; populated by `createSession`, `forkSession`, and `listSessions`
+  (via a side-effect loop), and lazy-filled by `GET /session/{id}` on miss.
+- `onSessionDirectoryAdded` lets the bus auto-spawn a stream whenever a new
+  directory shows up in the cache.
+- On startup the bus opens the global stream, replays
+  `knownSessionDirectories()`, and calls `opencodeListSessions(config)` to
+  prime the cache from server-side sessions (recovers from restarts).
+
+Symptom you'll see if this breaks again: user message shows optimistically,
+assistant turn stays blank forever, no JS errors. The transcript
+(`GET .../message`) shows the response was generated and persisted — it
+just never streams to the renderer because the matching scoped stream
+isn't open. Verify with
+`curl -sN 'http://127.0.0.1:4096/event?directory=<cwd>'` while a prompt is
+in flight: you should see `message.part.delta` frames.
+
+The mobile server (`src/server/opencode.mjs`) mirrors this with its own
+`sessionDirectoryCache` and `subscribeEvents()` that opens global + one
+scoped stream per known directory. Both code paths share the same contract;
+when changing one, change the other.
 - Sessions persist FileParts forever. A bad-mime FilePart (e.g. `application/json`)
   in history causes every subsequent Anthropic call to fail. Fix:
   `DELETE /session/{sid}/message/{mid}/part/{pid}` on each offender.

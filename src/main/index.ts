@@ -48,6 +48,8 @@ import {
   listModels as opencodeListModels,
   getDefaultModel as opencodeGetDefaultModel,
   getVcsBranch as opencodeGetVcsBranch,
+  knownSessionDirectories,
+  onSessionDirectoryAdded,
   listSessions as opencodeListSessions,
   forkSession as opencodeForkSession,
   compactSession as opencodeCompactSession,
@@ -113,13 +115,25 @@ function startPollerIfReady(): void {
   startStatusPoller(mainWindow, () => config);
 }
 
-// Long-lived opencode SSE bus, owned by main. Forwards every event from the
-// remote opencode server to the renderer; renderer filters by sessionID per
-// component (ChatPanel). Reconnects with backoff on stream end / errors.
-// Only relevant for chat-mode windows but cheap to keep up even when none
-// exist (opencode just emits no events).
+// Opencode SSE bus — multi-stream.
+//
+// opencode's `/event` endpoint is scoped by `?directory=<cwd>`: a POST with
+// `?directory=X` emits its message/session events on the stream subscribed
+// to `?directory=X` only. To catch every project's events we open:
+//   - one global stream (`/event`) for unscoped events (server.heartbeat,
+//     vcs.branch.updated, etc.), AND
+//   - one scoped stream per directory we've ever cached (createSession,
+//     forkSession, listSessions all feed `sessionDirectoryCache` and fire
+//     `onSessionDirectoryAdded`).
+//
+// On start we bootstrap by listing existing sessions so server-restart
+// scenarios re-open every directory's stream automatically.
+//
+// Reconnect: each stream loop has its own backoff. We do NOT tear down all
+// streams when one dies — others keep flowing.
 let opencodeBusStopped = true;
-let opencodeBusDispose: (() => void) | null = null;
+const opencodeStreams = new Map<string, () => void>(); // key: "" (global) or dir
+let unsubscribeDirAdded: (() => void) | null = null;
 
 function startOpencodeBus(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -128,62 +142,106 @@ function startOpencodeBus(): void {
     return;
   }
   opencodeBusStopped = false;
-  void opencodeBusLoop();
+
+  // Auto-spawn a scoped stream when a new directory shows up in the cache.
+  if (!unsubscribeDirAdded) {
+    unsubscribeDirAdded = onSessionDirectoryAdded((dir) => {
+      if (opencodeBusStopped) return;
+      ensureOpencodeStream(dir);
+    });
+  }
+
+  // Always run the global stream.
+  ensureOpencodeStream("");
+
+  // Bootstrap: open scoped streams for every directory we already know
+  // (sidebar refreshes since launch, or any session created earlier in
+  // this run). Also kick a global listSessions() so the server's pre-
+  // existing sessions seed the cache (and thus open streams via the hook).
+  for (const dir of knownSessionDirectories()) ensureOpencodeStream(dir);
+  void opencodeListSessions(config).catch(() => { /* non-fatal bootstrap */ });
 }
 
 function stopOpencodeBus(): void {
   opencodeBusStopped = true;
-  if (opencodeBusDispose) {
-    try { opencodeBusDispose(); } catch { /* ignore */ }
-    opencodeBusDispose = null;
+  if (unsubscribeDirAdded) {
+    try { unsubscribeDirAdded(); } catch { /* ignore */ }
+    unsubscribeDirAdded = null;
   }
+  for (const stop of opencodeStreams.values()) {
+    try { stop(); } catch { /* ignore */ }
+  }
+  opencodeStreams.clear();
 }
 
-async function opencodeBusLoop(): Promise<void> {
-  let backoffMs = 500;
-  while (!opencodeBusStopped) {
-    if (!config.host) {
-      await new Promise((r) => setTimeout(r, 2000));
-      continue;
+function ensureOpencodeStream(directory: string): void {
+  if (opencodeBusStopped) return;
+  if (opencodeStreams.has(directory)) return;
+  let stopped = false;
+  // Stop function is wired before the async loop starts, so callers can
+  // teardown even if we haven't received the first event yet.
+  opencodeStreams.set(directory, () => {
+    stopped = true;
+    const dispose = activeDispose;
+    if (dispose) {
+      try { dispose(); } catch { /* ignore */ }
     }
-    try {
-      const stream = await opencodeSubscribeEvents(config);
-      opencodeBusDispose = stream.dispose;
-      backoffMs = 500;
-      for await (const ev of stream.iter) {
-        if (opencodeBusStopped) break;
-
-        // Trust mode: auto-reply "always" to every permission.asked. The card
-        // never reaches the renderer, so tools execute without prompting —
-        // closest analog to Claude Code's --dangerously-skip-permissions.
-        if (ev.type === "permission.asked" && config.chatAutoAllow) {
-          const perm = ev.properties as { id?: string } | undefined;
-          if (perm?.id) {
-            void opencodeReplyPermission(config, perm.id, "always").catch(
-              (e) => console.warn("[opencode-bus] auto-allow failed:", (e as Error).message),
-            );
-          }
-          // Suppress forwarding — the renderer doesn't need to render the
-          // card. The subsequent permission.replied event still flows through.
-          continue;
-        }
-
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send(IPC.opencodeEvent, ev);
-        }
+  });
+  let activeDispose: (() => void) | null = null;
+  void (async function loop() {
+    let backoffMs = 500;
+    while (!stopped && !opencodeBusStopped) {
+      if (!config.host) {
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
       }
-    } catch (e) {
-      // Server might not be up yet — fine, retry. We don't proactively
-      // start opencode serve here; that happens on first chat-mode window
-      // creation (in pty.ts → maybeCreateChatSession → ensureRunning).
-      console.warn("[opencode-bus] SSE loop:", (e as Error).message);
-    } finally {
-      opencodeBusDispose = null;
+      try {
+        const stream = await opencodeSubscribeEvents(
+          config,
+          directory || undefined,
+        );
+        activeDispose = stream.dispose;
+        backoffMs = 500;
+        for await (const ev of stream.iter) {
+          if (stopped || opencodeBusStopped) break;
+
+          // Trust mode: auto-reply "always" to every permission.asked. The
+          // card never reaches the renderer, so tools execute without
+          // prompting — closest analog to Claude Code's
+          // --dangerously-skip-permissions.
+          if (ev.type === "permission.asked" && config.chatAutoAllow) {
+            const perm = ev.properties as { id?: string } | undefined;
+            if (perm?.id) {
+              void opencodeReplyPermission(config, perm.id, "always").catch(
+                (e) => console.warn("[opencode-bus] auto-allow failed:", (e as Error).message),
+              );
+            }
+            // Suppress forwarding — the renderer doesn't need to render the
+            // card. The subsequent permission.replied event still flows through.
+            continue;
+          }
+
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send(IPC.opencodeEvent, ev);
+          }
+        }
+      } catch (e) {
+        // Server might not be up yet — fine, retry. We don't proactively
+        // start opencode serve here; that happens on first chat-mode window
+        // creation (in pty.ts → maybeCreateChatSession → ensureRunning).
+        console.warn(
+          `[opencode-bus${directory ? `:${directory}` : ""}] SSE loop:`,
+          (e as Error).message,
+        );
+      } finally {
+        activeDispose = null;
+      }
+      if (stopped || opencodeBusStopped) break;
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 8000);
     }
-    if (opencodeBusStopped) break;
-    await new Promise((r) => setTimeout(r, backoffMs));
-    backoffMs = Math.min(backoffMs * 2, 8000);
-  }
+    opencodeStreams.delete(directory);
+  })();
 }
 
 // Periodic upload cleanup. Runs once on (re)start and every hour afterward;

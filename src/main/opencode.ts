@@ -290,6 +290,101 @@ export type CreatedSession = {
   projectID: string;
 };
 
+// ===== Per-session project-directory scope =====
+//
+// opencode's tool execution (Bash, Read, Grep, etc.) runs from the SERVER
+// process's startup cwd, NOT from session.directory metadata. To make tools
+// execute inside the project worktree, every session-mutating POST must
+// carry `?directory=<absolute-worktree-path>` (issue #25561 — the directory
+// query param IS the channel).
+//
+// opencode's `/event` stream is ALSO scoped by `?directory=`: a POST with
+// `?directory=X` emits its message/session events on the stream subscribed
+// to `?directory=X` only. The event bus in src/main/index.ts therefore
+// opens one subscription per known directory; here we just have to remember
+// each session's directory so prompt/command/fork/compact can append the
+// right query string.
+const sessionDirectoryCache = new Map<string, string>();
+const directoryListeners = new Set<(directory: string) => void>();
+
+function rememberSessionDirectory(
+  sessionId: string,
+  directory: string | undefined | null,
+): void {
+  if (!sessionId || typeof directory !== "string" || directory.length === 0) {
+    return;
+  }
+  const prev = sessionDirectoryCache.get(sessionId);
+  sessionDirectoryCache.set(sessionId, directory);
+  if (prev !== directory) {
+    for (const fn of directoryListeners) {
+      try { fn(directory); } catch { /* ignore listener error */ }
+    }
+  }
+}
+
+// Subscribe to discovery of new session directories. Used by the event bus
+// in src/main/index.ts to auto-open a `/event?directory=` stream whenever
+// bui learns of a new project worktree.
+export function onSessionDirectoryAdded(
+  listener: (directory: string) => void,
+): () => void {
+  directoryListeners.add(listener);
+  return () => { directoryListeners.delete(listener); };
+}
+
+// Snapshot of every directory the cache currently knows about. Used by the
+// bus on (re)start to open scoped streams for sessions discovered before
+// the subscription was active.
+export function knownSessionDirectories(): string[] {
+  return Array.from(new Set(sessionDirectoryCache.values()));
+}
+
+async function fetchSessionDirectory(
+  config: AppConfig,
+  sessionId: string,
+): Promise<string | null> {
+  await ensureForward(config);
+  try {
+    const res = await fetch(apiUrl(config, `/session/${encodeURIComponent(sessionId)}`));
+    if (!res.ok) return null;
+    const body = (await res.json()) as { directory?: unknown };
+    return typeof body.directory === "string" ? body.directory : null;
+  } catch {
+    return null;
+  }
+}
+
+// Look up (and lazily populate) the per-session directory, then return the
+// query-string fragment opencode needs to scope tools + event emission.
+// Returns "" only when we genuinely can't resolve a directory.
+async function getSessionDirectoryQuery(
+  config: AppConfig,
+  sessionId: string,
+): Promise<string> {
+  let dir = sessionDirectoryCache.get(sessionId);
+  if (!dir) {
+    const fetched = await fetchSessionDirectory(config, sessionId);
+    if (fetched) {
+      sessionDirectoryCache.set(sessionId, fetched);
+      dir = fetched;
+    }
+  }
+  return dir ? `?directory=${encodeURIComponent(dir)}` : "";
+}
+
+// Returns the cached directory for a session (sync). Used by the event-bus
+// manager to know which scoped stream to keep open. Returns null if we have
+// never created or fetched this session's directory.
+export function getSessionDirectorySync(sessionId: string): string | null {
+  return sessionDirectoryCache.get(sessionId) ?? null;
+}
+
+// Test-only: reset cache between scenarios.
+export function _resetSessionDirectoryCache(): void {
+  sessionDirectoryCache.clear();
+}
+
 export async function createSession(
   config: AppConfig,
   directory: string,
@@ -305,7 +400,11 @@ export async function createSession(
   if (!res.ok) {
     throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
   }
-  return (await res.json()) as CreatedSession;
+  const sess = (await res.json()) as CreatedSession;
+  // Cache session.directory immediately. Prefer the server-confirmed value
+  // (handles symlink resolution / canonicalization); fall back to the input.
+  rememberSessionDirectory(sess.id, sess.directory ?? directory);
+  return sess;
 }
 
 // Fetch the full transcript for a session. Phase 1 renders the result as-is;
@@ -362,13 +461,13 @@ export async function sendPrompt(
   mentions?: PromptAgentMention[],
 ): Promise<void> {
   await ensureForward(config);
-  // NOTE: do NOT append ?directory= here. opencode's /event SSE stream is
-  // project-scoped: a prompt POSTed with ?directory= emits its events on the
-  // scoped channel, and the global /event subscription bui uses sees nothing
-  // (assistant text never streams to the renderer). Tools then run from the
-  // server's startup cwd, not the session worktree — accepted tradeoff until
-  // we move event subscription to per-project scoped streams.
-  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/prompt_async`);
+  // Scope tools + event emission to the session's worktree. The matching
+  // per-directory SSE subscription in src/main/index.ts (OpencodeEventBus)
+  // is what makes assistant text reach the renderer; without that subscription
+  // the events would only land on the scoped channel and the global stream
+  // would see nothing.
+  const dirQ = await getSessionDirectoryQuery(config, sessionId);
+  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/prompt_async${dirQ}`);
   const parts: Array<Record<string, unknown>> = [];
   if (attachments) {
     for (const a of attachments) {
@@ -743,9 +842,9 @@ export async function runCommand(
   model?: PromptModel,
 ): Promise<void> {
   await ensureForward(config);
-  // NOTE: no ?directory= — see sendPrompt for why (would silence the SSE
-  // event stream the renderer subscribes to).
-  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/command`);
+  // Same rationale as sendPrompt: scope tools + events to the session worktree.
+  const dirQ = await getSessionDirectoryQuery(config, sessionId);
+  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/command${dirQ}`);
   const parts: Array<Record<string, unknown>> = [];
   if (attachments) {
     for (const a of attachments) {
@@ -783,6 +882,11 @@ export async function runCommand(
 // GET /session?directory=... lists sessions scoped to a project directory.
 // We don't paginate (limit defaults large on the server). Returns trimmed
 // metadata only — the renderer fetches full transcripts on demand.
+//
+// Side effect: every session whose payload carries a `directory` gets cached
+// here. That feeds the per-directory event bus (`onSessionDirectoryAdded`),
+// so any call from the sidebar / renderer transparently keeps the streams
+// up to date for sessions bui learns about post-launch.
 export async function listSessions(
   config: AppConfig,
   directory?: string,
@@ -793,7 +897,15 @@ export async function listSessions(
   if (!res.ok) {
     throw new Error(`opencode listSessions ${res.status}: ${await res.text()}`);
   }
-  return (await res.json()) as OpencodeSessionListItem[];
+  const data = (await res.json()) as OpencodeSessionListItem[];
+  for (const s of data) {
+    const sid = (s as { id?: unknown }).id;
+    const dir = (s as { directory?: unknown }).directory;
+    if (typeof sid === "string" && typeof dir === "string") {
+      rememberSessionDirectory(sid, dir);
+    }
+  }
+  return data;
 }
 
 // Fork: copies session history up to `messageID` (or end if omitted) into a
@@ -804,8 +916,9 @@ export async function forkSession(
   messageID?: string,
 ): Promise<CreatedSession> {
   await ensureForward(config);
-  // No ?directory= — see sendPrompt note.
-  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/fork`);
+  // Scope to the parent session's directory; the fork inherits it.
+  const dirQ = await getSessionDirectoryQuery(config, sessionId);
+  const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/fork${dirQ}`);
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -814,7 +927,11 @@ export async function forkSession(
   if (!res.ok) {
     throw new Error(`opencode forkSession ${res.status}: ${await res.text()}`);
   }
-  return (await res.json()) as CreatedSession;
+  const sess = (await res.json()) as CreatedSession;
+  // The fork inherits the parent session's directory; cache it so the new
+  // session id's first prompt POST already carries the right ?directory=.
+  rememberSessionDirectory(sess.id, sess.directory);
+  return sess;
 }
 
 // Compact: v2 endpoint summarizes the session in-place, freeing context. The
@@ -822,8 +939,8 @@ export async function forkSession(
 // path picks up the new transcript automatically.
 export async function compactSession(config: AppConfig, sessionId: string): Promise<void> {
   await ensureForward(config);
-  // No ?directory= — see sendPrompt note.
-  const url = apiUrl(config, `/api/session/${encodeURIComponent(sessionId)}/compact`);
+  const dirQ = await getSessionDirectoryQuery(config, sessionId);
+  const url = apiUrl(config, `/api/session/${encodeURIComponent(sessionId)}/compact${dirQ}`);
   const res = await fetch(url, { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode compactSession ${res.status}: ${await res.text()}`);
@@ -834,6 +951,8 @@ export async function compactSession(config: AppConfig, sessionId: string): Prom
 // responsible for tearing down the matching tmux window separately.
 export async function deleteSession(config: AppConfig, sessionId: string): Promise<void> {
   await ensureForward(config);
+  // Drop the cache entry — sid will not be reused.
+  sessionDirectoryCache.delete(sessionId);
   const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}`);
   const res = await fetch(url, { method: "DELETE" });
   if (!res.ok) {
@@ -851,10 +970,21 @@ export type EventStream = {
   dispose: () => void;
 };
 
-export async function subscribeEvents(config: AppConfig): Promise<EventStream> {
+// `directory` opens a project-scoped event stream. opencode emits message /
+// session events on the stream whose `?directory=` matches the POST that
+// triggered them — a global (`undefined`) subscription sees only events from
+// POSTs that themselves had no `?directory=`. To get both, you must open one
+// stream per directory you care about. See OpencodeEventBus in src/main/index.ts.
+export async function subscribeEvents(
+  config: AppConfig,
+  directory?: string,
+): Promise<EventStream> {
   await ensureForward(config);
   const controller = new AbortController();
-  const res = await fetch(apiUrl(config, "/event"), {
+  const path = directory
+    ? `/event?directory=${encodeURIComponent(directory)}`
+    : "/event";
+  const res = await fetch(apiUrl(config, path), {
     signal: controller.signal,
     headers: { accept: "text/event-stream" },
   });
