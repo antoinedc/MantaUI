@@ -150,10 +150,21 @@ const api = {
   // Question tool — v2 API only.
   opencodeQuestions: (): Promise<QuestionRequest[]> =>
     ipcRenderer.invoke(IPC.opencodeQuestions),
-  opencodeQuestionReply: (requestId: string, answers: string[][]): Promise<void> =>
-    ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers }),
-  opencodeQuestionReject: (requestId: string): Promise<void> =>
-    ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId }),
+  opencodeQuestionReply: (
+    requestId: string,
+    answers: string[][],
+    sessionId?: string,
+  ): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodeQuestionReply, {
+      requestId,
+      answers,
+      sessionId,
+    }),
+  opencodeQuestionReject: (
+    requestId: string,
+    sessionId?: string,
+  ): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId, sessionId }),
 
   // Model picker.
   opencodeModels: (): Promise<OpencodeModel[]> =>

@@ -650,6 +650,15 @@ export type QuestionRequest = {
   tool?: { messageID: string; callID: string };
 };
 
+// REGRESSION FIX: opencode's /question endpoints are `?directory=`-scoped,
+// exactly like prompt_async / the /event stream. The directory-scoping work
+// (7392534 et al.) threaded ?directory= onto prompt_async but NOT onto
+// list/reply/reject — so after a question fires on the scoped channel, an
+// UNSCOPED reply is accepted (HTTP 200) yet the scoped session's blocked
+// tool never receives it: the agent hangs in "processing" forever. Append
+// the session's scoped query the same way prompt_async does. `sessionId`
+// is optional (listQuestions has no session context — it lists globally);
+// when present we scope to that session's worktree directory.
 export async function listQuestions(
   config: AppConfig,
 ): Promise<QuestionRequest[]> {
@@ -667,9 +676,16 @@ export async function replyQuestion(
   config: AppConfig,
   requestId: string,
   answers: string[][],
+  sessionId?: string,
 ): Promise<void> {
   await ensureForward(config);
-  const url = apiUrl(config, `/question/${encodeURIComponent(requestId)}/reply`);
+  const dirQ = sessionId
+    ? await getSessionDirectoryQuery(config, sessionId)
+    : "";
+  const url = apiUrl(
+    config,
+    `/question/${encodeURIComponent(requestId)}/reply${dirQ}`,
+  );
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -683,9 +699,16 @@ export async function replyQuestion(
 export async function rejectQuestion(
   config: AppConfig,
   requestId: string,
+  sessionId?: string,
 ): Promise<void> {
   await ensureForward(config);
-  const url = apiUrl(config, `/question/${encodeURIComponent(requestId)}/reject`);
+  const dirQ = sessionId
+    ? await getSessionDirectoryQuery(config, sessionId)
+    : "";
+  const url = apiUrl(
+    config,
+    `/question/${encodeURIComponent(requestId)}/reject${dirQ}`,
+  );
   const res = await fetch(url, { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode rejectQuestion ${res.status}: ${await res.text()}`);

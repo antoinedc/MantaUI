@@ -224,6 +224,96 @@ export function isSelfFilteringLifecycleEvent(type: string): boolean {
   );
 }
 
+/**
+ * Apply a question.* lifecycle event to the pending-questions list.
+ *
+ * THE regression this fixes (present since 1a5a336, the feature's first
+ * commit): the handler called refreshQuestions() → GET /question on every
+ * question.* event. But in opencode v1.15 `GET /question` stays EMPTY for
+ * live questions — the question payload is delivered in the
+ * `question.asked` EVENT itself (verified live: event.properties is a full
+ * QuestionRequest = {id, sessionID, questions, tool}). Re-polling the empty
+ * endpoint set questions to [] and the card never appeared. The event is
+ * the source of truth; use its payload directly.
+ *
+ *  - question.asked    → upsert the QuestionRequest from the event payload
+ *  - question.replied  → remove it (answered)
+ *  - question.rejected → remove it (dismissed)
+ *
+ * Filtered to the viewed session. Pure (prev list + event → next list) so
+ * the contract is unit-tested and can't silently regress again.
+ */
+export type QuestionLike = {
+  id: string; // canonical: tool.callID when present (unifies event+transcript)
+  sessionID: string;
+  questions: unknown[];
+  tool?: { messageID: string; callID: string };
+  // The opencode `que_…` request id from the asked event, when present.
+  // Kept ALONGSIDE the callID-keyed `id` so a replied/rejected event that
+  // echoes only the `que_` id can still clear a callID-keyed card.
+  requestId?: string;
+};
+
+export function applyQuestionEvent(
+  prev: QuestionLike[],
+  eventType: string,
+  properties: Record<string, unknown> | undefined,
+  viewedSessionId: string,
+): QuestionLike[] {
+  const p = properties ?? {};
+  const sessionID = typeof p.sessionID === "string" ? p.sessionID : "";
+  const tool = p.tool as { messageID?: string; callID?: string } | undefined;
+  // Canonical id = the tool callID when present (stable across re-asks);
+  // fall back to the event's own `que_…` id. The `que_` is preserved
+  // separately as `requestId` because opencode's reply/reject API accepts
+  // ONLY that form (verified: server rejects a callID with HTTP 400).
+  const callID = typeof tool?.callID === "string" ? tool.callID : "";
+  const id = callID || (typeof p.id === "string" ? p.id : "");
+
+  if (eventType === "question.replied" || eventType === "question.rejected") {
+    // The replied/rejected event's id field is not guaranteed to match the
+    // id we stored on `asked` (asked is keyed on tool.callID for transcript
+    // unification; replied may carry `que_…`/requestID instead). Match
+    // defensively on ANY id form the event exposes so the card always
+    // clears, regardless of which identifier opencode echoes back.
+    const ids = new Set(
+      [
+        p.id,
+        p.requestID,
+        p.callID,
+        tool?.callID,
+        tool?.messageID,
+      ].filter((x): x is string => typeof x === "string" && x.length > 0),
+    );
+    if (ids.size === 0) return prev;
+    return prev.filter(
+      (q) =>
+        !ids.has(q.id) &&
+        !(q.requestId !== undefined && ids.has(q.requestId)) &&
+        !(q.tool && (ids.has(q.tool.callID) || ids.has(q.tool.messageID))),
+    );
+  }
+  if (eventType === "question.asked") {
+    if (!id) return prev; // need a stable key to store/dedupe
+    // Only surface questions for the session the user is viewing.
+    if (sessionID !== viewedSessionId) return prev;
+    if (!Array.isArray(p.questions)) return prev;
+    const next: QuestionLike = {
+      id,
+      sessionID,
+      questions: p.questions as unknown[],
+      tool:
+        tool?.messageID && tool?.callID
+          ? { messageID: tool.messageID, callID: tool.callID }
+          : undefined,
+      requestId: typeof p.id === "string" ? p.id : undefined,
+    };
+    const without = prev.filter((q) => q.id !== id); // dedupe re-asks
+    return [...without, next];
+  }
+  return prev;
+}
+
 // === Slash-command provenance ===
 //
 // opencode injects a command's `template` into the transcript verbatim as a

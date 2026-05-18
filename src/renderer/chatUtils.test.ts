@@ -13,6 +13,7 @@ import {
   allTodosTerminal,
   selectActiveTodos,
   isSelfFilteringLifecycleEvent,
+  applyQuestionEvent,
   commandPrefixKey,
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
@@ -421,6 +422,112 @@ describe("isSelfFilteringLifecycleEvent", () => {
     ]) {
       expect(isSelfFilteringLifecycleEvent(t)).toBe(false);
     }
+  });
+});
+
+// ===== applyQuestionEvent =====
+
+describe("applyQuestionEvent", () => {
+  const SID = "ses_view";
+  const askedProps = {
+    id: "que_1",
+    sessionID: SID,
+    questions: [{ question: "TS or JS?", header: "Lang", options: [] }],
+    tool: { messageID: "msg_1", callID: "toolu_1" },
+  };
+
+  it("REGRESSION: question.asked populates the list FROM THE EVENT PAYLOAD (not a /question re-poll)", () => {
+    // The bug (since 1a5a336): handler called refreshQuestions() → GET
+    // /question, which is empty for live questions in opencode v1.15, so
+    // the card never appeared. The event payload IS the QuestionRequest;
+    // applying it must surface the question.
+    const next = applyQuestionEvent([], "question.asked", askedProps, SID);
+    expect(next).toHaveLength(1);
+    // Canonical id = tool.callID (unifies live event with transcript-scan
+    // recovery, which has no que_ id). The que_ id is retained as requestId
+    // so a replied event echoing it still clears the card.
+    expect(next[0].id).toBe("toolu_1");
+    expect(next[0].requestId).toBe("que_1");
+    expect(next[0].questions).toEqual(askedProps.questions);
+    expect(next[0].tool).toEqual(askedProps.tool);
+  });
+
+  it("question.replied removes the answered question", () => {
+    const prev = [askedProps];
+    expect(
+      applyQuestionEvent(prev, "question.replied", { id: "que_1", sessionID: SID }, SID),
+    ).toEqual([]);
+  });
+
+  it("question.rejected removes the dismissed question", () => {
+    const prev = [askedProps];
+    expect(
+      applyQuestionEvent(prev, "question.rejected", { id: "que_1", sessionID: SID }, SID),
+    ).toEqual([]);
+  });
+
+  it("question.asked for a DIFFERENT session is ignored (not surfaced in the viewed panel)", () => {
+    const other = { ...askedProps, id: "que_2", sessionID: "ses_other" };
+    expect(applyQuestionEvent([], "question.asked", other, SID)).toEqual([]);
+  });
+
+  it("re-asking the same id dedupes (no duplicate cards)", () => {
+    const first = applyQuestionEvent([], "question.asked", askedProps, SID);
+    const second = applyQuestionEvent(first, "question.asked", askedProps, SID);
+    expect(second).toHaveLength(1);
+  });
+
+  it("preserves unrelated pending questions when one is replied", () => {
+    const q2 = { ...askedProps, id: "que_2" };
+    const prev = [askedProps, q2];
+    const next = applyQuestionEvent(prev, "question.replied", { id: "que_1", sessionID: SID }, SID);
+    expect(next).toEqual([q2]);
+  });
+
+  it("malformed payloads are no-ops (missing id / missing questions)", () => {
+    expect(applyQuestionEvent([], "question.asked", undefined, SID)).toEqual([]);
+    expect(applyQuestionEvent([], "question.asked", { sessionID: SID }, SID)).toEqual([]);
+    expect(
+      applyQuestionEvent([], "question.asked", { id: "que_x", sessionID: SID }, SID),
+    ).toEqual([]); // no questions array
+  });
+});
+
+describe("applyQuestionEvent — callID unification & defensive removal", () => {
+  const SID = "ses_v";
+  const askedViaEvent = {
+    id: "que_99",
+    sessionID: SID,
+    questions: [{ question: "q", header: "h", options: [] }],
+    tool: { messageID: "msg_9", callID: "toolu_9" },
+  };
+
+  it("asked keys the stored question on tool.callID (unifies with transcript scan)", () => {
+    const next = applyQuestionEvent([], "question.asked", askedViaEvent, SID);
+    expect(next[0].id).toBe("toolu_9"); // callID, not que_99
+  });
+
+  it("replied clears the card even when its id differs from the stored callID", () => {
+    const asked = applyQuestionEvent([], "question.asked", askedViaEvent, SID);
+    // opencode echoes que_/requestID on replied, not the callID we keyed on
+    const cleared = applyQuestionEvent(
+      asked,
+      "question.replied",
+      { sessionID: SID, requestID: "que_99" },
+      SID,
+    );
+    expect(cleared).toEqual([]);
+  });
+
+  it("rejected clears via tool.callID match too", () => {
+    const asked = applyQuestionEvent([], "question.asked", askedViaEvent, SID);
+    const cleared = applyQuestionEvent(
+      asked,
+      "question.rejected",
+      { tool: { callID: "toolu_9" } },
+      SID,
+    );
+    expect(cleared).toEqual([]);
   });
 });
 

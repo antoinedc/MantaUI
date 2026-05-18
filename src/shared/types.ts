@@ -356,8 +356,14 @@ export type QuestionInfo = {
   custom?: boolean;   // allow free-text answer
 };
 export type QuestionRequest = {
+  // Canonical key: tool.callID when present (dedupes the live question.asked
+  // event with transcript recovery). NOT the API reply key — see requestId.
   id: string;
   sessionID: string;
   questions: QuestionInfo[];
   tool?: { messageID: string; callID: string };
+  // The opencode `que_…` request id from the question.asked event. This is
+  // the ONLY id opencode's /question/{requestID}/reply|reject accepts. Absent
+  // for transcript-only recovered questions (which are thus unanswerable).
+  requestId?: string;
 };

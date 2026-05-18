@@ -824,13 +824,21 @@ function registerHandlers(): void {
   );
   ipcMain.handle(
     IPC.opencodeQuestionReply,
-    (_e, input: { requestId: string; answers: string[][] }) =>
-      opencodeReplyQuestion(config, input.requestId, input.answers),
+    (
+      _e,
+      input: { requestId: string; answers: string[][]; sessionId?: string },
+    ) =>
+      opencodeReplyQuestion(
+        config,
+        input.requestId,
+        input.answers,
+        input.sessionId,
+      ),
   );
   ipcMain.handle(
     IPC.opencodeQuestionReject,
-    (_e, input: { requestId: string }) =>
-      opencodeRejectQuestion(config, input.requestId),
+    (_e, input: { requestId: string; sessionId?: string }) =>
+      opencodeRejectQuestion(config, input.requestId, input.sessionId),
   );
 
   // Model picker. Strip-and-forward — opencode embeds apiKey in the wire

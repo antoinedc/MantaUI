@@ -319,10 +319,16 @@ export async function listQuestions() {
 
 /**
  * Reply to a question (one answers array per QuestionInfo entry).
- * @param {{ requestId: string, answers: string[][] }} opts
+ *
+ * opencode's /question endpoints are `?directory=`-scoped like prompt_async;
+ * an UNSCOPED reply 200s but never resumes the blocked tool (agent hangs in
+ * "processing"). Scope to the question's session directory. Mirrors the
+ * desktop fix in src/main/opencode.ts:replyQuestion.
+ * @param {{ requestId: string, answers: string[][], sessionId?: string }} opts
  */
-export async function replyQuestion({ requestId, answers }) {
-  const url = `/question/${encodeURIComponent(requestId)}/reply`;
+export async function replyQuestion({ requestId, answers, sessionId }) {
+  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
+  const url = `/question/${encodeURIComponent(requestId)}/reply${dirQ}`;
   const res = await fetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -334,10 +340,11 @@ export async function replyQuestion({ requestId, answers }) {
 }
 
 /** Reject (dismiss) a question without answering.
- *  @param {string} requestId
+ *  @param {{ requestId: string, sessionId?: string }} opts
  */
-export async function rejectQuestion(requestId) {
-  const url = `/question/${encodeURIComponent(requestId)}/reject`;
+export async function rejectQuestion({ requestId, sessionId }) {
+  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
+  const url = `/question/${encodeURIComponent(requestId)}/reject${dirQ}`;
   const res = await fetch(apiUrl(url), { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode rejectQuestion ${res.status}: ${await res.text()}`);

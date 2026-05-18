@@ -120,13 +120,13 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // preload: ipcRenderer.invoke(IPC.opencodeQuestions)  → no args
     "opencode:questions": () => oc.listQuestions(),
 
-    // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers })
-    // → args[0] = { requestId, answers }; opencode.mjs replyQuestion expects same shape
+    // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers, sessionId })
+    // → opencode.mjs replyQuestion expects { requestId, answers, sessionId }
     "opencode:question-reply": (input) => oc.replyQuestion(input),
 
-    // preload: ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId })
-    // → args[0] = { requestId } (object); opencode.mjs rejectQuestion expects plain string
-    "opencode:question-reject": ({ requestId }) => oc.rejectQuestion(requestId),
+    // preload: ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId, sessionId })
+    // → opencode.mjs rejectQuestion expects { requestId, sessionId }
+    "opencode:question-reject": (input) => oc.rejectQuestion(input),
 
     // preload: ipcRenderer.invoke(IPC.opencodeModels)  → no args
     "opencode:models": () => oc.listModels(),

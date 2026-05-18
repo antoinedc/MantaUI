@@ -42,6 +42,7 @@ import {
   allTodosTerminal,
   selectActiveTodos,
   isSelfFilteringLifecycleEvent,
+  applyQuestionEvent,
   detectCommandFromText,
   type TruncationKind,
 } from "./chatUtils";
@@ -495,7 +496,18 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
-        if (!cancelled) setMessages(m);
+        if (cancelled) return;
+        setMessages(m);
+        // NOTE: we deliberately do NOT reconstruct pending questions from
+        // the transcript here. opencode v1.15 broadcasts the `que_…` reply
+        // token exactly once, on the live question.asked event — it is not
+        // in the transcript, /question, or any replay. A transcript-
+        // recovered question would render but be unanswerable (verified:
+        // reply API hard-requires the que_). Showing an un-submittable card
+        // is worse than not showing it, so existing-session questions
+        // asked before this panel mounted are intentionally not surfaced.
+        // Questions asked while viewing a session work via the live event
+        // (applyQuestionEvent) which carries the que_ as requestId.
       })
       .catch((e) => {
         if (!cancelled) setError(String(e?.message ?? e));
@@ -897,14 +909,25 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         if (ev.type === "permission.replied") scheduleRefetch();
       }
 
-      // Question lifecycle — refresh the inline question list so the card
-      // appears/disappears in real time as opencode requests/closes them.
+      // Question lifecycle. opencode v1.15 delivers the FULL question in the
+      // `question.asked` event payload (properties is a QuestionRequest);
+      // `GET /question` stays empty for live questions, so the old
+      // refreshQuestions() re-poll set the list to [] and the card never
+      // appeared (regression since 1a5a336). Drive state from the event
+      // payload itself — see applyQuestionEvent (chatUtils, tested).
       if (
         ev.type === "question.asked" ||
         ev.type === "question.replied" ||
         ev.type === "question.rejected"
       ) {
-        refreshQuestions();
+        setQuestions((prev) =>
+          applyQuestionEvent(
+            prev,
+            ev.type,
+            ev.properties,
+            sessionId,
+          ) as QuestionRequest[],
+        );
         if (ev.type === "question.replied" || ev.type === "question.rejected") {
           scheduleRefetch();
         }
@@ -1275,15 +1298,32 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     [refreshPermissions],
   );
 
+  // opencode's reply/reject API is keyed STRICTLY on the `que_…` requestID
+  // (validated server-side: `Expected a string starting with "que"`). Our
+  // canonical `q.id` is the tool callID (for event/transcript dedup), so we
+  // must send `q.requestId` — the `que_` captured from the question.asked
+  // event — to the API, while still filtering UI state by `q.id`. A question
+  // with no requestId (e.g. transcript-only recovery) is NOT answerable in
+  // opencode v1.15 and isn't surfaced (see the mount path).
   const replyQuestion = useCallback(
-    async (requestId: string, answers: string[][]) => {
-      // Optimistically drop so the card disappears immediately.
-      setQuestions((prev) => prev.filter((q) => q.id !== requestId));
+    async (q: QuestionRequest, answers: string[][]) => {
+      const que = q.requestId;
+      if (!que) {
+        setSendError(
+          "This question can't be answered — its reply token was not " +
+            "captured (asked before this session was open).",
+        );
+        return;
+      }
+      setQuestions((prev) => prev.filter((x) => x.id !== q.id));
       try {
-        await window.api.opencodeQuestionReply(requestId, answers);
+        // Pass sessionID so the main process scopes the reply with
+        // ?directory= — opencode's /question endpoints are directory-scoped
+        // (like prompt_async); an unscoped reply 200s but never resumes the
+        // blocked tool, hanging the agent in "processing".
+        await window.api.opencodeQuestionReply(que, answers, q.sessionID);
       } catch (e) {
         setSendError(String((e as Error)?.message ?? e));
-        // Re-pull on failure so the card comes back if reply didn't land.
         refreshQuestions();
       }
     },
@@ -1291,11 +1331,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   );
 
   const rejectQuestion = useCallback(
-    async (requestId: string) => {
-      // Optimistically drop so the card disappears immediately.
-      setQuestions((prev) => prev.filter((q) => q.id !== requestId));
+    async (q: QuestionRequest) => {
+      const que = q.requestId;
+      setQuestions((prev) => prev.filter((x) => x.id !== q.id));
+      if (!que) return; // nothing to tell the server; just clear the card
       try {
-        await window.api.opencodeQuestionReject(requestId);
+        await window.api.opencodeQuestionReject(que, q.sessionID);
       } catch (e) {
         setSendError(String((e as Error)?.message ?? e));
         refreshQuestions();
@@ -2204,8 +2245,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             <QuestionCard
               key={q.id}
               request={q}
-              onReply={(answers) => replyQuestion(q.id, answers)}
-              onReject={() => rejectQuestion(q.id)}
+              onReply={(answers) => replyQuestion(q, answers)}
+              onReject={() => rejectQuestion(q)}
             />
           ))}
         </div>
