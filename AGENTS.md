@@ -19,7 +19,8 @@ session-state snapshot.
   owns an xterm instance. `ChatPanel.tsx` is the entire chat-mode UI (~3500 LoC).
   - `chatUtils.ts` — pure utility functions extracted for testability (`formatTokens`,
     `formatDuration`, `ctxStageColor`, `filterCommands`, `dedupeAgainstBuiltins`,
-    `resolveContextLimit`, `classifyFinish`, `describeTruncation`).
+    `resolveContextLimit`, `classifyFinish`, `describeTruncation`,
+    `isTerminalTodo`, `allTodosTerminal`).
     Import from here; don't redeclare them inline in ChatPanel.
 - `src/preload/` — typed `window.api` bridge.
 - `src/server/` — Node HTTP+WS server for mobile/web access. Runs **on the
@@ -232,11 +233,18 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
 
 ## Patterns worth knowing
 
-- **New window cwd inheritance** — desktop: `index.ts` `tmuxNewWindow` handler
-  resolves cwd as `input.cwd || project.defaultCwd || "~"`. Mobile server
-  (`rpc.mjs` `tmux:new-window`): does the same config lookup when `cwd` is
-  absent — without it, tmux silently inherits `$HOME`. Always pass or resolve
-  `defaultCwd`; never let the fallback reach tmux unchecked.
+- **New window / new chat-session cwd inheritance** — every code path that
+  creates a tmux window or an opencode session resolves cwd to the project's
+  stored `defaultCwd` when the renderer's input is empty OR the literal `"~"`.
+  Both substrings short-circuit the fallback: an empty cwd lets tmux silently
+  inherit `$HOME`, and opencode's `session.create` rejects tilde (needs an
+  absolute path) so `"~"` also collapses to `$HOME` server-side. Helper
+  `resolveProjectCwd(sessionName, inputCwd)` lives in `src/main/index.ts`
+  (desktop) and is duplicated inside `buildHandlers` in `src/server/rpc.mjs`
+  (mobile). Applied by: `tmux:new-window`, `opencode:clear-session`,
+  `opencode:fork-session`. **Renderer must pass `cwd ?? ""`**, NOT `cwd || "~"` —
+  the literal tilde would defeat the resolver. The matching server tests in
+  `src/server/rpc.test.mjs` cover empty / tilde / explicit-path inputs.
 - **TodoWrite checklist auto-dismissal** — when every item in the pinned
   `ActiveTodos` is terminal (`completed` or `cancelled`) at the moment the
   user submits their next prompt, `todosDismissed` flips true and the card
