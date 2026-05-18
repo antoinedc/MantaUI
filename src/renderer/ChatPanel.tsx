@@ -967,7 +967,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           const cleared = await window.api.opencodeClearSession({
             sessionName: tmuxSession,
             windowIndex,
-            cwd: cwd || "~",
+            // Empty string signals the main handler to resolve from the
+            // project's stored defaultCwd. Passing "~" or a stale paneCurrentPath
+            // would short-circuit that fallback.
+            cwd: cwd ?? "",
             title: `${tmuxSession} / cleared`,
           });
           // Carry the current model selection forward to the new session so
@@ -1287,7 +1290,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         sessionId,
         sessionName: tmuxSession,
         windowName,
-        cwd: cwd || "~",
+        // Empty string signals the main handler to resolve from the project's
+        // stored defaultCwd (see resolveProjectCwd in src/main/index.ts).
+        cwd: cwd ?? "",
       });
       await refresh();
     } catch (e) {

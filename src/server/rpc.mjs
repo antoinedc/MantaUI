@@ -16,6 +16,20 @@ export async function dispatch(handlers, channel, args) {
 // Channel key strings MUST match IPC.* values in src/shared/types.ts.
 // Arg shapes MUST match what src/preload/index.ts packs per channel.
 export function buildHandlers({ tmux, oc, pty, bus, local }) {
+  // Mirror of resolveProjectCwd() in src/main/index.ts. Renderer-supplied cwd
+  // is preferred when it's a real path, but falls through to the project's
+  // stored defaultCwd whenever the renderer sends nothing or the literal "~".
+  // opencode's session.create requires an absolute directory; per-pane
+  // paneCurrentPath can drift (or be empty for fresh chat-holder panes), so
+  // the workspace's defaultCwd is the canonical "where this project lives".
+  async function resolveProjectCwd(sessionName, inputCwd) {
+    const trimmed = typeof inputCwd === "string" ? inputCwd.trim() : "";
+    if (trimmed && trimmed !== "~") return trimmed;
+    const cfg = await local.configGet();
+    const meta = cfg.projects?.find((p) => p.tmuxSession === sessionName);
+    return (meta?.defaultCwd ?? "").trim() || trimmed || "~";
+  }
+
   return {
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
 
@@ -74,15 +88,8 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // project's stored defaultCwd (set when the workspace was created).
     // Without this, new chat windows opened in a workspace silently inherit
     // tmux's default cwd (usually $HOME) instead of the workspace path.
-    "tmux:new-window": async (i) => {
-      let cwd = i.cwd;
-      if (!cwd) {
-        const cfg = await local.configGet();
-        const meta = cfg.projects?.find((p) => p.tmuxSession === i.sessionName);
-        cwd = meta?.defaultCwd;
-      }
-      return tmux.newWindow({ ...i, cwd });
-    },
+    "tmux:new-window": async (i) =>
+      tmux.newWindow({ ...i, cwd: await resolveProjectCwd(i.sessionName, i.cwd) }),
     "tmux:rename-session": (i) => tmux.renameSession(i),
     "tmux:rename-window": (i) => tmux.renameWindow(i),
     "tmux:kill-session": (n) => tmux.killSession(n),
@@ -166,7 +173,8 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // we create a tmux window getting its index back, stamp it, then listProjects.
     "opencode:fork-session": async ({ sessionId, sessionName, windowName, cwd, messageID }) => {
       const forked = await oc.forkSession({ sessionId, messageID });
-      const windowIndex = await tmux.newWindowGetIndex(sessionName, windowName, cwd);
+      const resolvedCwd = await resolveProjectCwd(sessionName, cwd);
+      const windowIndex = await tmux.newWindowGetIndex(sessionName, windowName, resolvedCwd);
       await tmux.restampSessionId(sessionName, windowIndex, forked.id);
       const projects = await tmux.listProjects();
       return { newSessionId: forked.id, projects };
@@ -180,7 +188,8 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     //   3. return { newSessionId: sess.id, projects: await listProjects() }
     // mobile equivalent: oc.createSession({ directory, title }) then restamp.
     "opencode:clear-session": async ({ sessionName, windowIndex, cwd, title }) => {
-      const sess = await oc.createSession({ directory: cwd, title });
+      const directory = await resolveProjectCwd(sessionName, cwd);
+      const sess = await oc.createSession({ directory, title });
       await tmux.restampSessionId(sessionName, windowIndex, sess.id);
       const projects = await tmux.listProjects();
       return { newSessionId: sess.id, projects };

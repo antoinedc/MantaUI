@@ -89,6 +89,21 @@ function deleteProjectMeta(tmuxSession: string): void {
   commit({ projects: config.projects.filter((p) => p.tmuxSession !== tmuxSession) });
 }
 
+// Resolve the cwd for a session-creating opencode op (new chat session via
+// /clear, fork, etc.). Renderer-supplied cwd is preferred when it's a real
+// path, but falls through to the project's stored defaultCwd whenever the
+// renderer sends an empty string or the literal "~". opencode's session.create
+// requires an absolute directory, and the per-pane paneCurrentPath the
+// renderer normally passes can drift (or be empty for fresh chat-holder panes)
+// so the workspace's defaultCwd is the canonical source of truth for "where
+// this project lives".
+function resolveProjectCwd(sessionName: string, inputCwd?: string): string {
+  const trimmed = inputCwd?.trim();
+  if (trimmed && trimmed !== "~") return trimmed;
+  const meta = config.projects.find((p) => p.tmuxSession === sessionName);
+  return meta?.defaultCwd?.trim() || trimmed || "~";
+}
+
 function startPollerIfReady(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (!config.host) {
@@ -676,7 +691,7 @@ function registerHandlers(): void {
         config,
         input.sessionName,
         input.windowName,
-        input.cwd,
+        resolveProjectCwd(input.sessionName, input.cwd),
         true,                    // chatMode
         forked.id,
       );
@@ -749,7 +764,7 @@ function registerHandlers(): void {
     ) => {
       const sess = await opencodeCreateSession(
         config,
-        input.cwd,
+        resolveProjectCwd(input.sessionName, input.cwd),
         input.title,
       );
       await tmuxRestampSessionId(
