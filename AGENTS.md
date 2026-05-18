@@ -426,6 +426,14 @@ the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
   - `session.status` with `type === "retry"` — drives the `RetryCard` above
     the running indicator with `attempt`, `message`, and an optional
     `action {title, message, label, link?}`. Cleared on next `busy`/`idle`.
+  - `command.executed` — fired right after opencode creates the user
+    message that holds an expanded slash-command template. Properties
+    `{name, arguments, messageID, sessionID}` populate `commandByMessageId:
+    Map<messageID, {name, arguments}>`. `MessageRow` reads the map and
+    swaps the user-text gray bar for `UserCommandBar` — a collapsed
+    `› ▸ /name args` row with a chevron that expands to the full template
+    body. Without this, invoking a large skill (e.g. gsd-*) dumped the
+    entire SKILL.md as the user's turn.
 
 The `QuestionCard` component (bottom of `ChatPanel.tsx`) renders above
 `PermissionCard`. Each card shows question header + body text, clickable option
@@ -444,6 +452,9 @@ and fall back to the message scan:
 - `finishByMessageId` is pure state (from `session.next.step.ended`'s
   `properties.finish`) — survives refetch because the canonical messages
   payload doesn't carry per-step finish metadata.
+- `commandByMessageId` is pure state (from `command.executed`) — same
+  reason: the canonical messages payload has no command-origin field, so
+  re-fetch can't restore the `/name args` collapsed view.
 When adding a new live-event consumer in ChatPanel, follow the same shape:
 `useState` reset on session change, set in the SSE handler, consumed via a
 `liveX ?? transcript-derived` selector. Don't try to mutate messages
