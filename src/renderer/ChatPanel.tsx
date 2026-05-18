@@ -433,6 +433,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     Map<string, TruncationKind>
   >(() => new Map());
 
+  // Slash-command provenance, keyed by user messageID. Populated from
+  // opencode's `command.executed` SSE event (`{name, arguments, messageID}`).
+  // When set, the user-message renderer shows a collapsed `/name args` pill
+  // (with click-to-expand) instead of the full expanded template — otherwise
+  // invoking a skill dumps its entire body into the transcript.
+  // Live-event pattern same as finishByMessageId: kept as a side map because
+  // the canonical messages payload has no command-origin field.
+  const [commandByMessageId, setCommandByMessageId] = useState<
+    Map<string, { name: string; arguments: string }>
+  >(() => new Map());
+
   // Initial load + reload whenever sessionId changes.
   useEffect(() => {
     let cancelled = false;
@@ -451,6 +462,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setLiveTodos(null);
     setTodosDismissed(false);
     setFinishByMessageId(new Map());
+    setCommandByMessageId(new Map());
     setCompactionState(null);
     if (compactionClearTimer.current) {
       clearTimeout(compactionClearTimer.current);
@@ -780,6 +792,30 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           // New activity from the model — clear any prior user dismissal so
           // the refreshed list (even if itself fully completed) is shown.
           setTodosDismissed(false);
+        }
+      }
+
+      // Slash-command provenance. opencode emits this immediately after it
+      // creates the user message that holds the expanded template (skill
+      // body, /init body, etc.). We keep a side map messageID → {name, args}
+      // so MessageRow can collapse the verbose expansion into a `/name args`
+      // pill. Without this, invoking a large skill dumps the entire SKILL.md
+      // body into the transcript.
+      if (ev.type === "command.executed") {
+        const p = ev.properties as {
+          name?: string;
+          messageID?: string;
+          arguments?: string;
+        };
+        if (typeof p.messageID === "string" && typeof p.name === "string") {
+          const messageID = p.messageID;
+          const name = p.name;
+          const argumentsStr = typeof p.arguments === "string" ? p.arguments : "";
+          setCommandByMessageId((m) => {
+            const next = new Map(m);
+            next.set(messageID, { name, arguments: argumentsStr });
+            return next;
+          });
         }
       }
 
@@ -2056,6 +2092,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
                     isLastInTranscript && !running ? activeTodos : null
                   }
                   truncation={finishByMessageId.get(m.info.id) ?? null}
+                  commandInfo={commandByMessageId.get(m.info.id) ?? null}
                 />
               );
             })}
@@ -3379,12 +3416,57 @@ function InputArea({
 
 // ===== Message rows =====
 
+// Collapsed render for a user message that originated from a slash command
+// (e.g. `/skill-name arg`). opencode expands the command template — often
+// a multi-page skill body — into the user-message text part(s); rendering
+// that verbatim drowns the transcript. We show the original invocation
+// (`/name args`) with a ▸/▾ chevron that toggles the full expanded text.
+// Same gray-bar styling as a regular user message so it reads as "you said
+// this" without a visual mode switch.
+function UserCommandBar({
+  name,
+  args,
+  expandedText,
+}: {
+  name: string;
+  args: string;
+  expandedText: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const trimmedArgs = args.trim();
+  return (
+    <div className="-mx-4 px-4 py-0.5 bg-bg-soft">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-baseline gap-2 w-full text-left hover:bg-bg-elev/40 -mx-1 px-1 rounded transition-colors"
+        title={expanded ? "Collapse" : "Show expanded prompt"}
+      >
+        <span className="text-text-faint select-none shrink-0">›</span>
+        <span className="text-text-faint select-none shrink-0 text-[10px] w-3">
+          {expanded ? "▾" : "▸"}
+        </span>
+        <span className="font-mono text-text shrink-0">/{name}</span>
+        {trimmedArgs && (
+          <span className="font-mono text-text-muted truncate">{trimmedArgs}</span>
+        )}
+      </button>
+      {expanded && (
+        <div className="mt-1 ml-6 pl-2 border-l border-border whitespace-pre-wrap break-words text-text-muted text-[12px]">
+          {expandedText}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MessageRow({
   msg,
   showThinking,
   turnDurationMs,
   persistentTodos,
   truncation,
+  commandInfo,
 }: {
   msg: OpencodeMessage;
   showThinking: boolean;
@@ -3402,6 +3484,10 @@ function MessageRow({
   // messages within a multi-step turn that hit max_tokens). null = no
   // truncation, no badge.
   truncation: TruncationKind | null;
+  // Slash-command provenance from commandByMessageId. When set on a user
+  // message, the row shows a collapsed `/name args` pill with an expand
+  // chevron instead of the full expanded template body.
+  commandInfo: { name: string; arguments: string } | null;
 }) {
   const isUser = msg.info.role === "user";
 
@@ -3442,12 +3528,20 @@ function MessageRow({
           </div>
         )}
         {text && (
-          <div className="-mx-4 px-4 py-0.5 bg-bg-soft flex">
-            <span className="text-text-faint select-none mr-2 shrink-0">›</span>
-            <span className="flex-1 whitespace-pre-wrap break-words text-text">
-              {text}
-            </span>
-          </div>
+          commandInfo ? (
+            <UserCommandBar
+              name={commandInfo.name}
+              args={commandInfo.arguments}
+              expandedText={text}
+            />
+          ) : (
+            <div className="-mx-4 px-4 py-0.5 bg-bg-soft flex">
+              <span className="text-text-faint select-none mr-2 shrink-0">›</span>
+              <span className="flex-1 whitespace-pre-wrap break-words text-text">
+                {text}
+              </span>
+            </div>
+          )
         )}
       </div>
     );
