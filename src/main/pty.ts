@@ -230,7 +230,9 @@ async function maybeCreateChatSession(
   if (existingSessionId) return existingSessionId;
   await ensureOpencodeRunning(config);
   const absoluteCwd = await expandRemotePath(config, cwd);
+  console.log("[maybeCreateChatSession]", { rawCwd: cwd, absoluteCwd, title });
   const sess = await createOpencodeSession(config, absoluteCwd, title);
+  console.log("[maybeCreateChatSession] created", { sessionId: sess.id });
   return sess.id;
 }
 
