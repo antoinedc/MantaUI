@@ -199,6 +199,31 @@ export function selectActiveTodos(
   return null;
 }
 
+/**
+ * Event types whose ChatPanel handler RE-FETCHES and self-filters by
+ * sessionID (refreshQuestions / refreshPermissions). Their event
+ * `properties` is the Question/Permission request object, so
+ * `properties.sessionID` is the *request's* session — NOT necessarily the
+ * viewed one. They must therefore bypass the blanket per-session early-
+ * return guard in onOpencodeEvent; otherwise the refresh trigger is dropped
+ * and the card never appears. (Root cause of "questions never appear":
+ * question.asked is also emitted only on the scoped `?directory=` stream, so
+ * the live event is the primary delivery path — it cannot be pre-filtered.)
+ *
+ * Pure + exported so the exemption set is asserted by tests and can't
+ * silently regress when the guard is touched.
+ */
+export function isSelfFilteringLifecycleEvent(type: string): boolean {
+  return (
+    type === "question.asked" ||
+    type === "question.replied" ||
+    type === "question.rejected" ||
+    type === "permission.asked" ||
+    type === "permission.replied" ||
+    type === "permission.rejected"
+  );
+}
+
 // === Slash-command provenance ===
 //
 // opencode injects a command's `template` into the transcript verbatim as a

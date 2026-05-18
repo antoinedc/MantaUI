@@ -12,6 +12,7 @@ import {
   isTerminalTodo,
   allTodosTerminal,
   selectActiveTodos,
+  isSelfFilteringLifecycleEvent,
   commandPrefixKey,
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
@@ -384,6 +385,42 @@ describe("selectActiveTodos", () => {
     // Belt-and-suspenders: even with dismissed false and a populated
     // transcript, an empty live list must hide the card.
     expect(selectActiveTodos([], [{ status: "completed" }], false)).toBeNull();
+  });
+});
+
+// ===== isSelfFilteringLifecycleEvent =====
+
+describe("isSelfFilteringLifecycleEvent", () => {
+  it("REGRESSION: question.asked must bypass the per-session guard", () => {
+    // The bug: onOpencodeEvent's blanket `props.sessionID !== sessionId`
+    // early-return dropped question.asked (whose properties.sessionID is the
+    // question's session) before refreshQuestions() could fire — so the
+    // question card never appeared. These types must be exempt.
+    expect(isSelfFilteringLifecycleEvent("question.asked")).toBe(true);
+    expect(isSelfFilteringLifecycleEvent("question.replied")).toBe(true);
+    expect(isSelfFilteringLifecycleEvent("question.rejected")).toBe(true);
+  });
+
+  it("permission lifecycle events are also exempt (same self-filtering handler)", () => {
+    expect(isSelfFilteringLifecycleEvent("permission.asked")).toBe(true);
+    expect(isSelfFilteringLifecycleEvent("permission.replied")).toBe(true);
+    expect(isSelfFilteringLifecycleEvent("permission.rejected")).toBe(true);
+  });
+
+  it("transcript/state events are NOT exempt (they stay per-session filtered)", () => {
+    // These genuinely should be dropped for other sessions — exempting them
+    // would leak another session's deltas into the viewed transcript.
+    for (const t of [
+      "message.part.delta",
+      "message.updated",
+      "todo.updated",
+      "session.idle",
+      "command.executed",
+      "vcs.branch.updated",
+      "server.heartbeat",
+    ]) {
+      expect(isSelfFilteringLifecycleEvent(t)).toBe(false);
+    }
   });
 });
 

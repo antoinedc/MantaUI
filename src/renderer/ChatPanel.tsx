@@ -41,6 +41,7 @@ import {
   describeTruncation,
   allTodosTerminal,
   selectActiveTodos,
+  isSelfFilteringLifecycleEvent,
   detectCommandFromText,
   type TruncationKind,
 } from "./chatUtils";
@@ -570,7 +571,27 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
     const off = window.api.onOpencodeEvent((ev: OpencodeEvent) => {
       const props = ev.properties ?? {};
-      if (props.sessionID && props.sessionID !== sessionId) return;
+      // Per-session guard for transcript/state events (message.*, todo.*,
+      // etc.) that only matter for the currently-viewed session.
+      //
+      // EXEMPTION: question.*/permission.* lifecycle events must bypass this.
+      // Their `properties` is the QuestionRequest/PermissionRequest itself,
+      // so `props.sessionID` is the QUESTION's session — which differs from
+      // the viewed `sessionId` whenever the user isn't already on that exact
+      // session. The handlers below (refreshQuestions/refreshPermissions)
+      // already self-filter by sessionID after re-fetching, so pre-dropping
+      // here just means the refresh trigger never fires and the card never
+      // appears. opencode also emits question.asked ONLY on the scoped
+      // `?directory=` stream, so the mount-time poll alone can't cover a
+      // mid-turn question — the live event MUST get through. (Root cause of
+      // "questions never appear".)
+      if (
+        !isSelfFilteringLifecycleEvent(ev.type) &&
+        props.sessionID &&
+        props.sessionID !== sessionId
+      ) {
+        return;
+      }
 
       if (ev.type === "message.part.delta") {
         const partID = String(props.partID ?? "");
