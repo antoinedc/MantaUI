@@ -11,5 +11,8 @@ dist/
 # Brainstorming visual companion artifacts
 .superpowers/
 
+# Playwright MCP debug logs / page snapshots
+.playwright-mcp/
+
 # TypeScript incremental build info
 *.tsbuildinfo
