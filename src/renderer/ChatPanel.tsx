@@ -471,15 +471,25 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       compactionClearTimer.current = null;
     }
     setBranch(null);
-    // Initial branch fetch — SSE only fires on change, so without this the
-    // footer stays blank until the user switches branches in their terminal.
-    // Non-fatal on 404 / non-git dirs.
-    window.api
-      .opencodeVcsBranch(cwd)
-      .then((b) => {
-        if (!cancelled) setBranch(b);
-      })
-      .catch(() => { /* non-fatal — pre-v2 server or non-git cwd */ });
+    // Branch indicator. opencode's `vcs.branch.updated` event NEVER fires
+    // on a terminal-side `git checkout` (its internal watcher misses it)
+    // and `GET /vcs` returns stale cached data, so we cannot rely on
+    // event-driven updates. Instead, the main process bypasses opencode
+    // entirely and reads `git -C <cwd> branch --show-current` over the
+    // warm SSH ControlMaster (~30ms). We do an initial fetch on mount and
+    // poll every 5s while this session is mounted, so a checkout in any
+    // terminal reflects in the footer within one tick. Non-fatal on
+    // non-git cwds (returns null).
+    const fetchBranch = () => {
+      window.api
+        .opencodeVcsBranch(cwd)
+        .then((b) => {
+          if (!cancelled) setBranch(b);
+        })
+        .catch(() => { /* non-fatal — non-git cwd or transport blip */ });
+    };
+    fetchBranch();
+    const branchPoll = setInterval(fetchBranch, 5000);
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
@@ -520,6 +530,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       .catch(() => { /* non-fatal — v2-only endpoint */ });
     return () => {
       cancelled = true;
+      clearInterval(branchPoll);
     };
   }, [sessionId, cwd]);
 
@@ -977,6 +988,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setScreenshotToast(null);
     setRunning(true); // optimistic — session.status will confirm
     setInput("");
+    // Snap the branch indicator to current truth on every submit. The 5s
+    // poll catches terminal-side checkouts eventually, but the user is
+    // most likely to notice a wrong branch right when they hit enter.
+    window.api
+      .opencodeVcsBranch(cwd)
+      .then((b) => setBranch(b))
+      .catch(() => { /* non-fatal */ });
     // If the pinned todo list is fully terminal (every item completed or
     // cancelled), the user has acknowledged the previous turn's work by
     // starting a new one — hide the stale checklist until opencode writes a

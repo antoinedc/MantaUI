@@ -29,7 +29,7 @@
 
 import { spawn as cpSpawn } from "node:child_process";
 import { join as pathJoin } from "node:path";
-import { runSshOnce } from "./pty.js";
+import { runSshOnce, getBranch as getBranchSsh } from "./pty.js";
 import {
   decideEviction,
   isPortForwardingFailure,
@@ -568,24 +568,25 @@ export async function getDefaultModel(
 }
 
 // Current VCS branch for a working directory. Backs the chat footer's
-// "⎇ <branch>" indicator. The SSE event `vcs.branch.updated` only fires on
-// change, so the renderer fetches the initial value on mount via this IPC.
-// `/vcs` returns 200 with an empty body for non-git directories — we coalesce
-// undefined to null so the renderer can use `branch ?? null` everywhere.
+// "⎇ <branch>" indicator and is polled periodically (every ~5s) by the
+// renderer so terminal-side `git checkout` shows up without restarting bui.
+//
+// IMPORTANT: We deliberately do NOT call opencode's `GET /vcs` here.
+// opencode caches the branch per-worker and only refreshes via its own
+// internal watcher; a `git checkout` performed in the user's terminal does
+// NOT invalidate that cache, so `/vcs` returns stale data ("main" forever)
+// and `vcs.branch.updated` never fires. Going direct to `git` over the warm
+// ControlMaster (~30ms) is authoritative.
+//
+// Returns null for: no host, no directory, non-git dir, detached HEAD, or
+// transport failure. Detached HEAD is intentionally null — the indicator
+// only makes sense as a branch name.
 export async function getVcsBranch(
   config: AppConfig,
   directory?: string,
 ): Promise<string | null> {
-  await ensureForward(config);
-  const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
-  const res = await fetch(apiUrl(config, `/vcs${qs}`));
-  if (!res.ok) return null;
-  try {
-    const data = (await res.json()) as { branch?: string };
-    return data.branch ?? null;
-  } catch {
-    return null;
-  }
+  if (!directory) return null;
+  return getBranchSsh(config, directory);
 }
 
 // Only include models from CONNECTED providers (`/provider.connected`).

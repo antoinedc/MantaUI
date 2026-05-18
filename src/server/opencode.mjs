@@ -8,6 +8,8 @@
 // Export names are kept exactly as the rpc-wiring task expects them (see
 // task comments on each function).
 
+import { spawn as cpSpawn } from "node:child_process";
+
 const REMOTE_PORT = 4096;
 
 /** Build the full URL for an opencode API path. */
@@ -323,20 +325,32 @@ function _normalizeProviderModel(providerID, modelId, m) {
 
 /**
  * Get the current VCS branch for a working directory.
- * Returns null for non-git dirs or on error.
+ *
+ * Mirrors src/main/opencode.ts: we DO NOT call opencode's `GET /vcs`
+ * because that endpoint caches branch state per-worker and never reflects
+ * a `git checkout` performed in the user's terminal. Instead we shell out
+ * to `git -C <dir> branch --show-current` directly. Returns null for empty
+ * dir, non-git, detached HEAD, or any failure.
+ *
  * @param {string} [directory]
  * @returns {Promise<string|null>}
  */
 export async function getVcsBranch(directory) {
-  const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
-  const res = await fetch(apiUrl(`/vcs${qs}`));
-  if (!res.ok) return null;
-  try {
-    const data = await res.json();
-    return data.branch ?? null;
-  } catch {
-    return null;
-  }
+  if (!directory) return null;
+  return new Promise((resolve) => {
+    const proc = cpSpawn(
+      "git",
+      ["-C", directory, "branch", "--show-current"],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    proc.stdout.on("data", (b) => (stdout += b.toString()));
+    proc.on("error", () => resolve(null));
+    proc.on("exit", () => {
+      const name = stdout.trim();
+      resolve(name ? name : null);
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -389,10 +389,18 @@ the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
 - `POST /question/{id}/reply` — body `{answers: string[][]}` (one array of selected
   option labels per question)
 - `POST /question/{id}/reject` — dismiss without answering
-- `GET /vcs?directory=<cwd>` — `{branch?, default_branch?}` for the session cwd.
-  Initial value for the `⎇ <branch>` footer (the SSE event below only fires on
-  change). Exposed as `window.api.opencodeVcsBranch(directory)` —
-  `opencode:vcs-branch` IPC.
+- `GET /vcs?directory=<cwd>` — `{branch?, default_branch?}` for the session
+  cwd. **bui does NOT use this.** opencode caches the branch per-worker and
+  its internal watcher misses terminal-side `git checkout`s, so `/vcs`
+  returns stale data forever ("main" even when HEAD is on `feature/x`) and
+  the `vcs.branch.updated` SSE below never fires for those switches. The
+  `opencode:vcs-branch` IPC (`window.api.opencodeVcsBranch(directory)`)
+  bypasses opencode entirely: main spawns
+  `git -C <cwd> branch --show-current` over the warm SSH ControlMaster
+  (~30ms); the mobile server uses `child_process.spawn("git", ...)` locally.
+  ChatPanel polls every 5s and on every submit, so terminal-side checkouts
+  reflect within one tick. If you ever need branch info elsewhere, use the
+  same IPC — never call `/vcs` directly.
 - SSE events consumed in ChatPanel's `onOpencodeEvent` handler beyond the
   basics (`session.idle/status/error/compacted`, `message.part.*`, `permission.*`,
   `question.*`):
@@ -418,9 +426,14 @@ the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
   - `todo.updated` — `liveTodos` state, preferred over transcript-scraped
     `activeTodos`. Lets the `ActiveTodos` card flip items between
     in_progress/completed live.
-  - `vcs.branch.updated` — keeps the footer's branch indicator current.
-    Properties have no `sessionID` so the early sessionID filter at the top
-    of `onOpencodeEvent` short-circuits (undefined → falsy).
+  - `vcs.branch.updated` — keeps the footer's branch indicator current
+    when opencode itself notices a change (rare in practice: its watcher
+    misses terminal-side `git checkout`s — see the `/vcs` note above for
+    why we don't rely on this event). The handler is still wired because
+    when opencode DOES emit it, the value is correct, but the 5s poll +
+    submit refetch is the authoritative path. Properties have no
+    `sessionID` so the early sessionID filter at the top of
+    `onOpencodeEvent` short-circuits (undefined → falsy).
   - On `todo.updated`, `todosDismissed` is reset to `false` so a fresh
     TodoWrite resurfaces the card even if the prior list was user-dismissed.
   - `session.status` with `type === "retry"` — drives the `RetryCard` above
@@ -448,7 +461,8 @@ Several `useMemo` selectors over `messages` now check a "live" state first
 and fall back to the message scan:
 - `latestTokens` prefers `stepTokens` (from `session.next.step.ended`)
 - `activeTodos` prefers `liveTodos` (from `todo.updated`)
-- `branch` is pure state (initial fetch + `vcs.branch.updated`)
+- `branch` is pure state (initial fetch + 5s poll + submit refetch +
+  best-effort `vcs.branch.updated`; see `/vcs` note above)
 - `finishByMessageId` is pure state (from `session.next.step.ended`'s
   `properties.finish`) — survives refetch because the canonical messages
   payload doesn't carry per-step finish metadata.
@@ -497,8 +511,10 @@ to the raw message.
   (already done in `opencode.ts`).
 - The `/question` endpoint returns 404 on older opencode servers (pre-v2). The
   fetch in ChatPanel is wrapped in `.catch(() => {})` — non-fatal.
-- `GET /vcs` returns 200 with `{branch: null}` for non-git cwds. Coalesce to
-  `null` in the renderer; don't treat as error.
+- `opencodeVcsBranch` returns `null` for non-git cwds, detached HEAD,
+  empty cwd, or transport failure. The renderer renders nothing for `null`
+  (the `⎇ <branch>` indicator is gated on truthy branch). Don't treat
+  `null` as an error.
 - `vcs.branch.updated` events carry no `sessionID` — they pass the
   per-session filter by accident. Acceptable: there's only one branch per
   cwd, but be aware if you ever scope event handling more strictly.

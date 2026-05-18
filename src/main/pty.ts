@@ -633,6 +633,34 @@ function parseWorktreePorcelain(out: string): WorktreeInfo[] {
   return result;
 }
 
+// Current branch for a remote cwd, via SSH `git branch --show-current`.
+//
+// We DO NOT use opencode's `GET /vcs?directory=<cwd>` for this anymore.
+// opencode caches the branch per-worker and only refreshes via its own
+// internal watcher; a `git checkout` performed in the user's terminal does
+// NOT invalidate that cache, so `/vcs` returns stale data ("main" forever)
+// and `vcs.branch.updated` never fires. Going direct to `git` is
+// authoritative and cheap over the warm ControlMaster (~30ms).
+//
+// Returns null for: no host, empty cwd, non-git dir, detached HEAD, or any
+// failure. Detached HEAD is intentionally null — the footer indicator only
+// makes sense as a branch name; we'd rather show nothing than `HEAD`.
+export async function getBranch(
+  config: AppConfig,
+  cwd: string,
+): Promise<string | null> {
+  if (!config.host) return null;
+  if (!cwd.trim()) return null;
+  // `git -C <dir> branch --show-current` prints the branch name or empty
+  // (detached HEAD); errors go to stderr. `|| true` keeps the SSH exit zero
+  // on non-repo so the catch path is reserved for real transport failures.
+  const cmd =
+    `git -C ${pathQuote(cwd)} branch --show-current 2>/dev/null || true`;
+  const { stdout } = await runSshOnce(config, cmd).catch(() => ({ stdout: "" }));
+  const name = stdout.trim();
+  return name ? name : null;
+}
+
 // ===== Directory autocomplete =====
 //
 // `ls -1Ap <parent>` lists entries with `/` appended to directories. We keep
