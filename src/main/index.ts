@@ -482,14 +482,6 @@ function registerHandlers(): void {
     ) => {
       const project = config.projects.find((p) => p.tmuxSession === input.sessionName);
       const cwd = input.cwd?.trim() || project?.defaultCwd || "~";
-      console.log("[tmuxNewWindow]", {
-        sessionName: input.sessionName,
-        windowName: input.windowName,
-        chatMode: input.chatMode,
-        inputCwd: input.cwd,
-        projectDefaultCwd: project?.defaultCwd,
-        resolvedCwd: cwd,
-      });
       if (!(await remoteDirExists(config, cwd))) {
         throw new Error(
           `Directory does not exist on ${config.host}: ${cwd}\n\nCheck the path — tmux silently falls back to $HOME otherwise.`,
