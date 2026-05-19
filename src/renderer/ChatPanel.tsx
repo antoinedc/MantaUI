@@ -44,6 +44,7 @@ import {
   isSelfFilteringLifecycleEvent,
   applyQuestionEvent,
   detectCommandFromText,
+  isAssistantTurnComplete,
   type TruncationKind,
 } from "./chatUtils";
 
@@ -576,7 +577,23 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         refetchTimer.current = null;
         window.api
           .opencodeMessages(sessionId)
-          .then((m) => setMessages(m))
+          .then((m) => {
+            setMessages(m);
+            // Self-heal a stuck spinner. `running` is normally cleared by
+            // the live `session.idle` / `session.status{idle}` event — but
+            // if the scoped event stream dropped after the first post-resume
+            // frame and before that idle (half-dead dedicated tunnel, the
+            // "got a first line then hangs" failure), opencode never
+            // re-emits idle for the now-idle session on reconnect. The
+            // reconnect DOES trigger this refetch, and the completed turn is
+            // in `m` — so recompute "done" from the authoritative transcript
+            // (assistant `time.completed`) and clear the orphaned spinner.
+            // One-way: only clears, never sets running true (that stays
+            // event/optimistic-send driven), so it can't race an in-flight
+            // turn — an active turn has no completion stamp on its last
+            // message, or a trailing user message, both → not complete.
+            if (isAssistantTurnComplete(m)) setRunning(false);
+          })
           .catch(() => { /* keep last-known state */ });
       }, 300);
     };
@@ -886,6 +903,23 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         ev.type === "message.part.updated" ||
         ev.type === "message.updated"
       ) {
+        scheduleRefetch();
+      }
+
+      // Transport (re)connect resync. opencode emits `server.connected` as
+      // the first frame of EVERY SSE connection — including the fresh one
+      // the main-process bus opens after a dropped/stalled scoped stream.
+      // It carries no sessionID (transport frame, bypasses the per-session
+      // guard like vcs.branch.updated). This is the ONLY event guaranteed
+      // to arrive after a reconnect when the turn already finished
+      // server-side: the missed `session.idle` is never re-emitted for an
+      // already-idle session, and an idle reconnected stream otherwise
+      // produces only heartbeats (no refetch trigger). Refetching here
+      // re-pulls the canonical transcript; the isAssistantTurnComplete
+      // check in scheduleRefetch then clears any spinner orphaned by the
+      // drop. Root-cause fix for "UI stuck on spinner after the turn
+      // completed server-side" (HANDOFF-sse-ui-completion-gap).
+      if (ev.type === "server.connected") {
         scheduleRefetch();
       }
 

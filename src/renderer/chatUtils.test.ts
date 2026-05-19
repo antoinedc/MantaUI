@@ -17,6 +17,7 @@ import {
   commandPrefixKey,
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
+  isAssistantTurnComplete,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -626,5 +627,74 @@ describe("detectCommandFromText", () => {
   it("skips commands without a template", () => {
     const noTemplate = [{ name: "x" }, { name: "refactor", template: commands[0].template }];
     expect(detectCommandFromText(commands[0].template!, noTemplate)).toBe("refactor");
+  });
+});
+
+// ===== isAssistantTurnComplete =====
+//
+// Regression: SSE UI completion gap. The spinner is cleared only by live
+// `session.idle`/`session.status{idle}`/`session.error` events. When the
+// scoped event stream drops AFTER the first post-resume frame but BEFORE
+// `session.idle` (half-dead dedicated tunnel — "got a first line then
+// hangs"), that idle event is missed forever and the UI spins on a turn
+// that finished server-side. This helper lets the renderer recompute
+// "done" from the authoritative transcript (assistant `time.completed`)
+// on refetch and clear the stuck spinner.
+
+describe("isAssistantTurnComplete", () => {
+  it("treats empty / nullish transcript as complete (nothing running)", () => {
+    expect(isAssistantTurnComplete([])).toBe(true);
+    expect(isAssistantTurnComplete(null)).toBe(true);
+    expect(isAssistantTurnComplete(undefined)).toBe(true);
+  });
+
+  it("is NOT complete when the last message is a user message (turn in flight)", () => {
+    // User just sent; assistant hasn't produced a message yet. Spinner
+    // must stay up — clearing here would hide an active turn.
+    const msgs = [
+      { info: { role: "assistant", time: { completed: 1000 } } },
+      { info: { role: "user" } },
+    ];
+    expect(isAssistantTurnComplete(msgs)).toBe(false);
+  });
+
+  it("is NOT complete when the last assistant message has no completion stamp", () => {
+    // Mid-generation: opencode stamps time.completed only when the turn
+    // fully finishes. Absent stamp = still streaming → keep spinner.
+    const msgs = [
+      { info: { role: "user" } },
+      { info: { role: "assistant", time: { created: 1000 } } },
+    ];
+    expect(isAssistantTurnComplete(msgs)).toBe(false);
+  });
+
+  it("is NOT complete when time is entirely absent on the last assistant message", () => {
+    const msgs = [{ info: { role: "assistant" } }];
+    expect(isAssistantTurnComplete(msgs)).toBe(false);
+  });
+
+  it("is complete when the last assistant message carries time.completed", () => {
+    // THE missed-session.idle case: the completed response is in the
+    // refetched transcript; the helper recovers "done" without the event.
+    const msgs = [
+      { info: { role: "user" } },
+      { info: { role: "assistant", time: { created: 1000, completed: 1234 } } },
+    ];
+    expect(isAssistantTurnComplete(msgs)).toBe(true);
+  });
+
+  it("treats completed:0 as NOT complete (defensive against falsy stamp)", () => {
+    const msgs = [{ info: { role: "assistant", time: { completed: 0 } } }];
+    expect(isAssistantTurnComplete(msgs)).toBe(false);
+  });
+
+  it("only inspects the LAST message (a finished earlier turn does not mask an active one)", () => {
+    const msgs = [
+      { info: { role: "user" } },
+      { info: { role: "assistant", time: { completed: 1000 } } },
+      { info: { role: "user" } },
+      { info: { role: "assistant", time: { created: 2000 } } }, // in flight
+    ];
+    expect(isAssistantTurnComplete(msgs)).toBe(false);
   });
 });

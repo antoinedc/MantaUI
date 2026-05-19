@@ -374,3 +374,57 @@ export function detectCommandFromText(
   }
   return best?.name ?? null;
 }
+
+// === Transcript-derived turn completion ===
+//
+// THE regression this fixes: the renderer's `running` (spinner) state is
+// cleared ONLY by live SSE events — `session.idle`, `session.status
+// {type:"idle"}`, or `session.error`. There is no transcript-derived
+// fallback. So if the scoped event stream drops AFTER delivering the first
+// post-resume frame but BEFORE `session.idle` (the documented "got a first
+// line then hangs" failure: a half-dead dedicated tunnel), that idle event
+// is missed permanently — opencode does not re-emit `session.idle` for an
+// already-idle session when the stream reconnects. The reconnect triggers a
+// message refetch (the COMPLETED response is in it), but nothing recomputes
+// "done", so the spinner spins forever though the turn finished server-side.
+//
+// `isAssistantTurnComplete` derives completion from the authoritative
+// server-side transcript: an assistant message carries `time.completed`
+// (a unix-ms stamp) only once opencode has fully finished that turn. The
+// renderer calls this on every refetch and clears `running` when it returns
+// true — a self-healing fallback for the missed-idle case that cannot
+// false-positive mid-turn (in-flight assistant messages have no
+// `time.completed`; a queued user message makes the last role "user").
+//
+// Returns:
+//   - false  → a turn is in flight (running should NOT be cleared here):
+//              last message is a user message (assistant hasn't replied),
+//              or the last assistant message has no completion stamp.
+//   - true   → the last assistant turn is complete server-side; safe to
+//              clear a stuck spinner. Empty transcript is also "complete"
+//              (nothing is running).
+//
+// Deliberately ONE-WAY: callers use it only to clear `running`, never to
+// set it true. Driving the spinner ON from the transcript would race the
+// optimistic send path (setRunning(true) before the user message lands in
+// any refetch) and live `session.status {busy}` events.
+export function isAssistantTurnComplete(
+  messages:
+    | Array<{
+        info: {
+          role: string;
+          // `completed?` is the only field read; the open member keeps the
+          // type assignable from the real OpencodeMessageInfo.time (which
+          // also carries `created`) and from test fixtures.
+          time?: { completed?: number; [k: string]: unknown };
+        };
+      }>
+    | null
+    | undefined,
+): boolean {
+  if (!messages || messages.length === 0) return true;
+  const last = messages[messages.length - 1];
+  if (last.info.role !== "assistant") return false;
+  const completed = last.info.time?.completed;
+  return typeof completed === "number" && completed > 0;
+}
