@@ -72,6 +72,7 @@ import {
   isSubstantiveFrame,
   STREAM_STALL_MS,
 } from "./forwardHeal.js";
+import { buildRemoteConfigWriteCmd } from "./remoteConfigWrite.js";
 import {
   IPC,
   type AppConfig,
@@ -658,9 +659,19 @@ function registerHandlers(): void {
           },
         };
         const content = JSON.stringify(merged, null, 2);
+        // Write the JSON bytes UNCHANGED. The previous code did
+        // `printf '%s' ${JSON.stringify(content)}` — double-encoding the
+        // already-stringified JSON, which wrote literal backslash-n /
+        // escaped-quote garbage and produced an invalid opencode.jsonc that
+        // stopped opencode from starting (2026-05-18 incident). The pure,
+        // tested builder emits a single-quoted heredoc so arbitrary JSON
+        // passes through byte-for-byte. See remoteConfigWrite.ts.
         await runSshOnce(
           next,
-          `mkdir -p ~/.config/opencode && printf '%s' ${JSON.stringify(content)} > ~/.config/opencode/opencode.jsonc`,
+          buildRemoteConfigWriteCmd(
+            content,
+            "~/.config/opencode/opencode.jsonc",
+          ),
         );
       } catch (e) {
         // Non-fatal — user can still add URLs manually
