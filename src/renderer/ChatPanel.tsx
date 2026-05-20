@@ -41,6 +41,8 @@ import {
   describeTruncation,
   allTodosTerminal,
   selectActiveTodos,
+  selectVisibleTodos,
+  formatHiddenTodosSummary,
   isSelfFilteringLifecycleEvent,
   applyQuestionEvent,
   detectCommandFromText,
@@ -995,13 +997,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // On every messages update (initial fetch, refetch, or in-flight delta),
   // if we're pinned to the bottom, glue to it. Streaming text triggers this
   // many times per second so the viewport follows the tail naturally.
+  // Also re-pins on `liveTodos` changes: the live todo list now renders
+  // inside the scroll container at the tail of the transcript while a turn
+  // is running, and `todo.updated` events update it independently of
+  // `messages`. Without this dep, growing a checklist mid-turn would leave
+  // the viewport parked above the new rows even when the user was pinned to
+  // the bottom. We use `liveTodos` (not the derived `activeTodos`) to dodge
+  // a TDZ — `activeTodos` is a useMemo declared later in the component.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     if (pinnedToBottom.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, liveTodos]);
 
   // Going from idle → running (just sent a message): force pin to bottom so
   // the user sees their own message and the live spinner appear.
@@ -1046,6 +1055,48 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   useEffect(() => {
     resizeInput();
   }, [input, resizeInput]);
+
+  // Focus the chat input whenever this panel becomes the active one or its
+  // owning session id changes. Covers two flows the user expects:
+  //   1. Switching between sessions in the sidebar — focus follows the
+  //      newly visible ChatPanel (the previous one had `isActive=false`).
+  //   2. After `/clear` — the handler swaps in a new session id via
+  //      `refresh()`, which re-renders this same panel with a new
+  //      `sessionId`; the effect re-fires and refocuses the textarea.
+  // Skip on the mobile shell — auto-focusing a textarea on touch devices
+  // pops the soft keyboard before the user has decided to type, which is
+  // disruptive on the drill-down session list flow.
+  useEffect(() => {
+    if (!isActive) return;
+    const el = inputRef.current;
+    if (!el) return;
+    if (el.closest(".mobile-body")) return;
+    // RAF defers focus to after the active-panel `display:block` flip in
+    // App.tsx has committed; focusing a hidden element is a no-op.
+    const raf = requestAnimationFrame(() => {
+      inputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [isActive, sessionId]);
+
+  // Re-pin to bottom when this panel becomes active again. GOTCHA: while
+  // App.tsx hides an inactive panel with `display:none`, the scroll
+  // container has no layout — `scrollHeight` reads 0, so the `[messages]`
+  // effect's `el.scrollTop = el.scrollHeight` becomes a no-op write of 0.
+  // New messages keep accumulating in the DOM while hidden, and when the
+  // user switches back the viewport is parked at the top of the (now-
+  // tall) container even though `pinnedToBottom.current` is still true.
+  // RAF after the display flip so layout is live and scrollHeight reflects
+  // the full transcript.
+  useEffect(() => {
+    if (!isActive) return;
+    if (!pinnedToBottom.current) return;
+    const raf = requestAnimationFrame(() => {
+      const sc = scrollRef.current;
+      if (sc) sc.scrollTop = sc.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [isActive]);
 
   const submit = useCallback(async () => {
     const text = input.trim();
@@ -2266,6 +2317,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
                 />
               );
             })}
+            {/* Live todos while a turn is running — rendered INSIDE the */}
+            {/* scroll container at the tail of the transcript so the list */}
+            {/* scrolls with the rest of the chat instead of sitting in a */}
+            {/* shrink-0 row above the input (which made it feel "sticky" */}
+            {/* and ate vertical space on long checklists). The */}
+            {/* `!running` branch above still attaches activeTodos to the */}
+            {/* last assistant message via persistentTodos — same data, */}
+            {/* same rendering, just owned by MessageRow once idle. */}
+            {running && activeTodos && activeTodos.length > 0 && (
+              <ActiveTodos todos={activeTodos} />
+            )}
           </div>
         )}
         </div>
@@ -2321,7 +2383,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {running && (
         <>
           <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
-          {activeTodos && <ActiveTodos todos={activeTodos} />}
+          {/* activeTodos used to render here, sticky above the input. Moved */}
+          {/* into the scroll container above (tail of the transcript) so */}
+          {/* long checklists scroll like normal chat content. */}
           {messageQueue.length > 0 && (
             <div className="shrink-0 px-4 pb-2 flex flex-col gap-0.5">
               {messageQueue.map((msg, i) => (
@@ -2550,12 +2614,19 @@ function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | null; atB
 // dominant when the list grows.
 
 function ActiveTodos({ todos }: { todos: Array<Record<string, unknown>> }) {
-  // Render every item inline — in_progress as a filled square (orange),
-  // pending as empty square, completed as green ✓ in dim text, cancelled
-  // as ⊘. Collapsing completed items reads worse than just listing them.
+  // Render at most VISIBLE_TODOS_CAP items inline. Order: current
+  // (in_progress) → pending → done so the row the model is actively
+  // working on is always on screen even when the list grows past the cap.
+  // Overflow collapses into a single faint summary row at the bottom:
+  // "+ N pending & M done" / "+ N pending" / "+ M done".
+  // Icons: in_progress = filled orange square, pending = empty square,
+  // completed = green ✓ in dim text, cancelled = ⊘ struck through.
+  const { visible, hiddenPending, hiddenDone } = selectVisibleTodos(todos);
+  const summary = formatHiddenTodosSummary(hiddenPending, hiddenDone);
+  const lastVisibleIdx = visible.length - 1;
   return (
     <div className="px-4 pb-2 text-[13px]">
-      {todos.map((t, i) => {
+      {visible.map((t, i) => {
         const content = String(t.content ?? "");
         const status = String(t.status ?? "pending");
         const isInProgress = status === "in_progress";
@@ -2577,6 +2648,9 @@ function ActiveTodos({ todos }: { todos: Array<Record<string, unknown>> }) {
           icon = "⊘";
           textCls = "text-text-faint line-through opacity-60";
         }
+        // Show the ⎿ corner only on the very first row of the card. The
+        // summary row (when present) replaces the last todo row's leading
+        // slot with a blank so the gutter stays aligned.
         return (
           <div key={i} className="flex">
             <span className="select-none w-5 shrink-0 text-text-faint">
@@ -2594,6 +2668,15 @@ function ActiveTodos({ todos }: { todos: Array<Record<string, unknown>> }) {
           </div>
         );
       })}
+      {summary && (
+        <div className="flex">
+          <span className="select-none w-5 shrink-0 text-text-faint">
+            {lastVisibleIdx < 0 ? "⎿" : " "}
+          </span>
+          <span className="select-none w-4 shrink-0" />
+          <span className="flex-1 text-text-faint">{summary}</span>
+        </div>
+      )}
     </div>
   );
 }

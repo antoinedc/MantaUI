@@ -12,6 +12,9 @@ import {
   isTerminalTodo,
   allTodosTerminal,
   selectActiveTodos,
+  selectVisibleTodos,
+  formatHiddenTodosSummary,
+  VISIBLE_TODOS_CAP,
   isSelfFilteringLifecycleEvent,
   applyQuestionEvent,
   commandPrefixKey,
@@ -387,6 +390,177 @@ describe("selectActiveTodos", () => {
     // Belt-and-suspenders: even with dismissed false and a populated
     // transcript, an empty live list must hide the card.
     expect(selectActiveTodos([], [{ status: "completed" }], false)).toBeNull();
+  });
+});
+
+// ===== selectVisibleTodos / formatHiddenTodosSummary =====
+
+describe("selectVisibleTodos", () => {
+  const todo = (content: string, status: string) => ({ content, status });
+
+  it("cap matches the exported constant (sanity)", () => {
+    expect(VISIBLE_TODOS_CAP).toBe(5);
+  });
+
+  it("returns every todo with zero hidden counts when under the cap", () => {
+    const list = [
+      todo("a", "pending"),
+      todo("b", "in_progress"),
+      todo("c", "completed"),
+    ];
+    const out = selectVisibleTodos(list);
+    // Order is in_progress → pending → done, NOT input order.
+    expect(out.visible.map((t) => t.content)).toEqual(["b", "a", "c"]);
+    expect(out.hiddenPending).toBe(0);
+    expect(out.hiddenDone).toBe(0);
+  });
+
+  it("returns empty visible + zero hidden for empty input", () => {
+    const out = selectVisibleTodos([]);
+    expect(out.visible).toEqual([]);
+    expect(out.hiddenPending).toBe(0);
+    expect(out.hiddenDone).toBe(0);
+  });
+
+  it("orders current → pending → done regardless of input order", () => {
+    const list = [
+      todo("done1", "completed"),
+      todo("pend1", "pending"),
+      todo("current", "in_progress"),
+      todo("done2", "cancelled"),
+      todo("pend2", "pending"),
+    ];
+    const out = selectVisibleTodos(list);
+    expect(out.visible.map((t) => t.content)).toEqual([
+      "current",
+      "pend1",
+      "pend2",
+      "done1",
+      "done2",
+    ]);
+  });
+
+  it("preserves input order within each bucket (no content re-sort)", () => {
+    // Stable order matters — TodoWrite returns the list in the order the
+    // model picked; re-sorting by content would scramble user intent.
+    const list = [
+      todo("z-pending", "pending"),
+      todo("a-pending", "pending"),
+      todo("m-pending", "pending"),
+    ];
+    const out = selectVisibleTodos(list);
+    expect(out.visible.map((t) => t.content)).toEqual([
+      "z-pending",
+      "a-pending",
+      "m-pending",
+    ]);
+  });
+
+  it("truncates at the cap and counts hidden by bucket (pending + done)", () => {
+    const list = [
+      todo("ip", "in_progress"),
+      todo("p1", "pending"),
+      todo("p2", "pending"),
+      todo("p3", "pending"),
+      todo("p4", "pending"),
+      // Above five fill the visible slots. Below should be hidden.
+      todo("p5", "pending"),
+      todo("p6", "pending"),
+      todo("d1", "completed"),
+      todo("d2", "cancelled"),
+      todo("d3", "completed"),
+    ];
+    const out = selectVisibleTodos(list);
+    expect(out.visible).toHaveLength(5);
+    expect(out.visible.map((t) => t.content)).toEqual([
+      "ip",
+      "p1",
+      "p2",
+      "p3",
+      "p4",
+    ]);
+    expect(out.hiddenPending).toBe(2);
+    expect(out.hiddenDone).toBe(3);
+  });
+
+  it("hides only done when all in_progress + pending fit under the cap", () => {
+    const list = [
+      todo("ip", "in_progress"),
+      todo("p1", "pending"),
+      todo("d1", "completed"),
+      todo("d2", "completed"),
+      todo("d3", "completed"),
+      todo("d4", "completed"),
+      todo("d5", "completed"),
+    ];
+    const out = selectVisibleTodos(list);
+    expect(out.visible.map((t) => t.content)).toEqual([
+      "ip",
+      "p1",
+      "d1",
+      "d2",
+      "d3",
+    ]);
+    expect(out.hiddenPending).toBe(0);
+    expect(out.hiddenDone).toBe(2);
+  });
+
+  it("classifies unknown statuses as pending (blocked, etc.)", () => {
+    // isTerminalTodo treats only completed/cancelled as terminal — the
+    // visible-todo selector mirrors that so a "blocked" item never gets
+    // accidentally counted as done.
+    const list = [
+      todo("ip", "in_progress"),
+      todo("blocked", "blocked"),
+      todo("done", "completed"),
+    ];
+    const out = selectVisibleTodos(list, 1);
+    expect(out.visible.map((t) => t.content)).toEqual(["ip"]);
+    expect(out.hiddenPending).toBe(1); // "blocked" counted as pending
+    expect(out.hiddenDone).toBe(1);
+  });
+
+  it("respects a custom cap (used by tests; UI always passes the default)", () => {
+    const list = [
+      todo("ip", "in_progress"),
+      todo("p1", "pending"),
+      todo("p2", "pending"),
+    ];
+    const out = selectVisibleTodos(list, 2);
+    expect(out.visible.map((t) => t.content)).toEqual(["ip", "p1"]);
+    expect(out.hiddenPending).toBe(1);
+    expect(out.hiddenDone).toBe(0);
+  });
+
+  it("is case-insensitive on status (matches isTerminalTodo behavior)", () => {
+    const list = [
+      todo("a", "IN_PROGRESS"),
+      todo("b", "Completed"),
+      todo("c", "Pending"),
+    ];
+    const out = selectVisibleTodos(list);
+    expect(out.visible.map((t) => t.content)).toEqual(["a", "c", "b"]);
+  });
+});
+
+describe("formatHiddenTodosSummary", () => {
+  it("returns null when nothing is hidden", () => {
+    expect(formatHiddenTodosSummary(0, 0)).toBeNull();
+  });
+
+  it("formats pending-only", () => {
+    expect(formatHiddenTodosSummary(5, 0)).toBe("+ 5 pending");
+    expect(formatHiddenTodosSummary(1, 0)).toBe("+ 1 pending");
+  });
+
+  it("formats done-only", () => {
+    expect(formatHiddenTodosSummary(0, 4)).toBe("+ 4 done");
+    expect(formatHiddenTodosSummary(0, 1)).toBe("+ 1 done");
+  });
+
+  it("formats both with the literal '&' separator from the spec", () => {
+    expect(formatHiddenTodosSummary(5, 5)).toBe("+ 5 pending & 5 done");
+    expect(formatHiddenTodosSummary(2, 3)).toBe("+ 2 pending & 3 done");
   });
 });
 

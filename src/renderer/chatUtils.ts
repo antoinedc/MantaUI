@@ -199,6 +199,81 @@ export function selectActiveTodos(
   return null;
 }
 
+/** Maximum todo rows the ActiveTodos card renders before collapsing the
+ * tail into a "+ N pending & M done" summary line. 5 keeps the card from
+ * dominating the chat scroll on long checklists while still showing the
+ * full in-progress context. */
+export const VISIBLE_TODOS_CAP = 5;
+
+/**
+ * Pick which todo rows the ActiveTodos card should render and how many were
+ * truncated. Sort order is **current → pending → done** so the row the
+ * model is actively working on is always visible regardless of where it
+ * sits in the canonical list; within each bucket the input order is
+ * preserved (don't re-sort by content — TodoWrite already returns the
+ * list in the order the model chose).
+ *
+ * Buckets:
+ *   - in_progress  → "current"
+ *   - everything non-terminal that isn't in_progress (pending, blocked, …)
+ *                  → "pending"
+ *   - completed | cancelled → "done"
+ *
+ * If the total <= cap, returns every input in bucket order with zero
+ * hidden counts. If it exceeds the cap, fills `visible` from the top and
+ * reports how many pending vs done rows were truncated. (in_progress rows
+ * can be truncated too — they spill into `hiddenPending` since the user
+ * cares "there's still work to start" more than the precise sub-status.)
+ */
+export function selectVisibleTodos(
+  todos: Array<Record<string, unknown>>,
+  cap: number = VISIBLE_TODOS_CAP,
+): {
+  visible: Array<Record<string, unknown>>;
+  hiddenPending: number;
+  hiddenDone: number;
+} {
+  const inProgress: Array<Record<string, unknown>> = [];
+  const pending: Array<Record<string, unknown>> = [];
+  const done: Array<Record<string, unknown>> = [];
+  for (const t of todos) {
+    const s = String(t.status ?? "").toLowerCase();
+    if (s === "in_progress") inProgress.push(t);
+    else if (s === "completed" || s === "cancelled") done.push(t);
+    else pending.push(t);
+  }
+  const ordered = [...inProgress, ...pending, ...done];
+  if (ordered.length <= cap) {
+    return { visible: ordered, hiddenPending: 0, hiddenDone: 0 };
+  }
+  const visible = ordered.slice(0, cap);
+  const hidden = ordered.slice(cap);
+  let hiddenPending = 0;
+  let hiddenDone = 0;
+  for (const t of hidden) {
+    const s = String(t.status ?? "").toLowerCase();
+    if (s === "completed" || s === "cancelled") hiddenDone += 1;
+    else hiddenPending += 1;
+  }
+  return { visible, hiddenPending, hiddenDone };
+}
+
+/**
+ * Format the hidden-counts overflow line for the ActiveTodos card.
+ * Returns null when nothing is hidden (caller skips the row entirely).
+ * Examples: "+ 5 pending & 5 done", "+ 5 pending", "+ 4 done".
+ */
+export function formatHiddenTodosSummary(
+  hiddenPending: number,
+  hiddenDone: number,
+): string | null {
+  const parts: string[] = [];
+  if (hiddenPending > 0) parts.push(`${hiddenPending} pending`);
+  if (hiddenDone > 0) parts.push(`${hiddenDone} done`);
+  if (parts.length === 0) return null;
+  return `+ ${parts.join(" & ")}`;
+}
+
 /**
  * Event types whose ChatPanel handler RE-FETCHES and self-filters by
  * sessionID (refreshQuestions / refreshPermissions). Their event
