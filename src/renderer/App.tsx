@@ -9,6 +9,7 @@ export function App() {
   const {
     loaded,
     host,
+    user,
     projects,
     activeProjectName,
     activeWindowByProject,
@@ -151,23 +152,51 @@ export function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [projects, activeProjectName, activeWindowByProject, setActive]);
 
-  const activeWinName = activeProjectName
-    ? projects
-        .find((p) => p.tmuxSession === activeProjectName)
-        ?.windows.find((w) => w.index === activeWindowByProject[activeProjectName])?.name
+  const activeProject = activeProjectName
+    ? projects.find((p) => p.tmuxSession === activeProjectName) ?? null
     : null;
+  const activeWinName = activeProject?.windows.find(
+    (w) => w.index === activeWindowByProject[activeProjectName!],
+  )?.name ?? null;
+  // CWD for the active (project, window). tmux's `paneCurrentPath` is always
+  // absolute and follows shell-side `cd`s, so prefer it; fall back to the
+  // project's configured `defaultCwd` for chat-mode holder panes that haven't
+  // emitted a path yet. Compact `/home/<user>/...` to `~/...` for display —
+  // matches the convention used everywhere else in the UI.
+  const activeCwdRaw = activeWin?.paneCurrentPath || activeProject?.defaultCwd || "";
+  const activeCwd = (() => {
+    if (!activeCwdRaw) return "";
+    if (user && activeCwdRaw.startsWith(`/home/${user}/`)) {
+      return `~/${activeCwdRaw.slice(`/home/${user}/`.length)}`;
+    }
+    if (user && activeCwdRaw === `/home/${user}`) return "~";
+    return activeCwdRaw;
+  })();
 
   return (
     <div className="h-full w-full flex bg-bg text-text">
       <Sidebar ref={sidebarRef} onOpenSettings={() => setSettingsOpen(true)} />
       <main className="flex-1 flex flex-col min-w-0">
-        <div className="titlebar-drag h-10 border-b border-border flex items-center px-3 gap-2">
-          <div className="text-xs text-text-muted">
-            {host ? host : "Not configured"}
+        <div className="titlebar-drag h-10 border-b border-border flex items-center px-3 gap-2 min-w-0">
+          <div className="text-xs text-text-muted flex items-center gap-2 min-w-0">
+            <span className="shrink-0">{host ? host : "Not configured"}</span>
             {activeProjectName && (
-              <span className="ml-2 text-text-faint">
+              <span className="text-text-faint shrink-0">
                 · {activeProjectName}
                 {activeWinName && ` / ${activeWinName}`}
+              </span>
+            )}
+            {/* Active cwd — last segment in the chain so it can shrink and */}
+            {/* truncate when the title bar is narrow. `direction:rtl` keeps */}
+            {/* the *tail* of the path visible (the meaningful subdir name) */}
+            {/* when truncation hits, instead of cutting it off mid-name. */}
+            {activeCwd && (
+              <span
+                className="text-text-faint min-w-0 truncate"
+                style={{ direction: "rtl", textAlign: "left" }}
+                title={activeCwdRaw}
+              >
+                · <bdi style={{ direction: "ltr" }}>{activeCwd}</bdi>
               </span>
             )}
           </div>
