@@ -116,6 +116,92 @@ export function ctxStageColor(pct: number): string {
   return "#ef4444"; // red-500
 }
 
+// ===== Context window breakdown =====
+//
+// The opencode `session.next.step.ended` event carries per-turn token usage
+// as `{ input, output, reasoning, cache: { read, write } }`. These mirror
+// the Anthropic `usage` object (and opencode normalizes other providers to
+// the same shape):
+//
+//   - `input`       → uncached input tokens (paid at full rate)
+//   - `cache.read`  → tokens served from prompt cache (paid at ~10% rate,
+//                     "warm")
+//   - `cache.write` → tokens written into prompt cache THIS turn (paid at
+//                     ~125% rate — full price + 25% cache-creation
+//                     surcharge — and they re-bill on the next cold turn
+//                     until a hit lands)
+//   - `output`      → assistant output (not relevant to context window)
+//
+// All THREE input buckets (input + cache.read + cache.write) are disjoint
+// and ALL consume the context window on the request. The previous code
+// summed only `input + cache.read`, under-counting the bar on cache-warming
+// turns. Output and reasoning never enter the context window numerator
+// (they're produced by the model, not fed back in until the next turn —
+// where they show up under the appropriate input bucket).
+//
+// `computeContextBreakdown` returns the four numbers the bar/pill UI
+// needs: a tuple of segment widths (% of `limit`) plus the raw token
+// counts. Clamps to never exceed 100% total (very over-context turns
+// would otherwise overflow the bar visually).
+
+export type ContextSegment = "fresh" | "cacheRead" | "cacheWrite";
+
+export type ContextBreakdown = {
+  // Raw counts. Always non-negative, ints.
+  freshInput: number;
+  cacheRead: number;
+  cacheWrite: number;
+  // Total input tokens that consume the context window this request.
+  totalInput: number;
+  // Percent of `limit` used, clamped to [0, 100], rounded.
+  pct: number;
+  // Per-segment percentages of `limit` (NOT of totalInput) so the segmented
+  // bar can render them as proportional slices that visually sum to `pct`.
+  // Clamped so their sum never exceeds 100 (the last segment absorbs the
+  // clamp when over-context).
+  segments: { kind: ContextSegment; pct: number }[];
+};
+
+export function computeContextBreakdown(
+  tokens: {
+    input?: number;
+    cache?: { read?: number; write?: number };
+  } | null | undefined,
+  limit: number,
+): ContextBreakdown {
+  const freshInput = Math.max(0, Math.round(tokens?.input ?? 0));
+  const cacheRead = Math.max(0, Math.round(tokens?.cache?.read ?? 0));
+  const cacheWrite = Math.max(0, Math.round(tokens?.cache?.write ?? 0));
+  const totalInput = freshInput + cacheRead + cacheWrite;
+  const safeLimit = limit > 0 ? limit : ASSUMED_CONTEXT_TOKENS;
+  const rawPct = (totalInput / safeLimit) * 100;
+  const pct = Math.min(100, Math.round(rawPct));
+
+  // Compute segment percentages with the same clamp envelope. Convert
+  // each bucket to its share of the LIMIT (not totalInput) so the
+  // segmented bar's filled portion equals `pct` exactly.
+  const segFresh = (freshInput / safeLimit) * 100;
+  const segRead = (cacheRead / safeLimit) * 100;
+  const segWrite = (cacheWrite / safeLimit) * 100;
+  // Render order: fresh (uncached, paid full rate) | cache.write (warm-up,
+  // paid full rate + surcharge) | cache.read (cheap, paid ~10%). Putting
+  // cache.write between fresh and cache.read groups the "expensive" buckets
+  // visually on the left so the bar reads left→right as cost-decreasing.
+  const segments: { kind: ContextSegment; pct: number }[] = [
+    { kind: "fresh", pct: segFresh },
+    { kind: "cacheWrite", pct: segWrite },
+    { kind: "cacheRead", pct: segRead },
+  ];
+  // Clamp the sum to `pct` (handles both rounding drift and over-context
+  // overflow): scale down proportionally if we'd exceed 100%.
+  const sum = segments.reduce((a, s) => a + s.pct, 0);
+  if (sum > 100 && sum > 0) {
+    const scale = 100 / sum;
+    for (const s of segments) s.pct *= scale;
+  }
+  return { freshInput, cacheRead, cacheWrite, totalInput, pct, segments };
+}
+
 export type TypeaheadCommandRow = {
   name: string;
   description?: string;

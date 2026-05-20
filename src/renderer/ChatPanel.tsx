@@ -47,7 +47,9 @@ import {
   applyQuestionEvent,
   detectCommandFromText,
   isAssistantTurnComplete,
+  computeContextBreakdown,
   type TruncationKind,
+  type ContextBreakdown,
 } from "./chatUtils";
 
 // In-flight attachments tracked alongside the textarea content. Each chip
@@ -2710,30 +2712,98 @@ function formatFileDiff(additions: number, deletions: number): React.ReactNode {
 
 // ===== Context bar =====
 //
-// Chunky horizontal bar with a dotted "empty" pattern and a solid filled
-// portion. Color staged by usage: green → yellow → orange → red.
-// Matches the Claude TUI style.
+// Chunky horizontal bar with a dotted "empty" pattern and a SEGMENTED filled
+// portion: fresh-input (paid full rate) | cache.write (warm-up, paid full
+// rate + 25% surcharge) | cache.read (cached, paid ~10%). Color of the
+// fresh segment stages by total usage (green → yellow → orange → red);
+// cache.write uses a steady amber to flag the "this turn cost extra to
+// warm the cache" bucket; cache.read uses a steady muted teal for the
+// "served from cache" bucket.
+//
+// When `cache.write > 0` an inline `↻ Nk warm` pill renders to the right of
+// the % so the warm-up cost is visible WITHOUT hovering. (The old code
+// surfaced cache.write only inside a native HTML `title` tooltip — easy
+// to miss, hidden on mobile.) cache.read is shown in the tooltip; not
+// promoted to its own pill since it represents *savings*, not a cost.
 
-function ContextBar({ pct, tooltip }: { pct: number; tooltip?: string }) {
+// Cache-segment colors — tuned to read as distinct buckets without
+// competing with the stage color of the fresh segment.
+const CACHE_WRITE_COLOR = "#f59e0b"; // amber-500: warm-up, expensive
+const CACHE_READ_COLOR = "#0ea5a4"; // teal-600: cached, cheap
+
+function ContextBar({
+  breakdown,
+  limit,
+  modelName,
+  tooltip,
+}: {
+  breakdown: ContextBreakdown;
+  limit: number;
+  modelName: string | null;
+  tooltip?: string;
+}) {
+  const { pct, segments, freshInput, cacheRead, cacheWrite, totalInput } =
+    breakdown;
+  // Stage color is driven by total usage (so the % digits + fresh slice
+  // share the same warning hue).
   const fill = ctxStageColor(pct);
-  // Dot pattern uses the same hue at ~35% alpha so the "remaining" area still
-  // reads as the same stage color, just dimmer.
   const dot = `${fill}55`;
+  const segColor = (kind: ContextBreakdown["segments"][number]["kind"]) => {
+    if (kind === "fresh") return fill;
+    if (kind === "cacheWrite") return CACHE_WRITE_COLOR;
+    return CACHE_READ_COLOR;
+  };
+  // Multi-line tooltip showing the full breakdown. Caller appends any
+  // contextual hints (compact recommended, model name, etc.).
+  const breakdownLines = [
+    `${totalInput.toLocaleString()} / ${limit.toLocaleString()} tokens (${pct}%)`,
+    modelName ? `Model window: ${modelName}` : null,
+    cacheRead > 0
+      ? `  · ${cacheRead.toLocaleString()} cache read (cheap, served from cache)`
+      : null,
+    cacheWrite > 0
+      ? `  · ${cacheWrite.toLocaleString()} cache write (warm-up — paid full rate + surcharge this turn)`
+      : null,
+    freshInput > 0
+      ? `  · ${freshInput.toLocaleString()} fresh input (uncached, paid full rate)`
+      : null,
+    tooltip ?? null,
+  ].filter(Boolean);
   return (
-    <span className="flex items-center gap-1.5 shrink-0" title={tooltip}>
+    <span
+      className="flex items-center gap-1.5 shrink-0"
+      title={breakdownLines.join("\n")}
+    >
       <span
+        // Keep the `w-24` class — mobile.css selects on it to hide the
+        // track on phones. Don't rename the width without updating that
+        // CSS rule.
         className="inline-block w-24 h-3 rounded-[2px] overflow-hidden align-middle"
         style={{
-          // Solid base for the dot pattern to sit on.
           backgroundColor: "#1b1e25",
           backgroundImage: `radial-gradient(circle, ${dot} 1.2px, transparent 1.4px)`,
           backgroundSize: "4px 4px",
         }}
       >
-        <span
-          className="block h-full"
-          style={{ width: `${pct}%`, backgroundColor: fill }}
-        />
+        {/* Render segments inline; each takes its share of the WHOLE track
+            (not of the filled portion), so widths sum to `pct` and the
+            empty remainder is the dotted pattern beneath. */}
+        {segments.map((s, i) =>
+          s.pct > 0 ? (
+            <span
+              key={s.kind}
+              className="inline-block h-full align-top"
+              style={{
+                width: `${s.pct}%`,
+                backgroundColor: segColor(s.kind),
+                // Subtle inset between segments so adjacent slices read as
+                // distinct buckets even when their colors are close.
+                boxShadow:
+                  i > 0 ? "inset 1px 0 0 rgba(0,0,0,0.35)" : undefined,
+              }}
+            />
+          ) : null,
+        )}
       </span>
       <span
         className="tabular-nums text-[12px] font-semibold"
@@ -2741,6 +2811,20 @@ function ContextBar({ pct, tooltip }: { pct: number; tooltip?: string }) {
       >
         {pct}%
       </span>
+      {cacheWrite > 0 && (
+        // Visible warm-up pill: surfaces cache.write WITHOUT hover. Uses
+        // the amber cache-write color so it ties back to the bar segment.
+        <span
+          className="tabular-nums text-[11px] font-medium px-1 rounded-sm shrink-0"
+          style={{
+            color: CACHE_WRITE_COLOR,
+            backgroundColor: `${CACHE_WRITE_COLOR}1f`,
+          }}
+          title={`${cacheWrite.toLocaleString()} cache write tokens this turn — paid full rate plus a 25% cache-creation surcharge. Re-billed every cold turn until a cache hit lands.`}
+        >
+          ↻ {formatTokens(cacheWrite).replace(" tokens", "")} warm
+        </span>
+      )}
     </span>
   );
 }
@@ -3475,10 +3559,16 @@ function InputArea({
   // (Opus 4.7 = 1M, Sonnet 4 = 200k, etc.) so the bar reflects what the
   // provider will actually accept on the next request. Falls back to
   // ASSUMED_CONTEXT_TOKENS (200k) when no model is selected yet.
-  const ctxTokens =
-    tokens != null ? tokens.input + (tokens.cache?.read ?? 0) : 0;
+  // Context window numerator = input + cache.read + cache.write. All three
+  // input buckets are disjoint and ALL consume the request's context window;
+  // the previous formula omitted cache.write and under-reported the bar on
+  // cache-warming turns. computeContextBreakdown also produces the per-
+  // segment widths the SEGMENTED ContextBar needs (uncached vs warm vs
+  // cached) so the user can see the warm-up bucket without hovering.
   const ctxLimit = resolveContextLimit(activeModel);
-  const ctxPct = Math.min(100, Math.round((ctxTokens / ctxLimit) * 100));
+  const ctxBreakdown = computeContextBreakdown(tokens, ctxLimit);
+  const ctxTokens = ctxBreakdown.totalInput;
+  const ctxPct = ctxBreakdown.pct;
   return (
     <div className="shrink-0">
       {/* Error banner moved to ChatPanel scope (dismissable + closer to the */}
@@ -3607,28 +3697,27 @@ function InputArea({
           />
           {ctxTokens > 0 && (
             <ContextBar
-              pct={ctxPct}
-              tooltip={[
-                `${ctxTokens.toLocaleString()} / ${ctxLimit.toLocaleString()} tokens`,
+              breakdown={ctxBreakdown}
+              limit={ctxLimit}
+              modelName={
                 activeModel
-                  ? `Model window: ${activeModel.name}`
-                  : `No active model — using ${ASSUMED_CONTEXT_TOKENS.toLocaleString()}-token fallback`,
+                  ? activeModel.name
+                  : `(fallback ${ASSUMED_CONTEXT_TOKENS.toLocaleString()}-token window)`
+              }
+              tooltip={
                 // Action hint scales with how close we are to the wall.
                 // 100% on the real model limit means the next request will
                 // very likely truncate or hit `model_context_window_exceeded`
                 // — make the remediation explicit instead of letting the
-                // user discover it from a truncated reply.
+                // user discover it from a truncated reply. Bucket-level
+                // breakdown is provided by ContextBar itself; this tooltip
+                // is only the *hint* line.
                 ctxPct >= 100
                   ? "Compact recommended — run /compact to free space"
                   : ctxPct >= 90
                     ? "Approaching limit — consider /compact soon"
-                    : null,
-                tokens?.cache?.write
-                  ? `${tokens.cache.write.toLocaleString()} cache write tokens — billed again on next cold turn`
-                  : null,
-              ]
-                .filter(Boolean)
-                .join("\n")}
+                    : undefined
+              }
             />
           )}
         </span>

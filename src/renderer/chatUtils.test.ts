@@ -21,6 +21,7 @@ import {
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
   isAssistantTurnComplete,
+  computeContextBreakdown,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -143,6 +144,122 @@ describe("resolveContextLimit", () => {
     expect(resolveContextLimit({ limit: { context: NaN } })).toBe(
       ASSUMED_CONTEXT_TOKENS,
     );
+  });
+});
+
+// ===== computeContextBreakdown =====
+
+describe("computeContextBreakdown", () => {
+  it("returns all zeros for null/undefined tokens", () => {
+    const b = computeContextBreakdown(null, 200_000);
+    expect(b.freshInput).toBe(0);
+    expect(b.cacheRead).toBe(0);
+    expect(b.cacheWrite).toBe(0);
+    expect(b.totalInput).toBe(0);
+    expect(b.pct).toBe(0);
+    expect(b.segments.every((s) => s.pct === 0)).toBe(true);
+  });
+
+  it("sums input + cache.read + cache.write into totalInput (all three consume the window)", () => {
+    const b = computeContextBreakdown(
+      { input: 10_000, cache: { read: 30_000, write: 5_000 } },
+      200_000,
+    );
+    expect(b.freshInput).toBe(10_000);
+    expect(b.cacheRead).toBe(30_000);
+    expect(b.cacheWrite).toBe(5_000);
+    expect(b.totalInput).toBe(45_000);
+    // 45_000 / 200_000 = 22.5% → 23 rounded
+    expect(b.pct).toBe(23);
+  });
+
+  it("ignores output / reasoning (not part of context window)", () => {
+    // Caller only passes the input-bucket fields; the function MUST NOT
+    // try to read .output or .reasoning. Pass-through arbitrary extra
+    // keys to confirm.
+    const b = computeContextBreakdown(
+      {
+        input: 1_000,
+        cache: { read: 1_000, write: 0 },
+        // @ts-expect-error — extra fields should be ignored
+        output: 999_999,
+        reasoning: 999_999,
+      },
+      200_000,
+    );
+    expect(b.totalInput).toBe(2_000);
+  });
+
+  it("clamps pct to 100 when over-context", () => {
+    const b = computeContextBreakdown(
+      { input: 250_000, cache: { read: 0, write: 0 } },
+      200_000,
+    );
+    expect(b.totalInput).toBe(250_000);
+    expect(b.pct).toBe(100);
+    // Segment percentages should scale down so their sum never exceeds 100.
+    const sum = b.segments.reduce((a, s) => a + s.pct, 0);
+    expect(sum).toBeLessThanOrEqual(100 + 0.001);
+  });
+
+  it("produces per-segment percentages of the LIMIT (not totalInput)", () => {
+    const b = computeContextBreakdown(
+      { input: 20_000, cache: { read: 60_000, write: 20_000 } },
+      200_000,
+    );
+    // Each segment's pct should equal bucket / 200_000 * 100.
+    const fresh = b.segments.find((s) => s.kind === "fresh");
+    const read = b.segments.find((s) => s.kind === "cacheRead");
+    const write = b.segments.find((s) => s.kind === "cacheWrite");
+    expect(fresh?.pct).toBeCloseTo(10, 5);
+    expect(read?.pct).toBeCloseTo(30, 5);
+    expect(write?.pct).toBeCloseTo(10, 5);
+    // And they should sum to the same percent as `pct` (modulo rounding).
+    const segSum = (fresh?.pct ?? 0) + (read?.pct ?? 0) + (write?.pct ?? 0);
+    expect(Math.round(segSum)).toBe(b.pct);
+  });
+
+  it("renders segment order fresh → cacheWrite → cacheRead", () => {
+    // The bar reads left→right as cost-decreasing: full-rate fresh
+    // tokens, then the warm-up bucket (full + surcharge), then the
+    // cheap cached bucket on the right.
+    const b = computeContextBreakdown(
+      { input: 1, cache: { read: 1, write: 1 } },
+      200_000,
+    );
+    expect(b.segments.map((s) => s.kind)).toEqual([
+      "fresh",
+      "cacheWrite",
+      "cacheRead",
+    ]);
+  });
+
+  it("treats missing cache as zero", () => {
+    const b = computeContextBreakdown({ input: 5_000 }, 200_000);
+    expect(b.cacheRead).toBe(0);
+    expect(b.cacheWrite).toBe(0);
+    expect(b.totalInput).toBe(5_000);
+  });
+
+  it("clamps negative inputs to zero (defensive)", () => {
+    const b = computeContextBreakdown(
+      { input: -100, cache: { read: -50, write: -1 } },
+      200_000,
+    );
+    expect(b.freshInput).toBe(0);
+    expect(b.cacheRead).toBe(0);
+    expect(b.cacheWrite).toBe(0);
+    expect(b.totalInput).toBe(0);
+  });
+
+  it("falls back to ASSUMED_CONTEXT_TOKENS when limit is non-positive", () => {
+    // Avoids division-by-zero / negative-pct paths.
+    const b = computeContextBreakdown(
+      { input: 100_000, cache: { read: 0, write: 0 } },
+      0,
+    );
+    // 100_000 / 200_000 = 50%
+    expect(b.pct).toBe(50);
   });
 });
 
