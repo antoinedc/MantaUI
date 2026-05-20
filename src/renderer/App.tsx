@@ -190,14 +190,20 @@ export function App() {
             {/* truncate when the title bar is narrow. `direction:rtl` keeps */}
             {/* the *tail* of the path visible (the meaningful subdir name) */}
             {/* when truncation hits, instead of cutting it off mid-name. */}
+            {/* The `·` separator lives OUTSIDE the rtl span so it renders */}
+            {/* before the path (rtl would otherwise flip it to the right */}
+            {/* side, leaving an orphan dot trailing the cwd). */}
             {activeCwd && (
-              <span
-                className="text-text-faint min-w-0 truncate"
-                style={{ direction: "rtl", textAlign: "left" }}
-                title={activeCwdRaw}
-              >
-                · <bdi style={{ direction: "ltr" }}>{activeCwd}</bdi>
-              </span>
+              <>
+                <span className="text-text-faint shrink-0">·</span>
+                <span
+                  className="text-text-faint min-w-0 truncate"
+                  style={{ direction: "rtl", textAlign: "left" }}
+                  title={activeCwdRaw}
+                >
+                  <bdi style={{ direction: "ltr" }}>{activeCwd}</bdi>
+                </span>
+              </>
             )}
           </div>
 

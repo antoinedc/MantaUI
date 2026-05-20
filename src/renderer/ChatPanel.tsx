@@ -1061,13 +1061,19 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   //   1. Switching between sessions in the sidebar — focus follows the
   //      newly visible ChatPanel (the previous one had `isActive=false`).
   //   2. After `/clear` — the handler swaps in a new session id via
-  //      `refresh()`, which re-renders this same panel with a new
-  //      `sessionId`; the effect re-fires and refocuses the textarea.
+  //      `refresh()`, which mounts a NEW ChatPanel for the new session id
+  //      (App.tsx keys panels by `chat:${sid}`). The new panel's first
+  //      render returns "Loading session…" — the textarea is NOT in the
+  //      DOM yet, so `inputRef.current` is null and `.focus()` no-ops.
+  //      Depending on `messages` here re-fires the effect once the initial
+  //      message fetch lands and the textarea actually exists.
   // Skip on the mobile shell — auto-focusing a textarea on touch devices
   // pops the soft keyboard before the user has decided to type, which is
   // disruptive on the drill-down session list flow.
+  const messagesReady = !!messages;
   useEffect(() => {
     if (!isActive) return;
+    if (!messagesReady) return;
     const el = inputRef.current;
     if (!el) return;
     if (el.closest(".mobile-body")) return;
@@ -1077,7 +1083,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       inputRef.current?.focus();
     });
     return () => cancelAnimationFrame(raf);
-  }, [isActive, sessionId]);
+  }, [isActive, sessionId, messagesReady]);
 
   // Re-pin to bottom when this panel becomes active again. GOTCHA: while
   // App.tsx hides an inactive panel with `display:none`, the scroll
