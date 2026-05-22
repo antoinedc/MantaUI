@@ -17,10 +17,24 @@ export type ActiveSession = {
 // Per-window UI status: live `running`/`subagents` from the poller, plus an
 // `attention` flag we set locally on the running→idle transition and clear
 // when the user opens the window.
+//
+// `attentionKind` discriminates WHY the window is asking for attention so
+// the sidebar can render distinct affordances:
+//   - "idle"       → claude finished, user hasn't visited the window yet
+//                    (amber dot, no urgency)
+//   - "question"   → opencode's Question tool fired — AI is BLOCKED waiting
+//                    on the user (red dot + `?` label)
+//   - "permission" → opencode's permission.asked fired — AI is BLOCKED
+//                    waiting on permission approval (red dot + `!` label)
+// `attention` (boolean) remains the gate; `attentionKind` is meaningful
+// only when `attention === true`. Defaults to "idle" when unset for
+// backward compat with the existing poller-driven flow.
+export type AttentionKind = "idle" | "question" | "permission";
 export type WindowStatusUI = {
   running: boolean;
   subagents: number;
   attention: boolean;
+  attentionKind?: AttentionKind;
 };
 
 // Global screenshot detection toast. Single instance app-wide — the active
@@ -67,6 +81,26 @@ type State = {
   applyProjects: (projects: Project[]) => void;
   applyConfig: (c: AppConfig) => void;
   applyStatusBatch: (batch: WindowStatus[]) => void;
+  // Chat-mode running state driven by opencode SSE (session.status /
+  // session.idle / session.error). The PTY-pane poller can't see chat
+  // windows' state — the holder runs `sleep infinity`, not claude — so
+  // without this the sidebar dot would always be off for chat-mode
+  // even mid-generation. Same store map (status[session][windowIndex]),
+  // same UI; just a different update path. Owning window is resolved
+  // from `sessionId` via the active projects tree.
+  setChatRunning: (sessionId: string, running: boolean) => void;
+  // Chat-mode attention signals driven by opencode SSE. `question.asked`
+  // (AI is blocked waiting for the user to pick an answer) and
+  // `permission.asked` (AI is blocked waiting for tool-use approval)
+  // both flip `attention:true` with a distinct `attentionKind`. Cleared
+  // by `setActive` when the user opens the window (existing behavior)
+  // OR by the matching `*.replied` / `*.rejected` event flowing through
+  // this action with kind="idle" — the kind transition tracks whether
+  // any of the higher-urgency signals is still pending.
+  setChatAttention: (
+    sessionId: string,
+    kind: AttentionKind | null,
+  ) => void;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   setScreenshotToast: (t: ScreenshotToast | null) => void;
 };
@@ -197,7 +231,94 @@ export const useStore = create<State>((set, get) => ({
       // produces an empty batch (we return early in the catch), and a
       // successful run that omits a window means the window is gone.
       void seen;
+      // Preserve the prior values for chat-mode windows — the PTY poller
+      // can't see their state (the holder pane runs `sleep infinity`),
+      // so a fresh `next` map would silently clobber whatever
+      // setChatRunning / setChatAttention have set from the SSE stream.
+      // Look up each chat window's prior status and copy it through.
+      for (const p of prev.projects) {
+        for (const w of p.windows) {
+          if (!w.opencodeSessionId) continue;
+          const prior = prev.status[p.tmuxSession]?.[w.index];
+          if (prior) {
+            (next[p.tmuxSession] ??= {})[w.index] = prior;
+          }
+        }
+      }
       return { status: next };
+    }),
+
+  setChatRunning: (sessionId, running) =>
+    set((prev) => {
+      const owner = resolveSessionOwner(prev.projects, sessionId);
+      if (!owner) return prev;
+      const old = prev.status[owner.tmuxSession]?.[owner.windowIndex];
+      const wasRunning = old?.running === true;
+      const isActiveHere =
+        prev.activeProjectName === owner.tmuxSession &&
+        prev.activeWindowByProject[owner.tmuxSession] === owner.windowIndex;
+      // Latch the same "running → idle while user isn't here" attention
+      // signal the poller uses. Only fires for the idle transition; a
+      // running→running tick (no-op) or fresh-start running carries
+      // attention forward.
+      const attentionNow = old?.attention ?? false;
+      const attentionKindNow = old?.attentionKind;
+      const attention =
+        attentionNow || (wasRunning && !running && !isActiveHere);
+      // Preserve a more-urgent kind ("question"/"permission") if one is
+      // already latched; otherwise default to "idle" on the
+      // running→idle latch.
+      const attentionKind: AttentionKind | undefined =
+        attentionKindNow && attentionKindNow !== "idle"
+          ? attentionKindNow
+          : attention
+            ? "idle"
+            : undefined;
+      const nextWin: WindowStatusUI = {
+        running,
+        subagents: old?.subagents ?? 0,
+        attention,
+        attentionKind,
+      };
+      return {
+        status: {
+          ...prev.status,
+          [owner.tmuxSession]: {
+            ...prev.status[owner.tmuxSession],
+            [owner.windowIndex]: nextWin,
+          },
+        },
+      };
+    }),
+
+  setChatAttention: (sessionId, kind) =>
+    set((prev) => {
+      const owner = resolveSessionOwner(prev.projects, sessionId);
+      if (!owner) return prev;
+      const old = prev.status[owner.tmuxSession]?.[owner.windowIndex];
+      const isActiveHere =
+        prev.activeProjectName === owner.tmuxSession &&
+        prev.activeWindowByProject[owner.tmuxSession] === owner.windowIndex;
+      // Don't latch attention if the user is already viewing the window
+      // — the QuestionCard / PermissionCard is right there in front of
+      // them. The sidebar dot would be redundant and would auto-clear on
+      // the next setActive anyway.
+      const wantAttention = kind != null && !isActiveHere;
+      const nextWin: WindowStatusUI = {
+        running: old?.running ?? false,
+        subagents: old?.subagents ?? 0,
+        attention: wantAttention,
+        attentionKind: wantAttention ? kind ?? "idle" : undefined,
+      };
+      return {
+        status: {
+          ...prev.status,
+          [owner.tmuxSession]: {
+            ...prev.status[owner.tmuxSession],
+            [owner.windowIndex]: nextWin,
+          },
+        },
+      };
     }),
 
   applyProjects: (projects) =>

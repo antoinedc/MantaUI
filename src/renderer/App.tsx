@@ -59,6 +59,85 @@ export function App() {
     return off;
   }, []);
 
+  // Sidebar status for chat-mode windows. The PTY-pane poller
+  // (src/main/status.ts) can't see chat-mode state — the holder pane
+  // runs `sleep infinity`, so `capture-pane` returns nothing claude-
+  // looking and BUSY_RE never matches. Without this subscription, chat
+  // windows' sidebar dot would always be off even mid-generation, and
+  // there'd be no signal at all for pending questions or permission
+  // requests.
+  //
+  // App-level (not per-ChatPanel) so signals fire even for chat windows
+  // the user hasn't visited yet this session — opencode SSE delivers
+  // events for ALL active sessions on every connected directory's
+  // scoped stream, not just the one the user has open.
+  //
+  // Driven entirely from opencode SSE events main/server already forward:
+  //   - session.status{type:"busy"|"retry"} → running:true
+  //   - session.status{type:"idle"} / session.idle → running:false
+  //                                                  (latches "idle"
+  //                                                  attention if user
+  //                                                  isn't on the
+  //                                                  window — same
+  //                                                  logic as the poller)
+  //   - question.asked   → attention "question"
+  //   - question.replied / question.rejected → clear attention
+  //   - permission.asked → attention "permission"
+  //   - permission.replied / permission.rejected → clear attention
+  //
+  // chatAutoAllow suppresses permission.asked at the bus layer in
+  // both transports, so the sidebar correctly stays quiet in trust
+  // mode without any extra branching here.
+  useEffect(() => {
+    if (!window.api.onOpencodeEvent) return;
+    const off = window.api.onOpencodeEvent((ev) => {
+      const props = (ev.properties ?? {}) as Record<string, unknown>;
+      // Running / idle / error transitions.
+      if (ev.type === "session.idle" || ev.type === "session.error") {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (sid) useStore.getState().setChatRunning(sid, false);
+        return;
+      }
+      if (ev.type === "session.status") {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (!sid) return;
+        const status = props.status as { type?: string } | undefined;
+        const t = status?.type;
+        if (t === "busy" || t === "retry") {
+          useStore.getState().setChatRunning(sid, true);
+        } else if (t === "idle") {
+          useStore.getState().setChatRunning(sid, false);
+        }
+        return;
+      }
+      // Question and permission lifecycle — both use `properties.sessionID`
+      // (verified in chatUtils.applyQuestionEvent and the in-ChatPanel
+      // handler). Treat `.asked` as latch-on, `.replied`/`.rejected`
+      // as latch-off.
+      if (ev.type === "question.asked") {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (sid) useStore.getState().setChatAttention(sid, "question");
+        return;
+      }
+      if (ev.type === "permission.asked") {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (sid) useStore.getState().setChatAttention(sid, "permission");
+        return;
+      }
+      if (
+        ev.type === "question.replied" ||
+        ev.type === "question.rejected" ||
+        ev.type === "permission.replied" ||
+        ev.type === "permission.rejected"
+      ) {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (sid) useStore.getState().setChatAttention(sid, null);
+        return;
+      }
+    });
+    return off;
+  }, []);
+
   // Without this, dropping a file anywhere outside the terminal area causes
   // Chromium to navigate the renderer to the file:// URL.
   useEffect(() => {

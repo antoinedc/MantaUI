@@ -758,10 +758,30 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   );
 });
 
-// Subtle per-window indicator:
-//   running       → pulsing accent dot, with `·N` if subagents > 0
-//   attention     → steady amber dot (claude finished, user hasn't visited yet)
-//   neither       → nothing
+// Subtle per-window indicator. Four states:
+//
+//   running                  → pulsing accent (blue) dot, with `·N` if
+//                              subagents > 0. Sourced from the PTY
+//                              poller for claude-TUI windows and from
+//                              opencode SSE (`setChatRunning`) for
+//                              chat-mode windows — the same dot, just a
+//                              different update path.
+//   attention "question"     → pulsing red dot + `?` glyph. AI is
+//                              blocked on a Question tool request;
+//                              user MUST answer for the turn to proceed.
+//   attention "permission"   → pulsing red dot + `!` glyph. AI is
+//                              blocked on a permission.asked event;
+//                              user MUST approve/deny for a tool call
+//                              to run. Same urgency as a question;
+//                              distinct glyph so the user can tell
+//                              what's blocking before opening the
+//                              window.
+//   attention "idle"         → steady amber dot (no animation, no
+//                              glyph). Claude or chat finished a turn
+//                              while the user was on a different
+//                              window — soft "go check" signal, not
+//                              urgent.
+//   none                     → nothing rendered.
 function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
   if (!status) return null;
   if (status.running) {
@@ -782,6 +802,23 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
     );
   }
   if (status.attention) {
+    const kind = status.attentionKind ?? "idle";
+    if (kind === "question" || kind === "permission") {
+      const glyph = kind === "question" ? "?" : "!";
+      const tooltip =
+        kind === "question"
+          ? "Waiting on a question — click to answer"
+          : "Waiting on permission — click to approve or deny";
+      return (
+        <span
+          className="flex items-center gap-0.5 text-[10px] text-red-400 leading-none"
+          title={tooltip}
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+          <span className="font-bold tabular-nums">{glyph}</span>
+        </span>
+      );
+    }
     return (
       <span
         className="w-1.5 h-1.5 rounded-full bg-amber-400"

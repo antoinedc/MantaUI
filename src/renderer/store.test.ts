@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { resolveSessionOwner } from "./store";
+import { describe, it, expect, beforeEach } from "vitest";
+import { resolveSessionOwner, useStore } from "./store";
 import type { Project } from "../shared/types";
 
 function proj(over: Partial<Project> & { tmuxSession: string }): Project {
@@ -73,6 +73,165 @@ describe("resolveSessionOwner", () => {
       tmuxSession: "b",
       windowIndex: 0,
       cwd: "/b",
+    });
+  });
+});
+
+// ===== Chat-mode status: setChatRunning / setChatAttention =====
+//
+// Drives the sidebar dot for chat-mode windows. The PTY-pane poller
+// can't see chat windows' state (the holder runs `sleep infinity`),
+// so all sidebar signals for chat sessions flow through these actions
+// from the global opencode SSE subscription in App.tsx.
+
+describe("setChatRunning / setChatAttention", () => {
+  // Reset zustand store to a known state before each test. Only the
+  // fields the actions read or write need to be set.
+  beforeEach(() => {
+    useStore.setState({
+      projects: [
+        proj({
+          tmuxSession: "bui",
+          windows: [
+            {
+              index: 0,
+              name: "chat",
+              active: false,
+              paneCurrentPath: "/x",
+              opencodeSessionId: "ses_chat",
+            },
+          ],
+        }),
+      ],
+      status: {},
+      activeProjectName: null,
+      activeWindowByProject: {},
+    });
+  });
+
+  describe("setChatRunning", () => {
+    it("no-ops when no window owns the sessionId", () => {
+      useStore.getState().setChatRunning("ses_unknown", true);
+      expect(useStore.getState().status).toEqual({});
+    });
+
+    it("sets running:true for the matching window", () => {
+      useStore.getState().setChatRunning("ses_chat", true);
+      expect(useStore.getState().status.bui[0]).toEqual({
+        running: true,
+        subagents: 0,
+        attention: false,
+        attentionKind: undefined,
+      });
+    });
+
+    it("latches attention='idle' on running → idle when user isn't on the window", () => {
+      useStore.getState().setChatRunning("ses_chat", true);
+      useStore.getState().setChatRunning("ses_chat", false);
+      const win = useStore.getState().status.bui[0];
+      expect(win.running).toBe(false);
+      expect(win.attention).toBe(true);
+      expect(win.attentionKind).toBe("idle");
+    });
+
+    it("does NOT latch attention when the user IS on the window", () => {
+      useStore.setState({
+        activeProjectName: "bui",
+        activeWindowByProject: { bui: 0 },
+      });
+      useStore.getState().setChatRunning("ses_chat", true);
+      useStore.getState().setChatRunning("ses_chat", false);
+      expect(useStore.getState().status.bui[0].attention).toBe(false);
+    });
+
+    it("preserves a more-urgent attentionKind ('question') across a running → idle latch", () => {
+      // Question arrives first, then the turn ends with running:false.
+      useStore.getState().setChatRunning("ses_chat", true);
+      useStore.getState().setChatAttention("ses_chat", "question");
+      useStore.getState().setChatRunning("ses_chat", false);
+      const win = useStore.getState().status.bui[0];
+      expect(win.attention).toBe(true);
+      // "question" wins over "idle" — the question is still the actionable
+      // signal, not "claude finished an unrelated step".
+      expect(win.attentionKind).toBe("question");
+    });
+  });
+
+  describe("setChatAttention", () => {
+    it("no-ops when no window owns the sessionId", () => {
+      useStore.getState().setChatAttention("ses_unknown", "question");
+      expect(useStore.getState().status).toEqual({});
+    });
+
+    it("sets attention:true with kind='question'", () => {
+      useStore.getState().setChatAttention("ses_chat", "question");
+      expect(useStore.getState().status.bui[0]).toEqual({
+        running: false,
+        subagents: 0,
+        attention: true,
+        attentionKind: "question",
+      });
+    });
+
+    it("sets attention:true with kind='permission'", () => {
+      useStore.getState().setChatAttention("ses_chat", "permission");
+      expect(useStore.getState().status.bui[0].attentionKind).toBe(
+        "permission",
+      );
+    });
+
+    it("clears attention when called with null (replied/rejected)", () => {
+      useStore.getState().setChatAttention("ses_chat", "question");
+      useStore.getState().setChatAttention("ses_chat", null);
+      const win = useStore.getState().status.bui[0];
+      expect(win.attention).toBe(false);
+      expect(win.attentionKind).toBeUndefined();
+    });
+
+    it("does NOT set attention when the user IS on the window", () => {
+      // QuestionCard / PermissionCard is right there in front of them —
+      // the sidebar dot would be redundant.
+      useStore.setState({
+        activeProjectName: "bui",
+        activeWindowByProject: { bui: 0 },
+      });
+      useStore.getState().setChatAttention("ses_chat", "question");
+      expect(useStore.getState().status.bui[0]?.attention ?? false).toBe(false);
+    });
+
+    it("preserves running:true while raising attention", () => {
+      useStore.getState().setChatRunning("ses_chat", true);
+      useStore.getState().setChatAttention("ses_chat", "question");
+      const win = useStore.getState().status.bui[0];
+      expect(win.running).toBe(true);
+      expect(win.attention).toBe(true);
+      expect(win.attentionKind).toBe("question");
+    });
+  });
+
+  describe("applyStatusBatch preserves chat-window state", () => {
+    it("does not clobber chat windows' running state with poller data", () => {
+      // Set running via the chat path...
+      useStore.getState().setChatRunning("ses_chat", true);
+      // ...then the poller batch arrives. Because the window has an
+      // opencodeSessionId set, applyStatusBatch must NOT overwrite it
+      // with whatever (probably false) the BUSY_RE matched against the
+      // empty holder pane.
+      useStore.getState().applyStatusBatch([
+        // No entry for bui:0 in the batch (the poller wouldn't include
+        // chat-mode windows in a fixed world, but even when it does,
+        // the chat-state must win).
+      ]);
+      const win = useStore.getState().status.bui[0];
+      expect(win.running).toBe(true);
+    });
+
+    it("preserves chat-window attentionKind across poller ticks", () => {
+      useStore.getState().setChatAttention("ses_chat", "question");
+      useStore.getState().applyStatusBatch([]);
+      const win = useStore.getState().status.bui[0];
+      expect(win.attentionKind).toBe("question");
+      expect(win.attention).toBe(true);
     });
   });
 });

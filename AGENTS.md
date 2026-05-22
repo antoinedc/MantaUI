@@ -360,6 +360,23 @@ compare against the regexes. The bottom of an alt-screen has the spinner
 ~10 lines above the input box, so a naive tail-line check misses it; the
 regex matches anywhere in the captured body.
 
+**Chat-mode windows are NOT served by this poller.** Their tmux pane runs
+`sleep infinity` (the holder); `capture-pane` returns blank output, BUSY_RE
+can't match, so the poller would silently report `running:false` forever
+for chat windows. Sidebar status for chat-mode flows through a separate
+path: an `onOpencodeEvent` subscription in `App.tsx` calls
+`setChatRunning(sessionId, running)` on `session.status` / `session.idle`
+and `setChatAttention(sessionId, kind)` on `question.asked` /
+`permission.asked` / `*.replied` / `*.rejected`. `applyStatusBatch`
+preserves chat windows' prior status across poller ticks (looking up
+`w.opencodeSessionId`) so the poller never clobbers the live SSE state.
+Attention kinds: `"idle"` (running→idle while user wasn't on the window,
+amber dot), `"question"` (Question tool blocked the turn, pulsing red
+dot + `?`), `"permission"` (permission.asked blocked a tool, pulsing red
+dot + `!`). `chatAutoAllow` suppresses `permission.asked` at the bus
+layer in both transports, so the sidebar naturally stays quiet in trust
+mode.
+
 ## Chat-mode windows
 
 A second window type alongside the claude-TUI window. A tmux window running

@@ -34,6 +34,58 @@ export function MobileApp() {
     return window.api.onStatusEvent(applyStatusBatch);
   }, [applyStatusBatch]);
 
+  // Sidebar status for chat-mode windows (mirror of the desktop App.tsx
+  // listener; same logic, same store actions). The mobile server's PTY
+  // poller has the same blindspot as desktop status.ts — capture-pane
+  // returns nothing for the `sleep infinity` holder — so chat-mode
+  // running / question / permission signals must come from the
+  // opencode SSE stream the server already forwards through /events.
+  // See App.tsx for the full rationale.
+  useEffect(() => {
+    if (!window.api.onOpencodeEvent) return;
+    const off = window.api.onOpencodeEvent((ev) => {
+      const props = (ev.properties ?? {}) as Record<string, unknown>;
+      if (ev.type === "session.idle" || ev.type === "session.error") {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (sid) useStore.getState().setChatRunning(sid, false);
+        return;
+      }
+      if (ev.type === "session.status") {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (!sid) return;
+        const status = props.status as { type?: string } | undefined;
+        const t = status?.type;
+        if (t === "busy" || t === "retry") {
+          useStore.getState().setChatRunning(sid, true);
+        } else if (t === "idle") {
+          useStore.getState().setChatRunning(sid, false);
+        }
+        return;
+      }
+      if (ev.type === "question.asked") {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (sid) useStore.getState().setChatAttention(sid, "question");
+        return;
+      }
+      if (ev.type === "permission.asked") {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (sid) useStore.getState().setChatAttention(sid, "permission");
+        return;
+      }
+      if (
+        ev.type === "question.replied" ||
+        ev.type === "question.rejected" ||
+        ev.type === "permission.replied" ||
+        ev.type === "permission.rejected"
+      ) {
+        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
+        if (sid) useStore.getState().setChatAttention(sid, null);
+        return;
+      }
+    });
+    return off;
+  }, []);
+
   const goList = () => setNav({ screen: "list" });
   const openSession = (projectName: string, windowIndex: number) => {
     setActive(projectName, windowIndex);
