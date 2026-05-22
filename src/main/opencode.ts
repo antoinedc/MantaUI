@@ -172,11 +172,29 @@ export function teardownEventTunnel(): void {
 // ===== server lifecycle =====
 
 export async function ensureRunning(config: AppConfig): Promise<void> {
+  // Probe the REMOTE port directly — `tmux has-session` only tells us the
+  // wrapping tmux is alive, not that opencode inside it didn't crash on
+  // startup or get killed by an upgrade/OOM. Trusting tmux's presence was
+  // how a dead opencode produced a bare `TypeError: fetch failed` at the
+  // next session-create.
   const { stdout } = await runSshOnce(
     config,
-    `tmux has-session -t ${BUI_OPENCODE_TMUX_SESSION} 2>/dev/null && echo up || echo down`,
+    `if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:${REMOTE_PORT}/global/health; then echo healthy; ` +
+    `elif tmux has-session -t ${BUI_OPENCODE_TMUX_SESSION} 2>/dev/null; then echo stale; ` +
+    `else echo down; fi`,
   );
-  if (stdout.trim() === "up") return;
+  const state = stdout.trim();
+  if (state === "healthy") return;
+
+  // Stale tmux session (opencode crashed inside) — tear it down so the
+  // new-session below isn't a no-op (tmux refuses to create a session that
+  // already exists). Best-effort kill.
+  if (state === "stale") {
+    await runSshOnce(
+      config,
+      `tmux kill-session -t ${BUI_OPENCODE_TMUX_SESSION} 2>/dev/null || true`,
+    );
+  }
 
   // Ubuntu's stock .bashrc returns early when non-interactive, so the PATH
   // export the opencode installer writes never runs under `bash -lc`. Prepend
@@ -565,11 +583,21 @@ export async function createSession(
     ? await expandRemotePath(config, directory)
     : directory;
   const url = apiUrl(config, `/session?directory=${encodeURIComponent(absDir)}`);
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+  } catch (e) {
+    // Bare `TypeError: fetch failed` from undici drops the cause chain by the
+    // time it crosses IPC. Surface the underlying connect error (ECONNREFUSED
+    // / ETIMEDOUT) so the renderer toast is actionable instead of mysterious.
+    const cause = (e as { cause?: { code?: string; message?: string } })?.cause;
+    const detail = cause?.code || cause?.message || (e as Error).message;
+    throw new Error(`opencode createSession transport error (${url}): ${detail}`);
+  }
   if (!res.ok) {
     throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
   }
