@@ -52,9 +52,12 @@ import {
   selectLastAssistantCompletion,
   computeStaleCache,
   STALE_CACHE_MIN_TOKENS,
+  findFlushBoundary,
+  mergeBufferedDeltas,
   type TruncationKind,
   type ContextBreakdown,
   type StaleCacheResult,
+  type PendingDelta,
 } from "./chatUtils";
 
 // In-flight attachments tracked alongside the textarea content. Each chip
@@ -393,6 +396,36 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Delta events apply inline so streams feel live; everything else (new parts,
   // tool state transitions, etc.) just retriggers the canonical fetch.
   const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ===== Streamed-text delta buffer =====
+  //
+  // opencode emits `message.part.delta` events ~character-by-character for
+  // text/reasoning parts. The earlier policy of "apply every delta to React
+  // state immediately" produced visible jitter on partial markdown: bullets
+  // appeared before their content, code fences flashed as inline-code
+  // before closing, and Prism re-tokenized the in-progress code body on
+  // every keystroke. Instead, accumulate deltas in a ref-keyed buffer and
+  // flush at natural section boundaries (paragraph breaks outside code
+  // blocks, closing ``` fences) — with a 250ms max-age fallback so a
+  // single long paragraph doesn't stall.
+  //
+  // Per part: { messageID, field, text } where `text` is the unflushed
+  // suffix waiting on a boundary. The flush helper slices the
+  // longest-prefix-ending-at-a-boundary into `setMessages` (one render
+  // for ALL pending parts) and keeps the remainder buffered.
+  //
+  // Force-flushed on: session.next.step.ended (each step's narration is
+  // complete), message.part.updated (part snapshot — refetch will follow
+  // anyway), session.idle (turn over), and on session change/unmount.
+  const pendingDeltas = useRef<Map<string, PendingDelta>>(new Map());
+  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The max-age fallback: 250ms of un-flushed buffered content forces a
+  // flush even without a boundary character. Keeps streams feeling live
+  // when paragraphs run long. Tuned to match Claude Code's perceived
+  // rhythm — not so short it produces the jitter we're trying to fix,
+  // not so long the user thinks the stream stalled.
+  const FLUSH_MAX_AGE_MS = 250;
+  const oldestPendingAt = useRef<number | null>(null);
   // Live step token/cost snapshot from session.next.step.ended. Updates the
   // footer's ctx bar / running indicator without waiting for the next message
   // re-fetch. Cleared on session change. Preferred over the transcript-derived
@@ -484,6 +517,14 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setFinishByMessageId(new Map());
     setCommandByMessageId(new Map());
     setCompactionState(null);
+    // Drop any buffered text deltas from the previous session — they
+    // refer to part IDs that no longer exist in the new transcript.
+    pendingDeltas.current.clear();
+    oldestPendingAt.current = null;
+    if (flushTimer.current) {
+      clearTimeout(flushTimer.current);
+      flushTimer.current = null;
+    }
     if (compactionClearTimer.current) {
       clearTimeout(compactionClearTimer.current);
       compactionClearTimer.current = null;
@@ -585,6 +626,96 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   // Subscribe to the global opencode event stream; filter by sessionID.
   useEffect(() => {
+    // ===== Buffered text-delta flush =====
+    //
+    // Applies as much of each pending delta as can be safely flushed
+    // (i.e. everything up to the deepest section boundary) into
+    // `messages` state in ONE setMessages call, then keeps any trailing
+    // not-yet-bounded text in the buffer for the next round.
+    //
+    // `force=true` flushes everything regardless of boundaries — used on
+    // step-ended, part-updated, session-idle, and the max-age timeout.
+    // Returns the count of partIDs that couldn't be matched against any
+    // part in `messages` (race: delta arrived before snapshot); caller
+    // schedules a refetch if any unmatched.
+    const flushPendingDeltas = (force: boolean): number => {
+      const buf = pendingDeltas.current;
+      if (buf.size === 0) return 0;
+      // Build the to-flush map: for each pending part, slice off either
+      // the longest bounded prefix (normal) or the whole buffer (force).
+      const toApply = new Map<string, PendingDelta>();
+      for (const [partID, d] of buf) {
+        if (force) {
+          toApply.set(partID, d);
+          continue;
+        }
+        const idx = findFlushBoundary(d.text);
+        if (idx <= 0) continue;
+        toApply.set(partID, { ...d, text: d.text.slice(0, idx) });
+        // Keep the unbounded remainder in the buffer.
+        const remainder = d.text.slice(idx);
+        if (remainder.length > 0) {
+          buf.set(partID, { ...d, text: remainder });
+        } else {
+          buf.delete(partID);
+        }
+      }
+      if (force) buf.clear();
+      if (toApply.size === 0) return 0;
+      let unmatchedCount = 0;
+      setMessages((prev) => {
+        const { messages: next, unmatched } = mergeBufferedDeltas(
+          prev,
+          toApply,
+        );
+        unmatchedCount = unmatched.length;
+        return next ?? prev;
+      });
+      // If the buffer is now empty (force, or every entry flushed
+      // cleanly), reset the age clock; otherwise leave it ticking so
+      // the trailing remainder still has a deadline.
+      if (buf.size === 0) oldestPendingAt.current = null;
+      return unmatchedCount;
+    };
+
+    // Schedule a flush check soon. Uses two timers conceptually:
+    //   - A short (16ms) "boundary check" tick after each delta so we
+    //     react quickly when a boundary character lands, without doing
+    //     a full setMessages on every keystroke-equivalent.
+    //   - The age-based force flush handled inline by checking
+    //     `oldestPendingAt` against FLUSH_MAX_AGE_MS.
+    // Both share a single setTimeout slot.
+    const scheduleFlush = () => {
+      if (flushTimer.current) return;
+      const now = Date.now();
+      const age =
+        oldestPendingAt.current != null ? now - oldestPendingAt.current : 0;
+      const delay = Math.max(0, Math.min(16, FLUSH_MAX_AGE_MS - age));
+      flushTimer.current = setTimeout(() => {
+        flushTimer.current = null;
+        const now2 = Date.now();
+        const aged =
+          oldestPendingAt.current != null &&
+          now2 - oldestPendingAt.current >= FLUSH_MAX_AGE_MS;
+        const unmatched = flushPendingDeltas(aged);
+        if (unmatched > 0) scheduleRefetchRef.current?.();
+        // If anything is still buffered (trailing remainder), keep
+        // checking — but only if the buffer is actually still aging.
+        if (pendingDeltas.current.size > 0) {
+          // Either we just sliced off a prefix and the remainder is
+          // waiting for its own boundary, or aged=true cleared
+          // everything. Defensive: reschedule only if there's content.
+          scheduleFlush();
+        }
+      }, delay);
+    };
+
+    // Forward declaration so scheduleFlush can call scheduleRefetch
+    // (declared inside this effect after the flush helpers).
+    const scheduleRefetchRef: { current: (() => void) | null } = {
+      current: null,
+    };
+
     const scheduleRefetch = () => {
       if (refetchTimer.current) clearTimeout(refetchTimer.current);
       refetchTimer.current = setTimeout(() => {
@@ -611,6 +742,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           .catch(() => { /* keep last-known state */ });
       }, 300);
     };
+    scheduleRefetchRef.current = scheduleRefetch;
 
     const off = window.api.onOpencodeEvent((ev: OpencodeEvent) => {
       const props = ev.properties ?? {};
@@ -643,23 +775,30 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         const delta = String(props.delta ?? "");
         if (!partID || !delta) return;
 
-        setMessages((prev) => {
-          if (!prev) return prev;
-          let matched = false;
-          const next = prev.map((m) => {
-            if (m.info.id !== messageID) return m;
-            const parts = m.parts.map((p) => {
-              if (p.id !== partID) return p;
-              matched = true;
-              return { ...p, [field]: ((p as Record<string, unknown>)[field] as string ?? "") + delta };
-            });
-            return { ...m, parts };
-          });
-          if (!matched) {
-            scheduleRefetch();
-          }
-          return next;
-        });
+        // Buffer the delta instead of applying it immediately. The flush
+        // helper will slice off the longest prefix ending at a section
+        // boundary (paragraph break outside a code block, or a closing
+        // ``` fence) and apply only that to state — keeping any trailing
+        // half-formed content out of React until it's complete. See
+        // `findFlushBoundary` (chatUtils.ts) for the boundary rules and
+        // FLUSH_MAX_AGE_MS for the long-paragraph fallback.
+        //
+        // Different (partID, field) pairs need separate buffer entries
+        // — a reasoning part and a text part can stream concurrently
+        // and they go to different `field` keys on different `partID`s.
+        // The key is partID alone because opencode only ever streams
+        // one field per part at a time (reasoning parts stream `text`
+        // just like text parts do).
+        const existing = pendingDeltas.current.get(partID);
+        if (existing && existing.field === field) {
+          existing.text += delta;
+        } else {
+          pendingDeltas.current.set(partID, { messageID, field, text: delta });
+        }
+        if (oldestPendingAt.current == null) {
+          oldestPendingAt.current = Date.now();
+        }
+        scheduleFlush();
         return;
       }
 
@@ -750,6 +889,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       // long tool roundtrip. step.ended fires after each reasoning/tool step
       // with the cumulative usage — feed it straight into stepTokens.
       if (ev.type === "session.next.step.ended") {
+        // A step ending means the assistant's narration for this step is
+        // complete — flush any buffered tail (a final sentence/paragraph
+        // that didn't end with a paragraph break) so the user sees it
+        // before the next step starts (often a tool call).
+        flushPendingDeltas(true);
         const tokens = props.tokens as TokenUsage | undefined;
         const cost = typeof props.cost === "number" ? props.cost : 0;
         if (tokens) {
@@ -917,6 +1061,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         ev.type === "message.part.updated" ||
         ev.type === "message.updated"
       ) {
+        // Force-flush any buffered text deltas before the refetch
+        // overwrites state. Without this, a still-buffered trailing
+        // paragraph would be discarded when the canonical transcript
+        // arrives (the server-side snapshot has the same content but the
+        // refetch races the buffer's max-age timer).
+        flushPendingDeltas(true);
         scheduleRefetch();
       }
 
@@ -988,6 +1138,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       if (compactionClearTimer.current) {
         clearTimeout(compactionClearTimer.current);
         compactionClearTimer.current = null;
+      }
+      // Force-flush whatever's still buffered on unmount/session change
+      // so the user doesn't lose the final sentence of a turn when they
+      // navigate away. (The new session's effect will clear the buffer
+      // again on its own initial-load reset.)
+      if (flushTimer.current) {
+        clearTimeout(flushTimer.current);
+        flushTimer.current = null;
+      }
+      if (pendingDeltas.current.size > 0) {
+        flushPendingDeltas(true);
       }
     };
   }, [sessionId]);

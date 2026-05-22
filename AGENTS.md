@@ -554,6 +554,41 @@ cachedTokens >= min`) to re-evaluate the predicate over time without
 remounting; same pattern as the RunningIndicator's 1s elapsed-time tick
 but coarser since staleness is a 5-min / 1-hr scale.
 
+**Buffered text-delta streaming.** opencode emits `message.part.delta`
+events ~character-by-character for text/reasoning parts. The naive
+"setMessages on every delta" policy produces visible markdown jitter:
+bullets appear before their content, code fences flash as inline-code
+before closing, Prism re-tokenizes a growing code block on every
+keystroke. Instead, deltas accumulate in `pendingDeltas: Map<partID,
+{messageID, field, text}>` (a ref in ChatPanel) and flush at section
+boundaries computed by the pure `findFlushBoundary(buffer)` helper in
+`chatUtils.ts`:
+
+- Paragraph breaks (`\n\n`) **outside** an open code block.
+- The newline immediately after a closing ` ``` ` fence (so whole code
+  blocks appear at once — no half-formed fence rendered as inline code).
+- The largest valid boundary wins (deepest flushable prefix).
+- 250ms max-age fallback (FLUSH_MAX_AGE_MS) so a single long paragraph
+  doesn't stall.
+
+Force-flushed on: `session.next.step.ended` (step narration complete —
+flush before next step starts), `message.part.updated` /
+`session.idle` / `session.status` / `session.compacted` /
+`session.error` / `message.updated` (BEFORE the refetch, otherwise the
+canonical-transcript pull races the buffer's max-age timer and the
+trailing paragraph gets discarded), and on session change / unmount.
+
+Race tolerance: if a delta arrives before the part's `message.part.updated`
+snapshot (so `mergeBufferedDeltas` reports the partID as unmatched), the
+flush scheduler triggers `scheduleRefetch()` and the buffered text waits
+for the next flush — the refetch creates the part in state, the next
+flush merges the buffer cleanly.
+
+Pure logic (`findFlushBoundary`, `mergeBufferedDeltas`) lives in
+`chatUtils.ts` with full unit-test coverage including the tricky cases
+(open code block suppresses `\n\n` boundaries, empty code block, multiple
+fences in one buffer, inline backticks don't toggle fence state).
+
 **Typed `session.error` names.** The `session.error` handler switches on
 `err.name` to prepend a context-appropriate prefix before the raw message:
 `ProviderAuthError` → "Auth error: …", `ContextOverflowError` → "Context

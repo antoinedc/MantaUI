@@ -116,6 +116,168 @@ export function ctxStageColor(pct: number): string {
   return "#ef4444"; // red-500
 }
 
+// ===== Streamed-text flush boundaries =====
+//
+// opencode streams text/reasoning content via `message.part.delta` events
+// that arrive ~character-by-character (one or a few tokens per frame).
+// The naive policy of "apply every delta to React state immediately"
+// produces visible jitter on partially-formed markdown: a bullet appears
+// before its content; a code fence opens and renders as inline-code
+// briefly before closing; the cursor at the end of a half-finished line
+// flickers as Prism re-tokenizes a growing code block on every keystroke.
+//
+// Instead, buffer deltas in-memory and FLUSH at natural section
+// boundaries: paragraph breaks (`\n\n`) outside a code block, and the
+// newline that follows a closing ``` fence. Plus a 250ms max-age
+// fallback (handled at the caller) so a single long paragraph doesn't
+// stall indefinitely.
+//
+// `findFlushBoundary(buffer)` returns the byte index AFTER which the
+// buffer is safe to flush, or -1 if no boundary is present yet. The
+// caller slices `buffer.slice(0, idx)` into state and keeps the
+// remainder buffered for the next round.
+//
+// Algorithm:
+//   - Walk the buffer left→right counting ``` fences (toggles in/out of
+//     a code block).
+//   - At every `\n\n` while OUTSIDE a code block, record the position
+//     just after the second `\n` as a candidate.
+//   - At every transition OUT of a code block (the closing ```), once
+//     we hit the next `\n`, record THAT position as a candidate.
+//   - Return the LARGEST candidate (the deepest safe flush point); that
+//     way one delta with multiple paragraph breaks flushes them all in
+//     one render.
+//
+// Returns -1 if no boundary is present yet. The current code-block
+// state of the trailing buffer is what's preserved across flushes —
+// don't flush mid-fence, even if there's a `\n\n` inside it, because
+// the user wants whole code blocks to appear at once.
+//
+// Pure + tested in chatUtils.test.ts.
+
+export function findFlushBoundary(buffer: string): number {
+  if (!buffer) return -1;
+  let lastBoundary = -1;
+  let inCode = false;
+  let i = 0;
+  while (i < buffer.length) {
+    // Check for ``` fence (open or close). The opencode stream uses
+    // standard markdown; backtick-only code blocks don't appear in the
+    // assistant's narration outside of explicit ``` fences.
+    if (
+      buffer[i] === "`" &&
+      buffer[i + 1] === "`" &&
+      buffer[i + 2] === "`"
+    ) {
+      const wasInCode = inCode;
+      inCode = !inCode;
+      // If we just CLOSED a code block, look for the newline that
+      // terminates the closing fence line. Everything up to and
+      // including that newline is now a safe flush point.
+      if (wasInCode && !inCode) {
+        let j = i + 3;
+        while (j < buffer.length && buffer[j] !== "\n") j++;
+        if (j < buffer.length) {
+          // We have the trailing newline of the close fence — include
+          // it in the flush.
+          lastBoundary = j + 1;
+          i = j + 1;
+          continue;
+        }
+        // Closing fence present but no trailing newline yet — the
+        // model is still emitting the next line; don't flush here.
+        return lastBoundary;
+      }
+      // Opened a code block — keep walking.
+      i += 3;
+      continue;
+    }
+    // Paragraph break (`\n\n`) OUTSIDE a code block is a flush point.
+    // Inside a code block, blank lines are part of the code; don't
+    // flush there.
+    if (!inCode && buffer[i] === "\n" && buffer[i + 1] === "\n") {
+      lastBoundary = i + 2;
+      // Skip past the doubled newline; subsequent characters may form
+      // another paragraph that flushes even deeper.
+      i += 2;
+      // Coalesce more consecutive newlines into the same boundary
+      // (\n\n\n etc. — rare but harmless).
+      while (i < buffer.length && buffer[i] === "\n") {
+        lastBoundary = i + 1;
+        i++;
+      }
+      continue;
+    }
+    i++;
+  }
+  return lastBoundary;
+}
+
+// Merge a map of buffered delta strings (partID → text) into the
+// messages array. Pure — produces a new array if any change applies,
+// otherwise returns the input unchanged so React skips the re-render.
+//
+// `buffer` is `Map<partID, { messageID, field, text }>`. Each entry
+// appends `text` to the named `field` of the matching part. Parts not
+// found in the messages tree are silently skipped — the caller is
+// expected to fall back to a refetch when a delta arrives ahead of the
+// part's `message.part.updated` snapshot.
+
+export type PendingDelta = {
+  messageID: string;
+  field: string;
+  text: string;
+};
+
+export function mergeBufferedDeltas<M extends {
+  info: { id: string };
+  parts: Array<Record<string, unknown> & { id: string }>;
+}>(
+  messages: M[] | null | undefined,
+  buffer: Map<string, PendingDelta>,
+): { messages: M[] | null | undefined; unmatched: string[] } {
+  if (!messages || buffer.size === 0) {
+    return { messages, unmatched: [] };
+  }
+  // Group buffered entries by messageID so we only rebuild each
+  // message object once even when multiple parts of the same message
+  // have pending deltas (common: text part + reasoning part stream
+  // interleaved).
+  const byMessage = new Map<string, PendingDelta[] & { partID?: string }>();
+  for (const [partID, d] of buffer) {
+    const list = byMessage.get(d.messageID) ?? [];
+    // Stash the partID alongside the delta so we don't need a second
+    // lookup inside the per-message map.
+    (list as Array<PendingDelta & { partID: string }>).push({ ...d, partID });
+    byMessage.set(d.messageID, list);
+  }
+  const unmatched: string[] = [];
+  const matchedPartIds = new Set<string>();
+  const nextMessages = messages.map((m) => {
+    const pending = byMessage.get(m.info.id);
+    if (!pending) return m;
+    const parts = m.parts.map((p) => {
+      const hit = (pending as Array<PendingDelta & { partID: string }>).find(
+        (d) => d.partID === p.id,
+      );
+      if (!hit) return p;
+      matchedPartIds.add(hit.partID);
+      const prior = (p[hit.field] as string | undefined) ?? "";
+      return { ...p, [hit.field]: prior + hit.text };
+    });
+    return { ...m, parts };
+  });
+  for (const partID of buffer.keys()) {
+    if (!matchedPartIds.has(partID)) unmatched.push(partID);
+  }
+  // If nothing matched, return the same reference so React doesn't
+  // bother re-rendering.
+  if (matchedPartIds.size === 0) {
+    return { messages, unmatched };
+  }
+  return { messages: nextMessages, unmatched };
+}
+
 // ===== Cache staleness =====
 //
 // Anthropic's prompt cache has a sliding TTL — every cache hit refreshes

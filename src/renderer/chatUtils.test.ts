@@ -26,6 +26,8 @@ import {
   selectLastAssistantCompletion,
   computeStaleCache,
   STALE_CACHE_MIN_TOKENS,
+  findFlushBoundary,
+  mergeBufferedDeltas,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -264,6 +266,229 @@ describe("computeContextBreakdown", () => {
     );
     // 100_000 / 200_000 = 50%
     expect(b.pct).toBe(50);
+  });
+});
+
+// ===== findFlushBoundary =====
+
+describe("findFlushBoundary", () => {
+  it("returns -1 for empty / no-boundary input", () => {
+    expect(findFlushBoundary("")).toBe(-1);
+    expect(findFlushBoundary("hello world")).toBe(-1);
+    expect(findFlushBoundary("single line\n")).toBe(-1);
+  });
+
+  it("returns position after \\n\\n for a paragraph break", () => {
+    const buf = "first paragraph\n\nsecond";
+    const idx = findFlushBoundary(buf);
+    // Should slice the "first paragraph\n\n" prefix (length 17).
+    expect(idx).toBe("first paragraph\n\n".length);
+    expect(buf.slice(0, idx)).toBe("first paragraph\n\n");
+    expect(buf.slice(idx)).toBe("second");
+  });
+
+  it("returns the LAST boundary when multiple paragraph breaks exist", () => {
+    const buf = "one\n\ntwo\n\nthree";
+    const idx = findFlushBoundary(buf);
+    // Should flush through "one\n\ntwo\n\n".
+    expect(idx).toBe("one\n\ntwo\n\n".length);
+    expect(buf.slice(0, idx)).toBe("one\n\ntwo\n\n");
+    expect(buf.slice(idx)).toBe("three");
+  });
+
+  it("does NOT flush \\n\\n inside an open code block", () => {
+    // The blank line is inside an open ```fence, so we mustn't flush
+    // (the user wants the whole code block at once, and rendering
+    // half a fence as inline code is the jitter we're fixing).
+    const buf = "intro\n\n```\nfunction foo() {\n\n  return 1;";
+    const idx = findFlushBoundary(buf);
+    // Only the "intro\n\n" prefix is safe to flush.
+    expect(idx).toBe("intro\n\n".length);
+  });
+
+  it("flushes through the closing ``` fence + trailing newline", () => {
+    const buf = "intro\n\n```\nconst x = 1;\n```\nafter";
+    const idx = findFlushBoundary(buf);
+    // Should flush through the entire code block AND the newline after
+    // the closing fence: "intro\n\n```\nconst x = 1;\n```\n".
+    const expected = "intro\n\n```\nconst x = 1;\n```\n";
+    expect(idx).toBe(expected.length);
+    expect(buf.slice(0, idx)).toBe(expected);
+    expect(buf.slice(idx)).toBe("after");
+  });
+
+  it("does NOT flush a closing ``` without its trailing newline yet", () => {
+    // The closing fence has arrived but no newline followed yet —
+    // we don't know if the next char is part of the same line (it
+    // shouldn't be, but defensive).
+    const buf = "intro\n\n```\nconst x = 1;\n```";
+    const idx = findFlushBoundary(buf);
+    // Only the leading paragraph is flushable.
+    expect(idx).toBe("intro\n\n".length);
+  });
+
+  it("treats ``` as a toggle: open / close / open / close", () => {
+    // Two complete code blocks with intervening paragraph.
+    const buf = "```\nA\n```\n\nbetween\n\n```\nB\n```\nend";
+    const idx = findFlushBoundary(buf);
+    // Should flush through the SECOND closing fence's trailing newline:
+    // "```\nA\n```\n\nbetween\n\n```\nB\n```\n".
+    const expected = "```\nA\n```\n\nbetween\n\n```\nB\n```\n";
+    expect(idx).toBe(expected.length);
+    expect(buf.slice(idx)).toBe("end");
+  });
+
+  it("coalesces consecutive newlines past \\n\\n", () => {
+    // "\n\n\n" (three newlines) should flush through all three.
+    const buf = "para\n\n\nnext";
+    const idx = findFlushBoundary(buf);
+    expect(buf.slice(0, idx)).toBe("para\n\n\n");
+    expect(buf.slice(idx)).toBe("next");
+  });
+
+  it("handles ``` at the very start of the buffer", () => {
+    // Open code block at position 0.
+    const buf = "```js\nconst x = 1;";
+    expect(findFlushBoundary(buf)).toBe(-1);
+  });
+
+  it("handles ``` immediately followed by ``` (empty code block)", () => {
+    const buf = "```\n```\nafter";
+    const idx = findFlushBoundary(buf);
+    // Should flush through the closing fence's newline.
+    const expected = "```\n```\n";
+    expect(idx).toBe(expected.length);
+  });
+
+  it("ignores stray single backticks (inline code chars)", () => {
+    // Single ` is not a fence start; should not toggle the in-code flag.
+    const buf = "Use `foo` and `bar`\n\nafter";
+    const idx = findFlushBoundary(buf);
+    expect(buf.slice(0, idx)).toBe("Use `foo` and `bar`\n\n");
+  });
+});
+
+// ===== mergeBufferedDeltas =====
+
+describe("mergeBufferedDeltas", () => {
+  type Part = { id: string; text?: string; type?: string; [k: string]: unknown };
+  type Msg = { info: { id: string }; parts: Part[] };
+
+  const makeMessages = (): Msg[] => [
+    {
+      info: { id: "msg1" },
+      parts: [
+        { id: "p1", type: "text", text: "hello " },
+        { id: "p2", type: "reasoning", text: "thinking " },
+      ],
+    },
+    {
+      info: { id: "msg2" },
+      parts: [{ id: "p3", type: "text", text: "" }],
+    },
+  ];
+
+  it("returns input unchanged when buffer is empty", () => {
+    const msgs = makeMessages();
+    const result = mergeBufferedDeltas(msgs, new Map());
+    expect(result.messages).toBe(msgs);
+    expect(result.unmatched).toEqual([]);
+  });
+
+  it("returns input unchanged when messages is null/undefined", () => {
+    const buf = new Map([
+      ["p1", { messageID: "msg1", field: "text", text: "x" }],
+    ]);
+    expect(mergeBufferedDeltas(null, buf).messages).toBeNull();
+    expect(mergeBufferedDeltas(undefined, buf).messages).toBeUndefined();
+  });
+
+  it("appends a single delta to the matching part", () => {
+    const msgs = makeMessages();
+    const buf = new Map([
+      ["p1", { messageID: "msg1", field: "text", text: "world" }],
+    ]);
+    const { messages: next, unmatched } = mergeBufferedDeltas(msgs, buf);
+    expect(unmatched).toEqual([]);
+    expect(next).not.toBe(msgs); // new reference
+    const part = (next as Msg[])[0].parts[0];
+    expect(part.text).toBe("hello world");
+    // Sibling part untouched.
+    expect((next as Msg[])[0].parts[1].text).toBe("thinking ");
+  });
+
+  it("appends to multiple parts of the same message in one pass", () => {
+    const msgs = makeMessages();
+    const buf = new Map([
+      ["p1", { messageID: "msg1", field: "text", text: "WORLD" }],
+      ["p2", { messageID: "msg1", field: "text", text: "MORE" }],
+    ]);
+    const { messages: next, unmatched } = mergeBufferedDeltas(msgs, buf);
+    expect(unmatched).toEqual([]);
+    // Fixture has "hello " with a trailing space; helper just appends.
+    expect((next as Msg[])[0].parts[0].text).toBe("hello WORLD");
+    expect((next as Msg[])[0].parts[1].text).toBe("thinking MORE");
+  });
+
+  it("appends to parts across multiple messages", () => {
+    const msgs = makeMessages();
+    const buf = new Map([
+      ["p1", { messageID: "msg1", field: "text", text: "world" }],
+      ["p3", { messageID: "msg2", field: "text", text: "fresh" }],
+    ]);
+    const { messages: next } = mergeBufferedDeltas(msgs, buf);
+    expect((next as Msg[])[0].parts[0].text).toBe("hello world");
+    expect((next as Msg[])[1].parts[0].text).toBe("fresh");
+  });
+
+  it("reports unmatched partIDs when a part isn't in messages", () => {
+    const msgs = makeMessages();
+    const buf = new Map([
+      ["p1", { messageID: "msg1", field: "text", text: "ok" }],
+      ["pNEW", { messageID: "msgNEW", field: "text", text: "race" }],
+    ]);
+    const { messages: next, unmatched } = mergeBufferedDeltas(msgs, buf);
+    expect(unmatched).toEqual(["pNEW"]);
+    // The matched one still applies.
+    expect((next as Msg[])[0].parts[0].text).toBe("hello ok");
+  });
+
+  it("returns same reference when nothing matches", () => {
+    const msgs = makeMessages();
+    const buf = new Map([
+      ["pNEW", { messageID: "msgNEW", field: "text", text: "race" }],
+    ]);
+    const { messages: next, unmatched } = mergeBufferedDeltas(msgs, buf);
+    expect(next).toBe(msgs); // unchanged reference, lets React skip re-render
+    expect(unmatched).toEqual(["pNEW"]);
+  });
+
+  it("supports non-text fields (e.g. tool output streaming)", () => {
+    const msgs: Msg[] = [
+      {
+        info: { id: "m1" },
+        parts: [{ id: "p1", type: "tool", state: { output: "a" } } as Part],
+      },
+    ];
+    const buf = new Map([
+      ["p1", { messageID: "m1", field: "output", text: "bcd" }],
+    ]);
+    const { messages: next } = mergeBufferedDeltas(msgs, buf);
+    // The merge writes to the named field on the part itself, NOT into
+    // nested state (state.output handling is the caller's
+    // responsibility — keep this helper field-flat).
+    expect((next as Msg[])[0].parts[0].output).toBe("bcd");
+  });
+
+  it("treats missing field as empty string before appending", () => {
+    const msgs: Msg[] = [
+      { info: { id: "m1" }, parts: [{ id: "p1", type: "text" }] },
+    ];
+    const buf = new Map([
+      ["p1", { messageID: "m1", field: "text", text: "first" }],
+    ]);
+    const { messages: next } = mergeBufferedDeltas(msgs, buf);
+    expect((next as Msg[])[0].parts[0].text).toBe("first");
   });
 });
 
