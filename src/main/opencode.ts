@@ -461,6 +461,21 @@ export type CreatedSession = {
 const sessionDirectoryCache = new Map<string, string>();
 const directoryListeners = new Set<(directory: string) => void>();
 
+// Repair the `/home/<user>/~/...` corruption that opencode persists when a
+// session was created (pre-createSession-fix) with a tilde directory: it
+// naively joins its cwd ($HOME) with the literal `~/...`, yielding a path
+// that does not exist on disk. Every prompt then scopes to that dead path
+// and the turn hangs. The fix at createSession stops NEW corruption; this
+// repairs sessions ALREADY persisted corrupt, applied at the cache-ingestion
+// chokepoint so a stale `?directory=` is never emitted. Pure + exported for
+// tests. Collapses a `/~/` segment; leaves clean paths untouched.
+export function repairCorruptDirectory(directory: string): string {
+  // Only the `/<dir>/~/<rest>` shape is the known corruption. A legitimate
+  // path component literally named "~" is implausible on a real worktree.
+  const idx = directory.indexOf("/~/");
+  return idx === -1 ? directory : directory.slice(0, idx) + directory.slice(idx + 2);
+}
+
 function rememberSessionDirectory(
   sessionId: string,
   directory: string | undefined | null,
@@ -468,6 +483,7 @@ function rememberSessionDirectory(
   if (!sessionId || typeof directory !== "string" || directory.length === 0) {
     return;
   }
+  directory = repairCorruptDirectory(directory);
   const prev = sessionDirectoryCache.get(sessionId);
   sessionDirectoryCache.set(sessionId, directory);
   if (prev !== directory) {
