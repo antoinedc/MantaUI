@@ -1164,18 +1164,73 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
   }, [sessionId]);
 
-  // Track scroll position to set the pinned-to-bottom flag. A small threshold
-  // (~80px) means user has to scroll a meaningful amount UP to break out of
-  // tail-follow mode, and scrolling back close to the bottom rejoins it.
+  // Pinned-to-bottom detection. THE BUG this guards against: a pure
+  // distance-threshold check (`dist < 80 → pinned`) loses to streaming. While
+  // content streams, content is added below the viewport; a small user
+  // scroll-up (say 30px) leaves us still inside the 80px window, the next
+  // delta's auto-scroll effect sees `pinned === true` and snaps to bottom
+  // before the user's next wheel tick lands. Visible jump.
+  //
+  // Fix: distinguish USER intent from PROGRAMMATIC scrolls.
+  //  - Any wheel-up, touchmove, keydown (PgUp/Home/Arrow), or non-programmatic
+  //    scroll event ⇒ unpin immediately, regardless of distance.
+  //  - Re-pin only when the user actually scrolls back within 80px of bottom.
+  //  - Our own `scrollTop = scrollHeight` writes set `programmaticScroll`
+  //    true for one scroll tick so they don't get treated as user gestures.
+  const programmaticScroll = useRef(false);
+  const stickToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    programmaticScroll.current = true;
+    el.scrollTop = el.scrollHeight;
+    // Clear on next frame; the resulting scroll event fires before then.
+    requestAnimationFrame(() => {
+      programmaticScroll.current = false;
+    });
+  }, []);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    const RE_PIN_PX = 8; // user must reach the bottom to re-engage tail-follow
     const onScroll = () => {
       const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      pinnedToBottom.current = dist < 80;
+      if (programmaticScroll.current) {
+        // Our own write — we're at the bottom, stay pinned.
+        pinnedToBottom.current = true;
+        return;
+      }
+      // User-driven scroll (scrollbar drag, momentum, anything we didn't
+      // initiate). The unpin paths below handle leaving the bottom; here we
+      // only handle the RE-pin path. Threshold is tight so we don't snap
+      // back unless the user truly lands at the bottom — a half-completed
+      // wheel-up that left them 30px from bottom must NOT re-pin.
+      if (dist <= RE_PIN_PX) pinnedToBottom.current = true;
+    };
+    const onWheel = (e: WheelEvent) => {
+      // Any upward wheel ⇒ user wants out of tail-follow, regardless of
+      // current distance. Downward wheel doesn't auto-pin; the scroll
+      // handler re-pins when they actually reach bottom.
+      if (e.deltaY < 0) pinnedToBottom.current = false;
+    };
+    const onTouchMove = () => {
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (dist > RE_PIN_PX) pinnedToBottom.current = false;
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "PageUp" || e.key === "Home" || e.key === "ArrowUp") {
+        pinnedToBottom.current = false;
+      }
     };
     el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    el.addEventListener("keydown", onKeyDown);
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("keydown", onKeyDown);
+    };
   }, []);
 
   // On every messages update (initial fetch, refetch, or in-flight delta),
@@ -1189,12 +1244,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // the bottom. We use `liveTodos` (not the derived `activeTodos`) to dodge
   // a TDZ — `activeTodos` is a useMemo declared later in the component.
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
     if (pinnedToBottom.current) {
-      el.scrollTop = el.scrollHeight;
+      stickToBottom();
     }
-  }, [messages, liveTodos]);
+  }, [messages, liveTodos, stickToBottom]);
 
   // Going from idle → running (just sent a message): force pin to bottom so
   // the user sees their own message and the live spinner appear.
@@ -1204,11 +1257,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   useEffect(() => {
     if (running && !wasRunning.current) {
       pinnedToBottom.current = true;
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      stickToBottom();
     }
     wasRunning.current = running;
-  }, [running]);
+  }, [running, stickToBottom]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -1232,10 +1284,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     const cap = 6 * 20;
     el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
     if (pinnedToBottom.current) {
-      const sc = scrollRef.current;
-      if (sc) sc.scrollTop = sc.scrollHeight;
+      stickToBottom();
     }
-  }, []);
+  }, [stickToBottom]);
   useEffect(() => {
     resizeInput();
   }, [input, resizeInput]);
@@ -1282,11 +1333,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     if (!isActive) return;
     if (!pinnedToBottom.current) return;
     const raf = requestAnimationFrame(() => {
-      const sc = scrollRef.current;
-      if (sc) sc.scrollTop = sc.scrollHeight;
+      stickToBottom();
     });
     return () => cancelAnimationFrame(raf);
-  }, [isActive]);
+  }, [isActive, stickToBottom]);
 
   const submit = useCallback(async () => {
     const text = input.trim();
