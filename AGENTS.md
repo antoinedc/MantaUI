@@ -589,6 +589,27 @@ Pure logic (`findFlushBoundary`, `mergeBufferedDeltas`) lives in
 (open code block suppresses `\n\n` boundaries, empty code block, multiple
 fences in one buffer, inline backticks don't toggle fence state).
 
+**Transcript row memoization — REQUIRED for input perf.** The chat
+input's `input` state lives in `ChatPanel`, so every keystroke
+re-renders the whole component. Without `React.memo` on transcript
+rows that cascade re-runs `react-markdown` + Prism for every assistant
+message — visibly laggy past ~50 messages. Memoized leaf components:
+`MessageRow`, `AssistantPart`, `MarkdownBody`, `CodeBlock`, `ToolCall`,
+`ToolOutput`, `ActiveTodos`, `UserCommandBar`. All use the default
+shallow comparator; props passed in `messages.map()` are either
+primitives or Map lookups from panel-scope `useMemo`s
+(`userCommandInfo`, `turnInfo`, `finishByMessageId`, `commandByMessageId`).
+**Do not build fresh objects inline inside `messages.map`** — the
+`{name, arguments}` cmdInfo literal used to do this and silently
+defeated the memo on every keystroke. `userCommandInfo` precomputes
+the Map once, the map callback just does an O(1) lookup. If you add
+a new prop to MessageRow, either make it primitive or back it with
+a memoized lookup; otherwise the keystroke lag returns.
+
+`@`-typeahead file lookup is debounced 80ms (`fileSearchTimer`) so a
+fast typist doesn't pile up parallel SSH-tunneled `opencodeFindFiles`
+requests; the seq guard remains so any stale response is discarded.
+
 **Typed `session.error` names.** The `session.error` handler switches on
 `err.name` to prepend a context-appropriate prefix before the raw message:
 `ProviderAuthError` → "Auth error: …", `ContextOverflowError` → "Context

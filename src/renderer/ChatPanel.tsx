@@ -13,7 +13,7 @@
 // No Electron-only deps — only `window.api.*` (the mobile HTTP server will
 // shim that surface).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Highlight, themes, type Language } from "prism-react-renderer";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -377,6 +377,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const [agents, setAgents] = useState<OpencodeAgent[] | null>(null);
   const [fileResults, setFileResults] = useState<string[]>([]);
   const fileSearchSeqRef = useRef(0);
+  // Debounce timer for the @-typeahead file lookup. Without this every
+  // keystroke fires a fresh `opencodeFindFiles` HTTP call over the SSH
+  // tunnel; a fast typist can pile up parallel requests that don't
+  // matter (the seq guard discards stale responses) but waste bandwidth
+  // and contribute to perceived input lag. 80ms is small enough that
+  // the suggestion list still feels live as you type.
+  const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Prompt history: when textarea has focus and typeahead is closed, Up/Down
   // cycle through previously-submitted prompts (terminal-style). The index
   // is internal to navigateHistory's setter — never read elsewhere, so the
@@ -528,6 +535,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     if (compactionClearTimer.current) {
       clearTimeout(compactionClearTimer.current);
       compactionClearTimer.current = null;
+    }
+    if (fileSearchTimer.current) {
+      clearTimeout(fileSearchTimer.current);
+      fileSearchTimer.current = null;
     }
     setBranch(null);
     // Branch indicator. opencode's `vcs.branch.updated` event NEVER fires
@@ -2010,18 +2021,22 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // browse-style listing of the directory's top-level entries, which is
   // exactly what we want when the user has just typed `@` with no filter.
   const searchFiles = useCallback(
-    async (query: string) => {
-      const seq = ++fileSearchSeqRef.current;
+    (query: string) => {
+      if (fileSearchTimer.current) clearTimeout(fileSearchTimer.current);
       if (!cwd) {
         setFileResults([]);
         return;
       }
-      try {
-        const list = await window.api.opencodeFindFiles({ query, directory: cwd });
-        if (seq === fileSearchSeqRef.current) setFileResults(list.slice(0, 20));
-      } catch {
-        if (seq === fileSearchSeqRef.current) setFileResults([]);
-      }
+      fileSearchTimer.current = setTimeout(async () => {
+        fileSearchTimer.current = null;
+        const seq = ++fileSearchSeqRef.current;
+        try {
+          const list = await window.api.opencodeFindFiles({ query, directory: cwd });
+          if (seq === fileSearchSeqRef.current) setFileResults(list.slice(0, 20));
+        } catch {
+          if (seq === fileSearchSeqRef.current) setFileResults([]);
+        }
+      }, 80);
     },
     [cwd],
   );
@@ -2451,6 +2466,58 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     return out;
   }, [messages]);
 
+  // Slash-command provenance per USER message id. Two-source resolution:
+  //
+  //   (1) Live: opencode emits `command.executed.messageID` pointing at the
+  //       ASSISTANT message the command kicked off. The expanded user
+  //       message sits at messages[idx], the assistant at messages[idx+1].
+  //       So a user message is command-origin when the NEXT message's id
+  //       is in `commandByMessageId`.
+  //   (2) Historical: live events only fire for commands invoked during
+  //       this panel's lifetime. For older transcripts, detect by matching
+  //       the user-message text against the static prefix of every known
+  //       command template (`detectCommandFromText`). When the live map
+  //       doesn't have it, fall back to this.
+  //
+  // This memo MUST live at panel scope (NOT inside messages.map), because
+  // the map runs on every keystroke (the InputArea's `input` state lives
+  // in ChatPanel and forces a re-render). The map callback used to
+  // recompute `userText` and call `detectCommandFromText` for every user
+  // message every render — O(user_messages × commands) per keystroke and
+  // a fresh `{name, arguments}` object that defeated React.memo on
+  // MessageRow. The memo's key is the user-message id; lookup inside the
+  // map is O(1) and the returned object is stable across renders.
+  const userCommandInfo = useMemo<
+    Map<string, { name: string; arguments: string }>
+  >(() => {
+    const out = new Map<string, { name: string; arguments: string }>();
+    if (!messages) return out;
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.info.role !== "user") continue;
+      // (1) Live map first — most authoritative, has the run-time
+      // `arguments` string the historical-prefix match can't recover.
+      const nextMsg = messages[i + 1];
+      if (nextMsg && nextMsg.info.role === "assistant") {
+        const live = commandByMessageId.get(nextMsg.info.id);
+        if (live) {
+          out.set(m.info.id, live);
+          continue;
+        }
+      }
+      // (2) Historical fallback.
+      if (commands && commands.length > 0) {
+        const userText = m.parts
+          .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
+          .map((p) => p.text ?? "")
+          .join("\n");
+        const detected = detectCommandFromText(userText, commands);
+        if (detected) out.set(m.info.id, { name: detected, arguments: "" });
+      }
+    }
+    return out;
+  }, [messages, commandByMessageId, commands]);
+
   if (error) {
     return (
       <div className="h-full w-full flex items-center justify-center bg-bg text-text-muted p-6 font-mono">
@@ -2512,37 +2579,14 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             {messages.map((m, idx) => {
               const isLastInTranscript =
                 idx === messages.length - 1 && m.info.role === "assistant";
-              // Slash-command provenance resolution — two paths:
-              //
-              // (1) Live: `command.executed.messageID` points at the
-              //     ASSISTANT turn the command kicked off (the new,
-              //     initially-empty assistant message), not the user
-              //     message holding the expanded template. The expanded
-              //     user message sits at messages[idx], the assistant at
-              //     messages[idx+1]. If the next message's id is in the
-              //     live map, use that.
-              // (2) Historical: live events only fire for commands invoked
-              //     during this panel's lifetime. For older transcripts,
-              //     detect command-origin by matching the user-message
-              //     text against the static prefix of every known command
-              //     template (see detectCommandFromText). When a match
-              //     hits we don't have the run-time `arguments` string —
-              //     just the name. That's fine for the collapsed pill.
-              let cmdInfo: { name: string; arguments: string } | null = null;
-              if (m.info.role === "user") {
-                const nextMsg = messages[idx + 1];
-                if (nextMsg && nextMsg.info.role === "assistant") {
-                  cmdInfo = commandByMessageId.get(nextMsg.info.id) ?? null;
-                }
-                if (!cmdInfo && commands && commands.length > 0) {
-                  const userText = m.parts
-                    .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
-                    .map((p) => p.text ?? "")
-                    .join("\n");
-                  const detected = detectCommandFromText(userText, commands);
-                  if (detected) cmdInfo = { name: detected, arguments: "" };
-                }
-              }
+              // cmdInfo comes from `userCommandInfo` (memoized at panel
+              // scope on [messages, commandByMessageId, commands]).
+              // O(1) Map lookup here means MessageRow can be React.memo'd
+              // without keystrokes invalidating the prop reference.
+              const cmdInfo =
+                m.info.role === "user"
+                  ? userCommandInfo.get(m.info.id) ?? null
+                  : null;
               return (
                 <MessageRow
                   key={m.info.id}
@@ -2854,7 +2898,7 @@ function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | null; atB
 // completed items collapse to a count summary so the active focus stays
 // dominant when the list grows.
 
-function ActiveTodos({ todos }: { todos: Array<Record<string, unknown>> }) {
+const ActiveTodos = memo(function ActiveTodos({ todos }: { todos: Array<Record<string, unknown>> }) {
   // Render at most VISIBLE_TODOS_CAP items inline. Order: current
   // (in_progress) → pending → done so the row the model is actively
   // working on is always on screen even when the list grows past the cap.
@@ -2920,7 +2964,7 @@ function ActiveTodos({ todos }: { todos: Array<Record<string, unknown>> }) {
       )}
     </div>
   );
-}
+});
 
 // Verbose summary of an Edit/Write/MultiEdit diff: "Added 5 lines",
 // "Removed 3 lines", or "Added 5 lines, removed 3 lines". Replaces the
@@ -4048,7 +4092,7 @@ function InputArea({
 // (`/name args`) with a ▸/▾ chevron that toggles the full expanded text.
 // Same gray-bar styling as a regular user message so it reads as "you said
 // this" without a visual mode switch.
-function UserCommandBar({
+const UserCommandBar = memo(function UserCommandBar({
   name,
   args,
   expandedText,
@@ -4083,9 +4127,19 @@ function UserCommandBar({
       )}
     </div>
   );
-}
+});
 
-function MessageRow({
+// React.memo guards against the dominant per-keystroke cost: the chat
+// input lives in ChatPanel and forces a re-render on every keystroke,
+// which (without memo) cascades to re-rendering every MessageRow in the
+// transcript — re-running react-markdown + Prism for every assistant
+// message and producing visible input lag past ~50 messages. All props
+// passed in messages.map() are either primitives or stable references
+// (msg from a stable identity; turnInfo / commandInfo / finishBy*
+// Maps are memoized at panel scope; persistentTodos comes from
+// memoized activeTodos). The default shallow-equals check is what we
+// want — no custom comparator needed.
+const MessageRow = memo(function MessageRow({
   msg,
   showThinking,
   turnDurationMs,
@@ -4246,7 +4300,7 @@ function MessageRow({
       )}
     </div>
   );
-}
+});
 
 // Bullet color/animation by part kind + tool status. Text gets grey; tools
 // blink grey while running/pending, turn green on completion, red on error.
@@ -4261,7 +4315,13 @@ function bulletStyle(part: OpencodePart): { color: string; pulse: boolean } {
   return { color: "#6b7280", pulse: true };
 }
 
-function AssistantPart({
+// Memoized so re-renders of a memo'd MessageRow whose parts haven't
+// changed identity don't re-render every child part (and re-tokenize
+// every code block). `part` references are stable across renders
+// because the messages array uses object spread for updates and
+// unchanged parts keep their identity. `first` and `showThinking` are
+// primitives. Safe to use the default shallow comparator.
+const AssistantPart = memo(function AssistantPart({
   part,
   first,
   showThinking,
@@ -4368,13 +4428,13 @@ function AssistantPart({
       <div className="flex-1 text-xs">[{part.type}]</div>
     </div>
   );
-}
+});
 
 // Renders a tool's `output` string. If it looks like a unified diff (starts
 // with `--- ` or `@@`, or has multiple `@@` headers), each line is colored
 // red/green/neutral. Otherwise we render it as a monospace code block,
 // truncated to a sensible height by default.
-function ToolOutput({ output }: { output: string }) {
+const ToolOutput = memo(function ToolOutput({ output }: { output: string }) {
   const looksLikeDiff =
     /^---\s/.test(output) ||
     /\n---\s/.test(output) ||
@@ -4388,7 +4448,7 @@ function ToolOutput({ output }: { output: string }) {
       <code>{output}</code>
     </pre>
   );
-}
+});
 
 // ===== Tool call rendering =====
 //
@@ -4407,7 +4467,7 @@ type ToolState = {
   metadata?: Record<string, unknown>;
 };
 
-function ToolCall({ part, verbose }: { part: OpencodePart; verbose: boolean }) {
+const ToolCall = memo(function ToolCall({ part, verbose }: { part: OpencodePart; verbose: boolean }) {
   const rawTool = String((part as Record<string, unknown>).tool ?? "tool");
   // Title-case: "edit" → "Edit", "todo_write" → "TodoWrite".
   const toolName = rawTool
@@ -4460,7 +4520,7 @@ function ToolCall({ part, verbose }: { part: OpencodePart; verbose: boolean }) {
       </div>
     </div>
   );
-}
+});
 
 function ToolBody({
   tool,
@@ -4916,13 +4976,17 @@ const MD_COMPONENTS: MarkdownComponents = {
   hr: () => <hr className="my-2 border-border" />,
 };
 
-function MarkdownBody({ text }: { text: string }) {
+// Memoized so re-rendering a parent (AssistantPart, MessageRow) whose
+// own props/state haven't changed doesn't re-parse the markdown AST
+// and re-tokenize Prism inside CodeBlock. `text` is the only prop and
+// is a primitive — default shallow comparator works.
+const MarkdownBody = memo(function MarkdownBody({ text }: { text: string }) {
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
       {preprocessForStream(text)}
     </ReactMarkdown>
   );
-}
+});
 
 // react-markdown passes children as ReactNode (array of strings/elements). For
 // code blocks we want a plain string so Prism can tokenize. Walk the tree.
@@ -5005,7 +5069,12 @@ const PRISM_SUPPORTED: ReadonlySet<string> = new Set<Language>([
   "yaml",
 ] as Language[]);
 
-function CodeBlock({ lang, body }: { lang?: string; body: string }) {
+// Memoized so we don't re-tokenize a code block on every keystroke in
+// the chat input. Prism's <Highlight> is expensive (tokenization is
+// linear in code length per language); re-running it across N code
+// blocks per keystroke was the dominant cost of the previous typing-
+// lag bug. Both props are primitives.
+const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string; body: string }) {
   // Trim a single trailing newline that almost always precedes the closing fence.
   const cleaned = body.replace(/\n$/, "");
   const normalized = (lang ?? "").toLowerCase();
@@ -5047,5 +5116,5 @@ function CodeBlock({ lang, body }: { lang?: string; body: string }) {
       </Highlight>
     </div>
   );
-}
+});
 
