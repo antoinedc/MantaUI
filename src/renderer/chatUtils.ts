@@ -116,6 +116,109 @@ export function ctxStageColor(pct: number): string {
   return "#ef4444"; // red-500
 }
 
+// ===== Cache staleness =====
+//
+// Anthropic's prompt cache has a sliding TTL — every cache hit refreshes
+// the clock. When a session goes idle past the TTL, the cache entry is
+// evicted and the next request re-bills the entire cached prefix as
+// `cache_creation_input_tokens` at full input rate + 25% surcharge
+// (5m TTL) or 2× input rate (1h TTL). For long sessions with a deep
+// cached prefix, this can be 100k+ tokens of "wasted" spend just to
+// warm the cache back up — typically more expensive than just running
+// /clear and starting fresh.
+//
+// `selectCacheTtlMs(ttl)` returns the TTL in milliseconds. The TTL value
+// itself is configured per-request by opencode (NOT by bui); the
+// setting here is the user's claim about what opencode is sending, used
+// solely to predict when to show the "/clear to save Nk tokens" pill.
+//
+// `selectLastAssistantCompletion(messages)` returns the unix-ms timestamp
+// of the most recent fully-completed assistant turn, or null when there
+// is no completed turn yet (fresh session, or turn still in flight).
+// `time.completed` is set by opencode only when the turn is fully done
+// server-side, so it can't false-positive mid-turn.
+//
+// `computeStaleCache({...})` returns the {staleTokens, idleMs, isStale}
+// the UI needs. Gated by:
+//   - lastCompleted != null (a turn has finished)
+//   - cachedTokens >= minCacheTokens (don't pester for trivial savings)
+//   - idleMs >= ttlMs (the cache has actually expired)
+// `cachedTokens` is the size of the prefix that WOULD be re-billed:
+// the last step's cache.read + cache.write (= every token currently in
+// the cache for this session). On a normal warm turn that's the bulk
+// of the context.
+
+export function selectCacheTtlMs(ttl: "5m" | "1h"): number {
+  return ttl === "1h" ? 60 * 60_000 : 5 * 60_000;
+}
+
+export function selectLastAssistantCompletion(
+  messages:
+    | Array<{
+        info: {
+          role: string;
+          time?: { completed?: number; [k: string]: unknown };
+        };
+      }>
+    | null
+    | undefined,
+): number | null {
+  if (!messages || messages.length === 0) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.info.role !== "assistant") continue;
+    const c = m.info.time?.completed;
+    if (typeof c === "number" && c > 0) return c;
+  }
+  return null;
+}
+
+// Minimum cached-token threshold below which we suppress the pill. 5k is
+// roughly the largest a low-overhead session could be and still feel
+// "throwaway" — at that size a re-warm is ~$0.02 on Sonnet and not worth
+// nagging about. Above 5k the warning carries real value.
+export const STALE_CACHE_MIN_TOKENS = 5_000;
+
+export type StaleCacheResult = {
+  isStale: boolean;
+  idleMs: number;
+  staleTokens: number;
+  ttlMs: number;
+};
+
+export function computeStaleCache(input: {
+  lastCompleted: number | null;
+  now: number;
+  ttlMs: number;
+  cachedTokens: number;
+  minCacheTokens?: number;
+  running?: boolean;
+}): StaleCacheResult {
+  const min = input.minCacheTokens ?? STALE_CACHE_MIN_TOKENS;
+  const idleMs =
+    input.lastCompleted != null
+      ? Math.max(0, input.now - input.lastCompleted)
+      : 0;
+  const tokens = Math.max(0, Math.round(input.cachedTokens));
+  // Never report stale while a turn is running — the cache is being
+  // actively touched (writes count as touches) and a "/clear to save"
+  // suggestion is meaningless until the turn ends.
+  if (input.running) {
+    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs };
+  }
+  // Need a completed turn to know when staleness started; need real
+  // cached tokens to make the warning actionable.
+  if (input.lastCompleted == null || tokens < min) {
+    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs };
+  }
+  return {
+    isStale: idleMs >= input.ttlMs,
+    idleMs,
+    staleTokens: tokens,
+    ttlMs: input.ttlMs,
+  };
+}
+
 // ===== Context window breakdown =====
 //
 // The opencode `session.next.step.ended` event carries per-turn token usage

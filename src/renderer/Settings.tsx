@@ -11,6 +11,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     uploadCleanupHours,
     defaultModel,
     skillRegistryUrls,
+    cacheTtl,
     transport,
     tmuxConfig,
     refresh,
@@ -29,6 +30,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // Skill registry URLs
   const [registryUrls, setRegistryUrls] = useState<string[]>(skillRegistryUrls ?? []);
   const [newRegistryUrl, setNewRegistryUrl] = useState("");
+  // Anthropic prompt cache TTL — used to predict session staleness for the
+  // "/clear to save Nk tokens" pill. Must match opencode's actual
+  // cache_control.ttl setting; bui doesn't control it directly.
+  const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
 
   useEffect(() => {
     setH(host);
@@ -38,7 +43,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setUch(String(uploadCleanupHours));
     setSelectedModel(defaultModel ?? null);
     setRegistryUrls(skillRegistryUrls ?? []);
-  }, [host, user, identityFile, transportPreference, uploadCleanupHours, defaultModel, skillRegistryUrls]);
+    setTtl(cacheTtl);
+  }, [host, user, identityFile, transportPreference, uploadCleanupHours, defaultModel, skillRegistryUrls, cacheTtl]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -58,6 +64,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       uploadCleanupHours: Number.isFinite(hoursNum) && hoursNum >= 0 ? hoursNum : 1,
       defaultModel: selectedModel ?? undefined,
       skillRegistryUrls: registryUrls,
+      cacheTtl: ttl,
     });
     await refresh();
     onClose();
@@ -208,6 +215,46 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <div className="text-xs text-text-faint">
             Applied to every new and cleared chat session. Can still be overridden per-session
             with the model picker. "opencode default" lets the server decide.
+          </div>
+        </div>
+
+        <div className="space-y-2 pt-2 border-t border-border">
+          <label className="block text-xs uppercase tracking-wider text-text-muted">
+            Prompt cache TTL
+          </label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setTtl("5m")}
+              className={`flex-1 px-3 py-1.5 text-sm rounded border ${
+                ttl === "5m"
+                  ? "bg-accent text-bg border-accent"
+                  : "bg-bg-soft text-text-muted border-border hover:text-text"
+              }`}
+            >
+              5 minutes
+            </button>
+            <button
+              type="button"
+              onClick={() => setTtl("1h")}
+              className={`flex-1 px-3 py-1.5 text-sm rounded border ${
+                ttl === "1h"
+                  ? "bg-accent text-bg border-accent"
+                  : "bg-bg-soft text-text-muted border-border hover:text-text"
+              }`}
+            >
+              1 hour (default)
+            </button>
+          </div>
+          <div className="text-xs text-text-faint">
+            How long Anthropic keeps a session's prompt cache warm between
+            requests. Used to predict when a session has gone stale and show
+            "/clear to save Nk tokens" in the chat footer. bui doesn't set
+            this value itself — opencode does, when it builds the Anthropic
+            request. Match this setting to opencode's{" "}
+            <code className="text-text-muted">cache_control.ttl</code> so the
+            staleness pill fires at the right time. 1h is the better default
+            for bui's typical "step away to read code" pattern.
           </div>
         </div>
 

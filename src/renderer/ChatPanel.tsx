@@ -48,8 +48,13 @@ import {
   detectCommandFromText,
   isAssistantTurnComplete,
   computeContextBreakdown,
+  selectCacheTtlMs,
+  selectLastAssistantCompletion,
+  computeStaleCache,
+  STALE_CACHE_MIN_TOKENS,
   type TruncationKind,
   type ContextBreakdown,
+  type StaleCacheResult,
 } from "./chatUtils";
 
 // In-flight attachments tracked alongside the textarea content. Each chip
@@ -309,6 +314,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
   const configDefaultModel = useStore((s) => s.defaultModel);
+  // User-configured Anthropic prompt cache TTL — drives the "/clear to
+  // save Nk tokens" pill when the session has been idle past this TTL.
+  // bui doesn't set the real cache_control.ttl on requests; this is the
+  // user's claim about what opencode is sending. See AppConfig comment.
+  const cacheTtl = useStore((s) => s.cacheTtl);
   const [messages, setMessages] = useState<OpencodeMessage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Pending permission requests for THIS session. Polled on mount and refreshed
@@ -2139,6 +2149,67 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     return null;
   }, [messages, stepTokens]);
 
+  // ===== Stale prompt-cache detection =====
+  //
+  // Drives the "/clear to save Nk tokens" pill in the footer. When the
+  // session has been idle long enough that Anthropic's prompt cache has
+  // expired (TTL = 5m default OR 1h opt-in, set in Settings to match
+  // opencode's cache_control.ttl), the next user turn will re-bill the
+  // entire cached prefix as cache_creation_input_tokens. For deep
+  // sessions that's often 100k+ tokens of avoidable spend; suggest /clear
+  // when the cached prefix is non-trivial AND the cache has expired.
+  //
+  // Three inputs to the predicate:
+  //   - lastCompleted: timestamp of the last fully-finished assistant
+  //     turn (cache TTL clock starts at the request that wrote it, but
+  //     time.completed is the closest proxy in the data we have)
+  //   - cachedTokens: cache.read + cache.write from the most recent step
+  //     (= every token currently in this session's cache entry)
+  //   - now: stale cache is time-driven, so we need to re-evaluate over
+  //     time without remounting. Tick at 10s — staleness is a 5-min /
+  //     1-hr scale so sub-10s precision is irrelevant.
+  //
+  // The tick ONLY runs while a turn isn't actively in flight; running
+  // turns can't go stale by definition.
+  const lastAssistantCompletion = useMemo(
+    () => selectLastAssistantCompletion(messages),
+    [messages],
+  );
+  // Cached prefix size = read + write from the last step. On a warm
+  // session most of the prefix is `cache.read`; on the first turn after
+  // /compact (or the first turn ever) it'll be mostly `cache.write`.
+  // Either way, this is what flips from "free" to "paid" when the TTL
+  // expires.
+  const cachedTokens = latestTokens
+    ? (latestTokens.cache?.read ?? 0) + (latestTokens.cache?.write ?? 0)
+    : 0;
+  const ttlMs = selectCacheTtlMs(cacheTtl);
+  // Tick state — re-render every 10s when we have a completed turn and
+  // we're not running. The interval is deliberately scope-gated to avoid
+  // burning a wakeup every 10s on idle apps with no completed turns.
+  const [staleTick, setStaleTick] = useState(0);
+  useEffect(() => {
+    if (running) return;
+    if (lastAssistantCompletion == null) return;
+    if (cachedTokens < STALE_CACHE_MIN_TOKENS) return;
+    const id = setInterval(() => setStaleTick((t) => t + 1), 10_000);
+    return () => clearInterval(id);
+  }, [running, lastAssistantCompletion, cachedTokens]);
+  const staleCache = useMemo<StaleCacheResult>(
+    () =>
+      computeStaleCache({
+        lastCompleted: lastAssistantCompletion,
+        now: Date.now(),
+        ttlMs,
+        cachedTokens,
+        running,
+      }),
+    // staleTick is intentionally in the deps so the memo recomputes on
+    // each tick even when other inputs haven't changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lastAssistantCompletion, ttlMs, cachedTokens, running, staleTick],
+  );
+
   // Most recent TodoWrite call from anywhere in the session — pinned under
   // either the running indicator (while a turn is live) or the final turn's
   // duration footer (when idle). Walks back through ALL messages, not just
@@ -2511,6 +2582,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         chatAutoAllow={chatAutoAllow}
         setChatAutoAllow={setChatAutoAllow}
         tokens={latestTokens}
+        staleCache={staleCache}
         models={models}
         modelOverride={modelOverride}
         defaultModel={defaultModel}
@@ -2720,25 +2792,51 @@ function formatFileDiff(additions: number, deletions: number): React.ReactNode {
 // warm the cache" bucket; cache.read uses a steady muted teal for the
 // "served from cache" bucket.
 //
-// When `cache.write > 0` an inline `↻ Nk warm` pill renders to the right of
-// the % so the warm-up cost is visible WITHOUT hovering. (The old code
-// surfaced cache.write only inside a native HTML `title` tooltip — easy
-// to miss, hidden on mobile.) cache.read is shown in the tooltip; not
-// promoted to its own pill since it represents *savings*, not a cost.
+// When the session has gone stale (idle past the Anthropic cache TTL the
+// user configured in Settings, AND the cached prefix is non-trivial), an
+// amber `⚠ /clear to save Nk tokens` pill renders to the right of the %.
+// This is the actionable warning: those tokens are about to flip from
+// "served from cache (~10% rate)" to "cache_creation_input_tokens (full
+// rate + surcharge)" on the next user message, so the user can either
+// /clear (save them entirely) or /compact (shrink the prefix first).
 
 // Cache-segment colors — tuned to read as distinct buckets without
 // competing with the stage color of the fresh segment.
 const CACHE_WRITE_COLOR = "#f59e0b"; // amber-500: warm-up, expensive
 const CACHE_READ_COLOR = "#0ea5a4"; // teal-600: cached, cheap
 
+// Format a token count compactly for the inline stale-cache pill
+// ("12k", "120k", "1.2M"). Differs from `formatTokens` (which appends
+// "tokens" and never reaches M-scale) because pill space is tight and
+// we want a millions suffix once a session crosses 1M (Opus 4.7's full
+// window).
+function formatTokensCompact(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 100_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+}
+
+function formatIdleDuration(ms: number): string {
+  // Coarse human format for the tooltip — exact precision doesn't help.
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${totalSec}s`;
+}
+
 function ContextBar({
   breakdown,
   limit,
+  staleCache,
   modelName,
   tooltip,
 }: {
   breakdown: ContextBreakdown;
   limit: number;
+  staleCache: StaleCacheResult;
   modelName: string | null;
   tooltip?: string;
 }) {
@@ -2811,18 +2909,30 @@ function ContextBar({
       >
         {pct}%
       </span>
-      {cacheWrite > 0 && (
-        // Visible warm-up pill: surfaces cache.write WITHOUT hover. Uses
-        // the amber cache-write color so it ties back to the bar segment.
+      {staleCache.isStale && (
+        // Visible stale-cache pill — only appears when the session has
+        // been idle past the configured Anthropic cache TTL (5m or 1h,
+        // see Settings) AND the cached prefix is non-trivial. The next
+        // user message will pay full rate + surcharge to re-warm exactly
+        // these tokens; /clear avoids the bill entirely.
         <span
-          className="tabular-nums text-[11px] font-medium px-1 rounded-sm shrink-0"
+          className="tabular-nums text-[11px] font-medium px-1.5 rounded-sm shrink-0"
           style={{
             color: CACHE_WRITE_COLOR,
             backgroundColor: `${CACHE_WRITE_COLOR}1f`,
           }}
-          title={`${cacheWrite.toLocaleString()} cache write tokens this turn — paid full rate plus a 25% cache-creation surcharge. Re-billed every cold turn until a cache hit lands.`}
+          title={[
+            `Session idle for ${formatIdleDuration(staleCache.idleMs)} — prompt cache has expired.`,
+            `${staleCache.staleTokens.toLocaleString()} tokens currently in cache will be re-billed as cache_creation_input_tokens on your next message (full input rate + 25% surcharge, or 2× for 1h cache).`,
+            "",
+            "Actions:",
+            "  · /clear  — start a fresh session, skip the re-warm cost entirely",
+            "  · /compact — shrink the prefix before re-warming",
+            "",
+            "(Cache TTL is set by opencode; bui predicts staleness from the Settings → Prompt cache TTL value. If this fires at the wrong time, that setting probably doesn't match opencode's cache_control.ttl.)",
+          ].join("\n")}
         >
-          ↻ {formatTokens(cacheWrite).replace(" tokens", "")} warm
+          ⚠ /clear to save {formatTokensCompact(staleCache.staleTokens)} tokens
         </span>
       )}
     </span>
@@ -3491,6 +3601,7 @@ function InputArea({
   chatAutoAllow,
   setChatAutoAllow,
   tokens,
+  staleCache,
   models,
   modelOverride,
   defaultModel,
@@ -3524,6 +3635,10 @@ function InputArea({
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   tokens: TokenUsage | null;
+  // Stale-prompt-cache result: when isStale is true the footer shows
+  // "/clear to save Nk tokens" next to the context bar. Computed at the
+  // panel scope so the tick interval doesn't run inside InputArea.
+  staleCache: StaleCacheResult;
   models: OpencodeModel[] | null;
   modelOverride: ModelSelection | null;
   defaultModel: { providerID: string; modelID: string } | null;
@@ -3699,6 +3814,7 @@ function InputArea({
             <ContextBar
               breakdown={ctxBreakdown}
               limit={ctxLimit}
+              staleCache={staleCache}
               modelName={
                 activeModel
                   ? activeModel.name

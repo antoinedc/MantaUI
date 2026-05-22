@@ -36,6 +36,21 @@ export type AppConfig = {
   // is always prepended by the binary once the upstream PR lands; these are
   // user-added extras. Empty array = no user-added registries.
   skillRegistryUrls?: string[];
+  // Anthropic prompt cache TTL used by opencode. Used ONLY to predict when
+  // a chat session has gone stale (cache expired → the next user turn
+  // would re-bill the entire cached prefix as cache_creation_input_tokens
+  // at full rate + surcharge). bui does NOT itself set
+  // `cache_control.ttl` — opencode does. This setting must match what
+  // opencode is configured to send, otherwise the "/clear to save Nk
+  // tokens" pill will fire either too eagerly (configured 1h, opencode
+  // sending 5m) or too late (vice versa). Anthropic supports two values:
+  //   - "5m" → default sliding 5-minute TTL, 1.25× write cost
+  //   - "1h" → opt-in 1-hour TTL via `cache_control.ttl: "1h"`, 2× write
+  //            cost. Best fit for bui's "step away to read code / run a
+  //            build / take a meeting" usage pattern.
+  // Defaults to "1h" because that matches bui's typical multi-minute idle
+  // pattern; cost-sensitive users can switch to "5m" in Settings.
+  cacheTtl?: "5m" | "1h";
 };
 
 export type TransportInfo = {

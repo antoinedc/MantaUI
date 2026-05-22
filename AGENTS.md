@@ -419,6 +419,11 @@ single-line only) before `JSON.parse`; if it's unparseable we start from `{}`
 rather than corrupting other keys. The default registry
 (`https://antoinedc.github.io/bui-skills`) ships in the opencode binary once
 the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
+`cacheTtl: "5m" | "1h"` — Anthropic prompt cache TTL (default `"1h"`).
+Display-only: drives the stale-cache pill threshold in ChatPanel's
+footer. bui does NOT set the real `cache_control.ttl` on Anthropic
+requests — opencode does — so this setting must match what opencode is
+configured to send.
 
 **v2-only endpoints** (used alongside the v1 base):
 - `GET /question` — list pending Question tool requests
@@ -518,6 +523,36 @@ what the provider will actually accept; falls back to `ASSUMED_CONTEXT_TOKENS`
 "consider /compact soon"; at 100% says "Compact recommended". If you add
 a new place that shows ctx %, use the same helper — don't reintroduce the
 200k hardcode.
+
+**ContextBar numerator = input + cache.read + cache.write** (all three
+Anthropic input buckets are disjoint and ALL consume the request's context
+window). Earlier code used `input + cache.read` and under-counted on
+cache-warming turns. Math + per-segment widths live in
+`computeContextBreakdown()` in `chatUtils.ts` (tested). The bar is
+SEGMENTED: fresh-input slice in the stage color, cache.write slice in
+amber (`#f59e0b`), cache.read slice in teal (`#0ea5a4`). Mobile CSS hides
+the bar on `span[class*="w-24"]` — don't rename that class without
+updating `mobile.css`.
+
+**Stale prompt-cache pill — "/clear to save Nk tokens"** in the footer.
+Anthropic's prompt cache has a sliding TTL (5m default, 1h opt-in via
+`cache_control.ttl`). When the session has been idle past the TTL, the
+next user message re-bills the entire cached prefix as
+`cache_creation_input_tokens` (full rate + 25% for 5m, 2× for 1h). The
+pill surfaces this in the ContextBar component (`ChatPanel.tsx`) when:
+`!running && idleMs >= ttlMs && cachedTokens >= STALE_CACHE_MIN_TOKENS`
+(5k). The TTL is **NOT set by bui** — opencode picks the
+`cache_control.ttl` value when it builds each Anthropic request. bui only
+predicts staleness based on `AppConfig.cacheTtl` ("5m" | "1h", default
+"1h", configurable in Settings). If staleness fires at the wrong time,
+the config doesn't match opencode's setting — the tooltip says so. The
+predicate (`computeStaleCache`), TTL → ms (`selectCacheTtlMs`), and
+"last assistant completion" selector (`selectLastAssistantCompletion`)
+are pure + tested in `chatUtils.ts`. ChatPanel runs a 10s
+`setInterval` (gated on `!running && lastCompleted != null &&
+cachedTokens >= min`) to re-evaluate the predicate over time without
+remounting; same pattern as the RunningIndicator's 1s elapsed-time tick
+but coarser since staleness is a 5-min / 1-hr scale.
 
 **Typed `session.error` names.** The `session.error` handler switches on
 `err.name` to prepend a context-appropriate prefix before the raw message:

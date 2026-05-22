@@ -45,6 +45,11 @@ type State = {
   defaultModel: { providerID: string; modelID: string } | null;
   // User-added skill registry URLs (written to remote opencode.jsonc on save).
   skillRegistryUrls: string[];
+  // Anthropic prompt cache TTL — drives the "/clear to save Nk tokens"
+  // pill in ChatPanel's footer. Display-only (bui doesn't set the actual
+  // cache_control.ttl on requests — opencode does); must match opencode's
+  // setting. Defaults to "1h".
+  cacheTtl: "5m" | "1h";
   transport: TransportInfo | null;
   tmuxConfig: TmuxConfigStatus | null;
   projects: Project[];
@@ -76,6 +81,7 @@ export const useStore = create<State>((set, get) => ({
   chatAutoAllow: false,
   defaultModel: null,
   skillRegistryUrls: [],
+  cacheTtl: "1h",
   transport: null,
   tmuxConfig: null,
   projects: [],
@@ -145,6 +151,7 @@ export const useStore = create<State>((set, get) => ({
       chatAutoAllow: c.chatAutoAllow ?? false,
       defaultModel: c.defaultModel ?? null,
       skillRegistryUrls: c.skillRegistryUrls ?? [],
+      cacheTtl: c.cacheTtl === "5m" ? "5m" : "1h",
     }),
 
   setChatAutoAllow: async (v) => {

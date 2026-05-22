@@ -22,6 +22,10 @@ import {
   MIN_COMMAND_PREFIX_LEN,
   isAssistantTurnComplete,
   computeContextBreakdown,
+  selectCacheTtlMs,
+  selectLastAssistantCompletion,
+  computeStaleCache,
+  STALE_CACHE_MIN_TOKENS,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -260,6 +264,187 @@ describe("computeContextBreakdown", () => {
     );
     // 100_000 / 200_000 = 50%
     expect(b.pct).toBe(50);
+  });
+});
+
+// ===== selectCacheTtlMs =====
+
+describe("selectCacheTtlMs", () => {
+  it("returns 5 minutes for '5m'", () => {
+    expect(selectCacheTtlMs("5m")).toBe(5 * 60 * 1000);
+  });
+
+  it("returns 1 hour for '1h'", () => {
+    expect(selectCacheTtlMs("1h")).toBe(60 * 60 * 1000);
+  });
+});
+
+// ===== selectLastAssistantCompletion =====
+
+describe("selectLastAssistantCompletion", () => {
+  it("returns null for empty/null/undefined input", () => {
+    expect(selectLastAssistantCompletion(null)).toBeNull();
+    expect(selectLastAssistantCompletion(undefined)).toBeNull();
+    expect(selectLastAssistantCompletion([])).toBeNull();
+  });
+
+  it("returns null when no assistant message has completed yet", () => {
+    expect(
+      selectLastAssistantCompletion([
+        { info: { role: "user", time: { completed: 1000 } } },
+      ]),
+    ).toBeNull();
+    // Assistant message present but in-flight (no completed stamp).
+    expect(
+      selectLastAssistantCompletion([
+        { info: { role: "assistant", time: { created: 1000 } } },
+      ]),
+    ).toBeNull();
+  });
+
+  it("returns the most recent completed assistant turn", () => {
+    const msgs = [
+      { info: { role: "user", time: { completed: 1000 } } },
+      { info: { role: "assistant", time: { completed: 2000 } } },
+      { info: { role: "user", time: { completed: 3000 } } },
+      { info: { role: "assistant", time: { completed: 4000 } } },
+    ];
+    expect(selectLastAssistantCompletion(msgs)).toBe(4000);
+  });
+
+  it("walks backwards past in-flight assistant turns to find the last complete one", () => {
+    // Last assistant has no `completed` (turn still streaming) — should
+    // return the prior completed assistant turn instead of null.
+    const msgs = [
+      { info: { role: "assistant", time: { completed: 1000 } } },
+      { info: { role: "user", time: { completed: 1500 } } },
+      { info: { role: "assistant", time: { created: 2000 } } },
+    ];
+    expect(selectLastAssistantCompletion(msgs)).toBe(1000);
+  });
+
+  it("ignores non-numeric / zero / negative completion stamps", () => {
+    const msgs = [
+      { info: { role: "assistant", time: { completed: 0 } } },
+      { info: { role: "assistant", time: { completed: -1 } } },
+      { info: { role: "assistant", time: {} } },
+    ];
+    expect(selectLastAssistantCompletion(msgs)).toBeNull();
+  });
+});
+
+// ===== computeStaleCache =====
+
+describe("computeStaleCache", () => {
+  const TTL_5M = 5 * 60 * 1000;
+  const TTL_1H = 60 * 60 * 1000;
+
+  it("returns isStale=false when running, regardless of idle time", () => {
+    const r = computeStaleCache({
+      lastCompleted: 0,
+      now: TTL_1H * 10, // far past any TTL
+      ttlMs: TTL_5M,
+      cachedTokens: 100_000,
+      running: true,
+    });
+    expect(r.isStale).toBe(false);
+  });
+
+  it("returns isStale=false when no turn has completed yet", () => {
+    const r = computeStaleCache({
+      lastCompleted: null,
+      now: 999_999_999,
+      ttlMs: TTL_5M,
+      cachedTokens: 100_000,
+    });
+    expect(r.isStale).toBe(false);
+  });
+
+  it("returns isStale=false when cached prefix is below the minimum", () => {
+    const r = computeStaleCache({
+      lastCompleted: 0,
+      now: TTL_5M * 2,
+      ttlMs: TTL_5M,
+      cachedTokens: STALE_CACHE_MIN_TOKENS - 1,
+    });
+    expect(r.isStale).toBe(false);
+  });
+
+  it("returns isStale=false when idle is below the TTL", () => {
+    const r = computeStaleCache({
+      lastCompleted: 1_000_000,
+      now: 1_000_000 + TTL_5M - 1,
+      ttlMs: TTL_5M,
+      cachedTokens: 50_000,
+    });
+    expect(r.isStale).toBe(false);
+    expect(r.idleMs).toBe(TTL_5M - 1);
+  });
+
+  it("returns isStale=true when idle >= TTL AND tokens >= min AND not running", () => {
+    const r = computeStaleCache({
+      lastCompleted: 1_000_000,
+      now: 1_000_000 + TTL_5M,
+      ttlMs: TTL_5M,
+      cachedTokens: 50_000,
+    });
+    expect(r.isStale).toBe(true);
+    expect(r.idleMs).toBe(TTL_5M);
+    expect(r.staleTokens).toBe(50_000);
+    expect(r.ttlMs).toBe(TTL_5M);
+  });
+
+  it("respects a 1h TTL — 30min idle is fresh, 90min is stale", () => {
+    const base = 1_000_000;
+    const at30 = computeStaleCache({
+      lastCompleted: base,
+      now: base + 30 * 60_000,
+      ttlMs: TTL_1H,
+      cachedTokens: 200_000,
+    });
+    const at90 = computeStaleCache({
+      lastCompleted: base,
+      now: base + 90 * 60_000,
+      ttlMs: TTL_1H,
+      cachedTokens: 200_000,
+    });
+    expect(at30.isStale).toBe(false);
+    expect(at90.isStale).toBe(true);
+  });
+
+  it("supports a custom minimum threshold", () => {
+    const r = computeStaleCache({
+      lastCompleted: 0,
+      now: TTL_5M * 2,
+      ttlMs: TTL_5M,
+      cachedTokens: 100,
+      minCacheTokens: 50,
+    });
+    expect(r.isStale).toBe(true);
+    expect(r.staleTokens).toBe(100);
+  });
+
+  it("clamps idleMs and staleTokens to non-negative", () => {
+    // Now BEFORE lastCompleted (clock skew) — should not produce negative idle.
+    const r = computeStaleCache({
+      lastCompleted: 2_000_000,
+      now: 1_000_000,
+      ttlMs: TTL_5M,
+      cachedTokens: -500,
+    });
+    expect(r.idleMs).toBe(0);
+    expect(r.staleTokens).toBe(0);
+    expect(r.isStale).toBe(false);
+  });
+
+  it("rounds fractional cachedTokens", () => {
+    const r = computeStaleCache({
+      lastCompleted: 0,
+      now: TTL_5M * 2,
+      ttlMs: TTL_5M,
+      cachedTokens: 49_999.7,
+    });
+    expect(r.staleTokens).toBe(50_000);
   });
 });
 
