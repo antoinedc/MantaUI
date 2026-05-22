@@ -48,6 +48,7 @@ import {
   applyQuestionEvent,
   detectCommandFromText,
   isAssistantTurnComplete,
+  isAssistantTurnInProgress,
   computeContextBreakdown,
   selectCacheTtlMs,
   selectLastAssistantCompletion,
@@ -753,6 +754,14 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         for (const cid of collectChildSessionIds(m)) {
           childSessionIds.current.add(cid);
         }
+        // Recover the running state from the transcript at mount. If the
+        // last message is an assistant turn with no completion stamp, that
+        // turn is in flight or wedged (stuck mid-tool-call — opencode never
+        // emitted idle). Either way we must show `running` so the abort
+        // button appears; without this a wedged session looks idle and the
+        // user has no way to clear it. Mount-only — safe to set running
+        // true here because no local send can have raced yet.
+        if (isAssistantTurnInProgress(m)) setRunning(true);
         // NOTE: we deliberately do NOT reconstruct pending questions from
         // the transcript here. opencode v1.15 broadcasts the `que_…` reply
         // token exactly once, on the live question.asked event — it is not

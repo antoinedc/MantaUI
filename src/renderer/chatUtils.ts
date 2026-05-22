@@ -1143,3 +1143,39 @@ export function summarizeChildSession(
   }
   return { toolCount, lastToolName, tokens };
 }
+
+// `isAssistantTurnInProgress` is the mount-time counterpart to
+// `isAssistantTurnComplete`. On a fresh panel mount we fetch the
+// authoritative transcript; if the last message is an assistant turn with
+// no `time.completed` stamp, that turn is either genuinely running or
+// WEDGED (e.g. stuck mid-tool-call — opencode never emitted `idle`). Either
+// way the UI must show `running` so the abort affordance is available;
+// otherwise the user has a silently-stuck session and no way to clear it
+// (every new prompt just queues behind the dead turn).
+//
+// SAFE ONLY AT MOUNT. Unlike the one-way clear in `isAssistantTurnComplete`,
+// this can set `running` true — which would race the optimistic-send path
+// and live `session.status` events if used on a live refetch. Call it once,
+// from the initial-load effect, before any local send can have happened.
+//
+// A trailing `user` message returns false here: opencode has not begun an
+// assistant turn for it yet, so there is nothing to abort. (That is the
+// queued-prompt case; it resolves when opencode starts the turn and emits
+// `session.status {busy}`.) Empty transcript → false.
+export function isAssistantTurnInProgress(
+  messages:
+    | Array<{
+        info: {
+          role: string;
+          time?: { completed?: number; [k: string]: unknown };
+        };
+      }>
+    | null
+    | undefined,
+): boolean {
+  if (!messages || messages.length === 0) return false;
+  const last = messages[messages.length - 1];
+  if (last.info.role !== "assistant") return false;
+  const completed = last.info.time?.completed;
+  return !(typeof completed === "number" && completed > 0);
+}

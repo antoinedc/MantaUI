@@ -21,6 +21,7 @@ import {
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
   isAssistantTurnComplete,
+  isAssistantTurnInProgress,
   computeContextBreakdown,
   selectCacheTtlMs,
   selectLastAssistantCompletion,
@@ -1806,5 +1807,69 @@ describe("shouldDropEventForSessionFilter", () => {
     // Register first — as ChatPanel does. Now the filter passes it.
     registerChildSessionFromCreated(ev, "ses_parent", children);
     expect(shouldDropEventForSessionFilter(ev, "ses_parent", children)).toBe(false);
+  });
+});
+
+// ===== isAssistantTurnInProgress =====
+//
+// Regression: a session whose last assistant turn wedged (stuck mid-tool-
+// call — opencode never emitted idle) looked IDLE on panel mount because
+// the initial load never derived `running` from the transcript. With no
+// spinner there was no abort affordance; new prompts queued silently
+// behind the dead turn. This helper drives `running` true at mount so the
+// abort button appears.
+
+describe("isAssistantTurnInProgress", () => {
+  it("is false for empty / nullish transcript (nothing to abort)", () => {
+    expect(isAssistantTurnInProgress([])).toBe(false);
+    expect(isAssistantTurnInProgress(null)).toBe(false);
+    expect(isAssistantTurnInProgress(undefined)).toBe(false);
+  });
+
+  it("is true when the last assistant message has no completion stamp (running or wedged)", () => {
+    const msgs = [
+      { info: { role: "user" } },
+      { info: { role: "assistant", time: { created: 1000 } } },
+    ];
+    expect(isAssistantTurnInProgress(msgs)).toBe(true);
+  });
+
+  it("is true when time is entirely absent on the last assistant message", () => {
+    expect(isAssistantTurnInProgress([{ info: { role: "assistant" } }])).toBe(
+      true,
+    );
+  });
+
+  it("is false when the last assistant message is completed", () => {
+    const msgs = [
+      { info: { role: "user" } },
+      { info: { role: "assistant", time: { created: 1000, completed: 1234 } } },
+    ];
+    expect(isAssistantTurnInProgress(msgs)).toBe(false);
+  });
+
+  it("is false when the last message is a user message (queued prompt, no turn started)", () => {
+    // A trailing user message means opencode has not begun an assistant
+    // turn — there is nothing to abort yet.
+    const msgs = [
+      { info: { role: "assistant", time: { completed: 1000 } } },
+      { info: { role: "user" } },
+    ];
+    expect(isAssistantTurnInProgress(msgs)).toBe(false);
+  });
+
+  it("treats completed:0 as in progress (defensive against falsy stamp)", () => {
+    expect(
+      isAssistantTurnInProgress([
+        { info: { role: "assistant", time: { completed: 0 } } },
+      ]),
+    ).toBe(true);
+  });
+
+  it("is the strict inverse of isAssistantTurnComplete for assistant-tailed transcripts", () => {
+    const wedged = [{ info: { role: "assistant", time: { created: 1 } } }];
+    const done = [{ info: { role: "assistant", time: { completed: 2 } } }];
+    expect(isAssistantTurnInProgress(wedged)).toBe(!isAssistantTurnComplete(wedged));
+    expect(isAssistantTurnInProgress(done)).toBe(!isAssistantTurnComplete(done));
   });
 });
