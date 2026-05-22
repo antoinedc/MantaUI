@@ -651,6 +651,83 @@ export function isSelfFilteringLifecycleEvent(type: string): boolean {
 }
 
 /**
+ * Minimal event shape consumed by the per-session filter helpers below.
+ * Matches OpencodeEvent's relevant fields without dragging the type in.
+ */
+type FilterEvent = {
+  type: string;
+  properties?: {
+    sessionID?: string;
+    info?: { id?: string; parentID?: string };
+    [k: string]: unknown;
+  };
+};
+
+/**
+ * If `ev` is a `session.created` event whose new session is a CHILD of
+ * `viewedSessionId`, add the child's id to `childSessionIds` and return
+ * true. Otherwise no-op + return false.
+ *
+ * MUST be called BEFORE `shouldDropEventForSessionFilter` — the filter
+ * looks up the new id in `childSessionIds`, and the child wouldn't be in
+ * there yet without this registration step. (HIGH-severity regression
+ * that was present in the initial Phase-1 implementation: the registration
+ * block ran AFTER the filter, so live `session.created` events were
+ * dropped and the allowlist fell back to the slower transcript-seeding
+ * path — leaving a window before the parent's task tool part was stamped
+ * during which child events were silently filtered out.)
+ *
+ * Mutates `childSessionIds` in place; returns whether a registration
+ * happened so callers can assert/trace it.
+ */
+export function registerChildSessionFromCreated(
+  ev: FilterEvent,
+  viewedSessionId: string,
+  childSessionIds: Set<string>,
+): boolean {
+  if (ev.type !== "session.created") return false;
+  const info = ev.properties?.info;
+  if (!info || info.parentID !== viewedSessionId) return false;
+  if (typeof info.id !== "string" || info.id.length === 0) return false;
+  if (childSessionIds.has(info.id)) return false;
+  childSessionIds.add(info.id);
+  return true;
+}
+
+/**
+ * Per-session early-return guard for `onOpencodeEvent`.
+ *
+ * Returns true when the event should be dropped because it's scoped to a
+ * different session AND not a known child subagent AND not a
+ * self-filtering lifecycle event.
+ *
+ * The three pass-through cases:
+ *   - `evSessionID === viewedSessionId` → main session event.
+ *   - `evSessionID ∈ childSessionIds` → known subagent child.
+ *   - `isSelfFilteringLifecycleEvent(ev.type)` → question.* / permission.*
+ *     (their handlers re-filter after the refresh trigger they cause).
+ *
+ * Empty/missing `properties.sessionID` also passes through — some events
+ * (vcs.branch.updated, certain server-wide notifications) carry no
+ * sessionID and would otherwise be silently dropped.
+ *
+ * Pure + exported so the guard contract is tested and can't silently
+ * regress when the routing is touched.
+ */
+export function shouldDropEventForSessionFilter(
+  ev: FilterEvent,
+  viewedSessionId: string,
+  childSessionIds: Set<string>,
+): boolean {
+  if (isSelfFilteringLifecycleEvent(ev.type)) return false;
+  const evSessionID = ev.properties?.sessionID;
+  if (typeof evSessionID !== "string" || evSessionID.length === 0) return false;
+  if (evSessionID === viewedSessionId) return false;
+  if (childSessionIds.has(evSessionID)) return false;
+  return true;
+}
+
+/**
  * Apply a question.* lifecycle event to the pending-questions list.
  *
  * THE regression this fixes (present since 1a5a336, the feature's first
@@ -853,4 +930,216 @@ export function isAssistantTurnComplete(
   if (last.info.role !== "assistant") return false;
   const completed = last.info.time?.completed;
   return typeof completed === "number" && completed > 0;
+}
+
+// ===== Subagent (Task tool / child session) helpers =====
+//
+// The opencode "task" tool spawns a CHILD session and waits for it to finish.
+// On the wire (verified live + OpenAPI), the parent's task tool part carries:
+//   - state.input: { description, prompt, subagent_type }
+//   - state.metadata.sessionId: the child session's id (present as soon as
+//     the part exists, even before status === "completed")
+//   - state.metadata.model: { providerID, modelID } the child runs on
+//   - state.metadata.truncated: was the child's output cut off
+//   - state.status: "pending" | "running" | "completed" | "error"
+//   - state.title / state.output / state.time.{start,end}
+//
+// The child session runs in the parent's `directory`, so its events flow on
+// the SAME scoped `/event?directory=` stream bui already has open. The only
+// thing standing between bui and live subagent rendering is the early
+// sessionID filter (it drops events whose sessionID === childId). The
+// collector helpers below produce the allowlist that filter consults.
+
+/**
+ * Minimal part shape the subagent helpers consume. `tokens` is at the part
+ * root for `step-finish` parts (verified against opencode's OpenAPI:
+ * `StepFinishPart.tokens` is required, with `input`/`output`/`reasoning`/
+ * `cache` keys) — declared here so the helpers don't need a tactical cast.
+ */
+type SubagentPart = {
+  type?: string;
+  tool?: string;
+  state?: {
+    status?: string;
+    title?: string;
+    output?: string;
+    input?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+    time?: { start?: number; end?: number };
+  };
+  // step-finish parts only.
+  tokens?: { input?: number; output?: number };
+};
+
+/** Minimal message shape the helpers consume. */
+type SubagentMessage = { parts?: SubagentPart[] };
+
+/**
+ * Structured view of a single subagent invocation, extracted from the parent's
+ * task tool part. Returns null when the part isn't a task tool call or doesn't
+ * carry a child session id yet (some pending parts haven't been stamped).
+ */
+export type SubagentInfo = {
+  childSessionId: string;
+  // From state.input
+  agent: string;                 // subagent_type, e.g. "explore"
+  description: string;           // human-readable summary
+  prompt: string;                // full prompt sent to the child
+  // From state
+  status: "pending" | "running" | "completed" | "error" | "unknown";
+  title: string | null;          // opencode-generated short label
+  output: string | null;         // child's final text (only when completed)
+  truncated: boolean;            // state.metadata.truncated
+  durationMs: number | null;     // end - start when both stamps exist
+  model: { providerID: string; modelID: string } | null;
+};
+
+/**
+ * Extract subagent info from any part. Returns null when:
+ *   - the part isn't a tool call, OR
+ *   - the tool isn't "task", OR
+ *   - the part hasn't been stamped with a child sessionId yet (very brief
+ *     window between tool-input.started and the first state.metadata write).
+ *
+ * Defensive against the loose `OpencodePart` type ({ [k: string]: unknown });
+ * every field is narrowed at read time.
+ */
+export function extractSubagentInfo(part: SubagentPart): SubagentInfo | null {
+  if (!part || part.type !== "tool" || part.tool !== "task") return null;
+  const state = part.state ?? {};
+  const meta = (state.metadata ?? {}) as Record<string, unknown>;
+  const childSessionId =
+    typeof meta.sessionId === "string" && meta.sessionId.length > 0
+      ? meta.sessionId
+      : null;
+  if (!childSessionId) return null;
+  const input = (state.input ?? {}) as Record<string, unknown>;
+  const status = ((): SubagentInfo["status"] => {
+    const s = typeof state.status === "string" ? state.status : "";
+    if (s === "pending" || s === "running" || s === "completed" || s === "error") return s;
+    return "unknown";
+  })();
+  const time = state.time ?? {};
+  const durationMs =
+    typeof time.start === "number" && typeof time.end === "number" && time.end >= time.start
+      ? time.end - time.start
+      : null;
+  const modelRaw = meta.model as Record<string, unknown> | undefined;
+  const model =
+    modelRaw &&
+    typeof modelRaw.providerID === "string" &&
+    typeof modelRaw.modelID === "string"
+      ? { providerID: modelRaw.providerID, modelID: modelRaw.modelID }
+      : null;
+  return {
+    childSessionId,
+    agent: typeof input.subagent_type === "string" ? input.subagent_type : "subagent",
+    description: typeof input.description === "string" ? input.description : "",
+    prompt: typeof input.prompt === "string" ? input.prompt : "",
+    status,
+    title: typeof state.title === "string" ? state.title : null,
+    output: typeof state.output === "string" ? state.output : null,
+    truncated: meta.truncated === true,
+    durationMs,
+    model,
+  };
+}
+
+/**
+ * Walk a transcript and collect every child session id mentioned in any task
+ * tool part. Used to seed the panel's `childSessionIds` allowlist on initial
+ * fetch (and refetches) so the sessionID filter lets child events through
+ * even before the live `session.created` arrives.
+ *
+ * Safe with undefined / null / empty inputs.
+ */
+export function collectChildSessionIds(
+  messages: SubagentMessage[] | null | undefined,
+): Set<string> {
+  const out = new Set<string>();
+  if (!messages) return out;
+  for (const m of messages) {
+    const parts = m?.parts;
+    if (!parts) continue;
+    for (const p of parts) {
+      const info = extractSubagentInfo(p);
+      if (info) out.add(info.childSessionId);
+    }
+  }
+  return out;
+}
+
+/**
+ * Count task tool parts whose status is "running" (or "pending"). Live status
+ * can be more accurate than the parent's transcript snapshot — when a child's
+ * `session.idle` arrives, ChatPanel maps its sessionId → "idle" in a Map and
+ * passes it here so we don't keep counting subagents that just finished but
+ * whose parent task-part status hasn't been refetched yet.
+ *
+ * `liveStatus` keys are child session ids; values are the latest live state
+ * inferred from child SSE events ("running" | "idle"). When a child id isn't
+ * in the map, we fall back to the transcript status (running/pending count).
+ */
+export function countRunningSubagents(
+  messages: SubagentMessage[] | null | undefined,
+  liveStatus?: Map<string, "running" | "idle"> | null,
+): number {
+  if (!messages) return 0;
+  let n = 0;
+  for (const m of messages) {
+    const parts = m?.parts;
+    if (!parts) continue;
+    for (const p of parts) {
+      const info = extractSubagentInfo(p);
+      if (!info) continue;
+      const live = liveStatus?.get(info.childSessionId);
+      if (live === "idle") continue;
+      if (live === "running") {
+        n++;
+        continue;
+      }
+      // No live signal — fall back to transcript status.
+      if (info.status === "running" || info.status === "pending") n++;
+    }
+  }
+  return n;
+}
+
+/**
+ * Lightweight summary of a child session's transcript, for the collapsed
+ * TaskBody header (tool count, last tool name, cumulative tokens scraped from
+ * the child's step-finish parts). Used while the child is running OR after
+ * completion when the user wants a one-line glance without expanding.
+ *
+ * Returns zeros for an empty/null transcript so callers can render
+ * unconditionally without guarding.
+ */
+export function summarizeChildSession(
+  messages: SubagentMessage[] | null | undefined,
+): { toolCount: number; lastToolName: string | null; tokens: number } {
+  let toolCount = 0;
+  let lastToolName: string | null = null;
+  let tokens = 0;
+  if (!messages) return { toolCount, lastToolName, tokens };
+  for (const m of messages) {
+    const parts = m?.parts;
+    if (!parts) continue;
+    for (const p of parts) {
+      if (p.type === "tool") {
+        toolCount++;
+        const name = typeof p.tool === "string" ? p.tool : null;
+        if (name) lastToolName = name;
+        continue;
+      }
+      // step-finish parts carry cumulative tokens for the step at the
+      // part root (verified against StepFinishPart in opencode's OpenAPI).
+      if (p.type === "step-finish") {
+        const tk = p.tokens;
+        if (tk) {
+          tokens += (tk.input ?? 0) + (tk.output ?? 0);
+        }
+      }
+    }
+  }
+  return { toolCount, lastToolName, tokens };
 }

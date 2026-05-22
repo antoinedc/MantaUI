@@ -234,4 +234,49 @@ describe("setChatRunning / setChatAttention", () => {
       expect(win.attention).toBe(true);
     });
   });
+
+  describe("setChatSubagents", () => {
+    // Sole update path for the `·N` indicator on chat-mode windows. The
+    // TUI poller's regex can't see chat-mode panes (they run `sleep
+    // infinity`, not claude). ChatPanel pushes here whenever its derived
+    // count from countRunningSubagents changes.
+
+    it("no-ops when no window owns the sessionId", () => {
+      useStore.getState().setChatSubagents("ses_unknown", 3);
+      expect(useStore.getState().status).toEqual({});
+    });
+
+    it("sets the subagent count on the matching window", () => {
+      useStore.getState().setChatSubagents("ses_chat", 2);
+      expect(useStore.getState().status.bui[0]).toEqual({
+        running: false,
+        subagents: 2,
+        attention: false,
+        attentionKind: undefined,
+      });
+    });
+
+    it("returns the previous state object when the count is unchanged (no churn)", () => {
+      // Critical for keystroke perf: ChatPanel pushes on every transcript
+      // change, which is many per second during streaming. A no-op must
+      // not allocate a new state, or every zustand subscriber re-renders.
+      useStore.getState().setChatSubagents("ses_chat", 0);
+      const firstStatus = useStore.getState().status;
+      useStore.getState().setChatSubagents("ses_chat", 0);
+      expect(useStore.getState().status).toBe(firstStatus);
+    });
+
+    it("preserves running and attention fields when changing the count", () => {
+      // Subagent count is orthogonal to running/attention; updating it
+      // must not clear unrelated flags set by setChatRunning/Attention.
+      useStore.getState().setChatRunning("ses_chat", true);
+      useStore.getState().setChatAttention("ses_chat", "question");
+      useStore.getState().setChatSubagents("ses_chat", 4);
+      const win = useStore.getState().status.bui[0];
+      expect(win.running).toBe(true);
+      expect(win.attention).toBe(true);
+      expect(win.attentionKind).toBe("question");
+      expect(win.subagents).toBe(4);
+    });
+  });
 });

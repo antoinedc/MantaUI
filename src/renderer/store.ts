@@ -101,6 +101,13 @@ type State = {
     sessionId: string,
     kind: AttentionKind | null,
   ) => void;
+  // Chat-mode subagent count driven by ChatPanel's task-tool inspection
+  // (`countRunningSubagents` over the live transcript + child status). The
+  // PTY poller's regex (`● Task(...)` + `⎿ Running…`) can't see chat-mode
+  // windows because their pane runs `sleep infinity` — without this update
+  // path the sidebar `·N` indicator would always be 0 for chat windows.
+  // Owning window is resolved from `sessionId` via `resolveSessionOwner`.
+  setChatSubagents: (sessionId: string, count: number) => void;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   setScreenshotToast: (t: ScreenshotToast | null) => void;
 };
@@ -309,6 +316,32 @@ export const useStore = create<State>((set, get) => ({
         subagents: old?.subagents ?? 0,
         attention: wantAttention,
         attentionKind: wantAttention ? kind ?? "idle" : undefined,
+      };
+      return {
+        status: {
+          ...prev.status,
+          [owner.tmuxSession]: {
+            ...prev.status[owner.tmuxSession],
+            [owner.windowIndex]: nextWin,
+          },
+        },
+      };
+    }),
+
+  setChatSubagents: (sessionId, count) =>
+    set((prev) => {
+      const owner = resolveSessionOwner(prev.projects, sessionId);
+      if (!owner) return prev;
+      const old = prev.status[owner.tmuxSession]?.[owner.windowIndex];
+      const prevCount = old?.subagents ?? 0;
+      // No-op when unchanged to avoid pointless re-renders of the entire
+      // sidebar tree (zustand re-emits to all subscribers on every set).
+      if (prevCount === count) return prev;
+      const nextWin: WindowStatusUI = {
+        running: old?.running ?? false,
+        subagents: count,
+        attention: old?.attention ?? false,
+        attentionKind: old?.attentionKind,
       };
       return {
         status: {

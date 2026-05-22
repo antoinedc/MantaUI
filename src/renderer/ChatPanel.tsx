@@ -13,7 +13,7 @@
 // No Electron-only deps — only `window.api.*` (the mobile HTTP server will
 // shim that surface).
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Highlight, themes, type Language } from "prism-react-renderer";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -43,7 +43,8 @@ import {
   selectActiveTodos,
   selectVisibleTodos,
   formatHiddenTodosSummary,
-  isSelfFilteringLifecycleEvent,
+  registerChildSessionFromCreated,
+  shouldDropEventForSessionFilter,
   applyQuestionEvent,
   detectCommandFromText,
   isAssistantTurnComplete,
@@ -54,6 +55,10 @@ import {
   STALE_CACHE_MIN_TOKENS,
   findFlushBoundary,
   mergeBufferedDeltas,
+  extractSubagentInfo,
+  collectChildSessionIds,
+  countRunningSubagents,
+  summarizeChildSession,
   type TruncationKind,
   type ContextBreakdown,
   type StaleCacheResult,
@@ -246,6 +251,32 @@ function writeSavedModel(sessionId: string, m: ModelSelection | null): void {
 // brand the chat panel without touching the rest of bui's blue accent.
 const CLAUDE_ORANGE = "#d97757";
 
+// Subagent (Task tool) context. Carries the per-panel state needed to render
+// expanded child transcripts inside TaskBody. Provided once by ChatPanel near
+// its scroll container; consumed by TaskBody via useContext so the chain of
+// memoized components (MessageRow → AssistantPart → ToolCall → ToolBody) stays
+// untouched and their default shallow-comparator memos keep working. Without
+// the context, TaskBody falls back to its collapsed-header-only rendering
+// (the chevron is hidden because there's nothing to expand into).
+type TaskContextValue = {
+  expanded: Set<string>;
+  toggle: (childSessionId: string) => void;
+  // Lazy-loaded child transcripts. Map.get(childSessionId) may be undefined
+  // (never fetched) — TaskBody shows a spinner or "expand to load" depending
+  // on fetchState.
+  childMessages: Map<string, OpencodeMessage[]>;
+  // "loading" while the initial fetch is in flight; "error" if it failed
+  // (TaskBody renders a small retry hint). Absent = idle.
+  childFetchState: Map<string, "loading" | "error">;
+  // Live child running/idle from session.status / session.idle events.
+  // Overrides the parent's stale `state.status` for the running pulse.
+  liveStatus: Map<string, "running" | "idle">;
+  // Inherited from ChatPanel's Ctrl+O toggle so reasoning visibility
+  // matches between parent and child transcripts.
+  showThinking: boolean;
+};
+const TaskContext = createContext<TaskContextValue | null>(null);
+
 // ASSUMED_CONTEXT_TOKENS, formatTokens, formatDuration, ctxStageColor,
 // filterCommands, dedupeAgainstBuiltins, resolveContextLimit,
 // classifyFinish, describeTruncation are imported from ./chatUtils.
@@ -370,6 +401,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Only the active panel renders it (gated below by `isActive`).
   const screenshotToast = useStore((s) => s.screenshotToast);
   const setScreenshotToast = useStore((s) => s.setScreenshotToast);
+  const setChatSubagents = useStore((s) => s.setChatSubagents);
   // Typeahead popup state + result caches. Commands and agents are fetched
   // lazily on first @/ and reused; file searches re-issue per-keystroke.
   const [typeahead, setTypeahead] = useState<TypeaheadState | null>(null);
@@ -504,6 +536,150 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     Map<string, { name: string; arguments: string }>
   >(() => new Map());
 
+  // ===== Subagent (Task tool / child session) state =====
+  //
+  // When the parent agent invokes the `task` tool, opencode spawns a CHILD
+  // session and runs the subagent inside it. The child's events arrive on
+  // the SAME scoped /event?directory= stream the parent uses (child inherits
+  // parent's cwd), but with the child's sessionID — so the early sessionID
+  // filter would drop them. `childSessionIds` is the runtime allowlist that
+  // filter consults; we populate it from two converging sources:
+  //   1. Walking `messages` for task tool parts → state.metadata.sessionId.
+  //      Covers everything in the persisted transcript (including child
+  //      sessions spawned in previous turns/sessions).
+  //   2. Live `session.created` events whose properties.info.parentID
+  //      matches our sessionId. Covers the brief window before the parent's
+  //      task tool part has been stamped with the child id.
+  //
+  // Stored as a ref because the filter runs INSIDE the SSE handler closure
+  // — needs to read the current set without triggering a re-render or
+  // forcing the handler to re-subscribe on every update.
+  const childSessionIds = useRef<Set<string>>(new Set());
+  // Lazily fetched child transcripts, one per expanded TaskBody. The Map
+  // value is { messages, loading, error } so the card can show a spinner /
+  // error state without a per-card local state hook. Populated on first
+  // expand; kept current by routing child message.part.* events through
+  // the same buffer machinery and applying them here instead of `messages`.
+  const [childMessages, setChildMessages] = useState<
+    Map<string, OpencodeMessage[]>
+  >(() => new Map());
+  // Per-child loading/error state for the lazy fetch on expand.
+  const [childFetchState, setChildFetchState] = useState<
+    Map<string, "loading" | "error">
+  >(() => new Map());
+  // Live running/idle status per child session id, driven by the child's
+  // own session.status / session.idle events. Preferred over the parent's
+  // transcript snapshot of `state.status` because the parent's task-part
+  // status only refreshes on the 300ms refetch — leaves a noticeable
+  // window where the badge says "running" but the child has actually
+  // finished. countRunningSubagents() consumes this for the sidebar.
+  const [liveChildStatus, setLiveChildStatus] = useState<
+    Map<string, "running" | "idle">
+  >(() => new Map());
+  // Which task cards are expanded. Keyed by CHILD SESSION ID (not callID)
+  // so the SSE handler — which sees evSessionID, not the callID — can
+  // gate per-card refetches via a ref-mirror without joining maps.
+  // Cleared on session change.
+  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(
+    () => new Set(),
+  );
+  // Mirror of expandedTasks read by the SSE handler closure (which
+  // wouldn't re-subscribe to state changes; refs are how we read mutable
+  // values out of the long-lived effect cleanly). Kept in sync via the
+  // effect below.
+  const expandedTasksRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    expandedTasksRef.current = expandedTasks;
+  }, [expandedTasks]);
+  // Ref mirrors of the child-state maps so `toggleTaskExpand` can read
+  // current values synchronously without taking them as deps (which would
+  // invalidate the callback on every keystroke that touches transcript
+  // state and defeat MessageRow memos downstream via TaskContext).
+  const childMessagesRef = useRef<Map<string, OpencodeMessage[]>>(new Map());
+  const childFetchStateRef = useRef<Map<string, "loading" | "error">>(new Map());
+  const liveChildStatusRef = useRef<Map<string, "running" | "idle">>(new Map());
+  useEffect(() => {
+    childMessagesRef.current = childMessages;
+  }, [childMessages]);
+  useEffect(() => {
+    childFetchStateRef.current = childFetchState;
+  }, [childFetchState]);
+  useEffect(() => {
+    liveChildStatusRef.current = liveChildStatus;
+  }, [liveChildStatus]);
+  // Per-child debounce timers for refetching child transcripts when their
+  // expanded card is receiving SSE traffic. Keyed by childSessionId. 300ms
+  // matches the parent's scheduleRefetch debounce so behavior is uniform.
+  const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
+
+  // Internal fetch helper. Sets loading state, hits the API, populates
+  // childMessages on success, marks error on failure. Idempotent against
+  // concurrent calls via the in-flight `loading` guard. Pulled out so we
+  // can call it both on first expand AND on re-expand of a running child.
+  const fetchChildTranscript = useCallback((childSessionId: string) => {
+    if (childFetchStateRef.current.get(childSessionId) === "loading") return;
+    setChildFetchState((prev) => {
+      if (prev.get(childSessionId) === "loading") return prev;
+      const next = new Map(prev);
+      next.set(childSessionId, "loading");
+      return next;
+    });
+    window.api
+      .opencodeMessages(childSessionId)
+      .then((m) => {
+        setChildMessages((prev) => {
+          const next = new Map(prev);
+          next.set(childSessionId, m);
+          return next;
+        });
+        setChildFetchState((prev) => {
+          const next = new Map(prev);
+          next.delete(childSessionId);
+          return next;
+        });
+      })
+      .catch(() => {
+        setChildFetchState((prev) => {
+          const next = new Map(prev);
+          next.set(childSessionId, "error");
+          return next;
+        });
+      });
+  }, []);
+
+  // Expand/collapse handler for a TaskBody card. On FIRST expand fetches
+  // the child's transcript; on RE-expand fetches again when the child is
+  // still running (the cached snapshot would otherwise be stale until the
+  // next live event hits the now-expanded card). Idempotent: re-expanding
+  // a completed child uses the cached transcript with no extra fetch.
+  const toggleTaskExpand = useCallback((childSessionId: string) => {
+    // Reads are synchronous via refs so we can decide the fetch policy
+    // outside the state setter — strict-mode safe (no side effects inside
+    // updaters that would fire twice in dev) and clearer to read.
+    let willExpand = false;
+    setExpandedTasks((prev) => {
+      const next = new Set(prev);
+      if (next.has(childSessionId)) {
+        next.delete(childSessionId);
+        willExpand = false;
+      } else {
+        next.add(childSessionId);
+        willExpand = true;
+      }
+      return next;
+    });
+    if (!willExpand) return;
+    const cached = childMessagesRef.current.has(childSessionId);
+    const isRunning = liveChildStatusRef.current.get(childSessionId) === "running";
+    // Fetch when: no cached snapshot yet, OR the child is still running
+    // (cache is stale by the time the user re-opens the card).
+    if (!cached || isRunning) {
+      fetchChildTranscript(childSessionId);
+    }
+  }, [fetchChildTranscript]);
+
   // Initial load + reload whenever sessionId changes.
   useEffect(() => {
     let cancelled = false;
@@ -524,6 +700,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setFinishByMessageId(new Map());
     setCommandByMessageId(new Map());
     setCompactionState(null);
+    childSessionIds.current = new Set();
+    setChildMessages(new Map());
+    setChildFetchState(new Map());
+    setLiveChildStatus(new Map());
+    setExpandedTasks(new Set());
     // Drop any buffered text deltas from the previous session — they
     // refer to part IDs that no longer exist in the new transcript.
     pendingDeltas.current.clear();
@@ -565,6 +746,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       .then((m) => {
         if (cancelled) return;
         setMessages(m);
+        // Seed the subagent allowlist from the persisted transcript so
+        // events for previously-spawned children (still running OR finished
+        // and being inspected) pass the sessionID filter. Live `session.
+        // created` events keep it current for new spawns.
+        for (const cid of collectChildSessionIds(m)) {
+          childSessionIds.current.add(cid);
+        }
         // NOTE: we deliberately do NOT reconstruct pending questions from
         // the transcript here. opencode v1.15 broadcasts the `que_…` reply
         // token exactly once, on the live question.asked event — it is not
@@ -735,6 +923,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           .opencodeMessages(sessionId)
           .then((m) => {
             setMessages(m);
+            // Re-seed the subagent allowlist on every refetch — covers
+            // children spawned by a turn that completed entirely in
+            // between event subscriptions (rare, but possible after a
+            // reconnect window).
+            for (const cid of collectChildSessionIds(m)) {
+              childSessionIds.current.add(cid);
+            }
             // Self-heal a stuck spinner. `running` is normally cleared by
             // the live `session.idle` / `session.status{idle}` event — but
             // if the scoped event stream dropped after the first post-resume
@@ -755,6 +950,31 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
     scheduleRefetchRef.current = scheduleRefetch;
 
+    // Per-child debounced refetch — called when a known child's
+    // message.part.* event arrives while its TaskBody is expanded. We
+    // re-pull the FULL child transcript instead of merging deltas inline
+    // because subagent transcripts are typically short (one task = one
+    // turn), and pure-refetch sidesteps the buffered-delta-buffer's
+    // parent-keyed state.
+    const scheduleChildRefetch = (childId: string) => {
+      const existing = childRefetchTimers.current.get(childId);
+      if (existing) clearTimeout(existing);
+      const t = setTimeout(() => {
+        childRefetchTimers.current.delete(childId);
+        window.api
+          .opencodeMessages(childId)
+          .then((m) => {
+            setChildMessages((prev) => {
+              const next = new Map(prev);
+              next.set(childId, m);
+              return next;
+            });
+          })
+          .catch(() => { /* non-fatal */ });
+      }, 300);
+      childRefetchTimers.current.set(childId, t);
+    };
+
     const off = window.api.onOpencodeEvent((ev: OpencodeEvent) => {
       const props = ev.properties ?? {};
       // Per-session guard for transcript/state events (message.*, todo.*,
@@ -771,11 +991,104 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       // `?directory=` stream, so the mount-time poll alone can't cover a
       // mid-turn question — the live event MUST get through. (Root cause of
       // "questions never appear".)
-      if (
-        !isSelfFilteringLifecycleEvent(ev.type) &&
-        props.sessionID &&
-        props.sessionID !== sessionId
-      ) {
+      // Per-session guard. Events for OUR session always pass; events for a
+      // known CHILD subagent session (in childSessionIds allowlist) are
+      // routed to the subagent-handling branch below; everything else with a
+      // non-matching sessionID is dropped — UNLESS it's a self-filtering
+      // lifecycle event (question.*/permission.*, whose own handlers
+      // re-filter after the refresh trigger they cause).
+      const evSessionID = typeof props.sessionID === "string" ? props.sessionID : "";
+
+      // Register a NEW subagent child id BEFORE the per-session filter
+      // runs — see registerChildSessionFromCreated's docstring for the
+      // ordering rationale (the filter would otherwise drop the very
+      // event we'd use to enlarge the allowlist).
+      registerChildSessionFromCreated(
+        ev as { type: string; properties?: { info?: { id?: string; parentID?: string } } },
+        sessionId,
+        childSessionIds.current,
+      );
+
+      if (shouldDropEventForSessionFilter(
+        ev as { type: string; properties?: { sessionID?: string } },
+        sessionId,
+        childSessionIds.current,
+      )) {
+        return;
+      }
+      const isChildEvent =
+        evSessionID.length > 0 &&
+        evSessionID !== sessionId &&
+        childSessionIds.current.has(evSessionID);
+
+      // ===== Subagent child-session event routing =====
+      //
+      // For events scoped to a known child, only a narrow set actually
+      // matters for the inline TaskBody renderer: message-shape updates
+      // (so the expanded card stays live), session lifecycle (so the
+      // header badge flips running→idle), and session.created (which we
+      // also use to enlarge the allowlist for grandchildren). Everything
+      // else (compaction, todo.updated, vcs.branch.updated on child, etc.)
+      // is intentionally ignored — TaskBody is read-only, no point routing
+      // them into a separate state pipeline.
+      if (isChildEvent) {
+        if (
+          ev.type === "message.part.updated" ||
+          ev.type === "message.part.delta" ||
+          ev.type === "message.updated" ||
+          ev.type === "message.part.removed" ||
+          ev.type === "message.removed"
+        ) {
+          // Only refetch children whose card is expanded — keeps idle
+          // panels cheap and avoids re-rendering subagent transcripts the
+          // user isn't looking at. The expanded card has the partID's
+          // parent message in its state; without that part, deltas would
+          // accumulate orphaned in `pendingDeltas`.
+          //
+          // Coalesce per-child via a small debounce. Without it, a chatty
+          // subagent (one streaming delta every ~30ms) would re-fetch its
+          // full transcript on every event.
+          if (expandedTasksRef.current.has(evSessionID)) {
+            scheduleChildRefetch(evSessionID);
+          }
+          return;
+        }
+        if (ev.type === "session.idle") {
+          setLiveChildStatus((prev) => {
+            if (prev.get(evSessionID) === "idle") return prev;
+            const next = new Map(prev);
+            next.set(evSessionID, "idle");
+            return next;
+          });
+          // The parent's task tool part status snapshot is what users
+          // actually see in the collapsed card — re-fetch the parent so
+          // its state.status flips from "running" to "completed". Otherwise
+          // the badge keeps spinning until the next parent SSE event.
+          scheduleRefetch();
+          return;
+        }
+        if (ev.type === "session.status") {
+          const t = (props.status as { type?: string } | undefined)?.type;
+          if (t === "busy" || t === "retry") {
+            setLiveChildStatus((prev) => {
+              if (prev.get(evSessionID) === "running") return prev;
+              const next = new Map(prev);
+              next.set(evSessionID, "running");
+              return next;
+            });
+          } else if (t === "idle") {
+            setLiveChildStatus((prev) => {
+              if (prev.get(evSessionID) === "idle") return prev;
+              const next = new Map(prev);
+              next.set(evSessionID, "idle");
+              return next;
+            });
+            scheduleRefetch();
+          }
+          return;
+        }
+        // Any other child-scoped event is dropped — handled above or not
+        // needed for read-only subagent UI.
         return;
       }
 
@@ -1150,6 +1463,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         clearTimeout(compactionClearTimer.current);
         compactionClearTimer.current = null;
       }
+      // Cancel any pending child transcript refetches; the next session's
+      // effect will fetch fresh on first expand.
+      for (const t of childRefetchTimers.current.values()) clearTimeout(t);
+      childRefetchTimers.current.clear();
       // Force-flush whatever's still buffered on unmount/session change
       // so the user doesn't lose the final sentence of a turn when they
       // navigate away. (The new session's effect will clear the buffer
@@ -2568,6 +2885,49 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     return out;
   }, [messages, commandByMessageId, commands]);
 
+  // Memoized TaskContext value. Identity-stable across keystroke renders
+  // (input/typeahead state churn): only changes when one of the underlying
+  // subagent maps or showThinking flips. Without the memo, the Provider
+  // would re-render every TaskBody on every keystroke and the user would
+  // see the expand state visually flash through React's reconciliation.
+  const taskContextValue = useMemo<TaskContextValue>(
+    () => ({
+      expanded: expandedTasks,
+      toggle: toggleTaskExpand,
+      childMessages,
+      childFetchState,
+      liveStatus: liveChildStatus,
+      showThinking,
+    }),
+    [
+      expandedTasks,
+      toggleTaskExpand,
+      childMessages,
+      childFetchState,
+      liveChildStatus,
+      showThinking,
+    ],
+  );
+
+  // Push the running-subagent count into the global store so the sidebar's
+  // `·N` indicator (Sidebar.tsx's StatusIndicator) lights up for chat-mode
+  // windows. The TUI poller can't see chat-mode subagents (holder pane runs
+  // `sleep infinity`), so this is the sole update path for chat-mode `·N`.
+  // Pure derivation from the same data TaskBody consumes; the store no-ops
+  // when the count is unchanged so this doesn't churn other subscribers.
+  const runningSubagents = useMemo(
+    () => countRunningSubagents(messages, liveChildStatus),
+    [messages, liveChildStatus],
+  );
+  useEffect(() => {
+    setChatSubagents(sessionId, runningSubagents);
+  }, [sessionId, runningSubagents, setChatSubagents]);
+  // Reset to zero on unmount / session change so a stale count from the
+  // previous session doesn't linger on the sidebar dot.
+  useEffect(() => {
+    return () => setChatSubagents(sessionId, 0);
+  }, [sessionId, setChatSubagents]);
+
   if (error) {
     return (
       <div className="h-full w-full flex items-center justify-center bg-bg text-text-muted p-6 font-mono">
@@ -2618,6 +2978,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         ref={scrollRef}
         className="flex-1 overflow-y-auto px-4 py-3"
       >
+        <TaskContext.Provider value={taskContextValue}>
         <div className="flex flex-col justify-end min-h-full">
         {messages.length === 0 ? (
           <div className="text-text-faint">
@@ -2665,6 +3026,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           </div>
         )}
         </div>
+        </TaskContext.Provider>
       </div>
 
       {/* Pending question cards. Shown above permissions + running indicator */}
@@ -4602,10 +4964,184 @@ function ToolBody({
     case "webfetch":
     case "web_fetch":
       return <WebFetchBody state={state} />;
+    case "task":
+      return <TaskBody state={state} />;
     default:
       // Unknown tool — show output (if any) as a generic block.
       return state.output ? <ToolOutput output={state.output} /> : null;
   }
+}
+
+// Task (subagent) body. Collapsed by default to a one-line summary
+// (description · agent · status · duration · live tool count). On expand,
+// renders the child session's full transcript inline, indented under the
+// header with a left border accent so the nesting is visually unambiguous.
+//
+// The child transcript uses the SAME MessageRow components as the parent —
+// full fidelity, including tool calls, reasoning (Ctrl+O), text markdown,
+// active todos, etc. (Nested subagents would recurse for free because the
+// task tool case here just re-enters the same flow on the inner ToolBody.)
+//
+// Data sources:
+//   - The parent's task tool part (`state` prop here) gives us the headline
+//     metadata: status, title, duration, child id, agent type, model, output.
+//   - The child's transcript is fetched lazily on first expand via the
+//     `toggle` callback in TaskContext (registered by ChatPanel as
+//     `toggleTaskExpand`); subsequent SSE traffic for that child triggers
+//     a debounced re-fetch (also in ChatPanel) so the expanded card stays
+//     live.
+//   - Live status from child's session.idle/status events (in liveStatus
+//     map) overrides the parent's stale `state.status` for the badge.
+//
+// When no TaskContext is provided (defensive — shouldn't happen in
+// ChatPanel but might in a future test harness), renders the static
+// header + final output only, no expand affordance.
+function TaskBody({ state }: { state: ToolState }) {
+  const ctx = useContext(TaskContext);
+  const info = useMemo(
+    () => extractSubagentInfo({ type: "tool", tool: "task", state }),
+    [state],
+  );
+  if (!info) {
+    // No child id yet (very brief window between tool-input.started and
+    // the first metadata write). Fall back to whatever output is present.
+    return state.output ? <ToolOutput output={state.output} /> : null;
+  }
+  const isExpanded = ctx?.expanded.has(info.childSessionId) ?? false;
+  const childMsgs = ctx?.childMessages.get(info.childSessionId);
+  const childFetch = ctx?.childFetchState.get(info.childSessionId);
+  const liveState = ctx?.liveStatus.get(info.childSessionId);
+  // Prefer live SSE status over the parent's transcript snapshot (which
+  // lags by one refetch cycle). Maps "running" → still going, "idle" →
+  // finished. The transcript status acts as the initial value before any
+  // live event lands AND the source of truth for completed/error.
+  const effectiveStatus =
+    liveState === "idle" && info.status === "running"
+      ? "completed"
+      : liveState === "running" && info.status === "completed"
+        ? "running"
+        : info.status;
+  const summary = useMemo(() => summarizeChildSession(childMsgs), [childMsgs]);
+  const showThinking = ctx?.showThinking ?? false;
+
+  const statusColor =
+    effectiveStatus === "completed"
+      ? "#22c55e"
+      : effectiveStatus === "error"
+        ? "#ef4444"
+        : "#6b7280"; // running / pending / unknown
+  const statusPulse = effectiveStatus === "running" || effectiveStatus === "pending";
+
+  const onToggle = ctx ? () => ctx.toggle(info.childSessionId) : null;
+
+  return (
+    <div className="text-[12px] text-text-muted">
+      {/* Header row: description + meta line. Click anywhere on the row to
+          toggle when context is available. */}
+      <div
+        className={
+          "flex items-start " +
+          (onToggle ? "cursor-pointer hover:text-text" : "")
+        }
+        onClick={onToggle ?? undefined}
+      >
+        <span className="select-none w-4 shrink-0 text-text-faint">
+          {onToggle ? (isExpanded ? "▾" : "▸") : "⎿"}
+        </span>
+        <div className="flex-1 min-w-0">
+          {info.description && (
+            <div className="text-text truncate">{info.description}</div>
+          )}
+          <div className="flex flex-wrap items-center gap-x-1 text-text-faint">
+            <span style={{ color: statusColor }} className={statusPulse ? "animate-pulse" : ""}>
+              ●
+            </span>
+            <span>{info.agent}</span>
+            <span>·</span>
+            <span>{effectiveStatus}</span>
+            {summary.toolCount > 0 && (
+              <>
+                <span>·</span>
+                <span>
+                  {summary.toolCount} tool{summary.toolCount === 1 ? "" : "s"}
+                  {effectiveStatus === "running" && summary.lastToolName
+                    ? ` (${summary.lastToolName})`
+                    : ""}
+                </span>
+              </>
+            )}
+            {info.durationMs != null && (
+              <>
+                <span>·</span>
+                <span>{formatDuration(info.durationMs)}</span>
+              </>
+            )}
+            {summary.tokens > 0 && (
+              <>
+                <span>·</span>
+                <span>{formatTokens(summary.tokens)}</span>
+              </>
+            )}
+            {info.truncated && (
+              <>
+                <span>·</span>
+                {/* Inline hex matches `CACHE_WRITE_COLOR` / the truncation
+                    badge elsewhere; the theme has no `warning` token. */}
+                <span style={{ color: "#f59e0b" }}>⚠ truncated</span>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Expanded body: child transcript (full fidelity, indented + bordered)
+          followed by the final output. While loading, a small spinner. */}
+      {isExpanded && (
+        <div className="mt-1 ml-4 pl-3 border-l-2 border-border">
+          {childFetch === "loading" && !childMsgs && (
+            <div className="text-text-faint italic">Loading subagent transcript…</div>
+          )}
+          {childFetch === "error" && !childMsgs && (
+            // Inline hex — theme has no `error` token; matches bulletStyle()'s
+            // red used for failed tool calls.
+            <div style={{ color: "#ef4444" }}>Failed to load subagent transcript.</div>
+          )}
+          {childMsgs && childMsgs.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {childMsgs.map((m) => (
+                <MessageRow
+                  key={m.info.id}
+                  msg={m}
+                  showThinking={showThinking}
+                  // Subagent transcripts have their own footers; don't paint
+                  // turn-duration / persistent-todo / truncation overlays
+                  // designed for the top-level conversation.
+                  turnDurationMs={null}
+                  persistentTodos={null}
+                  truncation={null}
+                  commandInfo={null}
+                />
+              ))}
+            </div>
+          )}
+          {childMsgs && childMsgs.length === 0 && (
+            <div className="text-text-faint italic">
+              (no messages — subagent finished without producing a transcript)
+            </div>
+          )}
+          {/* Final output, shown below the transcript for completed runs.
+              Same visual treatment as the generic ToolOutput so users
+              recognize "this is what the subagent returned to its parent". */}
+          {info.output && effectiveStatus !== "running" && (
+            <div className="mt-2">
+              <div className="text-text-faint mb-1">Result:</div>
+              <ToolOutput output={info.output} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Read: collapsed to a one-line summary by default — "Read N lines (ctrl+o)"

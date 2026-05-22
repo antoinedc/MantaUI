@@ -28,6 +28,12 @@ import {
   STALE_CACHE_MIN_TOKENS,
   findFlushBoundary,
   mergeBufferedDeltas,
+  extractSubagentInfo,
+  collectChildSessionIds,
+  countRunningSubagents,
+  summarizeChildSession,
+  registerChildSessionFromCreated,
+  shouldDropEventForSessionFilter,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -1397,5 +1403,408 @@ describe("isAssistantTurnComplete", () => {
       { info: { role: "assistant", time: { created: 2000 } } }, // in flight
     ];
     expect(isAssistantTurnComplete(msgs)).toBe(false);
+  });
+});
+
+// ===== Subagent helpers =====
+
+describe("extractSubagentInfo", () => {
+  it("returns null for non-tool parts", () => {
+    expect(extractSubagentInfo({ type: "text" })).toBeNull();
+    expect(extractSubagentInfo({ type: "reasoning" })).toBeNull();
+  });
+
+  it("returns null for non-task tool parts", () => {
+    expect(extractSubagentInfo({ type: "tool", tool: "bash", state: { status: "running" } })).toBeNull();
+    expect(extractSubagentInfo({ type: "tool", tool: "read" })).toBeNull();
+  });
+
+  it("returns null when task tool has no metadata.sessionId yet (pre-stamp window)", () => {
+    // Brief window between tool-input.started and the first metadata write
+    // where the child id isn't available yet — must not throw, must not
+    // produce a malformed SubagentInfo with empty id.
+    const p = { type: "tool", tool: "task", state: { status: "pending", input: { subagent_type: "explore" } } };
+    expect(extractSubagentInfo(p)).toBeNull();
+  });
+
+  it("extracts full info from a completed task part (live shape)", () => {
+    // Verbatim from opencode wire (curl /session/.../message). Mirror of
+    // the actual shape so a wire change here triggers a test failure.
+    const p = {
+      type: "tool",
+      tool: "task",
+      state: {
+        status: "completed",
+        input: {
+          description: "Find skill loading code",
+          prompt: "Search the OpenCode codebase…",
+          subagent_type: "explore",
+        },
+        output: "I found that skills load from…",
+        title: "Find skill loading code",
+        time: { start: 1000, end: 13500 },
+        metadata: {
+          parentSessionId: "ses_parent",
+          sessionId: "ses_child123",
+          model: { modelID: "claude-sonnet-4-6", providerID: "anthropic" },
+          truncated: false,
+        },
+      },
+    };
+    expect(extractSubagentInfo(p)).toEqual({
+      childSessionId: "ses_child123",
+      agent: "explore",
+      description: "Find skill loading code",
+      prompt: "Search the OpenCode codebase…",
+      status: "completed",
+      title: "Find skill loading code",
+      output: "I found that skills load from…",
+      truncated: false,
+      durationMs: 12500,
+      model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    });
+  });
+
+  it("defaults agent to 'subagent' when subagent_type is missing", () => {
+    const p = {
+      type: "tool",
+      tool: "task",
+      state: { status: "running", input: {}, metadata: { sessionId: "ses_x" } },
+    };
+    expect(extractSubagentInfo(p)?.agent).toBe("subagent");
+  });
+
+  it("returns null durationMs when only start is stamped (mid-run)", () => {
+    const p = {
+      type: "tool",
+      tool: "task",
+      state: {
+        status: "running",
+        input: { subagent_type: "explore" },
+        time: { start: 1000 },
+        metadata: { sessionId: "ses_x" },
+      },
+    };
+    expect(extractSubagentInfo(p)?.durationMs).toBeNull();
+  });
+
+  it("maps unknown status strings to 'unknown' instead of leaking arbitrary values", () => {
+    const p = {
+      type: "tool",
+      tool: "task",
+      state: { status: "weird-future-status", input: {}, metadata: { sessionId: "ses_x" } },
+    };
+    expect(extractSubagentInfo(p)?.status).toBe("unknown");
+  });
+
+  it("truncated defaults to false when metadata.truncated is absent or non-boolean", () => {
+    const p = {
+      type: "tool",
+      tool: "task",
+      state: { status: "completed", input: {}, metadata: { sessionId: "ses_x" } },
+    };
+    expect(extractSubagentInfo(p)?.truncated).toBe(false);
+    const p2 = {
+      type: "tool",
+      tool: "task",
+      state: { status: "completed", input: {}, metadata: { sessionId: "ses_x", truncated: "yes" as unknown } },
+    };
+    expect(extractSubagentInfo(p2)?.truncated).toBe(false);
+  });
+});
+
+describe("collectChildSessionIds", () => {
+  it("returns an empty Set for null / undefined / empty inputs", () => {
+    expect(collectChildSessionIds(null).size).toBe(0);
+    expect(collectChildSessionIds(undefined).size).toBe(0);
+    expect(collectChildSessionIds([]).size).toBe(0);
+  });
+
+  it("collects ids from task tool parts across multiple messages", () => {
+    const messages = [
+      { parts: [{ type: "text", text: "hello" }] },
+      {
+        parts: [
+          { type: "tool", tool: "bash", state: {} }, // not task
+          { type: "tool", tool: "task", state: { metadata: { sessionId: "ses_a" } } },
+        ],
+      },
+      {
+        parts: [
+          { type: "tool", tool: "task", state: { metadata: { sessionId: "ses_b" } } },
+          { type: "tool", tool: "task", state: { metadata: { sessionId: "ses_a" } } }, // dup
+        ],
+      },
+    ];
+    const ids = collectChildSessionIds(messages);
+    expect(ids.size).toBe(2);
+    expect(ids.has("ses_a")).toBe(true);
+    expect(ids.has("ses_b")).toBe(true);
+  });
+
+  it("skips task parts that have no childSessionId yet", () => {
+    const messages = [
+      { parts: [{ type: "tool", tool: "task", state: { status: "pending" } }] },
+    ];
+    expect(collectChildSessionIds(messages).size).toBe(0);
+  });
+});
+
+describe("countRunningSubagents", () => {
+  const taskPart = (childId: string, status: string) => ({
+    parts: [{ type: "tool", tool: "task", state: { status, metadata: { sessionId: childId } } }],
+  });
+
+  it("returns 0 for null/empty transcript", () => {
+    expect(countRunningSubagents(null)).toBe(0);
+    expect(countRunningSubagents([])).toBe(0);
+  });
+
+  it("counts transcript-status running / pending; skips completed / error", () => {
+    const messages = [
+      taskPart("a", "running"),
+      taskPart("b", "completed"),
+      taskPart("c", "pending"),
+      taskPart("d", "error"),
+    ];
+    // a (running) + c (pending) = 2
+    expect(countRunningSubagents(messages)).toBe(2);
+  });
+
+  it("liveStatus 'idle' WINS over transcript 'running' (the staleness case)", () => {
+    // Child just sent session.idle but the parent's task-part status snapshot
+    // is still "running" because the parent's transcript hasn't been refetched
+    // yet. Without this override, the sidebar would over-count.
+    const messages = [taskPart("a", "running"), taskPart("b", "running")];
+    const live = new Map<string, "running" | "idle">([
+      ["a", "idle"],
+      ["b", "running"],
+    ]);
+    expect(countRunningSubagents(messages, live)).toBe(1);
+  });
+
+  it("liveStatus 'running' counts even when transcript says completed", () => {
+    // Rare but possible during a refetch race: live SSE says running, the
+    // refetched task part still shows the previous completed run. Trust live.
+    const messages = [taskPart("a", "completed")];
+    const live = new Map<string, "running" | "idle">([["a", "running"]]);
+    expect(countRunningSubagents(messages, live)).toBe(1);
+  });
+
+  it("missing live entry falls back to transcript status", () => {
+    const messages = [taskPart("a", "running")];
+    expect(countRunningSubagents(messages, new Map())).toBe(1);
+  });
+});
+
+describe("summarizeChildSession", () => {
+  it("returns zeros for null / empty input", () => {
+    expect(summarizeChildSession(null)).toEqual({ toolCount: 0, lastToolName: null, tokens: 0 });
+    expect(summarizeChildSession([])).toEqual({ toolCount: 0, lastToolName: null, tokens: 0 });
+  });
+
+  it("counts tool calls and records the last tool name", () => {
+    const messages = [
+      {
+        parts: [
+          { type: "tool", tool: "glob", state: {} },
+          { type: "text", text: "thinking" },
+          { type: "tool", tool: "read", state: {} },
+          { type: "tool", tool: "bash", state: {} },
+        ],
+      },
+    ];
+    const s = summarizeChildSession(messages);
+    expect(s.toolCount).toBe(3);
+    expect(s.lastToolName).toBe("bash");
+  });
+
+  it("sums step-finish tokens across the transcript", () => {
+    // step-finish parts carry `tokens` at the part root (verified against
+    // StepFinishPart in opencode's OpenAPI). SubagentPart declares the
+    // field, so no cast is needed.
+    const messages = [
+      {
+        parts: [
+          { type: "step-finish", tokens: { input: 500, output: 100 } },
+          { type: "tool", tool: "bash", state: {} },
+          { type: "step-finish", tokens: { input: 300, output: 50 } },
+        ],
+      },
+    ];
+    expect(summarizeChildSession(messages).tokens).toBe(950);
+  });
+
+  it("tolerates step-finish parts with missing tokens", () => {
+    const messages = [
+      { parts: [{ type: "step-finish" }, { type: "step-finish", tokens: {} }] },
+    ];
+    expect(summarizeChildSession(messages).tokens).toBe(0);
+  });
+});
+
+// ===== Per-session event filter (subagent allowlist) =====
+//
+// These exist to lock in the ordering invariant: registration must run
+// BEFORE the filter, otherwise a live `session.created` for a brand-new
+// subagent child is dropped by its own filter pass (the new child id
+// isn't in the allowlist yet — this very event is what would register
+// it).
+
+describe("registerChildSessionFromCreated", () => {
+  it("registers a child whose parent is the viewed session", () => {
+    const ids = new Set<string>();
+    const registered = registerChildSessionFromCreated(
+      {
+        type: "session.created",
+        properties: { info: { id: "ses_child", parentID: "ses_parent" } },
+      },
+      "ses_parent",
+      ids,
+    );
+    expect(registered).toBe(true);
+    expect(ids.has("ses_child")).toBe(true);
+  });
+
+  it("ignores session.created for unrelated parents", () => {
+    const ids = new Set<string>();
+    const registered = registerChildSessionFromCreated(
+      {
+        type: "session.created",
+        properties: { info: { id: "ses_other", parentID: "ses_someone_else" } },
+      },
+      "ses_parent",
+      ids,
+    );
+    expect(registered).toBe(false);
+    expect(ids.size).toBe(0);
+  });
+
+  it("ignores non-session.created events", () => {
+    const ids = new Set<string>();
+    const registered = registerChildSessionFromCreated(
+      {
+        type: "message.part.delta",
+        properties: { info: { id: "ses_child", parentID: "ses_parent" } },
+      },
+      "ses_parent",
+      ids,
+    );
+    expect(registered).toBe(false);
+    expect(ids.size).toBe(0);
+  });
+
+  it("is idempotent — re-registering the same child returns false", () => {
+    const ids = new Set<string>(["ses_child"]);
+    const registered = registerChildSessionFromCreated(
+      {
+        type: "session.created",
+        properties: { info: { id: "ses_child", parentID: "ses_parent" } },
+      },
+      "ses_parent",
+      ids,
+    );
+    expect(registered).toBe(false);
+    expect(ids.size).toBe(1);
+  });
+
+  it("tolerates missing info or missing id", () => {
+    const ids = new Set<string>();
+    expect(registerChildSessionFromCreated(
+      { type: "session.created", properties: {} },
+      "ses_parent",
+      ids,
+    )).toBe(false);
+    expect(registerChildSessionFromCreated(
+      { type: "session.created", properties: { info: { parentID: "ses_parent" } } },
+      "ses_parent",
+      ids,
+    )).toBe(false);
+    expect(ids.size).toBe(0);
+  });
+});
+
+describe("shouldDropEventForSessionFilter", () => {
+  it("passes events for the viewed session", () => {
+    expect(shouldDropEventForSessionFilter(
+      { type: "message.part.delta", properties: { sessionID: "ses_self" } },
+      "ses_self",
+      new Set(),
+    )).toBe(false);
+  });
+
+  it("drops events for a different, non-child session", () => {
+    expect(shouldDropEventForSessionFilter(
+      { type: "message.part.delta", properties: { sessionID: "ses_other" } },
+      "ses_self",
+      new Set(),
+    )).toBe(true);
+  });
+
+  it("passes events for a known child subagent session", () => {
+    const children = new Set(["ses_child"]);
+    expect(shouldDropEventForSessionFilter(
+      { type: "message.part.delta", properties: { sessionID: "ses_child" } },
+      "ses_self",
+      children,
+    )).toBe(false);
+  });
+
+  it("passes question.*/permission.* lifecycle events regardless of session", () => {
+    // These are self-filtering — their handlers re-filter by sessionID
+    // after triggering a refetch, so the early-return guard must not
+    // pre-drop them.
+    for (const t of [
+      "question.asked",
+      "question.replied",
+      "question.rejected",
+      "permission.asked",
+      "permission.replied",
+      "permission.rejected",
+    ]) {
+      expect(shouldDropEventForSessionFilter(
+        { type: t, properties: { sessionID: "ses_other" } },
+        "ses_self",
+        new Set(),
+      )).toBe(false);
+    }
+  });
+
+  it("passes events with no sessionID (vcs.branch.updated et al.)", () => {
+    expect(shouldDropEventForSessionFilter(
+      { type: "vcs.branch.updated", properties: {} },
+      "ses_self",
+      new Set(),
+    )).toBe(false);
+    expect(shouldDropEventForSessionFilter(
+      { type: "something.global" },
+      "ses_self",
+      new Set(),
+    )).toBe(false);
+  });
+
+  // ===== HIGH-severity regression =====
+  //
+  // The ordering invariant in onOpencodeEvent: registration MUST run
+  // before the filter, otherwise a fresh `session.created` for a brand
+  // new subagent child gets dropped by the filter (its sessionID is the
+  // CHILD's id, which isn't in the allowlist yet — this very event is
+  // what would register it). The earlier Phase-1 implementation had the
+  // registration block AFTER the filter and silently fell back to the
+  // slower transcript-seeding path.
+  it("REGRESSION: session.created for a new child passes the filter when registered first", () => {
+    const children = new Set<string>();
+    const ev = {
+      type: "session.created",
+      properties: {
+        sessionID: "ses_child", // OpenAPI: this is the NEW session's id
+        info: { id: "ses_child", parentID: "ses_parent" },
+      },
+    };
+    // Without prior registration, the filter would drop it.
+    expect(shouldDropEventForSessionFilter(ev, "ses_parent", children)).toBe(true);
+    // Register first — as ChatPanel does. Now the filter passes it.
+    registerChildSessionFromCreated(ev, "ses_parent", children);
+    expect(shouldDropEventForSessionFilter(ev, "ses_parent", children)).toBe(false);
   });
 });

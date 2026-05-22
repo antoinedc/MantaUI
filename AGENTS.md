@@ -703,6 +703,123 @@ when changing one, change the other.
   per-session filter by accident. Acceptable: there's only one branch per
   cwd, but be aware if you ever scope event handling more strictly.
 
+## Subagent rendering (read-only, Phase 1)
+
+When the parent agent invokes the `task` tool, opencode spawns a CHILD
+session and runs the subagent inside it. The child's events flow on the
+**same scoped `/event?directory=` stream** as the parent (child inherits
+parent cwd), but with the child's `sessionID` — so the early sessionID
+filter in `onOpencodeEvent` would drop them. Phase 1 renders the subagent
+inline (collapsed by default, expand for full child transcript) without
+spawning a tmux window for it. Phase 2 ("Open as session") is the open
+work bullet at the bottom — promotes the child into its own chat-mode
+window.
+
+**Wire shape — verified live + against OpenAPI** (`/doc` endpoint, opencode
+v2):
+
+```js
+// Parent's task tool part:
+{ type: "tool", tool: "task", callID: "toolu_…", state: {
+    status: "pending" | "running" | "completed" | "error",
+    title: "Find skill loading code",        // opencode-generated
+    input: { description, prompt, subagent_type },
+    output: "I now have…",                    // present when completed
+    metadata: {
+      parentSessionId: "ses_parent",          // ourselves
+      sessionId:       "ses_child",           // ← child id, present from
+                                              //   first metadata write
+      model: { providerID, modelID },
+      truncated: false,
+    },
+    time: { start, end },                     // end set on completion
+} }
+```
+
+**Child id discovery — two converging sources:**
+1. `collectChildSessionIds(messages)` walks the transcript for
+   `state.metadata.sessionId` on every task part. Used to seed the
+   `childSessionIds` allowlist on initial fetch AND every refetch.
+2. `session.created` events whose `properties.info.parentID === sessionId`
+   add the new child id to the allowlist (covers the brief window before
+   the parent's task part is stamped). **GOTCHA — registration MUST run
+   BEFORE the per-session filter**, otherwise the filter drops the event
+   whose payload would register the child:
+   `EventSessionCreated.properties.sessionID` per opencode's OpenAPI is the
+   NEW child's id, which is not in the allowlist yet (this event is what
+   would add it). The pure `registerChildSessionFromCreated(ev, sessionId,
+   childIds)` helper handles registration and is called before
+   `shouldDropEventForSessionFilter(...)` in `onOpencodeEvent`. The
+   regression is locked in by `shouldDropEventForSessionFilter REGRESSION:
+   session.created for a new child …` in `chatUtils.test.ts`.
+
+**The sessionID filter** (`shouldDropEventForSessionFilter` in
+`chatUtils.ts`, called from `onOpencodeEvent`) is 3-state, not 2-state:
+- `evSessionID === sessionId` → main session event, normal handling.
+- `evSessionID ∈ childSessionIds` → CHILD event, routed to the subagent
+  branch (re-fetches the child's transcript when its card is expanded;
+  updates `liveChildStatus` on `session.idle` / `session.status`; triggers
+  a parent refetch so the task part's `state.status` flips).
+- otherwise → dropped (unless it's a self-filtering lifecycle event:
+  `question.*` / `permission.*`).
+
+**State pattern matches the "live-event preferred" rule** from the rest of
+ChatPanel:
+- `childSessionIds: Ref<Set<string>>` — allowlist consulted by the SSE
+  handler; a ref so the closure reads current value without resubscribing.
+- `childMessages: Map<childId, OpencodeMessage[]>` — lazily fetched on
+  first expand; refetched (300ms debounce) on subsequent SSE traffic
+  while expanded; ALSO refetched on re-expand when the child is still
+  running (the cached snapshot would otherwise be stale until the next
+  live event hits the now-expanded card).
+- `childFetchState: Map<childId, "loading"|"error">` — drives the
+  spinner / retry hint in collapsed-but-pending state.
+- `liveChildStatus: Map<childId, "running"|"idle">` — overrides the
+  parent's stale `state.status` snapshot for the header badge.
+- `expandedTasks: Set<childId>` + `expandedTasksRef` mirror — the SSE
+  handler gates per-child refetches on whether the card is expanded
+  (closed cards don't burn fetch traffic).
+
+**TaskContext** (provided by ChatPanel around the scroll container) is
+how `TaskBody` reads this state without breaking the existing
+MessageRow/AssistantPart/ToolCall/ToolBody memo chain. **Don't pass the
+context value as a prop** — `taskContextValue` is memoized for keystroke
+stability; provider value identity is what matters.
+
+**Sidebar `·N` indicator for chat-mode subagents** flows through a new
+`setChatSubagents(sessionId, count)` store action (mirrors
+`setChatRunning` / `setChatAttention`). ChatPanel pushes
+`countRunningSubagents(messages, liveChildStatus)` via a 1-effect
+derivation. The store no-ops when the count is unchanged (perf:
+ChatPanel re-derives on every message update, which is many per second
+during streaming). The TUI poller's regex can't see chat-mode panes
+(holder pane runs `sleep infinity`), so this is the **sole** update
+path for the chat-window `·N` count.
+
+**Helpers** (all pure + tested in `chatUtils.ts`):
+- `extractSubagentInfo(part)` — returns `SubagentInfo | null`. Null when
+  not a task part OR when `state.metadata.sessionId` isn't stamped yet
+  (the pre-stamp window). Brittle on the wire format — if a test on this
+  fails, opencode changed the task tool's metadata shape.
+- `collectChildSessionIds(messages)` — for seeding the allowlist.
+- `countRunningSubagents(messages, liveStatus)` — for the sidebar count.
+  Live `idle` overrides transcript `running` (covers the stale-snapshot
+  case); live `running` overrides transcript `completed` (covers the
+  refetch-race case); missing live falls back to transcript.
+- `summarizeChildSession(childMessages)` — `{toolCount, lastToolName,
+  tokens}` for the collapsed header.
+
+**What is NOT handled in Phase 1:**
+- Nested subagents (sub-subagents) render recursively today because
+  `TaskBody` re-enters the same `ToolBody` switch, but the second-level
+  collapsed header is visually identical to the first — could become
+  confusing on deep trees. No depth limit imposed.
+- Permission/question requests originating in a child session are NOT
+  surfaced in the parent's `PermissionCard` / `QuestionCard`. They reach
+  the renderer (we no longer drop them via the filter), but the existing
+  cards key on the parent's sessionId. Future: tag with "from subagent: X".
+- "Open as session" — see the open-work bullet at the bottom.
+
 ## File upload paths (chat-mode)
 
 Three upload paths all land in `~/.bui-uploads/<session>/<ts>/` on the remote:
@@ -783,11 +900,17 @@ Full CLI cheat sheet: `/home/dev/projects/shared/multica/setup.md`
 
 ## Open work (as of 2026-05-18)
 
-- **Subagent / Task tool rendering in chat-mode.** `task` tool part falls
-  through to the generic `default:` branch of `ToolBody`. v2 SDK exposes
-  `session.created` with `parentID` + `session.next.tool.*` events for inline
-  child rows. Needs per-session debounce map + allowing child session ids
-  through the early sessionID filter in `onOpencodeEvent`.
+- **Open subagent as its own chat-mode window.** Phase 1 ships read-only
+  inline subagent rendering (see "Subagent rendering" section above).
+  Phase 2 is the "Open as session" affordance: a button on the TaskBody
+  header that creates a fresh chat-mode tmux window stamped with the
+  child's existing opencode sessionId — no new opencode session. The
+  plumbing is already there (`pty.ts:tmuxNewWindow`'s `existingSessionId`
+  param + `maybeCreateChatSession` short-circuit; the fork handler is
+  the template to copy minus the fork POST). Needs a new
+  `IPC.opencodeAdoptSession` channel mirrored on desktop + mobile, with
+  `rememberSessionDirectory` exported from both transports so the
+  per-directory SSE stream opens before the renderer mounts the panel.
 - **Global model preference** — `AppConfig.defaultModel` (Settings UI, persisted to `config.json`). New sessions and `/clear` fall back to this when no per-session localStorage entry exists. `/clear` also carries the current per-session override forward to the new session id before refresh.
 - **Live refresh polling** — sidebar updates only on bui's own actions.
 - **Command palette (⌘K)** — fuzzy switch + actions (~150 lines).
