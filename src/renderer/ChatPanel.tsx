@@ -5003,13 +5003,27 @@ function TaskBody({ state }: { state: ToolState }) {
     () => extractSubagentInfo({ type: "tool", tool: "task", state }),
     [state],
   );
+  // HOOK ORDER: every hook used by this component must run BEFORE the
+  // `!info` early return below. Previously `summary` was computed after
+  // the return, so a render that flipped from `info === null` (1 hook)
+  // to `info !== null` (2 hooks) crashed with "Rendered more hooks than
+  // during the previous render" and blanked the whole panel. Resolve
+  // `childMsgs` here (independent of `info`) so the memo's input is
+  // stable across both branches.
+  const childMsgsForSummary = info
+    ? ctx?.childMessages.get(info.childSessionId)
+    : undefined;
+  const summary = useMemo(
+    () => summarizeChildSession(childMsgsForSummary),
+    [childMsgsForSummary],
+  );
   if (!info) {
     // No child id yet (very brief window between tool-input.started and
     // the first metadata write). Fall back to whatever output is present.
     return state.output ? <ToolOutput output={state.output} /> : null;
   }
   const isExpanded = ctx?.expanded.has(info.childSessionId) ?? false;
-  const childMsgs = ctx?.childMessages.get(info.childSessionId);
+  const childMsgs = childMsgsForSummary;
   const childFetch = ctx?.childFetchState.get(info.childSessionId);
   const liveState = ctx?.liveStatus.get(info.childSessionId);
   // Prefer live SSE status over the parent's transcript snapshot (which
@@ -5022,7 +5036,6 @@ function TaskBody({ state }: { state: ToolState }) {
       : liveState === "running" && info.status === "completed"
         ? "running"
         : info.status;
-  const summary = useMemo(() => summarizeChildSession(childMsgs), [childMsgs]);
   const showThinking = ctx?.showThinking ?? false;
 
   const statusColor =
