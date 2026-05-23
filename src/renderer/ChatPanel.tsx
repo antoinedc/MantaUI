@@ -1425,8 +1425,19 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       // check in scheduleRefetch then clears any spinner orphaned by the
       // drop. Root-cause fix for "UI stuck on spinner after the turn
       // completed server-side" (HANDOFF-sse-ui-completion-gap).
+      //
+      // ALSO re-pull questions + permissions. Long-running tools (e.g. a
+      // bash that takes >45s) produce no substantive frames while running,
+      // so the bus watchdog tears the stream down. If a `question.asked`
+      // or `permission.asked` fires DURING the reconnect window, the live
+      // event is lost — the card never appears and the session looks stuck
+      // even after the workspace-scope fix landed. Resyncing both lists on
+      // every reconnect closes the gap: any pending entry the server has
+      // for this session re-hydrates and the existing renderers handle it.
       if (ev.type === "server.connected") {
         scheduleRefetch();
+        refreshQuestions();
+        refreshPermissions();
       }
 
       // Drain the queue between tool calls — send the next queued message as
