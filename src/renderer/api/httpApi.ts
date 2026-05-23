@@ -342,16 +342,17 @@ export const httpApi: Api = {
     rpc(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions }),
 
   opencodeAbort: (sessionId) => rpc(IPC.opencodeAbort, sessionId),
-  opencodePermissions: () => rpc(IPC.opencodePermissions),
+  opencodePermissions: (sessionId) =>
+    rpc(IPC.opencodePermissions, sessionId),
 
   /**
-   * Preload packs: ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply })
+   * Preload packs: ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply, sessionId })
    */
-  opencodePermissionReply: (requestId, reply) =>
-    rpc(IPC.opencodePermissionReply, { requestId, reply }),
+  opencodePermissionReply: (requestId, reply, sessionId) =>
+    rpc(IPC.opencodePermissionReply, { requestId, reply, sessionId }),
 
   // -- question tool --
-  opencodeQuestions: () => rpc(IPC.opencodeQuestions),
+  opencodeQuestions: (sessionId) => rpc(IPC.opencodeQuestions, sessionId),
 
   /**
    * Preload packs: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers })

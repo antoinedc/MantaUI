@@ -873,20 +873,37 @@ function registerHandlers(): void {
     opencodeAbortSession(config, sessionId),
   );
 
-  // Permission approval. Returns the full list; renderer filters by sessionID.
-  ipcMain.handle(IPC.opencodePermissions, () =>
-    opencodeListPermissions(config),
+  // Permission approval. `sessionId` is required for workspace-scoped routing
+  // — without it the server returns [] for non-default-workspace sessions
+  // and reply requests silently no-op (see listPermissions comment in
+  // opencode.ts). Legacy callers without sessionId still work but only see
+  // the default workspace's pending entries.
+  ipcMain.handle(IPC.opencodePermissions, (_e, sessionId?: string) =>
+    opencodeListPermissions(config, sessionId),
   );
   ipcMain.handle(
     IPC.opencodePermissionReply,
-    (_e, input: { requestId: string; reply: "once" | "always" | "reject" }) =>
-      opencodeReplyPermission(config, input.requestId, input.reply),
+    (
+      _e,
+      input: {
+        requestId: string;
+        reply: "once" | "always" | "reject";
+        sessionId?: string;
+      },
+    ) =>
+      opencodeReplyPermission(
+        config,
+        input.requestId,
+        input.reply,
+        input.sessionId,
+      ),
   );
 
-  // Question tool. Returns the full list; renderer filters by sessionID.
+  // Question tool. Same workspace-scoping rule as permissions above —
+  // `sessionId` is what makes the live `que_…` visible.
   // No chatAutoAllow auto-handling — questions need explicit user choice.
-  ipcMain.handle(IPC.opencodeQuestions, () =>
-    opencodeListQuestions(config),
+  ipcMain.handle(IPC.opencodeQuestions, (_e, sessionId?: string) =>
+    opencodeListQuestions(config, sessionId),
   );
   ipcMain.handle(
     IPC.opencodeQuestionReply,

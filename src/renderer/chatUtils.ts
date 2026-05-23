@@ -732,12 +732,17 @@ export function shouldDropEventForSessionFilter(
  *
  * THE regression this fixes (present since 1a5a336, the feature's first
  * commit): the handler called refreshQuestions() → GET /question on every
- * question.* event. But in opencode v1.15 `GET /question` stays EMPTY for
- * live questions — the question payload is delivered in the
- * `question.asked` EVENT itself (verified live: event.properties is a full
- * QuestionRequest = {id, sessionID, questions, tool}). Re-polling the empty
- * endpoint set questions to [] and the card never appeared. The event is
- * the source of truth; use its payload directly.
+ * question.* event. Originally `GET /question` appeared to stay EMPTY for
+ * live questions, and we concluded the question payload was only deliverable
+ * via the live `question.asked` event. UPDATE: the real cause was a missing
+ * `?directory=` query — opencode's `GET /question` IS authoritative when
+ * called workspace-scoped (see listQuestions in main/opencode.ts). The
+ * event still drives live in-session updates (avoids a round-trip per event
+ * and carries the full payload), but initial-mount hydration now works too,
+ * so a question fired before the panel mounted is recoverable on attach.
+ *
+ * `applyQuestionEvent` is the live-update path; `refreshQuestions`/mount
+ * hydration is the missed-event recovery path. Both must agree on shape.
  *
  *  - question.asked    → upsert the QuestionRequest from the event payload
  *  - question.replied  → remove it (answered)

@@ -756,24 +756,46 @@ export type PermissionRequest = {
   tool?: { messageID: string; callID: string };
 };
 
+// `sessionId` is optional. When present we scope the list to that session's
+// worktree directory — opencode's `WorkspaceRoutingMiddleware` makes the
+// unscoped endpoint return [] for sessions bound to a non-default directory
+// (verified live against 1.15.5). Skipping `?directory=` here was the root
+// cause of "PermissionCard never appears" wedges: the live `per_…` was
+// sitting in the server's pending map, we just couldn't see it.
 export async function listPermissions(
   config: AppConfig,
+  sessionId?: string,
 ): Promise<PermissionRequest[]> {
   await ensureForward(config);
-  const res = await fetch(apiUrl(config, "/permission"));
+  const dirQ = sessionId
+    ? await getSessionDirectoryQuery(config, sessionId)
+    : "";
+  const res = await fetch(apiUrl(config, `/permission${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listPermissions ${res.status}: ${await res.text()}`);
   }
   return (await res.json()) as PermissionRequest[];
 }
 
+// Same workspace-routing rule as listPermissions: the reply endpoint silently
+// no-ops if the request is routed to the wrong workspace. Pass `sessionId`
+// so the reply lands on the pending entry's scope. Without this, bui-side
+// "Allow"/"Deny" clicks looked like they worked client-side but never
+// reached the server — the tool stayed pending forever.
 export async function replyPermission(
   config: AppConfig,
   requestId: string,
   reply: "once" | "always" | "reject",
+  sessionId?: string,
 ): Promise<void> {
   await ensureForward(config);
-  const url = apiUrl(config, `/permission/${encodeURIComponent(requestId)}/reply`);
+  const dirQ = sessionId
+    ? await getSessionDirectoryQuery(config, sessionId)
+    : "";
+  const url = apiUrl(
+    config,
+    `/permission/${encodeURIComponent(requestId)}/reply${dirQ}`,
+  );
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -811,14 +833,26 @@ export type QuestionRequest = {
 // list/reply/reject — so after a question fires on the scoped channel, an
 // UNSCOPED reply is accepted (HTTP 200) yet the scoped session's blocked
 // tool never receives it: the agent hangs in "processing" forever. Append
-// the session's scoped query the same way prompt_async does. `sessionId`
-// is optional (listQuestions has no session context — it lists globally);
-// when present we scope to that session's worktree directory.
+// the session's scoped query the same way prompt_async does.
+//
+// The same workspace scoping applies to LIST: `GET /question` (unscoped)
+// returns [] for sessions whose worktree isn't the server's default. The
+// live `que_…` IDs are sitting in the server's pending map; we just can't
+// see them without the right `?directory=`. (Verified live against 1.15.5;
+// matches packages/opencode/src/server/routes/instance/httpapi/middleware/
+// workspace-routing.ts behavior.) This was the root cause of the
+// "QuestionCard never appears" wedge: bui's initial-mount fetch returned
+// [], the `que_` was already consumed by the live SSE event we missed,
+// and the question stayed unrenderable until manual recovery.
 export async function listQuestions(
   config: AppConfig,
+  sessionId?: string,
 ): Promise<QuestionRequest[]> {
   await ensureForward(config);
-  const res = await fetch(apiUrl(config, "/question"));
+  const dirQ = sessionId
+    ? await getSessionDirectoryQuery(config, sessionId)
+    : "";
+  const res = await fetch(apiUrl(config, `/question${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listQuestions ${res.status}: ${await res.text()}`);
   }

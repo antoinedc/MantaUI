@@ -139,17 +139,26 @@ const api = {
     }),
   opencodeAbort: (sessionId: string): Promise<void> =>
     ipcRenderer.invoke(IPC.opencodeAbort, sessionId),
-  opencodePermissions: (): Promise<PermissionRequest[]> =>
-    ipcRenderer.invoke(IPC.opencodePermissions),
+  // `sessionId` scopes the list to the session's workspace directory —
+  // without it the server returns [] for sessions outside the default
+  // workspace (see listPermissions in opencode.ts).
+  opencodePermissions: (sessionId?: string): Promise<PermissionRequest[]> =>
+    ipcRenderer.invoke(IPC.opencodePermissions, sessionId),
   opencodePermissionReply: (
     requestId: string,
     reply: "once" | "always" | "reject",
+    sessionId?: string,
   ): Promise<void> =>
-    ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply }),
+    ipcRenderer.invoke(IPC.opencodePermissionReply, {
+      requestId,
+      reply,
+      sessionId,
+    }),
 
-  // Question tool — v2 API only.
-  opencodeQuestions: (): Promise<QuestionRequest[]> =>
-    ipcRenderer.invoke(IPC.opencodeQuestions),
+  // Question tool — v2 API only. `sessionId` scopes the list the same way
+  // permissions are scoped (see opencodePermissions above).
+  opencodeQuestions: (sessionId?: string): Promise<QuestionRequest[]> =>
+    ipcRenderer.invoke(IPC.opencodeQuestions, sessionId),
   opencodeQuestionReply: (
     requestId: string,
     answers: string[][],

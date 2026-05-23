@@ -789,18 +789,24 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       })
       .catch(() => { /* non-fatal */ });
     // Pull current pending permissions (e.g. a tool that was waiting from a
-    // previous bui session before we mounted).
+    // previous bui session before we mounted). `sessionId` is required so
+    // the main process can append `?directory=` — opencode's workspace
+    // routing returns [] for non-default-workspace sessions otherwise, and
+    // we'd render no PermissionCard even though one is live on the server.
     window.api
-      .opencodePermissions()
+      .opencodePermissions(sessionId)
       .then((all) => {
         if (!cancelled) {
           setPermissions(all.filter((p) => p.sessionID === sessionId));
         }
       })
       .catch(() => { /* non-fatal */ });
-    // Pull current pending questions (v2 API — may return 404 on older servers).
+    // Pull current pending questions. Same workspace-scoping rule as
+    // permissions above — without `sessionId` the live `que_…` is invisible
+    // and the QuestionCard never appears (was the root-cause wedge before
+    // the `?directory=` fix on listQuestions).
     window.api
-      .opencodeQuestions()
+      .opencodeQuestions(sessionId)
       .then((all) => {
         if (!cancelled) {
           setQuestions(all.filter((q) => q.sessionID === sessionId));
@@ -814,9 +820,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   }, [sessionId, cwd]);
 
   // Refresh permissions list. Called on any permission event.
+  // Passes `sessionId` so the main process scopes the request to this
+  // session's workspace directory (see opencodePermissions in opencode.ts).
   const refreshPermissions = useCallback(() => {
     window.api
-      .opencodePermissions()
+      .opencodePermissions(sessionId)
       .then((all) =>
         setPermissions(all.filter((p) => p.sessionID === sessionId)),
       )
@@ -826,7 +834,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Refresh question list. Called on any question event.
   const refreshQuestions = useCallback(() => {
     window.api
-      .opencodeQuestions()
+      .opencodeQuestions(sessionId)
       .then((all) =>
         setQuestions(all.filter((q) => q.sessionID === sessionId)),
       )
@@ -1920,14 +1928,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       // the SSE permission.replied event will reconcile if anything diverges.
       setPermissions((prev) => prev.filter((p) => p.id !== requestId));
       try {
-        await window.api.opencodePermissionReply(requestId, reply);
+        // Pass `sessionId` so the reply lands on this session's workspace
+        // scope — without it the server silently routes to the default
+        // workspace and the permission never clears (verified live).
+        await window.api.opencodePermissionReply(requestId, reply, sessionId);
       } catch (e) {
         setSendError(String((e as Error)?.message ?? e));
         // Re-pull on failure so the card comes back if reply didn't land.
         refreshPermissions();
       }
     },
-    [refreshPermissions],
+    [refreshPermissions, sessionId],
   );
 
   // opencode's reply/reject API is keyed STRICTLY on the `que_…` requestID
