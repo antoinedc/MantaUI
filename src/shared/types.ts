@@ -238,7 +238,47 @@ export const IPC = {
   // @bui-session-id user-option. The renderer notices the new id and
   // unmounts/remounts ChatPanel.
   opencodeClearSession: "opencode:clear-session",
+
+  // ---- setup wizard ----
+  // One-shot diagnostic over SSH: returns the status of every remote
+  // prerequisite bui depends on (ssh reachable, tmux installed, opencode
+  // installed, Anthropic auth wired). Used by the "Test connection"
+  // button in Settings.
+  setupProbe: "setup:probe",
+  // Best-effort installer: runs opencode's official installer on the
+  // remote and writes a minimal opencode.jsonc with the
+  // opencode-claude-auth plugin. Idempotent — safe to re-run. Does NOT
+  // perform Anthropic login (that requires browser flow on the remote);
+  // surfaces the exact next-step command instead.
+  setupBootstrap: "setup:bootstrap",
 } as const;
+
+// ----- Setup probe / bootstrap -----
+
+// One probe check. `ok=true` means the prerequisite is satisfied;
+// `detail` is a short human-readable line (version string when ok,
+// failure reason or next-step hint when not).
+export type ProbeCheck = {
+  name: "ssh" | "tmux" | "opencode" | "opencodeAuthPlugin" | "anthropicAuth";
+  ok: boolean;
+  detail: string;
+};
+
+export type ProbeResult = {
+  checks: ProbeCheck[];
+  // Composite: true iff every check passed. Renderer uses this to flip
+  // the wizard from "needs attention" to "ready".
+  allOk: boolean;
+};
+
+export type BootstrapResult = {
+  ok: boolean;
+  // Per-step log lines, suitable for showing to the user in a <pre>.
+  // Includes successes ("✓ opencode 0.9.1 installed") and failures
+  // ("✗ Anthropic auth: run `opencode auth login anthropic` on the
+  // remote"). Order is execution order.
+  log: string[];
+};
 
 // ---- opencode message + part types (subset for Phase 1) ----
 //

@@ -14,7 +14,10 @@ import type { Api } from "../../preload/index.js";
 //      same-origin. Critical for the HTTPS cloudflare tunnel: hardcoding
 //      http://IP here gets blocked as Mixed Content from an https page.
 //      location.origin carries the page's own scheme, so no protocol skew.
-//   3. Otherwise (Capacitor http://localhost, file:) → dev-box fallback.
+//   3. Otherwise (Capacitor http://localhost, file:) → no fallback. The
+//      mobile/web client is currently descoped from v1; fail fast with a
+//      clear error so a tester knows to set localStorage["bui_server"]
+//      rather than silently hitting some hardcoded box.
 // ---------------------------------------------------------------------------
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
@@ -26,7 +29,10 @@ function serverBase(): string {
   if ((protocol === "https:" || protocol === "http:") && !LOCAL_HOSTS.has(hostname)) {
     return origin.replace(/\/+$/, "");
   }
-  return "http://157.90.224.92:8787";
+  throw new Error(
+    "bui mobile/web server not configured. Set localStorage['bui_server'] " +
+    "to your server URL (e.g. http://192.168.1.10:8787) and reload.",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +276,13 @@ export const httpApi: Api = {
   tmuxConfigStatus: () => rpc(IPC.tmuxConfigStatus),
   tmuxSetupConfig: () => rpc(IPC.tmuxSetupConfig),
   tmuxRestoreConfig: () => rpc(IPC.tmuxRestoreConfig),
+
+  // -- setup wizard --
+  // Mobile server doesn't run a setup wizard today (the user has already
+  // installed/started the mobile server) — return a stub indicating that.
+  // Desktop wires the real implementation through Electron IPC.
+  setupProbe: () => rpc(IPC.setupProbe),
+  setupBootstrap: () => rpc(IPC.setupBootstrap),
 
   // -- clipboard --
   clipboardWriteText: (text) => rpc(IPC.clipboardWriteText, text),

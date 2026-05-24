@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import {
   IPC,
   type AppConfig,
+  type BootstrapResult,
   type OpencodeAgent,
   type OpencodeCommand,
   type OpencodeEvent,
@@ -9,6 +10,7 @@ import {
   type OpencodeModel,
   type OpencodeSessionListItem,
   type PermissionRequest,
+  type ProbeResult,
   type QuestionRequest,
   type Project,
   type ProjectMeta,
@@ -65,6 +67,12 @@ const api = {
   tmuxConfigStatus: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxConfigStatus),
   tmuxSetupConfig: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxSetupConfig),
   tmuxRestoreConfig: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxRestoreConfig),
+
+  // Setup wizard: probe runs the diagnostic; bootstrap installs opencode
+  // + writes the auth plugin config. Both are best-effort and return
+  // structured results the Settings UI renders.
+  setupProbe: (): Promise<ProbeResult> => ipcRenderer.invoke(IPC.setupProbe),
+  setupBootstrap: (): Promise<BootstrapResult> => ipcRenderer.invoke(IPC.setupBootstrap),
 
   clipboardWriteText: (text: string): Promise<void> =>
     ipcRenderer.invoke(IPC.clipboardWriteText, text),

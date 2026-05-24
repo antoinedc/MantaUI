@@ -75,6 +75,25 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // preload: ipcRenderer.invoke(IPC.tmuxRestoreConfig)  → no args
     "tmux:restore-config": () => local.tmuxRestoreConfig(),
 
+    // Setup wizard — desktop-only feature today. The mobile server runs
+    // locally on the box already, so the user has already done the
+    // bootstrap. Return a stub probe that flags everything as "n/a" so
+    // the UI doesn't show false negatives if it's ever opened on mobile.
+    "setup:probe": () => ({
+      checks: [
+        { name: "ssh", ok: true, detail: "n/a (mobile server runs on the box)" },
+        { name: "tmux", ok: true, detail: "n/a" },
+        { name: "opencode", ok: true, detail: "n/a" },
+        { name: "opencodeAuthPlugin", ok: true, detail: "n/a" },
+        { name: "anthropicAuth", ok: true, detail: "n/a" },
+      ],
+      allOk: true,
+    }),
+    "setup:bootstrap": () => ({
+      ok: false,
+      log: ["Bootstrap is a desktop-only feature. Run the wizard from the bui Mac app."],
+    }),
+
     // preload: ipcRenderer.invoke(IPC.uploadFiles, { projectName, localPaths })
     // → args[0] = { projectName, localPaths }
     // Mobile stub: returns [] because localPaths are client-device paths unknown
