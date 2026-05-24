@@ -16,3 +16,11 @@ dist/
 
 # TypeScript incremental build info
 *.tsbuildinfo
+
+# Multica workspace/agent definitions — local dev metadata, contains
+# private workspace/agent/skill IDs. Not needed by users of the app.
+.multica/
+
+# In-progress session handoffs (per-developer scratch).
+HANDOFF*.md
+.planning/

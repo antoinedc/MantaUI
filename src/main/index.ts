@@ -32,6 +32,7 @@ import {
   runSshOnce,
 } from "./pty.js";
 import { info as transportInfo, invalidate as invalidateTransport } from "./transport.js";
+import { probe as setupProbe, bootstrap as setupBootstrap } from "./setup.js";
 import { startStatusPoller, stopStatusPoller } from "./status.js";
 import {
   listMessages as opencodeListMessages,
@@ -473,6 +474,13 @@ function clipboardImageFingerprint(): string {
 }
 
 function startScreenshotDetector(): void {
+  // macOS-only: the clipboard fingerprint relies on Mac's screencapture
+  // populating the clipboard on ⌘⇧^3/4, and the file watcher targets the
+  // Mac-default `~/Desktop/Screenshot YYYY-MM-DD at HH.MM.SS.png` filename.
+  // On Linux/Windows both paths would no-op at best and burn CPU on the
+  // 500ms clipboard poller at worst.
+  if (process.platform !== "darwin") return;
+
   // --- Clipboard poller ---
   let lastFingerprint = clipboardImageFingerprint();
   screenshotClipboardTimer = setInterval(() => {
@@ -837,6 +845,14 @@ function registerHandlers(): void {
     await tmuxRestoreConfig(config);
     return tmuxConfigStatus(config);
   });
+
+  // Setup wizard: one-shot diagnostic + best-effort installer. Both run
+  // against the currently saved config (so the user must Save before
+  // testing — Settings UI enforces this by disabling the buttons while
+  // there are unsaved changes is a TODO; for now we just run with what's
+  // persisted).
+  ipcMain.handle(IPC.setupProbe, () => setupProbe(config));
+  ipcMain.handle(IPC.setupBootstrap, () => setupBootstrap(config));
 
   // Phase 1 chat-mode: one-shot fetch of a session's transcript. Live updates
   // arrive separately via the opencodeEvent stream forwarded by startOpencodeBus.

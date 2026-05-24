@@ -75,6 +75,27 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // preload: ipcRenderer.invoke(IPC.tmuxRestoreConfig)  → no args
     "tmux:restore-config": () => local.tmuxRestoreConfig(),
 
+    // Setup wizard — desktop-only feature today. Mobile server runs
+    // locally on the box (no SSH hop), so the wizard's "ssh → tmux →
+    // opencode → auth" probe doesn't map onto its environment. We
+    // return allOk:false with explanatory n/a details so the UI shows
+    // "not applicable" rather than silently lying "all green" if a user
+    // ever opens Settings on mobile.
+    "setup:probe": () => ({
+      checks: [
+        { name: "ssh", ok: false, detail: "n/a — mobile server runs locally on the box" },
+        { name: "tmux", ok: false, detail: "n/a — desktop-only wizard" },
+        { name: "opencode", ok: false, detail: "n/a — desktop-only wizard" },
+        { name: "opencodeAuthPlugin", ok: false, detail: "n/a — desktop-only wizard" },
+        { name: "anthropicAuth", ok: false, detail: "n/a — desktop-only wizard" },
+      ],
+      allOk: false,
+    }),
+    "setup:bootstrap": () => ({
+      ok: false,
+      log: ["Bootstrap is a desktop-only feature. Run the wizard from the bui Mac app."],
+    }),
+
     // preload: ipcRenderer.invoke(IPC.uploadFiles, { projectName, localPaths })
     // → args[0] = { projectName, localPaths }
     // Mobile stub: returns [] because localPaths are client-device paths unknown

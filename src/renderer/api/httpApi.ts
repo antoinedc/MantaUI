@@ -14,7 +14,10 @@ import type { Api } from "../../preload/index.js";
 //      same-origin. Critical for the HTTPS cloudflare tunnel: hardcoding
 //      http://IP here gets blocked as Mixed Content from an https page.
 //      location.origin carries the page's own scheme, so no protocol skew.
-//   3. Otherwise (Capacitor http://localhost, file:) → dev-box fallback.
+//   3. Otherwise (Capacitor http://localhost, file:) → no fallback. The
+//      mobile/web client is currently descoped from v1; fail fast with a
+//      clear error so a tester knows to set localStorage["bui_server"]
+//      rather than silently hitting some hardcoded box.
 // ---------------------------------------------------------------------------
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
@@ -26,7 +29,10 @@ function serverBase(): string {
   if ((protocol === "https:" || protocol === "http:") && !LOCAL_HOSTS.has(hostname)) {
     return origin.replace(/\/+$/, "");
   }
-  return "http://157.90.224.92:8787";
+  throw new Error(
+    "bui mobile/web server not configured. Set localStorage['bui_server'] " +
+    "to your server URL (e.g. http://192.168.1.10:8787) and reload.",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +143,15 @@ function wsUrl(): string {
 // socket), so swapping `es` is transparent to every on() consumer. The
 // {kind,payload} frame is byte-identical to the old SSE envelope, so the
 // dispatch body is unchanged.
+//
+// GOTCHA: serverBase() can throw if localStorage["bui_server"] is unset on
+// a non-localhost page (mobile/web descope — fail-fast intent). This
+// function is called synchronously from on() inside React useEffects, so
+// an uncaught throw white-screens the renderer with no recovery path.
+// Catch the throw here, log once, and let the next openStream() call
+// retry (the user typically fixes it by entering a server URL and
+// reloading). The `bootError` from refresh() carries the user-facing
+// message; we just need to not crash before that surfaces.
 function openStream() {
   if (es && (es.readyState === WebSocket.OPEN || es.readyState === WebSocket.CONNECTING)) {
     return;
@@ -145,7 +160,19 @@ function openStream() {
   if (es) {
     try { es.close(); } catch { /* already dead */ }
   }
-  es = new WebSocket(wsUrl());
+  let url: string;
+  try {
+    url = wsUrl();
+  } catch (e) {
+    // No server URL configured. Log once for DevTools and bail — refresh()
+    // will produce its own bootError that the UI renders.
+    console.warn(
+      "[bui] events WebSocket not opened:",
+      e instanceof Error ? e.message : String(e),
+    );
+    return;
+  }
+  es = new WebSocket(url);
   es.onmessage = (m) => {
     try {
       const { kind, payload } = JSON.parse(m.data as string) as {
@@ -270,6 +297,13 @@ export const httpApi: Api = {
   tmuxConfigStatus: () => rpc(IPC.tmuxConfigStatus),
   tmuxSetupConfig: () => rpc(IPC.tmuxSetupConfig),
   tmuxRestoreConfig: () => rpc(IPC.tmuxRestoreConfig),
+
+  // -- setup wizard --
+  // Mobile server doesn't run a setup wizard today (the user has already
+  // installed/started the mobile server) — return a stub indicating that.
+  // Desktop wires the real implementation through Electron IPC.
+  setupProbe: () => rpc(IPC.setupProbe),
+  setupBootstrap: () => rpc(IPC.setupBootstrap),
 
   // -- clipboard --
   clipboardWriteText: (text) => rpc(IPC.clipboardWriteText, text),
