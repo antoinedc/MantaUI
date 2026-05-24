@@ -8,6 +8,7 @@ import {
   runCommand,
   forkSession,
   compactSession,
+  abortSession,
   _resetSessionDirectoryCache,
   _onSessionDirectoryAdded,
 } from "./opencode.mjs";
@@ -299,6 +300,65 @@ test("forkSession carries parent ?directory= and caches it for the new session",
   assert.ok(
     childPrompt.url.includes("directory=%2Fproj%2Fa"),
     `child prompt missing scoped directory: ${childPrompt.url}`,
+  );
+});
+
+test("abortSession appends ?directory= from cache", async () => {
+  // Regression: without ?directory= the abort POST lands on the wrong
+  // (un-scoped) worker. opencode emits some idle signal so the UI's
+  // running indicator clears, but the per-directory worker keeps
+  // generating tokens. ESC felt like a no-op server-side.
+  _resetSessionDirectoryCache();
+  let abortUrl = "";
+  await withMockFetch(
+    async (url, opts) => {
+      const u = String(url);
+      if (u.startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(JSON.stringify({
+          id: "ses_ab",
+          title: "t",
+          directory: "/proj/ab",
+          projectID: "pid",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u.includes("/abort")) abortUrl = u;
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await createSession({ directory: "/proj/ab", title: "t" });
+      await abortSession("ses_ab");
+    },
+  );
+  assert.ok(
+    abortUrl.includes("directory=%2Fproj%2Fab"),
+    `abort URL missing scoped directory: ${abortUrl}`,
+  );
+});
+
+test("abortSession lazy-fetches directory via GET /session/{id} on cache miss", async () => {
+  _resetSessionDirectoryCache();
+  const calls = [];
+  await withMockFetch(
+    async (url, opts) => {
+      const u = String(url);
+      calls.push({ url: u, method: opts?.method ?? "GET" });
+      if (u === "http://127.0.0.1:4096/session/ses_amiss" && (opts?.method ?? "GET") === "GET") {
+        return new Response(
+          JSON.stringify({ id: "ses_amiss", directory: "/restored/abort" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await abortSession("ses_amiss");
+    },
+  );
+  const abort = calls.find((c) => c.url.includes("/abort"));
+  assert.ok(abort, "expected /abort call");
+  assert.ok(
+    abort.url.includes("directory=%2Frestored%2Fabort"),
+    `abort URL missing scoped directory after lazy fetch: ${abort.url}`,
   );
 });
 

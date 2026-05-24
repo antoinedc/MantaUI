@@ -205,10 +205,18 @@ export async function sendPrompt({ sessionId, text, model, attachments, mentions
 }
 
 /** Abort the running generation for a session (idempotent).
+ *
+ *  MUST carry `?directory=<session.directory>` like every other session-
+ *  mutating POST (prompt_async, command, fork, compact). opencode v2 routes
+ *  session mutations to the per-directory worker; an unscoped abort lands
+ *  on the wrong worker so the per-directory worker keeps generating. The
+ *  renderer's running indicator clears because opencode emits *some* idle
+ *  signal in response, but the model loop never actually stops.
  *  @param {string} sessionId
  */
 export async function abortSession(sessionId) {
-  const url = `/session/${encodeURIComponent(sessionId)}/abort`;
+  const dirQ = await getSessionDirectoryQuery(sessionId);
+  const url = `/session/${encodeURIComponent(sessionId)}/abort${dirQ}`;
   const res = await fetch(apiUrl(url), { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode abortSession ${res.status}: ${await res.text()}`);
