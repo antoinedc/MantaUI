@@ -822,6 +822,41 @@ export function applyQuestionEvent(
   return prev;
 }
 
+/**
+ * Normalize a server `GET /question` response row into the renderer's
+ * QuestionLike shape used by applyQuestionEvent's output. The server returns
+ * `{id: "que_…", sessionID, questions, tool}`; the renderer keeps a
+ * separate `requestId` field because the live-event path treats `id` as
+ * the dedup key (= callID when available) and stores the `que_` reply
+ * token separately. Without this normalization step, a card rendered from
+ * GET hydrate looks correct but reply errors with "reply token was not
+ * captured" because `requestId` is undefined.
+ *
+ * Pure + exported so the contract is tested and can't silently regress
+ * when either shape changes.
+ */
+export function hydrateQuestion(server: {
+  id: string;
+  sessionID: string;
+  questions: unknown[];
+  tool?: { messageID: string; callID: string };
+}): QuestionLike {
+  // Dedup key prefers tool.callID (matches applyQuestionEvent so a live
+  // event arriving after GET hydrate updates the same row instead of
+  // duplicating it). Falls back to `que_…` when no tool info is present.
+  const id =
+    typeof server.tool?.callID === "string" && server.tool.callID.length > 0
+      ? server.tool.callID
+      : server.id;
+  return {
+    id,
+    sessionID: server.sessionID,
+    questions: server.questions,
+    tool: server.tool,
+    requestId: server.id, // the `que_…` — what opencode's reply API requires
+  };
+}
+
 // === Slash-command provenance ===
 //
 // opencode injects a command's `template` into the transcript verbatim as a

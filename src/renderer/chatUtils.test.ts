@@ -17,6 +17,7 @@ import {
   VISIBLE_TODOS_CAP,
   isSelfFilteringLifecycleEvent,
   applyQuestionEvent,
+  hydrateQuestion,
   commandPrefixKey,
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
@@ -1240,6 +1241,51 @@ describe("applyQuestionEvent — callID unification & defensive removal", () => 
       SID,
     );
     expect(cleared).toEqual([]);
+  });
+});
+
+// ===== hydrateQuestion =====
+
+describe("hydrateQuestion", () => {
+  it("copies the server's que_ id into requestId so reply has a token", () => {
+    const server = {
+      id: "que_42",
+      sessionID: "ses_a",
+      questions: [{ question: "q", header: "h", options: [] }],
+    };
+    const h = hydrateQuestion(server);
+    // requestId is what opencode's /question/:id/reply requires (^que…)
+    expect(h.requestId).toBe("que_42");
+  });
+
+  it("uses tool.callID as dedup key when present (matches live-event keying)", () => {
+    const h = hydrateQuestion({
+      id: "que_7",
+      sessionID: "ses_a",
+      questions: [{ question: "q", header: "h", options: [] }],
+      tool: { messageID: "msg_1", callID: "toolu_7" },
+    });
+    expect(h.id).toBe("toolu_7");
+    expect(h.requestId).toBe("que_7");
+  });
+
+  it("falls back to que_ as id when no tool info", () => {
+    const h = hydrateQuestion({
+      id: "que_7",
+      sessionID: "ses_a",
+      questions: [{ question: "q", header: "h", options: [] }],
+    });
+    expect(h.id).toBe("que_7");
+    expect(h.requestId).toBe("que_7");
+  });
+
+  it("preserves sessionID, questions, and tool intact", () => {
+    const tool = { messageID: "msg_1", callID: "toolu_7" };
+    const questions = [{ question: "q", header: "h", options: [] }];
+    const h = hydrateQuestion({ id: "que_x", sessionID: "ses_y", questions, tool });
+    expect(h.sessionID).toBe("ses_y");
+    expect(h.questions).toBe(questions);
+    expect(h.tool).toEqual(tool);
   });
 });
 

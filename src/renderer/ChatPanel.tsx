@@ -46,6 +46,7 @@ import {
   registerChildSessionFromCreated,
   shouldDropEventForSessionFilter,
   applyQuestionEvent,
+  hydrateQuestion,
   detectCommandFromText,
   isAssistantTurnComplete,
   isAssistantTurnInProgress,
@@ -809,7 +810,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       .opencodeQuestions(sessionId)
       .then((all) => {
         if (!cancelled) {
-          setQuestions(all.filter((q) => q.sessionID === sessionId));
+          setQuestions(
+            all
+              .filter((q) => q.sessionID === sessionId)
+              .map(hydrateQuestion) as QuestionRequest[],
+          );
         }
       })
       .catch(() => { /* non-fatal — v2-only endpoint */ });
@@ -832,11 +837,26 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   }, [sessionId]);
 
   // Refresh question list. Called on any question event.
+  //
+  // `hydrateQuestion` (defined above the component) normalizes the server's
+  // QuestionRequest shape into the renderer's QuestionLike: in particular,
+  // it copies the server's `id` (which is the `que_…`) into our `requestId`
+  // field. Without this, a card rendered from the GET-hydrate path looks
+  // visually correct but the reply handler errors with "reply token was not
+  // captured" because `q.requestId` is undefined — even though the `que_`
+  // is sitting right there in `q.id`. (Live SSE events carry both shapes:
+  // applyQuestionEvent fills `requestId` from `p.id` explicitly; the GET
+  // path was the regression introduced by the workspace-scope fix making
+  // GET authoritative.)
   const refreshQuestions = useCallback(() => {
     window.api
       .opencodeQuestions(sessionId)
       .then((all) =>
-        setQuestions(all.filter((q) => q.sessionID === sessionId)),
+        setQuestions(
+          all
+            .filter((q) => q.sessionID === sessionId)
+            .map(hydrateQuestion) as QuestionRequest[],
+        ),
       )
       .catch(() => { /* keep last-known — v2-only endpoint */ });
   }, [sessionId]);
