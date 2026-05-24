@@ -103,6 +103,12 @@ body,
   position: relative;
   min-height: 0;
   padding-bottom: max(env(safe-area-inset-bottom), 8px);
+  /* Belt-and-suspenders against any descendant escaping the viewport: the
+     mobile-body itself clips. position: relative above means absolute
+     children are constrained to this box, and overflow: hidden ensures
+     even if a child sets a static width wider than the viewport, the
+     overflow doesn't spawn a document-level horizontal scrollbar. */
+  overflow: hidden;
 }
 .mobile-body > * {
   position: absolute;
@@ -110,6 +116,14 @@ body,
   left: 0;
   right: 0;
   bottom: max(env(safe-area-inset-bottom), 0px);
+  /* ChatPanel root is `h-full w-full flex flex-col` with no overflow clamp.
+     A horizontally-overflowing transcript child (long code block, tool
+     output, etc.) would push its parent flex column past `right: 0` since
+     absolute positioning constrains the box but NOT the in-flow content.
+     Clip here so the scroll-x stays inside the offending child's own
+     overflow-x:auto container (where the .flex-1 min-width:0 rule lets it
+     actually do its job). */
+  overflow-x: hidden;
 }
 
 /* --- Reused ChatPanel composer, reshaped for phone width ---
