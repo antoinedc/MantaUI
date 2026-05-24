@@ -60,6 +60,7 @@ import {
   collectChildSessionIds,
   countRunningSubagents,
   summarizeChildSession,
+  classifyScrollForPin,
   type TruncationKind,
   type ContextBreakdown,
   type StaleCacheResult,
@@ -1490,72 +1491,54 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
   }, [sessionId]);
 
-  // Pinned-to-bottom detection. THE BUG this guards against: a pure
-  // distance-threshold check (`dist < 80 → pinned`) loses to streaming. While
-  // content streams, content is added below the viewport; a small user
-  // scroll-up (say 30px) leaves us still inside the 80px window, the next
-  // delta's auto-scroll effect sees `pinned === true` and snaps to bottom
-  // before the user's next wheel tick lands. Visible jump.
+  // Pinned-to-bottom detection — single symmetric threshold, pure observation.
   //
-  // Fix: distinguish USER intent from PROGRAMMATIC scrolls.
-  //  - Any wheel-up, touchmove, keydown (PgUp/Home/Arrow), or non-programmatic
-  //    scroll event ⇒ unpin immediately, regardless of distance.
-  //  - Re-pin only when the user actually scrolls back within 80px of bottom.
-  //  - Our own `scrollTop = scrollHeight` writes set `programmaticScroll`
-  //    true for one scroll tick so they don't get treated as user gestures.
-  const programmaticScroll = useRef(false);
+  // Two previous designs both bled the "snap-back during streaming" bug:
+  //
+  //   v1 (pre-631b03e): symmetric 80px threshold. A 30px scroll-up left
+  //     dist=30 < 80, the next delta saw `pinned === true`, snap. Lost.
+  //
+  //   v2 (631b03e): tight 8px re-pin + wheel/touch/key "intent" un-pin.
+  //     wheel-up explicitly unpinned regardless of distance, fixing v1.
+  //     But missed two real-world scroll paths:
+  //       - scrollbar-handle drag (no wheel/touch/key — only `scroll`
+  //         event); the handler only RE-pinned, never UN-pinned.
+  //       - the `running` false→true edge effect force-pinned on every
+  //         `session.status` busy/idle oscillation during multi-step
+  //         turns, regardless of user intent. Multiple snaps per turn.
+  //
+  // v3 (here): pure observation, single 8px symmetric threshold. The
+  // browser fires `scroll` for every cause (wheel, touch, key, scrollbar
+  // drag, momentum, our own writes), so one listener is the only signal
+  // needed. `classifyScrollForPin` is a pure boolean: `dist <= 8 → pin`,
+  // otherwise unpin. Each scroll event correctly reflects current position
+  // — no stale state, no flapping. Don't reintroduce wheel/touch/key
+  // listeners or a `programmaticScroll` guard; they were load-bearing only
+  // for v2's missing un-pin path.
+  //
+  // Force-pin paths are explicit and limited to user actions: `submit()`
+  // and `sendQueuedRef.current()` set `pinnedToBottom.current = true`
+  // right before their optimistic setMessages so the user sees their own
+  // message land. The old running-edge effect is gone — it was the source
+  // of mid-turn snaps.
   const stickToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    programmaticScroll.current = true;
     el.scrollTop = el.scrollHeight;
-    // Clear on next frame; the resulting scroll event fires before then.
-    requestAnimationFrame(() => {
-      programmaticScroll.current = false;
-    });
   }, []);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const RE_PIN_PX = 8; // user must reach the bottom to re-engage tail-follow
     const onScroll = () => {
-      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (programmaticScroll.current) {
-        // Our own write — we're at the bottom, stay pinned.
-        pinnedToBottom.current = true;
-        return;
-      }
-      // User-driven scroll (scrollbar drag, momentum, anything we didn't
-      // initiate). The unpin paths below handle leaving the bottom; here we
-      // only handle the RE-pin path. Threshold is tight so we don't snap
-      // back unless the user truly lands at the bottom — a half-completed
-      // wheel-up that left them 30px from bottom must NOT re-pin.
-      if (dist <= RE_PIN_PX) pinnedToBottom.current = true;
-    };
-    const onWheel = (e: WheelEvent) => {
-      // Any upward wheel ⇒ user wants out of tail-follow, regardless of
-      // current distance. Downward wheel doesn't auto-pin; the scroll
-      // handler re-pins when they actually reach bottom.
-      if (e.deltaY < 0) pinnedToBottom.current = false;
-    };
-    const onTouchMove = () => {
-      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (dist > RE_PIN_PX) pinnedToBottom.current = false;
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "PageUp" || e.key === "Home" || e.key === "ArrowUp") {
-        pinnedToBottom.current = false;
-      }
+      pinnedToBottom.current = classifyScrollForPin({
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+        clientHeight: el.clientHeight,
+      });
     };
     el.addEventListener("scroll", onScroll, { passive: true });
-    el.addEventListener("wheel", onWheel, { passive: true });
-    el.addEventListener("touchmove", onTouchMove, { passive: true });
-    el.addEventListener("keydown", onKeyDown);
     return () => {
       el.removeEventListener("scroll", onScroll);
-      el.removeEventListener("wheel", onWheel);
-      el.removeEventListener("touchmove", onTouchMove);
-      el.removeEventListener("keydown", onKeyDown);
     };
   }, []);
 
@@ -1574,19 +1557,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       stickToBottom();
     }
   }, [messages, liveTodos, stickToBottom]);
-
-  // Going from idle → running (just sent a message): force pin to bottom so
-  // the user sees their own message and the live spinner appear.
-  // Only fires on the false→true edge; does NOT re-pin on every streaming
-  // update (that would yank the viewport while the user is reading history).
-  const wasRunning = useRef(false);
-  useEffect(() => {
-    if (running && !wasRunning.current) {
-      pinnedToBottom.current = true;
-      stickToBottom();
-    }
-    wasRunning.current = running;
-  }, [running, stickToBottom]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -1706,6 +1676,14 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     // overwrite `messages` entirely with the canonical state, so this
     // entry is naturally replaced (no manual dedupe needed). On error we
     // strip it by id in the catch block.
+    //
+    // Force-pin to bottom BEFORE the setMessages commit so the
+    // [messages, liveTodos] effect snaps to the freshly-appended turn even
+    // if the user had scrolled up to read history. This is the only
+    // legitimate force-pin path — the previous design fired on every
+    // `running` false→true edge, which incorrectly yanked the viewport on
+    // every busy/idle oscillation during multi-step turns.
+    pinnedToBottom.current = true;
     const optimisticUserId = `optimistic-user-${Date.now()}`;
     setMessages((prev) => [
       ...(prev ?? []),
@@ -1891,6 +1869,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     if (q.length === 0) return;
     const [next, ...rest] = q;
     setMessageQueue(rest);
+    // Force-pin to bottom — same rationale as submit(). The user is having
+    // a queued turn dispatched, they want to see it land in the transcript.
+    pinnedToBottom.current = true;
     const optimisticUserId = `optimistic-user-${Date.now()}`;
     setMessages((prev) => [
       ...(prev ?? []),

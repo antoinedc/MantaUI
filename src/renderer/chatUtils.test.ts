@@ -35,6 +35,9 @@ import {
   summarizeChildSession,
   registerChildSessionFromCreated,
   shouldDropEventForSessionFilter,
+  SCROLL_REPIN_PX,
+  distFromBottom,
+  classifyScrollForPin,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -1871,5 +1874,78 @@ describe("isAssistantTurnInProgress", () => {
     const done = [{ info: { role: "assistant", time: { completed: 2 } } }];
     expect(isAssistantTurnInProgress(wedged)).toBe(!isAssistantTurnComplete(wedged));
     expect(isAssistantTurnInProgress(done)).toBe(!isAssistantTurnComplete(done));
+  });
+});
+
+// ===== distFromBottom =====
+
+describe("distFromBottom", () => {
+  it("returns 0 when scrolled all the way to the bottom", () => {
+    expect(distFromBottom({ scrollHeight: 1000, scrollTop: 800, clientHeight: 200 })).toBe(0);
+  });
+
+  it("returns the gap between viewport bottom and content bottom", () => {
+    expect(distFromBottom({ scrollHeight: 1000, scrollTop: 500, clientHeight: 200 })).toBe(300);
+  });
+
+  it("clamps negative distances (overscroll) to 0", () => {
+    // Some browsers/momentum-scroll briefly report scrollTop + clientHeight > scrollHeight.
+    expect(distFromBottom({ scrollHeight: 1000, scrollTop: 900, clientHeight: 200 })).toBe(0);
+  });
+
+  it("returns full distance for an empty/short transcript", () => {
+    expect(distFromBottom({ scrollHeight: 200, scrollTop: 0, clientHeight: 200 })).toBe(0);
+  });
+});
+
+// ===== classifyScrollForPin (single symmetric threshold) =====
+
+describe("classifyScrollForPin", () => {
+  const metricsAtDist = (dist: number) => ({
+    scrollHeight: 2000,
+    scrollTop: 2000 - 500 - dist,
+    clientHeight: 500,
+  });
+
+  it("pins when at the bottom", () => {
+    expect(classifyScrollForPin(metricsAtDist(0))).toBe(true);
+  });
+
+  it("pins at or within the threshold", () => {
+    expect(classifyScrollForPin(metricsAtDist(SCROLL_REPIN_PX))).toBe(true);
+    expect(classifyScrollForPin(metricsAtDist(SCROLL_REPIN_PX - 1))).toBe(true);
+  });
+
+  it("unpins beyond the threshold", () => {
+    expect(classifyScrollForPin(metricsAtDist(SCROLL_REPIN_PX + 1))).toBe(false);
+    expect(classifyScrollForPin(metricsAtDist(30))).toBe(false);
+    expect(classifyScrollForPin(metricsAtDist(500))).toBe(false);
+  });
+
+  it("treats overscroll as pinned (dist clamped to 0)", () => {
+    expect(
+      classifyScrollForPin({ scrollHeight: 1000, scrollTop: 900, clientHeight: 200 }),
+    ).toBe(true);
+  });
+
+  it("REGRESSION: a 30px scroll-up un-pins so the next delta does NOT snap", () => {
+    // This is the v1 bug (80px symmetric threshold) AND a v3-draft bug
+    // (asymmetric hysteresis with dead-zone "no change" return). With a
+    // single 8px threshold, any non-trivial scroll-up flips pin to false
+    // and the next delta is left alone.
+    expect(classifyScrollForPin(metricsAtDist(30))).toBe(false);
+  });
+
+  it("REGRESSION: drag-up via scrollbar handle past the threshold un-pins", () => {
+    // The v2 bug: previous onScroll handler only RE-pinned, never UN-pinned.
+    // Scrollbar-handle drag fires only `scroll` events (no wheel/touch/key),
+    // so a drag from `dist=0` to `dist=200` left `pinned == true` and the
+    // next streaming delta snapped the viewport back to the tail.
+    expect(classifyScrollForPin(metricsAtDist(200))).toBe(false);
+  });
+
+  it("respects custom threshold", () => {
+    expect(classifyScrollForPin(metricsAtDist(20), 32)).toBe(true);
+    expect(classifyScrollForPin(metricsAtDist(33), 32)).toBe(false);
   });
 });

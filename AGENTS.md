@@ -295,6 +295,45 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   event in `attachCustomKeyEventHandler`, call `preventDefault()` to kill
   the textarea side, and manually `ptyWrite("\x1b\r")` — the same sequence
   iTerm2's `/terminal-setup` sends. Don't drop the `preventDefault()`.
+- **Chat transcript pin-to-bottom — single 8px symmetric threshold, pure
+  observation, no intent detection.** Two prior designs (v1: 80px
+  symmetric; v2: 8px + wheel/touch/key intent detection in commit 631b03e)
+  both regressed "viewport snaps back during streaming." A first v3 draft
+  tried asymmetric hysteresis (REPIN=8, UNPIN=64) with a dead-zone "no
+  change" return — that re-introduced v1's bug because the dead zone
+  PRESERVES the prior pin state, so a 30px scroll-up from `pinned=true`
+  stays pinned and the next delta snaps. The dead zone is a trap; don't
+  bring it back.
+
+  The current model lives in `classifyScrollForPin()` in `chatUtils.ts`
+  (pure + tested) and is a plain boolean:
+    - `dist <= SCROLL_REPIN_PX (8px)` → pin
+    - otherwise → unpin
+
+  ChatPanel attaches a single `scroll` listener that pipes through it.
+  The browser fires `scroll` for every cause (wheel, touch, key,
+  **scrollbar drag**, momentum, our own writes), so one listener is the
+  source of truth — no wheel/touch/key heuristics, no `programmaticScroll`
+  flag, no race conditions. The previous v2 design missed scrollbar-drag
+  because it only had wheel/touch/key unpin paths and the scroll handler
+  ONLY re-pinned (never un-pinned); v1 missed everything because the
+  threshold was too generous. **Do NOT re-introduce intent-detection
+  listeners or a dead-zone classifier.**
+
+  Trade-off baked in: scrolls of < 8px (single-pixel jiggles, very gentle
+  trackpad nudges) stay pinned and get snapped on the next delta. This is
+  intentional — most wheel detents are 40-100px, a sub-8px scroll is
+  almost certainly accidental, and re-engaging follow by scrolling back to
+  the bottom is trivial.
+
+  **Force-pin paths are limited and explicit**: `submit()` and
+  `sendQueuedRef.current()` set `pinnedToBottom.current = true` just
+  before their optimistic `setMessages` so the user sees their own
+  message land. That's it. There used to be a `running` false→true
+  edge effect that force-pinned on every `session.status` busy/idle
+  transition — this was the dominant cause of mid-turn snaps because
+  multi-step turns oscillate busy/idle/busy several times. **Do NOT
+  reintroduce a `running`-derived force-pin.**
 
 ## New-project dialog (`Sidebar.tsx`)
 
