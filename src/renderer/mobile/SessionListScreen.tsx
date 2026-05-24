@@ -1,9 +1,15 @@
+import { useState } from "react";
 import { useStore } from "../store";
 import type { Project, TmuxWindow } from "../../shared/types";
+import { MobileCreateSheet } from "./MobileCreateSheet";
 
 type Props = {
   onOpenSession: (projectName: string, windowIndex: number) => void;
-  onCreate: () => void;
+  // Called when the user wants to refresh the session list (pull-to-refresh
+  // replacement). The create flow no longer reuses this — it has its own
+  // sheet that calls refresh internally on success.
+  onRefresh: () => void;
+  onOpenSettings: () => void;
 };
 
 function dotColor(running: boolean, attention: boolean): string {
@@ -54,18 +60,68 @@ function SessionRow({
   );
 }
 
-export function SessionListScreen({ onOpenSession, onCreate }: Props) {
+// Sheet state: which create flow is open (or null = none). We track this in
+// the list screen rather than MobileApp so the sheet animates over the list,
+// not over the entire app shell — the desktop equivalent is the inline
+// new-project form expanding inside the sidebar.
+type CreateState =
+  | null
+  | { kind: "new-project" }
+  | { kind: "new-session"; projectName: string }
+  // The "+" action sheet that lets the user pick "new project" vs "new
+  // session in <project>" (only when there's at least one project).
+  | { kind: "menu" };
+
+export function SessionListScreen({
+  onOpenSession,
+  onRefresh,
+  onOpenSettings,
+}: Props) {
   const projects = useStore((s) => s.projects);
   const host = useStore((s) => s.host);
+  const activeProjectName = useStore((s) => s.activeProjectName);
+
+  const [createState, setCreateState] = useState<CreateState>(null);
+
+  // "+" tap:
+  //   - 0 projects: open new-project directly (only option that makes sense).
+  //   - 1+ projects: open a small action sheet so the user can choose
+  //     "new project" or "new session in <active project>". Hold-press could
+  //     bypass the menu, but touch hold-press UX is fiddly — explicit menu
+  //     is clearer.
+  const onPlus = () => {
+    if (projects.length === 0) setCreateState({ kind: "new-project" });
+    else setCreateState({ kind: "menu" });
+  };
+
+  // Default project to add a session into when the user picks "new session"
+  // from the menu — active project if any, otherwise the first one.
+  const defaultSessionProject = activeProjectName ?? projects[0]?.tmuxSession;
 
   return (
     <div className="mobile-screen">
       <div className="mobile-header">
         <div className="flex-1 text-text font-bold text-base px-1">Sessions</div>
         <button
+          className="mobile-tap text-text-muted text-xl leading-none"
+          onClick={onRefresh}
+          aria-label="Refresh"
+          title="Refresh"
+        >
+          ↻
+        </button>
+        <button
+          className="mobile-tap text-text-muted text-xl leading-none"
+          onClick={onOpenSettings}
+          aria-label="Settings"
+          title="Settings"
+        >
+          ⚙
+        </button>
+        <button
           className="mobile-tap rounded-lg bg-accent-soft text-white text-xl"
-          onClick={onCreate}
-          aria-label="New session"
+          onClick={onPlus}
+          aria-label="New"
         >
           +
         </button>
@@ -80,8 +136,21 @@ export function SessionListScreen({ onOpenSession, onCreate }: Props) {
         ) : (
           projects.map((p) => (
             <div key={p.tmuxSession}>
-              <div className="px-4 pt-3 pb-1 text-[10px] uppercase tracking-wide text-text-faint">
-                {p.tmuxSession}
+              <div className="px-4 pt-3 pb-1 flex items-center justify-between text-[10px] uppercase tracking-wide text-text-faint">
+                <span className="truncate">{p.tmuxSession}</span>
+                <button
+                  className="mobile-tap text-text-faint -my-2"
+                  onClick={() =>
+                    setCreateState({
+                      kind: "new-session",
+                      projectName: p.tmuxSession,
+                    })
+                  }
+                  aria-label={`New session in ${p.tmuxSession}`}
+                  title="New session in this project"
+                >
+                  +
+                </button>
               </div>
               {p.windows.map((w) => (
                 <SessionRow
@@ -95,6 +164,50 @@ export function SessionListScreen({ onOpenSession, onCreate }: Props) {
           ))
         )}
       </div>
+
+      {/* "+" action sheet: only shown when there's at least one project so
+          the user can choose between new-project and new-session. */}
+      {createState?.kind === "menu" && (
+        <div
+          className="mobile-sheet-backdrop"
+          onClick={() => setCreateState(null)}
+        >
+          <div className="mobile-sheet" onClick={(e) => e.stopPropagation()}>
+            <button onClick={() => setCreateState({ kind: "new-project" })}>
+              New project
+            </button>
+            {defaultSessionProject && (
+              <button
+                onClick={() =>
+                  setCreateState({
+                    kind: "new-session",
+                    projectName: defaultSessionProject,
+                  })
+                }
+              >
+                New session in "{defaultSessionProject}"
+              </button>
+            )}
+            <button onClick={() => setCreateState(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {(createState?.kind === "new-project" ||
+        createState?.kind === "new-session") && (
+        <MobileCreateSheet
+          mode={createState}
+          onClose={() => setCreateState(null)}
+          onCreated={(projectName, windowIndex) => {
+            setCreateState(null);
+            // For new-session we navigate straight into the new window so the
+            // user sees their freshly created chat. For new-project we stay
+            // on the list — the project may have several worktree windows
+            // and we don't presume which one to open.
+            if (windowIndex != null) onOpenSession(projectName, windowIndex);
+          }}
+        />
+      )}
     </div>
   );
 }

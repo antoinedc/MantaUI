@@ -11,7 +11,14 @@ type Props = {
 
 export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   const projects = useStore((s) => s.projects);
+  const refresh = useStore((s) => s.refresh);
   const [sheetOpen, setSheetOpen] = useState(false);
+  // Inline rename state — when set, the sheet replaces its action buttons with
+  // a name input + Save / Cancel. Mobile keyboards make a separate modal
+  // gratuitous; the sheet IS the modal.
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   const project = projects.find((p) => p.tmuxSession === projectName);
   const win = project?.windows.find((w) => w.index === windowIndex);
@@ -62,6 +69,58 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
     onBack();
   };
 
+  // Rename uses tmux:rename-window — it renames the underlying tmux window
+  // (the unit the user sees as a "session" in mobile UI). Works for BOTH
+  // chat windows and terminal windows because both ARE tmux windows; the
+  // chat-mode distinction is the @bui-session-id user-option, not the
+  // window kind. Same channel desktop's Sidebar.tsx commitRename uses.
+  const startRename = () => {
+    setRenameValue(win.name);
+    setRenameError(null);
+    setRenaming(true);
+  };
+  const closeSheet = () => {
+    setSheetOpen(false);
+    setRenaming(false);
+    setRenameError(null);
+  };
+  const commitRename = async () => {
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === win.name) {
+      closeSheet();
+      return;
+    }
+    try {
+      await window.api.tmuxRenameWindow({
+        sessionName: projectName,
+        windowIndex: win.index,
+        newName: trimmed,
+      });
+      await refresh();
+      closeSheet();
+    } catch (e) {
+      setRenameError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Kill is available for terminal windows too — for chat windows the
+  // existing "Delete session" path already covers it (also deletes the
+  // opencode session). Terminal-only path uses tmux:kill-window directly.
+  const killWindow = async () => {
+    try {
+      await window.api.tmuxKillWindow({
+        sessionName: projectName,
+        windowIndex: win.index,
+      });
+      await refresh();
+      closeSheet();
+      onBack();
+    } catch (e) {
+      // Surface but keep sheet open so the user sees the error and can decide.
+      setRenameError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   return (
     <div className="mobile-screen">
       <div className="mobile-header">
@@ -79,15 +138,16 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
             {sid ? " · chat" : " · terminal"}
           </div>
         </div>
-        {sid && (
-          <button
-            className="mobile-tap text-text-muted text-xl"
-            onClick={() => setSheetOpen(true)}
-            aria-label="Session actions"
-          >
-            ⋯
-          </button>
-        )}
+        {/* Action sheet is available for both chat and terminal windows now —
+            terminal windows get rename + kill; chat windows additionally get
+            fork / compact / delete. */}
+        <button
+          className="mobile-tap text-text-muted text-xl"
+          onClick={() => setSheetOpen(true)}
+          aria-label="Session actions"
+        >
+          ⋯
+        </button>
       </div>
 
       <div className="mobile-body">
@@ -104,18 +164,67 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
         )}
       </div>
 
-      {sheetOpen && sid && (
-        <div
-          className="mobile-sheet-backdrop"
-          onClick={() => setSheetOpen(false)}
-        >
+      {sheetOpen && (
+        <div className="mobile-sheet-backdrop" onClick={closeSheet}>
           <div className="mobile-sheet" onClick={(e) => e.stopPropagation()}>
-            <button onClick={forkSession}>Fork session</button>
-            <button onClick={compactSession}>Compact context</button>
-            <button className="danger" onClick={deleteSession}>
-              Delete session
-            </button>
-            <button onClick={() => setSheetOpen(false)}>Cancel</button>
+            {renaming ? (
+              <div className="space-y-3 p-2">
+                <div className="text-text font-semibold text-sm">
+                  Rename session
+                </div>
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRename();
+                    else if (e.key === "Escape") closeSheet();
+                  }}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoComplete="off"
+                  className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+                />
+                {renameError && (
+                  <div className="text-xs text-red-400">{renameError}</div>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    onClick={commitRename}
+                    className="flex-1 px-3 py-2 bg-accent text-bg rounded font-semibold"
+                    style={{ textAlign: "center" }}
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={closeSheet}
+                    className="flex-1 px-3 py-2 text-text-faint"
+                    style={{ textAlign: "center" }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <button onClick={startRename}>Rename</button>
+                {sid && (
+                  <>
+                    <button onClick={forkSession}>Fork session</button>
+                    <button onClick={compactSession}>Compact context</button>
+                    <button className="danger" onClick={deleteSession}>
+                      Delete session
+                    </button>
+                  </>
+                )}
+                {!sid && (
+                  <button className="danger" onClick={killWindow}>
+                    Kill window
+                  </button>
+                )}
+                <button onClick={closeSheet}>Cancel</button>
+              </>
+            )}
           </div>
         </div>
       )}
