@@ -350,7 +350,27 @@ export const httpApi: Api = {
 
   // -- misc --
   peekRemoteFile: (remotePath) => rpc(IPC.peekRemoteFile, remotePath),
-  openExternal: (url) => rpc(IPC.openExternal, url),
+
+  /**
+   * Markdown links in ChatPanel always call `window.api.openExternal(href)`
+   * after `e.preventDefault()`. On desktop this hops to Electron's
+   * `shell.openExternal` which spawns the Mac default browser. On mobile we
+   * have no system-browser bridge, but the WebView itself IS a browser —
+   * `window.open(url, "_blank")` makes Safari/Chrome handle it correctly
+   * (new tab in browser, switch-to-Safari in standalone PWAs, system
+   * external browser in the Capacitor APK via the WebView's default link
+   * handler). The previous server-side rpc no-op (see local.mjs comment)
+   * silently swallowed every chat link click — this restores that behavior.
+   * Returns Promise<void> to match the desktop signature; the open call is
+   * fire-and-forget.
+   */
+  openExternal: async (url) => {
+    try {
+      window.open(url, "_blank", "noreferrer");
+    } catch {
+      /* popup blocker / about:blank in restricted contexts — silent */
+    }
+  },
 
   // -- PTY --
   ptySpawn: (opts) => rpc(IPC.ptySpawn, opts),

@@ -1,10 +1,29 @@
 /* All rules scoped under .mobile (set by MobileApp's root div) so they can
    reshape the reused ChatPanel/Terminal internals WITHOUT ever matching in
-   the desktop <App/> tree. Do not add an unscoped selector to this file. */
+   the desktop <App/> tree. Do not add an unscoped selector to this file.
+
+   The ONLY exceptions are the html/body/#root document-root rules below.
+   They are unscoped on purpose: a horizontal-scroll regression at the
+   document level can't be fixed by a `.mobile`-scoped rule because the
+   browser computes page width from the body's intrinsic content size.
+   The desktop's `index.css` already sets `overflow: hidden` on these
+   three selectors so adding `overflow-x: hidden` here is redundant on
+   desktop but safe (matches existing behavior). */
+
+html,
+body,
+#root {
+  overflow-x: hidden;
+  max-width: 100vw;
+}
 
 .mobile {
   height: 100dvh;
-  width: 100vw;
+  /* 100% (not 100vw) so when iOS Safari shows a vertical scrollbar gutter
+     during overscroll, the panel doesn't get pushed an extra ~17px wide and
+     create a horizontal scroll loop. Parent (#root) is already 100vw via the
+     html/body rule above. */
+  width: 100%;
   overflow: hidden;
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior: none;
@@ -162,6 +181,58 @@
   > span:last-child
   > span:first-child {
   display: none;
+}
+
+/* ---- Inner-overflow clamps: stop the chat panel pushing past viewport ----
+
+   ChatPanel paints `<pre>`, `<table>` and `overflow-x-auto` containers as
+   children of flex columns that don't carry `min-width: 0`. A flex item's
+   default `min-width` is `auto`, which is the intrinsic min-content width of
+   its content — a `<pre>` with `white-space: pre` reports its widest line as
+   that intrinsic size, so the flex refuses to shrink, the row grows, and
+   `overflow-x-auto` becomes a no-op (the element is already as wide as it
+   wants to be). The desktop avoids this because its <main> wrapper has
+   `min-w-0` baked in, but the mobile wrapper is `absolute inset-0` and the
+   `flex-1` siblings inside ChatPanel weren't authored for a viewport-sized
+   panel.
+
+   Per the AGENTS rule we don't edit ChatPanel; reshape its descendants via
+   `.mobile-body` here instead. These three rules together remove the leaks:
+
+   1. Clamp pre/table/overflow-x-auto containers to the panel width and let
+      the inner content scroll horizontally on its own scrollbar.
+   2. Force `min-width: 0` on ANY .flex-1 inside .mobile-body — the most
+      common flex-item-grows-with-content pattern in ChatPanel (assistant
+      bullet → text column, tool body wrappers, etc.).
+   3. Same for the ModelPicker dropdown's hardcoded `min-w-[240px]`, which
+      can push the panel right when the picker is wrapped to the right of
+      the composer row at phone width. */
+.mobile-body pre,
+.mobile-body table,
+.mobile-body .overflow-x-auto {
+  max-width: 100%;
+}
+.mobile-body .flex-1 {
+  min-width: 0;
+}
+.mobile-body div[class*="min-w-[240px]"] {
+  min-width: 0;
+  max-width: calc(100vw - 32px);
+}
+/* Long unbreakable tokens (URLs, file paths) in user-message bars should
+   wrap rather than push the row. `break-words` alone isn't enough on
+   WebKit for path-like strings — `overflow-wrap: anywhere` is. */
+.mobile-body .break-words {
+  overflow-wrap: anywhere;
+}
+
+/* iOS Safari auto-zooms <input>/<textarea> with font-size < 16px on focus,
+   and after the zoom the viewport stays scaled up — the page is now wider
+   than the visual viewport and Safari grants horizontal scroll. Bumping the
+   composer textarea (the only frequently-focused input in mobile chat) to
+   16px defeats the auto-zoom without compromising the rest of the layout. */
+.mobile-body textarea {
+  font-size: 16px;
 }
 
 /* Bottom-sheet for session actions (fork/compact/delete/rename). */
