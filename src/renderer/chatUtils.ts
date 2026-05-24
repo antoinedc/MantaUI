@@ -1179,3 +1179,69 @@ export function isAssistantTurnInProgress(
   const completed = last.info.time?.completed;
   return !(typeof completed === "number" && completed > 0);
 }
+
+// ===== Scroll-pin classification =====
+//
+// The chat transcript auto-follows the bottom while a turn streams, but only
+// when the user is actually watching the tail. Three designs have shipped:
+//
+//   v1 (80px symmetric, no intent detection): a 30px scroll-up still
+//     measured "near bottom", so the next delta yanked it back.
+//
+//   v2 (commit 631b03e: tight 8px re-pin + wheel/touch/key intent un-pin):
+//     wheel-up explicitly unpinned regardless of distance, fixing v1. But
+//     scrollbar-handle drags don't fire wheel/touch/key — only `scroll` —
+//     and the scroll handler ONLY re-pinned, never un-pinned. A drag from
+//     the bottom past the threshold left stale `pinned == true`, next
+//     delta snapped. Combined with a separate ChatPanel effect that
+//     force-pinned on every `session.status` busy/idle oscillation during
+//     multi-step turns, the viewport kept snapping back.
+//
+//   v3 (here): pure observation, single symmetric threshold. The browser
+//     fires `scroll` for every scroll cause (wheel, touch, key, scrollbar
+//     drag, momentum, our own writes) so it's the only signal needed.
+//
+//       dist <= SCROLL_REPIN_PX (8px) → pin
+//       dist >  SCROLL_REPIN_PX       → unpin
+//
+//     Symmetric threshold means each scroll event correctly reflects the
+//     current position — no stale state, no flapping (scroll events fire
+//     many times per second during scrolling, so the state stabilizes well
+//     before the next ~hundred-millisecond delta tick). Trade-off: scrolls
+//     of < 8px stay pinned and get snapped on the next delta. Acceptable
+//     because (a) most wheel detents are 40-100px, (b) a single-pixel
+//     scroll-up is almost certainly accidental, (c) re-engaging follow by
+//     scrolling back to the bottom is trivial.
+//
+//     An earlier v3 draft used asymmetric thresholds (REPIN=8, UNPIN=64)
+//     with a dead-zone "no change" return. That re-introduced v1's bug:
+//     a 30px wheel-up landed in the dead zone, pin stayed true, next
+//     delta snapped. The dead zone PRESERVES the prior state — it does
+//     not prevent the snap. Don't bring it back without state-aware
+//     hysteresis (and even then, the simple symmetric model works fine).
+export const SCROLL_REPIN_PX = 8;
+
+export type ScrollMetrics = {
+  scrollHeight: number;
+  scrollTop: number;
+  clientHeight: number;
+};
+
+/** Distance from the bottom of the scroll container, clamped to >= 0. */
+export function distFromBottom(m: ScrollMetrics): number {
+  return Math.max(0, m.scrollHeight - m.scrollTop - m.clientHeight);
+}
+
+/**
+ * Whether the viewport is currently close enough to the bottom to be
+ * considered "pinned to tail" — i.e., new content should auto-scroll.
+ *
+ * Single symmetric threshold by design. See the SCROLL_REPIN_PX comment
+ * block above for why a dead-zone hysteresis variant doesn't work.
+ */
+export function classifyScrollForPin(
+  metrics: ScrollMetrics,
+  thresholdPx: number = SCROLL_REPIN_PX,
+): boolean {
+  return distFromBottom(metrics) <= thresholdPx;
+}
