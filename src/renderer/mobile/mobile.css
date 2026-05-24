@@ -197,6 +197,27 @@ body,
   display: none;
 }
 
+/* The ChatPanel transcript is `flex-1 overflow-y-auto px-4 py-3` — a
+   y-only scroller, but it has NO x-axis clamp, so an oversized child
+   (a tool output, a wide table, a wrapped row that didn't actually wrap,
+   the user-message `-mx-4` bar with a long URL, etc.) scrolls
+   horizontally INSIDE the transcript. That's what the user sees as
+   "the message area scrolls sideways" even after .mobile-body has
+   overflow: hidden — the page doesn't scroll, but the transcript box
+   does, which is the same visible bug.
+
+   Force overflow-x: hidden on the transcript scroller. The horizontal
+   scroll has nowhere useful to go — the `<pre>` blocks inside still get
+   their own overflow-x: auto and scrollbar (from the rule below), so
+   long code lines remain reachable, they just don't drag the entire
+   transcript with them. Targeted at the FIRST overflow-y-auto inside
+   .mobile-body (ChatPanel's scrollRef container) — not @-typeahead
+   popups or model-picker dropdowns, which use absolute positioning and
+   shouldn't be affected by an x clamp anyway. */
+.mobile-body [class*="overflow-y-auto"] {
+  overflow-x: hidden;
+}
+
 /* ---- Inner-overflow clamps: stop the chat panel pushing past viewport ----
 
    ChatPanel paints `<pre>`, `<table>` and `overflow-x-auto` containers as
