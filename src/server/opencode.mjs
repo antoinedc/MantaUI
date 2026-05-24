@@ -315,10 +315,16 @@ export async function replyPermission({ requestId, reply }) {
 // ---------------------------------------------------------------------------
 
 /** List pending questions from the Question tool.
+ *  Scoped to the session's directory when sessionId is provided, so questions
+ *  from the correct workspace are returned. Without scoping, opencode returns
+ *  questions for the default workspace only — causing the QuestionCard to
+ *  never appear for non-default sessions and the agent to hang forever.
+ *  @param {string} [sessionId]
  *  @returns {Promise<Array<{ id: string, sessionID: string, questions: Array<...>, ... }>>}
  */
-export async function listQuestions() {
-  const res = await fetch(apiUrl("/question"));
+export async function listQuestions(sessionId) {
+  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
+  const res = await fetch(apiUrl(`/question${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listQuestions ${res.status}: ${await res.text()}`);
   }

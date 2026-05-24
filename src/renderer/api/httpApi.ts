@@ -389,16 +389,16 @@ export const httpApi: Api = {
   opencodeQuestions: (sessionId) => rpc(IPC.opencodeQuestions, sessionId),
 
   /**
-   * Preload packs: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers })
+   * Preload packs: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers, sessionId })
    */
-  opencodeQuestionReply: (requestId, answers) =>
-    rpc(IPC.opencodeQuestionReply, { requestId, answers }),
+  opencodeQuestionReply: (requestId, answers, sessionId) =>
+    rpc(IPC.opencodeQuestionReply, { requestId, answers, sessionId }),
 
   /**
-   * Preload packs: ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId })
+   * Preload packs: ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId, sessionId })
    */
-  opencodeQuestionReject: (requestId) =>
-    rpc(IPC.opencodeQuestionReject, { requestId }),
+  opencodeQuestionReject: (requestId, sessionId) =>
+    rpc(IPC.opencodeQuestionReject, { requestId, sessionId }),
 
   // -- model picker --
   opencodeModels: () => rpc(IPC.opencodeModels),

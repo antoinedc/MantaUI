@@ -138,8 +138,8 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // → args[0] = { requestId, reply }; opencode.mjs replyPermission expects same shape
     "opencode:permission-reply": (input) => oc.replyPermission(input),
 
-    // preload: ipcRenderer.invoke(IPC.opencodeQuestions)  → no args
-    "opencode:questions": () => oc.listQuestions(),
+    // preload: ipcRenderer.invoke(IPC.opencodeQuestions, sessionId?)  → args[0] = sessionId
+    "opencode:questions": (sessionId) => oc.listQuestions(sessionId),
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers, sessionId })
     // → opencode.mjs replyQuestion expects { requestId, answers, sessionId }
