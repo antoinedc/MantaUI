@@ -1285,3 +1285,48 @@ export function classifyScrollForPin(
 ): boolean {
   return distFromBottom(metrics) <= thresholdPx;
 }
+
+/**
+ * Whether the viewport was at the tail of the transcript BEFORE the current
+ * commit grew the scroll container. Used by the post-commit layout effect
+ * to decide whether to glue to the new bottom.
+ *
+ * Why this exists — v3's bug (which v4 fixes):
+ *
+ *   v3 cached `pinnedToBottom.current` from `scroll` events and read the
+ *   cache from the `[messages]` effect. `scroll` events are async (rAF
+ *   batched) but `setMessages` → render → effect is synchronous in the
+ *   same task. So this sequence eats the user's scroll-up:
+ *
+ *     1. User wheels up 50px (scrollTop drops).
+ *     2. Streaming delta arrives in the SAME tick (very common during
+ *        active streaming — deltas land every few ms).
+ *     3. setMessages → render → effect runs with stale `pinned == true`
+ *        from the LAST scroll event, fires stickToBottom, snaps to tail.
+ *     4. Only NOW does the browser dispatch the scroll event for the
+ *        wheel-up — but it observes dist=0 (post-snap) and re-affirms
+ *        `pinned == true`. The user's scroll-up is silently erased.
+ *
+ *   The fix: don't rely on event-cached pin state for stick decisions.
+ *   Read the live DOM in a `useLayoutEffect` (runs synchronously post-
+ *   commit, pre-paint), and compute pre-commit dist as:
+ *
+ *     prevDist = max(0, prevScrollHeight - currentScrollTop - clientHeight)
+ *
+ *   `scrollTop` is unchanged by appending content (browsers preserve it),
+ *   so this gives the user's actual position before the new rows landed.
+ *   No event timing, no stale ref.
+ */
+export function wasAtBottomBeforeCommit(
+  prevScrollHeight: number,
+  currentScrollTop: number,
+  clientHeight: number,
+  thresholdPx: number = SCROLL_REPIN_PX,
+): boolean {
+  if (prevScrollHeight <= 0) return true; // first commit — pin
+  const prevDist = Math.max(
+    0,
+    prevScrollHeight - currentScrollTop - clientHeight,
+  );
+  return prevDist <= thresholdPx;
+}

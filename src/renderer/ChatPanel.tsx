@@ -13,7 +13,7 @@
 // No Electron-only deps — only `window.api.*` (the mobile HTTP server will
 // shim that surface).
 
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Highlight, themes, type Language } from "prism-react-renderer";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -62,6 +62,7 @@ import {
   countRunningSubagents,
   summarizeChildSession,
   classifyScrollForPin,
+  wasAtBottomBeforeCommit,
   type TruncationKind,
   type ContextBreakdown,
   type StaleCacheResult,
@@ -1530,41 +1531,65 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
   }, [sessionId]);
 
-  // Pinned-to-bottom detection — single symmetric threshold, pure observation.
+  // Pinned-to-bottom detection — derive pin state from the PRE-commit DOM,
+  // not from event-cached state.
   //
-  // Two previous designs both bled the "snap-back during streaming" bug:
+  // Prior designs and the bug they each hit:
   //
   //   v1 (pre-631b03e): symmetric 80px threshold. A 30px scroll-up left
   //     dist=30 < 80, the next delta saw `pinned === true`, snap. Lost.
   //
   //   v2 (631b03e): tight 8px re-pin + wheel/touch/key "intent" un-pin.
   //     wheel-up explicitly unpinned regardless of distance, fixing v1.
-  //     But missed two real-world scroll paths:
-  //       - scrollbar-handle drag (no wheel/touch/key — only `scroll`
-  //         event); the handler only RE-pinned, never UN-pinned.
-  //       - the `running` false→true edge effect force-pinned on every
-  //         `session.status` busy/idle oscillation during multi-step
-  //         turns, regardless of user intent. Multiple snaps per turn.
+  //     Missed scrollbar-handle drag (no wheel/touch/key) and got snapped
+  //     by the `running` false→true edge effect on busy/idle oscillations.
   //
-  // v3 (here): pure observation, single 8px symmetric threshold. The
-  // browser fires `scroll` for every cause (wheel, touch, key, scrollbar
-  // drag, momentum, our own writes), so one listener is the only signal
-  // needed. `classifyScrollForPin` is a pure boolean: `dist <= 8 → pin`,
-  // otherwise unpin. Each scroll event correctly reflects current position
-  // — no stale state, no flapping. Don't reintroduce wheel/touch/key
-  // listeners or a `programmaticScroll` guard; they were load-bearing only
-  // for v2's missing un-pin path.
+  //   v3 (f1b7341): single 8px symmetric threshold + one `scroll` listener.
+  //     Right idea, wrong substrate. `scroll` events are dispatched
+  //     asynchronously (rAF-batched in modern browsers), but
+  //     setMessages → render → effect is synchronous in the SAME task. So
+  //     this sequence eats the user's scroll-up during active streaming:
   //
-  // Force-pin paths are explicit and limited to user actions: `submit()`
+  //       1. User wheels up 50px. scrollTop drops synchronously.
+  //       2. Streaming delta lands in the same tick. setMessages fires.
+  //       3. Effect runs with stale `pinned == true` from the LAST scroll
+  //          event, calls stickToBottom, scrollTop = scrollHeight.
+  //       4. Only NOW does the queued scroll event for the wheel-up
+  //          dispatch. It observes dist=0 (post-snap) and reaffirms
+  //          `pinned == true`. The user's wheel-up is silently erased.
+  //
+  //     During heavy streaming (deltas every few ms) this happens on
+  //     virtually every wheel attempt, hence "still jumping to bottom."
+  //
+  // v4 (here): the post-commit stick decision reads the live DOM in a
+  // `useLayoutEffect` (synchronous post-commit, pre-paint) and computes
+  // pre-commit distance against the PREVIOUS render's scrollHeight:
+  //
+  //     prevDist = max(0, prevScrollHeight - scrollTop - clientHeight)
+  //
+  // `scrollTop` is preserved by the browser when content is appended, so
+  // this is the user's actual position before the new rows landed. No
+  // event timing, no stale ref. The `scroll` listener is kept as a
+  // back-channel for callers that need the boolean outside the messages
+  // commit (the RunningIndicator `atBottom` prop, the resizeInput
+  // re-stick, the isActive re-pin), but it is no longer load-bearing for
+  // the streaming case.
+  //
+  // Force-pin paths stay explicit and limited to user actions: `submit()`
   // and `sendQueuedRef.current()` set `pinnedToBottom.current = true`
-  // right before their optimistic setMessages so the user sees their own
-  // message land. The old running-edge effect is gone — it was the source
-  // of mid-turn snaps.
+  // AND reset `prevScrollHeight.current = 0` (so the next layout effect
+  // sticks unconditionally via the prevScrollHeight=0 → pin branch in
+  // `wasAtBottomBeforeCommit`).
   const stickToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, []);
+  // Tracks the scrollHeight as of the last completed commit. The layout
+  // effect compares this against the live DOM to derive whether the user
+  // WAS pinned before the new content landed. Reset to 0 on session
+  // change and on explicit force-pin (submit/sendQueued).
+  const prevScrollHeight = useRef(0);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1581,21 +1606,42 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
   }, []);
 
-  // On every messages update (initial fetch, refetch, or in-flight delta),
-  // if we're pinned to the bottom, glue to it. Streaming text triggers this
-  // many times per second so the viewport follows the tail naturally.
-  // Also re-pins on `liveTodos` changes: the live todo list now renders
-  // inside the scroll container at the tail of the transcript while a turn
-  // is running, and `todo.updated` events update it independently of
-  // `messages`. Without this dep, growing a checklist mid-turn would leave
-  // the viewport parked above the new rows even when the user was pinned to
-  // the bottom. We use `liveTodos` (not the derived `activeTodos`) to dodge
-  // a TDZ — `activeTodos` is a useMemo declared later in the component.
+  // Reset prevScrollHeight when the session id changes — the new session's
+  // first messages commit must pin unconditionally (the initial render's
+  // scrollHeight is 0 anyway, but being explicit guards against effect
+  // ordering surprises if anything else resets `messages` to null first).
   useEffect(() => {
-    if (pinnedToBottom.current) {
-      stickToBottom();
+    prevScrollHeight.current = 0;
+    pinnedToBottom.current = true;
+  }, [sessionId]);
+
+  // On every messages / liveTodos commit: if the user WAS at the tail
+  // before this commit grew the container, glue to the new tail. Layout
+  // effect — runs synchronously post-commit, pre-paint, so the user never
+  // sees the brief mid-frame where the viewport is partway down.
+  //
+  // The decision uses `prevScrollHeight.current` (the height as of the
+  // last commit), NOT a cached pin boolean. `scrollTop` in the live DOM is
+  // unchanged by appending content, so `prevScrollHeight - scrollTop -
+  // clientHeight` is the user's actual pre-commit distance from bottom.
+  // This is robust against the v3 streaming-snap-back race because we
+  // never consult the async-dispatched scroll event for stick decisions.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const wasPinned = wasAtBottomBeforeCommit(
+      prevScrollHeight.current,
+      el.scrollTop,
+      el.clientHeight,
+    );
+    if (wasPinned) {
+      el.scrollTop = el.scrollHeight;
+      pinnedToBottom.current = true;
+    } else {
+      pinnedToBottom.current = false;
     }
-  }, [messages, liveTodos, stickToBottom]);
+    prevScrollHeight.current = el.scrollHeight;
+  }, [messages, liveTodos]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -1612,14 +1658,32 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Textarea auto-resize up to a 6-line cap. After resizing, if the scroll
   // container is pinned to bottom we re-scroll so the input growing pushes
   // the chat content up rather than sliding over it.
+  //
+  // Reads the LIVE DOM pin state rather than the event-cached
+  // `pinnedToBottom.current`. The cache lags scroll events (rAF-batched
+  // dispatch), so if a user scrolled up to read history and then typed a
+  // character, the cache could be stale=true and we'd snap them back.
+  // The live read uses `classifyScrollForPin` directly against the
+  // pre-resize scrollHeight, which is what the user actually sees.
   const resizeInput = useCallback(() => {
     const el = inputRef.current;
     if (!el) return;
+    const scroller = scrollRef.current;
+    const wasAtBottom = scroller
+      ? classifyScrollForPin({
+          scrollHeight: scroller.scrollHeight,
+          scrollTop: scroller.scrollTop,
+          clientHeight: scroller.clientHeight,
+        })
+      : false;
     el.style.height = "auto";
     const cap = 6 * 20;
     el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
-    if (pinnedToBottom.current) {
+    if (wasAtBottom) {
       stickToBottom();
+      // Resync derived state so a subsequent layout effect agrees.
+      pinnedToBottom.current = true;
+      if (scroller) prevScrollHeight.current = scroller.scrollHeight;
     }
   }, [stickToBottom]);
   useEffect(() => {
@@ -1657,18 +1721,23 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   // Re-pin to bottom when this panel becomes active again. GOTCHA: while
   // App.tsx hides an inactive panel with `display:none`, the scroll
-  // container has no layout — `scrollHeight` reads 0, so the `[messages]`
-  // effect's `el.scrollTop = el.scrollHeight` becomes a no-op write of 0.
-  // New messages keep accumulating in the DOM while hidden, and when the
-  // user switches back the viewport is parked at the top of the (now-
+  // container has no layout — `scrollHeight` reads 0, so the post-commit
+  // layout effect's `el.scrollTop = el.scrollHeight` becomes a no-op write
+  // of 0. New messages keep accumulating in the DOM while hidden, and when
+  // the user switches back the viewport is parked at the top of the (now-
   // tall) container even though `pinnedToBottom.current` is still true.
   // RAF after the display flip so layout is live and scrollHeight reflects
-  // the full transcript.
+  // the full transcript. Also resync `prevScrollHeight.current` to the
+  // post-stick scrollHeight so the next [messages] layout effect doesn't
+  // see a stale (small) prevScrollHeight and misderive that the user
+  // scrolled up by `currentScrollHeight - prevScrollHeight`.
   useEffect(() => {
     if (!isActive) return;
     if (!pinnedToBottom.current) return;
     const raf = requestAnimationFrame(() => {
       stickToBottom();
+      const el = scrollRef.current;
+      if (el) prevScrollHeight.current = el.scrollHeight;
     });
     return () => cancelAnimationFrame(raf);
   }, [isActive, stickToBottom]);
@@ -1717,12 +1786,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     // strip it by id in the catch block.
     //
     // Force-pin to bottom BEFORE the setMessages commit so the
-    // [messages, liveTodos] effect snaps to the freshly-appended turn even
-    // if the user had scrolled up to read history. This is the only
-    // legitimate force-pin path — the previous design fired on every
+    // [messages, liveTodos] layout effect snaps to the freshly-appended
+    // turn even if the user had scrolled up to read history. This is the
+    // only legitimate force-pin path — the previous design fired on every
     // `running` false→true edge, which incorrectly yanked the viewport on
     // every busy/idle oscillation during multi-step turns.
+    //
+    // Reset `prevScrollHeight.current = 0` so the layout effect's
+    // `wasAtBottomBeforeCommit` short-circuits to true (its first-commit
+    // branch). Without this, a user who had scrolled mid-history before
+    // submitting a new turn would still NOT auto-scroll to their own
+    // optimistic message, because the pre-commit dist would correctly
+    // read "above threshold."
     pinnedToBottom.current = true;
+    prevScrollHeight.current = 0;
     const optimisticUserId = `optimistic-user-${Date.now()}`;
     setMessages((prev) => [
       ...(prev ?? []),
@@ -1910,7 +1987,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setMessageQueue(rest);
     // Force-pin to bottom — same rationale as submit(). The user is having
     // a queued turn dispatched, they want to see it land in the transcript.
+    // Reset prevScrollHeight to 0 so the layout effect's
+    // `wasAtBottomBeforeCommit` short-circuits (first-commit branch).
     pinnedToBottom.current = true;
+    prevScrollHeight.current = 0;
     const optimisticUserId = `optimistic-user-${Date.now()}`;
     setMessages((prev) => [
       ...(prev ?? []),

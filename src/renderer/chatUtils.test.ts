@@ -39,6 +39,7 @@ import {
   SCROLL_REPIN_PX,
   distFromBottom,
   classifyScrollForPin,
+  wasAtBottomBeforeCommit,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -1993,5 +1994,58 @@ describe("classifyScrollForPin", () => {
   it("respects custom threshold", () => {
     expect(classifyScrollForPin(metricsAtDist(20), 32)).toBe(true);
     expect(classifyScrollForPin(metricsAtDist(33), 32)).toBe(false);
+  });
+});
+
+// ===== wasAtBottomBeforeCommit (v4 — pre-commit pin derivation) =====
+
+describe("wasAtBottomBeforeCommit", () => {
+  it("returns true when previous layout had the user pinned at the bottom", () => {
+    // prevScrollHeight=1000, clientHeight=200 → bottom is scrollTop=800.
+    // scrollTop is unchanged by appending content, so a still-at-bottom
+    // reader has scrollTop=800 even after scrollHeight grows.
+    expect(wasAtBottomBeforeCommit(1000, 800, 200)).toBe(true);
+  });
+
+  it("returns true within the 8px threshold", () => {
+    expect(wasAtBottomBeforeCommit(1000, 800 - SCROLL_REPIN_PX, 200)).toBe(true);
+    expect(wasAtBottomBeforeCommit(1000, 800 - SCROLL_REPIN_PX + 1, 200)).toBe(true);
+  });
+
+  it("returns false when the user scrolled up past the threshold", () => {
+    expect(wasAtBottomBeforeCommit(1000, 800 - SCROLL_REPIN_PX - 1, 200)).toBe(false);
+    expect(wasAtBottomBeforeCommit(1000, 500, 200)).toBe(false);
+  });
+
+  it("returns true on first commit (prevScrollHeight=0) so initial render pins", () => {
+    expect(wasAtBottomBeforeCommit(0, 0, 200)).toBe(true);
+  });
+
+  it("REGRESSION (v3 streaming snap-back): if user wheeled up 50px right before a delta lands, the post-commit effect must NOT stick", () => {
+    // Sequence:
+    //   - Before user input: scrollHeight=1000, scrollTop=800 (at bottom).
+    //   - User wheels up 50px. Browser updates scrollTop=750 synchronously.
+    //   - Before the browser dispatches the scroll event, a streaming
+    //     delta lands and React commits. scrollHeight now = 1100 (delta
+    //     added 100px of content). clientHeight unchanged at 200.
+    //     scrollTop is preserved by the browser at 750.
+    //   - The post-commit layout effect reads (prevScrollHeight=1000,
+    //     scrollTop=750, clientHeight=200) → prevDist = 1000 - 750 - 200
+    //     = 50 → above threshold → DON'T stick.
+    expect(wasAtBottomBeforeCommit(1000, 750, 200)).toBe(false);
+  });
+
+  it("REGRESSION (v3 streaming snap-back): if user did NOT scroll, post-commit effect still sticks even though new scrollHeight is larger", () => {
+    // Same setup minus the wheel: scrollTop stays at 800 (the pre-commit
+    // bottom). New scrollHeight is 1100, but we evaluate against the
+    // prevScrollHeight (1000) → prevDist = 0 → stick.
+    expect(wasAtBottomBeforeCommit(1000, 800, 200)).toBe(true);
+  });
+
+  it("respects custom threshold", () => {
+    // prevScrollHeight=1000, clientHeight=200 → bottom=800. scrollTop=775
+    // → prevDist=25.
+    expect(wasAtBottomBeforeCommit(1000, 775, 200, 32)).toBe(true);
+    expect(wasAtBottomBeforeCommit(1000, 760, 200, 32)).toBe(false);
   });
 });
