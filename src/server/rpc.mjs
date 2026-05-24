@@ -75,19 +75,21 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // preload: ipcRenderer.invoke(IPC.tmuxRestoreConfig)  → no args
     "tmux:restore-config": () => local.tmuxRestoreConfig(),
 
-    // Setup wizard — desktop-only feature today. The mobile server runs
-    // locally on the box already, so the user has already done the
-    // bootstrap. Return a stub probe that flags everything as "n/a" so
-    // the UI doesn't show false negatives if it's ever opened on mobile.
+    // Setup wizard — desktop-only feature today. Mobile server runs
+    // locally on the box (no SSH hop), so the wizard's "ssh → tmux →
+    // opencode → auth" probe doesn't map onto its environment. We
+    // return allOk:false with explanatory n/a details so the UI shows
+    // "not applicable" rather than silently lying "all green" if a user
+    // ever opens Settings on mobile.
     "setup:probe": () => ({
       checks: [
-        { name: "ssh", ok: true, detail: "n/a (mobile server runs on the box)" },
-        { name: "tmux", ok: true, detail: "n/a" },
-        { name: "opencode", ok: true, detail: "n/a" },
-        { name: "opencodeAuthPlugin", ok: true, detail: "n/a" },
-        { name: "anthropicAuth", ok: true, detail: "n/a" },
+        { name: "ssh", ok: false, detail: "n/a — mobile server runs locally on the box" },
+        { name: "tmux", ok: false, detail: "n/a — desktop-only wizard" },
+        { name: "opencode", ok: false, detail: "n/a — desktop-only wizard" },
+        { name: "opencodeAuthPlugin", ok: false, detail: "n/a — desktop-only wizard" },
+        { name: "anthropicAuth", ok: false, detail: "n/a — desktop-only wizard" },
       ],
-      allOk: true,
+      allOk: false,
     }),
     "setup:bootstrap": () => ({
       ok: false,

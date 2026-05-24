@@ -41,12 +41,24 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [restoring, setRestoring] = useState(false);
   const [settingUp, setSettingUp] = useState(false);
   // Setup wizard — probe runs the diagnostic, bootstrap installs opencode.
-  // Both target the *saved* config (the user must Save first if they
-  // changed host/user/key).
+  // Both target the *saved* config (Electron IPC reads from main process
+  // state, not the form). We disable the buttons while the form is dirty
+  // so a user can't run probe against stale values and get confused by
+  // the result (regression-bait if you forget — verified live during PR
+  // self-review).
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
   const [bootstrapping, setBootstrapping] = useState(false);
   const [bootstrapResult, setBootstrapResult] = useState<BootstrapResult | null>(null);
+
+  // True iff any connection-related field differs from the saved config.
+  // We compare against the values that probe/bootstrap actually use
+  // (host, user, identityFile). Transport/uploadCleanupHours/etc. don't
+  // affect the wizard and shouldn't gate it.
+  const connectionDirty =
+    h.trim() !== host ||
+    u.trim() !== (user ?? "") ||
+    k.trim() !== (identityFile ?? "");
   // Default model selection
   const [models, setModels] = useState<OpencodeModel[] | null>(null);
   const [selectedModel, setSelectedModel] = useState<{ providerID: string; modelID: string } | null>(
@@ -108,7 +120,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
   const runProbe = async () => {
     setProbing(true);
-    setBootstrapResult(null);
     try {
       const r = await window.api.setupProbe();
       setProbeResult(r);
@@ -121,11 +132,26 @@ export function Settings({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // User-initiated probe (button click) clears any prior bootstrap log
+  // so the new probe result isn't visually competing with a stale log.
+  // runBootstrap → runProbe must NOT clear bootstrapResult, otherwise the
+  // bootstrap log flashes for one React commit then disappears (the whole
+  // point of the log pane is to read what bootstrap did).
+  const runProbeFromButton = async () => {
+    setBootstrapResult(null);
+    await runProbe();
+  };
+
   const runBootstrap = async () => {
     if (!confirm(
       "Install opencode on the remote and add the Claude auth plugin?\n\n" +
-      "This runs the official opencode installer (curl | bash) and writes " +
-      "~/.config/opencode/opencode.jsonc. Safe to re-run.",
+      "• Runs the official opencode installer (curl https://opencode.ai/install | bash) " +
+      "if opencode isn't already present.\n" +
+      "• Merges the opencode-claude-auth plugin into ~/.config/opencode/opencode.jsonc, " +
+      "preserving your existing keys. If you already have a plugin (with or without an " +
+      "@version pin), no change is made. If the file is unparseable, it's backed up to " +
+      "opencode.jsonc.pre-bui before being replaced.\n\n" +
+      "Safe to re-run.",
     )) return;
     setBootstrapping(true);
     try {
@@ -425,20 +451,25 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <div className="text-xs text-text-faint">
             Verify the remote host has everything bui needs: ssh reachable, tmux
             installed, opencode installed, and Anthropic auth wired up for chat
-            mode. Save your changes above first — these run against the saved
-            config.
+            mode.
           </div>
+          {connectionDirty && (
+            <div className="text-xs text-amber-400">
+              You have unsaved connection changes. Save first — the wizard runs
+              against the saved host/user/identity.
+            </div>
+          )}
           <div className="flex gap-2">
             <button
-              onClick={runProbe}
-              disabled={!host || probing || bootstrapping}
+              onClick={runProbeFromButton}
+              disabled={!host || probing || bootstrapping || connectionDirty}
               className="text-xs px-3 py-1.5 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {probing ? "Testing…" : "Test connection"}
             </button>
             <button
               onClick={runBootstrap}
-              disabled={!host || probing || bootstrapping}
+              disabled={!host || probing || bootstrapping || connectionDirty}
               className="text-xs px-3 py-1.5 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {bootstrapping ? "Bootstrapping…" : "Bootstrap remote"}

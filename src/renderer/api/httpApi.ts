@@ -143,6 +143,15 @@ function wsUrl(): string {
 // socket), so swapping `es` is transparent to every on() consumer. The
 // {kind,payload} frame is byte-identical to the old SSE envelope, so the
 // dispatch body is unchanged.
+//
+// GOTCHA: serverBase() can throw if localStorage["bui_server"] is unset on
+// a non-localhost page (mobile/web descope — fail-fast intent). This
+// function is called synchronously from on() inside React useEffects, so
+// an uncaught throw white-screens the renderer with no recovery path.
+// Catch the throw here, log once, and let the next openStream() call
+// retry (the user typically fixes it by entering a server URL and
+// reloading). The `bootError` from refresh() carries the user-facing
+// message; we just need to not crash before that surfaces.
 function openStream() {
   if (es && (es.readyState === WebSocket.OPEN || es.readyState === WebSocket.CONNECTING)) {
     return;
@@ -151,7 +160,19 @@ function openStream() {
   if (es) {
     try { es.close(); } catch { /* already dead */ }
   }
-  es = new WebSocket(wsUrl());
+  let url: string;
+  try {
+    url = wsUrl();
+  } catch (e) {
+    // No server URL configured. Log once for DevTools and bail — refresh()
+    // will produce its own bootError that the UI renders.
+    console.warn(
+      "[bui] events WebSocket not opened:",
+      e instanceof Error ? e.message : String(e),
+    );
+    return;
+  }
+  es = new WebSocket(url);
   es.onmessage = (m) => {
     try {
       const { kind, payload } = JSON.parse(m.data as string) as {
