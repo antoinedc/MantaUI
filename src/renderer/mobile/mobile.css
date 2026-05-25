@@ -44,6 +44,14 @@ body,
   background: #0e0f12;
   transition: transform 220ms ease;
   will-change: transform;
+  /* Defense-in-depth against horizontal rubber-band scroll on iOS Safari /
+     Capacitor: if any descendant's intrinsic min-content width exceeds the
+     viewport (long unbreakable tmux session name, etc.), iOS treats the
+     overflowing axis as scrollable AND bouncy. The .mobile-body already
+     clips, but list/settings screens use `flex-1 overflow-auto` which is
+     bidirectional — clamp at the screen root so the bounce can't escape. */
+  overflow-x: hidden;
+  max-width: 100%;
 }
 .mobile-screen--list-behind {
   transform: translateX(-22%);
@@ -61,6 +69,12 @@ body,
   border-radius: 12px;
   background: #15171c;
   border: 1px solid transparent;
+  /* Cap so the row never exceeds the screen width even if a child fails to
+     shrink (e.g. tmux session name too long; the truncate child needs a
+     min-width:0 chain, which Tailwind's `min-w-0` provides on the inner
+     span but not on the row itself). 16px = the row's 2×8px outer margin. */
+  max-width: calc(100% - 16px);
+  box-sizing: border-box;
 }
 .mobile-row:active {
   border-color: #383c47;
@@ -273,6 +287,27 @@ body,
    16px defeats the auto-zoom without compromising the rest of the layout. */
 .mobile-body textarea {
   font-size: 16px;
+}
+
+/* Session-list & settings scrollers: their JSX uses `overflow-auto` which on
+   iOS is bidirectional and rubber-bands horizontally when the content's
+   intrinsic min-width matches viewport width to the pixel. We never want a
+   horizontal scroll on these screens — the rows are sized to fit. */
+.mobile-screen [class*="overflow-auto"] {
+  overflow-x: hidden;
+}
+
+/* The project-section header in the list (`px-4 pt-3 pb-1 flex
+   items-center justify-between`) holds a `truncate` child for the tmux
+   session name. Tailwind's truncate is `overflow:hidden;
+   text-overflow:ellipsis; white-space:nowrap` — but a flex child only
+   truncates if its flex parent allows it to shrink below intrinsic min
+   (i.e. has `min-width: 0`). On phone width a long session name pushes
+   the row past the screen. Scope this strictly to the list scroller (the
+   `.mobile-screen [class*="overflow-auto"]` clamped above) so it can't
+   reach ChatPanel/Terminal subtrees inside SessionScreen's `.mobile-body`. */
+.mobile-screen [class*="overflow-auto"] .flex {
+  min-width: 0;
 }
 
 /* Bottom-sheet for session actions (fork/compact/delete/rename). */
