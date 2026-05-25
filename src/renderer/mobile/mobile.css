@@ -78,7 +78,12 @@ body,
   align-items: center;
   gap: 8px;
   min-height: 52px;
-  padding: 8px 12px;
+  /* iOS notch / Android status bar overlay the header in PWA / Capacitor full-
+     screen mode. Inset the TOP padding by safe-area-inset-top so the back
+     button and title clear the status bar. Falls back to 8px on devices
+     without safe-area support (desktop browsers, older Android). Mirrors the
+     bottom inset already applied on `.mobile-body`. */
+  padding: max(env(safe-area-inset-top), 8px) 12px 8px;
   border-bottom: 1px solid #262932;
   flex: none;
 }
