@@ -935,6 +935,34 @@ before the OS prompt fires.
   "command" button to the composer. Mobile composer real estate is
   already tight (see "Reshaping reused ChatPanel/Terminal internals on
   mobile" above).
+- **`useVoiceRecorder` owns the long-press → command promotion** — the
+  button passes `start("dictate")` and the HOOK schedules the
+  `longPressMs` timer that flips its own `modeRef` + the exposed
+  `mode` state. The MicButton reads `mode` from the hook for its
+  label. Do NOT reintroduce a parallel `modeRef` in the button —
+  that was PR #4's W2 bug: the button promoted its own ref but never
+  told the hook, so long-press on touch always transcribed as
+  dictate. The hook's `mode` is the single source of truth.
+- **`MediaRecorder.start(250)` timeslice** — without it, iOS WKWebView
+  17.x sometimes delivers the final `dataavailable` AFTER `onstop`,
+  leaving an empty chunks array. 250ms forces periodic emission. The
+  chunks just concatenate in the Blob constructor.
+- **Cancel checked AFTER `getUserMedia` resolves** — a fast press
+  release (cancel before mic permission resolves) used to leave the
+  recorder running until the 60s `maxDurationMs` cap. We check
+  `cancelledRef.current` between the await and the recorder
+  construction; if true, tear the stream tracks down and bail.
+- **Phase guard uses a ref, not state** — `phaseRef.current` is
+  updated synchronously by `setPhaseSync` so two `pointerdown` events
+  inside the same React commit can't both pass the re-entrancy guard.
+- **Voice action dispatcher picks the NEWEST pending card** via a
+  local `findLast` helper, not `.find()`. Matches the visual stack:
+  the topmost PermissionCard / QuestionCard is the most recent ask,
+  which is what the user is looking at when they say "yes" / "reject".
+- **"reject" falls through from permission to question** — when no
+  permission is pending but a question is, "reject" dismisses the
+  question via `rejectQuestion`. `allow-once` / `allow-always` have
+  no question equivalent and surface a hint if no permission is open.
 - Rules-first classifier — never go LLM-only. The bare `yes`/`no` /
   `clear` / `compact` paths fire in ~0ms with no token spend.
 - Batch transcription (no streaming) — Groq's HTTP API has no native

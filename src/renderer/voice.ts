@@ -45,7 +45,22 @@ export type UseVoiceRecorderOptions = {
   // 60s — Groq's whisper-large-v3-turbo handles ~25MB / ~half hour per call,
   // but most conversational use is well under a minute.
   maxDurationMs?: number;
+  // Long-press threshold to promote a dictate-mode press to command mode
+  // on touch devices (no modifier key available). Default 500ms — the iOS
+  // standard for "long press". The hook owns this timer so the button
+  // doesn't need its own duplicate state (W2 from review: previously the
+  // button kept its own modeRef which never propagated to the hook, so
+  // long-press always transcribed as dictate).
+  longPressMs?: number;
 };
+
+// MediaRecorder timeslice. Without a timeslice argument, MediaRecorder is
+// spec'd to emit a single `dataavailable` at stop time — and on iOS 17.x
+// WKWebView that event sometimes fires AFTER `onstop`, leaving an empty
+// chunks array. 250ms forces periodic emission, so the Blob is whole by
+// the time onstop runs. The chunks just concatenate downstream — no logic
+// change. See PR #4 review (W1).
+const RECORDER_TIMESLICE_MS = 250;
 
 /**
  * Pick the best mimeType MediaRecorder supports on this platform. Order is
@@ -187,14 +202,34 @@ function stopRecorder(
  *
  * Re-entrancy: a second start() while already recording is a no-op.
  * Unmount stops cleanly so the mic LED doesn't stick on.
+ *
+ * The hook OWNS the long-press → command-mode promotion (W2 fix). Callers
+ * pass `start("dictate")` on press; the hook flips its own modeRef to
+ * "command" if the press hasn't released within `longPressMs`. `mode` is
+ * exposed read-only via the return value so the UI can re-label the
+ * button when promotion fires. Don't keep a parallel mode flag in the
+ * button or the two will drift.
  */
 export function useVoiceRecorder({
   onResult,
   onError,
   maxDurationMs = 60_000,
+  longPressMs = 500,
 }: UseVoiceRecorderOptions) {
   const [phase, setPhase] = useState<VoicePhase>("idle");
+  // mode is exposed so the UI can update its label when the hook promotes
+  // from dictate → command after longPressMs. The ref below is the source
+  // of truth at end-of-press; the state mirror is for re-renders.
+  const [mode, setMode] = useState<VoiceMode>("dictate");
   const [lastError, setLastError] = useState<string | null>(null);
+  // phaseRef shadows `phase` for synchronous re-entrancy guards. React
+  // state lags behind event handlers within the same commit (W4 from
+  // review: two pointerdowns could both pass the state-based guard).
+  const phaseRef = useRef<VoicePhase>("idle");
+  const setPhaseSync = useCallback((p: VoicePhase) => {
+    phaseRef.current = p;
+    setPhase(p);
+  }, []);
   // Refs so concurrent start/stop don't race against React render cycles —
   // we need to know IMMEDIATELY whether we're already mid-press.
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -204,12 +239,21 @@ export function useVoiceRecorder({
   const mimeRef = useRef<string>("");
   const cancelledRef = useRef<boolean>(false);
   const maxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Long-press promotion timer (W2). Cleared on stop/cancel/unmount.
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
 
   const reportError = useCallback(
     (err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
       setLastError(msg);
-      setPhase("error");
+      setPhaseSync("error");
       if (onError) {
         try {
           onError(err instanceof Error ? err : new Error(msg));
@@ -221,33 +265,66 @@ export function useVoiceRecorder({
         console.warn("[voice]", msg);
       }
     },
-    [onError],
+    [onError, setPhaseSync],
   );
 
   const start = useCallback(
-    async (mode: VoiceMode) => {
-      if (phase === "recording" || phase === "requesting" || phase === "processing") {
+    async (initialMode: VoiceMode) => {
+      // W4: ref-based guard. The state-based phase check used to leak
+      // double-presses inside the same React commit; phaseRef is updated
+      // synchronously via setPhaseSync so it can't lie.
+      if (
+        phaseRef.current === "recording" ||
+        phaseRef.current === "requesting" ||
+        phaseRef.current === "processing"
+      ) {
         return;
       }
       setLastError(null);
       cancelledRef.current = false;
-      modeRef.current = mode;
+      modeRef.current = initialMode;
+      setMode(initialMode);
+      // Schedule the dictate → command promotion. Only "dictate" presses
+      // get promoted; "command" (⌥-modifier) starts there and stays.
+      clearLongPressTimer();
+      if (initialMode === "dictate") {
+        longPressTimerRef.current = setTimeout(() => {
+          modeRef.current = "command";
+          setMode("command");
+          longPressTimerRef.current = null;
+        }, longPressMs);
+      }
       const mime = pickRecorderMime();
       mimeRef.current = mime;
       if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+        clearLongPressTimer();
         reportError(new Error("Microphone not available in this environment."));
         return;
       }
-      setPhase("requesting");
+      setPhaseSync("requesting");
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (e) {
+        clearLongPressTimer();
         reportError(
           e instanceof Error && e.name === "NotAllowedError"
             ? new Error("Microphone permission denied. Allow it in your browser/OS settings.")
             : (e as Error) ?? new Error("Could not access microphone."),
         );
+        return;
+      }
+      // W3: if the user already released (cancel() flipped cancelledRef
+      // while we were awaiting getUserMedia), abandon NOW — tear the mic
+      // down, don't construct a recorder that nothing will stop. Without
+      // this the maxDurationMs timer would record for the full 60s after
+      // a too-quick press.
+      if (cancelledRef.current) {
+        clearLongPressTimer();
+        for (const t of stream.getTracks()) {
+          try { t.stop(); } catch { /* ignore */ }
+        }
+        setPhaseSync("idle");
         return;
       }
       streamRef.current = stream;
@@ -257,6 +334,7 @@ export function useVoiceRecorder({
           ? new MediaRecorder(stream, { mimeType: mime })
           : new MediaRecorder(stream);
       } catch (e) {
+        clearLongPressTimer();
         stopRecorder(null, stream);
         streamRef.current = null;
         reportError(e);
@@ -277,6 +355,9 @@ export function useVoiceRecorder({
         reportError(err);
       };
       recorder.onstop = async () => {
+        // Long-press timer is one-shot for this press; clear it whether
+        // it fired or not.
+        clearLongPressTimer();
         // Tear down the mic immediately so the OS-level recording indicator
         // disappears even before the transcribe call returns.
         if (streamRef.current) {
@@ -296,7 +377,7 @@ export function useVoiceRecorder({
           chunksRef.current = [];
           recorderRef.current = null;
           streamRef.current = null;
-          setPhase("idle");
+          setPhaseSync("idle");
           return;
         }
         const chunks = chunksRef.current;
@@ -304,16 +385,16 @@ export function useVoiceRecorder({
         recorderRef.current = null;
         streamRef.current = null;
         if (chunks.length === 0) {
-          setPhase("idle");
+          setPhaseSync("idle");
           return;
         }
         const blob = new Blob(chunks, { type: mimeRef.current || "audio/webm" });
         if (blob.size < 1024) {
           // Too short — Groq returns "audio_too_short". Don't bother.
-          setPhase("idle");
+          setPhaseSync("idle");
           return;
         }
-        setPhase("processing");
+        setPhaseSync("processing");
         try {
           const buffer = await blob.arrayBuffer();
           const res = await window.api.voiceTranscribe({
@@ -322,7 +403,7 @@ export function useVoiceRecorder({
           });
           const text = res.text.trim();
           if (!text) {
-            setPhase("idle");
+            setPhaseSync("idle");
             return;
           }
           if (modeRef.current === "command") {
@@ -334,21 +415,25 @@ export function useVoiceRecorder({
           } else {
             onResult({ mode: "dictate", text });
           }
-          setPhase("idle");
+          setPhaseSync("idle");
         } catch (e) {
           reportError(e);
         }
       };
       try {
-        recorder.start();
+        // W1: 250ms timeslice so ondataavailable fires periodically.
+        // Without it, iOS WKWebView occasionally drops the final chunk
+        // when it arrives after onstop, leaving an empty Blob.
+        recorder.start(RECORDER_TIMESLICE_MS);
       } catch (e) {
+        clearLongPressTimer();
         stopRecorder(recorder, stream);
         recorderRef.current = null;
         streamRef.current = null;
         reportError(e);
         return;
       }
-      setPhase("recording");
+      setPhaseSync("recording");
       // Auto-stop after maxDurationMs so a stuck press doesn't burn quota.
       maxTimerRef.current = setTimeout(() => {
         if (recorderRef.current && recorderRef.current.state === "recording") {
@@ -360,10 +445,11 @@ export function useVoiceRecorder({
         }
       }, maxDurationMs);
     },
-    [phase, onResult, reportError, maxDurationMs],
+    [onResult, reportError, maxDurationMs, longPressMs, clearLongPressTimer, setPhaseSync],
   );
 
   const stop = useCallback(() => {
+    clearLongPressTimer();
     const rec = recorderRef.current;
     if (rec && rec.state !== "inactive") {
       try {
@@ -372,10 +458,11 @@ export function useVoiceRecorder({
         /* ignore */
       }
     }
-  }, []);
+  }, [clearLongPressTimer]);
 
   const cancel = useCallback(() => {
     cancelledRef.current = true;
+    clearLongPressTimer();
     const rec = recorderRef.current;
     const stream = streamRef.current;
     stopRecorder(rec, stream);
@@ -386,20 +473,21 @@ export function useVoiceRecorder({
     recorderRef.current = null;
     streamRef.current = null;
     chunksRef.current = [];
-    setPhase("idle");
-  }, []);
+    setPhaseSync("idle");
+  }, [clearLongPressTimer, setPhaseSync]);
 
   // Stop cleanly on unmount so the mic LED doesn't stick on if the user
   // navigates away mid-press.
   useEffect(() => {
     return () => {
       cancelledRef.current = true;
+      clearLongPressTimer();
       stopRecorder(recorderRef.current, streamRef.current);
       if (maxTimerRef.current) clearTimeout(maxTimerRef.current);
     };
-  }, []);
+  }, [clearLongPressTimer]);
 
-  return { phase, lastError, start, stop, cancel };
+  return { phase, mode, lastError, start, stop, cancel };
 }
 
 /**

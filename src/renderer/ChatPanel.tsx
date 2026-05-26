@@ -203,6 +203,17 @@ function mimeToInputMode(mime: string): "image" | "video" | "audio" | "pdf" | "o
 // Drag-drop has File.type for many cases; @-mention only has the path. The
 // FilePartInput's mime field is required by the API but opencode is tolerant
 // of generic types like `application/octet-stream`.
+// Array.findLast polyfill — ES2023, not in our ES2022 target. Returns the
+// last element matching `pred`, or undefined. Used by the voice action
+// dispatcher to pick the NEWEST pending permission/question (matches the
+// visual stack: topmost card is the most recent ask).
+function findLast<T>(arr: readonly T[], pred: (v: T) => boolean): T | undefined {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (pred(arr[i])) return arr[i];
+  }
+  return undefined;
+}
+
 function guessMime(filename: string): string {
   const ext = filename.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
@@ -2313,25 +2324,47 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         case "allow-once":
         case "allow-always":
         case "reject": {
-          // Oldest pending permission for THIS session; "reject" can also be
-          // an answer to a question, but we route to the more-urgent
-          // permission card when both are open (matches the visual stack
-          // order — PermissionCard renders above QuestionCard).
-          const pending = permissions.find((p) => p.sessionID === sessionId);
-          if (!pending) {
-            setSendError("No pending permission request to respond to.");
+          // PermissionCard renders above QuestionCard in the visual stack,
+          // so when both are open we route permission replies there. If
+          // no permission is pending and the action is "reject", fall
+          // through to question-rejection — the QuestionCard's Cancel
+          // button is the user's only other "reject" target (W6 fix:
+          // previously we surfaced "no pending permission" even when a
+          // question was the obvious target).
+          //
+          // We pick the LAST (newest) pending request, not the first —
+          // matches the visual order: the topmost card is the most
+          // recent ask. The .find()-from-end pattern is the W5 fix.
+          const lastPerm = findLast(permissions, (p) => p.sessionID === sessionId);
+          if (lastPerm) {
+            const reply =
+              action.kind === "allow-once" ? "once"
+                : action.kind === "allow-always" ? "always"
+                  : "reject";
+            replyPermission(lastPerm.id, reply);
             return;
           }
-          const reply =
-            action.kind === "allow-once" ? "once"
-              : action.kind === "allow-always" ? "always"
-                : "reject";
-          replyPermission(pending.id, reply);
+          // No permission pending. "reject" can still mean "dismiss the
+          // open question". "allow-once" / "allow-always" don't have a
+          // question equivalent — surface the hint.
+          if (action.kind === "reject") {
+            const lastQ = findLast(questions, (q) => q.sessionID === sessionId);
+            if (lastQ) {
+              rejectQuestion(lastQ);
+              return;
+            }
+          }
+          setSendError("No pending permission request to respond to.");
           return;
         }
         case "answer": {
-          const pending = questions.find((q) => q.sessionID === sessionId);
-          if (!pending || pending.questions.length === 0) {
+          // Newest question matches what's visually on top (W5). Same
+          // findLast pattern as the permission branch above.
+          const pending = findLast(
+            questions,
+            (q) => q.sessionID === sessionId && q.questions.length > 0,
+          );
+          if (!pending) {
             setSendError("No pending question to answer.");
             return;
           }
@@ -2382,6 +2415,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       abort,
       replyPermission,
       replyQuestion,
+      rejectQuestion,
     ],
   );
 
@@ -3484,6 +3518,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         setChatAutoAllow={setChatAutoAllow}
         voiceEnabled={voiceEnabled}
         voicePhase={voiceRecorder.phase}
+        voiceMode={voiceRecorder.mode}
         startVoice={voiceRecorder.start}
         stopVoice={voiceRecorder.stop}
         cancelVoice={voiceRecorder.cancel}
@@ -4496,13 +4531,14 @@ function QuestionCard({
 
 // Press-and-hold mic button. Plain tap = dictate (transcript inserted at
 // caret). Hold + ⌥ on desktop, or a long-press (≥500ms) on touch, = command
-// mode (transcript routed through the rules classifier + Groq llama). The
-// mode is decided at PRESS time and committed for that capture.
+// mode (transcript routed through the rules classifier + Groq llama).
 //
-// Why long-press for command mode on touch: most touch devices have no
-// usable modifier key, and adding a second button eats the already-tight
-// mobile composer footer. 500ms is the iOS standard for "long press" and
-// felt right in spike testing.
+// **Mode source of truth lives in `useVoiceRecorder`** — see the W2 fix in
+// PR #4 review. The previous design kept a parallel `modeRef` in the
+// button which never propagated to the hook, so long-press on touch
+// transcribed as dictate. The button now passes "dictate" or "command"
+// at press time (based on the ⌥ modifier) and the HOOK schedules the
+// long-press promotion + exposes the current mode for the label.
 //
 // Visual states (phase):
 //   - idle       → microphone glyph in text-muted
@@ -4512,36 +4548,30 @@ function QuestionCard({
 //   - error      → muted-red mic; click to retry by pressing again
 function MicButton({
   phase,
+  mode,
   onStart,
   onStop,
   onCancel,
 }: {
   phase: VoicePhase;
+  mode: VoiceMode;
   onStart: (mode: VoiceMode) => Promise<void>;
   onStop: () => void;
   onCancel: () => void;
 }) {
-  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const modeRef = useRef<VoiceMode>("dictate");
   const recording = phase === "recording" || phase === "requesting";
   const busy = phase === "processing";
 
-  // Pointer-based handlers — single code path for mouse + touch + pen, so
+  // Pointer-based handlers — single code path for mouse + touch + pen so
   // we don't have to worry about emulated mouse events firing AFTER touch
   // on iOS / Android WebView (the classic "double-tap" bug).
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     if (busy || recording) return;
     e.preventDefault();
-    // Desktop ⌥-modifier wins immediately. Touch users get the long-press
-    // promotion 500ms in.
-    const mode: VoiceMode = e.altKey ? "command" : "dictate";
-    modeRef.current = mode;
-    if (mode === "dictate") {
-      longPressTimer.current = setTimeout(() => {
-        modeRef.current = "command";
-      }, 500);
-    }
-    onStart(modeRef.current);
+    // Desktop ⌥-modifier promotes to command IMMEDIATELY. Otherwise we
+    // start in dictate and let the hook's longPressMs timer flip us.
+    const initial: VoiceMode = e.altKey ? "command" : "dictate";
+    onStart(initial);
     // Capture so onPointerUp fires even if the cursor leaves the button.
     try {
       (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
@@ -4549,32 +4579,19 @@ function MicButton({
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (longPressTimer.current) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
-    }
     if (!recording) return;
     e.preventDefault();
     onStop();
   };
 
   const handlePointerCancel = () => {
-    if (longPressTimer.current) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
-    }
     if (recording) onCancel();
   };
-
-  // Stop on unmount (in case the user navigates away mid-press).
-  useEffect(() => () => {
-    if (longPressTimer.current) clearTimeout(longPressTimer.current);
-  }, []);
 
   const label = busy
     ? "transcribing…"
     : recording
-      ? modeRef.current === "command"
+      ? mode === "command"
         ? "release · command"
         : "release · dictate"
       : "hold to speak (⌥ = command)";
@@ -4633,6 +4650,7 @@ function InputArea({
   setChatAutoAllow,
   voiceEnabled,
   voicePhase,
+  voiceMode,
   startVoice,
   stopVoice,
   cancelVoice,
@@ -4672,9 +4690,12 @@ function InputArea({
   setChatAutoAllow: (v: boolean) => Promise<void>;
   // Voice (Groq STT). When voiceEnabled=false the MicButton is hidden so
   // users without a configured API key never see the affordance. start/stop/
-  // cancel come from useVoiceRecorder; phase drives the icon state.
+  // cancel come from useVoiceRecorder; phase drives the icon state; mode is
+  // owned by the hook (W2: previously the button kept its own copy and the
+  // two drifted, so long-press never reached the hook as "command").
   voiceEnabled: boolean;
   voicePhase: VoicePhase;
+  voiceMode: VoiceMode;
   startVoice: (mode: VoiceMode) => Promise<void>;
   stopVoice: () => void;
   cancelVoice: () => void;
@@ -4833,6 +4854,7 @@ function InputArea({
         {voiceEnabled && (
           <MicButton
             phase={voicePhase}
+            mode={voiceMode}
             onStart={startVoice}
             onStop={stopVoice}
             onCancel={cancelVoice}
