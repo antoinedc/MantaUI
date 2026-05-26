@@ -50,5 +50,11 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<!-- Voice (Groq STT). iOS 10+ requires this string before
+	     getUserMedia({audio:true}) will resolve in WKWebView; without it
+	     the promise rejects with NotAllowedError before showing any
+	     prompt. Shown verbatim in the system permission dialog. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>bui uses the microphone to capture voice prompts for the AI assistant.</string>
 </dict>
 </plist>

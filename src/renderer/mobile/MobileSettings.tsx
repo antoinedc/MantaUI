@@ -32,6 +32,9 @@ export function MobileSettings({ onClose }: Props) {
     defaultModel,
     skillRegistryUrls,
     cacheTtl,
+    groqApiKey,
+    voiceTranscriptionModel,
+    voiceCommandModel,
     refresh,
   } = useStore();
 
@@ -56,6 +59,10 @@ export function MobileSettings({ onClose }: Props) {
   const [models, setModels] = useState<OpencodeModel[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedToast, setSavedToast] = useState(false);
+  // Voice / Groq. Empty key hides the mic in the composer.
+  const [groqKey, setGroqKey] = useState(groqApiKey);
+  const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
+  const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
 
   // Sync local state if store updates while screen is open (rare —
   // shouldn't happen during a single-screen edit, but matches the
@@ -65,7 +72,10 @@ export function MobileSettings({ onClose }: Props) {
     setSelectedModel(defaultModel ?? null);
     setTtl(cacheTtl);
     setRegistryUrls(skillRegistryUrls ?? []);
-  }, [chatAutoAllow, defaultModel, cacheTtl, skillRegistryUrls]);
+    setGroqKey(groqApiKey);
+    setVoiceTrModel(voiceTranscriptionModel);
+    setVoiceCmdModel(voiceCommandModel);
+  }, [chatAutoAllow, defaultModel, cacheTtl, skillRegistryUrls, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
 
   // Model list is best-effort — opencode unreachable just means the
   // picker shows only "opencode default". Same as desktop Settings.
@@ -93,6 +103,9 @@ export function MobileSettings({ onClose }: Props) {
         defaultModel: selectedModel ?? undefined,
         skillRegistryUrls: registryUrls,
         cacheTtl: ttl,
+        groqApiKey: groqKey.trim(),
+        voiceTranscriptionModel: voiceTrModel.trim(),
+        voiceCommandModel: voiceCmdModel.trim(),
       });
       await refresh();
       setSavedToast(true);
@@ -251,6 +264,63 @@ export function MobileSettings({ onClose }: Props) {
             Must match opencode's <code className="text-text-muted">cache_control.ttl</code> —
             bui only uses this to predict when a chat has gone stale (drives
             the "/clear to save Nk tokens" pill).
+          </div>
+        </section>
+
+        {/* Voice / Groq STT. Empty key disables the mic button. */}
+        <section className="space-y-2 pt-1 border-t border-border">
+          <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+            Voice (Groq)
+          </label>
+          <div className="text-xs text-text-faint">
+            Adds a push-to-talk mic to the composer. Tap = dictate. Long-press
+            (≥500ms) = command mode (say "clear", "compact", "use opus",
+            "answer two", …). Get a key at{" "}
+            <a
+              href="https://console.groq.com/keys"
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent"
+            >
+              console.groq.com/keys
+            </a>
+            .
+          </div>
+          <input
+            type="password"
+            placeholder="gsk_… (leave blank to disable)"
+            value={groqKey}
+            onChange={(e) => setGroqKey(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            autoCapitalize="off"
+            className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+          />
+          <div className="space-y-1">
+            <label className="block text-[10px] uppercase tracking-wider text-text-faint">
+              Transcription model
+            </label>
+            <input
+              placeholder="whisper-large-v3-turbo"
+              value={voiceTrModel}
+              onChange={(e) => setVoiceTrModel(e.target.value)}
+              spellCheck={false}
+              autoCapitalize="off"
+              className="w-full bg-bg-soft border border-border px-2 py-1.5 text-xs rounded focus:outline-none focus:border-accent font-mono"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-[10px] uppercase tracking-wider text-text-faint">
+              Command classifier model
+            </label>
+            <input
+              placeholder="llama-3.1-8b-instant"
+              value={voiceCmdModel}
+              onChange={(e) => setVoiceCmdModel(e.target.value)}
+              spellCheck={false}
+              autoCapitalize="off"
+              className="w-full bg-bg-soft border border-border px-2 py-1.5 text-xs rounded focus:outline-none focus:border-accent font-mono"
+            />
           </div>
         </section>
 

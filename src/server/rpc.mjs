@@ -1,6 +1,8 @@
 // Channel -> handler dispatch. Handlers are async (...args) => result.
 // Mirrors Electron ipcMain.handle semantics.
 
+import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
+
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
   if (!fn) throw new Error(`unknown rpc channel: ${channel}`);
@@ -95,6 +97,41 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
       ok: false,
       log: ["Bootstrap is a desktop-only feature. Run the wizard from the bui Mac app."],
     }),
+
+    // ---- voice (Groq STT + lightweight classifier) ----
+    //
+    // Same channel names + payload shapes as the desktop IPC, so the
+    // renderer code is identical. API key + model overrides come from the
+    // mobile-server config (~/.bui-mobile/config.json). Stored plaintext —
+    // same trust model as the rest of bui's credentials.
+    //
+    // preload: ipcRenderer.invoke(IPC.voiceTranscribe, { buffer, mime })
+    //   → args[0] = { buffer: ArrayBuffer, mime: string }
+    // NOTE: over the RPC wire the buffer arrives base64-encoded (see
+    // httpApi.ts) because the body is JSON. Decode here before handing
+    // to groq.mjs. Detected by typeof === "string".
+    "voice:transcribe": async (input) => {
+      const cfg = await local.configGet();
+      let buf = input?.buffer;
+      if (typeof buf === "string") buf = Buffer.from(buf, "base64");
+      return transcribeAudio({
+        buffer: buf,
+        mime: input?.mime ?? "audio/webm",
+        apiKey: cfg.groqApiKey ?? "",
+        model: cfg.voiceTranscriptionModel,
+      });
+    },
+
+    // preload: ipcRenderer.invoke(IPC.voiceClassifyCommand, { transcript, useLlmFallback? })
+    "voice:classify-command": async (input) => {
+      const cfg = await local.configGet();
+      return classifyVoiceCommand({
+        transcript: input?.transcript ?? "",
+        apiKey: cfg.groqApiKey ?? "",
+        model: cfg.voiceCommandModel,
+        useLlmFallback: input?.useLlmFallback,
+      });
+    },
 
     // preload: ipcRenderer.invoke(IPC.uploadFiles, { projectName, localPaths })
     // → args[0] = { projectName, localPaths }

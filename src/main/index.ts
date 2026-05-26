@@ -74,6 +74,11 @@ import {
   STREAM_STALL_MS,
 } from "./forwardHeal.js";
 import { buildRemoteConfigWriteCmd } from "./remoteConfigWrite.js";
+// Plain-JS modules shared with the mobile server (src/server/*.mjs). The
+// bundler resolves .mjs imports here; main.process never sees them as TS.
+// Types live in groq.d.mts. Keep them dep-free so they stay portable across
+// both transports.
+import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import {
   IPC,
   type AppConfig,
@@ -853,6 +858,38 @@ function registerHandlers(): void {
   // persisted).
   ipcMain.handle(IPC.setupProbe, () => setupProbe(config));
   ipcMain.handle(IPC.setupBootstrap, () => setupBootstrap(config));
+
+  // Voice / speech-to-text via Groq. Audio bytes are captured by the
+  // renderer (MediaRecorder) and shipped here so the API key never lives
+  // in the renderer process. See src/shared/groq.mjs for the HTTP layer
+  // and src/shared/voiceClassifier.mjs for the rules classifier.
+  ipcMain.handle(
+    IPC.voiceTranscribe,
+    async (_e, input: { buffer: ArrayBuffer; mime: string }) => {
+      const apiKey = config.groqApiKey;
+      const model = config.voiceTranscriptionModel;
+      return transcribeAudio({
+        buffer: input.buffer,
+        mime: input.mime,
+        apiKey: apiKey ?? "",
+        model,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC.voiceClassifyCommand,
+    async (_e, input: { transcript: string; useLlmFallback?: boolean }) => {
+      const apiKey = config.groqApiKey;
+      const model = config.voiceCommandModel;
+      return classifyVoiceCommand({
+        transcript: input.transcript,
+        apiKey: apiKey ?? "",
+        model,
+        useLlmFallback: input.useLlmFallback,
+      });
+    },
+  );
 
   // Phase 1 chat-mode: one-shot fetch of a session's transcript. Live updates
   // arrive separately via the opencodeEvent stream forwarded by startOpencodeBus.

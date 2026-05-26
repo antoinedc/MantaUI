@@ -51,6 +51,20 @@ export type AppConfig = {
   // Defaults to "1h" because that matches bui's typical multi-minute idle
   // pattern; cost-sensitive users can switch to "5m" in Settings.
   cacheTtl?: "5m" | "1h";
+  // ----- Voice / speech-to-text (Groq) -----
+  // API key for api.groq.com. Stored plaintext in config.json, same as other
+  // bui credentials (ssh identity path, opencode auth). Settings UI shows
+  // a masked password input. Absent → mic button is hidden in the UI.
+  groqApiKey?: string;
+  // Whisper-family transcription model. Default
+  // "whisper-large-v3-turbo" balances latency (~200-500ms for short clips)
+  // and accuracy. Override only if you have a reason (e.g. larger-v3 for
+  // non-English content where turbo regresses).
+  voiceTranscriptionModel?: string;
+  // Small instruct model used as a LAST-RESORT classifier when the rules
+  // classifier in chatUtils.ts can't match a command-mode utterance. Default
+  // "llama-3.1-8b-instant" — JSON-mode capable, ~$0.0001/call, ~300ms.
+  voiceCommandModel?: string;
 };
 
 export type TransportInfo = {
@@ -239,6 +253,17 @@ export const IPC = {
   // unmounts/remounts ChatPanel.
   opencodeClearSession: "opencode:clear-session",
 
+  // ---- voice (Groq STT + lightweight classifier) ----
+  // Renderer captures audio via MediaRecorder, ships the ArrayBuffer to
+  // main/server, which posts multipart to api.groq.com so the API key never
+  // touches the renderer process. Same channel + shape on desktop and
+  // mobile transports. `mode:"dictate"` returns the raw transcript.
+  // `mode:"command"` ALSO routes through the local rules classifier and
+  // (on no match) a Groq llama call returning { kind:"action", action, args }
+  // — see chatUtils.ts classifyVoiceCommand.
+  voiceTranscribe: "voice:transcribe",
+  voiceClassifyCommand: "voice:classify-command",
+
   // ---- setup wizard ----
   // One-shot diagnostic over SSH: returns the status of every remote
   // prerequisite bui depends on (ssh reachable, tmux installed, opencode
@@ -421,4 +446,61 @@ export type QuestionRequest = {
   // the ONLY id opencode's /question/{requestID}/reply|reject accepts. Absent
   // for transcript-only recovered questions (which are thus unanswerable).
   requestId?: string;
+};
+
+// ----- Voice / speech-to-text (Groq) -----
+
+// Input for voice:transcribe. `buffer` is the raw audio bytes captured by
+// MediaRecorder on the renderer side; `mime` is the recorder's mimeType
+// (e.g. "audio/webm;codecs=opus" on Chromium, "audio/mp4" on iOS Safari).
+export type VoiceTranscribeInput = {
+  buffer: ArrayBuffer;
+  mime: string;
+};
+
+export type VoiceTranscribeResult = {
+  text: string;
+};
+
+// All actions a voice command can dispatch. Renderer routes these to the
+// appropriate handler — most are ChatPanel-scoped (submit/clear/compact/
+// abort/model/answer-question/reply-permission), a couple are App-scoped
+// (switch-window/new-session). `text` for "submit" carries the dictated body.
+export type VoiceAction =
+  | { kind: "submit"; text: string }
+  | { kind: "append"; text: string } // insert into textarea, don't send
+  | { kind: "clear" }
+  | { kind: "compact" }
+  | { kind: "fork" }
+  | { kind: "abort" }
+  | { kind: "help" }
+  | { kind: "toggle-trust" }
+  // Model: a fuzzy name match the renderer resolves against its model list.
+  // We pass the user's spoken name and let the renderer pick the best match
+  // (the classifier doesn't have the model list on hand).
+  | { kind: "model"; query: string }
+  // Permission/question replies — only valid when the matching card is open.
+  | { kind: "allow-once" }
+  | { kind: "allow-always" }
+  | { kind: "reject" }
+  | { kind: "answer"; choice: string }   // matches a QuestionOption.label
+  // App-scoped: jump to (project, window) tuple by 1-based flat index.
+  | { kind: "switch-window"; index: number }
+  | { kind: "new-session" }
+  | { kind: "open-settings" }
+  | { kind: "unknown"; transcript: string };
+
+// Input for voice:classify-command. Server runs the rules classifier first,
+// falls back to a Groq llama call only if `useLlmFallback !== false`.
+export type VoiceClassifyInput = {
+  transcript: string;
+  useLlmFallback?: boolean;
+};
+
+export type VoiceClassifyResult = {
+  action: VoiceAction;
+  // "rules" → matched the local rules classifier (zero token cost).
+  // "llm"   → fell back to the Groq llama call.
+  // "none"  → both paths failed; action.kind === "unknown".
+  source: "rules" | "llm" | "none";
 };
