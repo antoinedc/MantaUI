@@ -188,14 +188,41 @@ describe("setChatRunning / setChatAttention", () => {
       expect(win.attentionKind).toBeUndefined();
     });
 
-    it("does NOT set attention when the user IS on the window", () => {
-      // QuestionCard / PermissionCard is right there in front of them —
-      // the sidebar dot would be redundant.
+    it("latches question attention EVEN when the user is on the window", () => {
+      // Blocking kinds ('question' / 'permission') must persist so that
+      // navigating away mid-turn still surfaces the indicator in the
+      // sidebar. The card is also visible inline; the sidebar dot is
+      // redundant-but-harmless while active and gets cleared on the
+      // next setActive() touch.
       useStore.setState({
         activeProjectName: "bui",
         activeWindowByProject: { bui: 0 },
       });
       useStore.getState().setChatAttention("ses_chat", "question");
+      expect(useStore.getState().status.bui[0]?.attention).toBe(true);
+      expect(useStore.getState().status.bui[0]?.attentionKind).toBe("question");
+    });
+
+    it("latches permission attention EVEN when the user is on the window", () => {
+      useStore.setState({
+        activeProjectName: "bui",
+        activeWindowByProject: { bui: 0 },
+      });
+      useStore.getState().setChatAttention("ses_chat", "permission");
+      expect(useStore.getState().status.bui[0]?.attention).toBe(true);
+      expect(useStore.getState().status.bui[0]?.attentionKind).toBe(
+        "permission",
+      );
+    });
+
+    it("does NOT set 'idle' attention when the user IS on the window", () => {
+      // Soft "go check" signal — if they're already looking at the
+      // window, there's nothing to go check.
+      useStore.setState({
+        activeProjectName: "bui",
+        activeWindowByProject: { bui: 0 },
+      });
+      useStore.getState().setChatAttention("ses_chat", "idle");
       expect(useStore.getState().status.bui[0]?.attention ?? false).toBe(false);
     });
 
