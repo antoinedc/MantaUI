@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseSessions } from "./tmux.mjs";
+import { parseSessions, isMissingSessionError } from "./tmux.mjs";
 
 test("parseSessions builds project list from tmux -F output", () => {
   const sess = "alpha\t1\nbeta\t0";
@@ -38,4 +38,47 @@ test("parseSessions extracts opencodeSessionId from the 6th column (chat windows
   const w2 = cap.windows.find((w) => w.index === 2);
   assert.equal(w1.opencodeSessionId, null, "plain window -> null (not undefined, not empty string)");
   assert.equal(w2.opencodeSessionId, "ses_1c9c9e6a2ffe", "chat window -> the session id");
+});
+
+// `newWindow` auto-heals when the project's tmux session has been destroyed
+// between calls (server restart, manual kill, destroy-unattached racing the
+// next click). This classifier gates that branch — false negatives leak
+// `tmux exited 1: can't find session: X` to the mobile client.
+
+test("isMissingSessionError matches tmux's 'can't find session' stderr", () => {
+  assert.equal(
+    isMissingSessionError(new Error("tmux exited 1: can't find session: asdfg"), "asdfg"),
+    true,
+  );
+});
+
+test("isMissingSessionError matches case-insensitively", () => {
+  assert.equal(
+    isMissingSessionError(new Error("Can't Find Session: foo"), "foo"),
+    true,
+  );
+});
+
+test("isMissingSessionError matches the 'session not found' phrasing", () => {
+  assert.equal(
+    isMissingSessionError(new Error("tmux exited 1: session not found: nw"), "nw"),
+    true,
+  );
+});
+
+test("isMissingSessionError returns false for unrelated tmux failures", () => {
+  assert.equal(
+    isMissingSessionError(new Error("tmux exited 1: duplicate session: x"), "x"),
+    false,
+  );
+  assert.equal(
+    isMissingSessionError(new Error("tmux exited 1: no server running"), "x"),
+    false,
+  );
+});
+
+test("isMissingSessionError returns false for non-Error inputs", () => {
+  assert.equal(isMissingSessionError(null, "x"), false);
+  assert.equal(isMissingSessionError(undefined, "x"), false);
+  assert.equal(isMissingSessionError("can't find session: x", "x"), false);
 });

@@ -243,6 +243,28 @@ async function maybeCreateChatSession(
   return sess.id;
 }
 
+// Session-level survivability options. Applied to bui-created sessions only —
+// never `-g`, so user-created tmux sessions outside bui keep tmux's defaults.
+//
+// - `exit-empty off`: keep the tmux SERVER alive even when no sessions exist.
+//   Without this, the server self-terminates when the last session dies; the
+//   next bui SSH call has to cold-start a new server (~50ms wasted) and any
+//   pending mosh-server processes lose their attach target.
+// - `destroy-unattached off`: keep this SESSION alive after the last client
+//   detaches. Default ON would tear down `asdfg` the moment the user closes
+//   the bui window, so a reopened bui sees "can't find session: asdfg" and
+//   the renderer alerts `ssh exited 1: can't find session: asdfg`. The
+//   tmuxNewWindow auto-heal below recovers from that, but keeping the session
+//   pinned is the right primary fix — it preserves window history, pane state,
+//   and the `@bui-session-id` stamps that chat-mode windows depend on.
+function sessionSurvivabilityCmd(name: string): string {
+  const target = shellQuote(name);
+  return (
+    `set-option -t ${target} exit-empty off \\; ` +
+    `set-option -t ${target} destroy-unattached off`
+  );
+}
+
 export async function tmuxNewSession(
   config: AppConfig,
   name: string,
@@ -255,8 +277,26 @@ export async function tmuxNewSession(
   const cmd =
     `tmux new-session -d -s ${shellQuote(name)} -n ${shellQuote(windowName)} ` +
     `-c ${pathQuote(cwd)} ${shellQuote(launchCmd)} \\; ` +
+    sessionSurvivabilityCmd(name) + ` \\; ` +
     perWindowOptsCmd(`${name}:${windowName}`, sid ?? undefined);
   await runSshOnce(config, cmd);
+}
+
+// True iff err's message matches tmux's "can't find session: X" stderr line.
+// tmux emits this exact phrasing (libgit-style apostrophe) when a target
+// session has been destroyed between the user's last interaction and the
+// next bui call. Pure + exported so the auto-heal branch in tmuxNewWindow
+// is covered by a unit test without spawning ssh.
+export function isMissingSessionError(err: unknown, sessionName: string): boolean {
+  if (!(err instanceof Error)) return false;
+  // Tmux: `can't find session: <name>` (lowercase, straight apostrophe).
+  // Match generously so a future locale or punctuation tweak still triggers
+  // the heal — false positives just cost an extra new-session call.
+  if (/can.?t find session/i.test(err.message)) return true;
+  // Belt-and-braces: tmux 3.x sometimes prefixes with the session name when
+  // the command form was `tmux -t NAME` rather than passing it in args.
+  if (err.message.includes(`session not found: ${sessionName}`)) return true;
+  return false;
 }
 
 export async function tmuxNewWindow(
@@ -287,7 +327,27 @@ export async function tmuxNewWindow(
     `tmux new-window -a -t ${shellQuote(`${sessionName}:{end}`)} -n ${shellQuote(windowName)} ` +
     `-c ${pathQuote(cwd)} ${shellQuote(launchCmd)} \\; ` +
     perWindowOptsCmd(target, sid ?? undefined);
-  await runSshOnce(config, cmd);
+  try {
+    await runSshOnce(config, cmd);
+  } catch (err) {
+    // Auto-heal: the project's tmux session was destroyed (server restart,
+    // last window manually killed, etc.). Recreate it with this window as
+    // its FIRST window — same effect as new-window, no data lost (there
+    // were no other windows to lose). Without this branch the user sees
+    // `ssh exited 1: can't find session: <project>` and has to recreate
+    // the project from the sidebar.
+    //
+    // Note: we DON'T retry maybeCreateChatSession — `sid` is already
+    // resolved (and any opencode session it created is reusable as the
+    // new window's `@bui-session-id` stamp).
+    if (!isMissingSessionError(err, sessionName)) throw err;
+    const healCmd =
+      `tmux new-session -d -s ${shellQuote(sessionName)} -n ${shellQuote(windowName)} ` +
+      `-c ${pathQuote(cwd)} ${shellQuote(launchCmd)} \\; ` +
+      sessionSurvivabilityCmd(sessionName) + ` \\; ` +
+      perWindowOptsCmd(target, sid ?? undefined);
+    await runSshOnce(config, healCmd);
+  }
 }
 
 export async function tmuxRenameSession(
