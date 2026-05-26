@@ -4624,27 +4624,26 @@ function MicButton({
       onContextMenu={(e) => e.preventDefault()}
       title={label}
       aria-label={label}
+      // Inline glyph button — matches the `>` prompt next to it in size and
+      // baseline so the input row stays one-line-tall when the textarea has
+      // a single line. No round background bubble (the previous w-7 h-7
+      // version forced the row to 28px and made it visually two lines).
+      // Recording adds a subtle pulse on the glyph itself; busy swaps to a
+      // dots spinner. Pointer-capture is still set on pointerdown so we
+      // get the pointerup even if the user drifts off.
       className={
-        "shrink-0 self-start mt-px w-7 h-7 flex items-center justify-center rounded-full transition-colors " +
+        "select-none pt-px shrink-0 leading-none bg-transparent " +
         (busy
-          ? "bg-bg-soft text-accent cursor-progress"
+          ? "text-accent cursor-progress"
           : recording
-            ? "bg-red-500/20 text-red-300 animate-pulse"
+            ? "text-red-400 animate-pulse"
             : phase === "error"
               ? "text-red-400 hover:text-red-300"
               : "text-text-faint hover:text-text-muted")
       }
       style={{ touchAction: "none" }}  // suppress mobile pull-to-refresh
     >
-      {busy ? (
-        // Minimal spinner glyph — three dots oscillation reads as "thinking"
-        // without pulling in an icon dep.
-        <span className="text-xs">⋯</span>
-      ) : (
-        // Unicode mic ("studio microphone"). Renders as a clean glyph in
-        // SF Pro / Segoe / Noto without an icon font.
-        <span className="text-[15px] leading-none">🎙</span>
-      )}
+      {busy ? "⋯" : "🎙"}
     </button>
   );
 }
@@ -4768,8 +4767,21 @@ function InputArea({
       {/* attachment strip). Nothing rendered here for sendError anymore. */}
       {/* Top divider — white-ish, matches Claude TUI. */}
       <div className="border-t border-text/25" />
-      {/* Input row — no box, generous vertical padding. */}
-      <div className="px-4 py-3 flex items-start gap-3">
+      {/* Input row — no box, generous vertical padding. Mic sits LEFT of */}
+      {/* the `>` prompt so it shares the same visual gutter (glyph column) */}
+      {/* and reads as part of the prompt cluster, not as a send-side */}
+      {/* affordance. Both are inline glyphs at the textarea's font size so */}
+      {/* the row stays one-line-tall when the textarea has a single line. */}
+      <div className="px-4 py-3 flex items-start gap-2">
+        {voiceEnabled && (
+          <MicButton
+            phase={voicePhase}
+            mode={voiceMode}
+            onStart={startVoice}
+            onStop={stopVoice}
+            onCancel={cancelVoice}
+          />
+        )}
         <span
           className="select-none pt-px shrink-0"
           style={{ color: CLAUDE_ORANGE }}
@@ -4864,15 +4876,6 @@ function InputArea({
           className="flex-1 resize-none bg-transparent text-text text-[13px] focus:outline-none placeholder:text-text-faint font-mono"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
-        {voiceEnabled && (
-          <MicButton
-            phase={voicePhase}
-            mode={voiceMode}
-            onStart={startVoice}
-            onStop={stopVoice}
-            onCancel={cancelVoice}
-          />
-        )}
       </div>
       {/* Bottom divider — white-ish. */}
       <div className="border-t border-text/25" />
