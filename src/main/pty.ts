@@ -103,8 +103,13 @@ function pathQuote(s: string): string {
 //     wheel-scroll in the claude TUI (xterm.js falls back to arrow keys,
 //     which claude treats as prompt history). Native parity > custom UX.
 
+// CLAUDE_CODE_NO_FLICKER=1 silences the TUI's full-screen redraw on every
+// status-line update — without it the alt-screen flashes a few times per
+// second under high tool-call traffic. Scoped to the `claude` invocation
+// only, not the fallback `bash -i`, so a user dropping into the shell
+// doesn't carry the env var into anything else.
 const REMOTE_CLAUDE_CMD =
-  `bash -lc 'claude; code=$?; printf "\\n[claude exited %d — dropping into shell]\\n" $code; exec bash -i'`;
+  `bash -lc 'CLAUDE_CODE_NO_FLICKER=1 claude; code=$?; printf "\\n[claude exited %d — dropping into shell]\\n" $code; exec bash -i'`;
 
 // Chat-mode windows don't run a TUI — bui renders its own React panel into
 // the slot. The tmux pane just holds the window alive so the existing
