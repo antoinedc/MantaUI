@@ -2988,6 +2988,15 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // session.next.step.ended (item 2) feeds stepTokens on every step boundary
   // and we prefer it here so the footer reflects the latest snapshot without
   // waiting for a re-fetch cycle.
+  //
+  // **GOTCHA — fall through "empty" tokens.** A freshly-streaming assistant
+  // message has `tokens` either absent or all-zeros until the first step
+  // boundary lands. The naive "first assistant from the tail" loop returned
+  // that empty object, which made `ctxTokens === 0` and hid the ContextBar
+  // for the entire streaming turn — the bar only re-appeared after the
+  // step.ended event arrived (sometimes minutes later, after a long tool
+  // call). Skip empty entries and keep walking back to the PRIOR turn's
+  // tokens so the bar shows the last known good value during streaming.
   const latestTokens = useMemo<TokenUsage | null>(() => {
     if (stepTokens) {
       return {
@@ -3000,12 +3009,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     if (!messages) return null;
     for (let i = messages.length - 1; i >= 0; i--) {
       const info = messages[i].info;
-      if (info.role === "assistant") {
-        // OpencodeMessageInfo type doesn't surface `tokens` directly — read
-        // it off the underlying record. Shape matches AssistantMessage.tokens
-        // from the OpenAPI doc.
-        return (info as unknown as { tokens?: TokenUsage }).tokens ?? null;
-      }
+      if (info.role !== "assistant") continue;
+      // OpencodeMessageInfo type doesn't surface `tokens` directly — read
+      // it off the underlying record. Shape matches AssistantMessage.tokens
+      // from the OpenAPI doc.
+      const t = (info as unknown as { tokens?: TokenUsage }).tokens;
+      if (!t) continue;
+      const totalInput =
+        (t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0);
+      if (totalInput <= 0) continue;
+      return t;
     }
     return null;
   }, [messages, stepTokens]);

@@ -319,11 +319,22 @@ export const useStore = create<State>((set, get) => ({
       const isActiveHere =
         prev.activeProjectName === owner.tmuxSession &&
         prev.activeWindowByProject[owner.tmuxSession] === owner.windowIndex;
-      // Don't latch attention if the user is already viewing the window
-      // — the QuestionCard / PermissionCard is right there in front of
-      // them. The sidebar dot would be redundant and would auto-clear on
-      // the next setActive anyway.
-      const wantAttention = kind != null && !isActiveHere;
+      // Latch "question" and "permission" unconditionally — these block the
+      // turn and the user MUST act, so the sidebar indicator needs to
+      // persist if they navigate away mid-turn (most common case: user is
+      // typing a follow-up in another window when a permission fires; with
+      // the previous `!isActiveHere` gate, no indicator was ever set
+      // because the chat panel WAS active at that moment, and no later
+      // event re-latched it). For these blocking kinds the indicator
+      // auto-clears via `setActive` once the user actually focuses the
+      // window, so the redundancy when they're already looking at the
+      // card is cosmetic and harmless.
+      //
+      // "idle" (soft "go check" from running→idle while away) is still
+      // gated by `!isActiveHere` — if the user IS on the window when the
+      // turn finishes, there's nothing to go check.
+      const wantAttention =
+        kind != null && (kind === "question" || kind === "permission" || !isActiveHere);
       const nextWin: WindowStatusUI = {
         running: old?.running ?? false,
         subagents: old?.subagents ?? 0,
