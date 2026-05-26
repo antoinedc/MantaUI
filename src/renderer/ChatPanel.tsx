@@ -2419,18 +2419,34 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     ],
   );
 
+  // When the user presses Enter (or Ctrl+M) WHILE the desktop voice
+  // recorder is active, we want the transcribed text to land in the
+  // composer AND immediately submit, in one keystroke. The transcribe call
+  // is async (Groq round-trip ~200-500ms), so we set a one-shot flag that
+  // `onResult` consumes and then auto-submits. Esc just cancels.
+  const submitAfterTranscribeRef = useRef(false);
+
   const voiceRecorder = useVoiceRecorder({
     onResult: (r) => {
       if (r.mode === "dictate") {
         dispatchVoiceAction({ kind: "append", text: r.text });
+        if (submitAfterTranscribeRef.current) {
+          submitAfterTranscribeRef.current = false;
+          // One-tick delay so the setInput inside the append branch has
+          // committed before submit() reads the textarea value.
+          setTimeout(() => submitRef.current(), 0);
+        }
       } else {
         dispatchVoiceAction(r.classify.action);
       }
     },
-    onError: (e) => setSendError(e.message),
+    onError: (e) => {
+      submitAfterTranscribeRef.current = false;
+      setSendError(e.message);
+    },
   });
 
-  // Gate the mic button on: API key present, browser capable of capture.
+  // Gate the mic affordances on: API key present, browser capable of capture.
   // Mobile WebView typically needs RECORD_AUDIO granted at the OS layer —
   // we don't pre-check; the first start() surfaces "permission denied" via
   // setSendError if the user said no.
@@ -2439,6 +2455,95 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     typeof navigator !== "undefined" &&
     !!navigator.mediaDevices?.getUserMedia &&
     typeof MediaRecorder !== "undefined";
+
+  // Convenience refs so the Ctrl+M handler + the textarea's Enter/Esc
+  // handlers can read the latest phase + invoke start/stop/cancel without
+  // re-subscribing the keydown listener on every recorder re-render.
+  const voicePhaseRef = useRef(voiceRecorder.phase);
+  voicePhaseRef.current = voiceRecorder.phase;
+  const voiceStartRef = useRef(voiceRecorder.start);
+  voiceStartRef.current = voiceRecorder.start;
+  const voiceStopRef = useRef(voiceRecorder.stop);
+  voiceStopRef.current = voiceRecorder.stop;
+  const voiceCancelRef = useRef(voiceRecorder.cancel);
+  voiceCancelRef.current = voiceRecorder.cancel;
+  const voiceRecording =
+    voiceRecorder.phase === "recording" ||
+    voiceRecorder.phase === "requesting";
+  const voiceProcessing = voiceRecorder.phase === "processing";
+
+  // Desktop voice keybinds (Ctrl+M / Enter / Esc) — replace the mobile
+  // mic button on Mac/Linux/Windows. Mobile keeps the touch button (no
+  // physical keyboard in the typical case).
+  //
+  // Ctrl+M  → toggle: start recording, or stop + transcribe + append to
+  //           textarea (does NOT submit; user can edit before sending).
+  // Enter   → only intercepted WHILE recording: stop + transcribe + APPEND
+  //           + auto-submit in one stroke (the natural "I'm done speaking,
+  //           send it" gesture). The submitAfterTranscribeRef flag is what
+  //           threads through the async transcribe call. Outside recording,
+  //           Enter falls through to the textarea's normal submit path.
+  // Esc     → cancel the current recording (discards audio, no transcribe).
+  //           Outside recording, Esc falls through to its normal handlers
+  //           (typeahead-close / abort-running-turn).
+  //
+  // Captured at the window level (with capture:true so Enter/Esc preempt
+  // the textarea's own onKeyDown). The handler gates on voiceEnabled so
+  // users without a Groq key never accidentally trigger a no-op.
+  useEffect(() => {
+    if (!voiceEnabled) return;
+    const handler = (e: KeyboardEvent) => {
+      // Ctrl+M toggle — always available (gated on voiceEnabled).
+      if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "m" || e.key === "M")) {
+        e.preventDefault();
+        const phase = voicePhaseRef.current;
+        if (phase === "recording" || phase === "requesting") {
+          submitAfterTranscribeRef.current = false;
+          voiceStopRef.current();
+        } else if (phase === "idle" || phase === "error") {
+          // Always start in dictate mode from the keyboard. Command mode
+          // stays accessible via the mobile long-press path; on desktop
+          // typing `/clear` etc. is just as fast.
+          void voiceStartRef.current("dictate");
+        }
+        return;
+      }
+      // Enter and Esc are only intercepted while a recording is active
+      // OR transcription is in flight — otherwise they MUST fall through
+      // to the textarea/abort handlers.
+      const phase = voicePhaseRef.current;
+      const active = phase === "recording" || phase === "requesting";
+      if (!active && phase !== "processing") return;
+      if (
+        e.key === "Enter" &&
+        !e.shiftKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        // Only meaningful while recording — processing is already past the
+        // "stop" point and we'd just be racing the in-flight transcribe.
+        if (!active) return;
+        e.preventDefault();
+        e.stopPropagation();
+        submitAfterTranscribeRef.current = true;
+        voiceStopRef.current();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        submitAfterTranscribeRef.current = false;
+        voiceCancelRef.current();
+        return;
+      }
+    };
+    // capture:true so we preempt the textarea's bubble-phase onKeyDown
+    // (otherwise Enter would submit the empty/partial textarea before our
+    // submitAfterTranscribeRef flag was set).
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [voiceEnabled]);
 
   // ===== Drag-drop attachments =====
   //
@@ -3532,6 +3637,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         voiceEnabled={voiceEnabled}
         voicePhase={voiceRecorder.phase}
         voiceMode={voiceRecorder.mode}
+        voiceRecording={voiceRecording}
+        voiceProcessing={voiceProcessing}
         startVoice={voiceRecorder.start}
         stopVoice={voiceRecorder.stop}
         cancelVoice={voiceRecorder.cancel}
@@ -4663,6 +4770,8 @@ function InputArea({
   voiceEnabled,
   voicePhase,
   voiceMode,
+  voiceRecording,
+  voiceProcessing,
   startVoice,
   stopVoice,
   cancelVoice,
@@ -4708,6 +4817,13 @@ function InputArea({
   voiceEnabled: boolean;
   voicePhase: VoicePhase;
   voiceMode: VoiceMode;
+  // Derived flags so the input row's pulse class doesn't need to recompute
+  // these on every keystroke. "recording" covers both pre-permission
+  // (requesting) and active capture; "processing" is the post-stop
+  // transcribe round-trip. Both render the same pulsing affordance — the
+  // user only cares "is the mic busy".
+  voiceRecording: boolean;
+  voiceProcessing: boolean;
   startVoice: (mode: VoiceMode) => Promise<void>;
   stopVoice: () => void;
   cancelVoice: () => void;
@@ -4761,19 +4877,47 @@ function InputArea({
   const ctxBreakdown = computeContextBreakdown(tokens, ctxLimit);
   const ctxTokens = ctxBreakdown.totalInput;
   const ctxPct = ctxBreakdown.pct;
+  // Detect mobile shell (touch device using the no-window.api branch with
+  // MobileApp + .mobile-body wrapper). MicButton is only rendered there;
+  // on desktop the keyboard shortcut (Ctrl+M / Enter / Esc) drives voice.
+  // Read once on mount via a ref callback so we don't pay a per-render
+  // closest() cost.
+  const [isMobileShell, setIsMobileShell] = useState(false);
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (rowRef.current) {
+      setIsMobileShell(!!rowRef.current.closest(".mobile-body"));
+    }
+  }, []);
+  // Pulsing border on the input row while the recorder is active OR the
+  // transcribe round-trip is in flight. Same affordance for both phases
+  // (the user only cares "the mic is busy"). Implemented as a color +
+  // shadow swap on the existing top/bottom dividers — border width stays
+  // 1px in both states so there's no row jump when recording toggles.
+  const voiceActive = voiceRecording || voiceProcessing;
   return (
-    <div className="shrink-0">
+    <div className="shrink-0" ref={rowRef}>
       {/* Error banner moved to ChatPanel scope (dismissable + closer to the */}
       {/* attachment strip). Nothing rendered here for sendError anymore. */}
-      {/* Top divider — white-ish, matches Claude TUI. */}
-      <div className="border-t border-text/25" />
-      {/* Input row — no box, generous vertical padding. Mic sits LEFT of */}
-      {/* the `>` prompt so it shares the same visual gutter (glyph column) */}
-      {/* and reads as part of the prompt cluster, not as a send-side */}
-      {/* affordance. Both are inline glyphs at the textarea's font size so */}
-      {/* the row stays one-line-tall when the textarea has a single line. */}
+      {/* Top divider — white-ish, matches Claude TUI. Turns into a pulsing */}
+      {/* red line while voice is active so the user has clear peripheral */}
+      {/* feedback that the mic is hot (the `>` glyph also recolors red). */}
+      {/* Border width stays at 1px in both states to avoid a 1px row jump */}
+      {/* when recording starts/stops. */}
+      <div
+        className={
+          voiceActive
+            ? "border-t border-red-500 animate-pulse shadow-[0_0_6px_rgba(239,68,68,0.6)]"
+            : "border-t border-text/25"
+        }
+      />
+      {/* Input row — no box, generous vertical padding. The mic affordance */}
+      {/* on desktop is keyboard-only (Ctrl+M to toggle, Enter to stop+send, */}
+      {/* Esc to cancel); the visible feedback is the pulsing border above + */}
+      {/* below this row. On mobile (no physical keyboard) the MicButton is */}
+      {/* rendered as a tap target left of the `>` prompt. */}
       <div className="px-4 py-3 flex items-start gap-2">
-        {voiceEnabled && (
+        {voiceEnabled && isMobileShell && (
           <MicButton
             phase={voicePhase}
             mode={voiceMode}
@@ -4784,7 +4928,14 @@ function InputArea({
         )}
         <span
           className="select-none pt-px shrink-0"
-          style={{ color: CLAUDE_ORANGE }}
+          style={{ color: voiceActive ? "#f87171" : CLAUDE_ORANGE }}
+          title={
+            voiceActive
+              ? voiceProcessing
+                ? "Transcribing… (esc cancels)"
+                : "Recording — enter to send, ctrl+m to stop, esc to cancel"
+              : undefined
+          }
         >
           {">"}
         </span>
@@ -4877,8 +5028,15 @@ function InputArea({
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
       </div>
-      {/* Bottom divider — white-ish. */}
-      <div className="border-t border-text/25" />
+      {/* Bottom divider — mirrors the top so the pulsing voice ring */}
+      {/* frames the input row on both sides. */}
+      <div
+        className={
+          voiceActive
+            ? "border-t border-red-500 animate-pulse shadow-[0_0_6px_rgba(239,68,68,0.6)]"
+            : "border-t border-text/25"
+        }
+      />
       {/* Meta footer — model picker + ctx bar on the left, session ops + hints right. */}
       {/* NOTE: don't put `truncate` on this row's spans — it triggers */}
       {/* overflow:hidden which clips the model picker's absolute dropdown. */}
@@ -4936,9 +5094,13 @@ function InputArea({
             onDelete={onDelete}
           />
           <span className="text-[10px] text-text-faint">
-            {running
-              ? "esc · interrupt"
-              : `ctrl+o · thinking ${showThinking ? "on" : "off"} · shift+⏎ newline · ⏎ send`}
+            {voiceActive
+              ? voiceProcessing
+                ? "transcribing… · esc cancels"
+                : "🎙 recording · ⏎ send · ctrl+m stop · esc cancel"
+              : running
+                ? "esc · interrupt"
+                : `${voiceEnabled ? "ctrl+m · voice · " : ""}ctrl+o · thinking ${showThinking ? "on" : "off"} · shift+⏎ newline · ⏎ send`}
           </span>
         </span>
       </div>
