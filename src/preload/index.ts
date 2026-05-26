@@ -18,6 +18,10 @@ import {
   type PtyEvent,
   type TransportInfo,
   type TmuxConfigStatus,
+  type VoiceClassifyInput,
+  type VoiceClassifyResult,
+  type VoiceTranscribeInput,
+  type VoiceTranscribeResult,
   type WindowStatus,
   type WorktreeInfo,
 } from "../shared/types.js";
@@ -73,6 +77,14 @@ const api = {
   // structured results the Settings UI renders.
   setupProbe: (): Promise<ProbeResult> => ipcRenderer.invoke(IPC.setupProbe),
   setupBootstrap: (): Promise<BootstrapResult> => ipcRenderer.invoke(IPC.setupBootstrap),
+
+  // Voice (Groq STT + lightweight classifier). Main owns the API key;
+  // renderer only ships audio bytes / transcripts.
+  // See src/shared/voiceClassifier.mjs and src/shared/groq.mjs.
+  voiceTranscribe: (input: VoiceTranscribeInput): Promise<VoiceTranscribeResult> =>
+    ipcRenderer.invoke(IPC.voiceTranscribe, input),
+  voiceClassifyCommand: (input: VoiceClassifyInput): Promise<VoiceClassifyResult> =>
+    ipcRenderer.invoke(IPC.voiceClassifyCommand, input),
 
   clipboardWriteText: (text: string): Promise<void> =>
     ipcRenderer.invoke(IPC.clipboardWriteText, text),

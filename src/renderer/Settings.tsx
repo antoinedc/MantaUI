@@ -29,6 +29,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
     defaultModel,
     skillRegistryUrls,
     cacheTtl,
+    groqApiKey,
+    voiceTranscriptionModel,
+    voiceCommandModel,
     transport,
     tmuxConfig,
     refresh,
@@ -71,6 +74,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // "/clear to save Nk tokens" pill. Must match opencode's actual
   // cache_control.ttl setting; bui doesn't control it directly.
   const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
+  // Voice / Groq — empty key hides the mic button entirely in the chat input.
+  const [groqKey, setGroqKey] = useState(groqApiKey);
+  const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
+  const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
 
   useEffect(() => {
     setH(host);
@@ -81,7 +88,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setSelectedModel(defaultModel ?? null);
     setRegistryUrls(skillRegistryUrls ?? []);
     setTtl(cacheTtl);
-  }, [host, user, identityFile, transportPreference, uploadCleanupHours, defaultModel, skillRegistryUrls, cacheTtl]);
+    setGroqKey(groqApiKey);
+    setVoiceTrModel(voiceTranscriptionModel);
+    setVoiceCmdModel(voiceCommandModel);
+  }, [host, user, identityFile, transportPreference, uploadCleanupHours, defaultModel, skillRegistryUrls, cacheTtl, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -102,6 +112,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
       defaultModel: selectedModel ?? undefined,
       skillRegistryUrls: registryUrls,
       cacheTtl: ttl,
+      // Voice fields. Empty string clears (so unsetting the API key actually
+      // unsets it server-side). Leading/trailing whitespace stripped.
+      groqApiKey: groqKey.trim(),
+      voiceTranscriptionModel: voiceTrModel.trim(),
+      voiceCommandModel: voiceCmdModel.trim(),
     });
     await refresh();
     onClose();
@@ -352,6 +367,64 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <code className="text-text-muted">cache_control.ttl</code> so the
             staleness pill fires at the right time. 1h is the better default
             for bui's typical "step away to read code" pattern.
+          </div>
+        </div>
+
+        <div className="space-y-2 pt-2 border-t border-border">
+          <label className="block text-xs uppercase tracking-wider text-text-muted">
+            Voice (Groq)
+          </label>
+          <div className="text-xs text-text-faint">
+            Adds a press-and-hold mic button to the chat input. Default = dictate into
+            the textarea. Hold with{" "}
+            <kbd className="text-text-muted">⌥</kbd> (or right-click) = command mode — say
+            "clear", "compact", "use opus", "answer two", etc. Get a key at{" "}
+            <a
+              href="https://console.groq.com/keys"
+              onClick={(e) => {
+                e.preventDefault();
+                window.api.openExternal("https://console.groq.com/keys");
+              }}
+              className="text-accent hover:underline"
+            >
+              console.groq.com/keys
+            </a>
+            . Free tier covers normal use.
+          </div>
+          <input
+            type="password"
+            placeholder="gsk_… (leave blank to disable)"
+            value={groqKey}
+            onChange={(e) => setGroqKey(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1">
+              <label className="block text-[10px] uppercase tracking-wider text-text-faint">
+                Transcription model
+              </label>
+              <input
+                placeholder="whisper-large-v3-turbo"
+                value={voiceTrModel}
+                onChange={(e) => setVoiceTrModel(e.target.value)}
+                spellCheck={false}
+                className="w-full bg-bg-soft border border-border px-2 py-1.5 text-xs rounded focus:outline-none focus:border-accent font-mono"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="block text-[10px] uppercase tracking-wider text-text-faint">
+                Command classifier model
+              </label>
+              <input
+                placeholder="llama-3.1-8b-instant"
+                value={voiceCmdModel}
+                onChange={(e) => setVoiceCmdModel(e.target.value)}
+                spellCheck={false}
+                className="w-full bg-bg-soft border border-border px-2 py-1.5 text-xs rounded focus:outline-none focus:border-accent font-mono"
+              />
+            </div>
           </div>
         </div>
 

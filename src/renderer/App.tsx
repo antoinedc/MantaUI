@@ -231,6 +231,41 @@ export function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [projects, activeProjectName, activeWindowByProject, setActive]);
 
+  // Voice command → app-scoped action bus. ChatPanel dispatches a
+  // `bui-voice-app-action` CustomEvent for actions it doesn't own
+  // (switch-window / new-session / open-settings). Keeping the routing
+  // here avoids drilling refs into every panel and matches how the
+  // ⌘1..9 / ⌥⌘↑↓ shortcuts already work above.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ kind: string; index?: number }>).detail;
+      if (!detail) return;
+      if (detail.kind === "open-settings") {
+        setSettingsOpen(true);
+        return;
+      }
+      if (detail.kind === "new-session") {
+        sidebarRef.current?.openNewSessionInActive();
+        return;
+      }
+      if (detail.kind === "switch-window" && typeof detail.index === "number") {
+        const flat = flatSessions(projects);
+        const target = flat[detail.index - 1];
+        if (!target) return;
+        setActive(target.project.tmuxSession, target.window.index);
+        window.api
+          .tmuxSelectWindow({
+            sessionName: target.project.tmuxSession,
+            windowIndex: target.window.index,
+          })
+          .catch(() => {});
+      }
+    };
+    window.addEventListener("bui-voice-app-action", handler as EventListener);
+    return () =>
+      window.removeEventListener("bui-voice-app-action", handler as EventListener);
+  }, [projects, setActive]);
+
   const activeProject = activeProjectName
     ? projects.find((p) => p.tmuxSession === activeProjectName) ?? null
     : null;

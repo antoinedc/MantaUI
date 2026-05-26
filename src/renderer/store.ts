@@ -64,6 +64,13 @@ type State = {
   // cache_control.ttl on requests — opencode does); must match opencode's
   // setting. Defaults to "1h".
   cacheTtl: "5m" | "1h";
+  // Voice / Groq STT. `groqApiKey` is the gating signal — empty string
+  // means voice features are unavailable and the mic button stays hidden.
+  // Other two fields default to "" so the main/server picks the built-in
+  // defaults (whisper-large-v3-turbo / llama-3.1-8b-instant).
+  groqApiKey: string;
+  voiceTranscriptionModel: string;
+  voiceCommandModel: string;
   transport: TransportInfo | null;
   tmuxConfig: TmuxConfigStatus | null;
   projects: Project[];
@@ -123,6 +130,9 @@ export const useStore = create<State>((set, get) => ({
   defaultModel: null,
   skillRegistryUrls: [],
   cacheTtl: "1h",
+  groqApiKey: "",
+  voiceTranscriptionModel: "",
+  voiceCommandModel: "",
   transport: null,
   tmuxConfig: null,
   projects: [],
@@ -193,6 +203,9 @@ export const useStore = create<State>((set, get) => ({
       defaultModel: c.defaultModel ?? null,
       skillRegistryUrls: c.skillRegistryUrls ?? [],
       cacheTtl: c.cacheTtl === "5m" ? "5m" : "1h",
+      groqApiKey: c.groqApiKey ?? "",
+      voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
+      voiceCommandModel: c.voiceCommandModel ?? "",
     }),
 
   setChatAutoAllow: async (v) => {

@@ -878,6 +878,101 @@ path for the chat-window `·N` count.
   cards key on the parent's sessionId. Future: tag with "from subagent: X".
 - "Open as session" — see the open-work bullet at the bottom.
 
+## Voice / speech-to-text (Groq)
+
+Push-to-talk mic button in the chat input. Hold = record. Tap (≤500ms) =
+**dictate** — transcript inserted at the caret. Hold-with-⌥ (desktop) or
+long-press ≥500ms (touch) = **command** mode — transcript routed through
+the rules classifier and (on no match) a Groq llama call returning a
+structured `VoiceAction` that's dispatched panel-side (clear/compact/fork/
+abort/model/answer/permission/etc) or App-side (switch-window/new-session/
+open-settings, via a `bui-voice-app-action` `CustomEvent`).
+
+**Audio pipeline (identical on both transports):**
+1. `useVoiceRecorder` (`src/renderer/voice.ts`) drives a `MediaRecorder`
+   over `getUserMedia({audio:true})`. Mime selection prefers
+   `audio/webm;codecs=opus` (Chromium), falls back to `audio/mp4` (iOS
+   WKWebView — the only thing Apple ships).
+2. On release, `window.api.voiceTranscribe({buffer, mime})` ships the
+   `ArrayBuffer` to main/server. The mobile HTTP shim base64-encodes the
+   buffer because the RPC body is JSON; `rpc.mjs` decodes back to a
+   `Buffer`.
+3. `src/shared/groq.mjs` POSTs multipart to
+   `https://api.groq.com/openai/v1/audio/transcriptions` with the
+   configured key + model (default `whisper-large-v3-turbo`).
+4. In command mode, the renderer follows up with
+   `voiceClassifyCommand({transcript})`. `src/shared/voiceClassifier.mjs`
+   runs the rules first (zero-cost), falls back to
+   `chat/completions` with JSON-mode (default
+   `llama-3.1-8b-instant`) — `coerceLlmAction` validates the reply and
+   degrades to `{kind:"unknown",transcript}` on malformed input.
+
+**Why classify on the server side:** the Groq API key never leaves main/
+server, same trust boundary as opencode auth. The renderer only ever sees
+audio bytes and the final `VoiceAction`.
+
+**Settings:** `groqApiKey` (gates the mic button — empty = hidden),
+`voiceTranscriptionModel`, `voiceCommandModel`. All three live in
+AppConfig and the store; UI in `Settings.tsx` and `MobileSettings.tsx`.
+Stored plaintext, same as other bui credentials.
+
+**Mobile permissions:** `RECORD_AUDIO` + `MODIFY_AUDIO_SETTINGS` in
+`mobile/android/.../AndroidManifest.xml`; `NSMicrophoneUsageDescription`
+in `mobile/ios/.../Info.plist`. Without these the first
+`getUserMedia({audio:true})` call insta-rejects with `NotAllowedError`
+before the OS prompt fires.
+
+**Pure helpers (tested):**
+- `classifyByRules`, `normalizeTranscript`, `coerceLlmAction`,
+  `buildClassifierPrompt` in `src/shared/voiceClassifier.mjs`
+  (tested by `src/shared/voiceClassifier.test.ts`).
+- `pickRecorderMime`, `fuzzyMatchModel`, `resolveQuestionAnswer`,
+  `describeVoiceAction` in `src/renderer/voice.ts` (tested by
+  `src/renderer/voice.test.ts`).
+
+**Locked decisions:**
+- Modifier-based mode switch on ONE button — don't add a second
+  "command" button to the composer. Mobile composer real estate is
+  already tight (see "Reshaping reused ChatPanel/Terminal internals on
+  mobile" above).
+- **`useVoiceRecorder` owns the long-press → command promotion** — the
+  button passes `start("dictate")` and the HOOK schedules the
+  `longPressMs` timer that flips its own `modeRef` + the exposed
+  `mode` state. The MicButton reads `mode` from the hook for its
+  label. Do NOT reintroduce a parallel `modeRef` in the button —
+  that was PR #4's W2 bug: the button promoted its own ref but never
+  told the hook, so long-press on touch always transcribed as
+  dictate. The hook's `mode` is the single source of truth.
+- **`MediaRecorder.start(250)` timeslice** — without it, iOS WKWebView
+  17.x sometimes delivers the final `dataavailable` AFTER `onstop`,
+  leaving an empty chunks array. 250ms forces periodic emission. The
+  chunks just concatenate in the Blob constructor.
+- **Cancel checked AFTER `getUserMedia` resolves** — a fast press
+  release (cancel before mic permission resolves) used to leave the
+  recorder running until the 60s `maxDurationMs` cap. We check
+  `cancelledRef.current` between the await and the recorder
+  construction; if true, tear the stream tracks down and bail.
+- **Phase guard uses a ref, not state** — `phaseRef.current` is
+  updated synchronously by `setPhaseSync` so two `pointerdown` events
+  inside the same React commit can't both pass the re-entrancy guard.
+- **Voice action dispatcher picks the NEWEST pending card** via a
+  local `findLast` helper, not `.find()`. Matches the visual stack:
+  the topmost PermissionCard / QuestionCard is the most recent ask,
+  which is what the user is looking at when they say "yes" / "reject".
+- **"reject" falls through from permission to question** — when no
+  permission is pending but a question is, "reject" dismisses the
+  question via `rejectQuestion`. `allow-once` / `allow-always` have
+  no question equivalent and surface a hint if no permission is open.
+- Rules-first classifier — never go LLM-only. The bare `yes`/`no` /
+  `clear` / `compact` paths fire in ~0ms with no token spend.
+- Batch transcription (no streaming) — Groq's HTTP API has no native
+  streaming STT endpoint and short clips return in ~200-500ms. Don't
+  reintroduce a chunked-streaming spike; it under-delivered vs the
+  added complexity in spike testing.
+- Numeric switch-window indices in 1..9 only — both the rules
+  classifier and `coerceLlmAction` reject out-of-range and string-typed
+  indices, matching ⌘1..9's domain.
+
 ## File upload paths (chat-mode)
 
 Three upload paths all land in `~/.bui-uploads/<session>/<ts>/` on the remote:

@@ -33,4 +33,11 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Voice (Groq STT). Required for navigator.mediaDevices.getUserMedia
+         to resolve in the embedded WebView. The Capacitor WebChromeClient
+         forwards onPermissionRequest to the OS prompt the first time the
+         user holds the mic button; if denied, the renderer surfaces the
+         error via setSendError. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 </manifest>

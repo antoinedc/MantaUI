@@ -442,4 +442,31 @@ export const httpApi: Api = {
 
   // -- /clear --
   opencodeClearSession: (input) => rpc(IPC.opencodeClearSession, input),
+
+  // -- voice (Groq STT + classifier) --
+  // The RPC body is JSON, so the ArrayBuffer can't ride along raw. Base64-
+  // encode it here; rpc.mjs decodes back to a Buffer on the server side.
+  // For typical 5s clips this is ~70-100KB → ~95-135KB base64; well under
+  // the server's per-request body cap and not worth a multipart endpoint.
+  voiceTranscribe: ({ buffer, mime }) => {
+    const b64 = arrayBufferToBase64(buffer);
+    return rpc(IPC.voiceTranscribe, { buffer: b64, mime });
+  },
+  voiceClassifyCommand: (input) => rpc(IPC.voiceClassifyCommand, input),
 };
+
+// Base64-encode an ArrayBuffer in chunks. `btoa(String.fromCharCode(...))`
+// blows the call stack past ~125k bytes; chunked apply keeps it safe for
+// any clip size MediaRecorder will hand us.
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const CHUNK = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + CHUNK) as unknown as number[],
+    );
+  }
+  return btoa(binary);
+}

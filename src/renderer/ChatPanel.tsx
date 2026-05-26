@@ -30,6 +30,14 @@ import type {
 } from "../shared/types";
 import { useStore } from "./store";
 import {
+  useVoiceRecorder,
+  fuzzyMatchModel,
+  resolveQuestionAnswer,
+  type VoiceMode,
+  type VoicePhase,
+} from "./voice";
+import type { VoiceAction } from "../shared/types";
+import {
   ASSUMED_CONTEXT_TOKENS,
   formatTokens,
   formatDuration,
@@ -195,6 +203,17 @@ function mimeToInputMode(mime: string): "image" | "video" | "audio" | "pdf" | "o
 // Drag-drop has File.type for many cases; @-mention only has the path. The
 // FilePartInput's mime field is required by the API but opencode is tolerant
 // of generic types like `application/octet-stream`.
+// Array.findLast polyfill — ES2023, not in our ES2022 target. Returns the
+// last element matching `pred`, or undefined. Used by the voice action
+// dispatcher to pick the NEWEST pending permission/question (matches the
+// visual stack: topmost card is the most recent ask).
+function findLast<T>(arr: readonly T[], pred: (v: T) => boolean): T | undefined {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (pred(arr[i])) return arr[i];
+  }
+  return undefined;
+}
+
 function guessMime(filename: string): string {
   const ext = filename.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
@@ -2099,6 +2118,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     [refreshQuestions],
   );
 
+
+
   // Pre-fetch models + default on session mount so the footer shows the
   // actual model (not just "opencode") before the first response, and the
   // dropdown opens populated. Idempotent: skipped when both are already loaded.
@@ -2233,6 +2254,191 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       setSendError(String((e as Error)?.message ?? e));
     }
   }, [sessionId, tmuxSession, windowIndex, refresh]);
+
+  // ===== Voice dispatch =====
+  //
+  // Routes a VoiceAction (from rules classifier or LLM fallback) to the
+  // matching panel callback. Panel-scoped actions call local useCallbacks;
+  // App-scoped ones (switch-window / new-session / open-settings) dispatch
+  // a CustomEvent App.tsx listens for — same pattern as the keyboard
+  // shortcuts there. Declared AFTER every callback it depends on to dodge
+  // the TDZ on the dep array.
+  //
+  // For "submit" we both fill the textarea AND fire submit on the next tick
+  // so the dictated turn lands in transcript history exactly like a keypress.
+  const groqApiKey = useStore((s) => s.groqApiKey);
+
+  const dispatchVoiceAction = useCallback(
+    (action: VoiceAction) => {
+      switch (action.kind) {
+        case "append": {
+          // Insert at caret if possible; fall back to appending. Single-space
+          // separator so spoken text doesn't glue into the previous word.
+          const el = inputRef.current;
+          if (el) {
+            const start = el.selectionStart ?? input.length;
+            const end = el.selectionEnd ?? input.length;
+            const prefix = input.slice(0, start);
+            const suffix = input.slice(end);
+            const sep = prefix && !prefix.endsWith(" ") ? " " : "";
+            const tail = suffix && !suffix.startsWith(" ") ? " " : "";
+            const next = `${prefix}${sep}${action.text}${tail}${suffix}`;
+            setInput(next);
+            setTimeout(() => {
+              if (!inputRef.current) return;
+              const pos = (prefix + sep + action.text).length;
+              try {
+                inputRef.current.focus();
+                inputRef.current.setSelectionRange(pos, pos);
+              } catch { /* ignore */ }
+            }, 0);
+          } else {
+            setInput(input ? `${input} ${action.text}` : action.text);
+          }
+          return;
+        }
+        case "submit": {
+          setInput(action.text);
+          setTimeout(() => submitRef.current(), 0);
+          return;
+        }
+        case "clear":
+          // Reuse the /clear builtin path so future changes
+          // (model carry-forward, etc.) stay in one place.
+          setInput("/clear");
+          setTimeout(() => submitRef.current(), 0);
+          return;
+        case "compact": compactSession(); return;
+        case "fork":    forkSession();    return;
+        case "abort":   abort();          return;
+        case "help":    setSystemNotice(buildHelpText()); return;
+        case "toggle-trust":
+          setChatAutoAllow(!chatAutoAllow);
+          return;
+        case "model": {
+          const match = fuzzyMatchModel(action.query, models ?? []);
+          if (match) selectModel({ providerID: match.providerID, modelID: match.id });
+          else setSendError(`No model matched "${action.query}".`);
+          return;
+        }
+        case "allow-once":
+        case "allow-always":
+        case "reject": {
+          // PermissionCard renders above QuestionCard in the visual stack,
+          // so when both are open we route permission replies there. If
+          // no permission is pending and the action is "reject", fall
+          // through to question-rejection — the QuestionCard's Cancel
+          // button is the user's only other "reject" target (W6 fix:
+          // previously we surfaced "no pending permission" even when a
+          // question was the obvious target).
+          //
+          // We pick the LAST (newest) pending request, not the first —
+          // matches the visual order: the topmost card is the most
+          // recent ask. The .find()-from-end pattern is the W5 fix.
+          const lastPerm = findLast(permissions, (p) => p.sessionID === sessionId);
+          if (lastPerm) {
+            const reply =
+              action.kind === "allow-once" ? "once"
+                : action.kind === "allow-always" ? "always"
+                  : "reject";
+            replyPermission(lastPerm.id, reply);
+            return;
+          }
+          // No permission pending. "reject" can still mean "dismiss the
+          // open question". "allow-once" / "allow-always" don't have a
+          // question equivalent — surface the hint.
+          if (action.kind === "reject") {
+            const lastQ = findLast(questions, (q) => q.sessionID === sessionId);
+            if (lastQ) {
+              rejectQuestion(lastQ);
+              return;
+            }
+          }
+          setSendError("No pending permission request to respond to.");
+          return;
+        }
+        case "answer": {
+          // Newest question matches what's visually on top (W5). Same
+          // findLast pattern as the permission branch above.
+          const pending = findLast(
+            questions,
+            (q) => q.sessionID === sessionId && q.questions.length > 0,
+          );
+          if (!pending) {
+            setSendError("No pending question to answer.");
+            return;
+          }
+          // Same choice applied to every sub-question; abort if any
+          // sub-question can't resolve the spoken option.
+          const answers: string[][] = [];
+          for (const sub of pending.questions) {
+            const label = resolveQuestionAnswer(action.choice, sub.options);
+            if (!label) {
+              setSendError(
+                `Couldn't match "${action.choice}" to an option. ` +
+                `Available: ${sub.options.map((o) => o.label).join(", ")}.`,
+              );
+              return;
+            }
+            answers.push([label]);
+          }
+          replyQuestion(pending, answers);
+          return;
+        }
+        case "switch-window":
+        case "new-session":
+        case "open-settings":
+          window.dispatchEvent(
+            new CustomEvent("bui-voice-app-action", { detail: action }),
+          );
+          return;
+        case "unknown": {
+          // Fall back to inserting the raw transcript so the user can edit
+          // and resend — better than swallowing silently.
+          const text = action.transcript.trim();
+          if (text) setInput(input ? `${input} ${text}` : text);
+          return;
+        }
+      }
+    },
+    [
+      input,
+      models,
+      permissions,
+      questions,
+      sessionId,
+      chatAutoAllow,
+      setChatAutoAllow,
+      selectModel,
+      compactSession,
+      forkSession,
+      abort,
+      replyPermission,
+      replyQuestion,
+      rejectQuestion,
+    ],
+  );
+
+  const voiceRecorder = useVoiceRecorder({
+    onResult: (r) => {
+      if (r.mode === "dictate") {
+        dispatchVoiceAction({ kind: "append", text: r.text });
+      } else {
+        dispatchVoiceAction(r.classify.action);
+      }
+    },
+    onError: (e) => setSendError(e.message),
+  });
+
+  // Gate the mic button on: API key present, browser capable of capture.
+  // Mobile WebView typically needs RECORD_AUDIO granted at the OS layer —
+  // we don't pre-check; the first start() surfaces "permission denied" via
+  // setSendError if the user said no.
+  const voiceEnabled =
+    !!groqApiKey &&
+    typeof navigator !== "undefined" &&
+    !!navigator.mediaDevices?.getUserMedia &&
+    typeof MediaRecorder !== "undefined";
 
   // ===== Drag-drop attachments =====
   //
@@ -3310,6 +3516,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         showThinking={showThinking}
         chatAutoAllow={chatAutoAllow}
         setChatAutoAllow={setChatAutoAllow}
+        voiceEnabled={voiceEnabled}
+        voicePhase={voiceRecorder.phase}
+        voiceMode={voiceRecorder.mode}
+        startVoice={voiceRecorder.start}
+        stopVoice={voiceRecorder.stop}
+        cancelVoice={voiceRecorder.cancel}
         tokens={latestTokens}
         staleCache={staleCache}
         models={models}
@@ -4317,6 +4529,113 @@ function QuestionCard({
 
 // ===== Input area =====
 
+// Press-and-hold mic button. Plain tap = dictate (transcript inserted at
+// caret). Hold + ⌥ on desktop, or a long-press (≥500ms) on touch, = command
+// mode (transcript routed through the rules classifier + Groq llama).
+//
+// **Mode source of truth lives in `useVoiceRecorder`** — see the W2 fix in
+// PR #4 review. The previous design kept a parallel `modeRef` in the
+// button which never propagated to the hook, so long-press on touch
+// transcribed as dictate. The button now passes "dictate" or "command"
+// at press time (based on the ⌥ modifier) and the HOOK schedules the
+// long-press promotion + exposes the current mode for the label.
+//
+// Visual states (phase):
+//   - idle       → microphone glyph in text-muted
+//   - requesting → spinner in text-faint (waiting on mic permission)
+//   - recording  → filled circle pulsing in red, hint text "release to send"
+//   - processing → spinner in accent (Groq round-trip in flight)
+//   - error      → muted-red mic; click to retry by pressing again
+function MicButton({
+  phase,
+  mode,
+  onStart,
+  onStop,
+  onCancel,
+}: {
+  phase: VoicePhase;
+  mode: VoiceMode;
+  onStart: (mode: VoiceMode) => Promise<void>;
+  onStop: () => void;
+  onCancel: () => void;
+}) {
+  const recording = phase === "recording" || phase === "requesting";
+  const busy = phase === "processing";
+
+  // Pointer-based handlers — single code path for mouse + touch + pen so
+  // we don't have to worry about emulated mouse events firing AFTER touch
+  // on iOS / Android WebView (the classic "double-tap" bug).
+  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (busy || recording) return;
+    e.preventDefault();
+    // Desktop ⌥-modifier promotes to command IMMEDIATELY. Otherwise we
+    // start in dictate and let the hook's longPressMs timer flip us.
+    const initial: VoiceMode = e.altKey ? "command" : "dictate";
+    onStart(initial);
+    // Capture so onPointerUp fires even if the cursor leaves the button.
+    try {
+      (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
+    } catch { /* not all browsers support pointer capture */ }
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!recording) return;
+    e.preventDefault();
+    onStop();
+  };
+
+  const handlePointerCancel = () => {
+    if (recording) onCancel();
+  };
+
+  const label = busy
+    ? "transcribing…"
+    : recording
+      ? mode === "command"
+        ? "release · command"
+        : "release · dictate"
+      : "hold to speak (⌥ = command)";
+
+  return (
+    <button
+      type="button"
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onPointerLeave={(e) => {
+        // Only treat as cancel if pointer is no longer pressed — leaving
+        // while held should keep recording (pointer-capture handles this
+        // on most browsers, but be defensive).
+        if (e.buttons === 0 && recording) onCancel();
+      }}
+      onContextMenu={(e) => e.preventDefault()}
+      title={label}
+      aria-label={label}
+      className={
+        "shrink-0 self-start mt-px w-7 h-7 flex items-center justify-center rounded-full transition-colors " +
+        (busy
+          ? "bg-bg-soft text-accent cursor-progress"
+          : recording
+            ? "bg-red-500/20 text-red-300 animate-pulse"
+            : phase === "error"
+              ? "text-red-400 hover:text-red-300"
+              : "text-text-faint hover:text-text-muted")
+      }
+      style={{ touchAction: "none" }}  // suppress mobile pull-to-refresh
+    >
+      {busy ? (
+        // Minimal spinner glyph — three dots oscillation reads as "thinking"
+        // without pulling in an icon dep.
+        <span className="text-xs">⋯</span>
+      ) : (
+        // Unicode mic ("studio microphone"). Renders as a clean glyph in
+        // SF Pro / Segoe / Noto without an icon font.
+        <span className="text-[15px] leading-none">🎙</span>
+      )}
+    </button>
+  );
+}
+
 function InputArea({
   input,
   setInput,
@@ -4329,6 +4648,12 @@ function InputArea({
   showThinking,
   chatAutoAllow,
   setChatAutoAllow,
+  voiceEnabled,
+  voicePhase,
+  voiceMode,
+  startVoice,
+  stopVoice,
+  cancelVoice,
   tokens,
   staleCache,
   models,
@@ -4363,6 +4688,17 @@ function InputArea({
   showThinking: boolean;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
+  // Voice (Groq STT). When voiceEnabled=false the MicButton is hidden so
+  // users without a configured API key never see the affordance. start/stop/
+  // cancel come from useVoiceRecorder; phase drives the icon state; mode is
+  // owned by the hook (W2: previously the button kept its own copy and the
+  // two drifted, so long-press never reached the hook as "command").
+  voiceEnabled: boolean;
+  voicePhase: VoicePhase;
+  voiceMode: VoiceMode;
+  startVoice: (mode: VoiceMode) => Promise<void>;
+  stopVoice: () => void;
+  cancelVoice: () => void;
   tokens: TokenUsage | null;
   // Stale-prompt-cache result: when isStale is true the footer shows
   // "/clear to save Nk tokens" next to the context bar. Computed at the
@@ -4515,6 +4851,15 @@ function InputArea({
           className="flex-1 resize-none bg-transparent text-text text-[13px] focus:outline-none placeholder:text-text-faint font-mono"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
+        {voiceEnabled && (
+          <MicButton
+            phase={voicePhase}
+            mode={voiceMode}
+            onStart={startVoice}
+            onStop={stopVoice}
+            onCancel={cancelVoice}
+          />
+        )}
       </div>
       {/* Bottom divider — white-ish. */}
       <div className="border-t border-text/25" />
