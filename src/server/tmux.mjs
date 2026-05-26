@@ -47,14 +47,47 @@ export async function listProjects() {
   return parseSessions(sess.stdout, wins.stdout);
 }
 
+// See src/main/pty.ts:sessionSurvivabilityCmd for the rationale.
+// `exit-empty off` keeps the tmux server alive across empty-session moments,
+// and `destroy-unattached off` keeps the per-project session pinned after
+// the last client detaches — without these, the next "new window" call can
+// race against a destroyed target and fail with "can't find session: X".
+async function applySessionSurvivability(name) {
+  await run("tmux", ["set-option", "-t", name, "exit-empty", "off"]).catch(() => {});
+  await run("tmux", ["set-option", "-t", name, "destroy-unattached", "off"]).catch(() => {});
+}
+
+// True iff err is the tmux "can't find session" stderr from `run()`'s
+// rejection. Pure + exported for testability — mirrors
+// `isMissingSessionError` in src/main/pty.ts so the desktop and mobile
+// transports have matching auto-heal behaviour.
+export function isMissingSessionError(err, sessionName) {
+  if (!err || typeof err.message !== "string") return false;
+  if (/can.?t find session/i.test(err.message)) return true;
+  if (err.message.includes(`session not found: ${sessionName}`)) return true;
+  return false;
+}
+
 export async function newSession({ name, cwd, windowName }) {
   await run("tmux", ["new-session", "-d", "-s", name, "-c", cwd ?? ".",
     ...(windowName ? ["-n", windowName] : [])]);
+  await applySessionSurvivability(name);
   return listProjects();
 }
 export async function newWindow({ sessionName, windowName, cwd }) {
-  await run("tmux", ["new-window", "-t", sessionName, "-n", windowName,
-    ...(cwd ? ["-c", cwd] : [])]);
+  try {
+    await run("tmux", ["new-window", "-t", sessionName, "-n", windowName,
+      ...(cwd ? ["-c", cwd] : [])]);
+  } catch (err) {
+    // Auto-heal: the project's tmux session vanished between calls
+    // (server restart, manual kill, etc.). Recreate it with this window
+    // as the first window — see src/main/pty.ts:tmuxNewWindow for the
+    // matching desktop-transport branch.
+    if (!isMissingSessionError(err, sessionName)) throw err;
+    await run("tmux", ["new-session", "-d", "-s", sessionName, "-n", windowName,
+      ...(cwd ? ["-c", cwd] : [])]);
+    await applySessionSurvivability(sessionName);
+  }
   return listProjects();
 }
 
