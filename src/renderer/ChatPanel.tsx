@@ -2508,12 +2508,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         }
         return;
       }
-      // Enter and Esc are only intercepted while a recording is active
-      // OR transcription is in flight — otherwise they MUST fall through
-      // to the textarea/abort handlers.
+      // Enter and Esc only fire while voice is in a non-idle phase —
+      // otherwise they MUST fall through to the textarea/abort handlers.
       const phase = voicePhaseRef.current;
-      const active = phase === "recording" || phase === "requesting";
-      if (!active && phase !== "processing") return;
+      if (phase === "idle" || phase === "error") return;
       if (
         e.key === "Enter" &&
         !e.shiftKey &&
@@ -2521,9 +2519,14 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         !e.ctrlKey &&
         !e.altKey
       ) {
-        // Only meaningful while recording — processing is already past the
-        // "stop" point and we'd just be racing the in-flight transcribe.
-        if (!active) return;
+        // Only meaningful while actively recording. During "requesting"
+        // the recorder isn't constructed yet, so stop() would no-op and
+        // the eventual getUserMedia resolution would start recording
+        // anyway with no way to stop — the user would be silently
+        // recording until maxDurationMs (60s). During "processing" we'd
+        // race the in-flight transcribe. Both fall through to the
+        // textarea so Enter still submits whatever's typed.
+        if (phase !== "recording") return;
         e.preventDefault();
         e.stopPropagation();
         submitAfterTranscribeRef.current = true;
@@ -2531,6 +2534,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         return;
       }
       if (e.key === "Escape") {
+        // Esc cancels from any non-idle phase: requesting (abandons the
+        // pending permission), recording (discards audio), processing
+        // (lets the transcribe finish but suppresses the auto-submit
+        // flag — the transcript will still land in the textarea). The
+        // cancel() helper handles all three via cancelledRef.
         e.preventDefault();
         e.stopPropagation();
         submitAfterTranscribeRef.current = false;
