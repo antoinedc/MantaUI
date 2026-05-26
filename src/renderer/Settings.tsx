@@ -375,10 +375,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
             Voice (Groq)
           </label>
           <div className="text-xs text-text-faint">
-            Adds a press-and-hold mic button to the chat input. Default = dictate into
-            the textarea. Hold with{" "}
-            <kbd className="text-text-muted">⌥</kbd> (or right-click) = command mode — say
-            "clear", "compact", "use opus", "answer two", etc. Get a key at{" "}
+            Enables push-to-talk dictation in the chat composer. Press{" "}
+            <kbd className="text-text-muted">ctrl+m</kbd> to start recording — a
+            pulsing red ring appears around the input. Press{" "}
+            <kbd className="text-text-muted">⏎</kbd> to stop and send, or{" "}
+            <kbd className="text-text-muted">ctrl+m</kbd> again to stop and edit
+            before sending. <kbd className="text-text-muted">esc</kbd> cancels.
+            Get a key at{" "}
             <a
               href="https://console.groq.com/keys"
               onClick={(e) => {
