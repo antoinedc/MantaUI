@@ -246,17 +246,22 @@ async function maybeCreateChatSession(
 // Session-level survivability options. Applied to bui-created sessions only —
 // never `-g`, so user-created tmux sessions outside bui keep tmux's defaults.
 //
-// - `exit-empty off`: keep the tmux SERVER alive even when no sessions exist.
-//   Without this, the server self-terminates when the last session dies; the
-//   next bui SSH call has to cold-start a new server (~50ms wasted) and any
-//   pending mosh-server processes lose their attach target.
-// - `destroy-unattached off`: keep this SESSION alive after the last client
-//   detaches. Default ON would tear down `asdfg` the moment the user closes
-//   the bui window, so a reopened bui sees "can't find session: asdfg" and
-//   the renderer alerts `ssh exited 1: can't find session: asdfg`. The
-//   tmuxNewWindow auto-heal below recovers from that, but keeping the session
-//   pinned is the right primary fix — it preserves window history, pane state,
-//   and the `@bui-session-id` stamps that chat-mode windows depend on.
+// - `exit-empty off`: THE primary teeth of this fix. Default ON makes the
+//   tmux SERVER self-terminate when there are no sessions left. Failure
+//   flow this blocks: user's claude TUI exits → bash fallback also exits →
+//   window closes (default `remain-on-exit off`) → session has 0 windows
+//   → session dies → server has 0 sessions → with `exit-empty on`, server
+//   exits. Next bui call: cold-starts a new server and "can't find session:
+//   <project>" is the user-visible symptom.
+//
+// - `destroy-unattached off`: defensive only. Tmux's CURRENT default is
+//   already `off` (the man page: "leave the session orphaned"), so this is
+//   a no-op against today's tmux. Set explicitly to (a) survive any future
+//   default flip, and (b) override a user `~/.tmux.conf` that set
+//   `destroy-unattached on` globally — without this override, every detach
+//   (close bui, wifi drop with mosh) would tear the session down. The
+//   tmuxNewWindow auto-heal recovers either way, but the session-pin
+//   preserves window history, pane state, and `@bui-session-id` stamps.
 function sessionSurvivabilityCmd(name: string): string {
   const target = shellQuote(name);
   return (
