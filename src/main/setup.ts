@@ -95,10 +95,52 @@ else
 fi
 
 CRED="$HOME/.claude/.credentials.json"
-if [ -s "$CRED" ]; then
-  echo "anthropicAuth=ok|credentials present"
+if [ ! -s "$CRED" ]; then
+  echo "anthropicAuth=fail|Not signed in. Run 'opencode auth login anthropic' on the remote to sign in to Claude."
 else
-  echo "anthropicAuth=fail|Run 'opencode auth login anthropic' on the remote to sign in to Claude."
+  # File present — but "present" is not "usable". The token expires ~every 8h;
+  # what keeps the box self-sufficient is a VALID REFRESH TOKEN, which the
+  # opencode-claude-auth plugin uses to mint new access tokens in place. So we
+  # report: valid / expired-but-refreshable (still ok, plugin self-heals) /
+  # expired-and-dead (fail, needs interactive re-auth). Uses python3 if present,
+  # else node (guaranteed by opencode); if neither, falls back to presence-only.
+  CHECK='
+import json,sys,time
+try:
+    d=json.load(open(sys.argv[1]))["claudeAiOauth"]
+except Exception:
+    print("fail|Credentials file is malformed. Re-run: opencode auth login anthropic"); sys.exit()
+acc=d.get("accessToken"); rt=d.get("refreshToken"); exp=d.get("expiresAt") or 0
+now=int(time.time()*1000)
+if not acc:
+    print("fail|No access token. Re-run: opencode auth login anthropic")
+elif exp>now:
+    print("ok|valid (%dm left)"%int((exp-now)/60000))
+elif rt:
+    print("ok|access token expired; auto-refreshes via refresh token")
+else:
+    print("fail|Token expired and no refresh token. Re-run: opencode auth login anthropic")
+'
+  if command -v python3 >/dev/null 2>&1; then
+    echo "anthropicAuth=$(python3 -c "$CHECK" "$CRED" 2>/dev/null || echo 'ok|credentials present')"
+  else
+    OCNODE=""
+    if command -v node >/dev/null 2>&1; then OCNODE=node; fi
+    if [ -n "$OCNODE" ]; then
+      echo "anthropicAuth=$("$OCNODE" -e '
+        const fs=require("fs");let d;
+        try{d=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).claudeAiOauth;}
+        catch(e){console.log("fail|Credentials file is malformed. Re-run: opencode auth login anthropic");process.exit(0);}
+        const now=Date.now(),exp=d.expiresAt||0;
+        if(!d.accessToken)console.log("fail|No access token. Re-run: opencode auth login anthropic");
+        else if(exp>now)console.log("ok|valid ("+Math.round((exp-now)/60000)+"m left)");
+        else if(d.refreshToken)console.log("ok|access token expired; auto-refreshes via refresh token");
+        else console.log("fail|Token expired and no refresh token. Re-run: opencode auth login anthropic");
+      ' "$CRED" 2>/dev/null || echo 'ok|credentials present')"
+    else
+      echo "anthropicAuth=ok|credentials present"
+    fi
+  fi
 fi
 `;
 
