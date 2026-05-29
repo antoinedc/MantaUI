@@ -61,9 +61,10 @@ export function parseProbeOutput(stdout: string): ProbeResult {
  *                         (the installer's default). Reports version.
  *   opencodeAuthPlugin  — checks ~/.config/opencode/opencode.jsonc lists
  *                         `opencode-claude-auth` in the `plugin` array.
- *   anthropicAuth       — checks ~/.claude/.credentials.json exists AND is
- *                         non-empty. Doesn't validate contents (that would
- *                         require running opencode).
+ *   anthropicAuth       — parses ~/.claude/.credentials.json (without running
+ *                         opencode) and reports token health, not mere
+ *                         presence: valid / expired-but-refreshable (ok) vs
+ *                         expired-dead / malformed / unverifiable (fail).
  */
 export const PROBE_SCRIPT = `
 echo "ssh=ok|connected"
@@ -98,12 +99,29 @@ CRED="$HOME/.claude/.credentials.json"
 if [ ! -s "$CRED" ]; then
   echo "anthropicAuth=fail|Not signed in. Run 'opencode auth login anthropic' on the remote to sign in to Claude."
 else
-  # File present — but "present" is not "usable". The token expires ~every 8h;
-  # what keeps the box self-sufficient is a VALID REFRESH TOKEN, which the
-  # opencode-claude-auth plugin uses to mint new access tokens in place. So we
-  # report: valid / expired-but-refreshable (still ok, plugin self-heals) /
-  # expired-and-dead (fail, needs interactive re-auth). Uses python3 if present,
-  # else node (guaranteed by opencode); if neither, falls back to presence-only.
+  # File present — but "present" is not "usable". The access token is short-
+  # lived (observed ~8h on the claude.ai OAuth tier); what keeps the box self-
+  # sufficient is a VALID REFRESH TOKEN. The opencode-claude-auth plugin uses it
+  # to mint a new access token and writes it back to this file in place — this
+  # was verified directly: with the file's expiresAt forced into the past and
+  # the refresh token retained, a single opencode call refreshed the token on
+  # disk with no CLI or external timer involved. So the verdicts are:
+  #   valid                 -> ok
+  #   expired + refresh tok  -> ok (plugin self-heals on next request)
+  #   expired, no refresh    -> fail (needs interactive re-auth)
+  #   malformed / no token   -> fail
+  #
+  # NOTE on the "expired + refresh token" = ok heuristic: we report ok on the
+  # PRESENCE of a refresh token, not proof it still works server-side. A revoked
+  # or rotated-away refresh token reads ok here and only fails on the first real
+  # request. We accept that — confirming it would mean spending the (single-use!)
+  # refresh token, which would burn it for the plugin. Presence is the safe,
+  # non-destructive signal.
+  #
+  # Parsing uses python3 if present, else node (bundled with opencode). If the
+  # interpreter is missing OR exits unexpectedly, we report fail|unverified —
+  # NOT ok. A probe whose job is to detect broken auth must never answer "ok"
+  # when it could not actually validate; false confidence is worse than none.
   CHECK='
 import json,sys,time
 try:
@@ -121,25 +139,31 @@ elif rt:
 else:
     print("fail|Token expired and no refresh token. Re-run: opencode auth login anthropic")
 '
+  # Fallback verdict when we cannot run a validating interpreter. Deliberately
+  # fail, not ok — see NOTE above.
+  UNVERIFIED="fail|Credentials file present but could not be validated (no python3/node on remote). Verify auth manually."
   if command -v python3 >/dev/null 2>&1; then
-    echo "anthropicAuth=$(python3 -c "$CHECK" "$CRED" 2>/dev/null || echo 'ok|credentials present')"
+    echo "anthropicAuth=$(python3 -c "$CHECK" "$CRED" 2>/dev/null || echo "$UNVERIFIED")"
+  elif command -v node >/dev/null 2>&1; then
+    # Mirror the python logic exactly: a valid-JSON file MISSING the
+    # claudeAiOauth block must route to "malformed", same as python's KeyError.
+    # JSON.parse(...).claudeAiOauth yields undefined (no throw), so we throw
+    # explicitly inside the try; otherwise a later field access would throw
+    # OUTSIDE the try, exit non-zero, and the OR-fallback would mask it.
+    echo "anthropicAuth=$(node -e '
+      const fs=require("fs");let d;
+      try{
+        d=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).claudeAiOauth;
+        if(!d) throw new Error("no claudeAiOauth block");
+      }catch(e){console.log("fail|Credentials file is malformed. Re-run: opencode auth login anthropic");process.exit(0);}
+      const now=Date.now(),exp=d.expiresAt||0;
+      if(!d.accessToken)console.log("fail|No access token. Re-run: opencode auth login anthropic");
+      else if(exp>now)console.log("ok|valid ("+Math.round((exp-now)/60000)+"m left)");
+      else if(d.refreshToken)console.log("ok|access token expired; auto-refreshes via refresh token");
+      else console.log("fail|Token expired and no refresh token. Re-run: opencode auth login anthropic");
+    ' "$CRED" 2>/dev/null || echo "$UNVERIFIED")"
   else
-    OCNODE=""
-    if command -v node >/dev/null 2>&1; then OCNODE=node; fi
-    if [ -n "$OCNODE" ]; then
-      echo "anthropicAuth=$("$OCNODE" -e '
-        const fs=require("fs");let d;
-        try{d=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).claudeAiOauth;}
-        catch(e){console.log("fail|Credentials file is malformed. Re-run: opencode auth login anthropic");process.exit(0);}
-        const now=Date.now(),exp=d.expiresAt||0;
-        if(!d.accessToken)console.log("fail|No access token. Re-run: opencode auth login anthropic");
-        else if(exp>now)console.log("ok|valid ("+Math.round((exp-now)/60000)+"m left)");
-        else if(d.refreshToken)console.log("ok|access token expired; auto-refreshes via refresh token");
-        else console.log("fail|Token expired and no refresh token. Re-run: opencode auth login anthropic");
-      ' "$CRED" 2>/dev/null || echo 'ok|credentials present')"
-    else
-      echo "anthropicAuth=ok|credentials present"
-    fi
+    echo "anthropicAuth=$UNVERIFIED"
   fi
 fi
 `;
