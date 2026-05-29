@@ -929,13 +929,38 @@ export async function rejectQuestion(
 // `connected` is just an array of provider ids; we filter `all` by it and
 // flatten each provider's `models` map.
 // What opencode uses when prompt_async is called without an explicit model.
-// Pulled from `/provider`'s `default` map for the first connected provider.
-// Used by the renderer to show a meaningful label BEFORE the first assistant
-// response (otherwise we'd render an empty/fallback string).
+//
+// PRIMARY source: the user's configured `model` in opencode.jsonc, surfaced by
+// `/config` as `"<providerID>/<modelID>"`. This is what opencode actually uses
+// for a new session, so it's what the picker must show. We deliberately do NOT
+// rely on `/provider`'s `default` map for this — that map is a per-provider
+// CATALOG default (e.g. anthropic → claude-sonnet-4-6) that ignores the user's
+// configured `model`, so reading it made new sessions show the wrong model.
+//
+// FALLBACK (no `model` configured): the catalog default for the first connected
+// provider, so we still render a meaningful label before the first response.
 export async function getDefaultModel(
   config: AppConfig,
 ): Promise<{ providerID: string; modelID: string } | null> {
   await ensureForward(config);
+
+  // Configured default wins. `/config.model` is "<providerID>/<modelID>".
+  try {
+    const cfgRes = await fetch(apiUrl(config, "/config"));
+    if (cfgRes.ok) {
+      const cfg = (await cfgRes.json()) as { model?: string };
+      const slash = cfg.model?.indexOf("/") ?? -1;
+      if (cfg.model && slash > 0) {
+        return {
+          providerID: cfg.model.slice(0, slash),
+          modelID: cfg.model.slice(slash + 1),
+        };
+      }
+    }
+  } catch {
+    /* fall through to provider catalog default */
+  }
+
   const res = await fetch(apiUrl(config, "/provider"));
   if (!res.ok) return null;
   type R = { connected?: string[]; default?: Record<string, string> };
