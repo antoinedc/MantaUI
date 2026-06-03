@@ -322,13 +322,22 @@ function ensureOpencodeStream(directory: string): void {
         let stalledOut = false;
         watchdog = setInterval(() => {
           const now = Date.now();
-          // Active-work for THIS stream's directory. The global stream
-          // (directory === "") has no single dir; treat it as active if
-          // ANY directory has active work (its substantive frames are the
-          // union). Scoped streams read their own dir's state.
+          // Active-work for THIS stream's directory. Scoped streams read
+          // their own dir's state. The global stream (directory === "")
+          // must report activeWork=false here: opencode delivers
+          // session/message events ONLY to the matching `?directory=`
+          // stream (see opencode.ts:1301-1305). The global stream is
+          // expected to carry only keep-alives + a small set of
+          // cross-cutting events. Earlier this used the union of every
+          // dir's activeWork, which meant any mid-turn session anywhere
+          // false-triggered mode B on <global> every ~45s → the watchdog
+          // tore down ALL scoped streams (including the one actively
+          // receiving frames for that session) → user-visible "hang" mid
+          // turn. Treating global as never-mode-B keeps mode A (fully dead
+          // mux) intact while removing the false positive.
           const activeWork = directory
             ? activeWorkByDir.get(directory) === true
-            : [...activeWorkByDir.values()].some(Boolean);
+            : false;
           const health = classifyStreamHealth({
             framesSinceConnect: frames,
             msSinceConnect: now - connectedAt,
