@@ -34,6 +34,7 @@ import {
 import { info as transportInfo, invalidate as invalidateTransport } from "./transport.js";
 import { probe as setupProbe, bootstrap as setupBootstrap } from "./setup.js";
 import { startStatusPoller, stopStatusPoller } from "./status.js";
+import { noteSessionActivity } from "./transcriptCache.js";
 import {
   listMessages as opencodeListMessages,
   getCachedMessages as opencodeGetCachedMessages,
@@ -374,6 +375,18 @@ function ensureOpencodeStream(directory: string): void {
           // the per-directory active-work tracker the watchdog consults.
           if (isSubstantiveFrame(ev.type)) lastSubstantiveAt = nowFrame;
           noteSessionStatus(ev);
+          // Bump the per-session activity stamp so the transcript cache knows
+          // its on-disk copy is stale until the next listMessages refresh.
+          // Without this, a remount mid-turn (user switches away after sending
+          // and comes back) paints the cached pre-send transcript for the ~6s
+          // the fresh fetch takes — looks like the send never happened.
+          // Only events with a string sessionID count; transport keep-alives
+          // (server.connected, server.heartbeat) carry no sessionID and are
+          // harmlessly skipped.
+          {
+            const sid = (ev.properties as { sessionID?: unknown } | undefined)?.sessionID;
+            if (typeof sid === "string" && sid) noteSessionActivity(sid);
+          }
           // Lightweight success-path trace: first event + every 50th, so the
           // log shows events ARE flowing for a dir (vs. silent = the bug)
           // without flooding on delta storms.

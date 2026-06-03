@@ -51,8 +51,33 @@ function cachePath(sessionId: string): string {
 
 const memCache = new Map<string, OpencodeMessage[]>();
 const pendingWrites = new Map<string, ReturnType<typeof setTimeout>>();
+// `lastFreshAt` is the wall-clock ms we last received an authoritative
+// transcript (a successful listMessages, or a cached read we promoted).
+// `lastActivityAt` is the last time a live SSE event touched this session.
+// When activity is newer than freshness, the cached payload is known-stale
+// (deltas arrived after the last full fetch) and we must NOT paint it on a
+// remount — doing so showed users the pre-send transcript for the 6s a fresh
+// listMessages took to return, making "switch away and back" look like the
+// send never happened. The disk file is still useful as a cold-start safety
+// net for sessions with no SSE activity this run; we just suppress it for
+// the hot cases.
+const lastFreshAt = new Map<string, number>();
+const lastActivityAt = new Map<string, number>();
+
+// Called by the SSE bus on every event that carries a sessionID. Pure
+// recorder — never blocks, never throws.
+export function noteSessionActivity(sessionId: string): void {
+  lastActivityAt.set(sessionId, Date.now());
+}
 
 export function getCachedTranscript(sessionId: string): OpencodeMessage[] | null {
+  // If live SSE events for this session arrived AFTER the last time we
+  // stored a fresh transcript, the cached copy is stale by definition —
+  // skip it and let the renderer show its loading state until the real
+  // fetch lands. Avoids the "remount shows pre-send state for 6s" bug.
+  const activity = lastActivityAt.get(sessionId);
+  const fresh = lastFreshAt.get(sessionId);
+  if (activity != null && (fresh == null || activity > fresh)) return null;
   // Memory hit first — avoids JSON.parse on every session switch within a run.
   const mem = memCache.get(sessionId);
   if (mem) return mem;
@@ -76,6 +101,10 @@ export function setCachedTranscript(
   messages: OpencodeMessage[],
 ): void {
   memCache.set(sessionId, messages);
+  // Mark this as the freshest authoritative state we know about. A subsequent
+  // SSE event bumps lastActivityAt past this and invalidates the cache until
+  // the next listMessages call refreshes it.
+  lastFreshAt.set(sessionId, Date.now());
   // Debounce the disk write: SSE-driven refetches fire frequently during an
   // active turn, and each transcript is up to 3 MB. Coalesce so we only
   // serialize once per WRITE_DEBOUNCE_MS per session.
@@ -145,6 +174,8 @@ function evictOldest(): void {
 // Drop the cache for a session (e.g. after delete). Best-effort.
 export function dropCachedTranscript(sessionId: string): void {
   memCache.delete(sessionId);
+  lastFreshAt.delete(sessionId);
+  lastActivityAt.delete(sessionId);
   const pending = pendingWrites.get(sessionId);
   if (pending) {
     clearTimeout(pending);
