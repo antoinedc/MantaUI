@@ -52,9 +52,21 @@ function sshBaseArgs(config: AppConfig): string[] {
   return args;
 }
 
+// Hard timeout for one-shot ssh calls. Without this, an ssh process that
+// blocks on the remote (mux wedge, remote sshd at MaxStartups, network
+// blackhole) sits forever in SN state. Per-tick pollers (footer branch,
+// auto-refresh) then pile up dozens of wedged ssh procs locally while the
+// remote sshd hits its connection-rate cap → the user sees random
+// "Connection reset by peer" / "Session open refused by peer" errors on
+// otherwise-fine actions like tmux:select-window. 60 s is generous for any
+// real ssh side-channel call (tmuxList, branch, dir checks); anything
+// longer is the wedge.
+const DEFAULT_SSH_TIMEOUT_MS = 60_000;
+
 export function runSshOnce(
   config: AppConfig,
   remoteCmd: string,
+  opts: { timeoutMs?: number } = {},
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     if (!config.host) return reject(new Error("No host configured"));
@@ -62,12 +74,30 @@ export function runSshOnce(
     const proc = cpSpawn("ssh", args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_SSH_TIMEOUT_MS;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // SIGKILL: the proc is wedged in a network wait — SIGTERM may not
+      // dislodge it before the next poll tick spawns another one.
+      try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+      reject(new Error(`ssh timed out after ${timeoutMs}ms: ${remoteCmd.slice(0, 80)}`));
+    }, timeoutMs);
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
     proc.stdout.on("data", (b) => (stdout += b.toString()));
     proc.stderr.on("data", (b) => (stderr += b.toString()));
-    proc.on("error", reject);
+    proc.on("error", (err) => finish(() => reject(err)));
     proc.on("exit", (code) => {
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`ssh exited ${code}: ${stderr.trim() || stdout.trim()}`));
+      finish(() => {
+        if (code === 0) resolve({ stdout, stderr });
+        else reject(new Error(`ssh exited ${code}: ${stderr.trim() || stdout.trim()}`));
+      });
     });
   });
 }
@@ -719,20 +749,49 @@ function parseWorktreePorcelain(out: string): WorktreeInfo[] {
 // Returns null for: no host, empty cwd, non-git dir, detached HEAD, or any
 // failure. Detached HEAD is intentionally null — the footer indicator only
 // makes sense as a branch name; we'd rather show nothing than `HEAD`.
+// Per-cwd cache + in-flight coalescer for the branch poll. Every mounted
+// ChatPanel polls `getBranch` for its own cwd every 5 s (ChatPanel.tsx
+// fetchBranch). Without coalescing, N panels open on the same project →
+// N concurrent ssh procs every tick, and any slowness on the remote sshd
+// (MaxStartups throttling, OOM-recovery) leaves them stacking up locally
+// in SN state until the warm ControlMaster also stalls and unrelated
+// IPC (`tmux:select-window`) starts failing with `Session open refused by
+// peer`. TTL is just under one poll tick so a fresh checkout still
+// surfaces within ~5 s. In-flight dedupe collapses any concurrent panels
+// onto a single ssh.
+const BRANCH_CACHE_TTL_MS = 4_000;
+const branchCache = new Map<string, { value: string | null; at: number }>();
+const branchInFlight = new Map<string, Promise<string | null>>();
+
 export async function getBranch(
   config: AppConfig,
   cwd: string,
 ): Promise<string | null> {
   if (!config.host) return null;
-  if (!cwd.trim()) return null;
+  const key = cwd.trim();
+  if (!key) return null;
+  const cached = branchCache.get(key);
+  if (cached && Date.now() - cached.at < BRANCH_CACHE_TTL_MS) return cached.value;
+  const inflight = branchInFlight.get(key);
+  if (inflight) return inflight;
   // `git -C <dir> branch --show-current` prints the branch name or empty
   // (detached HEAD); errors go to stderr. `|| true` keeps the SSH exit zero
   // on non-repo so the catch path is reserved for real transport failures.
   const cmd =
-    `git -C ${pathQuote(cwd)} branch --show-current 2>/dev/null || true`;
-  const { stdout } = await runSshOnce(config, cmd).catch(() => ({ stdout: "" }));
-  const name = stdout.trim();
-  return name ? name : null;
+    `git -C ${pathQuote(key)} branch --show-current 2>/dev/null || true`;
+  // 8 s cap on the branch ssh specifically: the call is "instant" over a
+  // warm mux (~30 ms) and the poller refires every 5 s; waiting longer
+  // than the next tick adds nothing and just gives the wedge room to grow.
+  const p = runSshOnce(config, cmd, { timeoutMs: 8_000 })
+    .then(({ stdout }) => stdout.trim() || null)
+    .catch(() => null)
+    .then((value) => {
+      branchCache.set(key, { value, at: Date.now() });
+      branchInFlight.delete(key);
+      return value;
+    });
+  branchInFlight.set(key, p);
+  return p;
 }
 
 // ===== Directory autocomplete =====
