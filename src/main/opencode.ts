@@ -39,6 +39,11 @@ import {
   isPortForwardingFailure,
   parseLsofListeners,
 } from "./forwardHeal.js";
+import {
+  dropCachedTranscript,
+  getCachedTranscript,
+  setCachedTranscript,
+} from "./transcriptCache.js";
 import type {
   AppConfig,
   OpencodeMessage,
@@ -637,7 +642,20 @@ export async function listMessages(
   if (!res.ok) {
     throw new Error(`opencode listMessages ${res.status}: ${await res.text()}`);
   }
-  return (await res.json()) as OpencodeMessage[];
+  const messages = (await res.json()) as OpencodeMessage[];
+  // Stash the fresh transcript so the next mount of this session can render
+  // immediately instead of blocking on the (slow) opencode fetch.
+  setCachedTranscript(sessionId, messages);
+  return messages;
+}
+
+// Synchronous-ish cache lookup for renderer-initiated fast paths. Returns
+// `null` on miss; the renderer should then fall back to `listMessages` and
+// show its loading state. Reading is cheap (memory hit first, disk read at
+// worst), so the IPC handler can call this on the main thread without
+// blocking other IPC.
+export function getCachedMessages(sessionId: string): OpencodeMessage[] | null {
+  return getCachedTranscript(sessionId);
 }
 
 // Send a user message into the session.
@@ -1261,6 +1279,8 @@ export async function deleteSession(config: AppConfig, sessionId: string): Promi
   await ensureForward(config);
   // Drop the cache entry — sid will not be reused.
   sessionDirectoryCache.delete(sessionId);
+  // Drop the persisted transcript so we don't leak it on disk after delete.
+  dropCachedTranscript(sessionId);
   const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}`);
   const res = await fetch(url, { method: "DELETE" });
   if (!res.ok) {

@@ -136,6 +136,10 @@ const api = {
   // opencode chat-mode bridges.
   opencodeMessages: (sessionId: string): Promise<OpencodeMessage[]> =>
     ipcRenderer.invoke(IPC.opencodeMessages, sessionId),
+  opencodeMessagesCached: (
+    sessionId: string,
+  ): Promise<OpencodeMessage[] | null> =>
+    ipcRenderer.invoke(IPC.opencodeMessagesCached, sessionId),
   onOpencodeEvent: (cb: (ev: OpencodeEvent) => void): (() => void) => {
     const listener = (_: unknown, ev: OpencodeEvent) => cb(ev);
     ipcRenderer.on(IPC.opencodeEvent, listener);

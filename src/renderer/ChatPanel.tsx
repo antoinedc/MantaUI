@@ -378,6 +378,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const cacheTtl = useStore((s) => s.cacheTtl);
   const [messages, setMessages] = useState<OpencodeMessage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // True from session-switch until the fresh transcript fetch resolves. Lets
+  // the footer hint at "refreshing…" while we render the cached transcript.
+  // opencode's GET /session/{id}/message is 20–35s on large sessions, so
+  // this window is real and worth surfacing.
+  const [refreshing, setRefreshing] = useState(false);
   // Pending permission requests for THIS session. Polled on mount and refreshed
   // on permission.asked / permission.replied events.
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
@@ -764,11 +769,33 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
     fetchBranch();
     const branchPoll = setInterval(fetchBranch, 5000);
+
+    // Cached-first render: opencode's GET /session/{id}/message is 20–35s on
+    // large transcripts (3 MB JSON, no server-side cache), so blocking the
+    // panel on it makes session-switches feel broken. Paint the last-known
+    // transcript from disk immediately; the fresh fetch below overwrites it
+    // when it lands. `refreshing` drives the footer hint so the staleness is
+    // visible during the gap.
+    setRefreshing(true);
+    window.api
+      .opencodeMessagesCached(sessionId)
+      .then((cached) => {
+        // Guard against the fresh fetch winning the race: never overwrite
+        // a fresh transcript with a cached one.
+        if (cancelled || !cached) return;
+        setMessages((prev) => (prev === null ? cached : prev));
+        for (const cid of collectChildSessionIds(cached)) {
+          childSessionIds.current.add(cid);
+        }
+      })
+      .catch(() => { /* cache miss / corrupt — fresh fetch will fill in */ });
+
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
         if (cancelled) return;
         setMessages(m);
+        setRefreshing(false);
         // Seed the subagent allowlist from the persisted transcript so
         // events for previously-spawned children (still running OR finished
         // and being inspected) pass the sessionID filter. Live `session.
@@ -796,7 +823,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         // (applyQuestionEvent) which carries the que_ as requestId.
       })
       .catch((e) => {
-        if (!cancelled) setError(String(e?.message ?? e));
+        if (!cancelled) {
+          setRefreshing(false);
+          // If cached painted earlier, keep showing it and surface the error
+          // out-of-band would be ideal — but for now match prior behavior and
+          // show the error screen (overrides any cached render).
+          setError(String(e?.message ?? e));
+        }
       });
     // Eagerly fetch the command list (with templates) so the renderer can
     // detect historical /command-origin user messages and collapse them on
@@ -3638,6 +3671,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         abort={abort}
         running={running}
         branch={branch}
+        refreshing={refreshing}
         modelLabel={modelLabel}
         showThinking={showThinking}
         chatAutoAllow={chatAutoAllow}
@@ -4771,6 +4805,7 @@ function InputArea({
   abort,
   running,
   branch,
+  refreshing,
   modelLabel,
   showThinking,
   chatAutoAllow,
@@ -4813,6 +4848,7 @@ function InputArea({
   abort: () => void;
   running: boolean;
   branch: string | null;
+  refreshing: boolean;
   modelLabel: string | null;
   showThinking: boolean;
   chatAutoAllow: boolean;
@@ -5056,6 +5092,14 @@ function InputArea({
               title={`Current branch: ${branch}`}
             >
               ⎇ {branch}
+            </span>
+          )}
+          {refreshing && (
+            <span
+              className="text-text-faint shrink-0 animate-pulse"
+              title="Refreshing transcript from opencode (large sessions can take 20–30s)"
+            >
+              ↻ refreshing…
             </span>
           )}
           <ModelPicker

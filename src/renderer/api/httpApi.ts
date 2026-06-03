@@ -385,6 +385,8 @@ export const httpApi: Api = {
 
   // -- opencode chat --
   opencodeMessages: (sessionId) => rpc(IPC.opencodeMessages, sessionId),
+  opencodeMessagesCached: (sessionId) =>
+    rpc(IPC.opencodeMessagesCached, sessionId),
   onOpencodeEvent: (cb) => on<OpencodeEvent>("opencode", cb),
 
   /**

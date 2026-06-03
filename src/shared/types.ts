@@ -209,6 +209,11 @@ export const IPC = {
   // ---- opencode chat-mode ----
   // Fetch full transcript for a session id (one-shot HTTP call on the remote).
   opencodeMessages: "opencode:messages",
+  // Synchronous-ish cached transcript lookup. Returns the last successful
+  // `opencodeMessages` payload from disk (or null on miss). Used by the
+  // renderer to paint the chat panel instantly while the slow fresh fetch
+  // runs in the background.
+  opencodeMessagesCached: "opencode:messages-cached",
   // Live SSE stream from opencode, forwarded raw to the renderer. Renderer
   // filters by sessionID in the event payload.
   opencodeEvent: "opencode:event",

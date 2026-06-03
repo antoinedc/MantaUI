@@ -36,6 +36,7 @@ import { probe as setupProbe, bootstrap as setupBootstrap } from "./setup.js";
 import { startStatusPoller, stopStatusPoller } from "./status.js";
 import {
   listMessages as opencodeListMessages,
+  getCachedMessages as opencodeGetCachedMessages,
   subscribeEvents as opencodeSubscribeEvents,
   sendPrompt as opencodeSendPrompt,
   abortSession as opencodeAbortSession,
@@ -895,6 +896,11 @@ function registerHandlers(): void {
   // arrive separately via the opencodeEvent stream forwarded by startOpencodeBus.
   ipcMain.handle(IPC.opencodeMessages, (_e, sessionId: string) =>
     opencodeListMessages(config, sessionId),
+  );
+  // Cached transcript lookup — instant. Renderer paints this immediately at
+  // mount, then awaits opencodeMessages in the background for the refresh.
+  ipcMain.handle(IPC.opencodeMessagesCached, (_e, sessionId: string) =>
+    opencodeGetCachedMessages(sessionId),
   );
 
   // Phase 2: send user message + abort generation. Optional `model` overrides
