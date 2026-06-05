@@ -350,16 +350,38 @@ function ensureOpencodeStream(directory: string): void {
             stalledOut = true;
             const silentS = Math.round((now - lastFrameAt) / 1000);
             const substS = Math.round((now - lastSubstantiveAt) / 1000);
+            // Two recovery paths, scaled to the signal:
+            //
+            // - activeWork=true (the user is waiting on real events): a true
+            //   half-dead mux is dropping their assistant deltas. Worth the
+            //   blast radius of an eventTunnelRestart — every other stream
+            //   reconnects, but the user's in-flight turn gets unblocked.
+            //
+            // - activeWork=false (idle directory): "no frames in 50s" can
+            //   mean the mux died, OR the remote opencode-serve is just
+            //   slow (we've observed it pegged at 6 GB RES with full swap,
+            //   delaying heartbeats by tens of seconds). Restarting the
+            //   tunnel for every idle stream that times out cascades into
+            //   tearing down ALL streams every ~50s — that's what the user
+            //   feels as "UI stuck a lot". Just respawn THIS one stream;
+            //   the others stay live. If the tunnel really is dead, every
+            //   other stream will independently trip mode A and we converge
+            //   on the same outcome, just without amplification.
+            const action = activeWork
+              ? "restarting event tunnel + reconnecting"
+              : "reconnecting this stream only (idle — likely server lag, not dead mux)";
             console.warn(
               `[opencode-bus] STALLED dir=${directory || "<global>"} ` +
                 `(no frames ${silentS}s / no substantive ${substS}s, ` +
-                `activeWork=${activeWork}) — restarting event tunnel + reconnecting`,
+                `activeWork=${activeWork}) — ${action}`,
             );
-            // The event stream rides its OWN dedicated ssh -L -N tunnel
-            // (isolated from the RPC ControlMaster). Kill it; the next
-            // subscribeEvents respawns a FRESH connection. RPC/pty are
-            // untouched — no shared-mux collateral.
-            eventTunnelRestart();
+            if (activeWork) {
+              // The event stream rides its OWN dedicated ssh -L -N tunnel
+              // (isolated from the RPC ControlMaster). Kill it; the next
+              // subscribeEvents respawns a FRESH connection. RPC/pty are
+              // untouched — no shared-mux collateral.
+              eventTunnelRestart();
+            }
             try { stream.dispose(); } catch { /* already disposed */ }
           }
         }, Math.min(STREAM_STALL_MS, 10_000));

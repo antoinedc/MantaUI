@@ -176,8 +176,42 @@ function perWindowOptsCmd(target: string, opencodeSessionId?: string): string {
 // in its format spec.
 const FS = "	";
 
+// tmuxList does 3 SSH round-trips (list-sessions, list-windows, list-panes).
+// Every mutating IPC (kill-window, new-window, select-window, rename, …)
+// ends by returning a fresh tmuxList to the renderer. Under remote
+// pressure (swap-thrashing box, load avg 13) each round-trip can stretch
+// to seconds; back-to-back UI actions then stack up sequentially behind
+// the same data we already have. Coalesce concurrent callers onto a single
+// in-flight result, and serve a sub-second TTL cache so rapid-fire calls
+// don't each round-trip. Mutation paths bust the cache so the next read
+// reflects the change.
+const TMUX_LIST_TTL_MS = 1_500;
+let tmuxListCache: { value: TmuxSession[]; at: number } | null = null;
+let tmuxListInFlight: Promise<TmuxSession[]> | null = null;
+
+export function invalidateTmuxListCache(): void {
+  tmuxListCache = null;
+}
+
 export async function tmuxList(config: AppConfig): Promise<TmuxSession[]> {
   if (!config.host) return [];
+  if (tmuxListCache && Date.now() - tmuxListCache.at < TMUX_LIST_TTL_MS) {
+    return tmuxListCache.value;
+  }
+  if (tmuxListInFlight) return tmuxListInFlight;
+  tmuxListInFlight = (async () => {
+    try {
+      const value = await tmuxListUncached(config);
+      tmuxListCache = { value, at: Date.now() };
+      return value;
+    } finally {
+      tmuxListInFlight = null;
+    }
+  })();
+  return tmuxListInFlight;
+}
+
+async function tmuxListUncached(config: AppConfig): Promise<TmuxSession[]> {
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
   // 6th column is `@bui-session-id` — set on chat-mode windows when bui
   // creates them. Empty for claude-TUI windows. Presence of this id is the
@@ -315,6 +349,7 @@ export async function tmuxNewSession(
     sessionSurvivabilityCmd(name) + ` \\; ` +
     perWindowOptsCmd(`${name}:${windowName}`, sid ?? undefined);
   await runSshOnce(config, cmd);
+  invalidateTmuxListCache();
 }
 
 // True iff err's message matches tmux's "can't find session: X" stderr line.
@@ -383,6 +418,7 @@ export async function tmuxNewWindow(
       perWindowOptsCmd(target, sid ?? undefined);
     await runSshOnce(config, healCmd);
   }
+  invalidateTmuxListCache();
 }
 
 export async function tmuxRenameSession(
@@ -394,6 +430,7 @@ export async function tmuxRenameSession(
     config,
     `tmux rename-session -t ${shellQuote(oldName)} ${shellQuote(newName)}`,
   );
+  invalidateTmuxListCache();
 }
 
 export async function tmuxRenameWindow(
@@ -406,10 +443,12 @@ export async function tmuxRenameWindow(
     config,
     `tmux rename-window -t ${shellQuote(`${sessionName}:${windowIndex}`)} ${shellQuote(newName)}`,
   );
+  invalidateTmuxListCache();
 }
 
 export async function tmuxKillSession(config: AppConfig, name: string): Promise<void> {
   await runSshOnce(config, `tmux kill-session -t ${shellQuote(name)} || true`);
+  invalidateTmuxListCache();
 }
 
 export async function tmuxKillWindow(
@@ -421,6 +460,7 @@ export async function tmuxKillWindow(
     config,
     `tmux kill-window -t ${shellQuote(`${sessionName}:${windowIndex}`)} || true`,
   );
+  invalidateTmuxListCache();
 }
 
 export async function tmuxSelectWindow(
@@ -449,6 +489,7 @@ export async function tmuxRestampSessionId(
     config,
     `tmux set-window-option -t ${shellQuote(target)} ${OPENCODE_SID_OPT} ${shellQuote(sessionId)}`,
   );
+  invalidateTmuxListCache();
 }
 
 // ===== Remote tmux config management =====
