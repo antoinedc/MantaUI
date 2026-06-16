@@ -1480,16 +1480,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         refreshPermissions();
       }
 
-      // Drain the queue between tool calls — send the next queued message as
-      // soon as a tool part completes, rather than waiting for session.idle.
-      if (
-        ev.type === "message.part.updated" &&
-        props.type === "tool" &&
-        (props.state as Record<string, unknown> | undefined)?.status === "completed" &&
-        messageQueueRef.current.length > 0
-      ) {
-        sendQueuedRef.current();
-      }
+      // Queue drain happens ONLY on session.idle (the [running, messageQueue]
+      // effect below), never mid-turn. An earlier version drained on every
+      // tool part completion — but a tool completing inside an active turn
+      // is NOT end-of-turn (the assistant is about to write more text or
+      // call another tool). Posting a new prompt in that window made
+      // opencode abort the in-flight assistant message to start the new
+      // turn, surfacing a `MessageAbortedError` banner in the renderer
+      // AND marking the prior assistant message aborted in the transcript.
+      // Wait for true idle — slightly slower drain, but the queued message
+      // lands as a normal turn with no abort artifacts.
 
       // Permission lifecycle — refresh the inline approval list so the card
       // appears/disappears in real time as opencode requests/closes them.
@@ -1595,10 +1595,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // the streaming case.
   //
   // Force-pin paths stay explicit and limited to user actions: `submit()`
-  // and `sendQueuedRef.current()` set `pinnedToBottom.current = true`
-  // AND reset `prevScrollHeight.current = 0` (so the next layout effect
-  // sticks unconditionally via the prevScrollHeight=0 → pin branch in
-  // `wasAtBottomBeforeCommit`).
+  // sets `pinnedToBottom.current = true` AND resets
+  // `prevScrollHeight.current = 0` (so the next layout effect sticks
+  // unconditionally via the prevScrollHeight=0 → pin branch in
+  // `wasAtBottomBeforeCommit`). Queue drains route through the same
+  // submit() path, so they inherit this force-pin for free.
   const stickToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1607,7 +1608,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Tracks the scrollHeight as of the last completed commit. The layout
   // effect compares this against the live DOM to derive whether the user
   // WAS pinned before the new content landed. Reset to 0 on session
-  // change and on explicit force-pin (submit/sendQueued).
+  // change and on explicit force-pin (submit).
   const prevScrollHeight = useRef(0);
   useEffect(() => {
     const el = scrollRef.current;
@@ -1660,7 +1661,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       pinnedToBottom.current = false;
     }
     prevScrollHeight.current = el.scrollHeight;
-  }, [messages, liveTodos]);
+  }, [messages, liveTodos, questions]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -1990,52 +1991,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const submitRef = useRef<() => void>(() => {});
   submitRef.current = submit;
 
-  // Always-current mirror of messageQueue for use inside the SSE handler
-  // (effects capture a stale closure; a ref stays live).
-  const messageQueueRef = useRef<string[]>([]);
-  messageQueueRef.current = messageQueue;
-
-  // Pops the front of the queue and fires it directly to opencode without
-  // going through submit(). Used by the SSE handler to drain between tool
-  // calls — submit()'s `running` guard would block it there.
-  const sendQueuedRef = useRef<() => void>(() => {});
-  sendQueuedRef.current = () => {
-    const q = messageQueueRef.current;
-    if (q.length === 0) return;
-    const [next, ...rest] = q;
-    setMessageQueue(rest);
-    // Force-pin to bottom — same rationale as submit(). The user is having
-    // a queued turn dispatched, they want to see it land in the transcript.
-    // Reset prevScrollHeight to 0 so the layout effect's
-    // `wasAtBottomBeforeCommit` short-circuits (first-commit branch).
-    pinnedToBottom.current = true;
-    prevScrollHeight.current = 0;
-    const optimisticUserId = `optimistic-user-${Date.now()}`;
-    setMessages((prev) => [
-      ...(prev ?? []),
-      {
-        info: {
-          id: optimisticUserId,
-          sessionID: sessionId,
-          role: "user",
-          time: { created: Date.now() },
-        },
-        parts: [{ id: `${optimisticUserId}-text`, messageID: optimisticUserId, type: "text", text: next }],
-      },
-    ]);
-    window.api
-      .opencodePrompt(sessionId, next, modelOverride ?? undefined, [], undefined)
-      .catch((e: unknown) => {
-        setSendError(String((e as Error)?.message ?? e));
-        setMessages((prev) =>
-          prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
-        );
-      });
-  };
-
-  // When the AI finishes and there are queued messages, send the next one
-  // automatically. We pop the front item, restore it into `input`, and defer
-  // one tick so the state update propagates before submit() reads `input`.
+  // When the AI finishes (running flips to false) and there are queued
+  // messages, dispatch the next one. We restore it into `input` and call
+  // submit() via the ref so slash commands, attachments, and model
+  // resolution all go through the same code path as a manual submit.
+  // Drain runs ONLY on true idle — never mid-turn (see the SSE handler
+  // above for why intra-turn drains produced MessageAbortedError).
   useEffect(() => {
     if (running || messageQueue.length === 0) return;
     const [next, ...rest] = messageQueue;
@@ -3467,26 +3428,30 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             {running && activeTodos && activeTodos.length > 0 && (
               <ActiveTodos todos={activeTodos} />
             )}
+            {/* Pending question cards. Rendered INSIDE the scroll */}
+            {/* container at the tail of the transcript so they scroll */}
+            {/* with the rest of the chat instead of sitting in a shrink-0 */}
+            {/* row above the input. They still surface prominently (Claude */}
+            {/* is blocked until answered) but feel like part of the */}
+            {/* conversation — scrolling up through history doesn't keep */}
+            {/* the card glued to the bottom. Same pattern as ActiveTodos. */}
+            {questions.length > 0 && (
+              <div className="space-y-2 pt-1">
+                {questions.map((q) => (
+                  <QuestionCard
+                    key={q.id}
+                    request={q}
+                    onReply={(answers) => replyQuestion(q, answers)}
+                    onReject={() => rejectQuestion(q)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
         </div>
         </TaskContext.Provider>
       </div>
-
-      {/* Pending question cards. Shown above permissions + running indicator */}
-      {/* so they're hard to miss — tool execution blocks until answered. */}
-      {questions.length > 0 && (
-        <div className="shrink-0 px-4 pt-2 space-y-2">
-          {questions.map((q) => (
-            <QuestionCard
-              key={q.id}
-              request={q}
-              onReply={(answers) => replyQuestion(q, answers)}
-              onReject={() => rejectQuestion(q)}
-            />
-          ))}
-        </div>
-      )}
 
       {/* Pending permission cards. Shown above the running indicator/input */}
       {/* so they're hard to miss — tool execution pauses until reply. */}

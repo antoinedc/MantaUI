@@ -263,6 +263,21 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
     `createSession expands a leading ~ …` in `src/server/opencode.test.mjs`
     (red/green verified). Do NOT "simplify" by moving expansion back into a
     caller — the chokepoint is what makes the corruption unreachable.
+- **Queued message drain — ONLY on `session.idle`, never mid-turn.** When
+  the user submits while `running` is true, the text gets pushed to
+  `messageQueue` and the input clears. The `[running, messageQueue]`
+  effect in `ChatPanel.tsx` dispatches the next queued item the moment
+  `running` flips false (i.e. opencode emits `session.idle` or
+  `session.status{type:"idle"}`). Do NOT add an SSE-handler drain on
+  `message.part.updated` with tool `state.status === "completed"` (or any
+  other intra-turn signal): a tool completing inside an active turn is
+  NOT end-of-turn (the assistant is about to write more text or call
+  another tool), and posting a new prompt in that window makes opencode
+  abort the in-flight assistant message to start the new turn —
+  `MessageAbortedError` lands in the sendError banner and the prior
+  assistant message is marked aborted in the transcript. Slightly slower
+  drain (waits for true idle), but the queued message lands cleanly as a
+  normal turn.
 - **TodoWrite checklist auto-dismissal** — when every item in the pinned
   `ActiveTodos` is terminal (`completed` or `cancelled`) at the moment the
   user submits their next prompt, `todosDismissed` flips true and the card
@@ -337,15 +352,16 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   40-100px, a sub-8px scroll is almost certainly accidental, and
   re-engaging follow by scrolling to the bottom is trivial.
 
-  **Force-pin paths are limited and explicit**: `submit()` and
-  `sendQueuedRef.current()` set `pinnedToBottom.current = true` AND reset
-  `prevScrollHeight.current = 0` just before their optimistic
-  `setMessages`. The reset matters — `wasAtBottomBeforeCommit` returns
-  true unconditionally when `prevScrollHeight=0` (first-commit branch),
-  which forces the stick even if the user had scrolled into history
-  before submitting. That's it. The old `running` false→true edge effect
-  is gone — it fired on every busy/idle oscillation and yanked the
-  viewport mid-turn. **Do NOT reintroduce a `running`-derived force-pin.**
+  **Force-pin paths are limited and explicit**: `submit()` sets
+  `pinnedToBottom.current = true` AND resets `prevScrollHeight.current =
+  0` just before its optimistic `setMessages`. The reset matters —
+  `wasAtBottomBeforeCommit` returns true unconditionally when
+  `prevScrollHeight=0` (first-commit branch), which forces the stick even
+  if the user had scrolled into history before submitting. That's it.
+  Queue drains route through the same `submit()` path so they inherit
+  this force-pin for free. The old `running` false→true edge effect is
+  gone — it fired on every busy/idle oscillation and yanked the viewport
+  mid-turn. **Do NOT reintroduce a `running`-derived force-pin.**
 
   Also gone: asymmetric hysteresis with a dead-zone (re-introduces v1's
   bug — the dead zone PRESERVES prior state); wheel/touch/key intent
