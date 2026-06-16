@@ -117,9 +117,20 @@ async function serveFile(res, filePath, fallbackStatus = 404) {
     const s = await stat(filePath);
     if (!s.isFile()) throw new Error("not a file");
     const data = await readFile(filePath);
+    const ext = extname(filePath);
+    // HTML entry point + manifest are unhashed and must NEVER be cached, or an
+    // installed iOS PWA keeps booting a stale bundle that references old asset
+    // hashes — features land server-side but the phone never sees them.
+    // `no-cache` only forces revalidation, and with no ETag/Last-Modified the
+    // WKWebView sometimes serves its snapshot anyway; `no-store` is the
+    // belt-and-suspenders that guarantees a fresh fetch on every launch.
+    // Vite's JS/CSS are content-hashed (immutable), so they stay cacheable.
+    const noStore = ext === ".html" || ext === ".webmanifest";
     res.writeHead(200, {
-      "content-type": MIME[extname(filePath)] ?? "application/octet-stream",
-      "cache-control": "no-cache",
+      "content-type": MIME[ext] ?? "application/octet-stream",
+      "cache-control": noStore
+        ? "no-store, must-revalidate"
+        : "no-cache",
       "content-length": data.length,
     });
     res.end(data);
