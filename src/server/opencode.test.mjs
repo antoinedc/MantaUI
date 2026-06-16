@@ -9,6 +9,8 @@ import {
   forkSession,
   compactSession,
   abortSession,
+  listPermissions,
+  replyPermission,
   _resetSessionDirectoryCache,
   _onSessionDirectoryAdded,
 } from "./opencode.mjs";
@@ -387,5 +389,107 @@ test("compactSession appends ?directory= from cache", async () => {
   assert.ok(
     compactUrl.includes("directory=%2Fproj%2Fz"),
     `compact URL missing scoped directory: ${compactUrl}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Permission flow scope
+//
+// Regression: opencode's WorkspaceRoutingMiddleware returns [] from the
+// UNSCOPED /permission list (and 404s an unscoped reply) for a session bound
+// to a non-default directory. Without ?directory= the mobile PermissionCard
+// never appeared and trust-mode auto-allow failed with
+// PermissionNotFoundError — either way the turn hung. Mirrors the question
+// scoping + desktop src/main/opencode.ts.
+// ---------------------------------------------------------------------------
+
+test("listPermissions appends ?directory= from cache", async () => {
+  _resetSessionDirectoryCache();
+  let permUrl = "";
+  await withMockFetch(
+    async (url) => {
+      const u = String(url);
+      if (u.startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(JSON.stringify({
+          id: "ses_p",
+          title: "t",
+          directory: "/proj/perm",
+          projectID: "pid",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u.includes("/permission")) {
+        permUrl = u;
+        return new Response("[]", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await createSession({ directory: "/proj/perm", title: "t" });
+      await listPermissions("ses_p");
+    },
+  );
+  assert.ok(
+    permUrl.includes("directory=%2Fproj%2Fperm"),
+    `listPermissions URL missing scoped directory: ${permUrl}`,
+  );
+});
+
+test("listPermissions omits ?directory= when no sessionId given", async () => {
+  _resetSessionDirectoryCache();
+  let permUrl = "";
+  await withMockFetch(
+    async (url) => {
+      permUrl = String(url);
+      return new Response("[]", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    async () => {
+      await listPermissions();
+    },
+  );
+  assert.ok(
+    !permUrl.includes("directory="),
+    `unscoped listPermissions should not append directory: ${permUrl}`,
+  );
+});
+
+test("replyPermission appends ?directory= from cache (auto-allow path)", async () => {
+  _resetSessionDirectoryCache();
+  let replyUrl = "";
+  await withMockFetch(
+    async (url) => {
+      const u = String(url);
+      if (u.startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(JSON.stringify({
+          id: "ses_pr",
+          title: "t",
+          directory: "/proj/preply",
+          projectID: "pid",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u.includes("/reply")) replyUrl = u;
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await createSession({ directory: "/proj/preply", title: "t" });
+      await replyPermission({
+        requestId: "per_123",
+        reply: "always",
+        sessionId: "ses_pr",
+      });
+    },
+  );
+  assert.ok(
+    replyUrl.includes("/permission/per_123/reply"),
+    `reply URL wrong path: ${replyUrl}`,
+  );
+  assert.ok(
+    replyUrl.includes("directory=%2Fproj%2Fpreply"),
+    `replyPermission URL missing scoped directory: ${replyUrl}`,
   );
 });

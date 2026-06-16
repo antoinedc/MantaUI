@@ -60,9 +60,18 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
         const cfg = await local.configGet();
         if (cfg.chatAutoAllow) {
           const permId = evt.properties?.id;
+          // Scope the reply to the permission's session directory. Without
+          // this the unscoped reply 404s (PermissionNotFoundError) — the
+          // exact failure seen in the bui-server logs — so trust-mode
+          // auto-allow never actually allowed the tool and the turn hung.
+          const permSessionId = evt.properties?.sessionID;
           if (permId) {
             try {
-              await oc.replyPermission({ requestId: permId, reply: "always" });
+              await oc.replyPermission({
+                requestId: permId,
+                reply: "always",
+                sessionId: permSessionId,
+              });
             } catch (e) {
               console.warn("[opencode-pump] auto-allow failed:", e?.message ?? e);
               // Fall back: forward the event so the user can approve manually.
