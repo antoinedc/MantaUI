@@ -33,10 +33,21 @@ self.addEventListener("push", (event) => {
   const title = payload.title || "Better UI";
   const body = payload.body || "";
   const tag = payload.tag || undefined;
+  // Carry everything the click handler needs to either deep-link or post a
+  // direct answer (questionId + index→label map).
   const data = {
     sessionId: payload.sessionId || null,
     kind: payload.kind || null,
+    requestId: payload.requestId || null,
+    answers: Array.isArray(payload.answers) ? payload.answers : null,
   };
+  // Notification action buttons (shown on long-press on iOS). Cap to the
+  // platform's max so extras aren't silently dropped mid-list.
+  const max =
+    (self.Notification && self.Notification.maxActions) || 4;
+  const actions = Array.isArray(payload.actions)
+    ? payload.actions.slice(0, max)
+    : undefined;
   event.waitUntil(
     self.registration.showNotification(title, {
       body,
@@ -44,6 +55,7 @@ self.addEventListener("push", (event) => {
       renotify: !!tag,
       icon: "./icons/icon-180.png",
       badge: "./icons/icon-180.png",
+      actions,
       data,
     }),
   );
@@ -51,9 +63,35 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const sessionId = event.notification.data && event.notification.data.sessionId;
-  // Deep-link target: the app reads ?notif=<sessionId> (or the postMessage
-  // below) and navigates to that session.
+  const data = event.notification.data || {};
+  const sessionId = data.sessionId;
+  const action = event.action; // "" for body tap, "ans:<i>" for an option
+
+  // Direct answer: the user tapped an option action. POST the reply to the
+  // box and do NOT open the app (the whole point is answering in place).
+  if (action && action.indexOf("ans:") === 0 && data.requestId && data.answers) {
+    const idx = parseInt(action.slice(4), 10);
+    const label = data.answers[idx];
+    if (typeof label === "string") {
+      event.waitUntil(
+        fetch(self.location.origin + "/push/answer", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            requestId: data.requestId,
+            sessionId: sessionId,
+            answers: [[label]],
+          }),
+        }).catch(function () {
+          /* best-effort; if it fails the in-app card is still answerable */
+        }),
+      );
+      return;
+    }
+  }
+
+  // Body tap (or an action we couldn't resolve): focus/open the app and
+  // deep-link to the session.
   const url = sessionId
     ? "./?notif=" + encodeURIComponent(sessionId)
     : "./";

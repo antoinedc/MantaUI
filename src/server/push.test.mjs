@@ -23,6 +23,80 @@ test("question.asked → question notification", () => {
   assert.equal(p?.sessionId, "ses_2");
 });
 
+test("question.asked carries the question text + option actions (single select)", () => {
+  const p = classifyPushEvent(
+    {
+      type: "question.asked",
+      properties: {
+        id: "que_abc",
+        sessionID: "ses_q",
+        questions: [
+          {
+            header: "Deploy?",
+            question: "Should I deploy to production now?",
+            options: [
+              { label: "Yes", description: "" },
+              { label: "No", description: "" },
+              { label: "Wait", description: "" },
+            ],
+          },
+        ],
+      },
+    },
+    NOFOCUS,
+  );
+  assert.equal(p?.requestId, "que_abc");
+  assert.match(p?.title ?? "", /Deploy\?/);
+  assert.equal(p?.body, "Should I deploy to production now?");
+  assert.deepEqual(p?.answers, ["Yes", "No", "Wait"]);
+  assert.deepEqual(p?.actions, [
+    { action: "ans:0", title: "Yes" },
+    { action: "ans:1", title: "No" },
+    { action: "ans:2", title: "Wait" },
+  ]);
+});
+
+test("question.asked with multi-select → text but NO quick actions", () => {
+  const p = classifyPushEvent(
+    {
+      type: "question.asked",
+      properties: {
+        id: "que_m",
+        sessionID: "ses_q2",
+        questions: [
+          {
+            header: "Pick",
+            question: "Choose all that apply",
+            multiple: true,
+            options: [{ label: "A", description: "" }, { label: "B", description: "" }],
+          },
+        ],
+      },
+    },
+    NOFOCUS,
+  );
+  assert.equal(p?.body, "Choose all that apply");
+  assert.equal(p?.actions, undefined);
+});
+
+test("question.asked with multiple questions → no quick actions (open app)", () => {
+  const p = classifyPushEvent(
+    {
+      type: "question.asked",
+      properties: {
+        id: "que_multi",
+        sessionID: "ses_q3",
+        questions: [
+          { header: "One", question: "Q1?", options: [{ label: "a", description: "" }] },
+          { header: "Two", question: "Q2?", options: [{ label: "b", description: "" }] },
+        ],
+      },
+    },
+    NOFOCUS,
+  );
+  assert.equal(p?.actions, undefined);
+});
+
 test("session.error → error notification carrying the message", () => {
   const p = classifyPushEvent(
     { type: "session.error", properties: { sessionID: "ses_3", message: "boom" } },

@@ -163,14 +163,50 @@ export function classifyPushEvent(evt, ctx) {
         sessionId,
         tag: `perm-${tagBase}`,
       };
-    case "question.asked":
-      return {
+    case "question.asked": {
+      // The event's properties IS the QuestionRequest: { id: que_…, sessionID,
+      // questions: [{ question, header, options:[{label}], multiple?, custom? }] }.
+      // Put the real question text in the body, and (for a single single-select
+      // question) expose the options as notification actions so the user can
+      // answer straight from the notification — iOS surfaces these on
+      // long-press. `que_…` (properties.id) is the reply key.
+      const qs = Array.isArray(props.questions) ? props.questions : [];
+      const first = qs[0];
+      const requestId = typeof props.id === "string" ? props.id : null;
+      const out = {
         kind: "question",
-        title: "Claude has a question",
-        body: "Claude needs your input to continue. Tap to answer.",
+        title: first?.header ? `Claude: ${first.header}` : "Claude has a question",
+        body: first?.question || "Claude needs your input to continue.",
         sessionId,
         tag: `question-${tagBase}`,
+        requestId,
       };
+      // Quick-reply only makes sense for ONE single-select, non-free-text
+      // question. Multi-question / multi-select / custom fall back to "open the
+      // app to answer" (body tap), but still show the question text.
+      if (
+        requestId &&
+        qs.length === 1 &&
+        first &&
+        !first.multiple &&
+        !first.custom &&
+        Array.isArray(first.options) &&
+        first.options.length > 0
+      ) {
+        const labels = first.options
+          .map((o) => o?.label)
+          .filter((l) => typeof l === "string" && l.length > 0);
+        if (labels.length > 0) {
+          // Index→label map so the SW can build the reply from the tapped
+          // action ("ans:<i>"); platforms cap the visible count themselves.
+          out.answers = labels;
+          out.actions = labels
+            .slice(0, 4)
+            .map((label, i) => ({ action: `ans:${i}`, title: label }));
+        }
+      }
+      return out;
+    }
     case "session.error": {
       const msg =
         typeof props.message === "string" && props.message
