@@ -448,6 +448,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const draftInput = useRef<string>("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Wraps the pending QuestionCard(s). A notification deep-link asks us to
+  // scroll here (iOS can't show inline notification actions, so the tap opens
+  // the app and we bring the question into view). Set via wantQuestionScroll.
+  const questionCardRef = useRef<HTMLDivElement>(null);
+  const wantQuestionScroll = useRef(false);
   // Pinned-to-bottom auto-scroll: true while the viewport is near the bottom.
   // Flips to false when the user manually scrolls up to read history; flips
   // back to true when they scroll close to the bottom again. Streams only
@@ -1674,6 +1679,44 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
+
+  // Notification deep-link → scroll to the pending QuestionCard. iOS web push
+  // can't render inline action buttons, so a question notification opens the
+  // app; this brings the card into view so it's a single tap to answer. The
+  // signal comes two ways: a window global latch (set by MobileApp before this
+  // panel mounts on a cold start from a notification) and a live CustomEvent
+  // (warm — app already open on this session). Either arms wantQuestionScroll;
+  // the effect below performs the scroll once the questions have rendered.
+  useEffect(() => {
+    type ScrollWin = Window & { __buiScrollQuestionSession?: string | null };
+    const w = window as ScrollWin;
+    if (w.__buiScrollQuestionSession && w.__buiScrollQuestionSession === sessionId) {
+      wantQuestionScroll.current = true;
+      w.__buiScrollQuestionSession = null;
+    }
+    const onEvt = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
+      if (detail?.sessionId === sessionId) {
+        wantQuestionScroll.current = true;
+        if (questions.length > 0) {
+          questionCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+          wantQuestionScroll.current = false;
+        }
+      }
+    };
+    window.addEventListener("bui-scroll-to-question", onEvt);
+    return () => window.removeEventListener("bui-scroll-to-question", onEvt);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // Perform the deferred scroll once the question cards actually exist (cold
+  // start: questions arrive via the async fetch after this panel mounts).
+  useEffect(() => {
+    if (wantQuestionScroll.current && questions.length > 0) {
+      questionCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      wantQuestionScroll.current = false;
+    }
+  }, [questions]);
 
   // Textarea auto-resize up to a 6-line cap. After resizing, if the scroll
   // container is pinned to bottom we re-scroll so the input growing pushes
@@ -3436,7 +3479,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             {/* conversation — scrolling up through history doesn't keep */}
             {/* the card glued to the bottom. Same pattern as ActiveTodos. */}
             {questions.length > 0 && (
-              <div className="space-y-2 pt-1">
+              <div className="space-y-2 pt-1" ref={questionCardRef}>
                 {questions.map((q) => (
                   <QuestionCard
                     key={q.id}
