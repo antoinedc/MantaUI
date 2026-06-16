@@ -22,7 +22,7 @@ import type { Api } from "../../preload/index.js";
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
 
-function serverBase(): string {
+export function serverBase(): string {
   const v = localStorage.getItem("bui_server");
   if (v) return v.replace(/\/+$/, "");
   const { protocol, hostname, origin } = window.location;

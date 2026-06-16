@@ -20,6 +20,7 @@ import * as local from "./local.mjs";
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
+import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -78,6 +79,7 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
               bus.publish({ kind: "opencode", payload: evt });
             }
             // Suppress: don't publish when auto-allow succeeded (mirrors desktop continue).
+            // No push either — there's nothing for the user to act on.
             return;
           }
         }
@@ -87,12 +89,18 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
       }
       // chatAutoAllow is false, or permId was missing, or configGet threw — publish normally.
       bus.publish({ kind: "opencode", payload: evt });
+      // The user must approve manually → notify (best-effort, never throws).
+      push.firePush(evt);
     })().catch((e) => {
       console.warn("[opencode-pump] unexpected error:", e?.message ?? e);
     });
     return;
   }
   bus.publish({ kind: "opencode", payload: evt });
+  // Notify on question/error/done (and track busy→idle). firePush decides
+  // what (if anything) to send; permission.asked is handled in the branch
+  // above so it isn't double-fired here.
+  push.firePush(evt);
 });
 
 const PORT = Number(process.env.BUI_MOBILE_PORT ?? 8787);
@@ -124,8 +132,12 @@ async function serveFile(res, filePath, fallbackStatus = 404) {
     // `no-cache` only forces revalidation, and with no ETag/Last-Modified the
     // WKWebView sometimes serves its snapshot anyway; `no-store` is the
     // belt-and-suspenders that guarantees a fresh fetch on every launch.
+    // sw.js is also unhashed AND its updates must propagate immediately —
+    // Cloudflare otherwise edge-caches .js for hours, delaying SW updates.
     // Vite's JS/CSS are content-hashed (immutable), so they stay cacheable.
-    const noStore = ext === ".html" || ext === ".webmanifest";
+    const base = filePath.split("/").pop() ?? "";
+    const noStore =
+      ext === ".html" || ext === ".webmanifest" || base === "sw.js";
     res.writeHead(200, {
       "content-type": MIME[ext] ?? "application/octet-stream",
       "cache-control": noStore
@@ -144,6 +156,34 @@ function safeJoin(root, sub) {
   const target = normalize(join(root, sub));
   if (!target.startsWith(root)) return null; // path traversal guard
   return target;
+}
+
+// Read + JSON-parse a request body, capped at 64KB (push subscriptions are
+// ~1KB; the cap guards against a runaway/hostile body).
+function readJsonBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf-8").trim();
+      if (!raw) return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on("error", reject);
+  });
 }
 
 // ---------- uploads ----------
@@ -245,6 +285,57 @@ const server = createServer(async (req, res) => {
 
   if (req.method === "POST" && path === "/api/upload") {
     return handleUpload(req, res, url);
+  }
+
+  // ---------- Web Push ----------
+  // GET  /push/vapid       → { key }            (public VAPID key for subscribe)
+  // POST /push/subscribe   body = PushSubscription JSON
+  // POST /push/unsubscribe body = { endpoint }
+  // POST /push/focus       body = { sessionId, visible }  (suppress "done" for
+  //                        the session the user is actively viewing)
+  if (req.method === "GET" && path === "/push/vapid") {
+    try {
+      const key = await push.getVapidPublic();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ key }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+  if (req.method === "POST" && path.startsWith("/push/")) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "bad json" }));
+      return;
+    }
+    try {
+      let result = { ok: true };
+      if (path === "/push/subscribe") {
+        result = await push.addSubscription(body);
+      } else if (path === "/push/unsubscribe") {
+        result = await push.removeSubscription(body?.endpoint);
+      } else if (path === "/push/focus") {
+        result = push.setFocus({
+          sessionId: body?.sessionId,
+          visible: body?.visible,
+        });
+      } else {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "not found" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
   }
 
   // Static fallback for the React + PWA bundle in mobile/www/. All backend

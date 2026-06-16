@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import type { OpencodeModel } from "../../shared/types";
+import {
+  isPushSupported,
+  pushPermission,
+  hasActiveSubscription,
+  enablePush,
+  disablePush,
+} from "./push";
 
 type Props = { onClose: () => void };
 
@@ -63,6 +70,42 @@ export function MobileSettings({ onClose }: Props) {
   const [groqKey, setGroqKey] = useState(groqApiKey);
   const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
   const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
+
+  // Push notifications — not server config (it's a per-device subscription),
+  // so it lives outside the Save flow. `pushOn` reflects an actual live
+  // subscription; `pushBusy` guards the async enable/disable.
+  const [pushOn, setPushOn] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushErr, setPushErr] = useState<string | null>(null);
+  useEffect(() => {
+    hasActiveSubscription().then(setPushOn).catch(() => setPushOn(false));
+  }, []);
+  const togglePush = async () => {
+    setPushErr(null);
+    setPushBusy(true);
+    try {
+      if (pushOn) {
+        await disablePush();
+        setPushOn(false);
+      } else {
+        const state = await enablePush();
+        if (state === "granted") setPushOn(true);
+        else if (state === "denied")
+          setPushErr(
+            "Notifications are blocked. Enable them for this site in iOS Settings.",
+          );
+        else if (state === "unsupported")
+          setPushErr(
+            "Push needs the app installed to your home screen (iOS 16.4+).",
+          );
+        else setPushErr("Permission not granted.");
+      }
+    } catch (e) {
+      setPushErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPushBusy(false);
+    }
+  };
 
   // Sync local state if store updates while screen is open (rare —
   // shouldn't happen during a single-screen edit, but matches the
@@ -323,6 +366,38 @@ export function MobileSettings({ onClose }: Props) {
             />
           </div>
         </section>
+
+        {/* Push notifications — per-device subscription, not server config, so
+            it toggles immediately (outside the Save flow). */}
+        {isPushSupported() && (
+          <section className="space-y-2 pt-1 border-t border-border">
+            <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+              Notifications
+            </label>
+            <div className="text-xs text-text-faint">
+              Push alerts when Claude needs a permission/question, finishes a
+              turn (only when you're not watching it), or hits an error.
+              {pushPermission() === "default" &&
+                " iOS only delivers these to the app installed on your home screen."}
+            </div>
+            <button
+              onClick={togglePush}
+              disabled={pushBusy}
+              className={`w-full px-3 py-2 text-sm rounded border ${
+                pushOn
+                  ? "bg-accent-soft text-white border-accent"
+                  : "bg-bg-soft text-text-muted border-border"
+              } ${pushBusy ? "opacity-60" : ""}`}
+            >
+              {pushBusy
+                ? "Working…"
+                : pushOn
+                  ? "Notifications on — tap to disable"
+                  : "Enable notifications"}
+            </button>
+            {pushErr && <div className="text-xs text-red-400">{pushErr}</div>}
+          </section>
+        )}
 
         {/* Skill registries — add/remove with row buttons. */}
         <section className="space-y-2 pt-1 border-t border-border">

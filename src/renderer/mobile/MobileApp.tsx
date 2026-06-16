@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { useStore } from "../store";
+import { useStore, resolveSessionOwner } from "../store";
 import { SessionListScreen } from "./SessionListScreen";
 import { SessionScreen } from "./SessionScreen";
 import { MobileSettings } from "./MobileSettings";
+import { reportFocus } from "./push";
 
 type Nav =
   | { screen: "list" }
@@ -14,9 +15,21 @@ export function MobileApp() {
   const setActive = useStore((s) => s.setActive);
   const applyStatusBatch = useStore((s) => s.applyStatusBatch);
   const setScreenshotToast = useStore((s) => s.setScreenshotToast);
+  const projects = useStore((s) => s.projects);
 
   const [nav, setNav] = useState<Nav>({ screen: "list" });
   const [bootError, setBootError] = useState<string | null>(null);
+
+  // The opencode session id of the on-screen chat (null on list/settings or a
+  // terminal window). Drives push focus-suppression: the server skips the
+  // "Claude is done" notification for the session you're actively viewing.
+  const activeSessionId =
+    nav.screen === "session"
+      ? (projects
+          .find((p) => p.tmuxSession === nav.projectName)
+          ?.windows.find((w) => w.index === nav.windowIndex)
+          ?.opencodeSessionId ?? null)
+      : null;
 
   // Bootstrap: load projects/config. Surface failure with a retry (mobile has
   // no SSH layer; the box can simply be unreachable).
@@ -108,6 +121,73 @@ export function MobileApp() {
     setNav({ screen: "session", projectName, windowIndex });
   };
   const openSettings = () => setNav({ screen: "settings" });
+
+  // Push focus reporting — tell the server which session is on screen and
+  // whether the app is visible, so the "Claude is done" push is suppressed
+  // only for the session the user is actively watching. Re-sent on session
+  // change and on every visibility flip; pagehide marks not-visible so a
+  // backgrounded/closed app gets all "done" pushes.
+  useEffect(() => {
+    const send = () =>
+      reportFocus(
+        activeSessionId,
+        document.visibilityState === "visible" && nav.screen === "session",
+      );
+    send();
+    const onVis = () => send();
+    const onHide = () => reportFocus(activeSessionId, false);
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, [activeSessionId, nav.screen]);
+
+  // Notification deep-link — a tapped push opens the app with ?notif=<sid>
+  // (cold start) or posts a message from the service worker (warm). Stash the
+  // requested session id; the effect below resolves it to a (project, window)
+  // once projects have loaded and navigates there.
+  const pendingNotif = useRef<string | null>(null);
+  useEffect(() => {
+    try {
+      const u = new URL(window.location.href);
+      const n = u.searchParams.get("notif");
+      if (n) {
+        pendingNotif.current = n;
+        u.searchParams.delete("notif");
+        window.history.replaceState({}, "", u.toString());
+      }
+    } catch {
+      /* ignore malformed URL */
+    }
+    if (!navigator.serviceWorker) return;
+    const onMsg = (e: MessageEvent) => {
+      const d = e.data as { type?: string; sessionId?: string } | undefined;
+      if (d?.type === "bui-open-session" && d.sessionId) {
+        pendingNotif.current = d.sessionId;
+        const owner = resolveSessionOwner(useStore.getState().projects, d.sessionId);
+        if (owner) {
+          pendingNotif.current = null;
+          openSession(owner.tmuxSession, owner.windowIndex);
+        }
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onMsg);
+    return () => navigator.serviceWorker.removeEventListener("message", onMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Resolve a stashed deep-link once projects are available.
+  useEffect(() => {
+    if (!pendingNotif.current || projects.length === 0) return;
+    const owner = resolveSessionOwner(projects, pendingNotif.current);
+    if (owner) {
+      pendingNotif.current = null;
+      openSession(owner.tmuxSession, owner.windowIndex);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects]);
 
   // Android hardware back / browser back → pop to list. Both session and
   // settings screens collapse back to the list on back gesture.
