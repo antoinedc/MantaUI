@@ -4645,12 +4645,19 @@ function MicButton({
   onStart,
   onStop,
   onCancel,
+  floating = false,
 }: {
   phase: VoicePhase;
   mode: VoiceMode;
-  onStart: (mode: VoiceMode) => Promise<void>;
+  onStart: (mode: VoiceMode, opts?: { promote?: boolean }) => Promise<void>;
   onStop: () => void;
   onCancel: () => void;
+  // `floating` = the mobile WhatsApp-style push-to-talk FAB (bottom-right,
+  // above the composer). It is dictation-only: it starts in "dictate" with
+  // promotion DISABLED so a normal speak-length hold isn't reclassified as a
+  // voice command. The inline (non-floating) variant keeps the desktop ⌥ /
+  // long-press → command behavior.
+  floating?: boolean;
 }) {
   const recording = phase === "recording" || phase === "requesting";
   const busy = phase === "processing";
@@ -4661,10 +4668,15 @@ function MicButton({
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     if (busy || recording) return;
     e.preventDefault();
-    // Desktop ⌥-modifier promotes to command IMMEDIATELY. Otherwise we
-    // start in dictate and let the hook's longPressMs timer flip us.
-    const initial: VoiceMode = e.altKey ? "command" : "dictate";
-    onStart(initial);
+    if (floating) {
+      // PTT FAB: always plain dictation, no command promotion.
+      onStart("dictate", { promote: false });
+    } else {
+      // Desktop ⌥-modifier promotes to command IMMEDIATELY. Otherwise we
+      // start in dictate and let the hook's longPressMs timer flip us.
+      const initial: VoiceMode = e.altKey ? "command" : "dictate";
+      onStart(initial);
+    }
     // Capture so onPointerUp fires even if the cursor leaves the button.
     try {
       (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
@@ -4684,10 +4696,47 @@ function MicButton({
   const label = busy
     ? "transcribing…"
     : recording
-      ? mode === "command"
-        ? "release · command"
-        : "release · dictate"
-      : "hold to speak (⌥ = command)";
+      ? floating
+        ? "release to insert"
+        : mode === "command"
+          ? "release · command"
+          : "release · dictate"
+      : floating
+        ? "hold to talk"
+        : "hold to speak (⌥ = command)";
+
+  // Floating PTT FAB: round bubble, bottom-right (positioned by the
+  // `.mobile-ptt-fab` rule in mobile.css — visual/layout lives there per the
+  // mobile-CSS invariant; this component only sets state modifier classes).
+  if (floating) {
+    return (
+      <button
+        type="button"
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+        onPointerLeave={(e) => {
+          if (e.buttons === 0 && recording) onCancel();
+        }}
+        onContextMenu={(e) => e.preventDefault()}
+        title={label}
+        aria-label={label}
+        className={
+          "mobile-ptt-fab" +
+          (busy
+            ? " mobile-ptt-fab--busy"
+            : recording
+              ? " mobile-ptt-fab--recording"
+              : phase === "error"
+                ? " mobile-ptt-fab--error"
+                : "")
+        }
+        style={{ touchAction: "none" }}
+      >
+        {busy ? "⋯" : "🎙"}
+      </button>
+    );
+  }
 
   return (
     <button
@@ -4797,7 +4846,7 @@ function InputArea({
   // user only cares "is the mic busy".
   voiceRecording: boolean;
   voiceProcessing: boolean;
-  startVoice: (mode: VoiceMode) => Promise<void>;
+  startVoice: (mode: VoiceMode, opts?: { promote?: boolean }) => Promise<void>;
   stopVoice: () => void;
   cancelVoice: () => void;
   tokens: TokenUsage | null;
@@ -4870,6 +4919,21 @@ function InputArea({
   const voiceActive = voiceRecording || voiceProcessing;
   return (
     <div className="shrink-0" ref={rowRef}>
+      {/* Mobile push-to-talk FAB (WhatsApp-style, bottom-right above the
+          composer). Hold to record, release to insert the transcript into
+          the composer for review. Positioned + sized by `.mobile-ptt-fab` in
+          mobile.css; only rendered in the mobile shell with a Groq key set.
+          Desktop voice stays keyboard-driven (Ctrl+M / Enter / Esc). */}
+      {voiceEnabled && isMobileShell && (
+        <MicButton
+          phase={voicePhase}
+          mode={voiceMode}
+          onStart={startVoice}
+          onStop={stopVoice}
+          onCancel={cancelVoice}
+          floating
+        />
+      )}
       {/* Error banner moved to ChatPanel scope (dismissable + closer to the */}
       {/* attachment strip). Nothing rendered here for sendError anymore. */}
       {/* Top divider — white-ish, matches Claude TUI. Turns into a pulsing */}
@@ -4887,18 +4951,9 @@ function InputArea({
       {/* Input row — no box, generous vertical padding. The mic affordance */}
       {/* on desktop is keyboard-only (Ctrl+M to toggle, Enter to stop+send, */}
       {/* Esc to cancel); the visible feedback is the pulsing border above + */}
-      {/* below this row. On mobile (no physical keyboard) the MicButton is */}
-      {/* rendered as a tap target left of the `>` prompt. */}
+      {/* below this row. On mobile the mic lives in the floating PTT FAB */}
+      {/* above the composer (rendered at the top of this wrapper). */}
       <div className="px-4 py-3 flex items-start gap-2">
-        {voiceEnabled && isMobileShell && (
-          <MicButton
-            phase={voicePhase}
-            mode={voiceMode}
-            onStart={startVoice}
-            onStop={stopVoice}
-            onCancel={cancelVoice}
-          />
-        )}
         <span
           className="select-none pt-px shrink-0"
           style={{ color: voiceActive ? "#f87171" : CLAUDE_ORANGE }}

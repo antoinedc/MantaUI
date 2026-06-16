@@ -269,7 +269,15 @@ export function useVoiceRecorder({
   );
 
   const start = useCallback(
-    async (initialMode: VoiceMode) => {
+    async (
+      initialMode: VoiceMode,
+      opts?: { promote?: boolean },
+    ) => {
+      // promote=false disables the dictate→command long-press promotion for
+      // this press. The mobile push-to-talk FAB needs this: a hold long
+      // enough to speak ALWAYS exceeds longPressMs, so without opting out
+      // every PTT dictation would be misclassified as a voice command.
+      const promote = opts?.promote ?? true;
       // W4: ref-based guard. The state-based phase check used to leak
       // double-presses inside the same React commit; phaseRef is updated
       // synchronously via setPhaseSync so it can't lie.
@@ -287,7 +295,7 @@ export function useVoiceRecorder({
       // Schedule the dictate → command promotion. Only "dictate" presses
       // get promoted; "command" (⌥-modifier) starts there and stays.
       clearLongPressTimer();
-      if (initialMode === "dictate") {
+      if (initialMode === "dictate" && promote) {
         longPressTimerRef.current = setTimeout(() => {
           modeRef.current = "command";
           setMode("command");
