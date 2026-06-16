@@ -103,6 +103,22 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
     }
   };
 
+  // Send ESC to a terminal (claude TUI) window to interrupt / stop the agent.
+  // Mobile soft keyboards rarely expose an Esc key, so it gets an explicit
+  // button. Chat windows don't need this — ChatPanel already renders its own
+  // abort/stop control while a turn is running. Select the window first:
+  // mobile navigation doesn't select-window on open and the project's single
+  // PTY follows the active tmux window, so without this ESC could land on a
+  // different window than the one on screen.
+  const sendEsc = () => {
+    window.api
+      .tmuxSelectWindow({ sessionName: projectName, windowIndex: win.index })
+      .catch(() => {})
+      .finally(() => {
+        window.api.ptyWrite(projectName, "\x1b").catch(() => {});
+      });
+  };
+
   // Kill is available for terminal windows too — for chat windows the
   // existing "Delete session" path already covers it (also deletes the
   // opencode session). Terminal-only path uses tmux:kill-window directly.
@@ -138,6 +154,19 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
             {sid ? " · chat" : " · terminal"}
           </div>
         </div>
+        {/* Esc / stop — terminal (TUI) windows only. Interrupts the running
+            claude agent the way pressing Esc would on desktop. Chat windows
+            stop via ChatPanel's own abort control. */}
+        {!sid && (
+          <button
+            className="mobile-tap text-text-muted text-xs font-semibold px-2 border border-border rounded"
+            onClick={sendEsc}
+            aria-label="Send Esc to stop the agent"
+            title="Esc"
+          >
+            Esc
+          </button>
+        )}
         {/* Action sheet is available for both chat and terminal windows now —
             terminal windows get rename + kill; chat windows additionally get
             fork / compact / delete. */}
