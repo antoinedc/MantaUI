@@ -75,6 +75,19 @@ test("session.idle after busy, app backgrounded on that session → done notific
   assert.equal(p?.kind, "done");
 });
 
+test("session.idle while a question/permission is pending → suppressed (not 'done')", () => {
+  const p = classifyPushEvent(
+    { type: "session.idle", properties: { sessionID: "ses_9" } },
+    {
+      focusSessionId: null,
+      focusVisible: false,
+      wasBusy: true,
+      pendingAttention: true,
+    },
+  );
+  assert.equal(p, null);
+});
+
 test("unrelated event → null", () => {
   assert.equal(
     classifyPushEvent({ type: "message.part.delta", properties: {} }, NOFOCUS),

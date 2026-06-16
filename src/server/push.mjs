@@ -145,7 +145,7 @@ export function getFocus() {
  * what it says. Pure — all state comes in via `ctx`.
  *
  * @param {{type?: string, properties?: any}} evt
- * @param {{ focusSessionId: string|null, focusVisible: boolean, wasBusy: boolean }} ctx
+ * @param {{ focusSessionId: string|null, focusVisible: boolean, wasBusy: boolean, pendingAttention?: boolean }} ctx
  * @returns {{ kind: string, title: string, body: string, sessionId: string|null, tag: string }|null}
  */
 export function classifyPushEvent(evt, ctx) {
@@ -187,6 +187,10 @@ export function classifyPushEvent(evt, ctx) {
       };
     }
     case "session.idle": {
+      // A turn that pauses on a Question/permission tool also emits idle —
+      // but it's NOT "done", it's blocked on the user. The question/permission
+      // push already covers it, so suppress the redundant "done".
+      if (ctx.pendingAttention) return null;
       // Only notify if the session actually ran (avoids "done" pushes on a
       // fresh connect that emits idle) AND the user isn't watching it.
       if (!ctx.wasBusy) return null;
@@ -207,6 +211,11 @@ export function classifyPushEvent(evt, ctx) {
 // Sessions seen "busy" since their last idle — gates the "done" push so we
 // don't notify on spurious idles. Keyed by sessionID.
 const _busy = new Set();
+
+// Sessions with an unanswered question/permission. While present, the session's
+// idle is "blocked on the user", not "done" — so the "done" push is suppressed
+// (the question/permission push already told them to act).
+const _pending = new Set();
 
 async function sendPush(payload) {
   await ensureVapid();
@@ -245,22 +254,44 @@ export async function firePush(evt) {
     const sid = typeof props.sessionID === "string" ? props.sessionID : null;
 
     // Track busy → idle transitions so "done" only fires after real work.
+    // Resuming work also clears any pending-attention flag (the user answered,
+    // or we missed the reply event — either way it's no longer blocked).
     if (type === "session.status") {
       const t = props.status?.type;
-      if ((t === "busy" || t === "retry") && sid) _busy.add(sid);
+      if ((t === "busy" || t === "retry") && sid) {
+        _busy.add(sid);
+        _pending.delete(sid);
+      }
       return;
+    }
+
+    // Mark/clear pending attention so a paused-on-question idle isn't "done".
+    if (sid) {
+      if (type === "question.asked" || type === "permission.asked") {
+        _pending.add(sid);
+      } else if (
+        type === "question.replied" ||
+        type === "question.rejected" ||
+        type === "permission.replied" ||
+        type === "permission.rejected"
+      ) {
+        _pending.delete(sid);
+      }
     }
 
     const payload = classifyPushEvent(evt, {
       focusSessionId: _focus.sessionId,
       focusVisible: _focus.visible,
       wasBusy: sid ? _busy.has(sid) : false,
+      pendingAttention: sid ? _pending.has(sid) : false,
     });
 
     // Clear the busy flag once the session settles or errors.
     if ((type === "session.idle" || type === "session.error") && sid) {
       _busy.delete(sid);
     }
+    // An error clears any pending attention too (the ask won't be answered).
+    if (type === "session.error" && sid) _pending.delete(sid);
 
     if (!payload) return;
     await sendPush(payload);
@@ -272,5 +303,6 @@ export async function firePush(evt) {
 // Test hook.
 export function _resetPushState() {
   _busy.clear();
+  _pending.clear();
   _focus = { sessionId: null, visible: false };
 }
