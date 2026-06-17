@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  AgentFileReady,
   AppConfig,
   Project,
   TmuxConfigStatus,
@@ -54,6 +55,11 @@ type State = {
   transportPreference: "auto" | "mosh" | "ssh";
   uploadCleanupHours: number;
   chatAutoAllow: boolean;
+  // Agent → laptop push trust flag. When true, files the AI drops in its
+  // remote outbox are pulled to the downloads dir without confirmation.
+  allowAgentPush: boolean;
+  // Override destination for agent-pushed files. "" = main's default (~/Downloads).
+  downloadsDir: string;
   // Global default model for new/cleared sessions. Set in Settings, persisted
   // to config.json. null = let opencode pick its default.
   defaultModel: { providerID: string; modelID: string } | null;
@@ -80,6 +86,12 @@ type State = {
   status: Record<string, Record<number, WindowStatusUI>>;
   // Single global screenshot toast — see ScreenshotToast type comment.
   screenshotToast: ScreenshotToast | null;
+  // Single global agent-file toast: a file the remote AI pushed to its outbox.
+  // Same single-instance pattern as screenshotToast — App.tsx owns the one
+  // ipcRenderer listener, the active ChatPanel renders the toast, accept /
+  // dismiss clear it globally. In auto-pull (trust) mode it's informational
+  // (autoPulled:true, localPath set); otherwise it's a Save/dismiss prompt.
+  agentFileToast: AgentFileReady | null;
   // ----- derived selectors -----
   activeSession: () => ActiveSession | null;
   // ----- mutations -----
@@ -117,6 +129,7 @@ type State = {
   setChatSubagents: (sessionId: string, count: number) => void;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   setScreenshotToast: (t: ScreenshotToast | null) => void;
+  setAgentFileToast: (t: AgentFileReady | null) => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -127,6 +140,8 @@ export const useStore = create<State>((set, get) => ({
   transportPreference: "auto",
   uploadCleanupHours: 1,
   chatAutoAllow: false,
+  allowAgentPush: false,
+  downloadsDir: "",
   defaultModel: null,
   skillRegistryUrls: [],
   cacheTtl: "1h",
@@ -140,6 +155,7 @@ export const useStore = create<State>((set, get) => ({
   activeWindowByProject: {},
   status: {},
   screenshotToast: null,
+  agentFileToast: null,
 
   activeSession: () => {
     const s = get();
@@ -200,6 +216,8 @@ export const useStore = create<State>((set, get) => ({
       transportPreference: c.transport ?? "auto",
       uploadCleanupHours: c.uploadCleanupHours ?? 1,
       chatAutoAllow: c.chatAutoAllow ?? false,
+      allowAgentPush: c.allowAgentPush ?? false,
+      downloadsDir: c.downloadsDir ?? "",
       defaultModel: c.defaultModel ?? null,
       skillRegistryUrls: c.skillRegistryUrls ?? [],
       cacheTtl: c.cacheTtl === "5m" ? "5m" : "1h",
@@ -216,6 +234,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setScreenshotToast: (t) => set({ screenshotToast: t }),
+  setAgentFileToast: (t) => set({ agentFileToast: t }),
 
   applyStatusBatch: (batch) =>
     set((prev) => {

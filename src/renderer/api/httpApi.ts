@@ -1,5 +1,6 @@
 import {
   IPC,
+  type AgentFileReady,
   type OpencodeEvent,
   type PtyEvent,
   type WindowStatus,
@@ -58,13 +59,14 @@ async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
 // SSE stream — one shared EventSource, lazily created.
 // ---------------------------------------------------------------------------
 
-type Kind = "opencode" | "pty" | "status" | "screenshot";
+type Kind = "opencode" | "pty" | "status" | "screenshot" | "agentFile";
 
 const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   opencode: new Set(),
   pty: new Set(),
   status: new Set(),
   screenshot: new Set(),
+  agentFile: new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -350,6 +352,36 @@ export const httpApi: Api = {
 
   // -- misc --
   peekRemoteFile: (remotePath) => rpc(IPC.peekRemoteFile, remotePath),
+
+  // -- agent → device file push (outbox) --
+  // The mobile server's outbox poller (src/server/outbox.mjs) publishes
+  // `agentFile` bus events when the AI drops a file in ~/.bui-outbox/. On a
+  // device these always arrive as a confirm toast (autoPulled:false) since
+  // there's no silent disk write — the user taps Save → agentPullFile triggers
+  // a browser download.
+  onAgentFileReady: (cb) => on<AgentFileReady>("agentFile", cb),
+  // "Pull to downloads" on a device = trigger a browser download of the
+  // server-local file. We point an <a download> at /api/download and let the
+  // WebView/browser save it (the server deletes the source on success — the
+  // one-shot mailbox). Returns "" so the ChatPanel toast knows there's no
+  // local path to "Reveal" (a desktop-only affordance) and just dismisses.
+  agentPullFile: async (remotePath) => {
+    try {
+      const url = `${serverBase()}/api/download?path=${encodeURIComponent(remotePath)}`;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = remotePath.split("/").pop() ?? "file";
+      a.rel = "noreferrer";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch {
+      /* download trigger failed — non-fatal */
+    }
+    return "";
+  },
+  // No OS file manager to reveal into on a phone/browser — no-op.
+  revealInFolder: async (_localPath) => {},
 
   /**
    * Markdown links in ChatPanel always call `window.api.openExternal(href)`

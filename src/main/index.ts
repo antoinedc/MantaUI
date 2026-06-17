@@ -28,6 +28,8 @@ import {
   uploadBuffer,
   cleanupUploads,
   peekRemoteFile,
+  listOutbox,
+  pullToDownloads,
   writePty,
   runSshOnce,
 } from "./pty.js";
@@ -82,6 +84,7 @@ import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import {
   IPC,
   type AppConfig,
+  type AgentFileReady,
   type Project,
   type ProjectMeta,
   type SpawnOptions,
@@ -532,6 +535,116 @@ function stopScreenshotDetector(): void {
   }
 }
 
+// ===== Agent → laptop outbox poller =====
+//
+// The reverse of drag-and-drop. The remote AI drops a file into
+// `~/.bui-outbox/` and we pull it to the Mac's Downloads folder. This poller
+// is the detection half (the transfer is pty.ts:pullToDownloads); it mirrors
+// the screenshot Desktop watcher's philosophy — cheap periodic check over the
+// warm ControlMaster, push a toast to the renderer.
+//
+// Cadence is 3s: file pushes are a deliberate, low-frequency action (the AI
+// finished generating something), so we don't need sub-second latency, and a
+// single `find` over the warm master is ~30-60ms.
+
+const OUTBOX_POLL_MS = 3000;
+let outboxTimer: ReturnType<typeof setInterval> | null = null;
+// Remote paths we've already acted on this run, so a slow pull (or a
+// require-confirm toast the user hasn't answered yet) isn't re-offered every
+// tick. Cleared on host change so a new box starts fresh.
+const seenOutboxPaths = new Set<string>();
+let outboxPolling = false; // re-entrancy guard for the async tick
+
+// Where agent-pushed files land. Configurable override, else ~/Downloads.
+function resolveDownloadsDir(): string {
+  if (config.downloadsDir && config.downloadsDir.trim()) {
+    return config.downloadsDir.trim();
+  }
+  return app.getPath("downloads");
+}
+
+async function pollOutboxOnce(): Promise<void> {
+  if (outboxPolling) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!config.host) return;
+  outboxPolling = true;
+  try {
+    const entries = await listOutbox(config);
+    // Reconcile the seen-set with what's actually on the remote: a file the
+    // poller pulled (and rm'd) drops out of the listing, so prune it from the
+    // set. Otherwise the set would grow unbounded across a long session.
+    const present = new Set(entries.map((e) => e.path));
+    for (const p of [...seenOutboxPaths]) {
+      if (!present.has(p)) seenOutboxPaths.delete(p);
+    }
+    for (const entry of entries) {
+      if (seenOutboxPaths.has(entry.path)) continue;
+      seenOutboxPaths.add(entry.path);
+      void handleOutboxEntry(entry);
+    }
+  } catch (e) {
+    console.warn("[outbox] poll failed:", (e as Error).message);
+  } finally {
+    outboxPolling = false;
+  }
+}
+
+async function handleOutboxEntry(entry: {
+  path: string;
+  name: string;
+  size: number;
+  session: string | null;
+}): Promise<void> {
+  const base: AgentFileReady = {
+    remotePath: entry.path,
+    name: entry.name,
+    size: entry.size,
+    sessionName: entry.session,
+    autoPulled: false,
+  };
+  if (config.allowAgentPush) {
+    // Trust mode: pull immediately, toast is informational.
+    try {
+      const localPath = await pullToDownloads(
+        config,
+        entry.path,
+        resolveDownloadsDir(),
+      );
+      // The remote source is gone now (pullToDownloads rm'd it); drop it from
+      // the seen-set so a future same-named push is offered again.
+      seenOutboxPaths.delete(entry.path);
+      pushAgentFileReady({ ...base, autoPulled: true, localPath });
+    } catch (e) {
+      console.warn("[outbox] auto-pull failed:", (e as Error).message);
+      // Fall back to a confirm toast so the file isn't silently lost.
+      pushAgentFileReady(base);
+    }
+  } else {
+    // Require-confirm: just announce. The renderer calls agentPullFile on accept.
+    pushAgentFileReady(base);
+  }
+}
+
+function pushAgentFileReady(payload: AgentFileReady): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.agentFileReady, payload);
+  }
+}
+
+function startOutboxPoller(): void {
+  stopOutboxPoller();
+  if (!config.host) return;
+  void pollOutboxOnce();
+  outboxTimer = setInterval(() => void pollOutboxOnce(), OUTBOX_POLL_MS);
+}
+
+function stopOutboxPoller(): void {
+  if (outboxTimer) {
+    clearInterval(outboxTimer);
+    outboxTimer = null;
+  }
+}
+
 // IPC: renderer calls this to read the current clipboard image as PNG bytes.
 // Separate from the poller so we only read full pixel data on demand.
 function readClipboardImageBuffer(): Buffer | null {
@@ -579,6 +692,7 @@ app.whenReady().then(() => {
     startOpencodeBus();
     scheduleUploadCleanup();
     startScreenshotDetector();
+    startOutboxPoller();
   });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -589,6 +703,7 @@ app.on("window-all-closed", () => {
   stopStatusPoller();
   stopOpencodeBus();
   stopScreenshotDetector();
+  stopOutboxPoller();
   if (cleanupTimer) clearInterval(cleanupTimer);
   killAll();
   if (process.platform !== "darwin") app.quit();
@@ -598,6 +713,7 @@ app.on("before-quit", () => {
   stopStatusPoller();
   stopOpencodeBus();
   stopScreenshotDetector();
+  stopOutboxPoller();
   if (cleanupTimer) clearInterval(cleanupTimer);
   if (config.host) void teardownOpencodeForward(config).catch(() => {});
   killAll();
@@ -635,6 +751,9 @@ function registerHandlers(): void {
       startPollerIfReady();
       stopOpencodeBus();
       startOpencodeBus();
+      // New target → forget which outbox files we've seen and re-poll fresh.
+      seenOutboxPaths.clear();
+      startOutboxPoller();
     }
     if (
       "host" in patch ||
@@ -829,6 +948,25 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.peekRemoteFile, (_e, remotePath: string) =>
     peekRemoteFile(config, remotePath),
   );
+
+  // Agent outbox → laptop: pull a remote outbox file to the downloads dir.
+  // Returns the saved local absolute path. Used by the require-confirm toast's
+  // "Save" button (auto-pull mode does this in the poller). Drops the path from
+  // the seen-set so a future same-named push is offered again.
+  ipcMain.handle(IPC.agentPullFile, async (_e, remotePath: string) => {
+    const localPath = await pullToDownloads(
+      config,
+      remotePath,
+      resolveDownloadsDir(),
+    );
+    seenOutboxPaths.delete(remotePath);
+    return localPath;
+  });
+
+  // Reveal a local file in Finder / the OS file manager.
+  ipcMain.handle(IPC.revealInFolder, (_e, localPath: string) => {
+    if (localPath) shell.showItemInFolder(localPath);
+  });
 
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));
 

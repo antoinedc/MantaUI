@@ -2,7 +2,7 @@ import { spawn as ptySpawnNative, type IPty } from "node-pty";
 import { spawn as cpSpawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join as pathJoin, basename as pathBasename } from "node:path";
-import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { shell } from "electron";
 import { BrowserWindow } from "electron";
@@ -614,6 +614,99 @@ function scpDownload(
       else reject(new Error(`scp exited ${code}: ${stderr.trim() || "download failed"}`));
     });
   });
+}
+
+// ===== Agent → laptop file push (outbox) =====
+//
+// The reverse of drag-and-drop upload. The remote AI drops a file into
+// `~/.bui-outbox/` (optionally `~/.bui-outbox/<session>/`) and bui pulls it
+// down to the Mac's Downloads folder. The outbox is a one-shot mailbox: each
+// file is deleted on the remote after a successful pull so it isn't pulled
+// twice and doesn't accumulate.
+//
+// Detection is a poller in src/main/index.ts that calls `listOutbox` over the
+// warm ControlMaster; the actual transfer is `pullToDownloads` below (a
+// destination-flipped `scpDownload`).
+
+export const OUTBOX_DIRNAME = ".bui-outbox";
+
+export type OutboxEntry = {
+  // Absolute remote path of the file.
+  path: string;
+  // Basename.
+  name: string;
+  // Byte size from `stat`. 0 if unknown.
+  size: number;
+  // Subdir under the outbox root, used as the session label. null at root.
+  session: string | null;
+};
+
+// List every file currently in the remote outbox (one level of session
+// subdirs, plus loose files at the root). Returns [] when the outbox doesn't
+// exist yet — that's the steady state until the AI writes its first file.
+//
+// We emit one `printf` line per file: "<size>\t<abspath>". `find -type f`
+// walks both `~/.bui-outbox/*` and `~/.bui-outbox/<session>/*`; `-maxdepth 2`
+// caps it so a misbehaving AI can't make us walk a deep tree.
+export async function listOutbox(config: AppConfig): Promise<OutboxEntry[]> {
+  if (!config.host) return [];
+  const home = await remoteHome(config).catch(() => null);
+  if (!home) return [];
+  const root = `${home}/${OUTBOX_DIRNAME}`;
+  const cmd =
+    `[ -d ${shellQuote(root)} ] && ` +
+    `find ${shellQuote(root)} -mindepth 1 -maxdepth 2 -type f ` +
+    `-printf '%s\\t%p\\n' 2>/dev/null || true`;
+  const { stdout } = await runSshOnce(config, cmd).catch(() => ({ stdout: "" }));
+  const entries: OutboxEntry[] = [];
+  for (const line of stdout.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab < 0) continue;
+    const size = Number(line.slice(0, tab)) || 0;
+    const path = line.slice(tab + 1).trim();
+    if (!path) continue;
+    const rel = path.slice(root.length + 1); // strip "<root>/"
+    const slash = rel.indexOf("/");
+    const session = slash > 0 ? rel.slice(0, slash) : null;
+    entries.push({ path, name: pathBasename(path), size, session });
+  }
+  return entries;
+}
+
+// Pull a remote outbox file to `destDir` on the Mac (default the OS Downloads
+// folder, resolved by the caller). Returns the saved local absolute path.
+// Collisions are de-duped with a `name (n).ext` suffix so we never clobber an
+// existing download. On success the remote source is removed (one-shot mailbox).
+export async function pullToDownloads(
+  config: AppConfig,
+  remotePath: string,
+  destDir: string,
+): Promise<string> {
+  if (!config.host) throw new Error("No host configured");
+  if (!remotePath) throw new Error("Empty path");
+  mkdirSync(destDir, { recursive: true });
+  const localPath = uniqueLocalPath(destDir, pathBasename(remotePath) || "file");
+  await scpDownload(config, remotePath, localPath);
+  // Best-effort cleanup — a failed delete just means the poller might re-offer
+  // it; the de-dupe suffix keeps a re-pull from overwriting the saved copy.
+  await runSshOnce(config, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
+  return localPath;
+}
+
+// Pick a non-colliding path in `destDir` for `name`. "report.pdf" →
+// "report (1).pdf" → "report (2).pdf" … Caps at 50 to avoid an unbounded loop
+// if something is creating files underneath us.
+function uniqueLocalPath(destDir: string, name: string): string {
+  let candidate = pathJoin(destDir, name);
+  if (!existsSync(candidate)) return candidate;
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 1; i <= 50; i++) {
+    candidate = pathJoin(destDir, `${stem} (${i})${ext}`);
+    if (!existsSync(candidate)) return candidate;
+  }
+  return pathJoin(destDir, `${stem} (${Date.now()})${ext}`);
 }
 
 // Sweep upload batches older than `hours`. Layout is

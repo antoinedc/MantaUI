@@ -15,6 +15,7 @@ export function MobileApp() {
   const setActive = useStore((s) => s.setActive);
   const applyStatusBatch = useStore((s) => s.applyStatusBatch);
   const setScreenshotToast = useStore((s) => s.setScreenshotToast);
+  const setAgentFileToast = useStore((s) => s.setAgentFileToast);
   const projects = useStore((s) => s.projects);
 
   const [nav, setNav] = useState<Nav>({ screen: "list" });
@@ -114,6 +115,15 @@ export function MobileApp() {
     if (!window.api.onScreenshotDetected) return;
     return window.api.onScreenshotDetected((s) => setScreenshotToast(s));
   }, [setScreenshotToast]);
+
+  // Agent → device file push. The mobile server's outbox poller publishes
+  // `agentFile` events when the AI drops a file in ~/.bui-outbox/. On a device
+  // these arrive as a Save toast (the active ChatPanel renders it); tapping
+  // Save triggers a browser download via GET /api/download.
+  useEffect(() => {
+    if (!window.api.onAgentFileReady) return;
+    return window.api.onAgentFileReady((ev) => setAgentFileToast(ev));
+  }, [setAgentFileToast]);
 
   const goList = () => setNav({ screen: "list" });
   const openSession = (projectName: string, windowIndex: number) => {

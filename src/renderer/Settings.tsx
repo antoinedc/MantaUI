@@ -26,6 +26,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
     identityFile,
     transportPreference,
     uploadCleanupHours,
+    allowAgentPush,
+    downloadsDir,
     defaultModel,
     skillRegistryUrls,
     cacheTtl,
@@ -41,6 +43,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [k, setK] = useState(identityFile ?? "");
   const [tp, setTp] = useState<"auto" | "mosh" | "ssh">(transportPreference);
   const [uch, setUch] = useState<string>(String(uploadCleanupHours));
+  const [agentPush, setAgentPush] = useState(allowAgentPush);
+  const [dlDir, setDlDir] = useState(downloadsDir);
   const [restoring, setRestoring] = useState(false);
   const [settingUp, setSettingUp] = useState(false);
   // Setup wizard — probe runs the diagnostic, bootstrap installs opencode.
@@ -85,13 +89,15 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setK(identityFile ?? "");
     setTp(transportPreference);
     setUch(String(uploadCleanupHours));
+    setAgentPush(allowAgentPush);
+    setDlDir(downloadsDir);
     setSelectedModel(defaultModel ?? null);
     setRegistryUrls(skillRegistryUrls ?? []);
     setTtl(cacheTtl);
     setGroqKey(groqApiKey);
     setVoiceTrModel(voiceTranscriptionModel);
     setVoiceCmdModel(voiceCommandModel);
-  }, [host, user, identityFile, transportPreference, uploadCleanupHours, defaultModel, skillRegistryUrls, cacheTtl, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
+  }, [host, user, identityFile, transportPreference, uploadCleanupHours, allowAgentPush, downloadsDir, defaultModel, skillRegistryUrls, cacheTtl, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -109,6 +115,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
       identityFile: k.trim() || undefined,
       transport: tp,
       uploadCleanupHours: Number.isFinite(hoursNum) && hoursNum >= 0 ? hoursNum : 1,
+      allowAgentPush: agentPush,
+      downloadsDir: dlDir.trim(),
       defaultModel: selectedModel ?? undefined,
       skillRegistryUrls: registryUrls,
       cacheTtl: ttl,
@@ -297,6 +305,38 @@ export function Settings({ onClose }: { onClose: () => void }) {
             Sweeps <code className="text-text-muted">~/.bui-uploads</code> on the remote, removing
             drag-and-drop batches older than this. <code className="text-text-muted">0</code>{" "}
             disables.
+          </div>
+        </div>
+
+        <div className="space-y-2 pt-2 border-t border-border">
+          <label className="block text-xs uppercase tracking-wider text-text-muted">
+            Agent file delivery
+          </label>
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              checked={agentPush}
+              onChange={(e) => setAgentPush(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Auto-save files the AI sends
+              <span className="block text-xs text-text-faint">
+                When the AI drops a file in{" "}
+                <code className="text-text-muted">~/.bui-outbox</code> on the remote, save it to your
+                downloads folder without asking. Off = a toast asks before each file is saved.
+              </span>
+            </span>
+          </label>
+          <input
+            type="text"
+            placeholder="~/Downloads (default)"
+            value={dlDir}
+            onChange={(e) => setDlDir(e.target.value)}
+            className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+          />
+          <div className="text-xs text-text-faint">
+            Destination for AI-sent files. Absolute path; leave empty for your OS Downloads folder.
           </div>
         </div>
 

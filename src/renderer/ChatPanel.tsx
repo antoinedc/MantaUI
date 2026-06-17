@@ -40,6 +40,7 @@ import type { VoiceAction } from "../shared/types";
 import {
   ASSUMED_CONTEXT_TOKENS,
   formatTokens,
+  formatBytes,
   formatDuration,
   ctxStageColor,
   filterCommands,
@@ -424,6 +425,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Only the active panel renders it (gated below by `isActive`).
   const screenshotToast = useStore((s) => s.screenshotToast);
   const setScreenshotToast = useStore((s) => s.setScreenshotToast);
+  // Agent → laptop file push toast (single global instance, like screenshots).
+  const agentFileToast = useStore((s) => s.agentFileToast);
+  const setAgentFileToast = useStore((s) => s.setAgentFileToast);
+  const [agentFileSaving, setAgentFileSaving] = useState(false);
   const setChatSubagents = useStore((s) => s.setChatSubagents);
   // Typeahead popup state + result caches. Commands and agents are fetched
   // lazily on first @/ and reused; file searches re-issue per-keystroke.
@@ -2763,6 +2768,39 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     }
   }, [screenshotToast, tmuxSession]);
 
+  // Agent → laptop file push. In require-confirm mode the toast's "Save" button
+  // calls this: pull the remote outbox file to the downloads dir, then flip the
+  // toast to the saved state (so the user can Reveal it). In auto-pull mode the
+  // file is already down (main did it in the poller) and this isn't called.
+  const saveAgentFile = useCallback(async () => {
+    const toast = agentFileToast;
+    if (!toast || agentFileSaving) return;
+    setAgentFileSaving(true);
+    try {
+      const localPath = await window.api.agentPullFile(toast.remotePath);
+      // Desktop returns a real local path → flip the toast to the saved state
+      // so the user can Reveal it in Finder. Mobile returns "" (the download
+      // was handed to the browser; there's no OS file manager to reveal into)
+      // → just dismiss the toast.
+      if (localPath) {
+        setAgentFileToast({ ...toast, autoPulled: true, localPath });
+      } else {
+        setAgentFileToast(null);
+      }
+    } catch (err) {
+      setSendError(`Couldn't save file: ${String((err as Error)?.message ?? err)}`);
+      setAgentFileToast(null);
+    } finally {
+      setAgentFileSaving(false);
+    }
+  }, [agentFileToast, agentFileSaving, setAgentFileToast]);
+
+  const revealAgentFile = useCallback(() => {
+    const local = agentFileToast?.localPath;
+    if (local) void window.api.revealInFolder(local);
+    setAgentFileToast(null);
+  }, [agentFileToast, setAgentFileToast]);
+
   // Panel-level drag handlers. We listen on the chat container; the body of
   // the panel paints a dotted overlay while dragHover is true. App.tsx
   // already suppresses default drag/drop on the window so the renderer
@@ -3587,6 +3625,49 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           </button>
           <button
             onClick={() => setScreenshotToast(null)}
+            className="shrink-0 text-text-faint hover:text-text leading-none"
+            title="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Agent → laptop file toast. The remote AI dropped a file in its outbox. */}
+      {/* In auto-pull (trust) mode it's already saved (autoPulled) → "Reveal"; */}
+      {/* otherwise it's a Save/dismiss prompt. Single global instance, active */}
+      {/* panel only — mirrors the screenshot toast above. */}
+      {isActive && agentFileToast && (
+        <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-[12px] text-text-muted flex items-center gap-2">
+          <span className="flex-1 truncate">
+            <span className="text-text">↓ {agentFileToast.name}</span>
+            {formatBytes(agentFileToast.size) && (
+              <span className="text-text-faint"> · {formatBytes(agentFileToast.size)}</span>
+            )}
+            <span className="text-text-faint">
+              {agentFileToast.autoPulled ? " · saved to Downloads" : " — AI sent you a file"}
+            </span>
+          </span>
+          {agentFileToast.autoPulled ? (
+            agentFileToast.localPath && (
+              <button
+                onClick={revealAgentFile}
+                className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium"
+              >
+                Reveal
+              </button>
+            )
+          ) : (
+            <button
+              onClick={() => void saveAgentFile()}
+              disabled={agentFileSaving}
+              className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium disabled:opacity-50"
+            >
+              {agentFileSaving ? "Saving…" : "Save"}
+            </button>
+          )}
+          <button
+            onClick={() => setAgentFileToast(null)}
             className="shrink-0 text-text-faint hover:text-text leading-none"
             title="Dismiss"
           >

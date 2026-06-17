@@ -6,10 +6,10 @@
 //   skip the ssh hop entirely. One less moving part, one less auth surface.
 
 import { createServer } from "node:http";
-import { readFile, stat, mkdir } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { readFile, stat, mkdir, rm } from "node:fs/promises";
+import { createWriteStream, createReadStream } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, extname, normalize } from "node:path";
+import { dirname, join, extname, normalize, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import { pipeline } from "node:stream/promises";
 import { WebSocketServer } from "ws";
@@ -20,6 +20,7 @@ import * as local from "./local.mjs";
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
+import { startOutboxPoller } from "./outbox.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -36,6 +37,12 @@ const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
 // mobile sidebar's activity/attention dots work (parity with desktop status.ts).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
+
+// Agent → device file push: watch ~/.bui-outbox/ for files the AI drops and
+// publish `agentFile` bus events so connected devices show a "Save" toast
+// (parity with the desktop outbox poller; see src/server/outbox.mjs).
+// eslint-disable-next-line no-unused-vars
+const { stop: stopOutboxPoller } = startOutboxPoller(bus, { intervalMs: 3000 });
 
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.
@@ -193,6 +200,10 @@ function readJsonBody(req, limit = 64 * 1024) {
 // with raw bytes; filename + batch id come in headers. No multipart parser.
 
 const UPLOAD_ROOT = join(homedir(), ".bui-uploads");
+// Agent → device download root. The mobile mirror of the desktop outbox pull:
+// the device fetches a server-local file the AI dropped here. Constrained to
+// this dir so a crafted ?path= can't read arbitrary files off the box.
+const OUTBOX_ROOT = join(homedir(), ".bui-outbox");
 const SESSION_RE = /^[A-Za-z0-9._-]+$/;
 const BATCH_RE = /^[0-9]{6,20}$/;
 
@@ -242,6 +253,39 @@ async function handleUpload(req, res, url) {
   res.end(JSON.stringify({ path: target }));
 }
 
+// Agent → device download: stream a file from ~/.bui-outbox/ back to the
+// device as a browser download. Path-traversal guarded — the resolved path
+// must stay inside OUTBOX_ROOT. Deletes the source on success so the outbox
+// stays a one-shot mailbox, matching the desktop pullToDownloads semantics.
+async function handleDownload(req, res, url) {
+  const raw = url.searchParams.get("path") ?? "";
+  const resolved = resolve(raw);
+  if (resolved !== OUTBOX_ROOT && !resolved.startsWith(OUTBOX_ROOT + "/")) {
+    res.writeHead(403, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "path outside outbox" }));
+    return;
+  }
+  try {
+    const st = await stat(resolved);
+    if (!st.isFile()) throw new Error("not a file");
+    res.writeHead(200, {
+      "content-type": "application/octet-stream",
+      "content-length": String(st.size),
+      "content-disposition": `attachment; filename="${basename(resolved).replace(/"/g, "")}"`,
+    });
+    await pipeline(createReadStream(resolved), res);
+    // Best-effort one-shot cleanup (ignore failure — re-download is harmless).
+    await rm(resolved, { force: true }).catch(() => {});
+  } catch (e) {
+    if (!res.headersSent) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    } else {
+      res.destroy();
+    }
+  }
+}
+
 // ---------- HTTP ----------
 
 const server = createServer(async (req, res) => {
@@ -285,6 +329,10 @@ const server = createServer(async (req, res) => {
 
   if (req.method === "POST" && path === "/api/upload") {
     return handleUpload(req, res, url);
+  }
+
+  if (req.method === "GET" && path === "/api/download") {
+    return handleDownload(req, res, url);
   }
 
   // ---------- Web Push ----------

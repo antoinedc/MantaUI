@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   formatTokens,
+  formatBytes,
   formatDuration,
   ctxStageColor,
   filterCommands,
@@ -67,6 +68,34 @@ describe("formatTokens", () => {
     expect(formatTokens(100_000)).toBe("100k tokens");
     expect(formatTokens(123_456)).toBe("123k tokens");
     expect(formatTokens(200_000)).toBe("200k tokens");
+  });
+});
+
+// ===== formatBytes =====
+
+describe("formatBytes", () => {
+  it("returns empty string for 0 / unknown / negative", () => {
+    expect(formatBytes(0)).toBe("");
+    expect(formatBytes(-5)).toBe("");
+    expect(formatBytes(NaN)).toBe("");
+  });
+
+  it("formats raw bytes under 1 KiB", () => {
+    expect(formatBytes(1)).toBe("1 B");
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(1023)).toBe("1023 B");
+  });
+
+  it("formats KB with one decimal under 10, rounded above", () => {
+    expect(formatBytes(1024)).toBe("1 KB");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(20 * 1024)).toBe("20 KB");
+  });
+
+  it("scales up through MB / GB", () => {
+    expect(formatBytes(1024 * 1024)).toBe("1 MB");
+    expect(formatBytes(5.5 * 1024 * 1024)).toBe("5.5 MB");
+    expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe("3 GB");
   });
 });
 
