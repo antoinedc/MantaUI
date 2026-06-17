@@ -285,10 +285,18 @@ export async function deleteSessionRaw(sessionId) {
 // ---------------------------------------------------------------------------
 
 /** List all pending tool-use permissions.
+ *  Scoped to the session's directory when sessionId is provided. opencode's
+ *  WorkspaceRoutingMiddleware makes the UNSCOPED endpoint return [] for
+ *  sessions bound to a non-default directory — so without `?directory=` the
+ *  PermissionCard never appears on mobile and the turn hangs forever (the
+ *  live `per_…` is sitting in the server's pending map, we just can't see
+ *  it). Mirrors listQuestions above + desktop listPermissions.
+ *  @param {string} [sessionId]
  *  @returns {Promise<Array<{ id: string, sessionID: string, permission: string, ... }>>}
  */
-export async function listPermissions() {
-  const res = await fetch(apiUrl("/permission"));
+export async function listPermissions(sessionId) {
+  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
+  const res = await fetch(apiUrl(`/permission${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listPermissions ${res.status}: ${await res.text()}`);
   }
@@ -296,10 +304,16 @@ export async function listPermissions() {
 }
 
 /** Approve or deny a permission request.
- *  @param {{ requestId: string, reply: "once"|"always"|"reject" }} opts
+ *  Same workspace-routing rule as listPermissions: an UNSCOPED reply 404s
+ *  (PermissionNotFoundError) or silently no-ops if routed to the wrong
+ *  workspace, so the tool stays pending forever. Pass sessionId so the reply
+ *  lands on the pending entry's scope. This was the root cause of mobile
+ *  trust-mode auto-allow failing with `PermissionNotFoundError`.
+ *  @param {{ requestId: string, reply: "once"|"always"|"reject", sessionId?: string }} opts
  */
-export async function replyPermission({ requestId, reply }) {
-  const url = `/permission/${encodeURIComponent(requestId)}/reply`;
+export async function replyPermission({ requestId, reply, sessionId }) {
+  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
+  const url = `/permission/${encodeURIComponent(requestId)}/reply${dirQ}`;
   const res = await fetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },

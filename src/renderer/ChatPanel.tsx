@@ -40,6 +40,7 @@ import type { VoiceAction } from "../shared/types";
 import {
   ASSUMED_CONTEXT_TOKENS,
   formatTokens,
+  formatBytes,
   formatDuration,
   ctxStageColor,
   filterCommands,
@@ -429,6 +430,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Only the active panel renders it (gated below by `isActive`).
   const screenshotToast = useStore((s) => s.screenshotToast);
   const setScreenshotToast = useStore((s) => s.setScreenshotToast);
+  // Agent → laptop file push toast (single global instance, like screenshots).
+  const agentFileToast = useStore((s) => s.agentFileToast);
+  const setAgentFileToast = useStore((s) => s.setAgentFileToast);
+  const [agentFileSaving, setAgentFileSaving] = useState(false);
   const setChatSubagents = useStore((s) => s.setChatSubagents);
   // Typeahead popup state + result caches. Commands and agents are fetched
   // lazily on first @/ and reused; file searches re-issue per-keystroke.
@@ -453,6 +458,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const draftInput = useRef<string>("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Wraps the pending QuestionCard(s). A notification deep-link asks us to
+  // scroll here (iOS can't show inline notification actions, so the tap opens
+  // the app and we bring the question into view). Set via wantQuestionScroll.
+  const questionCardRef = useRef<HTMLDivElement>(null);
+  const wantQuestionScroll = useRef(false);
   // Pinned-to-bottom auto-scroll: true while the viewport is near the bottom.
   // Flips to false when the user manually scrolls up to read history; flips
   // back to true when they scroll close to the bottom again. Streams only
@@ -1513,16 +1523,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         refreshPermissions();
       }
 
-      // Drain the queue between tool calls — send the next queued message as
-      // soon as a tool part completes, rather than waiting for session.idle.
-      if (
-        ev.type === "message.part.updated" &&
-        props.type === "tool" &&
-        (props.state as Record<string, unknown> | undefined)?.status === "completed" &&
-        messageQueueRef.current.length > 0
-      ) {
-        sendQueuedRef.current();
-      }
+      // Queue drain happens ONLY on session.idle (the [running, messageQueue]
+      // effect below), never mid-turn. An earlier version drained on every
+      // tool part completion — but a tool completing inside an active turn
+      // is NOT end-of-turn (the assistant is about to write more text or
+      // call another tool). Posting a new prompt in that window made
+      // opencode abort the in-flight assistant message to start the new
+      // turn, surfacing a `MessageAbortedError` banner in the renderer
+      // AND marking the prior assistant message aborted in the transcript.
+      // Wait for true idle — slightly slower drain, but the queued message
+      // lands as a normal turn with no abort artifacts.
 
       // Permission lifecycle — refresh the inline approval list so the card
       // appears/disappears in real time as opencode requests/closes them.
@@ -1628,10 +1638,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // the streaming case.
   //
   // Force-pin paths stay explicit and limited to user actions: `submit()`
-  // and `sendQueuedRef.current()` set `pinnedToBottom.current = true`
-  // AND reset `prevScrollHeight.current = 0` (so the next layout effect
-  // sticks unconditionally via the prevScrollHeight=0 → pin branch in
-  // `wasAtBottomBeforeCommit`).
+  // sets `pinnedToBottom.current = true` AND resets
+  // `prevScrollHeight.current = 0` (so the next layout effect sticks
+  // unconditionally via the prevScrollHeight=0 → pin branch in
+  // `wasAtBottomBeforeCommit`). Queue drains route through the same
+  // submit() path, so they inherit this force-pin for free.
   const stickToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1640,7 +1651,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Tracks the scrollHeight as of the last completed commit. The layout
   // effect compares this against the live DOM to derive whether the user
   // WAS pinned before the new content landed. Reset to 0 on session
-  // change and on explicit force-pin (submit/sendQueued).
+  // change and on explicit force-pin (submit).
   const prevScrollHeight = useRef(0);
   useEffect(() => {
     const el = scrollRef.current;
@@ -1693,7 +1704,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       pinnedToBottom.current = false;
     }
     prevScrollHeight.current = el.scrollHeight;
-  }, [messages, liveTodos]);
+  }, [messages, liveTodos, questions]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -1706,6 +1717,44 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
+
+  // Notification deep-link → scroll to the pending QuestionCard. iOS web push
+  // can't render inline action buttons, so a question notification opens the
+  // app; this brings the card into view so it's a single tap to answer. The
+  // signal comes two ways: a window global latch (set by MobileApp before this
+  // panel mounts on a cold start from a notification) and a live CustomEvent
+  // (warm — app already open on this session). Either arms wantQuestionScroll;
+  // the effect below performs the scroll once the questions have rendered.
+  useEffect(() => {
+    type ScrollWin = Window & { __buiScrollQuestionSession?: string | null };
+    const w = window as ScrollWin;
+    if (w.__buiScrollQuestionSession && w.__buiScrollQuestionSession === sessionId) {
+      wantQuestionScroll.current = true;
+      w.__buiScrollQuestionSession = null;
+    }
+    const onEvt = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
+      if (detail?.sessionId === sessionId) {
+        wantQuestionScroll.current = true;
+        if (questions.length > 0) {
+          questionCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+          wantQuestionScroll.current = false;
+        }
+      }
+    };
+    window.addEventListener("bui-scroll-to-question", onEvt);
+    return () => window.removeEventListener("bui-scroll-to-question", onEvt);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // Perform the deferred scroll once the question cards actually exist (cold
+  // start: questions arrive via the async fetch after this panel mounts).
+  useEffect(() => {
+    if (wantQuestionScroll.current && questions.length > 0) {
+      questionCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      wantQuestionScroll.current = false;
+    }
+  }, [questions]);
 
   // Textarea auto-resize up to a 6-line cap. After resizing, if the scroll
   // container is pinned to bottom we re-scroll so the input growing pushes
@@ -2023,52 +2072,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const submitRef = useRef<() => void>(() => {});
   submitRef.current = submit;
 
-  // Always-current mirror of messageQueue for use inside the SSE handler
-  // (effects capture a stale closure; a ref stays live).
-  const messageQueueRef = useRef<string[]>([]);
-  messageQueueRef.current = messageQueue;
-
-  // Pops the front of the queue and fires it directly to opencode without
-  // going through submit(). Used by the SSE handler to drain between tool
-  // calls — submit()'s `running` guard would block it there.
-  const sendQueuedRef = useRef<() => void>(() => {});
-  sendQueuedRef.current = () => {
-    const q = messageQueueRef.current;
-    if (q.length === 0) return;
-    const [next, ...rest] = q;
-    setMessageQueue(rest);
-    // Force-pin to bottom — same rationale as submit(). The user is having
-    // a queued turn dispatched, they want to see it land in the transcript.
-    // Reset prevScrollHeight to 0 so the layout effect's
-    // `wasAtBottomBeforeCommit` short-circuits (first-commit branch).
-    pinnedToBottom.current = true;
-    prevScrollHeight.current = 0;
-    const optimisticUserId = `optimistic-user-${Date.now()}`;
-    setMessages((prev) => [
-      ...(prev ?? []),
-      {
-        info: {
-          id: optimisticUserId,
-          sessionID: sessionId,
-          role: "user",
-          time: { created: Date.now() },
-        },
-        parts: [{ id: `${optimisticUserId}-text`, messageID: optimisticUserId, type: "text", text: next }],
-      },
-    ]);
-    window.api
-      .opencodePrompt(sessionId, next, modelOverride ?? undefined, [], undefined)
-      .catch((e: unknown) => {
-        setSendError(String((e as Error)?.message ?? e));
-        setMessages((prev) =>
-          prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
-        );
-      });
-  };
-
-  // When the AI finishes and there are queued messages, send the next one
-  // automatically. We pop the front item, restore it into `input`, and defer
-  // one tick so the state update propagates before submit() reads `input`.
+  // When the AI finishes (running flips to false) and there are queued
+  // messages, dispatch the next one. We restore it into `input` and call
+  // submit() via the ref so slash commands, attachments, and model
+  // resolution all go through the same code path as a manual submit.
+  // Drain runs ONLY on true idle — never mid-turn (see the SSE handler
+  // above for why intra-turn drains produced MessageAbortedError).
   useEffect(() => {
     if (running || messageQueue.length === 0) return;
     const [next, ...rest] = messageQueue;
@@ -2792,6 +2801,39 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     }
   }, [screenshotToast, tmuxSession]);
 
+  // Agent → laptop file push. In require-confirm mode the toast's "Save" button
+  // calls this: pull the remote outbox file to the downloads dir, then flip the
+  // toast to the saved state (so the user can Reveal it). In auto-pull mode the
+  // file is already down (main did it in the poller) and this isn't called.
+  const saveAgentFile = useCallback(async () => {
+    const toast = agentFileToast;
+    if (!toast || agentFileSaving) return;
+    setAgentFileSaving(true);
+    try {
+      const localPath = await window.api.agentPullFile(toast.remotePath);
+      // Desktop returns a real local path → flip the toast to the saved state
+      // so the user can Reveal it in Finder. Mobile returns "" (the download
+      // was handed to the browser; there's no OS file manager to reveal into)
+      // → just dismiss the toast.
+      if (localPath) {
+        setAgentFileToast({ ...toast, autoPulled: true, localPath });
+      } else {
+        setAgentFileToast(null);
+      }
+    } catch (err) {
+      setSendError(`Couldn't save file: ${String((err as Error)?.message ?? err)}`);
+      setAgentFileToast(null);
+    } finally {
+      setAgentFileSaving(false);
+    }
+  }, [agentFileToast, agentFileSaving, setAgentFileToast]);
+
+  const revealAgentFile = useCallback(() => {
+    const local = agentFileToast?.localPath;
+    if (local) void window.api.revealInFolder(local);
+    setAgentFileToast(null);
+  }, [agentFileToast, setAgentFileToast]);
+
   // Panel-level drag handlers. We listen on the chat container; the body of
   // the panel paints a dotted overlay while dragHover is true. App.tsx
   // already suppresses default drag/drop on the window so the renderer
@@ -3500,26 +3542,30 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             {running && activeTodos && activeTodos.length > 0 && (
               <ActiveTodos todos={activeTodos} />
             )}
+            {/* Pending question cards. Rendered INSIDE the scroll */}
+            {/* container at the tail of the transcript so they scroll */}
+            {/* with the rest of the chat instead of sitting in a shrink-0 */}
+            {/* row above the input. They still surface prominently (Claude */}
+            {/* is blocked until answered) but feel like part of the */}
+            {/* conversation — scrolling up through history doesn't keep */}
+            {/* the card glued to the bottom. Same pattern as ActiveTodos. */}
+            {questions.length > 0 && (
+              <div className="space-y-2 pt-1" ref={questionCardRef}>
+                {questions.map((q) => (
+                  <QuestionCard
+                    key={q.id}
+                    request={q}
+                    onReply={(answers) => replyQuestion(q, answers)}
+                    onReject={() => rejectQuestion(q)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
         </div>
         </TaskContext.Provider>
       </div>
-
-      {/* Pending question cards. Shown above permissions + running indicator */}
-      {/* so they're hard to miss — tool execution blocks until answered. */}
-      {questions.length > 0 && (
-        <div className="shrink-0 px-4 pt-2 space-y-2">
-          {questions.map((q) => (
-            <QuestionCard
-              key={q.id}
-              request={q}
-              onReply={(answers) => replyQuestion(q, answers)}
-              onReject={() => rejectQuestion(q)}
-            />
-          ))}
-        </div>
-      )}
 
       {/* Pending permission cards. Shown above the running indicator/input */}
       {/* so they're hard to miss — tool execution pauses until reply. */}
@@ -3612,6 +3658,49 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           </button>
           <button
             onClick={() => setScreenshotToast(null)}
+            className="shrink-0 text-text-faint hover:text-text leading-none"
+            title="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Agent → laptop file toast. The remote AI dropped a file in its outbox. */}
+      {/* In auto-pull (trust) mode it's already saved (autoPulled) → "Reveal"; */}
+      {/* otherwise it's a Save/dismiss prompt. Single global instance, active */}
+      {/* panel only — mirrors the screenshot toast above. */}
+      {isActive && agentFileToast && (
+        <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-[12px] text-text-muted flex items-center gap-2">
+          <span className="flex-1 truncate">
+            <span className="text-text">↓ {agentFileToast.name}</span>
+            {formatBytes(agentFileToast.size) && (
+              <span className="text-text-faint"> · {formatBytes(agentFileToast.size)}</span>
+            )}
+            <span className="text-text-faint">
+              {agentFileToast.autoPulled ? " · saved to Downloads" : " — AI sent you a file"}
+            </span>
+          </span>
+          {agentFileToast.autoPulled ? (
+            agentFileToast.localPath && (
+              <button
+                onClick={revealAgentFile}
+                className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium"
+              >
+                Reveal
+              </button>
+            )
+          ) : (
+            <button
+              onClick={() => void saveAgentFile()}
+              disabled={agentFileSaving}
+              className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium disabled:opacity-50"
+            >
+              {agentFileSaving ? "Saving…" : "Save"}
+            </button>
+          )}
+          <button
+            onClick={() => setAgentFileToast(null)}
             className="shrink-0 text-text-faint hover:text-text leading-none"
             title="Dismiss"
           >
@@ -4714,12 +4803,19 @@ function MicButton({
   onStart,
   onStop,
   onCancel,
+  floating = false,
 }: {
   phase: VoicePhase;
   mode: VoiceMode;
-  onStart: (mode: VoiceMode) => Promise<void>;
+  onStart: (mode: VoiceMode, opts?: { promote?: boolean }) => Promise<void>;
   onStop: () => void;
   onCancel: () => void;
+  // `floating` = the mobile WhatsApp-style push-to-talk FAB (bottom-right,
+  // above the composer). It is dictation-only: it starts in "dictate" with
+  // promotion DISABLED so a normal speak-length hold isn't reclassified as a
+  // voice command. The inline (non-floating) variant keeps the desktop ⌥ /
+  // long-press → command behavior.
+  floating?: boolean;
 }) {
   const recording = phase === "recording" || phase === "requesting";
   const busy = phase === "processing";
@@ -4730,10 +4826,15 @@ function MicButton({
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     if (busy || recording) return;
     e.preventDefault();
-    // Desktop ⌥-modifier promotes to command IMMEDIATELY. Otherwise we
-    // start in dictate and let the hook's longPressMs timer flip us.
-    const initial: VoiceMode = e.altKey ? "command" : "dictate";
-    onStart(initial);
+    if (floating) {
+      // PTT FAB: always plain dictation, no command promotion.
+      onStart("dictate", { promote: false });
+    } else {
+      // Desktop ⌥-modifier promotes to command IMMEDIATELY. Otherwise we
+      // start in dictate and let the hook's longPressMs timer flip us.
+      const initial: VoiceMode = e.altKey ? "command" : "dictate";
+      onStart(initial);
+    }
     // Capture so onPointerUp fires even if the cursor leaves the button.
     try {
       (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
@@ -4753,10 +4854,47 @@ function MicButton({
   const label = busy
     ? "transcribing…"
     : recording
-      ? mode === "command"
-        ? "release · command"
-        : "release · dictate"
-      : "hold to speak (⌥ = command)";
+      ? floating
+        ? "release to insert"
+        : mode === "command"
+          ? "release · command"
+          : "release · dictate"
+      : floating
+        ? "hold to talk"
+        : "hold to speak (⌥ = command)";
+
+  // Floating PTT FAB: round bubble, bottom-right (positioned by the
+  // `.mobile-ptt-fab` rule in mobile.css — visual/layout lives there per the
+  // mobile-CSS invariant; this component only sets state modifier classes).
+  if (floating) {
+    return (
+      <button
+        type="button"
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+        onPointerLeave={(e) => {
+          if (e.buttons === 0 && recording) onCancel();
+        }}
+        onContextMenu={(e) => e.preventDefault()}
+        title={label}
+        aria-label={label}
+        className={
+          "mobile-ptt-fab" +
+          (busy
+            ? " mobile-ptt-fab--busy"
+            : recording
+              ? " mobile-ptt-fab--recording"
+              : phase === "error"
+                ? " mobile-ptt-fab--error"
+                : "")
+        }
+        style={{ touchAction: "none" }}
+      >
+        {busy ? "⋯" : "🎙"}
+      </button>
+    );
+  }
 
   return (
     <button
@@ -4868,7 +5006,7 @@ function InputArea({
   // user only cares "is the mic busy".
   voiceRecording: boolean;
   voiceProcessing: boolean;
-  startVoice: (mode: VoiceMode) => Promise<void>;
+  startVoice: (mode: VoiceMode, opts?: { promote?: boolean }) => Promise<void>;
   stopVoice: () => void;
   cancelVoice: () => void;
   tokens: TokenUsage | null;
@@ -4941,6 +5079,21 @@ function InputArea({
   const voiceActive = voiceRecording || voiceProcessing;
   return (
     <div className="shrink-0" ref={rowRef}>
+      {/* Mobile push-to-talk FAB (WhatsApp-style, bottom-right above the
+          composer). Hold to record, release to insert the transcript into
+          the composer for review. Positioned + sized by `.mobile-ptt-fab` in
+          mobile.css; only rendered in the mobile shell with a Groq key set.
+          Desktop voice stays keyboard-driven (Ctrl+M / Enter / Esc). */}
+      {voiceEnabled && isMobileShell && (
+        <MicButton
+          phase={voicePhase}
+          mode={voiceMode}
+          onStart={startVoice}
+          onStop={stopVoice}
+          onCancel={cancelVoice}
+          floating
+        />
+      )}
       {/* Error banner moved to ChatPanel scope (dismissable + closer to the */}
       {/* attachment strip). Nothing rendered here for sendError anymore. */}
       {/* Top divider — white-ish, matches Claude TUI. Turns into a pulsing */}
@@ -4958,18 +5111,9 @@ function InputArea({
       {/* Input row — no box, generous vertical padding. The mic affordance */}
       {/* on desktop is keyboard-only (Ctrl+M to toggle, Enter to stop+send, */}
       {/* Esc to cancel); the visible feedback is the pulsing border above + */}
-      {/* below this row. On mobile (no physical keyboard) the MicButton is */}
-      {/* rendered as a tap target left of the `>` prompt. */}
+      {/* below this row. On mobile the mic lives in the floating PTT FAB */}
+      {/* above the composer (rendered at the top of this wrapper). */}
       <div className="px-4 py-3 flex items-start gap-2">
-        {voiceEnabled && isMobileShell && (
-          <MicButton
-            phase={voicePhase}
-            mode={voiceMode}
-            onStart={startVoice}
-            onStop={stopVoice}
-            onCancel={cancelVoice}
-          />
-        )}
         <span
           className="select-none pt-px shrink-0"
           style={{ color: voiceActive ? "#f87171" : CLAUDE_ORANGE }}

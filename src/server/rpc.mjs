@@ -168,11 +168,14 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // → args[0] = sessionId (string)
     "opencode:abort": (sessionId) => oc.abortSession(sessionId),
 
-    // preload: ipcRenderer.invoke(IPC.opencodePermissions)  → no args
-    "opencode:permissions": () => oc.listPermissions(),
+    // preload: ipcRenderer.invoke(IPC.opencodePermissions, sessionId?) → args[0] = sessionId
+    // Scope the list to the session's directory — opencode returns [] for a
+    // non-default-directory session on the unscoped endpoint, so an unpassed
+    // sessionId made the PermissionCard never appear on mobile (turn hangs).
+    "opencode:permissions": (sessionId) => oc.listPermissions(sessionId),
 
-    // preload: ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply })
-    // → args[0] = { requestId, reply }; opencode.mjs replyPermission expects same shape
+    // preload: ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply, sessionId })
+    // → args[0] = { requestId, reply, sessionId }; opencode.mjs replyPermission expects same shape
     "opencode:permission-reply": (input) => oc.replyPermission(input),
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestions, sessionId?)  → args[0] = sessionId

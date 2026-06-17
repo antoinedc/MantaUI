@@ -103,6 +103,31 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
     }
   };
 
+  // Esc / stop — interrupt the running agent. Mobile soft keyboards rarely
+  // expose an Esc key, so it gets an explicit header button that works for
+  // BOTH session kinds. It's always available (not gated on a "running"
+  // flag): a stuck agent is exactly the case where the running indicator may
+  // be stale, so the stop must work regardless. Aborting an already-idle
+  // session is a harmless no-op.
+  //   - chat (opencode) windows  → opencodeAbort(sid), same as the desktop
+  //     "Esc to stop" keybind in ChatPanel.
+  //   - terminal (claude TUI) windows → write \x1b to the project PTY.
+  //     Select the window first: mobile navigation doesn't select-window on
+  //     open and the project's single PTY follows the active tmux window, so
+  //     without this ESC could land on a different window than the one shown.
+  const sendEsc = () => {
+    if (sid) {
+      window.api.opencodeAbort(sid).catch(() => {});
+      return;
+    }
+    window.api
+      .tmuxSelectWindow({ sessionName: projectName, windowIndex: win.index })
+      .catch(() => {})
+      .finally(() => {
+        window.api.ptyWrite(projectName, "\x1b").catch(() => {});
+      });
+  };
+
   // Kill is available for terminal windows too — for chat windows the
   // existing "Delete session" path already covers it (also deletes the
   // opencode session). Terminal-only path uses tmux:kill-window directly.
@@ -138,6 +163,18 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
             {sid ? " · chat" : " · terminal"}
           </div>
         </div>
+        {/* Esc / stop — interrupts the running agent the way pressing Esc
+            would on desktop. Shown for both chat and terminal windows; see
+            sendEsc for why it's always available rather than gated on a
+            running flag. */}
+        <button
+          className="mobile-tap text-text-muted text-xs font-semibold px-2 border border-border rounded"
+          onClick={sendEsc}
+          aria-label="Send Esc to stop the agent"
+          title="Esc"
+        >
+          Esc
+        </button>
         {/* Action sheet is available for both chat and terminal windows now —
             terminal windows get rename + kill; chat windows additionally get
             fork / compact / delete. */}

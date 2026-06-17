@@ -160,6 +160,61 @@ body,
   /* Composer wrapper: let its rows wrap instead of overflowing. */
   display: flex;
   flex-direction: column;
+  /* Positioning context for the floating push-to-talk FAB, which is rendered
+     as a child of this wrapper and anchored just above it (bottom: 100%). */
+  position: relative;
+}
+
+/* --- Push-to-talk FAB (WhatsApp-style) ---
+   Rendered by MicButton (floating variant) at the top of the composer
+   wrapper. Floats just above the composer at the bottom-right of the screen.
+   Layout + visuals live here (mobile-CSS invariant); the component only
+   toggles the --recording / --busy / --error state classes. */
+.mobile-ptt-fab {
+  position: absolute;
+  right: 14px;
+  bottom: calc(100% + 12px);
+  z-index: 20;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  font-size: 24px;
+  line-height: 1;
+  color: #fff;
+  /* accent-soft (#3a4a8a) — same white-on-blue treatment as the mobile "+"
+     button, so the FAB reads as a primary action in bui's theme. */
+  background: #3a4a8a;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  border: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: transform 0.08s ease, background 0.12s ease;
+}
+.mobile-ptt-fab:active {
+  transform: scale(0.94);
+}
+.mobile-ptt-fab--recording {
+  background: #ef4444;
+  animation: mobile-ptt-pulse 1.1s ease-in-out infinite;
+}
+.mobile-ptt-fab--busy {
+  background: #6b7280;
+  cursor: progress;
+}
+.mobile-ptt-fab--error {
+  background: #b91c1c;
+}
+@keyframes mobile-ptt-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 12px rgba(239, 68, 68, 0);
+  }
 }
 /* Every inner row of the composer (input row, meta footer, trust line) is
    a flexbox. Allow wrapping + a small row-gap so nothing collides. */

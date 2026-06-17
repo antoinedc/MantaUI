@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { useStore } from "../store";
+import { useStore, resolveSessionOwner } from "../store";
 import { SessionListScreen } from "./SessionListScreen";
 import { SessionScreen } from "./SessionScreen";
 import { MobileSettings } from "./MobileSettings";
+import { reportFocus } from "./push";
 
 type Nav =
   | { screen: "list" }
@@ -14,9 +15,22 @@ export function MobileApp() {
   const setActive = useStore((s) => s.setActive);
   const applyStatusBatch = useStore((s) => s.applyStatusBatch);
   const setScreenshotToast = useStore((s) => s.setScreenshotToast);
+  const setAgentFileToast = useStore((s) => s.setAgentFileToast);
+  const projects = useStore((s) => s.projects);
 
   const [nav, setNav] = useState<Nav>({ screen: "list" });
   const [bootError, setBootError] = useState<string | null>(null);
+
+  // The opencode session id of the on-screen chat (null on list/settings or a
+  // terminal window). Drives push focus-suppression: the server skips the
+  // "Claude is done" notification for the session you're actively viewing.
+  const activeSessionId =
+    nav.screen === "session"
+      ? (projects
+          .find((p) => p.tmuxSession === nav.projectName)
+          ?.windows.find((w) => w.index === nav.windowIndex)
+          ?.opencodeSessionId ?? null)
+      : null;
 
   // Bootstrap: load projects/config. Surface failure with a retry (mobile has
   // no SSH layer; the box can simply be unreachable).
@@ -102,12 +116,107 @@ export function MobileApp() {
     return window.api.onScreenshotDetected((s) => setScreenshotToast(s));
   }, [setScreenshotToast]);
 
+  // Agent → device file push. The mobile server's outbox poller publishes
+  // `agentFile` events when the AI drops a file in ~/.bui-outbox/. On a device
+  // these arrive as a Save toast (the active ChatPanel renders it); tapping
+  // Save triggers a browser download via GET /api/download.
+  useEffect(() => {
+    if (!window.api.onAgentFileReady) return;
+    return window.api.onAgentFileReady((ev) => setAgentFileToast(ev));
+  }, [setAgentFileToast]);
+
   const goList = () => setNav({ screen: "list" });
   const openSession = (projectName: string, windowIndex: number) => {
     setActive(projectName, windowIndex);
     setNav({ screen: "session", projectName, windowIndex });
   };
   const openSettings = () => setNav({ screen: "settings" });
+
+  // Open a session from a notification tap, and ask its ChatPanel to scroll the
+  // pending QuestionCard into view. The window global is a latch for the
+  // cold-start case (panel mounts after this runs); the event covers the warm
+  // case (panel already mounted on that session). See ChatPanel's
+  // bui-scroll-to-question handler.
+  const openSessionForNotif = (
+    projectName: string,
+    windowIndex: number,
+    sessionId: string,
+  ) => {
+    (window as Window & { __buiScrollQuestionSession?: string | null }).__buiScrollQuestionSession =
+      sessionId;
+    openSession(projectName, windowIndex);
+    window.dispatchEvent(
+      new CustomEvent("bui-scroll-to-question", { detail: { sessionId } }),
+    );
+  };
+
+  // Push focus reporting — tell the server which session is on screen and
+  // whether the app is visible, so the "Claude is done" push is suppressed
+  // only for the session the user is actively watching. Re-sent on session
+  // change and on every visibility flip; pagehide marks not-visible so a
+  // backgrounded/closed app gets all "done" pushes.
+  useEffect(() => {
+    const send = () =>
+      reportFocus(
+        activeSessionId,
+        document.visibilityState === "visible" && nav.screen === "session",
+      );
+    send();
+    const onVis = () => send();
+    const onHide = () => reportFocus(activeSessionId, false);
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, [activeSessionId, nav.screen]);
+
+  // Notification deep-link — a tapped push opens the app with ?notif=<sid>
+  // (cold start) or posts a message from the service worker (warm). Stash the
+  // requested session id; the effect below resolves it to a (project, window)
+  // once projects have loaded and navigates there.
+  const pendingNotif = useRef<string | null>(null);
+  useEffect(() => {
+    try {
+      const u = new URL(window.location.href);
+      const n = u.searchParams.get("notif");
+      if (n) {
+        pendingNotif.current = n;
+        u.searchParams.delete("notif");
+        window.history.replaceState({}, "", u.toString());
+      }
+    } catch {
+      /* ignore malformed URL */
+    }
+    if (!navigator.serviceWorker) return;
+    const onMsg = (e: MessageEvent) => {
+      const d = e.data as { type?: string; sessionId?: string } | undefined;
+      if (d?.type === "bui-open-session" && d.sessionId) {
+        pendingNotif.current = d.sessionId;
+        const owner = resolveSessionOwner(useStore.getState().projects, d.sessionId);
+        if (owner) {
+          pendingNotif.current = null;
+          openSessionForNotif(owner.tmuxSession, owner.windowIndex, d.sessionId);
+        }
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onMsg);
+    return () => navigator.serviceWorker.removeEventListener("message", onMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Resolve a stashed deep-link once projects are available.
+  useEffect(() => {
+    if (!pendingNotif.current || projects.length === 0) return;
+    const sid = pendingNotif.current;
+    const owner = resolveSessionOwner(projects, sid);
+    if (owner) {
+      pendingNotif.current = null;
+      openSessionForNotif(owner.tmuxSession, owner.windowIndex, sid);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects]);
 
   // Android hardware back / browser back → pop to list. Both session and
   // settings screens collapse back to the list on back gesture.

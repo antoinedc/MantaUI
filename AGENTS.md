@@ -101,6 +101,51 @@ empty session dirs. Threshold is `uploadCleanupHours` in config (default 1,
 `0` disables). Sweep runs once at app load + every hour after; worst-case
 staleness ≈ `uploadCleanupHours + 1h`.
 
+**Agent → laptop push (outbox).** The reverse of drag-in: the remote AI drops a
+file into `~/.bui-outbox/` (optionally `~/.bui-outbox/<session>/`) and bui pulls
+it to the Mac's Downloads folder. It's the mirror image of upload — same warm
+ControlMaster, `scpDownload` with the destination flipped (`pullToDownloads` in
+`src/main/pty.ts`). Detection is a 3s **outbox poller** in `src/main/index.ts`
+(`pollOutboxOnce` → `listOutbox` over SSH → `find -printf '%s\t%p\n'`); it
+mirrors the screenshot Desktop watcher's philosophy (cheap periodic check, push
+a toast). The outbox is a **one-shot mailbox** — `pullToDownloads` `rm`s the
+remote source after a successful pull, so files aren't re-pulled and don't
+accumulate. The poller keeps a `seenOutboxPaths` set (cleared on host change)
+reconciled against the live listing each tick so a require-confirm toast the
+user hasn't answered isn't re-offered every 3s.
+
+- **Trust flag `allowAgentPush`** (AppConfig, default OFF, Settings UI). ON =
+  pull immediately + informational toast ("↓ name · saved to Downloads ·
+  Reveal"). OFF = a confirm toast ("AI sent you a file · Save / ×"); the
+  renderer's `saveAgentFile` calls `agentPullFile` on Save. Mirrors
+  `chatAutoAllow`'s shape but is a SEPARATE flag — writing to Downloads is a
+  different trust boundary than auto-allowing tool runs.
+- **`downloadsDir`** (AppConfig) overrides the destination; empty →
+  `app.getPath("downloads")`. Resolved in `resolveDownloadsDir()`.
+- **Toast** is a single global instance like the screenshot toast:
+  `agentFileToast` in the store, App.tsx owns the one `onAgentFileReady`
+  listener, the active ChatPanel renders it. De-dupe on collision via
+  `uniqueLocalPath` (`report.pdf` → `report (1).pdf`).
+- **The AI learns the convention** via the `/send-file` command
+  (`docs/opencode-commands/send-file.md`). Install on the remote opencode host:
+  `ln -sf <repo>/docs/opencode-commands/send-file.md
+  ~/.config/opencode/commands/send-file.md` then restart `bui-opencode`. The
+  command just tells the AI to `cp <file> ~/.bui-outbox/` — no MCP server, works
+  with any model.
+- **Mobile** has no Mac Downloads folder (the server IS the box). A server-side
+  outbox poller (`src/server/outbox.mjs`, `startOutboxPoller` wired in
+  `index.mjs`) `readdir`s `~/.bui-outbox/` locally every 3s and publishes
+  `{kind:"agentFile"}` bus events; the httpApi shim's `onAgentFileReady`
+  subscribes to that kind. Every detection is a CONFIRM toast (`autoPulled:false`)
+  — there's no silent disk write to a phone/browser. Tapping Save calls
+  `agentPullFile`, which triggers a browser download via `GET /api/download`
+  (`src/server/index.mjs`, path-traversal-guarded to `~/.bui-outbox/`, deletes
+  the source on success — the one-shot mailbox). The mobile `agentPullFile`
+  returns `""` (no OS path to reveal) so the toast dismisses instead of showing
+  a dead "Reveal" button; `revealInFolder` is a no-op. `MobileApp.tsx` wires the
+  `onAgentFileReady` listener (mirror of `App.tsx`). Pure scan logic
+  (`createOutboxScanner`, `listOutbox`) is tested in `src/server/outbox.test.mjs`.
+
 ## Mobile / web client (`src/server/`)
 
 Node HTTP+WS server that runs **on the Linux box** (no SSH hop). The client
@@ -263,6 +308,21 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
     `createSession expands a leading ~ …` in `src/server/opencode.test.mjs`
     (red/green verified). Do NOT "simplify" by moving expansion back into a
     caller — the chokepoint is what makes the corruption unreachable.
+- **Queued message drain — ONLY on `session.idle`, never mid-turn.** When
+  the user submits while `running` is true, the text gets pushed to
+  `messageQueue` and the input clears. The `[running, messageQueue]`
+  effect in `ChatPanel.tsx` dispatches the next queued item the moment
+  `running` flips false (i.e. opencode emits `session.idle` or
+  `session.status{type:"idle"}`). Do NOT add an SSE-handler drain on
+  `message.part.updated` with tool `state.status === "completed"` (or any
+  other intra-turn signal): a tool completing inside an active turn is
+  NOT end-of-turn (the assistant is about to write more text or call
+  another tool), and posting a new prompt in that window makes opencode
+  abort the in-flight assistant message to start the new turn —
+  `MessageAbortedError` lands in the sendError banner and the prior
+  assistant message is marked aborted in the transcript. Slightly slower
+  drain (waits for true idle), but the queued message lands cleanly as a
+  normal turn.
 - **TodoWrite checklist auto-dismissal** — when every item in the pinned
   `ActiveTodos` is terminal (`completed` or `cancelled`) at the moment the
   user submits their next prompt, `todosDismissed` flips true and the card
@@ -337,15 +397,16 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   40-100px, a sub-8px scroll is almost certainly accidental, and
   re-engaging follow by scrolling to the bottom is trivial.
 
-  **Force-pin paths are limited and explicit**: `submit()` and
-  `sendQueuedRef.current()` set `pinnedToBottom.current = true` AND reset
-  `prevScrollHeight.current = 0` just before their optimistic
-  `setMessages`. The reset matters — `wasAtBottomBeforeCommit` returns
-  true unconditionally when `prevScrollHeight=0` (first-commit branch),
-  which forces the stick even if the user had scrolled into history
-  before submitting. That's it. The old `running` false→true edge effect
-  is gone — it fired on every busy/idle oscillation and yanked the
-  viewport mid-turn. **Do NOT reintroduce a `running`-derived force-pin.**
+  **Force-pin paths are limited and explicit**: `submit()` sets
+  `pinnedToBottom.current = true` AND resets `prevScrollHeight.current =
+  0` just before its optimistic `setMessages`. The reset matters —
+  `wasAtBottomBeforeCommit` returns true unconditionally when
+  `prevScrollHeight=0` (first-commit branch), which forces the stick even
+  if the user had scrolled into history before submitting. That's it.
+  Queue drains route through the same `submit()` path so they inherit
+  this force-pin for free. The old `running` false→true edge effect is
+  gone — it fired on every busy/idle oscillation and yanked the viewport
+  mid-turn. **Do NOT reintroduce a `running`-derived force-pin.**
 
   Also gone: asymmetric hysteresis with a dead-zone (re-introduces v1's
   bug — the dead zone PRESERVES prior state); wheel/touch/key intent

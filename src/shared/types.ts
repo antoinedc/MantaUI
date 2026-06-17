@@ -17,6 +17,21 @@ export type AppConfig = {
   transport?: "auto" | "mosh" | "ssh";
   // Auto-clean files in ~/.bui-uploads older than this many hours. 0 disables.
   uploadCleanupHours?: number;
+  // ----- Agent → laptop file push (outbox) -----
+  // The reverse of drag-and-drop upload: the remote AI drops a file into
+  // `~/.bui-outbox/` and bui scp-pulls it to the Mac. An outbox poller in
+  // main watches that dir over the warm ControlMaster.
+  //
+  // Trust flag, analogous to chatAutoAllow. When true, detected outbox files
+  // are pulled to `downloadsDir` immediately and the toast is informational
+  // ("AI sent you X · Reveal"). When false (default), the toast asks the user
+  // to confirm before the pull happens. Off by default — a remote process
+  // writing files straight into the user's Downloads is sensitive.
+  allowAgentPush?: boolean;
+  // Destination directory for agent-pushed files. Absolute path on the Mac.
+  // Absent → app.getPath("downloads") (~/Downloads). A leading "~" is NOT
+  // expanded here; pass an absolute path or leave empty for the default.
+  downloadsDir?: string;
   // Local port forwarded to the remote `opencode serve` instance for chat-mode
   // windows. Defaults to 14096 to avoid colliding with a user's local opencode
   // running on 4096.
@@ -187,6 +202,18 @@ export const IPC = {
   // Open a URL in the user's default browser
   openExternal: "shell:open-external",
 
+  // ---- Agent → laptop file push (outbox) ----
+  // Pull a remote outbox file to the local downloads dir. Returns the saved
+  // local absolute path. Deletes the remote source on success (one-shot mailbox).
+  agentPullFile: "agent:pull-file",
+  // Reveal a local file in Finder / the OS file manager.
+  revealInFolder: "shell:reveal-in-folder",
+  // main → renderer push: a new file appeared in the remote ~/.bui-outbox/.
+  // Payload: { remotePath, name, size, sessionName?, autoPulled, localPath? }.
+  // When config.allowAgentPush is on, main pulls first and sets autoPulled:true
+  // + localPath; otherwise it's a confirm prompt (autoPulled:false).
+  agentFileReady: "agent:file-ready",
+
   // Transport status (mosh vs ssh)
   transportInfo: "transport:info",
 
@@ -282,6 +309,28 @@ export const IPC = {
   // surfaces the exact next-step command instead.
   setupBootstrap: "setup:bootstrap",
 } as const;
+
+// ----- Agent → laptop file push (outbox) -----
+
+// main → renderer push when a file is detected in the remote ~/.bui-outbox/.
+// One per detected file. The toast (store-backed, rendered by the active
+// ChatPanel) either confirms the pull (autoPulled:false) or just announces a
+// completed pull (autoPulled:true, localPath set).
+export type AgentFileReady = {
+  // Absolute remote path of the outbox file (source of the scp pull).
+  remotePath: string;
+  // Basename, for display + the saved local filename.
+  name: string;
+  // Byte size from the remote `stat`, for display. 0 if unknown.
+  size: number;
+  // tmux/project session inferred from the outbox subdir (~/.bui-outbox/<session>/…),
+  // or null when the file was dropped at the outbox root.
+  sessionName: string | null;
+  // True when allowAgentPush was on and main already pulled the file.
+  autoPulled: boolean;
+  // Saved local absolute path — only set when autoPulled is true.
+  localPath?: string;
+};
 
 // ----- Setup probe / bootstrap -----
 

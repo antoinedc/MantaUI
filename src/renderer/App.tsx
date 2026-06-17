@@ -59,6 +59,18 @@ export function App() {
     return off;
   }, []);
 
+  // Agent → laptop file push. Same single-listener pattern as screenshots: a
+  // file the remote AI dropped in ~/.bui-outbox/ surfaces as one global toast
+  // the active ChatPanel renders. Guarded — the mobile httpApi shim doesn't
+  // implement onAgentFileReady (no outbox concept when the server IS the box).
+  useEffect(() => {
+    if (!window.api.onAgentFileReady) return;
+    const off = window.api.onAgentFileReady((ev) => {
+      useStore.getState().setAgentFileToast(ev);
+    });
+    return off;
+  }, []);
+
   // Sidebar status for chat-mode windows. The PTY-pane poller
   // (src/main/status.ts) can't see chat-mode state — the holder pane
   // runs `sleep infinity`, so `capture-pane` returns nothing claude-

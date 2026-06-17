@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import {
   IPC,
+  type AgentFileReady,
   type AppConfig,
   type BootstrapResult,
   type OpencodeAgent,
@@ -110,6 +111,20 @@ const api = {
   peekRemoteFile: (remotePath: string): Promise<void> =>
     ipcRenderer.invoke(IPC.peekRemoteFile, remotePath),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke(IPC.openExternal, url),
+
+  // Agent → laptop file push (outbox). `onAgentFileReady` fires when a file
+  // appears in the remote ~/.bui-outbox/. `agentPullFile` pulls it to the
+  // downloads dir (used by the require-confirm toast's Save button); returns
+  // the saved local path. `revealInFolder` opens Finder at the saved file.
+  onAgentFileReady: (cb: (ev: AgentFileReady) => void): (() => void) => {
+    const listener = (_: unknown, ev: AgentFileReady) => cb(ev);
+    ipcRenderer.on(IPC.agentFileReady, listener);
+    return () => ipcRenderer.removeListener(IPC.agentFileReady, listener);
+  },
+  agentPullFile: (remotePath: string): Promise<string> =>
+    ipcRenderer.invoke(IPC.agentPullFile, remotePath),
+  revealInFolder: (localPath: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.revealInFolder, localPath),
 
   // Long-lived attached PTYs (1 per active project)
   ptySpawn: (opts: SpawnOptions): Promise<void> => ipcRenderer.invoke(IPC.ptySpawn, opts),

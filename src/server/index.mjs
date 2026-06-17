@@ -6,10 +6,10 @@
 //   skip the ssh hop entirely. One less moving part, one less auth surface.
 
 import { createServer } from "node:http";
-import { readFile, stat, mkdir } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { readFile, stat, mkdir, rm } from "node:fs/promises";
+import { createWriteStream, createReadStream } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, extname, normalize } from "node:path";
+import { dirname, join, extname, normalize, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import { pipeline } from "node:stream/promises";
 import { WebSocketServer } from "ws";
@@ -20,6 +20,8 @@ import * as local from "./local.mjs";
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
+import { startOutboxPoller } from "./outbox.mjs";
+import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -35,6 +37,12 @@ const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
 // mobile sidebar's activity/attention dots work (parity with desktop status.ts).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
+
+// Agent → device file push: watch ~/.bui-outbox/ for files the AI drops and
+// publish `agentFile` bus events so connected devices show a "Save" toast
+// (parity with the desktop outbox poller; see src/server/outbox.mjs).
+// eslint-disable-next-line no-unused-vars
+const { stop: stopOutboxPoller } = startOutboxPoller(bus, { intervalMs: 3000 });
 
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.
@@ -60,15 +68,25 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
         const cfg = await local.configGet();
         if (cfg.chatAutoAllow) {
           const permId = evt.properties?.id;
+          // Scope the reply to the permission's session directory. Without
+          // this the unscoped reply 404s (PermissionNotFoundError) — the
+          // exact failure seen in the bui-server logs — so trust-mode
+          // auto-allow never actually allowed the tool and the turn hung.
+          const permSessionId = evt.properties?.sessionID;
           if (permId) {
             try {
-              await oc.replyPermission({ requestId: permId, reply: "always" });
+              await oc.replyPermission({
+                requestId: permId,
+                reply: "always",
+                sessionId: permSessionId,
+              });
             } catch (e) {
               console.warn("[opencode-pump] auto-allow failed:", e?.message ?? e);
               // Fall back: forward the event so the user can approve manually.
               bus.publish({ kind: "opencode", payload: evt });
             }
             // Suppress: don't publish when auto-allow succeeded (mirrors desktop continue).
+            // No push either — there's nothing for the user to act on.
             return;
           }
         }
@@ -78,12 +96,18 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
       }
       // chatAutoAllow is false, or permId was missing, or configGet threw — publish normally.
       bus.publish({ kind: "opencode", payload: evt });
+      // The user must approve manually → notify (best-effort, never throws).
+      push.firePush(evt);
     })().catch((e) => {
       console.warn("[opencode-pump] unexpected error:", e?.message ?? e);
     });
     return;
   }
   bus.publish({ kind: "opencode", payload: evt });
+  // Notify on question/error/done (and track busy→idle). firePush decides
+  // what (if anything) to send; permission.asked is handled in the branch
+  // above so it isn't double-fired here.
+  push.firePush(evt);
 });
 
 const PORT = Number(process.env.BUI_MOBILE_PORT ?? 8787);
@@ -108,9 +132,24 @@ async function serveFile(res, filePath, fallbackStatus = 404) {
     const s = await stat(filePath);
     if (!s.isFile()) throw new Error("not a file");
     const data = await readFile(filePath);
+    const ext = extname(filePath);
+    // HTML entry point + manifest are unhashed and must NEVER be cached, or an
+    // installed iOS PWA keeps booting a stale bundle that references old asset
+    // hashes — features land server-side but the phone never sees them.
+    // `no-cache` only forces revalidation, and with no ETag/Last-Modified the
+    // WKWebView sometimes serves its snapshot anyway; `no-store` is the
+    // belt-and-suspenders that guarantees a fresh fetch on every launch.
+    // sw.js is also unhashed AND its updates must propagate immediately —
+    // Cloudflare otherwise edge-caches .js for hours, delaying SW updates.
+    // Vite's JS/CSS are content-hashed (immutable), so they stay cacheable.
+    const base = filePath.split("/").pop() ?? "";
+    const noStore =
+      ext === ".html" || ext === ".webmanifest" || base === "sw.js";
     res.writeHead(200, {
-      "content-type": MIME[extname(filePath)] ?? "application/octet-stream",
-      "cache-control": "no-cache",
+      "content-type": MIME[ext] ?? "application/octet-stream",
+      "cache-control": noStore
+        ? "no-store, must-revalidate"
+        : "no-cache",
       "content-length": data.length,
     });
     res.end(data);
@@ -126,6 +165,34 @@ function safeJoin(root, sub) {
   return target;
 }
 
+// Read + JSON-parse a request body, capped at 64KB (push subscriptions are
+// ~1KB; the cap guards against a runaway/hostile body).
+function readJsonBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf-8").trim();
+      if (!raw) return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
 // ---------- uploads ----------
 //
 // Layout matches the Electron path (~/.bui-uploads/<session>/<ts>/<file>) so
@@ -133,6 +200,10 @@ function safeJoin(root, sub) {
 // with raw bytes; filename + batch id come in headers. No multipart parser.
 
 const UPLOAD_ROOT = join(homedir(), ".bui-uploads");
+// Agent → device download root. The mobile mirror of the desktop outbox pull:
+// the device fetches a server-local file the AI dropped here. Constrained to
+// this dir so a crafted ?path= can't read arbitrary files off the box.
+const OUTBOX_ROOT = join(homedir(), ".bui-outbox");
 const SESSION_RE = /^[A-Za-z0-9._-]+$/;
 const BATCH_RE = /^[0-9]{6,20}$/;
 
@@ -182,6 +253,39 @@ async function handleUpload(req, res, url) {
   res.end(JSON.stringify({ path: target }));
 }
 
+// Agent → device download: stream a file from ~/.bui-outbox/ back to the
+// device as a browser download. Path-traversal guarded — the resolved path
+// must stay inside OUTBOX_ROOT. Deletes the source on success so the outbox
+// stays a one-shot mailbox, matching the desktop pullToDownloads semantics.
+async function handleDownload(req, res, url) {
+  const raw = url.searchParams.get("path") ?? "";
+  const resolved = resolve(raw);
+  if (resolved !== OUTBOX_ROOT && !resolved.startsWith(OUTBOX_ROOT + "/")) {
+    res.writeHead(403, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "path outside outbox" }));
+    return;
+  }
+  try {
+    const st = await stat(resolved);
+    if (!st.isFile()) throw new Error("not a file");
+    res.writeHead(200, {
+      "content-type": "application/octet-stream",
+      "content-length": String(st.size),
+      "content-disposition": `attachment; filename="${basename(resolved).replace(/"/g, "")}"`,
+    });
+    await pipeline(createReadStream(resolved), res);
+    // Best-effort one-shot cleanup (ignore failure — re-download is harmless).
+    await rm(resolved, { force: true }).catch(() => {});
+  } catch (e) {
+    if (!res.headersSent) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    } else {
+      res.destroy();
+    }
+  }
+}
+
 // ---------- HTTP ----------
 
 const server = createServer(async (req, res) => {
@@ -225,6 +329,71 @@ const server = createServer(async (req, res) => {
 
   if (req.method === "POST" && path === "/api/upload") {
     return handleUpload(req, res, url);
+  }
+
+  if (req.method === "GET" && path === "/api/download") {
+    return handleDownload(req, res, url);
+  }
+
+  // ---------- Web Push ----------
+  // GET  /push/vapid       → { key }            (public VAPID key for subscribe)
+  // POST /push/subscribe   body = PushSubscription JSON
+  // POST /push/unsubscribe body = { endpoint }
+  // POST /push/focus       body = { sessionId, visible }  (suppress "done" for
+  //                        the session the user is actively viewing)
+  if (req.method === "GET" && path === "/push/vapid") {
+    try {
+      const key = await push.getVapidPublic();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ key }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+  if (req.method === "POST" && path.startsWith("/push/")) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "bad json" }));
+      return;
+    }
+    try {
+      let result = { ok: true };
+      if (path === "/push/subscribe") {
+        result = await push.addSubscription(body);
+      } else if (path === "/push/unsubscribe") {
+        result = await push.removeSubscription(body?.endpoint);
+      } else if (path === "/push/focus") {
+        result = push.setFocus({
+          sessionId: body?.sessionId,
+          visible: body?.visible,
+        });
+      } else if (path === "/push/answer") {
+        // Direct reply to a Question tool from a notification action button.
+        // answers is string[][] (one array per question); the SW sends
+        // [[label]] for the single-question quick-reply case.
+        await oc.replyQuestion({
+          requestId: body?.requestId,
+          answers: body?.answers,
+          sessionId: body?.sessionId,
+        });
+        result = { ok: true };
+      } else {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "not found" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
   }
 
   // Static fallback for the React + PWA bundle in mobile/www/. All backend

@@ -98,6 +98,22 @@ export function formatTokens(n: number): string {
   return `${Math.round(n / 1000)}k tokens`;
 }
 
+// Human-readable file size for the agent-file toast. Binary units (KiB-style
+// thresholds) but SI-ish labels (KB/MB/GB) to match what users expect from a
+// download chip. 0 / unknown → "" so the caller can omit the size entirely.
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let val = n / 1024;
+  let i = 0;
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024;
+    i++;
+  }
+  return `${val < 10 ? val.toFixed(1).replace(/\.0$/, "") : Math.round(val)} ${units[i]}`;
+}
+
 export function formatDuration(ms: number): string {
   if (ms < 1000) return "<1s";
   const totalSec = Math.round(ms / 1000);
