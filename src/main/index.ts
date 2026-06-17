@@ -428,14 +428,39 @@ function ensureOpencodeStream(directory: string): void {
           // prompting — closest analog to Claude Code's
           // --dangerously-skip-permissions.
           if (ev.type === "permission.asked" && config.chatAutoAllow) {
-            const perm = ev.properties as { id?: string } | undefined;
+            const perm = ev.properties as
+              | { id?: string; sessionID?: string }
+              | undefined;
             if (perm?.id) {
-              void opencodeReplyPermission(config, perm.id, "always").catch(
-                (e) => console.warn("[opencode-bus] auto-allow failed:", (e as Error).message),
-              );
+              // MUST pass sessionID. opencode's WorkspaceRoutingMiddleware
+              // silently no-ops a reply sent to the wrong workspace, so an
+              // unscoped "always" left the permission pending on the server.
+              // The bus still suppressed the live card, but the next
+              // refreshPermissions()/panel-mount re-fetched the still-pending
+              // entry and surfaced a card the user had to click manually —
+              // i.e. auto-allow "didn't work" for any non-default-workspace
+              // session. Scoping the reply is what actually unsticks the tool.
+              opencodeReplyPermission(
+                config,
+                perm.id,
+                "always",
+                perm.sessionID,
+              ).catch((e) => {
+                console.warn(
+                  "[opencode-bus] auto-allow failed:",
+                  (e as Error).message,
+                );
+                // Fall back to manual approval: forward the event so the
+                // renderer can render the card (mirrors the mobile pump).
+                // Without this a failed auto-allow silently hangs the turn.
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                  mainWindow.webContents.send(IPC.opencodeEvent, ev);
+                }
+              });
             }
-            // Suppress forwarding — the renderer doesn't need to render the
-            // card. The subsequent permission.replied event still flows through.
+            // Suppress forwarding on the success path — the renderer doesn't
+            // need to render the card. The subsequent permission.replied event
+            // still flows through. (On failure the .catch above re-forwards.)
             continue;
           }
 
