@@ -379,6 +379,7 @@ const server = createServer(async (req, res) => {
         // the user is active on desktop. Posted on focus/blur/system-idle over
         // the desktop's SSH -L 18787 forward.
         result = push.setDesktopPresence({ visible: body?.visible });
+        console.log(`[push] desktop-presence visible=${!!body?.visible}`);
       } else if (path === "/push/answer") {
         // Direct reply to a Question tool from a notification action button.
         // answers is string[][] (one array per question); the SW sends

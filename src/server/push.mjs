@@ -454,7 +454,21 @@ export async function firePush(evt) {
     // their phone for a "done". Only "done" is suppressed — permission /
     // question / error are blocking and surface on every device regardless
     // (mirrors Slack/Discord still escalating mentions/DMs across devices).
-    if (payload.kind === "done" && shouldSuppressForDesktop(_desktop)) return;
+    if (payload.kind === "done") {
+      const now = Date.now();
+      const suppress = shouldSuppressForDesktop(_desktop, now);
+      console.log(
+        `[push] done sid=${sid} suppressForDesktop=${suppress} ` +
+          `desktop={visible:${_desktop.visible},ageSeen:${
+            _desktop.lastSeen ? Math.round((now - _desktop.lastSeen) / 1000) : "∞"
+          }s,ageActive:${
+            _desktop.lastActive
+              ? Math.round((now - _desktop.lastActive) / 1000)
+              : "∞"
+          }s}`,
+      );
+      if (suppress) return;
+    }
 
     await sendPush(payload);
   } catch (e) {
