@@ -269,6 +269,12 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
       return tmux.listProjects();
     },
 
+    // opencode:generate-title
+    // Auto-rename: throwaway-session title generation. Mirror of desktop
+    // IPC.opencodeGenerateTitle. Returns the RAW model reply (caller sanitizes).
+    "opencode:generate-title": ({ directory, instruction }) =>
+      oc.generateSessionTitle({ directory, instruction }),
+
     // ---- pty channels (4 channels) ----
     //
     // IPC.ptySpawn   = "pty:spawn"   preload: ipcRenderer.invoke(IPC.ptySpawn, opts)

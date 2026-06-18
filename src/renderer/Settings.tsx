@@ -27,6 +27,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     transportPreference,
     uploadCleanupHours,
     allowAgentPush,
+    autoRenameSessions,
     downloadsDir,
     defaultModel,
     skillRegistryUrls,
@@ -44,6 +45,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [tp, setTp] = useState<"auto" | "mosh" | "ssh">(transportPreference);
   const [uch, setUch] = useState<string>(String(uploadCleanupHours));
   const [agentPush, setAgentPush] = useState(allowAgentPush);
+  const [autoRename, setAutoRename] = useState(autoRenameSessions);
   const [dlDir, setDlDir] = useState(downloadsDir);
   const [restoring, setRestoring] = useState(false);
   const [settingUp, setSettingUp] = useState(false);
@@ -90,6 +92,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setTp(transportPreference);
     setUch(String(uploadCleanupHours));
     setAgentPush(allowAgentPush);
+    setAutoRename(autoRenameSessions);
     setDlDir(downloadsDir);
     setSelectedModel(defaultModel ?? null);
     setRegistryUrls(skillRegistryUrls ?? []);
@@ -97,7 +100,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setGroqKey(groqApiKey);
     setVoiceTrModel(voiceTranscriptionModel);
     setVoiceCmdModel(voiceCommandModel);
-  }, [host, user, identityFile, transportPreference, uploadCleanupHours, allowAgentPush, downloadsDir, defaultModel, skillRegistryUrls, cacheTtl, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
+  }, [host, user, identityFile, transportPreference, uploadCleanupHours, allowAgentPush, autoRenameSessions, downloadsDir, defaultModel, skillRegistryUrls, cacheTtl, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -116,6 +119,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       transport: tp,
       uploadCleanupHours: Number.isFinite(hoursNum) && hoursNum >= 0 ? hoursNum : 1,
       allowAgentPush: agentPush,
+      autoRenameSessions: autoRename,
       downloadsDir: dlDir.trim(),
       defaultModel: selectedModel ?? undefined,
       skillRegistryUrls: registryUrls,
@@ -338,6 +342,28 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <div className="text-xs text-text-faint">
             Destination for AI-sent files. Absolute path; leave empty for your OS Downloads folder.
           </div>
+        </div>
+
+        <div className="space-y-2 pt-2 border-t border-border">
+          <label className="block text-xs uppercase tracking-wider text-text-muted">
+            Auto-rename sessions
+          </label>
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoRename}
+              onChange={(e) => setAutoRename(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Name sessions from the conversation
+              <span className="block text-xs text-text-faint">
+                Every few turns, ask the model for a 1-2 word title and rename
+                the chat window to match the current work. Overwrites the
+                window name, including names you set by hand.
+              </span>
+            </span>
+          </label>
         </div>
 
         <div className="space-y-2 pt-2 border-t border-border">

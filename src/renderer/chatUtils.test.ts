@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  shouldAutoRename,
+  countUserTurns,
+  buildTitlePromptInput,
+  sanitizeGeneratedTitle,
+  AUTO_RENAME_EVERY_N_TURNS,
   formatTokens,
   formatBytes,
   formatDuration,
@@ -2192,5 +2197,143 @@ describe("isDrainAbortError", () => {
     expect(isDrainAbortError("ProviderAuthError", true)).toBe(false);
     expect(isDrainAbortError("ContextOverflowError", true)).toBe(false);
     expect(isDrainAbortError(undefined, true)).toBe(false);
+  });
+});
+
+describe("shouldAutoRename", () => {
+  it("fires on every Nth user turn (1-indexed)", () => {
+    expect(shouldAutoRename(5, 5)).toBe(true);
+    expect(shouldAutoRename(10, 5)).toBe(true);
+    expect(shouldAutoRename(15, 5)).toBe(true);
+  });
+
+  it("does not fire on non-multiple turns", () => {
+    expect(shouldAutoRename(1, 5)).toBe(false);
+    expect(shouldAutoRename(4, 5)).toBe(false);
+    expect(shouldAutoRename(6, 5)).toBe(false);
+  });
+
+  it("never fires at turn 0", () => {
+    expect(shouldAutoRename(0, 5)).toBe(false);
+  });
+
+  it("guards against a non-positive cadence", () => {
+    expect(shouldAutoRename(5, 0)).toBe(false);
+    expect(shouldAutoRename(5, -1)).toBe(false);
+  });
+
+  it("defaults to AUTO_RENAME_EVERY_N_TURNS", () => {
+    expect(shouldAutoRename(AUTO_RENAME_EVERY_N_TURNS)).toBe(true);
+    expect(shouldAutoRename(AUTO_RENAME_EVERY_N_TURNS - 1)).toBe(false);
+  });
+});
+
+describe("countUserTurns", () => {
+  const userMsg = (text: string, extra: Record<string, unknown> = {}) => ({
+    info: { role: "user" },
+    parts: [{ type: "text", text, ...extra }],
+  });
+  const asst = (text: string) => ({
+    info: { role: "assistant" },
+    parts: [{ type: "text", text }],
+  });
+
+  it("counts only user messages with real text", () => {
+    expect(
+      countUserTurns([userMsg("fix bug"), asst("ok"), userMsg("now tests")]),
+    ).toBe(2);
+  });
+
+  it("ignores synthetic / ignored / empty user parts", () => {
+    expect(
+      countUserTurns([
+        userMsg("real"),
+        userMsg("expanded", { synthetic: true }),
+        userMsg("dropped", { ignored: true }),
+        userMsg("   "),
+      ]),
+    ).toBe(1);
+  });
+
+  it("returns 0 for null", () => {
+    expect(countUserTurns(null)).toBe(0);
+  });
+});
+
+describe("buildTitlePromptInput", () => {
+  it("joins user+assistant text labeled by role", () => {
+    const out = buildTitlePromptInput([
+      { info: { role: "user" }, parts: [{ type: "text", text: "fix login" }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+    ]);
+    expect(out).toBe("User: fix login\nAssistant: done");
+  });
+
+  it("skips synthetic/ignored/non-text parts", () => {
+    const out = buildTitlePromptInput([
+      {
+        info: { role: "user" },
+        parts: [
+          { type: "text", text: "keep", synthetic: false },
+          { type: "text", text: "drop", synthetic: true },
+          { type: "tool", text: "nope" } as never,
+        ],
+      },
+    ]);
+    expect(out).toBe("User: keep");
+  });
+
+  it("keeps the TAIL when truncating (latest work wins)", () => {
+    const long = "x".repeat(5000);
+    const out = buildTitlePromptInput([
+      { info: { role: "user" }, parts: [{ type: "text", text: long }] },
+      {
+        info: { role: "assistant" },
+        parts: [{ type: "text", text: "RECENT_MARKER" }],
+      },
+    ]);
+    expect(out.length).toBeLessThanOrEqual(2000);
+    expect(out.endsWith("RECENT_MARKER")).toBe(true);
+  });
+
+  it("returns empty string for null / no text", () => {
+    expect(buildTitlePromptInput(null)).toBe("");
+    expect(
+      buildTitlePromptInput([{ info: { role: "user" }, parts: [] }]),
+    ).toBe("");
+  });
+});
+
+describe("sanitizeGeneratedTitle", () => {
+  it("lowercases and keeps at most two words", () => {
+    expect(sanitizeGeneratedTitle("JWT Expiry Fix Now")).toBe("jwt expiry");
+  });
+
+  it("strips quotes, markdown, and trailing punctuation", () => {
+    expect(sanitizeGeneratedTitle('"**Login Bug.**"')).toBe("login bug");
+    expect(sanitizeGeneratedTitle("`auth`")).toBe("auth");
+    expect(sanitizeGeneratedTitle("“dark mode”")).toBe("dark mode");
+  });
+
+  it("drops a Title:/Name: preamble", () => {
+    expect(sanitizeGeneratedTitle("Title: refactor store")).toBe(
+      "refactor store",
+    );
+    expect(sanitizeGeneratedTitle("Name - cache fix")).toBe("cache fix");
+  });
+
+  it("uses only the first line of a chatty model", () => {
+    expect(sanitizeGeneratedTitle("api docs\nHere's why...")).toBe("api docs");
+  });
+
+  it("clamps overly long output", () => {
+    const out = sanitizeGeneratedTitle("supercalifragilisticexpialidocious");
+    expect(out.length).toBeLessThanOrEqual(24);
+  });
+
+  it("returns empty for null/blank (caller must skip the rename)", () => {
+    expect(sanitizeGeneratedTitle(null)).toBe("");
+    expect(sanitizeGeneratedTitle("   ")).toBe("");
+    expect(sanitizeGeneratedTitle("***")).toBe("");
   });
 });

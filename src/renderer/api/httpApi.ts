@@ -315,6 +315,12 @@ export const httpApi: Api = {
   onScreenshotDetected: (cb) =>
     on<{ source: "clipboard" | "file"; path?: string }>("screenshot", cb),
 
+  // Cross-device shared-config sync is desktop-driven (the desktop pushes to /
+  // pulls from this server). On mobile there's no inbound config-pull push, so
+  // this is a no-op subscription that returns an unsubscriber. Mobile edits
+  // persist locally and the desktop pulls them on its next sync.
+  onConfigChanged: () => () => {},
+
   // -- file uploads --
   uploadFiles: (input) => rpc(IPC.uploadFiles, input),
 
@@ -474,6 +480,9 @@ export const httpApi: Api = {
 
   // -- /clear --
   opencodeClearSession: (input) => rpc(IPC.opencodeClearSession, input),
+
+  // -- auto-rename: throwaway-session title generation --
+  opencodeGenerateTitle: (input) => rpc(IPC.opencodeGenerateTitle, input),
 
   // -- voice (Groq STT + classifier) --
   // The RPC body is JSON, so the ArrayBuffer can't ride along raw. Base64-

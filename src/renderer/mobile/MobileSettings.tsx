@@ -36,6 +36,7 @@ type Props = { onClose: () => void };
 export function MobileSettings({ onClose }: Props) {
   const {
     chatAutoAllow,
+    autoRenameSessions,
     defaultModel,
     skillRegistryUrls,
     cacheTtl,
@@ -54,6 +55,7 @@ export function MobileSettings({ onClose }: Props) {
     () => localStorage.getItem("bui_server") ?? "",
   );
   const [trust, setTrust] = useState(chatAutoAllow);
+  const [autoRename, setAutoRename] = useState(autoRenameSessions);
   const [selectedModel, setSelectedModel] = useState<{
     providerID: string;
     modelID: string;
@@ -112,13 +114,14 @@ export function MobileSettings({ onClose }: Props) {
   // desktop Settings pattern).
   useEffect(() => {
     setTrust(chatAutoAllow);
+    setAutoRename(autoRenameSessions);
     setSelectedModel(defaultModel ?? null);
     setTtl(cacheTtl);
     setRegistryUrls(skillRegistryUrls ?? []);
     setGroqKey(groqApiKey);
     setVoiceTrModel(voiceTranscriptionModel);
     setVoiceCmdModel(voiceCommandModel);
-  }, [chatAutoAllow, defaultModel, cacheTtl, skillRegistryUrls, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
+  }, [chatAutoAllow, autoRenameSessions, defaultModel, cacheTtl, skillRegistryUrls, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
 
   // Model list is best-effort — opencode unreachable just means the
   // picker shows only "opencode default". Same as desktop Settings.
@@ -143,6 +146,7 @@ export function MobileSettings({ onClose }: Props) {
 
       await window.api.configUpdate({
         chatAutoAllow: trust,
+        autoRenameSessions: autoRename,
         defaultModel: selectedModel ?? undefined,
         skillRegistryUrls: registryUrls,
         cacheTtl: ttl,
@@ -233,6 +237,26 @@ export function MobileSettings({ onClose }: Props) {
             Auto-reply "always" to every permission request — equivalent to
             opencode's <code className="text-text-muted">--dangerously-skip-permissions</code>.
             Question tool requests still require an explicit answer.
+          </div>
+        </section>
+
+        {/* Auto-rename sessions. */}
+        <section className="space-y-2 pt-1 border-t border-border">
+          <label className="flex items-center justify-between gap-3">
+            <span className="block text-[11px] uppercase tracking-wider text-text-muted">
+              Auto-rename sessions
+            </span>
+            <input
+              type="checkbox"
+              checked={autoRename}
+              onChange={(e) => setAutoRename(e.target.checked)}
+              className="w-5 h-5 accent-accent"
+            />
+          </label>
+          <div className="text-xs text-text-faint">
+            Every few turns, ask the model for a 1-2 word title and rename the
+            chat window to match the current work. Overwrites the window name,
+            including names you set by hand.
           </div>
         </section>
 
