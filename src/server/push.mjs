@@ -28,6 +28,7 @@ import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import * as tmux from "./tmux.mjs";
 
 const DIR = join(homedir(), ".bui-mobile");
 const VAPID_PATH = join(DIR, "vapid.json");
@@ -137,6 +138,75 @@ export function getFocus() {
 }
 
 // ---------------------------------------------------------------------------
+// Desktop presence — the Electron app reports "I'm focused" so a mobile "done"
+// push is suppressed when the user is heads-down on the desktop (Discord's
+// "active on desktop ⇒ no mobile push" rule). The desktop reaches this server
+// over an SSH -L 18787:127.0.0.1:8787 forward on the shared ControlMaster and
+// POSTs /push/desktop-presence on focus/blur/system-idle.
+//
+// Two timers gate suppression so a crashed/asleep desktop can't permanently
+// mute mobile:
+//   - lastSeen TTL (DESKTOP_PRESENCE_TTL_MS): no heartbeat in this long ⇒
+//     desktop is gone, mobile pushes resume regardless of the last `visible`.
+//   - grace window (DESKTOP_GRACE_MS): even after an explicit blur/idle, keep
+//     suppressing for this long so a quick desktop window-switch doesn't buzz
+//     the phone. Matches the ~30s Discord-style grace.
+//
+// Single user → a single snapshot. `visible` is the last reported foreground
+// state; `lastActive` is the last time desktop was actually focused (set on a
+// visible:true heartbeat), which the grace window is measured from.
+// ---------------------------------------------------------------------------
+
+export const DESKTOP_PRESENCE_TTL_MS = 60_000; // heartbeat staleness cutoff
+export const DESKTOP_GRACE_MS = 30_000; // keep suppressing after blur/idle
+
+let _desktop = { visible: false, lastSeen: 0, lastActive: 0 };
+
+/**
+ * Record a desktop presence heartbeat. The desktop posts these on focus, blur,
+ * and system idle/resume; an absent heartbeat (TTL) means the desktop is gone.
+ * @param {{visible?: boolean}} report
+ * @param {number} [now] injectable clock for tests
+ */
+export function setDesktopPresence({ visible } = {}, now = Date.now()) {
+  const vis = !!visible;
+  _desktop = {
+    visible: vis,
+    lastSeen: now,
+    // lastActive only advances while the desktop is actually foreground, so the
+    // grace window is measured from when the user last had it focused.
+    lastActive: vis ? now : _desktop.lastActive,
+  };
+  return _desktop;
+}
+
+export function getDesktopPresence() {
+  return _desktop;
+}
+
+/**
+ * Pure: should a mobile "done" push be suppressed because the desktop is (or
+ * was just) active? Suppress when the desktop is focused on ANY session, OR
+ * was focused within the grace window — provided the heartbeat is fresh (TTL).
+ *
+ * @param {{visible:boolean, lastSeen:number, lastActive:number}} desktop
+ * @param {number} now
+ * @returns {boolean}
+ */
+export function shouldSuppressForDesktop(desktop, now = Date.now()) {
+  if (!desktop) return false;
+  // Stale heartbeat → desktop is gone (crash, sleep, network drop). Don't let
+  // a dead desktop mute mobile forever.
+  if (now - (desktop.lastSeen ?? 0) > DESKTOP_PRESENCE_TTL_MS) return false;
+  // Currently foreground on desktop → suppress.
+  if (desktop.visible) return true;
+  // Recently foreground (within the grace window) → still suppress so a quick
+  // desktop window-switch / brief blur doesn't immediately buzz the phone.
+  if (now - (desktop.lastActive ?? 0) <= DESKTOP_GRACE_MS) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Event classification (pure) + dispatch (stateful)
 // ---------------------------------------------------------------------------
 
@@ -233,7 +303,11 @@ export function classifyPushEvent(evt, ctx) {
       if (ctx.focusVisible && ctx.focusSessionId === sessionId) return null;
       return {
         kind: "done",
-        title: "Claude is done",
+        // Title is the session's "workspace / session-name" label (resolved
+        // from tmux by firePush) so the user can tell WHICH chat finished at a
+        // glance. Falls back to the generic copy when the label can't be
+        // resolved (session not found in tmux, lookup failed).
+        title: typeof ctx.label === "string" && ctx.label ? ctx.label : "Claude is done",
         body: "Your turn finished.",
         sessionId,
         tag: `done-${tagBase}`,
@@ -241,6 +315,44 @@ export function classifyPushEvent(evt, ctx) {
     }
     default:
       return null;
+  }
+}
+
+/**
+ * Build the "workspace / session-name" notification title for an opencode
+ * sessionID by scanning tmux projects (workspace = tmux session, session-name
+ * = window name). Pure — takes the already-fetched projects list so it can be
+ * unit-tested without a live tmux.
+ *
+ * @param {Array<{tmuxSession:string, windows:Array<{name:string, opencodeSessionId:string|null}>}>} projects
+ * @param {string|null} sessionId
+ * @returns {string|null} "workspace / session-name", or null if not found.
+ */
+export function buildSessionLabel(projects, sessionId) {
+  if (!sessionId || !Array.isArray(projects)) return null;
+  for (const proj of projects) {
+    const wins = Array.isArray(proj?.windows) ? proj.windows : [];
+    for (const w of wins) {
+      if (w?.opencodeSessionId === sessionId) {
+        const workspace = proj.tmuxSession || "";
+        const name = w.name || "";
+        if (workspace && name) return `${workspace} / ${name}`;
+        return workspace || name || null;
+      }
+    }
+  }
+  return null;
+}
+
+// Resolve a sessionID → "workspace / session-name" by querying live tmux.
+// Best-effort: any failure returns null so the push falls back to generic copy.
+async function resolveSessionLabel(sessionId) {
+  if (!sessionId) return null;
+  try {
+    const projects = await tmux.listProjects();
+    return buildSessionLabel(projects, sessionId);
+  } catch {
+    return null;
   }
 }
 
@@ -315,11 +427,18 @@ export async function firePush(evt) {
       }
     }
 
+    // Resolve the "workspace / session-name" title only for the "done"
+    // (session.idle) case — the other notifications keep their action-specific
+    // titles ("Permission needed", etc.). Avoids a tmux query per event.
+    const label =
+      type === "session.idle" ? await resolveSessionLabel(sid) : null;
+
     const payload = classifyPushEvent(evt, {
       focusSessionId: _focus.sessionId,
       focusVisible: _focus.visible,
       wasBusy: sid ? _busy.has(sid) : false,
       pendingAttention: sid ? _pending.has(sid) : false,
+      label,
     });
 
     // Clear the busy flag once the session settles or errors.
@@ -330,6 +449,13 @@ export async function firePush(evt) {
     if (type === "session.error" && sid) _pending.delete(sid);
 
     if (!payload) return;
+
+    // Multi-device suppression: if the user is active on desktop, don't buzz
+    // their phone for a "done". Only "done" is suppressed — permission /
+    // question / error are blocking and surface on every device regardless
+    // (mirrors Slack/Discord still escalating mentions/DMs across devices).
+    if (payload.kind === "done" && shouldSuppressForDesktop(_desktop)) return;
+
     await sendPush(payload);
   } catch (e) {
     console.warn("[push] firePush error:", e?.message ?? e);
@@ -341,4 +467,5 @@ export function _resetPushState() {
   _busy.clear();
   _pending.clear();
   _focus = { sessionId: null, visible: false };
+  _desktop = { visible: false, lastSeen: 0, lastActive: 0 };
 }

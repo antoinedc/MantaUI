@@ -78,6 +78,10 @@ import {
   STREAM_STALL_MS,
 } from "./forwardHeal.js";
 import { buildRemoteConfigWriteCmd } from "./remoteConfigWrite.js";
+import {
+  startDesktopPresence,
+  stopDesktopPresence,
+} from "./desktopPresence.js";
 // Plain-JS modules shared with the mobile server (src/server/*.mjs). The
 // bundler resolves .mjs imports here; main.process never sees them as TS.
 // Types live in groq.d.mts. Keep them dep-free so they stay portable across
@@ -763,6 +767,9 @@ app.whenReady().then(() => {
     scheduleUploadCleanup();
     startScreenshotDetector();
     startOutboxPoller();
+    // Report desktop focus to the mobile server so it suppresses redundant
+    // mobile "done" pushes while the user is active on desktop.
+    startDesktopPresence(() => config);
   });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -784,6 +791,7 @@ app.on("before-quit", () => {
   stopOpencodeBus();
   stopScreenshotDetector();
   stopOutboxPoller();
+  stopDesktopPresence();
   if (cleanupTimer) clearInterval(cleanupTimer);
   if (config.host) void teardownOpencodeForward(config).catch(() => {});
   killAll();

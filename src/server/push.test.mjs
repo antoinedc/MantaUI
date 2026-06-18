@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyPushEvent } from "./push.mjs";
+import {
+  classifyPushEvent,
+  buildSessionLabel,
+  shouldSuppressForDesktop,
+  DESKTOP_PRESENCE_TTL_MS,
+  DESKTOP_GRACE_MS,
+} from "./push.mjs";
 
 const NOFOCUS = { focusSessionId: null, focusVisible: false, wasBusy: false };
 
@@ -160,6 +166,111 @@ test("session.idle while a question/permission is pending → suppressed (not 'd
     },
   );
   assert.equal(p, null);
+});
+
+test("session.idle 'done' uses the resolved workspace/session label as title", () => {
+  const p = classifyPushEvent(
+    { type: "session.idle", properties: { sessionID: "ses_lbl" } },
+    {
+      focusSessionId: null,
+      focusVisible: false,
+      wasBusy: true,
+      label: "default / my-chat",
+    },
+  );
+  assert.equal(p?.kind, "done");
+  assert.equal(p?.title, "default / my-chat");
+});
+
+test("session.idle 'done' falls back to generic title when no label", () => {
+  const p = classifyPushEvent(
+    { type: "session.idle", properties: { sessionID: "ses_lbl2" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: true, label: null },
+  );
+  assert.equal(p?.title, "Claude is done");
+});
+
+test("buildSessionLabel maps opencode sessionID → 'workspace / session-name'", () => {
+  const projects = [
+    {
+      tmuxSession: "default",
+      windows: [
+        { name: "shell", opencodeSessionId: null },
+        { name: "my-chat", opencodeSessionId: "ses_x" },
+      ],
+    },
+    {
+      tmuxSession: "other",
+      windows: [{ name: "wkit", opencodeSessionId: "ses_y" }],
+    },
+  ];
+  assert.equal(buildSessionLabel(projects, "ses_x"), "default / my-chat");
+  assert.equal(buildSessionLabel(projects, "ses_y"), "other / wkit");
+});
+
+test("buildSessionLabel → null for unknown / missing sessionID", () => {
+  const projects = [
+    { tmuxSession: "default", windows: [{ name: "c", opencodeSessionId: "ses_a" }] },
+  ];
+  assert.equal(buildSessionLabel(projects, "ses_missing"), null);
+  assert.equal(buildSessionLabel(projects, null), null);
+  assert.equal(buildSessionLabel(null, "ses_a"), null);
+});
+
+// --- Desktop presence suppression (multi-device routing) -------------------
+
+const NOW = 1_000_000_000;
+
+test("shouldSuppressForDesktop: desktop focused now → suppress", () => {
+  assert.equal(
+    shouldSuppressForDesktop(
+      { visible: true, lastSeen: NOW, lastActive: NOW },
+      NOW,
+    ),
+    true,
+  );
+});
+
+test("shouldSuppressForDesktop: blurred but within grace → suppress", () => {
+  const t = NOW + DESKTOP_GRACE_MS - 1;
+  assert.equal(
+    shouldSuppressForDesktop(
+      { visible: false, lastSeen: t, lastActive: NOW },
+      t,
+    ),
+    true,
+  );
+});
+
+test("shouldSuppressForDesktop: blurred past grace → allow push", () => {
+  const t = NOW + DESKTOP_GRACE_MS + 1;
+  assert.equal(
+    shouldSuppressForDesktop(
+      { visible: false, lastSeen: t, lastActive: NOW },
+      t,
+    ),
+    false,
+  );
+});
+
+test("shouldSuppressForDesktop: stale heartbeat (crash/sleep) → allow push", () => {
+  // visible:true but no heartbeat for > TTL → treat desktop as gone.
+  const t = NOW + DESKTOP_PRESENCE_TTL_MS + 1;
+  assert.equal(
+    shouldSuppressForDesktop(
+      { visible: true, lastSeen: NOW, lastActive: NOW },
+      t,
+    ),
+    false,
+  );
+});
+
+test("shouldSuppressForDesktop: no presence ever → allow push", () => {
+  assert.equal(
+    shouldSuppressForDesktop({ visible: false, lastSeen: 0, lastActive: 0 }, NOW),
+    false,
+  );
+  assert.equal(shouldSuppressForDesktop(null, NOW), false);
 });
 
 test("unrelated event → null", () => {
