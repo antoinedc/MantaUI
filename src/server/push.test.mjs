@@ -190,6 +190,51 @@ test("session.idle 'done' falls back to generic title when no label", () => {
   assert.equal(p?.title, "Claude is done");
 });
 
+const LBL = { ...NOFOCUS, label: "default / my-chat" };
+
+test("permission.asked uses the session label as title; kind in body", () => {
+  const p = classifyPushEvent(
+    { type: "permission.asked", properties: { sessionID: "ses_p", id: "per_1" } },
+    LBL,
+  );
+  assert.equal(p?.title, "default / my-chat");
+  assert.match(p?.body ?? "", /^Permission needed/);
+});
+
+test("session.error uses the session label as title; 'Error —' in body", () => {
+  const p = classifyPushEvent(
+    { type: "session.error", properties: { sessionID: "ses_e", message: "boom" } },
+    LBL,
+  );
+  assert.equal(p?.title, "default / my-chat");
+  assert.match(p?.body ?? "", /^Error — boom/);
+});
+
+test("session.error without label keeps generic title + raw message body", () => {
+  const p = classifyPushEvent(
+    { type: "session.error", properties: { sessionID: "ses_e2", message: "boom" } },
+    NOFOCUS,
+  );
+  assert.equal(p?.title, "Claude hit an error");
+  assert.equal(p?.body, "boom");
+});
+
+test("question.asked uses the session label as title; header+question in body", () => {
+  const p = classifyPushEvent(
+    {
+      type: "question.asked",
+      properties: {
+        id: "que_l",
+        sessionID: "ses_ql",
+        questions: [{ header: "Deploy?", question: "Ship it now?", options: [] }],
+      },
+    },
+    LBL,
+  );
+  assert.equal(p?.title, "default / my-chat");
+  assert.equal(p?.body, "Deploy? — Ship it now?");
+});
+
 test("buildSessionLabel maps opencode sessionID → 'workspace / session-name'", () => {
   const projects = [
     {

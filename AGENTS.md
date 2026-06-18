@@ -248,12 +248,18 @@ subscription if a delivered push shows no notification), so suppression logic
 lives in `classifyPushEvent` / `firePush`, not the service worker
 (`src/renderer/public/sw.js` → copied to `mobile/www/sw.js` by `build:mobile`).
 
-- **"done" title is the session's `workspace / session-name`** (tmux session /
-  window name), resolved by `firePush` via `buildSessionLabel(projects, sid)`
-  over `tmux.listProjects()`. Lookup runs ONLY on `session.idle` to avoid a
-  tmux query per event; falls back to "Claude is done" when the session isn't
-  found. The "from bui" subtitle under the notification is **iOS injecting the
-  PWA name** — not in our payload, not removable via the Push API.
+- **EVERY notification title is the session's `workspace / session-name`**
+  (tmux session / window name), resolved by `firePush` via
+  `buildSessionLabel(projects, sid)` over `tmux.listProjects()`. The lookup
+  runs for the four notifying types only (`permission.asked`, `question.asked`,
+  `session.error`, `session.idle`) — never for the streaming-event firehose —
+  so we don't pay a tmux query per event. The kind-specific context moves to
+  the BODY (e.g. `Permission needed — …`, `Error — <msg>`, `<header> — <q>`),
+  and each kind falls back to its old descriptive title (`Claude is done`,
+  `Claude hit an error`, …) when the session isn't found in tmux. `classify
+  PushEvent`'s `titleOr(fallback)` helper centralizes this. The "from bui"
+  subtitle under the notification is **iOS injecting the PWA name** — not in
+  our payload, not removable via the Push API.
 
 - **Multi-device suppression (Discord rule: active on desktop ⇒ no mobile
   push).** The desktop Electron app POSTs `/push/desktop-presence
