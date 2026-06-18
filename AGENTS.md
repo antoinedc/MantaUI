@@ -663,9 +663,16 @@ configured to send.
 
 The `QuestionCard` component (bottom of `ChatPanel.tsx`) renders above
 `PermissionCard`. Each card shows question header + body text, clickable option
-buttons (toggleable multi-select when `multiple:true`), optional free-text input
-(`custom:true`), and Submit / Cancel. Submit is disabled until every question in
-the request has at least one selection or custom text.
+buttons (toggleable multi-select when `multiple:true`), an **always-shown**
+free-text input ("Or type your own answer…"), and Submit / Cancel. The
+free-text box is no longer gated on opencode's `custom:true` flag — the user
+can type a custom reply for ANY question (desktop + mobile, since mobile reuses
+this component). On submit, typed text is appended AFTER any selected option
+labels for that question (`buildQuestionAnswers` in `chatUtils.ts`, pure +
+tested), so a picked option and a typed clarification both reach the model;
+Enter in the input submits when the whole request is answerable. Submit is
+disabled until every question has at least one selection or non-empty typed
+text (`canSubmitQuestion`, also pure + tested).
 
 **Pattern: live-event state preferred over transcript-derived `useMemo`.**
 The transcript only refreshes on the 300ms debounced refetch — a long tool
