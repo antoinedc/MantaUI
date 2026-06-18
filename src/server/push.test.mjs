@@ -4,6 +4,7 @@ import {
   classifyPushEvent,
   buildSessionLabel,
   shouldSuppressForDesktop,
+  shouldSuppressUnresolvedDone,
   DESKTOP_PRESENCE_TTL_MS,
   DESKTOP_GRACE_MS,
 } from "./push.mjs";
@@ -188,6 +189,37 @@ test("session.idle 'done' falls back to generic title when no label", () => {
     { focusSessionId: null, focusVisible: false, wasBusy: true, label: null },
   );
   assert.equal(p?.title, "Claude is done");
+});
+
+test("REGRESSION: a nameless 'done' (subagent/orphan, null label) is suppressed", () => {
+  // A subagent child session finishes: it inherited the parent's directory and
+  // streams session.idle on the same scoped /event stream, but no tmux window
+  // stamps its sessionID, so resolveSessionLabel → null. firePush must drop it
+  // (otherwise the user gets the nameless "Claude is done" that deep-links to a
+  // sessionId the app can't find, dumping them on the session list).
+  const done = classifyPushEvent(
+    { type: "session.idle", properties: { sessionID: "ses_child" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: true, label: null },
+  );
+  assert.equal(done?.kind, "done");
+  assert.equal(shouldSuppressUnresolvedDone(done, null), true);
+});
+
+test("a named 'done' (resolvable session) is NOT suppressed", () => {
+  const done = classifyPushEvent(
+    { type: "session.idle", properties: { sessionID: "ses_real" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: true, label: "default / my-chat" },
+  );
+  assert.equal(shouldSuppressUnresolvedDone(done, "default / my-chat"), false);
+});
+
+test("permission/question/error are NEVER suppressed by the unresolved gate", () => {
+  // These are blocking and must escalate even when the session can't be named.
+  for (const type of ["permission", "question", "error"]) {
+    assert.equal(shouldSuppressUnresolvedDone({ kind: type }, null), false);
+  }
+  // Null payload is a no-op too.
+  assert.equal(shouldSuppressUnresolvedDone(null, null), false);
 });
 
 const LBL = { ...NOFOCUS, label: "default / my-chat" };
