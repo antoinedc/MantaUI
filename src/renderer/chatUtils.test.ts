@@ -19,6 +19,8 @@ import {
   isSelfFilteringLifecycleEvent,
   applyQuestionEvent,
   hydrateQuestion,
+  buildQuestionAnswers,
+  canSubmitQuestion,
   commandPrefixKey,
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
@@ -1316,6 +1318,84 @@ describe("hydrateQuestion", () => {
     expect(h.sessionID).toBe("ses_y");
     expect(h.questions).toBe(questions);
     expect(h.tool).toEqual(tool);
+  });
+});
+
+// ===== buildQuestionAnswers / canSubmitQuestion =====
+
+describe("buildQuestionAnswers", () => {
+  it("sends only selected labels when no custom text", () => {
+    const sel = [new Set(["Yes"])];
+    expect(buildQuestionAnswers(sel, [""])).toEqual([["Yes"]]);
+  });
+
+  it("sends only custom text when nothing selected", () => {
+    const sel = [new Set<string>()];
+    expect(buildQuestionAnswers(sel, ["only staging"])).toEqual([
+      ["only staging"],
+    ]);
+  });
+
+  it("appends custom text AFTER selected labels when both present", () => {
+    const sel = [new Set(["Yes"])];
+    expect(buildQuestionAnswers(sel, ["but only staging"])).toEqual([
+      ["Yes", "but only staging"],
+    ]);
+  });
+
+  it("trims custom text and ignores whitespace-only input", () => {
+    const sel = [new Set(["A"])];
+    expect(buildQuestionAnswers(sel, ["   "])).toEqual([["A"]]);
+    expect(buildQuestionAnswers([new Set(["A"])], ["  hi  "])).toEqual([
+      ["A", "hi"],
+    ]);
+  });
+
+  it("handles multiple questions independently", () => {
+    const sel = [new Set(["X"]), new Set<string>()];
+    expect(buildQuestionAnswers(sel, ["", "freeform"])).toEqual([
+      ["X"],
+      ["freeform"],
+    ]);
+  });
+
+  it("preserves multi-select labels then custom", () => {
+    const sel = [new Set(["A", "B"])];
+    const out = buildQuestionAnswers(sel, ["note"]);
+    expect(out[0]).toContain("A");
+    expect(out[0]).toContain("B");
+    expect(out[0][out[0].length - 1]).toBe("note");
+  });
+
+  it("tolerates a missing customValues entry", () => {
+    const sel = [new Set(["A"])];
+    expect(buildQuestionAnswers(sel, [])).toEqual([["A"]]);
+  });
+});
+
+describe("canSubmitQuestion", () => {
+  it("true when every question has a selection", () => {
+    expect(canSubmitQuestion([new Set(["A"]), new Set(["B"])], ["", ""])).toBe(
+      true,
+    );
+  });
+
+  it("true when a question has only custom text", () => {
+    expect(canSubmitQuestion([new Set<string>()], ["typed"])).toBe(true);
+  });
+
+  it("false when a question has neither selection nor text", () => {
+    expect(canSubmitQuestion([new Set(["A"]), new Set<string>()], ["", ""])).toBe(
+      false,
+    );
+  });
+
+  it("treats whitespace-only custom text as empty", () => {
+    expect(canSubmitQuestion([new Set<string>()], ["   "])).toBe(false);
+  });
+
+  it("empty request (no questions) is trivially submittable", () => {
+    expect(canSubmitQuestion([], [])).toBe(true);
   });
 });
 

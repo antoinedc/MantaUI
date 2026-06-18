@@ -873,6 +873,46 @@ export function hydrateQuestion(server: {
   };
 }
 
+/**
+ * Build the `string[][]` reply payload for a Question tool request from the
+ * per-question selected option labels and the per-question free-text input.
+ *
+ * Custom text is always honored (the card now shows the free-text box for
+ * every question, regardless of opencode's `custom` flag). When the user typed
+ * something it is appended AFTER any selected option labels for that question,
+ * so a picked option + a typed clarification both reach the model. A blank
+ * custom field contributes nothing; selection-only and typed-only both work.
+ *
+ * Pure: no component state, fully unit-testable.
+ *
+ * @param selected one Set of selected option labels per question
+ * @param customValues one free-text string per question (untrimmed)
+ */
+export function buildQuestionAnswers(
+  selected: Array<ReadonlySet<string>>,
+  customValues: readonly string[],
+): string[][] {
+  return selected.map((sel, i) => {
+    const labels = Array.from(sel);
+    const custom = (customValues[i] ?? "").trim();
+    return custom ? [...labels, custom] : labels;
+  });
+}
+
+/**
+ * Whether a Question request is submittable: every question must have at least
+ * one selected option OR non-empty typed text. Mirror of buildQuestionAnswers'
+ * "an answer is a selection and/or custom text" contract.
+ */
+export function canSubmitQuestion(
+  selected: Array<ReadonlySet<string>>,
+  customValues: readonly string[],
+): boolean {
+  return selected.every(
+    (sel, i) => sel.size > 0 || (customValues[i] ?? "").trim().length > 0,
+  );
+}
+
 // === Slash-command provenance ===
 //
 // opencode injects a command's `template` into the transcript verbatim as a

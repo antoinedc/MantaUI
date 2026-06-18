@@ -56,6 +56,8 @@ import {
   shouldDropEventForSessionFilter,
   applyQuestionEvent,
   hydrateQuestion,
+  buildQuestionAnswers,
+  canSubmitQuestion,
   detectCommandFromText,
   isAssistantTurnComplete,
   isAssistantTurnInProgress,
@@ -4670,23 +4672,11 @@ function QuestionCard({
   }
 
   function handleSubmit() {
-    const answers = request.questions.map((info, i) => {
-      const sel = Array.from(selected[i]);
-      // If nothing was selected but custom text was entered, send that.
-      if (sel.length === 0 && info.custom && customValues[i].trim()) {
-        return [customValues[i].trim()];
-      }
-      return sel;
-    });
-    onReply(answers);
+    onReply(buildQuestionAnswers(selected, customValues));
   }
 
-  // Disable submit if any question has no selection AND no custom text.
-  const canSubmit = request.questions.every((info, i) => {
-    if (selected[i].size > 0) return true;
-    if (info.custom && customValues[i].trim()) return true;
-    return false;
-  });
+  // Submit is enabled once every question has either a selection OR typed text.
+  const canSubmit = canSubmitQuestion(selected, customValues);
 
   return (
     <div
@@ -4735,23 +4725,33 @@ function QuestionCard({
               })}
             </div>
 
-            {/* Free-text input when custom is true */}
-            {info.custom && (
-              <input
-                type="text"
-                placeholder="Or type your own answer…"
-                value={customValues[qIdx]}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setCustomValues((prev) => {
-                    const next = [...prev];
-                    next[qIdx] = v;
-                    return next;
-                  });
-                }}
-                className="mt-1.5 w-full rounded border border-border bg-transparent px-2 py-0.5 text-[12px] text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
-              />
-            )}
+            {/* Free-text input — always available so the user can type a
+                custom reply for any question, even when opencode didn't flag
+                it as custom. Combined with any selected option(s) on submit. */}
+            <input
+              type="text"
+              placeholder="Or type your own answer…"
+              value={customValues[qIdx]}
+              onChange={(e) => {
+                const v = e.target.value;
+                setCustomValues((prev) => {
+                  const next = [...prev];
+                  next[qIdx] = v;
+                  return next;
+                });
+              }}
+              onKeyDown={(e) => {
+                // Enter submits when the whole request is answerable (matches
+                // the composer's submit-on-Enter muscle memory). Shift+Enter
+                // is left alone for anyone who wants a literal newline-free
+                // multi-field flow.
+                if (e.key === "Enter" && !e.shiftKey && canSubmit) {
+                  e.preventDefault();
+                  handleSubmit();
+                }
+              }}
+              className="mt-1.5 w-full rounded border border-border bg-transparent px-2 py-0.5 text-[12px] text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
+            />
           </div>
         ))}
       </div>
