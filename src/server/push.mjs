@@ -224,12 +224,22 @@ export function classifyPushEvent(evt, ctx) {
   const sessionId = typeof props.sessionID === "string" ? props.sessionID : null;
   const tagBase = sessionId ?? "global";
 
+  // Every notification's TITLE is the session's "workspace / session-name"
+  // label (resolved from tmux by firePush) so the user can tell WHICH chat the
+  // push is about at a glance. The kind-specific context moves to the body.
+  // When the label can't be resolved (session not in tmux, lookup failed) we
+  // fall back to the per-kind descriptive title via titleOr(fallback).
+  const label = typeof ctx?.label === "string" && ctx.label ? ctx.label : null;
+  const titleOr = (fallback) => label ?? fallback;
+
   switch (type) {
     case "permission.asked":
       return {
         kind: "permission",
-        title: "Permission needed",
-        body: "Claude wants to run a tool. Tap to review.",
+        title: titleOr("Permission needed"),
+        body: label
+          ? "Permission needed — Claude wants to run a tool. Tap to review."
+          : "Claude wants to run a tool. Tap to review.",
         sessionId,
         tag: `perm-${tagBase}`,
       };
@@ -243,10 +253,17 @@ export function classifyPushEvent(evt, ctx) {
       const qs = Array.isArray(props.questions) ? props.questions : [];
       const first = qs[0];
       const requestId = typeof props.id === "string" ? props.id : null;
+      // Body shows the question text, prefixed with the header when we have a
+      // label in the title (so the "what kind" cue isn't lost). Without a label
+      // the title still carries the header (legacy "Claude: <header>" form).
+      const qBody = first?.question || "Claude needs your input to continue.";
       const out = {
         kind: "question",
-        title: first?.header ? `Claude: ${first.header}` : "Claude has a question",
-        body: first?.question || "Claude needs your input to continue.",
+        title: titleOr(
+          first?.header ? `Claude: ${first.header}` : "Claude has a question",
+        ),
+        body:
+          label && first?.header ? `${first.header} — ${qBody}` : qBody,
         sessionId,
         tag: `question-${tagBase}`,
         requestId,
@@ -286,8 +303,10 @@ export function classifyPushEvent(evt, ctx) {
             : "The turn failed.";
       return {
         kind: "error",
-        title: "Claude hit an error",
-        body: msg.slice(0, 180),
+        title: titleOr("Claude hit an error"),
+        // Prefix with "Error —" when the title is the session label, so the
+        // notification still reads as an error and not a normal message.
+        body: label ? `Error — ${msg.slice(0, 174)}` : msg.slice(0, 180),
         sessionId,
         tag: `error-${tagBase}`,
       };
@@ -303,11 +322,7 @@ export function classifyPushEvent(evt, ctx) {
       if (ctx.focusVisible && ctx.focusSessionId === sessionId) return null;
       return {
         kind: "done",
-        // Title is the session's "workspace / session-name" label (resolved
-        // from tmux by firePush) so the user can tell WHICH chat finished at a
-        // glance. Falls back to the generic copy when the label can't be
-        // resolved (session not found in tmux, lookup failed).
-        title: typeof ctx.label === "string" && ctx.label ? ctx.label : "Claude is done",
+        title: titleOr("Claude is done"),
         body: "Your turn finished.",
         sessionId,
         tag: `done-${tagBase}`,
@@ -427,11 +442,17 @@ export async function firePush(evt) {
       }
     }
 
-    // Resolve the "workspace / session-name" title only for the "done"
-    // (session.idle) case — the other notifications keep their action-specific
-    // titles ("Permission needed", etc.). Avoids a tmux query per event.
-    const label =
-      type === "session.idle" ? await resolveSessionLabel(sid) : null;
+    // Resolve the "workspace / session-name" label for every notifying event
+    // so ALL pushes show which chat they came from in the title. Only the four
+    // types that can produce a notification trigger the tmux lookup, so we
+    // never pay the query cost for the firehose of streaming events.
+    const NOTIFYING = new Set([
+      "permission.asked",
+      "question.asked",
+      "session.error",
+      "session.idle",
+    ]);
+    const label = NOTIFYING.has(type) ? await resolveSessionLabel(sid) : null;
 
     const payload = classifyPushEvent(evt, {
       focusSessionId: _focus.sessionId,

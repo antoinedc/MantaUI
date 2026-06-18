@@ -1386,3 +1386,38 @@ export function wasAtBottomBeforeCommit(
   );
   return prevDist <= thresholdPx;
 }
+
+// ── Queued-message drain (step-boundary abort) ────────────────────────────
+// When the user queues a prompt mid-turn, bui no longer waits for the whole
+// turn to finish. At the next `session.next.step.ended` boundary it aborts
+// the in-flight turn and lets the idle-drain submit the queued prompt as a
+// fresh turn. These two pure predicates make the decision points testable.
+
+/**
+ * Should a `session.next.step.ended` boundary trigger a drain-abort?
+ * True when at least one prompt is queued AND we have not already issued a
+ * drain-abort for the current turn (`alreadyDraining` guards re-entrancy
+ * against the multiple step.ended events that can arrive before the abort
+ * POST lands).
+ */
+export function shouldAbortForQueuedDrain(
+  queueLength: number,
+  alreadyDraining: boolean,
+): boolean {
+  return queueLength > 0 && !alreadyDraining;
+}
+
+/**
+ * Should a `session.error` be swallowed silently? True only for the
+ * `MessageAbortedError` produced by our own drain-abort — the queued prompt
+ * is about to be submitted on the upcoming idle, so the abort must be
+ * invisible to the user (no error banner, no "aborted" framing). Any other
+ * error name, or an abort the user triggered manually (`draining === false`),
+ * falls through to normal error handling.
+ */
+export function isDrainAbortError(
+  errName: string | undefined,
+  draining: boolean,
+): boolean {
+  return draining && errName === "MessageAbortedError";
+}
