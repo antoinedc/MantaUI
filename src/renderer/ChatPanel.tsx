@@ -74,6 +74,8 @@ import {
   summarizeChildSession,
   classifyScrollForPin,
   wasAtBottomBeforeCommit,
+  shouldAbortForQueuedDrain,
+  isDrainAbortError,
   type TruncationKind,
   type ContextBreakdown,
   type StaleCacheResult,
@@ -396,10 +398,24 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const [running, setRunning] = useState(false);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
-  // Messages queued while the AI was still running. Sent automatically one
-  // at a time as running flips to false. Shown below the RunningIndicator
-  // while waiting; each moves into the transcript once dispatched.
+  // Messages queued while the AI was still running. The moment a queued
+  // prompt exists, bui aborts the in-flight turn at the next step boundary
+  // and submits the queued prompt as a fresh turn (see the step.ended drain
+  // trigger + the [running, messageQueue] drain effect). Shown below the
+  // RunningIndicator while waiting; each moves into the transcript once
+  // dispatched.
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
+  // Live mirror of `messageQueue` for the SSE handler closure (registered
+  // once per session, so it can't read the latest state value directly).
+  const messageQueueRef = useRef<string[]>([]);
+  useEffect(() => {
+    messageQueueRef.current = messageQueue;
+  }, [messageQueue]);
+  // True between issuing a drain-abort (at a step boundary) and the queued
+  // prompt actually being submitted. Guards against firing a second abort on
+  // the next step.ended, and lets the session.error handler swallow the
+  // resulting MessageAbortedError so the swap is invisible to the user.
+  const drainAbortRef = useRef(false);
   // Available models + server default (pre-fetched on mount, not lazy — so
   // the footer can show a meaningful model name before the first response,
   // and clicking the picker doesn't flash a "Loading…" row). Selection is
@@ -728,6 +744,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setTypeahead(null);
     setSystemNotice(null);
     setMessageQueue([]);
+    messageQueueRef.current = [];
+    drainAbortRef.current = false;
     setStepTokens(null);
     setRetryInfo(null);
     setLiveTodos(null);
@@ -1251,6 +1269,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       if (ev.type === "session.error") {
         const err = (props.error as { data?: { message?: string }; name?: string } | undefined);
         const raw = err?.data?.message ?? err?.name ?? "Unknown server error";
+        // Drain-initiated abort: we aborted this turn ourselves to make room
+        // for a queued prompt. Swallow the MessageAbortedError silently — no
+        // banner — and just flip idle so the [running, messageQueue] effect
+        // submits the queued prompt. (session.idle usually also fires, but
+        // flipping here is the safety net if it doesn't.) Leave drainAbortRef
+        // set; the drain effect clears it when the queued prompt lands.
+        if (isDrainAbortError(err?.name, drainAbortRef.current)) {
+          setRunning(false);
+          return;
+        }
         let msg: string;
         switch (err?.name) {
           case "ProviderAuthError":
@@ -1288,6 +1316,25 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         // that didn't end with a paragraph break) so the user sees it
         // before the next step starts (often a tool call).
         flushPendingDeltas(true);
+
+        // Queued-prompt drain. If the user queued a prompt while this turn
+        // was running, don't wait for the whole (possibly many-step) turn to
+        // finish — abort the in-flight turn HERE, at the step boundary, and
+        // let the [running, messageQueue] effect submit the queued prompt as
+        // a fresh turn the moment the abort flips us idle. drainAbortRef
+        // guards re-entrancy (several step.ended events can arrive before the
+        // abort POST lands) and tags the resulting MessageAbortedError as
+        // ours so the session.error handler swallows it — the swap looks
+        // seamless (queue advances, new prompt processes; no abort banner).
+        if (shouldAbortForQueuedDrain(messageQueueRef.current.length, drainAbortRef.current)) {
+          drainAbortRef.current = true;
+          void window.api.opencodeAbort(sessionId).catch(() => {
+            // Abort POST failed — re-arm so a later step.ended can retry, and
+            // fall back to the slower idle-drain in the meantime.
+            drainAbortRef.current = false;
+          });
+        }
+
         const tokens = props.tokens as TokenUsage | undefined;
         const cost = typeof props.cost === "number" ? props.cost : 0;
         if (tokens) {
@@ -1492,16 +1539,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         refreshPermissions();
       }
 
-      // Queue drain happens ONLY on session.idle (the [running, messageQueue]
-      // effect below), never mid-turn. An earlier version drained on every
-      // tool part completion — but a tool completing inside an active turn
-      // is NOT end-of-turn (the assistant is about to write more text or
-      // call another tool). Posting a new prompt in that window made
-      // opencode abort the in-flight assistant message to start the new
-      // turn, surfacing a `MessageAbortedError` banner in the renderer
-      // AND marking the prior assistant message aborted in the transcript.
-      // Wait for true idle — slightly slower drain, but the queued message
-      // lands as a normal turn with no abort artifacts.
+      // Queue drain. The actual submit happens in the [running, messageQueue]
+      // effect below the moment `running` flips false. Idle is reached either
+      // by a turn finishing naturally OR by the step-boundary drain-abort in
+      // the session.next.step.ended handler above: as soon as a prompt is
+      // queued, we abort the in-flight turn at the next step boundary instead
+      // of waiting for the whole (possibly many-step) turn to end. The
+      // resulting MessageAbortedError is tagged via drainAbortRef and
+      // swallowed by the session.error handler, so the swap is invisible —
+      // the queue just advances and the new prompt starts processing.
+      //
+      // Posting a prompt mid-turn WITHOUT a preceding abort is what produced
+      // the old "MessageAbortedError banner + aborted assistant message"
+      // artifact — opencode aborts implicitly to start the new turn. The
+      // explicit abort + error suppression here is what makes that clean.
 
       // Permission lifecycle — refresh the inline approval list so the card
       // appears/disappears in real time as opencode requests/closes them.
@@ -2041,14 +2092,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const submitRef = useRef<() => void>(() => {});
   submitRef.current = submit;
 
-  // When the AI finishes (running flips to false) and there are queued
+  // When the AI goes idle (running flips false) and there are queued
   // messages, dispatch the next one. We restore it into `input` and call
   // submit() via the ref so slash commands, attachments, and model
   // resolution all go through the same code path as a manual submit.
-  // Drain runs ONLY on true idle — never mid-turn (see the SSE handler
-  // above for why intra-turn drains produced MessageAbortedError).
+  //
+  // Idle is reached one of two ways now: a turn finishing naturally, OR the
+  // step-boundary drain-abort (see the session.next.step.ended handler) that
+  // interrupts a still-running turn the moment a prompt is queued. Either
+  // way the submit path is identical — this effect just waits for !running.
+  // Re-arm drainAbortRef here so the NEXT queued item (if any) can again
+  // abort the freshly-submitted turn at its next step boundary.
   useEffect(() => {
     if (running || messageQueue.length === 0) return;
+    drainAbortRef.current = false;
     const [next, ...rest] = messageQueue;
     setMessageQueue(rest);
     setInput(next);

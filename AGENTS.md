@@ -361,21 +361,41 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
     `createSession expands a leading ~ …` in `src/server/opencode.test.mjs`
     (red/green verified). Do NOT "simplify" by moving expansion back into a
     caller — the chokepoint is what makes the corruption unreachable.
-- **Queued message drain — ONLY on `session.idle`, never mid-turn.** When
-  the user submits while `running` is true, the text gets pushed to
-  `messageQueue` and the input clears. The `[running, messageQueue]`
-  effect in `ChatPanel.tsx` dispatches the next queued item the moment
-  `running` flips false (i.e. opencode emits `session.idle` or
-  `session.status{type:"idle"}`). Do NOT add an SSE-handler drain on
-  `message.part.updated` with tool `state.status === "completed"` (or any
-  other intra-turn signal): a tool completing inside an active turn is
-  NOT end-of-turn (the assistant is about to write more text or call
-  another tool), and posting a new prompt in that window makes opencode
-  abort the in-flight assistant message to start the new turn —
-  `MessageAbortedError` lands in the sendError banner and the prior
-  assistant message is marked aborted in the transcript. Slightly slower
-  drain (waits for true idle), but the queued message lands cleanly as a
-  normal turn.
+- **Queued message drain — abort at the next step boundary, then submit on
+  idle.** When the user submits while `running` is true, the text gets pushed
+  to `messageQueue` and the input clears. bui does NOT wait for the whole
+  (possibly many-step) turn to finish: the moment a prompt is queued, the
+  next `session.next.step.ended` event triggers a **drain-abort**
+  (`shouldAbortForQueuedDrain` in `chatUtils.ts`) — `window.api.opencodeAbort`
+  on the in-flight turn. The abort flips the session idle, and the existing
+  `[running, messageQueue]` effect submits the queued prompt as a fresh turn
+  via `submit()` (so slash commands, attachments, and model resolution all go
+  through the normal path).
+
+  The abort is made INVISIBLE to the user:
+  - `drainAbortRef` is set when the drain-abort POSTs. It guards re-entrancy
+    (several `step.ended` events can arrive before the abort lands — only the
+    first fires) AND tags the resulting `MessageAbortedError`.
+  - The `session.error` handler swallows that error silently via
+    `isDrainAbortError(err.name, drainAbortRef.current)` — no `sendError`
+    banner. It just flips `running` false (safety net if `session.idle`
+    doesn't also fire) so the drain effect runs.
+  - The drain effect re-arms `drainAbortRef = false` before submitting, so a
+    SECOND queued item can again abort the freshly-submitted turn at its next
+    step boundary (FIFO, each interrupting at a step).
+
+  This REPLACES the older "drain ONLY on `session.idle`, never mid-turn"
+  rule. That rule existed because posting a prompt mid-turn WITHOUT a
+  preceding explicit abort makes opencode abort implicitly, surfacing a
+  `MessageAbortedError` banner + marking the assistant message aborted. The
+  fix is the explicit abort + `isDrainAbortError` suppression — NOT avoiding
+  mid-turn sends. Do NOT reintroduce an `idle`-only drain or remove the
+  `step.ended` trigger thinking it regresses that bug; the suppression path
+  is what keeps the swap clean. The partial assistant output generated before
+  the abort legitimately stays in the transcript (real work the model did);
+  only the abort *error/indication* is hidden. Both predicates are pure +
+  tested in `chatUtils.test.ts`. ChatPanel is shared with mobile, so this
+  behavior applies on both transports (both implement `opencodeAbort`).
 - **TodoWrite checklist auto-dismissal** — when every item in the pinned
   `ActiveTodos` is terminal (`completed` or `cancelled`) at the moment the
   user submits their next prompt, `todosDismissed` flips true and the card

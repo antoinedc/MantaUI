@@ -43,6 +43,8 @@ import {
   distFromBottom,
   classifyScrollForPin,
   wasAtBottomBeforeCommit,
+  shouldAbortForQueuedDrain,
+  isDrainAbortError,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2156,5 +2158,39 @@ describe("wasAtBottomBeforeCommit", () => {
     // → prevDist=25.
     expect(wasAtBottomBeforeCommit(1000, 775, 200, 32)).toBe(true);
     expect(wasAtBottomBeforeCommit(1000, 760, 200, 32)).toBe(false);
+  });
+});
+
+describe("shouldAbortForQueuedDrain", () => {
+  it("aborts at a step boundary when a prompt is queued and not already draining", () => {
+    expect(shouldAbortForQueuedDrain(1, false)).toBe(true);
+    expect(shouldAbortForQueuedDrain(3, false)).toBe(true);
+  });
+
+  it("does nothing when the queue is empty", () => {
+    expect(shouldAbortForQueuedDrain(0, false)).toBe(false);
+  });
+
+  it("does not re-fire while a drain-abort is already in flight (re-entrancy guard)", () => {
+    // Several session.next.step.ended events can arrive before the abort POST
+    // lands; only the first should issue the abort.
+    expect(shouldAbortForQueuedDrain(1, true)).toBe(false);
+    expect(shouldAbortForQueuedDrain(5, true)).toBe(false);
+  });
+});
+
+describe("isDrainAbortError", () => {
+  it("swallows the MessageAbortedError produced by our own drain-abort", () => {
+    expect(isDrainAbortError("MessageAbortedError", true)).toBe(true);
+  });
+
+  it("does NOT swallow a manual abort (draining=false) — that error is real to the user", () => {
+    expect(isDrainAbortError("MessageAbortedError", false)).toBe(false);
+  });
+
+  it("never swallows other error names even while draining", () => {
+    expect(isDrainAbortError("ProviderAuthError", true)).toBe(false);
+    expect(isDrainAbortError("ContextOverflowError", true)).toBe(false);
+    expect(isDrainAbortError(undefined, true)).toBe(false);
   });
 });
