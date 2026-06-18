@@ -28,6 +28,7 @@ import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import * as tmux from "./tmux.mjs";
 
 const DIR = join(homedir(), ".bui-mobile");
 const VAPID_PATH = join(DIR, "vapid.json");
@@ -233,7 +234,11 @@ export function classifyPushEvent(evt, ctx) {
       if (ctx.focusVisible && ctx.focusSessionId === sessionId) return null;
       return {
         kind: "done",
-        title: "Claude is done",
+        // Title is the session's "workspace / session-name" label (resolved
+        // from tmux by firePush) so the user can tell WHICH chat finished at a
+        // glance. Falls back to the generic copy when the label can't be
+        // resolved (session not found in tmux, lookup failed).
+        title: typeof ctx.label === "string" && ctx.label ? ctx.label : "Claude is done",
         body: "Your turn finished.",
         sessionId,
         tag: `done-${tagBase}`,
@@ -241,6 +246,44 @@ export function classifyPushEvent(evt, ctx) {
     }
     default:
       return null;
+  }
+}
+
+/**
+ * Build the "workspace / session-name" notification title for an opencode
+ * sessionID by scanning tmux projects (workspace = tmux session, session-name
+ * = window name). Pure — takes the already-fetched projects list so it can be
+ * unit-tested without a live tmux.
+ *
+ * @param {Array<{tmuxSession:string, windows:Array<{name:string, opencodeSessionId:string|null}>}>} projects
+ * @param {string|null} sessionId
+ * @returns {string|null} "workspace / session-name", or null if not found.
+ */
+export function buildSessionLabel(projects, sessionId) {
+  if (!sessionId || !Array.isArray(projects)) return null;
+  for (const proj of projects) {
+    const wins = Array.isArray(proj?.windows) ? proj.windows : [];
+    for (const w of wins) {
+      if (w?.opencodeSessionId === sessionId) {
+        const workspace = proj.tmuxSession || "";
+        const name = w.name || "";
+        if (workspace && name) return `${workspace} / ${name}`;
+        return workspace || name || null;
+      }
+    }
+  }
+  return null;
+}
+
+// Resolve a sessionID → "workspace / session-name" by querying live tmux.
+// Best-effort: any failure returns null so the push falls back to generic copy.
+async function resolveSessionLabel(sessionId) {
+  if (!sessionId) return null;
+  try {
+    const projects = await tmux.listProjects();
+    return buildSessionLabel(projects, sessionId);
+  } catch {
+    return null;
   }
 }
 
@@ -315,11 +358,18 @@ export async function firePush(evt) {
       }
     }
 
+    // Resolve the "workspace / session-name" title only for the "done"
+    // (session.idle) case — the other notifications keep their action-specific
+    // titles ("Permission needed", etc.). Avoids a tmux query per event.
+    const label =
+      type === "session.idle" ? await resolveSessionLabel(sid) : null;
+
     const payload = classifyPushEvent(evt, {
       focusSessionId: _focus.sessionId,
       focusVisible: _focus.visible,
       wasBusy: sid ? _busy.has(sid) : false,
       pendingAttention: sid ? _pending.has(sid) : false,
+      label,
     });
 
     // Clear the busy flag once the session settles or errors.

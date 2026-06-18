@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyPushEvent } from "./push.mjs";
+import { classifyPushEvent, buildSessionLabel } from "./push.mjs";
 
 const NOFOCUS = { focusSessionId: null, focusVisible: false, wasBusy: false };
 
@@ -160,6 +160,55 @@ test("session.idle while a question/permission is pending → suppressed (not 'd
     },
   );
   assert.equal(p, null);
+});
+
+test("session.idle 'done' uses the resolved workspace/session label as title", () => {
+  const p = classifyPushEvent(
+    { type: "session.idle", properties: { sessionID: "ses_lbl" } },
+    {
+      focusSessionId: null,
+      focusVisible: false,
+      wasBusy: true,
+      label: "default / my-chat",
+    },
+  );
+  assert.equal(p?.kind, "done");
+  assert.equal(p?.title, "default / my-chat");
+});
+
+test("session.idle 'done' falls back to generic title when no label", () => {
+  const p = classifyPushEvent(
+    { type: "session.idle", properties: { sessionID: "ses_lbl2" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: true, label: null },
+  );
+  assert.equal(p?.title, "Claude is done");
+});
+
+test("buildSessionLabel maps opencode sessionID → 'workspace / session-name'", () => {
+  const projects = [
+    {
+      tmuxSession: "default",
+      windows: [
+        { name: "shell", opencodeSessionId: null },
+        { name: "my-chat", opencodeSessionId: "ses_x" },
+      ],
+    },
+    {
+      tmuxSession: "other",
+      windows: [{ name: "wkit", opencodeSessionId: "ses_y" }],
+    },
+  ];
+  assert.equal(buildSessionLabel(projects, "ses_x"), "default / my-chat");
+  assert.equal(buildSessionLabel(projects, "ses_y"), "other / wkit");
+});
+
+test("buildSessionLabel → null for unknown / missing sessionID", () => {
+  const projects = [
+    { tmuxSession: "default", windows: [{ name: "c", opencodeSessionId: "ses_a" }] },
+  ];
+  assert.equal(buildSessionLabel(projects, "ses_missing"), null);
+  assert.equal(buildSessionLabel(projects, null), null);
+  assert.equal(buildSessionLabel(null, "ses_a"), null);
 });
 
 test("unrelated event → null", () => {
