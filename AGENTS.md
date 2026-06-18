@@ -257,22 +257,33 @@ lives in `classifyPushEvent` / `firePush`, not the service worker
 
 - **Multi-device suppression (Discord rule: active on desktop ⇒ no mobile
   push).** The desktop Electron app POSTs `/push/desktop-presence
-  {visible}` on focus/blur/system-idle over a best-effort SSH
-  `-L 18787:127.0.0.1:8787` forward on the shared ControlMaster
-  (`ensurePresenceForward` in `src/main/opencode.ts`; driver in
-  `src/main/desktopPresence.ts`). The server tracks `_desktop = {visible,
-  lastSeen, lastActive}` and ONLY the "done" push is gated by
-  `shouldSuppressForDesktop(desktop, now)` (pure, tested):
-  - suppress if desktop is currently `visible`, OR was visible within
-    `DESKTOP_GRACE_MS` (30s) — a quick desktop window-switch shouldn't buzz
-    the phone;
-  - but NOT if `lastSeen` is stale past `DESKTOP_PRESENCE_TTL_MS` (60s) — a
-    crashed/asleep desktop must not mute mobile forever (the desktop sends a
-    20s heartbeat while focused to stay fresh).
-  permission/question/error pushes are blocking and fire on every device
-  regardless (mirrors Slack/Discord still escalating mentions/DMs). Presence
-  is best-effort: if the mobile server is down or the forward isn't up, the
-  POST fails silently and mobile behaves as before (always notifies).
+  {visible}` over a best-effort SSH `-L 18787:127.0.0.1:8787` forward on the
+  shared ControlMaster (`ensurePresenceForward` in `src/main/opencode.ts`;
+  driver in `src/main/desktopPresence.ts`).
+  - **ACTIVE = window focused AND recent input — NOT focus alone.**
+    `desktopPresence.ts` gates `visible:true` on
+    `powerMonitor.getSystemIdleTime() < IDLE_ACTIVE_THRESHOLD_S` (30s) in
+    addition to window focus. This is THE fix for "no mobile pushes ever":
+    picking up your phone does **not** blur the desktop window (macOS only
+    fires `browser-window-blur` when another *Mac* app takes focus), so a
+    focus-only signal reports `visible:true` forever and permanently mutes
+    mobile. Idle-gating mirrors Slack/Discord "away" detection. A 10s poll
+    re-evaluates + heartbeats; blur/lock/suspend force an immediate
+    `visible:false`. **Do NOT regress to focus-only presence.**
+  - The server tracks `_desktop = {visible, lastSeen, lastActive}` and ONLY
+    the "done" push is gated by `shouldSuppressForDesktop(desktop, now)`
+    (pure, tested): suppress if desktop is currently `visible`, OR was visible
+    within `DESKTOP_GRACE_MS` (30s) — a quick window-switch shouldn't buzz the
+    phone — but NOT if `lastSeen` is stale past `DESKTOP_PRESENCE_TTL_MS`
+    (60s), so a crashed/asleep/idle desktop can't mute mobile forever.
+  - permission/question/error pushes are blocking and fire on every device
+    regardless (mirrors Slack/Discord still escalating mentions/DMs). Presence
+    is best-effort: if the mobile server is down or the forward isn't up, the
+    POST fails silently and mobile behaves as before (always notifies).
+  - Observability: the server logs `[push] desktop-presence visible=…` on each
+    heartbeat and `[push] done sid=… suppressForDesktop=… desktop={…}` on every
+    "done" decision (`journalctl --user -u bui-server`). Without these the
+    suppression decision is undiagnosable — keep them.
 
 ## Mouse mode — design decision, do not re-litigate
 
