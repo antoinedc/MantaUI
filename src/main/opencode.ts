@@ -50,6 +50,15 @@ const REMOTE_PORT = 4096;
 export const BUI_OPENCODE_TMUX_SESSION = "bui-opencode";
 export const OPENCODE_SID_OPT = "@bui-session-id";
 
+// Mobile/web server (src/server/index.mjs) listens on 127.0.0.1:8787 on the
+// box. The desktop forwards it to a local port so it can POST desktop-presence
+// heartbeats — letting the box suppress mobile "done" pushes while the user is
+// active on desktop. Best-effort: if the mobile server isn't running, the
+// forward still binds (it's the local socket that's created) and POSTs just
+// fail, which the presence reporter swallows.
+const MOBILE_SERVER_REMOTE_PORT = 8787;
+export const PRESENCE_LOCAL_PORT = 18787;
+
 function localPort(config: AppConfig): number {
   return config.opencodePort ?? 14096;
 }
@@ -406,8 +415,30 @@ export async function teardownForward(config: AppConfig): Promise<void> {
   forwarded = false;
 }
 
+// Best-effort `-L PRESENCE_LOCAL_PORT:127.0.0.1:8787` forward on the shared
+// ControlMaster so the desktop can POST presence heartbeats to the mobile
+// server. Idempotent ("already forwarded" is success). Never throws — a
+// missing mobile server or a forwarding hiccup must not break the opencode
+// path; presence is a nice-to-have. Assumes the ControlMaster is already up
+// (callers invoke this right after ensureForward()).
+let presenceForwarded = false;
+export async function ensurePresenceForward(config: AppConfig): Promise<boolean> {
+  try {
+    const spec = `${PRESENCE_LOCAL_PORT}:127.0.0.1:${MOBILE_SERVER_REMOTE_PORT}`;
+    const res = await runSshControl(config, "forward", ["-L", spec]);
+    presenceForwarded =
+      res.code === 0 || /already forwarded/i.test(res.stderr);
+    return presenceForwarded;
+  } catch {
+    return false;
+  }
+}
+
 export function invalidateForward(): void {
   forwarded = false;
+  // The presence forward rides the same master; when it dies, re-establish on
+  // the next ensurePresenceForward() too.
+  presenceForwarded = false;
 }
 
 // Force-evict OUR OWN live ControlMaster, then mark the forward stale.

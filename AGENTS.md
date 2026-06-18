@@ -238,6 +238,42 @@ the stage-colored `%`; clamp the empty textarea placeholder to one line via
 `resizeInput` still owns height). Verify on-device: `cd mobile && npm run
 apk`, `adb install -r`, screenshot the composer.
 
+## Web Push notifications (`src/server/push.mjs`)
+
+Mobile PWA gets Web Push (VAPID) for events it can't otherwise see when
+backgrounded: `permission.asked`, `question.asked`, `session.error` (always),
+and `session.idle` → "done" (only if the session was busy AND not being
+watched). The **server** decides whether to surface a push (iOS revokes the
+subscription if a delivered push shows no notification), so suppression logic
+lives in `classifyPushEvent` / `firePush`, not the service worker
+(`src/renderer/public/sw.js` → copied to `mobile/www/sw.js` by `build:mobile`).
+
+- **"done" title is the session's `workspace / session-name`** (tmux session /
+  window name), resolved by `firePush` via `buildSessionLabel(projects, sid)`
+  over `tmux.listProjects()`. Lookup runs ONLY on `session.idle` to avoid a
+  tmux query per event; falls back to "Claude is done" when the session isn't
+  found. The "from bui" subtitle under the notification is **iOS injecting the
+  PWA name** — not in our payload, not removable via the Push API.
+
+- **Multi-device suppression (Discord rule: active on desktop ⇒ no mobile
+  push).** The desktop Electron app POSTs `/push/desktop-presence
+  {visible}` on focus/blur/system-idle over a best-effort SSH
+  `-L 18787:127.0.0.1:8787` forward on the shared ControlMaster
+  (`ensurePresenceForward` in `src/main/opencode.ts`; driver in
+  `src/main/desktopPresence.ts`). The server tracks `_desktop = {visible,
+  lastSeen, lastActive}` and ONLY the "done" push is gated by
+  `shouldSuppressForDesktop(desktop, now)` (pure, tested):
+  - suppress if desktop is currently `visible`, OR was visible within
+    `DESKTOP_GRACE_MS` (30s) — a quick desktop window-switch shouldn't buzz
+    the phone;
+  - but NOT if `lastSeen` is stale past `DESKTOP_PRESENCE_TTL_MS` (60s) — a
+    crashed/asleep desktop must not mute mobile forever (the desktop sends a
+    20s heartbeat while focused to stay fresh).
+  permission/question/error pushes are blocking and fire on every device
+  regardless (mirrors Slack/Discord still escalating mentions/DMs). Presence
+  is best-effort: if the mobile server is down or the forward isn't up, the
+  POST fails silently and mobile behaves as before (always notifies).
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what

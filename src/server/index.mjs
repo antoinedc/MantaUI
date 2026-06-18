@@ -341,6 +341,8 @@ const server = createServer(async (req, res) => {
   // POST /push/unsubscribe body = { endpoint }
   // POST /push/focus       body = { sessionId, visible }  (suppress "done" for
   //                        the session the user is actively viewing)
+  // POST /push/desktop-presence body = { visible }  (desktop Electron heartbeat;
+  //                        suppress mobile "done" while active on desktop)
   if (req.method === "GET" && path === "/push/vapid") {
     try {
       const key = await push.getVapidPublic();
@@ -372,6 +374,11 @@ const server = createServer(async (req, res) => {
           sessionId: body?.sessionId,
           visible: body?.visible,
         });
+      } else if (path === "/push/desktop-presence") {
+        // Desktop (Electron) heartbeat: suppress mobile "done" pushes while
+        // the user is active on desktop. Posted on focus/blur/system-idle over
+        // the desktop's SSH -L 18787 forward.
+        result = push.setDesktopPresence({ visible: body?.visible });
       } else if (path === "/push/answer") {
         // Direct reply to a Question tool from a notification action button.
         // answers is string[][] (one array per question); the SW sends

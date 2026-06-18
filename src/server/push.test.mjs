@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyPushEvent, buildSessionLabel } from "./push.mjs";
+import {
+  classifyPushEvent,
+  buildSessionLabel,
+  shouldSuppressForDesktop,
+  DESKTOP_PRESENCE_TTL_MS,
+  DESKTOP_GRACE_MS,
+} from "./push.mjs";
 
 const NOFOCUS = { focusSessionId: null, focusVisible: false, wasBusy: false };
 
@@ -209,6 +215,62 @@ test("buildSessionLabel → null for unknown / missing sessionID", () => {
   assert.equal(buildSessionLabel(projects, "ses_missing"), null);
   assert.equal(buildSessionLabel(projects, null), null);
   assert.equal(buildSessionLabel(null, "ses_a"), null);
+});
+
+// --- Desktop presence suppression (multi-device routing) -------------------
+
+const NOW = 1_000_000_000;
+
+test("shouldSuppressForDesktop: desktop focused now → suppress", () => {
+  assert.equal(
+    shouldSuppressForDesktop(
+      { visible: true, lastSeen: NOW, lastActive: NOW },
+      NOW,
+    ),
+    true,
+  );
+});
+
+test("shouldSuppressForDesktop: blurred but within grace → suppress", () => {
+  const t = NOW + DESKTOP_GRACE_MS - 1;
+  assert.equal(
+    shouldSuppressForDesktop(
+      { visible: false, lastSeen: t, lastActive: NOW },
+      t,
+    ),
+    true,
+  );
+});
+
+test("shouldSuppressForDesktop: blurred past grace → allow push", () => {
+  const t = NOW + DESKTOP_GRACE_MS + 1;
+  assert.equal(
+    shouldSuppressForDesktop(
+      { visible: false, lastSeen: t, lastActive: NOW },
+      t,
+    ),
+    false,
+  );
+});
+
+test("shouldSuppressForDesktop: stale heartbeat (crash/sleep) → allow push", () => {
+  // visible:true but no heartbeat for > TTL → treat desktop as gone.
+  const t = NOW + DESKTOP_PRESENCE_TTL_MS + 1;
+  assert.equal(
+    shouldSuppressForDesktop(
+      { visible: true, lastSeen: NOW, lastActive: NOW },
+      t,
+    ),
+    false,
+  );
+});
+
+test("shouldSuppressForDesktop: no presence ever → allow push", () => {
+  assert.equal(
+    shouldSuppressForDesktop({ visible: false, lastSeen: 0, lastActive: 0 }, NOW),
+    false,
+  );
+  assert.equal(shouldSuppressForDesktop(null, NOW), false);
 });
 
 test("unrelated event → null", () => {

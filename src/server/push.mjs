@@ -138,6 +138,75 @@ export function getFocus() {
 }
 
 // ---------------------------------------------------------------------------
+// Desktop presence — the Electron app reports "I'm focused" so a mobile "done"
+// push is suppressed when the user is heads-down on the desktop (Discord's
+// "active on desktop ⇒ no mobile push" rule). The desktop reaches this server
+// over an SSH -L 18787:127.0.0.1:8787 forward on the shared ControlMaster and
+// POSTs /push/desktop-presence on focus/blur/system-idle.
+//
+// Two timers gate suppression so a crashed/asleep desktop can't permanently
+// mute mobile:
+//   - lastSeen TTL (DESKTOP_PRESENCE_TTL_MS): no heartbeat in this long ⇒
+//     desktop is gone, mobile pushes resume regardless of the last `visible`.
+//   - grace window (DESKTOP_GRACE_MS): even after an explicit blur/idle, keep
+//     suppressing for this long so a quick desktop window-switch doesn't buzz
+//     the phone. Matches the ~30s Discord-style grace.
+//
+// Single user → a single snapshot. `visible` is the last reported foreground
+// state; `lastActive` is the last time desktop was actually focused (set on a
+// visible:true heartbeat), which the grace window is measured from.
+// ---------------------------------------------------------------------------
+
+export const DESKTOP_PRESENCE_TTL_MS = 60_000; // heartbeat staleness cutoff
+export const DESKTOP_GRACE_MS = 30_000; // keep suppressing after blur/idle
+
+let _desktop = { visible: false, lastSeen: 0, lastActive: 0 };
+
+/**
+ * Record a desktop presence heartbeat. The desktop posts these on focus, blur,
+ * and system idle/resume; an absent heartbeat (TTL) means the desktop is gone.
+ * @param {{visible?: boolean}} report
+ * @param {number} [now] injectable clock for tests
+ */
+export function setDesktopPresence({ visible } = {}, now = Date.now()) {
+  const vis = !!visible;
+  _desktop = {
+    visible: vis,
+    lastSeen: now,
+    // lastActive only advances while the desktop is actually foreground, so the
+    // grace window is measured from when the user last had it focused.
+    lastActive: vis ? now : _desktop.lastActive,
+  };
+  return _desktop;
+}
+
+export function getDesktopPresence() {
+  return _desktop;
+}
+
+/**
+ * Pure: should a mobile "done" push be suppressed because the desktop is (or
+ * was just) active? Suppress when the desktop is focused on ANY session, OR
+ * was focused within the grace window — provided the heartbeat is fresh (TTL).
+ *
+ * @param {{visible:boolean, lastSeen:number, lastActive:number}} desktop
+ * @param {number} now
+ * @returns {boolean}
+ */
+export function shouldSuppressForDesktop(desktop, now = Date.now()) {
+  if (!desktop) return false;
+  // Stale heartbeat → desktop is gone (crash, sleep, network drop). Don't let
+  // a dead desktop mute mobile forever.
+  if (now - (desktop.lastSeen ?? 0) > DESKTOP_PRESENCE_TTL_MS) return false;
+  // Currently foreground on desktop → suppress.
+  if (desktop.visible) return true;
+  // Recently foreground (within the grace window) → still suppress so a quick
+  // desktop window-switch / brief blur doesn't immediately buzz the phone.
+  if (now - (desktop.lastActive ?? 0) <= DESKTOP_GRACE_MS) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Event classification (pure) + dispatch (stateful)
 // ---------------------------------------------------------------------------
 
@@ -380,6 +449,13 @@ export async function firePush(evt) {
     if (type === "session.error" && sid) _pending.delete(sid);
 
     if (!payload) return;
+
+    // Multi-device suppression: if the user is active on desktop, don't buzz
+    // their phone for a "done". Only "done" is suppressed — permission /
+    // question / error are blocking and surface on every device regardless
+    // (mirrors Slack/Discord still escalating mentions/DMs across devices).
+    if (payload.kind === "done" && shouldSuppressForDesktop(_desktop)) return;
+
     await sendPush(payload);
   } catch (e) {
     console.warn("[push] firePush error:", e?.message ?? e);
@@ -391,4 +467,5 @@ export function _resetPushState() {
   _busy.clear();
   _pending.clear();
   _focus = { sessionId: null, visible: false };
+  _desktop = { visible: false, lastSeen: 0, lastActive: 0 };
 }
