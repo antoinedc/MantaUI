@@ -48,6 +48,23 @@ export function App() {
     return off;
   }, [applyStatusBatch]);
 
+  // Startup attention replay. opencode SSE is forward-only, so a chat window
+  // already blocked on a question/permission when the app (re)connects never
+  // re-fires question.asked/permission.asked — the sidebar dot would stay
+  // dark until the user manually focuses the window. Once the projects tree
+  // has chat-mode windows, query each session's live pending state and latch
+  // the indicator. Keyed on the sorted set of chat session ids so it re-runs
+  // when a new chat window appears (e.g. a session adopted after launch),
+  // not on every projects mutation.
+  const chatSessionKey = projects
+    .flatMap((p) => p.windows.map((w) => w.opencodeSessionId).filter(Boolean))
+    .sort()
+    .join(",");
+  useEffect(() => {
+    if (!chatSessionKey) return;
+    void useStore.getState().replayChatAttention();
+  }, [chatSessionKey]);
+
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
   // used to register its own listener, so a single detection fanned out into
   // N toasts (one per mounted chat). Now the toast lives in the store, the

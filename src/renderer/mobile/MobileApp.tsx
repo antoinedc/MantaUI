@@ -51,6 +51,20 @@ export function MobileApp() {
     return window.api.onStatusEvent(applyStatusBatch);
   }, [applyStatusBatch]);
 
+  // Startup attention replay (mirror of App.tsx). opencode SSE is forward-
+  // only, so a chat window already blocked on a question/permission when the
+  // page (re)connects never re-fires the *.asked event — the dot would stay
+  // dark. Once chat-mode windows are known, query each session's live pending
+  // state and latch the indicator. See App.tsx / store.replayChatAttention.
+  const chatSessionKey = projects
+    .flatMap((p) => p.windows.map((w) => w.opencodeSessionId).filter(Boolean))
+    .sort()
+    .join(",");
+  useEffect(() => {
+    if (!chatSessionKey) return;
+    void useStore.getState().replayChatAttention();
+  }, [chatSessionKey]);
+
   // Sidebar status for chat-mode windows (mirror of the desktop App.tsx
   // listener; same logic, same store actions). The mobile server's PTY
   // poller has the same blindspot as desktop status.ts — capture-pane
