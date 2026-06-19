@@ -49,6 +49,7 @@ import {
   classifyScrollForPin,
   wasAtBottomBeforeCommit,
   shouldAbortForQueuedDrain,
+  isToolStepBoundary,
   isDrainAbortError,
 } from "./chatUtils";
 
@@ -2181,6 +2182,34 @@ describe("shouldAbortForQueuedDrain", () => {
     // lands; only the first should issue the abort.
     expect(shouldAbortForQueuedDrain(1, true)).toBe(false);
     expect(shouldAbortForQueuedDrain(5, true)).toBe(false);
+  });
+});
+
+describe("isToolStepBoundary", () => {
+  it("is true for a completed tool part (the real mid-turn step boundary)", () => {
+    expect(isToolStepBoundary({ type: "tool", state: { status: "completed" } })).toBe(true);
+  });
+
+  it("is true for an errored tool part (turn is about to recover/continue)", () => {
+    expect(isToolStepBoundary({ type: "tool", state: { status: "error" } })).toBe(true);
+  });
+
+  it("is false for a tool part still pending/running (not a boundary yet)", () => {
+    expect(isToolStepBoundary({ type: "tool", state: { status: "pending" } })).toBe(false);
+    expect(isToolStepBoundary({ type: "tool", state: { status: "running" } })).toBe(false);
+  });
+
+  it("is false for non-tool parts (text/reasoning stream mid-step)", () => {
+    expect(isToolStepBoundary({ type: "text", state: { status: "completed" } })).toBe(false);
+    expect(isToolStepBoundary({ type: "reasoning", state: { status: "completed" } })).toBe(false);
+  });
+
+  it("is false for malformed / missing input", () => {
+    expect(isToolStepBoundary(null)).toBe(false);
+    expect(isToolStepBoundary(undefined)).toBe(false);
+    expect(isToolStepBoundary({})).toBe(false);
+    expect(isToolStepBoundary({ type: "tool" })).toBe(false);
+    expect(isToolStepBoundary("tool")).toBe(false);
   });
 });
 

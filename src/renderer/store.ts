@@ -130,6 +130,16 @@ type State = {
   // path the sidebar `·N` indicator would always be 0 for chat windows.
   // Owning window is resolved from `sessionId` via `resolveSessionOwner`.
   setChatSubagents: (sessionId: string, count: number) => void;
+  // One-shot startup replay of chat-mode attention. opencode's SSE stream is
+  // forward-only — it does NOT re-emit `question.asked` / `permission.asked`
+  // for requests that were already pending when the app (re)connected. So on
+  // restart a window blocked on a question/permission shows no sidebar dot
+  // until the user manually focuses the window. This action queries the live
+  // pending state per chat-window (the /question + /permission lists are
+  // `?directory=`-scoped, so we MUST query per-session, not globally) and
+  // latches the attention indicator for any still-pending request. Safe to
+  // call repeatedly; it only ever sets attention for genuinely-pending asks.
+  replayChatAttention: () => Promise<void>;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   setAutoRenameSessions: (v: boolean) => Promise<void>;
   setScreenshotToast: (t: ScreenshotToast | null) => void;
@@ -409,6 +419,45 @@ export const useStore = create<State>((set, get) => ({
       };
     }),
 
+  replayChatAttention: async () => {
+    // Collect every chat-mode window's opencode session id from the current
+    // projects tree. The /question + /permission lists are `?directory=`-
+    // scoped (see listQuestions/listPermissions in src/main/opencode.ts), so
+    // an unscoped global fetch returns [] for any session outside the
+    // server's default workspace — we MUST query per-session.
+    const projects = get().projects;
+    const sessionIds = new Set<string>();
+    for (const p of projects) {
+      for (const w of p.windows) {
+        if (w.opencodeSessionId) sessionIds.add(w.opencodeSessionId);
+      }
+    }
+    if (sessionIds.size === 0) return;
+    if (!window.api.opencodeQuestions && !window.api.opencodePermissions) return;
+    await Promise.all(
+      [...sessionIds].map(async (sid) => {
+        try {
+          const [questions, permissions] = await Promise.all([
+            window.api.opencodeQuestions?.(sid).catch(() => []) ?? [],
+            window.api.opencodePermissions?.(sid).catch(() => []) ?? [],
+          ]);
+          // A pending question outranks a pending permission (matches the
+          // StatusIndicator priority — a blocked question is the most
+          // urgent ask). Only latch if something is genuinely pending; do
+          // NOT clear here — absence of a pending request at startup is the
+          // normal case and must not stomp live SSE-driven attention.
+          if (questions.length > 0) {
+            get().setChatAttention(sid, "question");
+          } else if (permissions.length > 0) {
+            get().setChatAttention(sid, "permission");
+          }
+        } catch {
+          // Per-session failure is non-fatal — best-effort replay.
+        }
+      }),
+    );
+  },
+
   applyProjects: (projects) =>
     set((prev) => {
       // Clamp activeProjectName to one that still exists; clamp window choice too.
@@ -476,9 +525,15 @@ function clearAttention(
   windowIndex: number,
 ): Record<string, Record<number, WindowStatusUI>> {
   const cur = status[session]?.[windowIndex];
-  if (!cur?.attention) return status;
+  if (!cur?.attention && cur?.attentionKind == null) return status;
+  // Wipe BOTH attention and attentionKind. Leaving a stale kind ("question"/
+  // "permission") around means a later running update could re-derive a red
+  // ?/! glyph from the dead kind — the focused window must be fully clean.
   return {
     ...status,
-    [session]: { ...status[session], [windowIndex]: { ...cur, attention: false } },
+    [session]: {
+      ...status[session],
+      [windowIndex]: { ...cur, attention: false, attentionKind: undefined },
+    },
   };
 }

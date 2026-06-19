@@ -365,16 +365,32 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   idle.** When the user submits while `running` is true, the text gets pushed
   to `messageQueue` and the input clears. bui does NOT wait for the whole
   (possibly many-step) turn to finish: the moment a prompt is queued, the
-  next `session.next.step.ended` event triggers a **drain-abort**
-  (`shouldAbortForQueuedDrain` in `chatUtils.ts`) — `window.api.opencodeAbort`
-  on the in-flight turn. The abort flips the session idle, and the existing
-  `[running, messageQueue]` effect submits the queued prompt as a fresh turn
-  via `submit()` (so slash commands, attachments, and model resolution all go
-  through the normal path).
+  next mid-turn **step boundary** triggers a **drain-abort**
+  (`maybeDrainQueuedPrompt` in ChatPanel, gated by `shouldAbortForQueuedDrain`
+  in `chatUtils.ts`) — `window.api.opencodeAbort` on the in-flight turn. The
+  abort flips the session idle, and the existing `[running, messageQueue]`
+  effect submits the queued prompt as a fresh turn via `submit()` (so slash
+  commands, attachments, and model resolution all go through the normal path).
+
+  **What counts as a "step boundary" — a COMPLETED TOOL PART, not
+  `session.next.step.ended`.** This is THE fix for "queued prompt waits for
+  the whole turn" (2026-06-19). The deployed opencode build does NOT emit the
+  `session.next.*` event family AT ALL — verified live by streaming `/event`
+  during a multi-tool turn: you only get `message.part.delta`,
+  `message.part.updated`, `session.status` (busy/idle), and a final
+  `session.idle`. The original trigger hooked onto `session.next.step.ended`
+  therefore never fired, so the drain silently fell back to full-idle. The
+  primary trigger is now a `message.part.updated` whose `properties.part` is a
+  `tool` part at `state.status === "completed" | "error"`
+  (`isToolStepBoundary`, pure + tested). The legacy `step.ended` block still
+  calls `maybeDrainQueuedPrompt` as a harmless fallback for any build that
+  DOES emit it (the helper is idempotent via `drainAbortRef`). If you ever see
+  the drain regress to "waits for whole turn", FIRST re-verify which events
+  opencode emits — do not assume `session.next.*` works.
 
   The abort is made INVISIBLE to the user:
   - `drainAbortRef` is set when the drain-abort POSTs. It guards re-entrancy
-    (several `step.ended` events can arrive before the abort lands — only the
+    (several boundary events can arrive before the abort lands — only the
     first fires) AND tags the resulting `MessageAbortedError`.
   - The `session.error` handler swallows that error silently via
     `isDrainAbortError(err.name, drainAbortRef.current)` — no `sendError`
@@ -382,18 +398,17 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
     doesn't also fire) so the drain effect runs.
   - The drain effect re-arms `drainAbortRef = false` before submitting, so a
     SECOND queued item can again abort the freshly-submitted turn at its next
-    step boundary (FIFO, each interrupting at a step).
+    step boundary (FIFO, each interrupting at a tool boundary).
 
   This REPLACES the older "drain ONLY on `session.idle`, never mid-turn"
   rule. That rule existed because posting a prompt mid-turn WITHOUT a
   preceding explicit abort makes opencode abort implicitly, surfacing a
   `MessageAbortedError` banner + marking the assistant message aborted. The
   fix is the explicit abort + `isDrainAbortError` suppression — NOT avoiding
-  mid-turn sends. Do NOT reintroduce an `idle`-only drain or remove the
-  `step.ended` trigger thinking it regresses that bug; the suppression path
-  is what keeps the swap clean. The partial assistant output generated before
-  the abort legitimately stays in the transcript (real work the model did);
-  only the abort *error/indication* is hidden. Both predicates are pure +
+  mid-turn sends. Do NOT reintroduce an `idle`-only drain; the suppression
+  path is what keeps the swap clean. The partial assistant output generated
+  before the abort legitimately stays in the transcript (real work the model
+  did); only the abort *error/indication* is hidden. The predicates are pure +
   tested in `chatUtils.test.ts`. ChatPanel is shared with mobile, so this
   behavior applies on both transports (both implement `opencodeAbort`).
 - **TodoWrite checklist auto-dismissal** — when every item in the pinned

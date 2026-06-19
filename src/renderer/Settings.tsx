@@ -110,27 +110,54 @@ export function Settings({ onClose }: { onClose: () => void }) {
       .catch(() => {});
   }, []);
 
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    setSaveError(null);
     const hoursNum = Number(uch);
-    await window.api.configUpdate({
-      host: h.trim(),
-      user: u.trim() || undefined,
-      identityFile: k.trim() || undefined,
-      transport: tp,
-      uploadCleanupHours: Number.isFinite(hoursNum) && hoursNum >= 0 ? hoursNum : 1,
-      allowAgentPush: agentPush,
-      autoRenameSessions: autoRename,
-      downloadsDir: dlDir.trim(),
-      defaultModel: selectedModel ?? undefined,
-      skillRegistryUrls: registryUrls,
-      cacheTtl: ttl,
-      // Voice fields. Empty string clears (so unsetting the API key actually
-      // unsets it server-side). Leading/trailing whitespace stripped.
-      groqApiKey: groqKey.trim(),
-      voiceTranscriptionModel: voiceTrModel.trim(),
-      voiceCommandModel: voiceCmdModel.trim(),
-    });
-    await refresh();
+    try {
+      // The write to disk is the part that MUST succeed for "saved" to be true.
+      await window.api.configUpdate({
+        host: h.trim(),
+        user: u.trim() || undefined,
+        identityFile: k.trim() || undefined,
+        transport: tp,
+        uploadCleanupHours: Number.isFinite(hoursNum) && hoursNum >= 0 ? hoursNum : 1,
+        allowAgentPush: agentPush,
+        autoRenameSessions: autoRename,
+        downloadsDir: dlDir.trim(),
+        defaultModel: selectedModel ?? undefined,
+        skillRegistryUrls: registryUrls,
+        cacheTtl: ttl,
+        // Voice fields. Empty string clears (so unsetting the API key actually
+        // unsets it server-side). Leading/trailing whitespace stripped.
+        groqApiKey: groqKey.trim(),
+        voiceTranscriptionModel: voiceTrModel.trim(),
+        voiceCommandModel: voiceCmdModel.trim(),
+      });
+    } catch (e) {
+      // configUpdate itself failed — the config was NOT saved. Surface it and
+      // keep the dialog open so the user can retry rather than silently losing
+      // their edits.
+      setSaveError(e instanceof Error ? e.message : String(e));
+      setSaving(false);
+      return;
+    }
+    // The config IS saved at this point. refresh() re-pulls tmux/transport
+    // state and can reject if the SSH host is unreachable — but that must NOT
+    // block closing or make a successful save look like a failure. Swallow it;
+    // the sidebar's own refresh paths recover. (This was the "saved but no
+    // feedback, dialog stuck open" bug: an unguarded refresh() threw before
+    // onClose().)
+    try {
+      await refresh();
+    } catch {
+      /* non-fatal — the save already persisted */
+    }
+    setSaving(false);
     onClose();
   };
 
@@ -637,18 +664,25 @@ export function Settings({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
+        {saveError && (
+          <div className="text-xs text-red-400 text-right">
+            Couldn't save: {saveError}
+          </div>
+        )}
         <div className="flex justify-end gap-2 pt-2">
           <button
             onClick={onClose}
-            className="px-3 py-1.5 text-sm text-text-muted hover:text-text"
+            disabled={saving}
+            className="px-3 py-1.5 text-sm text-text-muted hover:text-text disabled:opacity-40"
           >
             Cancel
           </button>
           <button
             onClick={save}
-            className="px-3 py-1.5 text-sm bg-accent text-bg rounded hover:opacity-90"
+            disabled={saving}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            Save
+            {saving ? "Saving…" : "Save"}
           </button>
         </div>
       </div>

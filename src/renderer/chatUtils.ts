@@ -1389,16 +1389,42 @@ export function wasAtBottomBeforeCommit(
 
 // ── Queued-message drain (step-boundary abort) ────────────────────────────
 // When the user queues a prompt mid-turn, bui no longer waits for the whole
-// turn to finish. At the next `session.next.step.ended` boundary it aborts
-// the in-flight turn and lets the idle-drain submit the queued prompt as a
-// fresh turn. These two pure predicates make the decision points testable.
+// turn to finish. At the next mid-turn STEP BOUNDARY it aborts the in-flight
+// turn and lets the idle-drain submit the queued prompt as a fresh turn.
+// These pure predicates make the decision points testable.
+//
+// IMPORTANT — the step boundary is a COMPLETED TOOL PART, not
+// `session.next.step.ended`. That event (and the whole `session.next.*`
+// family) is NOT emitted by the deployed opencode build — verified live by
+// streaming `/event` during a multi-tool turn: only `message.part.updated`,
+// `message.part.delta`, `session.status`, and a final `session.idle` arrive.
+// The original step.ended trigger therefore never fired, so a queued prompt
+// waited for full idle (the bug). A tool part flipping to a terminal status
+// IS a genuine step boundary (the model just finished a tool round-trip and
+// is about to think/call again), so aborting there is clean.
 
 /**
- * Should a `session.next.step.ended` boundary trigger a drain-abort?
- * True when at least one prompt is queued AND we have not already issued a
- * drain-abort for the current turn (`alreadyDraining` guards re-entrancy
- * against the multiple step.ended events that can arrive before the abort
- * POST lands).
+ * Should a `message.part.updated` event trigger a drain-abort? True when the
+ * updated part is a TOOL part that just reached a terminal status
+ * ("completed" or "error") — i.e. a real mid-turn step boundary. The caller
+ * still gates on a non-empty queue + the re-entrancy flag via
+ * `shouldAbortForQueuedDrain`; this predicate only classifies the event.
+ *
+ * `part` is the loosely-typed `properties.part` off the SSE event.
+ */
+export function isToolStepBoundary(part: unknown): boolean {
+  if (!part || typeof part !== "object") return false;
+  const p = part as { type?: unknown; state?: { status?: unknown } };
+  if (p.type !== "tool") return false;
+  const status = p.state?.status;
+  return status === "completed" || status === "error";
+}
+
+/**
+ * Should a step boundary trigger a drain-abort? True when at least one prompt
+ * is queued AND we have not already issued a drain-abort for the current turn
+ * (`alreadyDraining` guards re-entrancy against the multiple boundary events
+ * that can arrive before the abort POST lands).
  */
 export function shouldAbortForQueuedDrain(
   queueLength: number,

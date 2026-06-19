@@ -236,6 +236,19 @@ describe("setChatRunning / setChatAttention", () => {
     });
   });
 
+  describe("setActive clears attention fully", () => {
+    it("wipes BOTH attention and attentionKind when focusing the window", () => {
+      // REGRESSION: clearAttention used to leave attentionKind set. A later
+      // running update could then re-derive a red ?/! glyph from the dead
+      // kind. Focusing a window must leave it fully clean.
+      useStore.getState().setChatAttention("ses_chat", "question");
+      useStore.getState().setActive("bui", 0);
+      const win = useStore.getState().status.bui[0];
+      expect(win.attention).toBe(false);
+      expect(win.attentionKind).toBeUndefined();
+    });
+  });
+
   describe("applyStatusBatch preserves chat-window state", () => {
     it("does not clobber chat windows' running state with poller data", () => {
       // Set running via the chat path...
@@ -305,5 +318,118 @@ describe("setChatRunning / setChatAttention", () => {
       expect(win.attentionKind).toBe("question");
       expect(win.subagents).toBe(4);
     });
+  });
+});
+
+// ===== Startup attention replay =====
+//
+// opencode SSE is forward-only, so a window already blocked on a question /
+// permission when the app (re)connects never re-fires the *.asked event.
+// replayChatAttention queries each chat-window's live pending state per
+// session (the /question + /permission lists are ?directory=-scoped) and
+// latches the indicator so the dot appears WITHOUT the user focusing first.
+
+describe("replayChatAttention", () => {
+  let questionsBySid: Record<string, unknown[]>;
+  let permissionsBySid: Record<string, unknown[]>;
+  let questionCalls: string[];
+  let permissionCalls: string[];
+
+  beforeEach(() => {
+    questionsBySid = {};
+    permissionsBySid = {};
+    questionCalls = [];
+    permissionCalls = [];
+    (globalThis as unknown as { window: unknown }).window = {
+      api: {
+        opencodeQuestions: async (sid: string) => {
+          questionCalls.push(sid);
+          return questionsBySid[sid] ?? [];
+        },
+        opencodePermissions: async (sid: string) => {
+          permissionCalls.push(sid);
+          return permissionsBySid[sid] ?? [];
+        },
+      },
+    };
+    useStore.setState({
+      projects: [
+        proj({
+          tmuxSession: "bui",
+          windows: [
+            {
+              index: 0,
+              name: "chat",
+              active: false,
+              paneCurrentPath: "/x",
+              opencodeSessionId: "ses_q",
+            },
+            {
+              index: 1,
+              name: "chat2",
+              active: false,
+              paneCurrentPath: "/y",
+              opencodeSessionId: "ses_p",
+            },
+            {
+              index: 2,
+              name: "term",
+              active: false,
+              paneCurrentPath: "/z",
+              opencodeSessionId: null,
+            },
+          ],
+        }),
+      ],
+      status: {},
+      activeProjectName: null,
+      activeWindowByProject: {},
+    });
+  });
+
+  it("latches 'question' for a session with a pending question", async () => {
+    questionsBySid["ses_q"] = [{ id: "q1" }];
+    await useStore.getState().replayChatAttention();
+    const win = useStore.getState().status.bui[0];
+    expect(win.attention).toBe(true);
+    expect(win.attentionKind).toBe("question");
+  });
+
+  it("latches 'permission' for a session with only a pending permission", async () => {
+    permissionsBySid["ses_p"] = [{ id: "p1" }];
+    await useStore.getState().replayChatAttention();
+    const win = useStore.getState().status.bui[1];
+    expect(win.attention).toBe(true);
+    expect(win.attentionKind).toBe("permission");
+  });
+
+  it("question outranks permission when both are pending", async () => {
+    questionsBySid["ses_q"] = [{ id: "q1" }];
+    permissionsBySid["ses_q"] = [{ id: "p1" }];
+    await useStore.getState().replayChatAttention();
+    expect(useStore.getState().status.bui[0].attentionKind).toBe("question");
+  });
+
+  it("does NOT latch attention for sessions with nothing pending", async () => {
+    await useStore.getState().replayChatAttention();
+    expect(useStore.getState().status).toEqual({});
+  });
+
+  it("only queries chat-mode windows (skips terminal windows)", async () => {
+    await useStore.getState().replayChatAttention();
+    expect(questionCalls.sort()).toEqual(["ses_p", "ses_q"]);
+    expect(permissionCalls.sort()).toEqual(["ses_p", "ses_q"]);
+  });
+
+  it("is resilient to a per-session fetch rejection", async () => {
+    (globalThis as unknown as { window: { api: Record<string, unknown> } })
+      .window.api.opencodeQuestions = async (sid: string) => {
+      if (sid === "ses_q") throw new Error("scoped fetch failed");
+      return [];
+    };
+    permissionsBySid["ses_p"] = [{ id: "p1" }];
+    await useStore.getState().replayChatAttention();
+    // ses_p still latched despite ses_q's question fetch throwing.
+    expect(useStore.getState().status.bui[1].attentionKind).toBe("permission");
   });
 });

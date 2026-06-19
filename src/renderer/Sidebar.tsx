@@ -784,23 +784,11 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 //   none                     → nothing rendered.
 function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
   if (!status) return null;
-  if (status.running) {
-    return (
-      <span
-        className="flex items-center gap-1 text-[10px] text-accent leading-none"
-        title={
-          status.subagents > 0
-            ? `Running · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
-            : "Running"
-        }
-      >
-        <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
-        {status.subagents > 0 && (
-          <span className="tabular-nums">·{status.subagents}</span>
-        )}
-      </span>
-    );
-  }
+  // Blocking attention (question/permission) OUTRANKS running. opencode keeps
+  // the session "busy" while it's blocked on a Question/permission tool, so a
+  // running-first check would mask the red ?/! behind a blue running dot for
+  // the entire time the user is being asked to act — exactly when the
+  // indicator matters most. The red dot wins; the user MUST act to unblock.
   if (status.attention) {
     const kind = status.attentionKind ?? "idle";
     if (kind === "question" || kind === "permission") {
@@ -819,11 +807,33 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
         </span>
       );
     }
+    // "idle" attention is a soft "go check" signal. If the window is also
+    // still running (rare race), prefer the running dot below; otherwise
+    // show the steady amber dot.
+    if (!status.running) {
+      return (
+        <span
+          className="w-1.5 h-1.5 rounded-full bg-amber-400"
+          title="Finished — click to view"
+        />
+      );
+    }
+  }
+  if (status.running) {
     return (
       <span
-        className="w-1.5 h-1.5 rounded-full bg-amber-400"
-        title="Finished — click to view"
-      />
+        className="flex items-center gap-1 text-[10px] text-accent leading-none"
+        title={
+          status.subagents > 0
+            ? `Running · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
+            : "Running"
+        }
+      >
+        <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+        {status.subagents > 0 && (
+          <span className="tabular-nums">·{status.subagents}</span>
+        )}
+      </span>
     );
   }
   return null;
