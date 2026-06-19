@@ -22,7 +22,7 @@
 // shared with the server, so both sides agree on "newer wins".
 
 import { request } from "node:http";
-import { ensurePresenceForward, PRESENCE_LOCAL_PORT } from "./opencode.js";
+import { ensureForward, ensurePresenceForward, PRESENCE_LOCAL_PORT } from "./opencode.js";
 import {
   extractSharedConfig,
   mergeSharedConfig,
@@ -94,10 +94,20 @@ function requestSharedConfig(
 
 // Make sure the -L forward exists, then run `fn` against it. Mirrors how
 // desktopPresence gates its POSTs. Swallows everything.
+//
+// GOTCHA: ensurePresenceForward() assumes the shared SSH ControlMaster is
+// ALREADY up (it just adds an -L channel to it) — it does NOT boot the master
+// itself. The opencode path normally calls ensureForward() first, but a
+// shared-config push can fire before any chat window opened the tunnel (e.g.
+// the user changes the Groq model on a fresh launch). Without the master,
+// `ssh -O forward` fails, the POST never reaches the box, and the edit silently
+// never syncs to mobile. So bring the master up here first. Both calls are
+// best-effort and swallow their own errors.
 async function withForward<T>(fn: () => Promise<T>): Promise<T | null> {
   const cfg = getConfig?.();
   if (!cfg || !cfg.host) return null;
   try {
+    await ensureForward(cfg).catch(() => {});
     await ensurePresenceForward(cfg);
     return await fn();
   } catch {
@@ -110,13 +120,25 @@ async function withForward<T>(fn: () => Promise<T>): Promise<T | null> {
 // edit), we pull it back in. Call after every desktop configUpdate that touched
 // a shareable field.
 export async function pushSharedConfig(): Promise<void> {
-  await withForward(async () => {
-    const cfg = getConfig?.();
-    if (!cfg) return;
-    const ours = extractSharedConfig(cfg);
-    const serverSnap = await requestSharedConfig("POST", ours);
-    if (serverSnap) maybeApplyPulled(serverSnap);
-  });
+  // One retry: the very first push after launch may race the ControlMaster /
+  // -L forward coming up, so the POST lands on a not-yet-open port and returns
+  // null. A short backoff lets the forward settle, then we try once more. If it
+  // still fails, the desktop's next save (or startup pull) reconciles — sync is
+  // eventually-consistent, never load-bearing.
+  const attempt = (): Promise<boolean> =>
+    withForward(async () => {
+      const cfg = getConfig?.();
+      if (!cfg) return false;
+      const ours = extractSharedConfig(cfg);
+      const serverSnap = await requestSharedConfig("POST", ours);
+      if (!serverSnap) return false;
+      maybeApplyPulled(serverSnap);
+      return true;
+    }).then((r) => r === true);
+
+  if (await attempt()) return;
+  await new Promise((r) => setTimeout(r, 1500));
+  await attempt();
 }
 
 // PULL: fetch the box snapshot and LWW-merge into desktop config. Call on
