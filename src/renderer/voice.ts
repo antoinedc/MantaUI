@@ -41,6 +41,14 @@ export type UseVoiceRecorderOptions = {
   // Optional error sink — defaults to logging. Use it to surface mic
   // permission denied / no key / network errors in the chat error banner.
   onError?: (err: Error) => void;
+  // Optional sink for the "recorded but nothing usable came back" case:
+  // the clip was too short (< ~1KB) OR Groq returned an empty transcript
+  // (silence / unintelligible). This is NOT an error — the pipeline worked,
+  // there was just nothing to insert. Without this the hook silently returns
+  // to idle and the user sees zero feedback after releasing the mic ("I
+  // pressed it, it went red, released, and nothing happened"). `reason`
+  // distinguishes the two so the UI can word the hint appropriately.
+  onEmpty?: (reason: "too-short" | "no-speech") => void;
   // Hard cap on a single press so a stuck press doesn't burn quota. Default
   // 60s — Groq's whisper-large-v3-turbo handles ~25MB / ~half hour per call,
   // but most conversational use is well under a minute.
@@ -213,6 +221,7 @@ function stopRecorder(
 export function useVoiceRecorder({
   onResult,
   onError,
+  onEmpty,
   maxDurationMs = 60_000,
   longPressMs = 500,
 }: UseVoiceRecorderOptions) {
@@ -238,6 +247,15 @@ export function useVoiceRecorder({
   const modeRef = useRef<VoiceMode>("dictate");
   const mimeRef = useRef<string>("");
   const cancelledRef = useRef<boolean>(false);
+  // Set when stop() is called during the "requesting" window (mic permission /
+  // getUserMedia still pending, recorder not yet constructed). The start path
+  // checks this right after getUserMedia resolves and immediately stops the
+  // freshly-started recorder so a quick press doesn't record to the 60s cap.
+  // Distinct from cancelledRef: a stop is a deliberate "send what I said",
+  // whereas cancel discards. (For a too-quick press there's no audio yet, so
+  // both behave the same in practice, but keeping them separate means a
+  // slightly-slow getUserMedia still captures the tail of speech.)
+  const stopRequestedRef = useRef<boolean>(false);
   const maxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Long-press promotion timer (W2). Cleared on stop/cancel/unmount.
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -290,6 +308,7 @@ export function useVoiceRecorder({
       }
       setLastError(null);
       cancelledRef.current = false;
+      stopRequestedRef.current = false;
       modeRef.current = initialMode;
       setMode(initialMode);
       // Schedule the dictate → command promotion. Only "dictate" presses
@@ -398,8 +417,10 @@ export function useVoiceRecorder({
         }
         const blob = new Blob(chunks, { type: mimeRef.current || "audio/webm" });
         if (blob.size < 1024) {
-          // Too short — Groq returns "audio_too_short". Don't bother.
+          // Too short — Groq returns "audio_too_short". Don't bother. Tell the
+          // UI so the user gets feedback instead of a silent no-op.
           setPhaseSync("idle");
+          onEmpty?.("too-short");
           return;
         }
         setPhaseSync("processing");
@@ -411,7 +432,10 @@ export function useVoiceRecorder({
           });
           const text = res.text.trim();
           if (!text) {
+            // Pipeline worked but Groq heard no speech (silence / too quiet /
+            // unintelligible). Surface it so the release isn't a silent no-op.
             setPhaseSync("idle");
+            onEmpty?.("no-speech");
             return;
           }
           if (modeRef.current === "command") {
@@ -442,6 +466,20 @@ export function useVoiceRecorder({
         return;
       }
       setPhaseSync("recording");
+      // The user may have already released DURING the getUserMedia await
+      // (stop() set stopRequestedRef before the recorder existed). Honor it
+      // now: stop the just-started recorder so onstop fires and transcribes
+      // the brief tail instead of running to maxDuration. A genuinely empty
+      // clip falls through to the onEmpty("too-short") notice in onstop.
+      if (stopRequestedRef.current) {
+        stopRequestedRef.current = false;
+        try {
+          recorder.stop();
+        } catch {
+          /* already inactive */
+        }
+        return;
+      }
       // Auto-stop after maxDurationMs so a stuck press doesn't burn quota.
       maxTimerRef.current = setTimeout(() => {
         if (recorderRef.current && recorderRef.current.state === "recording") {
@@ -453,7 +491,7 @@ export function useVoiceRecorder({
         }
       }, maxDurationMs);
     },
-    [onResult, reportError, maxDurationMs, longPressMs, clearLongPressTimer, setPhaseSync],
+    [onResult, onEmpty, reportError, maxDurationMs, longPressMs, clearLongPressTimer, setPhaseSync],
   );
 
   const stop = useCallback(() => {
@@ -465,6 +503,13 @@ export function useVoiceRecorder({
       } catch {
         /* ignore */
       }
+    } else if (phaseRef.current === "requesting") {
+      // Released before getUserMedia resolved — the recorder doesn't exist
+      // yet. Record the intent; the start path stops the recorder the instant
+      // it's constructed (see stopRequestedRef check after recorder.start()).
+      // Without this the recording would run unstoppable to the 60s cap and
+      // the release would appear to do nothing.
+      stopRequestedRef.current = true;
     }
   }, [clearLongPressTimer]);
 

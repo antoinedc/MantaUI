@@ -75,6 +75,7 @@ import {
   classifyScrollForPin,
   wasAtBottomBeforeCommit,
   shouldAbortForQueuedDrain,
+  isToolStepBoundary,
   isDrainAbortError,
   shouldAutoRename,
   countUserTurns,
@@ -1069,6 +1070,25 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       childRefetchTimers.current.set(childId, t);
     };
 
+    // Issue a drain-abort if a prompt is queued and we haven't already this
+    // turn. Called at every real mid-turn step boundary (a completed tool
+    // part) AND the legacy step.ended fallback. Idempotent: drainAbortRef
+    // gates re-entrancy so multiple boundaries before the abort POST lands
+    // only fire one abort. The abort flips the turn idle (via the swallowed
+    // MessageAbortedError / session.idle), and the [running, messageQueue]
+    // effect then submits the queued prompt as a fresh turn.
+    const maybeDrainQueuedPrompt = () => {
+      if (!shouldAbortForQueuedDrain(messageQueueRef.current.length, drainAbortRef.current)) {
+        return;
+      }
+      drainAbortRef.current = true;
+      void window.api.opencodeAbort(sessionId).catch(() => {
+        // Abort POST failed — re-arm so a later boundary can retry, and fall
+        // back to the slower idle-drain in the meantime.
+        drainAbortRef.current = false;
+      });
+    };
+
     const off = window.api.onOpencodeEvent((ev: OpencodeEvent) => {
       const props = ev.properties ?? {};
       // Per-session guard for transcript/state events (message.*, todo.*,
@@ -1323,23 +1343,14 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         // before the next step starts (often a tool call).
         flushPendingDeltas(true);
 
-        // Queued-prompt drain. If the user queued a prompt while this turn
-        // was running, don't wait for the whole (possibly many-step) turn to
-        // finish — abort the in-flight turn HERE, at the step boundary, and
-        // let the [running, messageQueue] effect submit the queued prompt as
-        // a fresh turn the moment the abort flips us idle. drainAbortRef
-        // guards re-entrancy (several step.ended events can arrive before the
-        // abort POST lands) and tags the resulting MessageAbortedError as
-        // ours so the session.error handler swallows it — the swap looks
-        // seamless (queue advances, new prompt processes; no abort banner).
-        if (shouldAbortForQueuedDrain(messageQueueRef.current.length, drainAbortRef.current)) {
-          drainAbortRef.current = true;
-          void window.api.opencodeAbort(sessionId).catch(() => {
-            // Abort POST failed — re-arm so a later step.ended can retry, and
-            // fall back to the slower idle-drain in the meantime.
-            drainAbortRef.current = false;
-          });
-        }
+        // Queued-prompt drain (FALLBACK path). The PRIMARY trigger is a
+        // completed tool part in the message.part.updated handler below,
+        // because `session.next.step.ended` is NOT emitted by the deployed
+        // opencode build (verified live — see isToolStepBoundary's note in
+        // chatUtils.ts). This block stays as a no-cost fallback for builds
+        // that DO emit step.ended: maybeDrainQueuedPrompt is idempotent
+        // (drainAbortRef guards re-entrancy), so having both triggers is safe.
+        maybeDrainQueuedPrompt();
 
         const tokens = props.tokens as TokenUsage | undefined;
         const cost = typeof props.cost === "number" ? props.cost : 0;
@@ -1498,6 +1509,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             return next;
           });
         }
+      }
+
+      // PRIMARY queued-prompt drain trigger. A tool part flipping to a
+      // terminal status ("completed"/"error") is the only reliable mid-turn
+      // step boundary the deployed opencode emits (session.next.step.ended
+      // never fires — see isToolStepBoundary). The model just finished a tool
+      // round-trip and is about to think/call again, so aborting here cleanly
+      // ends the turn and lets the queued prompt go out as a fresh one rather
+      // than waiting for the whole (possibly many-step) turn to complete.
+      if (ev.type === "message.part.updated" && isToolStepBoundary(props.part)) {
+        maybeDrainQueuedPrompt();
       }
 
       if (
@@ -2131,6 +2153,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       // Optimistically drop this request so the card disappears immediately;
       // the SSE permission.replied event will reconcile if anything diverges.
       setPermissions((prev) => prev.filter((p) => p.id !== requestId));
+      // Clear the sidebar attention dot immediately. We otherwise rely on the
+      // SSE permission.replied round-trip to clear it, but that event is
+      // occasionally missed (reconnect window, scoped-stream race) which
+      // leaves the red `!` stuck forever. Answering the card IS the user
+      // resolving the block, so clear locally and let SSE reconcile.
+      useStore.getState().setChatAttention(sessionId, null);
       try {
         // Pass `sessionId` so the reply lands on this session's workspace
         // scope — without it the server silently routes to the default
@@ -2163,6 +2191,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         return;
       }
       setQuestions((prev) => prev.filter((x) => x.id !== q.id));
+      // Clear the sidebar attention dot immediately (see replyPermission) —
+      // don't wait on the question.replied SSE round-trip, which can be
+      // missed and leave the red `?` stuck.
+      useStore.getState().setChatAttention(q.sessionID, null);
       try {
         // Pass sessionID so the main process scopes the reply with
         // ?directory= — opencode's /question endpoints are directory-scoped
@@ -2181,6 +2213,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     async (q: QuestionRequest) => {
       const que = q.requestId;
       setQuestions((prev) => prev.filter((x) => x.id !== q.id));
+      // Clear the sidebar attention dot immediately (see replyPermission).
+      useStore.getState().setChatAttention(q.sessionID, null);
       if (!que) return; // nothing to tell the server; just clear the card
       try {
         await window.api.opencodeQuestionReject(que, q.sessionID);
@@ -2349,19 +2383,50 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const prevRunningForRenameRef = useRef(false);
   const lastAutoRenamedTurnRef = useRef(0);
   const autoRenameInFlightRef = useRef(false);
+  // Armed on the turn-completed edge, consumed once the transcript settles.
+  // See the two-effect rationale below.
+  const pendingRenameRef = useRef(false);
 
   useEffect(() => {
     // New session → reset the per-session rename bookkeeping.
     lastAutoRenamedTurnRef.current = 0;
     autoRenameInFlightRef.current = false;
     prevRunningForRenameRef.current = false;
+    pendingRenameRef.current = false;
   }, [sessionId]);
 
+  // ARM on the running true→false edge. We must NOT evaluate the transcript
+  // here: `messages` is updated by a 300ms-debounced refetch (scheduleRefetch),
+  // so at the instant `running` flips the transcript is still STALE — it's
+  // missing the turn that just completed (or off-by-one on the count). The old
+  // single-effect design read `countUserTurns(messages)` right on the edge,
+  // saw the wrong count, returned, and then when the refetch landed the edge
+  // was already consumed (wasRunning=false) — so the rename never fired. This
+  // effect only flips the pending flag; the evaluation runs below once the
+  // settled transcript arrives.
   useEffect(() => {
     const wasRunning = prevRunningForRenameRef.current;
     prevRunningForRenameRef.current = running;
-    // Only act on the turn-completed edge.
-    if (!(wasRunning && !running)) return;
+    // Arm on the completed edge. Re-running on a new turn (false→true) DIS-arms
+    // any rename still pending from the prior turn — its window has closed and
+    // the next completed edge will re-arm with the newer transcript.
+    if (wasRunning && !running) pendingRenameRef.current = true;
+    else if (!wasRunning && running) pendingRenameRef.current = false;
+  }, [running]);
+
+  // EVALUATE when a rename is armed AND the transcript is settled. Runs on
+  // every `messages` change while not running, so it catches the post-edge
+  // refetch that carries the just-completed turn. We do NOT clear the pending
+  // flag on a no-match pass: the first pass after the edge sees a STALE
+  // transcript (refetch is 300ms-debounced) whose turn count hasn't advanced,
+  // so it legitimately won't match the cadence — leaving the flag armed lets
+  // the refetch's `messages` update re-trigger this effect with the settled
+  // count. The flag is cleared only when we actually fire a rename, or when a
+  // new turn starts (the disarm above). `lastAutoRenamedTurnRef` still bounds
+  // us to one rename per qualifying turn count.
+  useEffect(() => {
+    if (running) return;
+    if (!pendingRenameRef.current) return;
     if (!autoRenameSessions) return;
     if (!tmuxSession || windowIndex == null) return;
     if (autoRenameInFlightRef.current) return;
@@ -2369,6 +2434,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     const turns = countUserTurns(messages);
     if (!shouldAutoRename(turns)) return;
     if (turns <= lastAutoRenamedTurnRef.current) return; // already done this turn
+
+    pendingRenameRef.current = false;
 
     const input = buildTitlePromptInput(messages);
     if (!input) return;
@@ -2587,6 +2654,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     onError: (e) => {
       submitAfterTranscribeRef.current = false;
       setSendError(e.message);
+    },
+    onEmpty: (reason) => {
+      // Recorded fine but nothing usable came back. Don't use the red error
+      // banner (it's not an error); show a transient system notice so the
+      // user knows the mic worked and why nothing was inserted.
+      submitAfterTranscribeRef.current = false;
+      setSystemNotice(
+        reason === "too-short"
+          ? "Didn't catch that — the recording was too short. Hold a bit longer."
+          : "Didn't catch any speech. Try again, a little louder or closer to the mic.",
+      );
     },
   });
 
@@ -4919,12 +4997,25 @@ function MicButton({
   const recording = phase === "recording" || phase === "requesting";
   const busy = phase === "processing";
 
+  // Track press state with a REF, not the rendered `recording` prop. This is
+  // THE fix for "hold → red → release → nothing happens": the pointerup
+  // handler used to gate on `recording`, which is derived from the `phase`
+  // PROP. Phase transitions (idle→requesting→recording) are async React
+  // state updates in the parent hook; the button only re-renders once they
+  // propagate. If the user releases before `phase` has re-rendered to
+  // "recording" (fast on a snappy device, or always during the "requesting"
+  // window), the closure's `recording` was still false → `onStop()` was
+  // never called → the recorder ran until the 60s maxDuration cap, silently.
+  // A ref flips synchronously on pointerdown so release ALWAYS reaches stop.
+  const pressActiveRef = useRef(false);
+
   // Pointer-based handlers — single code path for mouse + touch + pen so
   // we don't have to worry about emulated mouse events firing AFTER touch
   // on iOS / Android WebView (the classic "double-tap" bug).
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (busy || recording) return;
+    if (busy || pressActiveRef.current) return;
     e.preventDefault();
+    pressActiveRef.current = true;
     if (floating) {
       // PTT FAB: always plain dictation, no command promotion.
       onStart("dictate", { promote: false });
@@ -4941,13 +5032,24 @@ function MicButton({
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (!recording) return;
+    if (!pressActiveRef.current) return;
+    pressActiveRef.current = false;
     e.preventDefault();
+    // Always stop (not cancel) on a deliberate release — even if `phase` is
+    // still "requesting" (the recorder hasn't been constructed yet). The
+    // hook's stop() handles the requesting-window case: it records a
+    // stop-requested intent so the in-flight getUserMedia tears down cleanly
+    // instead of recording to the cap. A genuine too-quick press surfaces as
+    // the onEmpty("too-short") notice, never silence.
     onStop();
   };
 
   const handlePointerCancel = () => {
-    if (recording) onCancel();
+    // pointercancel is an OS-level abort of the gesture (scroll took over,
+    // app backgrounded). That's the one case where discarding is right.
+    if (!pressActiveRef.current) return;
+    pressActiveRef.current = false;
+    onCancel();
   };
 
   const label = busy
@@ -4972,9 +5074,6 @@ function MicButton({
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerCancel}
-        onPointerLeave={(e) => {
-          if (e.buttons === 0 && recording) onCancel();
-        }}
         onContextMenu={(e) => e.preventDefault()}
         title={label}
         aria-label={label}
@@ -5001,12 +5100,6 @@ function MicButton({
       onPointerDown={handlePointerDown}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerCancel}
-      onPointerLeave={(e) => {
-        // Only treat as cancel if pointer is no longer pressed — leaving
-        // while held should keep recording (pointer-capture handles this
-        // on most browsers, but be defensive).
-        if (e.buttons === 0 && recording) onCancel();
-      }}
       onContextMenu={(e) => e.preventDefault()}
       title={label}
       aria-label={label}
