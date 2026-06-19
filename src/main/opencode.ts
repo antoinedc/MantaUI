@@ -1319,6 +1319,113 @@ export async function deleteSession(config: AppConfig, sessionId: string): Promi
   }
 }
 
+// ===== Auto-rename: generate a short title via a throwaway session =====
+//
+// opencode has no cheap one-shot completion endpoint (its only LLM path is a
+// session-bound prompt that streams over SSE). To derive a 1-2 word window
+// name using the user's OWN opencode model — without a Groq key and without
+// polluting the real chat transcript — we spin up a HIDDEN session in the same
+// directory, fire one prompt_async, poll its transcript for the assistant
+// reply, then delete the session.
+//
+// `instruction` is the fully-built summarizer prompt (the renderer builds it
+// from the live transcript via buildTitleInstruction so the prompt text has a
+// single source of truth). Returns the RAW model reply — the caller sanitizes
+// it into a window name (sanitizeGeneratedTitle in chatUtils.ts). Returns ""
+// on timeout / transport failure so the caller skips the rename rather than
+// surfacing an error: an auto-rename is a nicety, never worth a banner.
+//
+// Cost note: this is gated to every Nth turn (see AUTO_RENAME_EVERY_N_TURNS)
+// precisely because the create→prompt→poll→delete dance is ~9s and spends a
+// few hundred tokens. Do NOT call it per-turn.
+export async function generateSessionTitle(
+  config: AppConfig,
+  directory: string,
+  instruction: string,
+): Promise<string> {
+  await ensureForward(config);
+  const absDir = directory.startsWith("~")
+    ? await expandRemotePath(config, directory)
+    : directory;
+  // A short-lived model preference: reuse the session's configured default so
+  // the title matches the voice of the user's own model. null → opencode picks.
+  let model: { providerID: string; modelID: string } | null = null;
+  try {
+    model = await getDefaultModel(config);
+  } catch {
+    /* non-fatal — opencode falls back to its own default */
+  }
+
+  let sid: string | null = null;
+  try {
+    const createUrl = apiUrl(
+      config,
+      `/session?directory=${encodeURIComponent(absDir)}`,
+    );
+    const createRes = await fetch(createUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "bui-auto-title" }),
+    });
+    if (!createRes.ok) return "";
+    sid = ((await createRes.json()) as CreatedSession).id;
+
+    const promptBody: Record<string, unknown> = {
+      parts: [{ type: "text", text: instruction }],
+    };
+    if (model) {
+      promptBody.model = { providerID: model.providerID, modelID: model.modelID };
+    }
+    const promptUrl = apiUrl(
+      config,
+      `/session/${encodeURIComponent(sid)}/prompt_async?directory=${encodeURIComponent(absDir)}`,
+    );
+    const promptRes = await fetch(promptUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(promptBody),
+    });
+    if (!promptRes.ok) return "";
+
+    // Poll the transcript for the assistant's text. Bounded at ~30s; the title
+    // model is tiny so this normally resolves in <10s.
+    const msgUrl = apiUrl(config, `/session/${encodeURIComponent(sid)}/message`);
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const r = await fetch(msgUrl);
+      if (!r.ok) continue;
+      const msgs = (await r.json()) as OpencodeMessage[];
+      const text = extractAssistantText(msgs);
+      if (text) return text;
+    }
+    return "";
+  } catch {
+    return "";
+  } finally {
+    // Best-effort cleanup — never leave the hidden session behind.
+    if (sid) {
+      try {
+        await deleteSession(config, sid);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+// Concatenate all assistant text parts in a transcript. Used only by
+// generateSessionTitle to read the throwaway session's reply.
+function extractAssistantText(msgs: OpencodeMessage[]): string {
+  const out: string[] = [];
+  for (const m of msgs) {
+    if (m.info.role !== "assistant") continue;
+    for (const p of m.parts) {
+      if (p.type === "text" && typeof p.text === "string") out.push(p.text);
+    }
+  }
+  return out.join("").trim();
+}
+
 // ===== SSE event subscription =====
 //
 // Returns an async iterator of parsed events. Caller calls dispose() to abort.

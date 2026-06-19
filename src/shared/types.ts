@@ -41,6 +41,14 @@ export type AppConfig = {
   // so tool calls run without prompting. Closest analog to Claude Code's
   // --dangerously-skip-permissions. Off by default.
   chatAutoAllow?: boolean;
+  // Auto-rename chat-mode tmux windows from the conversation. When true,
+  // ChatPanel periodically (every Nth user turn) asks opencode to summarize
+  // the recent transcript into a 1-2 word title and renames the window via
+  // tmuxRenameWindow. Uses a throwaway opencode session (the user's own model;
+  // no Groq key needed). ALWAYS overwrites the current name, including names
+  // set by hand — so it's OFF by default and opt-in via Settings. See the
+  // "Auto-rename" notes in AGENTS.md.
+  autoRenameSessions?: boolean;
   // Global default model for all new and cleared chat sessions. Stored as
   // { providerID, modelID } so the per-session localStorage override and
   // this setting use the same shape. When absent, opencode picks its own
@@ -80,6 +88,15 @@ export type AppConfig = {
   // classifier in chatUtils.ts can't match a command-mode utterance. Default
   // "llama-3.1-8b-instant" — JSON-mode capable, ~$0.0001/call, ~300ms.
   voiceCommandModel?: string;
+  // ----- Cross-device shared-settings sync (LWW) -----
+  // Epoch-ms timestamp of the last change to a SHAREABLE field (the
+  // device-independent subset in src/shared/sharedConfig.mjs — voice/Groq,
+  // defaultModel, chatAutoAllow, autoRenameSessions, cacheTtl). Desktop and
+  // the mobile server each stamp this on a shareable change and compare it to
+  // resolve "latest wins" when syncing. NOT bumped by device-local edits
+  // (host/user/transport/projects/ports), so a desktop-only host change never
+  // claims to be a newer shared-config snapshot. Absent = never synced.
+  configUpdatedAt?: number;
 };
 
 export type TransportInfo = {
@@ -233,6 +250,12 @@ export const IPC = {
   // path is only set for file-based detections (Desktop watcher).
   screenshotDetected: "screenshot:detected",
 
+  // Cross-device shared-config sync pulled a newer snapshot from the mobile
+  // server into desktop config. Renderer re-applies it to the store so the
+  // Settings UI reflects the change without a manual refresh. Payload: the
+  // full AppConfig.
+  configChanged: "config:changed",
+
   // ---- opencode chat-mode ----
   // Fetch full transcript for a session id (one-shot HTTP call on the remote).
   opencodeMessages: "opencode:messages",
@@ -284,6 +307,11 @@ export const IPC = {
   // @bui-session-id user-option. The renderer notices the new id and
   // unmounts/remounts ChatPanel.
   opencodeClearSession: "opencode:clear-session",
+  // Auto-rename: generate a short 1-2 word title for a session by spawning a
+  // throwaway opencode session, prompting it to summarize the conversation,
+  // then deleting it. Returns the RAW model reply (renderer sanitizes). Used
+  // by ChatPanel when AppConfig.autoRenameSessions is enabled.
+  opencodeGenerateTitle: "opencode:generate-title",
 
   // ---- voice (Groq STT + lightweight classifier) ----
   // Renderer captures audio via MediaRecorder, ships the ArrayBuffer to

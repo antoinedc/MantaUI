@@ -66,6 +66,7 @@ import {
   findFiles as opencodeFindFiles,
   runCommand as opencodeRunCommand,
   createSession as opencodeCreateSession,
+  generateSessionTitle as opencodeGenerateTitle,
   eventTunnelRestart,
   teardownEventTunnel,
   type PromptModel,
@@ -82,11 +83,17 @@ import {
   startDesktopPresence,
   stopDesktopPresence,
 } from "./desktopPresence.js";
+import {
+  initSharedConfigSync,
+  pushSharedConfig,
+  pullSharedConfig,
+} from "./sharedConfigSync.js";
 // Plain-JS modules shared with the mobile server (src/server/*.mjs). The
 // bundler resolves .mjs imports here; main.process never sees them as TS.
 // Types live in groq.d.mts. Keep them dep-free so they stay portable across
 // both transports.
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
+import { patchTouchesSharedConfig } from "../shared/sharedConfig.mjs";
 import {
   IPC,
   type AppConfig,
@@ -758,6 +765,15 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   config = loadConfig();
+  // Cross-device shared-settings sync: read the live config, and when a newer
+  // snapshot is pulled from the mobile server, commit it + tell the renderer.
+  initSharedConfigSync({
+    getConfig: () => config,
+    applyPulled: (snap) => {
+      const next = commit(snap as Partial<AppConfig>);
+      mainWindow?.webContents.send(IPC.configChanged, next);
+    },
+  });
   registerHandlers();
   createWindow();
   // Defer poller start until renderer is ready to receive events.
@@ -770,6 +786,8 @@ app.whenReady().then(() => {
     // Report desktop focus to the mobile server so it suppresses redundant
     // mobile "done" pushes while the user is active on desktop.
     startDesktopPresence(() => config);
+    // Pull any newer shared settings made on mobile while desktop was closed.
+    void pullSharedConfig().catch(() => {});
   });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -823,6 +841,14 @@ function registerHandlers(): void {
     if ("host" in patch || "user" in patch || "identityFile" in patch) {
       invalidateTransport();
       invalidateOpencodeForward();
+    }
+    // If this patch touches a SHAREABLE field, stamp configUpdatedAt so the
+    // cross-device sync treats this as the newer snapshot (LWW). Mutating
+    // `patch` here means commit() persists the timestamp too. Device-local
+    // edits (host/projects/ports/…) do NOT bump the clock.
+    const touchesShared = patchTouchesSharedConfig(patch);
+    if (touchesShared) {
+      (patch as AppConfig).configUpdatedAt = Date.now();
     }
     const next = commit(patch);
     if ("host" in patch || "user" in patch || "identityFile" in patch) {
@@ -888,6 +914,11 @@ function registerHandlers(): void {
         console.error("Failed to write skill registry URLs to remote opencode.jsonc:", e);
       }
     }
+    // Push the shareable subset to the mobile server so the other device picks
+    // it up (e.g. set the Groq STT key on desktop, get it on mobile). Fire-and-
+    // forget over the existing -L 18787 forward; the POST response is the
+    // post-merge snapshot, so a racing mobile edit is pulled back in.
+    if (touchesShared) void pushSharedConfig().catch(() => {});
     return next;
   });
 
@@ -1311,6 +1342,15 @@ function registerHandlers(): void {
         sess.id,
       );
       return { newSessionId: sess.id, projects: await listProjects() };
+    },
+  );
+
+  // Auto-rename: derive a short title for a session via a throwaway opencode
+  // session. Returns the RAW model reply; the renderer sanitizes + renames.
+  ipcMain.handle(
+    IPC.opencodeGenerateTitle,
+    async (_e, input: { directory: string; instruction: string }) => {
+      return opencodeGenerateTitle(config, input.directory, input.instruction);
     },
   );
 

@@ -280,6 +280,84 @@ export async function deleteSessionRaw(sessionId) {
   }
 }
 
+// Auto-rename: generate a 1-2 word title via a THROWAWAY session. Mirror of
+// desktop generateSessionTitle in src/main/opencode.ts — see that comment for
+// the full rationale (opencode has no one-shot completion endpoint, so we
+// create→prompt→poll→delete a hidden session). Returns the RAW model reply;
+// the renderer sanitizes it. Returns "" on timeout/failure so the caller
+// skips the rename rather than erroring.
+export async function generateSessionTitle({ directory, instruction }) {
+  const absDir = expandTilde(directory);
+  let model = null;
+  try {
+    model = await getDefaultModel();
+  } catch {
+    /* non-fatal */
+  }
+
+  let sid = null;
+  try {
+    const createRes = await fetch(
+      apiUrl(`/session?directory=${encodeURIComponent(absDir)}`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "bui-auto-title" }),
+      },
+    );
+    if (!createRes.ok) return "";
+    sid = (await createRes.json()).id;
+
+    const promptBody = { parts: [{ type: "text", text: instruction }] };
+    if (model) {
+      promptBody.model = { providerID: model.providerID, modelID: model.modelID };
+    }
+    const promptRes = await fetch(
+      apiUrl(
+        `/session/${encodeURIComponent(sid)}/prompt_async?directory=${encodeURIComponent(absDir)}`,
+      ),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(promptBody),
+      },
+    );
+    if (!promptRes.ok) return "";
+
+    const msgUrl = apiUrl(`/session/${encodeURIComponent(sid)}/message`);
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const r = await fetch(msgUrl);
+      if (!r.ok) continue;
+      const msgs = await r.json();
+      const text = extractAssistantText(msgs);
+      if (text) return text;
+    }
+    return "";
+  } catch {
+    return "";
+  } finally {
+    if (sid) {
+      try {
+        await deleteSessionRaw(sid);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+function extractAssistantText(msgs) {
+  const out = [];
+  for (const m of msgs ?? []) {
+    if (m?.info?.role !== "assistant") continue;
+    for (const p of m.parts ?? []) {
+      if (p?.type === "text" && typeof p.text === "string") out.push(p.text);
+    }
+  }
+  return out.join("").trim();
+}
+
 // ---------------------------------------------------------------------------
 // Permission flow (Write/Edit/Bash approval)
 // ---------------------------------------------------------------------------

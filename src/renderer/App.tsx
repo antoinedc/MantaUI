@@ -71,6 +71,18 @@ export function App() {
     return off;
   }, []);
 
+  // Cross-device shared settings: when the desktop pulls a newer config
+  // snapshot from the mobile server (e.g. you set the Groq STT key on your
+  // phone), main pushes the merged AppConfig down here so the store + Settings
+  // reflect it live. Guarded — the mobile shim's onConfigChanged is a no-op.
+  useEffect(() => {
+    if (!window.api.onConfigChanged) return;
+    const off = window.api.onConfigChanged((cfg) => {
+      useStore.getState().applyConfig(cfg);
+    });
+    return off;
+  }, []);
+
   // Sidebar status for chat-mode windows. The PTY-pane poller
   // (src/main/status.ts) can't see chat-mode state — the holder pane
   // runs `sleep infinity`, so `capture-pane` returns nothing claude-

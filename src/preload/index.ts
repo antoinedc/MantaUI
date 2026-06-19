@@ -100,6 +100,14 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.screenshotDetected, listener);
   },
 
+  // Cross-device shared-config sync pulled a newer snapshot from mobile into
+  // desktop config; the store re-applies it so Settings reflects the change.
+  onConfigChanged: (cb: (cfg: AppConfig) => void): (() => void) => {
+    const listener = (_: unknown, cfg: AppConfig) => cb(cfg);
+    ipcRenderer.on(IPC.configChanged, listener);
+    return () => ipcRenderer.removeListener(IPC.configChanged, listener);
+  },
+
   uploadFiles: (input: { projectName: string; localPaths: string[] }): Promise<string[]> =>
     ipcRenderer.invoke(IPC.uploadFiles, input),
   uploadBuffer: (input: { projectName: string; filename: string; buffer: ArrayBuffer }): Promise<string> =>
@@ -268,6 +276,14 @@ const api = {
     title: string;
   }): Promise<{ newSessionId: string; projects: Project[] }> =>
     ipcRenderer.invoke(IPC.opencodeClearSession, input),
+
+  // Auto-rename: generate a short title via a throwaway opencode session.
+  // Returns the RAW model reply ("" on timeout/failure); caller sanitizes.
+  opencodeGenerateTitle: (input: {
+    directory: string;
+    instruction: string;
+  }): Promise<string> =>
+    ipcRenderer.invoke(IPC.opencodeGenerateTitle, input),
 };
 
 contextBridge.exposeInMainWorld("api", api);

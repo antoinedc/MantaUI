@@ -55,6 +55,9 @@ type State = {
   transportPreference: "auto" | "mosh" | "ssh";
   uploadCleanupHours: number;
   chatAutoAllow: boolean;
+  // Auto-rename chat-mode windows from the conversation (opt-in). See
+  // AppConfig.autoRenameSessions.
+  autoRenameSessions: boolean;
   // Agent → laptop push trust flag. When true, files the AI drops in its
   // remote outbox are pulled to the downloads dir without confirmation.
   allowAgentPush: boolean;
@@ -128,6 +131,7 @@ type State = {
   // Owning window is resolved from `sessionId` via `resolveSessionOwner`.
   setChatSubagents: (sessionId: string, count: number) => void;
   setChatAutoAllow: (v: boolean) => Promise<void>;
+  setAutoRenameSessions: (v: boolean) => Promise<void>;
   setScreenshotToast: (t: ScreenshotToast | null) => void;
   setAgentFileToast: (t: AgentFileReady | null) => void;
 };
@@ -140,6 +144,7 @@ export const useStore = create<State>((set, get) => ({
   transportPreference: "auto",
   uploadCleanupHours: 1,
   chatAutoAllow: false,
+  autoRenameSessions: false,
   allowAgentPush: false,
   downloadsDir: "",
   defaultModel: null,
@@ -216,6 +221,7 @@ export const useStore = create<State>((set, get) => ({
       transportPreference: c.transport ?? "auto",
       uploadCleanupHours: c.uploadCleanupHours ?? 1,
       chatAutoAllow: c.chatAutoAllow ?? false,
+      autoRenameSessions: c.autoRenameSessions ?? false,
       allowAgentPush: c.allowAgentPush ?? false,
       downloadsDir: c.downloadsDir ?? "",
       defaultModel: c.defaultModel ?? null,
@@ -231,6 +237,12 @@ export const useStore = create<State>((set, get) => ({
     const next = await window.api.configUpdate({ chatAutoAllow: v });
     // Reconcile with what main actually saved (handles error/reject paths).
     set({ chatAutoAllow: next.chatAutoAllow ?? false });
+  },
+
+  setAutoRenameSessions: async (v) => {
+    set({ autoRenameSessions: v });
+    const next = await window.api.configUpdate({ autoRenameSessions: v });
+    set({ autoRenameSessions: next.autoRenameSessions ?? false });
   },
 
   setScreenshotToast: (t) => set({ screenshotToast: t }),

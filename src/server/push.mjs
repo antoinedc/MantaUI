@@ -334,6 +334,23 @@ export function classifyPushEvent(evt, ctx) {
 }
 
 /**
+ * Pure: should a "done" push be dropped because its session can't be resolved
+ * to a tmux chat window (null label)? Such a session is a SUBAGENT child (it
+ * inherited the parent's directory, runs on the same scoped /event stream, but
+ * has no `@bui-session-id` of its own) or a stale orphan — there is no chat for
+ * the user to land on, and the push would be the nameless "Claude is done" that
+ * deep-links nowhere. Only "done" is gated; permission/question/error must
+ * still escalate even for an unresolved session.
+ *
+ * @param {{kind?: string}|null} payload  classifyPushEvent result
+ * @param {string|null} label             resolved "workspace / session-name", or null
+ * @returns {boolean}
+ */
+export function shouldSuppressUnresolvedDone(payload, label) {
+  return payload?.kind === "done" && !label;
+}
+
+/**
  * Build the "workspace / session-name" notification title for an opencode
  * sessionID by scanning tmux projects (workspace = tmux session, session-name
  * = window name). Pure — takes the already-fetched projects list so it can be
@@ -470,6 +487,25 @@ export async function firePush(evt) {
     if (type === "session.error" && sid) _pending.delete(sid);
 
     if (!payload) return;
+
+    // Suppress an unresolvable "done": no tmux window stamps this sessionID
+    // (label is null), so it's a SUBAGENT child session (it inherited the
+    // parent's directory and runs on the same scoped /event stream) or a stale
+    // orphan — NOT a chat the user opened. Such a push has no workspace/name
+    // (generic "Claude is done") and deep-links to a sessionId the app can't
+    // find, dumping the user on the session list. The desktop renderer hides
+    // subagent idles via its childSessionIds allowlist; the server pump has no
+    // parent/child awareness, so the null-label test is our proxy: if we can't
+    // name the chat, the user has nothing actionable to land on. Permission /
+    // question / error stay un-gated below — those are blocking and must
+    // escalate even for an unresolved session.
+    if (shouldSuppressUnresolvedDone(payload, label)) {
+      console.log(
+        `[push] done sid=${sid} suppressed=unresolvable-session ` +
+          `(no tmux @bui-session-id → subagent/orphan)`,
+      );
+      return;
+    }
 
     // Multi-device suppression: if the user is active on desktop, don't buzz
     // their phone for a "done". Only "done" is suppressed — permission /

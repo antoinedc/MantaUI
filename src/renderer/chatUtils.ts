@@ -1421,3 +1421,139 @@ export function isDrainAbortError(
 ): boolean {
   return draining && errName === "MessageAbortedError";
 }
+
+// ── Auto-rename session ───────────────────────────────────────────────────
+// When `autoRenameSessions` is enabled, ChatPanel periodically asks opencode
+// to summarize the recent conversation into a 1-2 word tmux window name (see
+// the "Auto-rename" section in AGENTS.md). These pure helpers make the
+// trigger cadence, the prompt input, and the title sanitization testable
+// without spinning up a session.
+
+// How many completed user turns between auto-rename attempts. The summarize
+// path spawns a throwaway opencode session (~9s), so we don't run it every
+// turn — every Nth turn keeps the cost occasional while still tracking topic
+// shifts within a long session.
+export const AUTO_RENAME_EVERY_N_TURNS = 5;
+
+// Hard cap on characters fed to the summarizer. The model only needs the gist;
+// shipping the whole transcript wastes tokens and latency. We take the most
+// RECENT text so the name tracks where the work has moved, not where it began.
+const TITLE_INPUT_MAX_CHARS = 2000;
+
+// Max length of the final window name. tmux truncates long names in the status
+// line and our sidebar; a 1-2 word title should never approach this, but we
+// clamp defensively so a misbehaving model can't write an essay into the name.
+const TITLE_MAX_CHARS = 24;
+
+/**
+ * Should an auto-rename fire at this user-turn count? True on every Nth
+ * completed user turn (1-indexed), i.e. turns 5, 10, 15… for N=5. Turn 0
+ * (no user turns yet) never fires. Pure so the cadence is unit-testable.
+ */
+export function shouldAutoRename(
+  userTurnCount: number,
+  everyN: number = AUTO_RENAME_EVERY_N_TURNS,
+): boolean {
+  if (everyN <= 0) return false;
+  if (userTurnCount <= 0) return false;
+  return userTurnCount % everyN === 0;
+}
+
+/**
+ * Count completed user turns in a transcript. A "turn" is a user-role message
+ * that carries at least one non-synthetic, non-ignored text part — synthetic
+ * messages (command expansions, tool stubs) and empty placeholders don't
+ * count toward the rename cadence.
+ */
+export function countUserTurns(
+  messages: { info: { role: string }; parts: OpencodePartLike[] }[] | null,
+): number {
+  if (!messages) return 0;
+  let n = 0;
+  for (const m of messages) {
+    if (m.info.role !== "user") continue;
+    if (extractTextFromParts(m.parts).trim().length > 0) n += 1;
+  }
+  return n;
+}
+
+// Minimal structural shape we read off a part — avoids importing OpencodePart
+// here and keeps the helpers usable from tests with plain literals.
+type OpencodePartLike = {
+  type: string;
+  text?: string;
+  synthetic?: boolean;
+  ignored?: boolean;
+};
+
+function extractTextFromParts(parts: OpencodePartLike[]): string {
+  const out: string[] = [];
+  for (const p of parts) {
+    if (p.type !== "text" && p.type !== "reasoning") continue;
+    if (p.synthetic || p.ignored) continue;
+    if (typeof p.text === "string" && p.text.trim()) out.push(p.text);
+  }
+  return out.join("\n");
+}
+
+/**
+ * Build the summarizer input string from a transcript: the most recent
+ * user+assistant text, oldest-first, truncated to TITLE_INPUT_MAX_CHARS by
+ * KEEPING THE TAIL (the latest work). Returns "" when there's nothing to
+ * summarize (caller should skip the rename). Pure + tested.
+ */
+export function buildTitlePromptInput(
+  messages: { info: { role: string }; parts: OpencodePartLike[] }[] | null,
+): string {
+  if (!messages) return "";
+  const lines: string[] = [];
+  for (const m of messages) {
+    const role = m.info.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const text = extractTextFromParts(m.parts).trim();
+    if (!text) continue;
+    lines.push(`${role === "user" ? "User" : "Assistant"}: ${text}`);
+  }
+  const joined = lines.join("\n");
+  if (joined.length <= TITLE_INPUT_MAX_CHARS) return joined;
+  // Keep the tail — the most recent work is what the name should reflect.
+  return joined.slice(joined.length - TITLE_INPUT_MAX_CHARS);
+}
+
+/**
+ * Sanitize a model-generated title into a safe 1-2 word tmux window name.
+ * Strips surrounding quotes/markdown/punctuation, collapses whitespace,
+ * takes at most the first two words, lowercases, and clamps length. Returns
+ * "" when nothing usable remains (caller MUST skip the rename rather than
+ * blank the window name — the rename IPC rejects empty names anyway). Pure +
+ * tested.
+ */
+export function sanitizeGeneratedTitle(raw: string | null | undefined): string {
+  if (!raw) return "";
+  let s = raw.trim();
+  // Drop a leading "Title:" / "Name:" preamble the model sometimes adds.
+  s = s.replace(/^\s*(title|name)\s*[:\-]\s*/i, "");
+  // Strip markdown emphasis / code fences / surrounding quotes.
+  s = s.replace(/[`*_#]/g, "");
+  s = s.replace(/^["'“”‘’]+|["'“”‘’]+$/g, "");
+  // Keep only the first line (models occasionally explain on a second line).
+  s = s.split(/\r?\n/)[0] ?? "";
+  // Drop trailing sentence punctuation.
+  s = s.replace(/[.!?,;:]+$/g, "");
+  // Collapse internal whitespace, take at most two words.
+  const words = s.trim().split(/\s+/).filter(Boolean).slice(0, 2);
+  let out = words.join(" ").toLowerCase().trim();
+  if (out.length > TITLE_MAX_CHARS) out = out.slice(0, TITLE_MAX_CHARS).trim();
+  return out;
+}
+
+// The instruction sent to the throwaway opencode session. Kept here (not in
+// the main process) so the renderer and tests share one source of truth.
+export function buildTitleInstruction(conversation: string): string {
+  return (
+    "You are titling a work session. Reply with ONLY a 1-2 word lowercase " +
+    "title (no punctuation, no quotes, no explanation) that summarizes the " +
+    "current focus of this conversation:\n\n" +
+    conversation
+  );
+}
