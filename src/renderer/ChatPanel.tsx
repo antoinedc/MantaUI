@@ -860,6 +860,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     // when it lands. `refreshing` drives the footer hint so the staleness is
     // visible during the gap.
     setRefreshing(true);
+    // Watchdog: opencodeMessages can hang indefinitely (wedged main-process
+    // IPC, a stalled SSH ControlMaster, or opencode never responding on a
+    // huge transcript). When it never settles, neither the `.then` nor the
+    // `.catch` below fires, so `refreshing` would stay true forever with the
+    // "↻ refreshing…" hint stuck on and no way to clear it without switching
+    // sessions. Cap the hint at 60s — well past the 20–30s worst case — and
+    // clear it so the footer stops lying about an in-flight fetch.
+    const refreshWatchdog = setTimeout(() => {
+      if (!cancelled) setRefreshing(false);
+    }, 60_000);
     window.api
       .opencodeMessagesCached(sessionId)
       .then((cached) => {
@@ -876,6 +886,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     window.api
       .opencodeMessages(sessionId)
       .then((m) => {
+        clearTimeout(refreshWatchdog);
         if (cancelled) return;
         setMessages(m);
         setRefreshing(false);
@@ -906,6 +917,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         // (applyQuestionEvent) which carries the que_ as requestId.
       })
       .catch((e) => {
+        clearTimeout(refreshWatchdog);
         if (!cancelled) {
           setRefreshing(false);
           // If cached painted earlier, keep showing it and surface the error
@@ -957,6 +969,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     return () => {
       cancelled = true;
       clearInterval(branchPoll);
+      clearTimeout(refreshWatchdog);
     };
   }, [sessionId, cwd]);
 

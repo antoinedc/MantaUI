@@ -473,6 +473,83 @@ function apiUrl(config: AppConfig, path: string): string {
   return `http://127.0.0.1:${localPort(config)}${path}`;
 }
 
+// ===== Side-channel backpressure =====
+//
+// Every side-channel HTTP call (permissions, questions, prompt, models, …)
+// rides the `-L` forward over the SHARED ssh ControlMaster. undici opens a
+// fresh TCP socket per concurrent fetch to 127.0.0.1:<port>, and each becomes
+// a multiplexed ssh channel. With many sessions mounted, ChatPanel fans these
+// out unbounded; once concurrent channels exceed the remote sshd MaxSessions,
+// sshd refuses new ones and in-flight requests die with
+// `SocketError: other side closed` / `ssh exited 255` — the user sees the
+// send spinner hang forever and live updates stop. Cap concurrency here so the
+// client can never flood the mux, independent of how many sessions are open.
+// (Remote MaxSessions was also raised to 50; this is the belt to that braces.)
+//
+// The cap is a CEILING against mux exhaustion, not a throttle on normal
+// traffic. During an active turn, ChatPanel fires a full-transcript refetch
+// (listMessages) on every message.part.updated/.updated, and with several
+// chat panels streaming at once those refetches contend for slots. A cap of 6
+// queued them behind each other and made streaming visibly lag. 16 stays
+// comfortably under the remote MaxSessions=50 (leaving headroom for the SSE
+// streams and ensureForward's own channels) while no longer starving the
+// refetch storm — the regression that made live updates feel slow.
+const FORWARD_FETCH_MAX_CONCURRENCY = 16;
+let forwardFetchInFlight = 0;
+const forwardFetchQueue: Array<() => void> = [];
+
+function acquireForwardSlot(): Promise<void> {
+  if (forwardFetchInFlight < FORWARD_FETCH_MAX_CONCURRENCY) {
+    forwardFetchInFlight++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => forwardFetchQueue.push(resolve));
+}
+
+function releaseForwardSlot(): void {
+  const next = forwardFetchQueue.shift();
+  if (next) {
+    // Hand the slot directly to the next waiter; count stays unchanged.
+    next();
+  } else {
+    forwardFetchInFlight--;
+  }
+}
+
+// Drop-in replacement for `fetch(apiUrl(...))` that is gated by the
+// concurrency semaphore above. Same signature/return as global fetch.
+//
+// A hung request is catastrophic here, not merely slow: the SSH ControlMaster
+// can silently stall a forwarded connection (mux channel exhaustion, a dropped
+// link), and a `fetch` with no signal then waits FOREVER. Because the request
+// holds its semaphore slot until the `finally` runs, six such hangs exhaust
+// FORWARD_FETCH_MAX_CONCURRENCY and every subsequent forwardFetch deadlocks at
+// acquireForwardSlot() — the whole side channel wedges with no recovery (this
+// is what left the chat panel's "↻ refreshing…" hint stuck and unclearable).
+// So every request gets a hard timeout that aborts it, which releases the slot.
+// 90s is well past opencode's worst-case ~35s transcript fetch but bounded, so
+// a genuinely dead connection surfaces as an error the caller can handle
+// instead of an eternal pending promise. Callers that pass their own signal
+// (none today on this path — SSE streams use raw fetch) are still aborted by
+// whichever fires first.
+const FORWARD_FETCH_TIMEOUT_MS = 90_000;
+
+async function forwardFetch(
+  url: string,
+  init?: Parameters<typeof fetch>[1],
+): Promise<Response> {
+  await acquireForwardSlot();
+  const timeoutSignal = AbortSignal.timeout(FORWARD_FETCH_TIMEOUT_MS);
+  const signal = init?.signal
+    ? AbortSignal.any([init.signal, timeoutSignal])
+    : timeoutSignal;
+  try {
+    return await fetch(url, { ...init, signal });
+  } finally {
+    releaseForwardSlot();
+  }
+}
+
 export type CreatedSession = {
   id: string;
   title: string;
@@ -565,7 +642,7 @@ async function fetchSessionDirectory(
 ): Promise<string | null> {
   await ensureForward(config);
   try {
-    const res = await fetch(apiUrl(config, `/session/${encodeURIComponent(sessionId)}`));
+    const res = await forwardFetch(apiUrl(config, `/session/${encodeURIComponent(sessionId)}`));
     if (!res.ok) return null;
     const body = (await res.json()) as { directory?: unknown };
     return typeof body.directory === "string" ? body.directory : null;
@@ -637,7 +714,7 @@ export async function createSession(
   const url = apiUrl(config, `/session?directory=${encodeURIComponent(absDir)}`);
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await forwardFetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title }),
@@ -669,7 +746,7 @@ export async function listMessages(
 ): Promise<OpencodeMessage[]> {
   await ensureForward(config);
   const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/message`);
-  const res = await fetch(url);
+  const res = await forwardFetch(url);
   if (!res.ok) {
     throw new Error(`opencode listMessages ${res.status}: ${await res.text()}`);
   }
@@ -762,7 +839,7 @@ export async function sendPrompt(
     body.model = { providerID: model.providerID, modelID: model.modelID };
     if (model.variant) body.variant = model.variant;
   }
-  const res = await fetch(url, {
+  const res = await forwardFetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -785,7 +862,7 @@ export async function abortSession(config: AppConfig, sessionId: string): Promis
   await ensureForward(config);
   const dirQ = await getSessionDirectoryQuery(config, sessionId);
   const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/abort${dirQ}`);
-  const res = await fetch(url, { method: "POST" });
+  const res = await forwardFetch(url, { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode abortSession ${res.status}: ${await res.text()}`);
   }
@@ -827,7 +904,7 @@ export async function listPermissions(
   const dirQ = sessionId
     ? await getSessionDirectoryQuery(config, sessionId)
     : "";
-  const res = await fetch(apiUrl(config, `/permission${dirQ}`));
+  const res = await forwardFetch(apiUrl(config, `/permission${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listPermissions ${res.status}: ${await res.text()}`);
   }
@@ -853,7 +930,7 @@ export async function replyPermission(
     config,
     `/permission/${encodeURIComponent(requestId)}/reply${dirQ}`,
   );
-  const res = await fetch(url, {
+  const res = await forwardFetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ reply }),
@@ -909,7 +986,7 @@ export async function listQuestions(
   const dirQ = sessionId
     ? await getSessionDirectoryQuery(config, sessionId)
     : "";
-  const res = await fetch(apiUrl(config, `/question${dirQ}`));
+  const res = await forwardFetch(apiUrl(config, `/question${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listQuestions ${res.status}: ${await res.text()}`);
   }
@@ -932,7 +1009,7 @@ export async function replyQuestion(
     config,
     `/question/${encodeURIComponent(requestId)}/reply${dirQ}`,
   );
-  const res = await fetch(url, {
+  const res = await forwardFetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ answers }),
@@ -955,7 +1032,7 @@ export async function rejectQuestion(
     config,
     `/question/${encodeURIComponent(requestId)}/reject${dirQ}`,
   );
-  const res = await fetch(url, { method: "POST" });
+  const res = await forwardFetch(url, { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode rejectQuestion ${res.status}: ${await res.text()}`);
   }
@@ -995,7 +1072,7 @@ export async function getDefaultModel(
 
   // Configured default wins. `/config.model` is "<providerID>/<modelID>".
   try {
-    const cfgRes = await fetch(apiUrl(config, "/config"));
+    const cfgRes = await forwardFetch(apiUrl(config, "/config"));
     if (cfgRes.ok) {
       const cfg = (await cfgRes.json()) as { model?: string };
       const slash = cfg.model?.indexOf("/") ?? -1;
@@ -1010,7 +1087,7 @@ export async function getDefaultModel(
     /* fall through to provider catalog default */
   }
 
-  const res = await fetch(apiUrl(config, "/provider"));
+  const res = await forwardFetch(apiUrl(config, "/provider"));
   if (!res.ok) return null;
   type R = { connected?: string[]; default?: Record<string, string> };
   const data = (await res.json()) as R;
@@ -1054,7 +1131,7 @@ export async function listModels(config: AppConfig): Promise<OpencodeModel[]> {
   await ensureForward(config);
   const out: OpencodeModel[] = [];
   try {
-    const res = await fetch(apiUrl(config, "/provider"));
+    const res = await forwardFetch(apiUrl(config, "/provider"));
     if (res.ok) {
       type ProviderRow = {
         id?: string;
@@ -1133,7 +1210,7 @@ export type OpencodeAgent = {
 
 export async function listCommands(config: AppConfig): Promise<OpencodeCommand[]> {
   await ensureForward(config);
-  const res = await fetch(apiUrl(config, "/command"));
+  const res = await forwardFetch(apiUrl(config, "/command"));
   if (!res.ok) {
     throw new Error(`opencode listCommands ${res.status}: ${await res.text()}`);
   }
@@ -1151,7 +1228,7 @@ export async function listCommands(config: AppConfig): Promise<OpencodeCommand[]
 
 export async function listAgents(config: AppConfig): Promise<OpencodeAgent[]> {
   await ensureForward(config);
-  const res = await fetch(apiUrl(config, "/agent"));
+  const res = await forwardFetch(apiUrl(config, "/agent"));
   if (!res.ok) {
     throw new Error(`opencode listAgents ${res.status}: ${await res.text()}`);
   }
@@ -1177,7 +1254,7 @@ export async function findFiles(
   await ensureForward(config);
   const qs =
     `?query=${encodeURIComponent(query)}&directory=${encodeURIComponent(directory)}`;
-  const res = await fetch(apiUrl(config, `/find/file${qs}`));
+  const res = await forwardFetch(apiUrl(config, `/find/file${qs}`));
   if (!res.ok) {
     throw new Error(`opencode findFiles ${res.status}: ${await res.text()}`);
   }
@@ -1224,7 +1301,7 @@ export async function runCommand(
     body.model = `${model.providerID}/${model.modelID}`;
     if (model.variant) body.variant = model.variant;
   }
-  const res = await fetch(url, {
+  const res = await forwardFetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -1250,7 +1327,7 @@ export async function listSessions(
 ): Promise<OpencodeSessionListItem[]> {
   await ensureForward(config);
   const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
-  const res = await fetch(apiUrl(config, `/session${qs}`));
+  const res = await forwardFetch(apiUrl(config, `/session${qs}`));
   if (!res.ok) {
     throw new Error(`opencode listSessions ${res.status}: ${await res.text()}`);
   }
@@ -1276,7 +1353,7 @@ export async function forkSession(
   // Scope to the parent session's directory; the fork inherits it.
   const dirQ = await getSessionDirectoryQuery(config, sessionId);
   const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}/fork${dirQ}`);
-  const res = await fetch(url, {
+  const res = await forwardFetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(messageID ? { messageID } : {}),
@@ -1298,7 +1375,7 @@ export async function compactSession(config: AppConfig, sessionId: string): Prom
   await ensureForward(config);
   const dirQ = await getSessionDirectoryQuery(config, sessionId);
   const url = apiUrl(config, `/api/session/${encodeURIComponent(sessionId)}/compact${dirQ}`);
-  const res = await fetch(url, { method: "POST" });
+  const res = await forwardFetch(url, { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode compactSession ${res.status}: ${await res.text()}`);
   }
@@ -1313,7 +1390,7 @@ export async function deleteSession(config: AppConfig, sessionId: string): Promi
   // Drop the persisted transcript so we don't leak it on disk after delete.
   dropCachedTranscript(sessionId);
   const url = apiUrl(config, `/session/${encodeURIComponent(sessionId)}`);
-  const res = await fetch(url, { method: "DELETE" });
+  const res = await forwardFetch(url, { method: "DELETE" });
   if (!res.ok) {
     throw new Error(`opencode deleteSession ${res.status}: ${await res.text()}`);
   }
