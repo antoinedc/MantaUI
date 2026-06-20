@@ -31,20 +31,32 @@ Three pieces per tool:
    the model and is often enough on its own; AGENTS.md is the reliability
    backstop.
 
-Source of truth for the remote files is committed under `docs/opencode-tools/`
-and symlinked into `~/.config/opencode/` on the box (mirrors how
-`docs/opencode-commands/send-file.md` is installed). Install:
+Source of truth for the remote files is committed under `docs/opencode-tools/`.
+The tool is **COPIED** (not symlinked) into `~/.config/opencode/tools/` on the
+box. Install:
 
 ```bash
 mkdir -p ~/.config/opencode/tools
-ln -sf <repo>/docs/opencode-tools/schedule.ts ~/.config/opencode/tools/schedule.ts
-# AGENTS.md is appended/merged, not symlinked (it may hold other guidance):
+cp <repo>/docs/opencode-tools/schedule.ts ~/.config/opencode/tools/schedule.ts
+# AGENTS.md is appended/merged (it may hold other guidance):
 cat <repo>/docs/opencode-tools/AGENTS.md >> ~/.config/opencode/AGENTS.md
-# then restart opencode so it re-scans tools:
-tmux send-keys -t bui-opencode C-c Enter   # or: systemctl --user restart (n/a — opencode runs in tmux)
+# then restart opencode so it re-scans tools/:
+systemctl --user restart opencode-serve
 ```
 
-opencode re-scans `tools/` on restart of the `bui-opencode` tmux session.
+**DO NOT symlink the tool.** opencode resolves a tool's imports relative to the
+file's REAL path. A symlink points back into `<repo>/docs/opencode-tools/`,
+which has no `node_modules`, so the `import { tool } from "@opencode-ai/plugin"`
+fails at load with `Cannot find module '@opencode-ai/plugin'` and the tool
+silently never registers. A real copy inside `~/.config/opencode/tools/`
+resolves the import up the tree to `~/.config/opencode/node_modules/`. (The
+`/send-file` *command* can be symlinked because it's plain markdown with no
+imports — tools are not.)
+
+opencode runs as the **`opencode-serve` systemd --user service** (NOT a
+`bui-opencode` tmux session — that reference elsewhere is stale). It re-scans
+`tools/` on `systemctl --user restart opencode-serve`. Note: restarting
+opencode severs any live bui chat connection to `:4096` mid-turn.
 
 ## The `schedule` tool — behavior
 
