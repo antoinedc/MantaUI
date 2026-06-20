@@ -2,6 +2,7 @@
 // Mirrors Electron ipcMain.handle semantics.
 
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
+import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -274,6 +275,16 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // IPC.opencodeGenerateTitle. Returns the RAW model reply (caller sanitizes).
     "opencode:generate-title": ({ directory, instruction }) =>
       oc.generateSessionTitle({ directory, instruction }),
+
+    // ---- scheduled prompts (bui-server owned; in-process on mobile) ----
+    // Mirror of desktop IPC.scheduleList / scheduleDelete. The store + firing
+    // loop live in src/server/schedule.mjs; these just read/mutate it. Delete
+    // publishes schedule.updated so the ScheduledTasksCard refetches live.
+    // preload: ipcRenderer.invoke(IPC.scheduleList, sessionId)  → args[0] = sessionId?
+    "schedule:list": (sessionId) => scheduleListJobs(sessionId || undefined),
+    // preload: ipcRenderer.invoke(IPC.scheduleDelete, id)  → args[0] = id
+    "schedule:delete": (id) =>
+      scheduleDeleteJob(id, { publish: (evt) => bus.publish(evt) }),
 
     // ---- pty channels (4 channels) ----
     //

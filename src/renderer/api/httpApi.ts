@@ -470,6 +470,10 @@ export const httpApi: Api = {
     rpc(IPC.opencodeCompactSession, sessionId),
   opencodeDeleteSession: (input) => rpc(IPC.opencodeDeleteSession, input),
 
+  // -- scheduled prompts (bui-server owned; in-process on mobile) --
+  scheduleList: (sessionId) => rpc(IPC.scheduleList, sessionId),
+  scheduleDelete: (id) => rpc(IPC.scheduleDelete, id),
+
   // -- typeahead --
   opencodeCommands: () => rpc(IPC.opencodeCommands),
   opencodeAgents: () => rpc(IPC.opencodeAgents),

@@ -86,6 +86,11 @@ import {
   pushSharedConfig,
   pullSharedConfig,
 } from "./sharedConfigSync.js";
+import {
+  initScheduleClient,
+  listSchedules,
+  deleteSchedule,
+} from "./schedule.js";
 // Plain-JS modules shared with the mobile server (src/server/*.mjs). The
 // bundler resolves .mjs imports here; main.process never sees them as TS.
 // Types live in groq.d.mts. Keep them dep-free so they stay portable across
@@ -729,6 +734,9 @@ app.whenReady().then(() => {
       mainWindow?.webContents.send(IPC.configChanged, next);
     },
   });
+  // Scheduled-prompt management client (reaches the box's /api/schedule over
+  // the -L 18787 forward). Jobs are server-owned; this only lists/deletes.
+  initScheduleClient({ getConfig: () => config });
   registerHandlers();
   createWindow();
   // Defer poller start until renderer is ready to receive events.
@@ -1232,6 +1240,12 @@ function registerHandlers(): void {
       return listProjects();
     },
   );
+
+  // Scheduled prompts (bui-server owned; reached over the -L 18787 forward).
+  ipcMain.handle(IPC.scheduleList, (_e, sessionId?: string) =>
+    listSchedules(sessionId),
+  );
+  ipcMain.handle(IPC.scheduleDelete, (_e, id: string) => deleteSchedule(id));
 
   // Typeahead sources for @ and / mentions.
   ipcMain.handle(IPC.opencodeCommands, () => opencodeListCommands(config));

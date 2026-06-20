@@ -1583,3 +1583,69 @@ export function buildTitleInstruction(conversation: string): string {
     conversation
   );
 }
+
+// describeCron — best-effort human-readable label for a 5-field cron
+// expression, for the ScheduledTasksCard. Covers the common shapes the model
+// emits; falls back to the raw expression for anything it doesn't recognize.
+// Pure + never throws. cron fields: minute hour day-of-month month day-of-week.
+export function describeCron(expr: string, recurring = true): string {
+  const raw = (expr ?? "").trim();
+  const f = raw.split(/\s+/);
+  if (f.length !== 5) return raw || "(invalid)";
+  const [min, hour, dom, month, dow] = f;
+
+  const pad = (n: string) => (n.length === 1 ? `0${n}` : n);
+  const isNum = (s: string) => /^\d+$/.test(s);
+  const time = () =>
+    isNum(min) && isNum(hour) ? `${hour}:${pad(min)}` : null;
+
+  const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const dowLabel = (s: string): string | null => {
+    if (s === "1-5") return "weekdays";
+    if (s === "0,6" || s === "6,0" || s === "0,7") return "weekends";
+    if (isNum(s)) {
+      const n = Number(s) % 7; // 7 → 0 (Sunday)
+      return DOW_NAMES[n] ?? null;
+    }
+    return null;
+  };
+
+  // every-N-minutes: "*/N * * * *"
+  const stepMin = /^\*\/(\d+)$/.exec(min);
+  if (stepMin && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+    const n = Number(stepMin[1]);
+    return `every ${n} min`;
+  }
+  // hourly: "M * * * *"
+  if (isNum(min) && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+    return min === "0" ? "hourly" : `hourly at :${pad(min)}`;
+  }
+  // every-N-hours: "M */N * * *"
+  const stepHour = /^\*\/(\d+)$/.exec(hour);
+  if (isNum(min) && stepHour && dom === "*" && month === "*" && dow === "*") {
+    return `every ${Number(stepHour[1])}h`;
+  }
+
+  const t = time();
+  // weekday/specific-day at time: "M H * * DOW"
+  if (t && dom === "*" && month === "*" && dow !== "*") {
+    const d = dowLabel(dow);
+    if (d) return `${d} ${t}`;
+  }
+  // daily at time: "M H * * *"
+  if (t && dom === "*" && month === "*" && dow === "*") {
+    return recurring ? `daily ${t}` : `once at ${t}`;
+  }
+  // day-of-month at time: "M H DOM * *"
+  if (t && isNum(dom) && month === "*" && dow === "*") {
+    return `monthly on the ${dom}${ordinal(Number(dom))} at ${t}`;
+  }
+
+  return raw; // unrecognized — show the raw cron
+}
+
+function ordinal(n: number): string {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return s[(v - 20) % 10] ?? s[v] ?? s[0];
+}

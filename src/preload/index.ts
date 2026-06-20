@@ -15,6 +15,7 @@ import {
   type QuestionRequest,
   type Project,
   type ProjectMeta,
+  type ScheduledJob,
   type SpawnOptions,
   type PtyEvent,
   type TransportInfo,
@@ -245,6 +246,12 @@ const api = {
     windowIndex: number;
   }): Promise<Project[]> =>
     ipcRenderer.invoke(IPC.opencodeDeleteSession, input),
+
+  // Scheduled prompts (bui-server owned; desktop reaches it over -L 18787).
+  scheduleList: (sessionId?: string): Promise<ScheduledJob[]> =>
+    ipcRenderer.invoke(IPC.scheduleList, sessionId),
+  scheduleDelete: (id: string): Promise<{ deleted: boolean }> =>
+    ipcRenderer.invoke(IPC.scheduleDelete, id),
 
   // Typeahead sources.
   opencodeCommands: (): Promise<OpencodeCommand[]> =>

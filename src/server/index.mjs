@@ -21,6 +21,7 @@ import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { startOutboxPoller } from "./outbox.mjs";
+import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -43,6 +44,21 @@ const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
 // (parity with the desktop outbox poller; see src/server/outbox.mjs).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopOutboxPoller } = startOutboxPoller(bus, { intervalMs: 3000 });
+
+// Scheduled-prompt engine: durable jobs in ~/.bui-mobile/schedule.json, fired
+// by re-submitting the stored prompt into its opencode session via
+// oc.sendPrompt — the scheduled work then streams into the user's open
+// ChatPanel as a new turn. Server-owned (survives Mac-app-close / reboot).
+// The remote AI creates jobs via the global opencode `schedule` tool →
+// POST /api/schedule (below). See src/server/schedule.mjs + docs/.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopSchedulePoller } = startSchedulePoller(
+  {
+    sendPrompt: (args) => oc.sendPrompt(args),
+    publish: (evt) => bus.publish(evt),
+  },
+  { intervalMs: 30000 },
+);
 
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.
@@ -296,7 +312,7 @@ const server = createServer(async (req, res) => {
   // cross-origin. Allow any origin (the server is the user's own box) and
   // answer CORS preflight so the mobile WebView's fetch() isn't blocked.
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Filename");
   if (req.method === "OPTIONS") {
     res.writeHead(204).end();
@@ -355,6 +371,73 @@ const server = createServer(async (req, res) => {
         const snap = await local.sharedConfigApply(body);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(snap));
+        return;
+      }
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+
+  // ---------- Scheduled prompts ----------
+  // POST   /api/schedule        body {cron, prompt, recurring, label, sessionID,
+  //                             directory} → {id, cron, recurring} (400 bad cron)
+  // GET    /api/schedule?sessionID=  → {jobs:[...]} (filtered when sessionID set)
+  // DELETE /api/schedule?id=     → {deleted:bool}
+  // Created by the remote AI's global opencode `schedule` tool; listed/deleted
+  // by the ScheduledTasksCard UI (via schedule:* window.api channels → rpc.mjs,
+  // and by the desktop over its SSH -L 18787 forward). Store mutations publish a
+  // `schedule.updated` bus event so the card refetches live.
+  if (path === "/api/schedule") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await createJob(
+          {
+            cron: body?.cron,
+            prompt: body?.prompt,
+            recurring: body?.recurring,
+            label: body?.label,
+            sessionID: body?.sessionID,
+            directory: body?.directory,
+          },
+          { publish: (evt) => bus.publish(evt) },
+        );
+        if (!result.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: result.job.id,
+            cron: result.job.cron,
+            recurring: result.job.recurring,
+          }),
+        );
+        return;
+      }
+      if (req.method === "GET") {
+        const sessionID = url.searchParams.get("sessionID") || undefined;
+        const jobs = await listJobs(sessionID);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ jobs }));
+        return;
+      }
+      if (req.method === "DELETE") {
+        const id = url.searchParams.get("id");
+        if (!id) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "id is required" }));
+          return;
+        }
+        const result = await deleteJob(id, { publish: (evt) => bus.publish(evt) });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ deleted: result.deleted }));
         return;
       }
       res.writeHead(405, { "content-type": "application/json" });

@@ -286,10 +286,77 @@ lives in `classifyPushEvent` / `firePush`, not the service worker
     regardless (mirrors Slack/Discord still escalating mentions/DMs). Presence
     is best-effort: if the mobile server is down or the forward isn't up, the
     POST fails silently and mobile behaves as before (always notifies).
+  - **EXCEPTION — `MessageAbortedError` never pushes.** `classifyPushEvent`'s
+    `session.error` branch reads `properties.error.name` and returns `null`
+    for `MessageAbortedError`. An abort is intentional, not a failure: it
+    fires on both an explicit user abort AND the mid-flight queued-message
+    DRAIN (user submits while running → bui aborts the in-flight turn and
+    resubmits the queued prompt transparently; see the "Queued message drain"
+    pattern). The renderer already swallows this error's banner via
+    `isDrainAbortError`, but that suppression is **renderer-only** — the push
+    pump runs server-side and has zero visibility into `drainAbortRef`. Before
+    this check every drain fired a spurious "Error — The turn failed." push on
+    mobile. Do NOT regress: the name-check is the server's only signal (the
+    abort POST is unmarked and `drainAbortRef` never leaves the browser).
+    Regression test: `session.error MessageAbortedError → NO push` in
+    `src/server/push.test.mjs`.
   - Observability: the server logs `[push] desktop-presence visible=…` on each
     heartbeat and `[push] done sid=… suppressForDesktop=… desktop={…}` on every
     "done" decision (`journalctl --user -u bui-server`). Without these the
     suppression decision is undiagnosable — keep them.
+
+## Scheduled prompts — bui-native AI tool (`src/server/schedule.mjs`)
+
+The first **bui-native opencode tool**: the remote AI can schedule a prompt to
+run later (once or on a recurring cron) in the SAME chat session. Full design +
+the reusable "bui tools" pattern (for future tools like `ping`) is in
+`docs/bui-tools-scheduler.md`. Key facts:
+
+- **The AI's awareness comes from a GLOBAL opencode custom tool**, not bui code.
+  `docs/opencode-tools/schedule.ts` is symlinked into
+  `~/.config/opencode/tools/schedule.ts` on the box; opencode auto-loads it for
+  EVERY project/session/model. Multiple named exports → tools `schedule_create`,
+  `schedule_list`, `schedule_cancel`. A guidance blurb appended to
+  `~/.config/opencode/AGENTS.md` (from `docs/opencode-tools/AGENTS.md`) tells the
+  model when to reach for it. **Install/update requires restarting the
+  `bui-opencode` tmux session** so opencode re-scans `tools/`.
+- **The tool is a thin registrar** — it `fetch`es bui-server
+  (`127.0.0.1:8787/api/schedule`, same box, no SSH hop) and returns immediately.
+  `execute` must NOT sleep; the durable store + firing loop live server-side.
+- **Server-owned + durable.** Jobs in `~/.bui-mobile/schedule.json` (atomic
+  writes). `startSchedulePoller` ticks every 30s (`createScheduler`, outbox-
+  poller shape: inFlight guard + `timer.unref()`), fires due jobs via
+  `oc.sendPrompt({sessionId, text})` — the scheduled turn streams into the
+  user's open ChatPanel. Survives Mac-app-close / session-nav / reboot (systemd
+  + linger). Strictly more durable than Claude Code's session-scoped `/loop`.
+- **Cron is interpreted in box-LOCAL time.** `cronMatches`/`validateCron` are
+  pure (5-field, `* / - ,`, DOW 0/7=Sun, vixie either-match for DOM+DOW). The
+  model converts NL→cron itself. `lastFiredMinute` (minute-key) dedups within a
+  minute and means **no catch-up** for minutes missed while the box was off
+  (fire-once-when-due, like Claude Code). v1 has **no jitter / no 7-day
+  expiry** (single-user, one box).
+- **Management UI**: `ScheduledTasksCard` in `ChatPanel.tsx` (pinned card above
+  the composer, modeled on `PermissionCard` — a card, NOT a footer item, so it
+  renders on desktop AND mobile with no mobile-CSS edits). Opened by the
+  `⏰ schedules` button in `SessionToolbar` (desktop) or the `Scheduled tasks`
+  item in the mobile `⋯` sheet (`SessionScreen.tsx`), which dispatches a
+  `bui-open-schedules` window CustomEvent (the sheet is outside ChatPanel —
+  mirrors the `bui-scroll-to-question` bridge). **Freshness is refetch-driven**
+  (open + 10s open-poll), NOT a bus event: desktop's renderer isn't wired to the
+  server's in-process bus, so a `schedule.updated` event would only reach
+  mobile. bui-server still publishes `schedule.updated` (cheap) for a future
+  mobile optimization, but the UI does not depend on it. `describeCron` in
+  `chatUtils.ts` (pure, tested) renders human-readable cadence.
+- **Transport: `schedule:*` channels, NOT `opencode:*`** — schedules are a
+  bui-SERVER concept. Desktop reaches the server store over the existing SSH
+  `-L 18787` presence forward (`src/main/schedule.ts`, mirrors
+  `sharedConfigSync`); mobile is in-process (`src/server/rpc.mjs` →
+  `schedule.mjs`). If the desktop forward is down, list/delete shows an error
+  toast but jobs **still fire** (server-owned). `window.api.scheduleList`/
+  `scheduleDelete` wired across all 6 sites (types, preload, httpApi, main
+  handler, rpc dispatch, impls).
+- Tests: `src/server/schedule.test.mjs` (cron + tick, 20) and `describeCron` in
+  `chatUtils.test.ts` (10). Pure logic only.
 
 ## Mouse mode — design decision, do not re-litigate
 
