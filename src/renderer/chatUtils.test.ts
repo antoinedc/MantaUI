@@ -51,6 +51,7 @@ import {
   shouldAbortForQueuedDrain,
   isToolStepBoundary,
   isDrainAbortError,
+  describeCron,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2364,5 +2365,46 @@ describe("sanitizeGeneratedTitle", () => {
     expect(sanitizeGeneratedTitle(null)).toBe("");
     expect(sanitizeGeneratedTitle("   ")).toBe("");
     expect(sanitizeGeneratedTitle("***")).toBe("");
+  });
+});
+
+describe("describeCron", () => {
+  it("every-N-minutes", () => {
+    expect(describeCron("*/5 * * * *")).toBe("every 5 min");
+    expect(describeCron("*/15 * * * *")).toBe("every 15 min");
+  });
+  it("hourly", () => {
+    expect(describeCron("0 * * * *")).toBe("hourly");
+    expect(describeCron("7 * * * *")).toBe("hourly at :07");
+  });
+  it("every-N-hours", () => {
+    expect(describeCron("0 */2 * * *")).toBe("every 2h");
+  });
+  it("daily at time", () => {
+    expect(describeCron("0 9 * * *")).toBe("daily 9:00");
+    expect(describeCron("30 14 * * *")).toBe("daily 14:30");
+  });
+  it("one-shot daily renders 'once at'", () => {
+    expect(describeCron("0 15 * * *", false)).toBe("once at 15:00");
+  });
+  it("weekdays", () => {
+    expect(describeCron("0 9 * * 1-5")).toBe("weekdays 9:00");
+  });
+  it("specific weekday", () => {
+    expect(describeCron("0 9 * * 1")).toBe("Mon 9:00");
+    expect(describeCron("0 9 * * 0")).toBe("Sun 9:00");
+    expect(describeCron("0 9 * * 7")).toBe("Sun 9:00");
+  });
+  it("monthly on day", () => {
+    expect(describeCron("30 14 15 * *")).toBe("monthly on the 15th at 14:30");
+    expect(describeCron("0 0 1 * *")).toBe("monthly on the 1st at 0:00");
+  });
+  it("falls back to raw for unrecognized / invalid", () => {
+    expect(describeCron("30 14 15 3 *")).toBe("30 14 15 3 *"); // specific month → raw
+    expect(describeCron("garbage")).toBe("garbage");
+    expect(describeCron("")).toBe("(invalid)");
+  });
+  it("never throws", () => {
+    expect(() => describeCron(null as unknown as string)).not.toThrow();
   });
 });

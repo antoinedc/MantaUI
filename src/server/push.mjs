@@ -4,7 +4,10 @@
 // can't otherwise see when the app is backgrounded/closed:
 //   - permission.asked   → "Permission needed" (blocking; always notify)
 //   - question.asked     → "Question"          (blocking; always notify)
-//   - session.error      → "Error"             (always notify)
+//   - session.error      → "Error"             (always notify, EXCEPT a
+//                          MessageAbortedError, which is an intentional abort
+//                          — user abort or mid-flight queued-message drain —
+//                          and must NOT push)
 //   - session.idle       → "Claude is done"    (only if the session was busy
 //                          AND the user isn't actively viewing that session)
 //
@@ -295,6 +298,23 @@ export function classifyPushEvent(evt, ctx) {
       return out;
     }
     case "session.error": {
+      // A MessageAbortedError is NOT a failure — it's the signal opencode
+      // emits when the running turn was intentionally aborted. bui aborts on
+      // purpose in two cases: an explicit user abort, and the mid-flight
+      // queued-message DRAIN (user submits while running → bui aborts the
+      // in-flight turn and resubmits the queued prompt transparently; see
+      // ChatPanel `maybeDrainQueuedPrompt` + `isDrainAbortError`). The
+      // renderer swallows this error's banner client-side, but that
+      // suppression is renderer-only and never reaches the server push path,
+      // so without this check every drain fired a spurious "Error — The turn
+      // failed." push. Neither abort flavour should ever notify, so we drop
+      // the push for ANY MessageAbortedError. opencode nests the class name at
+      // properties.error.name (the renderer reads the same field).
+      const errName =
+        props.error && typeof props.error === "object"
+          ? props.error.name
+          : undefined;
+      if (errName === "MessageAbortedError") return null;
       const msg =
         typeof props.message === "string" && props.message
           ? props.message

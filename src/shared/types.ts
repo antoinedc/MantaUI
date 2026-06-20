@@ -336,7 +336,31 @@ export const IPC = {
   // perform Anthropic login (that requires browser flow on the remote);
   // surfaces the exact next-step command instead.
   setupBootstrap: "setup:bootstrap",
+
+  // ---- scheduled prompts (bui-server owned) ----
+  // Schedules are a bui-SERVER concept (durable jobs fired by the always-on
+  // box process), NOT an opencode concept — so they get their own channels
+  // that hit bui-server's /api/schedule rather than routing through the
+  // opencode client. Created by the remote AI's global `schedule` opencode
+  // tool; listed/deleted by the ScheduledTasksCard UI. Desktop reaches the
+  // server store over its existing SSH -L 18787 forward (src/main/schedule.ts);
+  // mobile is in-process (src/server/rpc.mjs → schedule.mjs).
+  scheduleList: "schedule:list", // (sessionId?) → ScheduledJob[]
+  scheduleDelete: "schedule:delete", // (id) → { deleted: boolean }
 } as const;
+
+// A durable scheduled-prompt job (bui-server store: ~/.bui-mobile/schedule.json).
+export type ScheduledJob = {
+  id: string; // 8-char hex
+  cron: string; // 5-field expression (local time)
+  prompt: string;
+  recurring: boolean;
+  label: string;
+  sessionID: string;
+  directory: string;
+  createdAt: number;
+  lastFiredMinute: string | null;
+};
 
 // ----- Agent → laptop file push (outbox) -----
 

@@ -27,6 +27,7 @@ import type {
   OpencodePart,
   PermissionRequest,
   QuestionRequest,
+  ScheduledJob,
 } from "../shared/types";
 import { useStore } from "./store";
 import {
@@ -82,6 +83,7 @@ import {
   buildTitlePromptInput,
   buildTitleInstruction,
   sanitizeGeneratedTitle,
+  describeCron,
   type TruncationKind,
   type ContextBreakdown,
   type StaleCacheResult,
@@ -404,6 +406,25 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Reasoning ("Thinking…") visibility — hidden by default to keep the
   // transcript focused on results. Ctrl+O toggles like Claude Code's TUI.
   const [showThinking, setShowThinking] = useState(false);
+  // Scheduled-prompt management (the ⏰ ScheduledTasksCard). Jobs are
+  // server-owned (bui-server fires them); here we only list + delete via the
+  // schedule:* window.api channels. Refetch-driven (open + open-poll + post-
+  // delete) — NOT a bus event, because desktop's renderer isn't wired to the
+  // server bus. See docs/bui-tools-scheduler.md.
+  const [showSchedules, setShowSchedules] = useState(false);
+  const [schedules, setSchedules] = useState<ScheduledJob[]>([]);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const refreshSchedules = useCallback(() => {
+    return window.api
+      .scheduleList(sessionId)
+      .then((jobs: ScheduledJob[]) => {
+        setSchedules(Array.isArray(jobs) ? jobs : []);
+        setScheduleError(null);
+      })
+      .catch((e: unknown) => {
+        setScheduleError(e instanceof Error ? e.message : "schedule server unreachable");
+      });
+  }, [sessionId]);
   // Running mirrors opencode session status (busy/idle/retry). We feed it from
   // session.status events for accuracy, but also set it optimistically on send
   // so the UI flips to "Stop" instantly rather than waiting for the next event.
@@ -498,6 +519,31 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Delta events apply inline so streams feel live; everything else (new parts,
   // tool state transitions, etc.) just retriggers the canonical fetch.
   const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ===== Inactive-panel work gating (perf) =====
+  //
+  // App.tsx keeps EVERY visited chat session's ChatPanel mounted (so scroll
+  // position + in-flight streaming survive a sidebar switch), and the main
+  // process broadcasts ONE opencodeEvent to the renderer for every event on
+  // every scoped SSE stream. So with K panels mounted, each event runs this
+  // panel's `onOpencodeEvent` K times. The dominant cost is the full-
+  // transcript refetch (`setMessages` with fresh IPC JSON re-renders + re-
+  // tokenizes the entire conversation, defeating the row memos) and the
+  // delta-buffer flush (re-renders the streaming message). Neither is needed
+  // for a panel the user can't see — the sidebar status (running / attention
+  // / todos / subagent count) flows through SEPARATE setState calls that we
+  // keep running. While inactive we suppress the refetch + delta flush and
+  // remember that a re-pull is owed; the panel does one catch-up refetch when
+  // it becomes active again (see the isActive→true effect below).
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+  // Set when a refetch was suppressed because the panel was inactive. The
+  // reactivation effect consumes this to pull the canonical transcript once.
+  const refetchOwedWhileInactive = useRef(false);
+  // Component-level handle to the SSE effect's `scheduleRefetch`. The SSE
+  // effect wires this on mount; the reactivation catch-up effect reads it.
+  // (Shared so a catch-up can fire outside the SSE effect's local scope.)
+  const scheduleRefetchRef = useRef<(() => void) | null>(null);
 
   // ===== Streamed-text delta buffer =====
   //
@@ -914,6 +960,23 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
   }, [sessionId, cwd]);
 
+  // Close the schedules card + clear its state on session change.
+  useEffect(() => {
+    setShowSchedules(false);
+    setSchedules([]);
+    setScheduleError(null);
+  }, [sessionId]);
+
+  // While the schedules card is open: fetch once + poll every 10s so a
+  // model-created or just-fired job appears without reopening. Refetch-driven
+  // (no bus event) so it behaves identically on desktop and mobile.
+  useEffect(() => {
+    if (!showSchedules) return;
+    void refreshSchedules();
+    const poll = setInterval(() => void refreshSchedules(), 10_000);
+    return () => clearInterval(poll);
+  }, [showSchedules, refreshSchedules]);
+
   // Refresh permissions list. Called on any permission event.
   // Passes `sessionId` so the main process scopes the request to this
   // session's workspace directory (see opencodePermissions in opencode.ts).
@@ -1037,13 +1100,21 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       }, delay);
     };
 
-    // Forward declaration so scheduleFlush can call scheduleRefetch
-    // (declared inside this effect after the flush helpers).
-    const scheduleRefetchRef: { current: (() => void) | null } = {
-      current: null,
-    };
-
+    // scheduleRefetchRef is a component-level useRef (declared near
+    // refetchTimer). scheduleFlush calls it before scheduleRefetch is
+    // defined below; the reactivation catch-up effect also reads it.
     const scheduleRefetch = () => {
+      // Inactive panels don't render their transcript (App.tsx hides them
+      // with display:none) — skip the expensive full re-pull + re-render and
+      // just remember we owe one. The reactivation effect pulls fresh on
+      // becoming visible. Live sidebar state (running/attention/todos) is set
+      // by the other branches of the handler, which still run. This is the
+      // primary fix for the per-event ×K-panels cost that grows over a
+      // session as more chat windows are opened.
+      if (!isActiveRef.current) {
+        refetchOwedWhileInactive.current = true;
+        return;
+      }
       if (refetchTimer.current) clearTimeout(refetchTimer.current);
       refetchTimer.current = setTimeout(() => {
         refetchTimer.current = null;
@@ -1245,6 +1316,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         const field = String(props.field ?? "text");
         const delta = String(props.delta ?? "");
         if (!partID || !delta) return;
+
+        // Inactive panel: don't buffer/flush deltas (flushing re-renders the
+        // streaming message, which the user can't see). The catch-up refetch
+        // on reactivation pulls the canonical transcript, which already
+        // contains this streamed text — so dropping the live delta loses
+        // nothing visible. Mark the owed refetch so reactivation repaints.
+        if (!isActiveRef.current) {
+          refetchOwedWhileInactive.current = true;
+          return;
+        }
 
         // Buffer the delta instead of applying it immediately. The flush
         // helper will slice off the longest prefix ending at a section
@@ -1828,6 +1909,18 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // Mobile entry point for the schedules card: the ⋯ sheet (outside ChatPanel)
+  // dispatches a window CustomEvent rather than reaching into this component's
+  // state. Mirrors the bui-scroll-to-question bridge above.
+  useEffect(() => {
+    const onOpenSchedules = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
+      if (detail?.sessionId === sessionId) setShowSchedules(true);
+    };
+    window.addEventListener("bui-open-schedules", onOpenSchedules);
+    return () => window.removeEventListener("bui-open-schedules", onOpenSchedules);
+  }, [sessionId]);
+
   // Perform the deferred scroll once the question cards actually exist (cold
   // start: questions arrive via the async fetch after this panel mounts).
   useEffect(() => {
@@ -1923,6 +2016,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     });
     return () => cancelAnimationFrame(raf);
   }, [isActive, stickToBottom]);
+
+  // Catch-up refetch on reactivation. While inactive, scheduleRefetch and the
+  // delta buffer are suppressed (see the gating refs near refetchTimer) so we
+  // don't re-render a transcript the user can't see. When the panel becomes
+  // active again, pull the canonical transcript once if any refetch/delta was
+  // dropped while hidden — this repaints with everything that streamed in the
+  // background. scheduleRefetchRef is set by the SSE effect (same lifecycle);
+  // guard for the first render where it may not be wired yet.
+  useEffect(() => {
+    if (!isActive) return;
+    if (!refetchOwedWhileInactive.current) return;
+    refetchOwedWhileInactive.current = false;
+    scheduleRefetchRef.current?.();
+  }, [isActive]);
 
   const submit = useCallback(async () => {
     const text = input.trim();
@@ -3812,6 +3919,30 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
+      {/* Scheduled-tasks management card. Toggled by the ⏰ toolbar button */}
+      {/* (desktop) or the ⋯ sheet (mobile). Refetch-driven while open. */}
+      {showSchedules && (
+        <div className="shrink-0 px-4 pt-2">
+          <ScheduledTasksCard
+            jobs={schedules}
+            error={scheduleError}
+            onClose={() => setShowSchedules(false)}
+            onDelete={(id) => {
+              setSchedules((prev) => prev.filter((j) => j.id !== id));
+              window.api
+                .scheduleDelete(id)
+                .then(() => refreshSchedules())
+                .catch((e: unknown) => {
+                  setScheduleError(
+                    e instanceof Error ? e.message : "delete failed",
+                  );
+                  void refreshSchedules();
+                });
+            }}
+          />
+        </div>
+      )}
+
       {running && (
         <>
           <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
@@ -3996,9 +4127,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         onSelectModel={selectModel}
         canFork={!!tmuxSession}
         canDelete={tmuxSession != null && windowIndex != null}
+        scheduleCount={schedules.length}
         onFork={forkSession}
         onCompact={compactSession}
         onDelete={deleteSession}
+        onSchedules={() => setShowSchedules((v) => !v)}
         typeaheadOpen={typeahead != null && typeaheadRows.length > 0}
         typeaheadExactMatch={(() => {
           if (!typeahead || typeaheadRows.length === 0) return false;
@@ -4522,18 +4655,83 @@ function ModelPicker({
 // context), delete (DELETE on the server + kill the tmux window). Fork and
 // delete are disabled when the panel doesn't know its owning tmux window.
 
+// ScheduledTasksCard — pinned card above the composer showing this session's
+// scheduled prompts (created by the AI's `schedule` opencode tool) with a
+// per-row delete. A card (not a footer item) so it renders on BOTH desktop and
+// mobile with no mobile-CSS edits. See docs/bui-tools-scheduler.md.
+const ScheduledTasksCard = memo(function ScheduledTasksCard({
+  jobs,
+  error,
+  onDelete,
+  onClose,
+}: {
+  jobs: ScheduledJob[];
+  error: string | null;
+  onDelete: (id: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color: CLAUDE_ORANGE }}>⏰</span>
+        <span className="text-text">Scheduled</span>
+        {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
+        <button
+          onClick={onClose}
+          className="ml-auto px-1 rounded text-text-faint hover:text-text-muted"
+          title="Close"
+        >
+          ×
+        </button>
+      </div>
+      {error ? (
+        <div className="text-red-400 break-words">{error}</div>
+      ) : jobs.length === 0 ? (
+        <div className="text-text-muted">No scheduled tasks in this session.</div>
+      ) : (
+        <div className="flex flex-col gap-1">
+          {jobs.map((j) => (
+            <div key={j.id} className="flex items-center gap-2">
+              <span className="text-text truncate flex-1" title={j.prompt}>
+                {j.label || j.prompt}
+              </span>
+              <span className="text-text-faint shrink-0 font-mono">
+                {describeCron(j.cron, j.recurring)}
+              </span>
+              <button
+                onClick={() => onDelete(j.id)}
+                className="shrink-0 px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30"
+                title="Cancel this scheduled task"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
 function SessionToolbar({
   canFork,
   canDelete,
+  scheduleCount,
   onFork,
   onCompact,
   onDelete,
+  onSchedules,
 }: {
   canFork: boolean;
   canDelete: boolean;
+  scheduleCount: number;
   onFork: () => void;
   onCompact: () => void;
   onDelete: () => void;
+  onSchedules: () => void;
 }) {
   return (
     <span className="flex items-center gap-1 text-[10px]">
@@ -4551,6 +4749,13 @@ function SessionToolbar({
         title="Compact — summarize to free context"
       >
         ⌥ compact
+      </button>
+      <button
+        onClick={onSchedules}
+        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
+        title="View / cancel scheduled tasks"
+      >
+        ⏰ schedules{scheduleCount > 0 ? ` (${scheduleCount})` : ""}
       </button>
       <button
         onClick={onDelete}
@@ -5192,9 +5397,11 @@ function InputArea({
   onSelectModel,
   canFork,
   canDelete,
+  scheduleCount,
   onFork,
   onCompact,
   onDelete,
+  onSchedules,
   typeaheadOpen,
   typeaheadExactMatch,
   onTypeaheadConfirm,
@@ -5253,9 +5460,11 @@ function InputArea({
   onSelectModel: (m: ModelSelection | null) => void;
   canFork: boolean;
   canDelete: boolean;
+  scheduleCount: number;
   onFork: () => void;
   onCompact: () => void;
   onDelete: () => void;
+  onSchedules: () => void;
   typeaheadOpen: boolean;
   typeaheadExactMatch: boolean;
   onTypeaheadConfirm: () => void;
@@ -5511,9 +5720,11 @@ function InputArea({
           <SessionToolbar
             canFork={canFork}
             canDelete={canDelete}
+            scheduleCount={scheduleCount}
             onFork={onFork}
             onCompact={onCompact}
             onDelete={onDelete}
+            onSchedules={onSchedules}
           />
           <span className="text-[10px] text-text-faint">
             {voiceActive
@@ -6632,11 +6843,27 @@ const MD_COMPONENTS: MarkdownComponents = {
   hr: () => <hr className="my-2 border-border" />,
 };
 
+// Above this many characters, skip the react-markdown AST parse entirely and
+// render the text as a plain <pre>. Parsing + rendering a very large markdown
+// body (a pasted log, a huge model dump) is synchronous and can block the main
+// thread for seconds — and it re-runs whenever the row's memo is defeated (e.g.
+// a full-transcript refetch swaps in fresh part objects). A multi-second freeze
+// is far worse than losing markdown formatting on an unusually large message.
+const MARKDOWN_MAX_CHARS = 50_000;
+
 // Memoized so re-rendering a parent (AssistantPart, MessageRow) whose
 // own props/state haven't changed doesn't re-parse the markdown AST
 // and re-tokenize Prism inside CodeBlock. `text` is the only prop and
 // is a primitive — default shallow comparator works.
 const MarkdownBody = memo(function MarkdownBody({ text }: { text: string }) {
+  if (text.length > MARKDOWN_MAX_CHARS) {
+    // Oversized: bypass markdown + Prism to keep the main thread responsive.
+    return (
+      <pre className="whitespace-pre-wrap break-words text-[13px] text-text">
+        {text}
+      </pre>
+    );
+  }
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
       {preprocessForStream(text)}
@@ -6725,11 +6952,15 @@ const PRISM_SUPPORTED: ReadonlySet<string> = new Set<Language>([
   "yaml",
 ] as Language[]);
 
-// Memoized so we don't re-tokenize a code block on every keystroke in
-// the chat input. Prism's <Highlight> is expensive (tokenization is
-// linear in code length per language); re-running it across N code
-// blocks per keystroke was the dominant cost of the previous typing-
-// lag bug. Both props are primitives.
+// Above either bound, skip Prism tokenization and render the raw code in a
+// plain <pre>. Prism's <Highlight> tokenizes the WHOLE body synchronously on
+// render (and is superlinear for some grammars); a large pasted file / log /
+// diff can block the main thread for seconds, and it re-runs every time the
+// row memo is defeated (e.g. a full-transcript refetch). Syntax colors aren't
+// worth a multi-second freeze on a giant block.
+const CODEBLOCK_MAX_CHARS = 30_000;
+const CODEBLOCK_MAX_LINES = 2_000;
+
 const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string; body: string }) {
   // Trim a single trailing newline that almost always precedes the closing fence.
   const cleaned = body.replace(/\n$/, "");
@@ -6740,6 +6971,13 @@ const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string; body:
     PRISM_LANG_ALIAS[normalized] ??
     (PRISM_SUPPORTED.has(normalized) ? (normalized as Language) : undefined);
 
+  // Oversized block: render plain (no Prism) to keep the UI responsive.
+  const tooLarge =
+    cleaned.length > CODEBLOCK_MAX_CHARS ||
+    // Counting newlines is O(n) but far cheaper than tokenizing; bail before
+    // <Highlight> ever sees a giant body.
+    countLines(cleaned) > CODEBLOCK_MAX_LINES;
+
   return (
     <div className="my-2 rounded border border-border bg-bg-soft overflow-hidden">
       {lang && (
@@ -6747,30 +6985,48 @@ const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string; body:
           {lang}
         </div>
       )}
-      <Highlight
-        theme={themes.vsDark}
-        code={cleaned}
-        language={resolved ?? ("text" as Language)}
-      >
-        {({ tokens, getLineProps, getTokenProps }) => (
-          <pre
-            className="px-2 py-1.5 text-[12px] overflow-x-auto whitespace-pre"
-            // vsDark's default bg would override our bg-bg-soft — disable it.
-            style={{ background: "transparent" }}
-          >
-            <code>
-              {tokens.map((line, i) => (
-                <div key={i} {...getLineProps({ line })}>
-                  {line.map((token, key) => (
-                    <span key={key} {...getTokenProps({ token })} />
-                  ))}
-                </div>
-              ))}
-            </code>
-          </pre>
-        )}
-      </Highlight>
+      {tooLarge ? (
+        <pre
+          className="px-2 py-1.5 text-[12px] overflow-x-auto whitespace-pre"
+          style={{ background: "transparent" }}
+        >
+          <code>{cleaned}</code>
+        </pre>
+      ) : (
+        <Highlight
+          theme={themes.vsDark}
+          code={cleaned}
+          language={resolved ?? ("text" as Language)}
+        >
+          {({ tokens, getLineProps, getTokenProps }) => (
+            <pre
+              className="px-2 py-1.5 text-[12px] overflow-x-auto whitespace-pre"
+              // vsDark's default bg would override our bg-bg-soft — disable it.
+              style={{ background: "transparent" }}
+            >
+              <code>
+                {tokens.map((line, i) => (
+                  <div key={i} {...getLineProps({ line })}>
+                    {line.map((token, key) => (
+                      <span key={key} {...getTokenProps({ token })} />
+                    ))}
+                  </div>
+                ))}
+              </code>
+            </pre>
+          )}
+        </Highlight>
+      )}
     </div>
   );
 });
+
+// Count newlines without allocating an array (cheap O(n) line count for the
+// CodeBlock size guard — body.split("\n").length would allocate a huge array
+// for exactly the inputs we're trying to avoid touching).
+function countLines(s: string): number {
+  let n = 1;
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n++;
+  return n;
+}
 

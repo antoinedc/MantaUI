@@ -249,6 +249,20 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                   <>
                     <button onClick={forkSession}>Fork session</button>
                     <button onClick={compactSession}>Compact context</button>
+                    <button
+                      onClick={() => {
+                        // Open the ScheduledTasksCard inside ChatPanel via the
+                        // window CustomEvent bridge (the sheet is outside it).
+                        window.dispatchEvent(
+                          new CustomEvent("bui-open-schedules", {
+                            detail: { sessionId: sid },
+                          }),
+                        );
+                        closeSheet();
+                      }}
+                    >
+                      Scheduled tasks
+                    </button>
                     <button className="danger" onClick={deleteSession}>
                       Delete session
                     </button>

@@ -113,6 +113,40 @@ test("session.error → error notification carrying the message", () => {
   assert.match(p?.body ?? "", /boom/);
 });
 
+test("session.error MessageAbortedError → NO push (intentional abort/drain)", () => {
+  // Mid-flight queued-message drain (and explicit user abort) both surface as
+  // a MessageAbortedError session.error. The renderer swallows the banner
+  // client-side; the server must drop the push so a transparent turn-swap
+  // doesn't buzz the phone with "Error — The turn failed."
+  const p = classifyPushEvent(
+    {
+      type: "session.error",
+      properties: {
+        sessionID: "ses_abort",
+        error: { name: "MessageAbortedError", data: { message: "aborted" } },
+      },
+    },
+    NOFOCUS,
+  );
+  assert.equal(p, null);
+});
+
+test("session.error with non-abort error object → still notifies", () => {
+  const p = classifyPushEvent(
+    {
+      type: "session.error",
+      properties: {
+        sessionID: "ses_err",
+        message: "real failure",
+        error: { name: "ProviderAuthError" },
+      },
+    },
+    NOFOCUS,
+  );
+  assert.equal(p?.kind, "error");
+  assert.match(p?.body ?? "", /real failure/);
+});
+
 test("session.idle with no prior busy → no notification (spurious idle)", () => {
   const p = classifyPushEvent(
     { type: "session.idle", properties: { sessionID: "ses_4" } },
