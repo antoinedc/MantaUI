@@ -164,6 +164,12 @@ const api = {
     sessionId: string,
   ): Promise<OpencodeMessage[] | null> =>
     ipcRenderer.invoke(IPC.opencodeMessagesCached, sessionId),
+  // Open/close the scoped SSE stream for a session. ChatPanel calls open on
+  // mount and close on unmount so the main process only streams open sessions.
+  opencodeOpenStream: (sessionId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodeOpenStream, sessionId),
+  opencodeCloseStream: (sessionId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.opencodeCloseStream, sessionId),
   onOpencodeEvent: (cb: (ev: OpencodeEvent) => void): (() => void) => {
     const listener = (_: unknown, ev: OpencodeEvent) => cb(ev);
     ipcRenderer.on(IPC.opencodeEvent, listener);

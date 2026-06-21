@@ -267,6 +267,16 @@ export const IPC = {
   // Live SSE stream from opencode, forwarded raw to the renderer. Renderer
   // filters by sessionID in the event payload.
   opencodeEvent: "opencode:event",
+  // Stream lifecycle. The renderer opens a scoped `/event?directory=` stream
+  // when a ChatPanel mounts for a session and releases it on unmount. The main
+  // process refcounts per directory and tears the stream down when the last
+  // open panel for that dir goes away. This is what bounds concurrent streams
+  // to the handful of sessions the user actually has open — without it, the
+  // bus opened a persistent stream for EVERY directory opencode knows about
+  // (on a Multica box, ~100 workspace dirs → hundreds of leaked CLOSE-WAIT
+  // sockets that drown opencode serve and make every request crawl).
+  opencodeOpenStream: "opencode:open-stream",
+  opencodeCloseStream: "opencode:close-stream",
   // Send a user prompt to a session. Returns when the server has accepted
   // the message (immediate); the assistant response streams via opencodeEvent.
   opencodePrompt: "opencode:prompt",

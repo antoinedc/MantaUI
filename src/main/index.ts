@@ -53,9 +53,8 @@ import {
   listModels as opencodeListModels,
   getDefaultModel as opencodeGetDefaultModel,
   getVcsBranch as opencodeGetVcsBranch,
-  knownSessionDirectories,
-  onSessionDirectoryAdded,
   getSessionDirectorySync,
+  resolveSessionDirectory as opencodeResolveSessionDirectory,
   setDirectoryReadyGate,
   listSessions as opencodeListSessions,
   forkSession as opencodeForkSession,
@@ -172,6 +171,14 @@ let opencodeBusStopped = true;
 const opencodeStreams = new Map<string, () => void>(); // key: "" (global) or dir
 let unsubscribeDirAdded: (() => void) | null = null;
 
+// Refcount of open ChatPanels per scoped directory. A scoped stream is kept
+// alive while ≥1 panel for that dir is mounted and is torn down when the last
+// one unmounts (renderer drives this via opencodeOpenStream/CloseStream on
+// ChatPanel mount/unmount). The global stream ("") is never refcounted — it
+// always runs. This bounds concurrent streams to the sessions actually open
+// in the UI; previously the bus streamed every dir opencode knew about.
+const streamRefcounts = new Map<string, number>();
+
 // Per-directory readiness: resolves the first time a scoped stream's SSE
 // connection is established (opencodeSubscribeEvents returned a live stream).
 // setDirectoryReadyGate uses this so a scoped prompt waits for its
@@ -226,13 +233,14 @@ function startOpencodeBus(): void {
   }
   opencodeBusStopped = false;
 
-  // Auto-spawn a scoped stream when a new directory shows up in the cache.
-  if (!unsubscribeDirAdded) {
-    unsubscribeDirAdded = onSessionDirectoryAdded((dir) => {
-      if (opencodeBusStopped) return;
-      ensureOpencodeStream(dir);
-    });
-  }
+  // NOTE: we deliberately do NOT auto-open a scoped stream for every directory
+  // that shows up in the cache. On a box with many opencode workspaces (e.g.
+  // Multica), listSessions() floods the cache with ~100 dirs and auto-opening
+  // a persistent stream per dir buried opencode serve under hundreds of
+  // connections (the "sessions stuck loading / sends time out" regression).
+  // Streams are now opened on demand: a ChatPanel mounting acquires its dir's
+  // stream (refcounted) and the readiness gate opens one for an in-flight
+  // prompt. See acquire/releaseOpencodeStream.
 
   // Readiness gate: a scoped prompt (opencode.ts:getSessionDirectoryQuery)
   // calls this after resolving its session directory. We open the scoped
@@ -263,11 +271,9 @@ function startOpencodeBus(): void {
   // Always run the global stream.
   ensureOpencodeStream("");
 
-  // Bootstrap: open scoped streams for every directory we already know
-  // (sidebar refreshes since launch, or any session created earlier in
-  // this run). Also kick a global listSessions() so the server's pre-
-  // existing sessions seed the cache (and thus open streams via the hook).
-  for (const dir of knownSessionDirectories()) ensureOpencodeStream(dir);
+  // Seed the session-directory cache so the sidebar can resolve sessions, but
+  // do NOT open a scoped stream per known dir (that was the connection-flood
+  // bug). Scoped streams open on demand when a ChatPanel mounts.
   void opencodeListSessions(config).catch(() => { /* non-fatal bootstrap */ });
 }
 
@@ -507,6 +513,32 @@ function ensureOpencodeStream(directory: string): void {
     opencodeStreams.delete(directory);
     streamReady.delete(directory);
   })();
+}
+
+// Refcounted acquire/release for scoped streams. The renderer calls these on
+// ChatPanel mount/unmount so a dir's stream lives exactly as long as a panel
+// needs it. Empty dir (global) is ignored here — it's always open.
+function acquireOpencodeStream(directory: string): void {
+  if (!directory || opencodeBusStopped) return;
+  streamRefcounts.set(directory, (streamRefcounts.get(directory) ?? 0) + 1);
+  ensureOpencodeStream(directory);
+}
+
+function releaseOpencodeStream(directory: string): void {
+  if (!directory) return;
+  const n = (streamRefcounts.get(directory) ?? 0) - 1;
+  if (n > 0) {
+    streamRefcounts.set(directory, n);
+    return;
+  }
+  // Last panel for this dir closed — drop the refcount and tear the stream
+  // down so we stop holding the connection (the fix for leaked CLOSE-WAIT
+  // sockets piling up on opencode serve).
+  streamRefcounts.delete(directory);
+  const stop = opencodeStreams.get(directory);
+  if (stop) {
+    try { stop(); } catch { /* ignore */ }
+  }
 }
 
 // Periodic upload cleanup. Runs once on (re)start and every hour afterward;
@@ -1156,6 +1188,27 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.opencodeMessagesCached, (_e, sessionId: string) =>
     opencodeGetCachedMessages(sessionId),
   );
+
+  // Scoped-stream lifecycle. A ChatPanel calls openStream on mount and
+  // closeStream on unmount; the main process refcounts per directory and only
+  // keeps a stream alive while a panel for that dir is open. We remember the
+  // dir each open resolved to (openStreamDirs) so the matching close releases
+  // the same dir even if the session→dir cache shifts in between.
+  const openStreamDirs = new Map<string, string>(); // sessionId -> dir
+  ipcMain.handle(IPC.opencodeOpenStream, async (_e, sessionId: string) => {
+    if (!sessionId) return;
+    const dir = await opencodeResolveSessionDirectory(config, sessionId);
+    if (!dir) return; // unresolved → global stream still covers it
+    openStreamDirs.set(sessionId, dir);
+    acquireOpencodeStream(dir);
+  });
+  ipcMain.handle(IPC.opencodeCloseStream, (_e, sessionId: string) => {
+    if (!sessionId) return;
+    const dir = openStreamDirs.get(sessionId);
+    if (!dir) return;
+    openStreamDirs.delete(sessionId);
+    releaseOpencodeStream(dir);
+  });
 
   // Phase 2: send user message + abort generation. Optional `model` overrides
   // the server default for this prompt only (opencode has no session-level

@@ -792,6 +792,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Initial load + reload whenever sessionId changes.
   useEffect(() => {
     let cancelled = false;
+    // Open the scoped SSE stream for this session while the panel is mounted;
+    // release it on unmount/session-change. The main process refcounts per
+    // directory so the stream lives only as long as a panel needs it — this is
+    // what keeps the bus from holding a connection open for every workspace
+    // opencode knows about (the connection-flood that wedged the backend).
+    void window.api.opencodeOpenStream(sessionId).catch(() => { /* non-fatal */ });
     setMessages(null);
     setError(null);
     setPermissions([]);
@@ -970,6 +976,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       cancelled = true;
       clearInterval(branchPoll);
       clearTimeout(refreshWatchdog);
+      // Release this session's scoped stream. Main-process refcount drops it
+      // only when the last panel for the dir unmounts.
+      void window.api.opencodeCloseStream(sessionId).catch(() => { /* non-fatal */ });
     };
   }, [sessionId, cwd]);
 

@@ -692,6 +692,25 @@ export function getSessionDirectorySync(sessionId: string): string | null {
   return sessionDirectoryCache.get(sessionId) ?? null;
 }
 
+// Resolve a session's directory, lazily fetching + caching it on a miss.
+// Used by the event bus's stream-open IPC: a ChatPanel mounting for a session
+// needs the dir to open the matching scoped `/event?directory=` stream, but
+// the dir may not be cached yet on first mount. Returns null only when the
+// directory genuinely can't be resolved.
+export async function resolveSessionDirectory(
+  config: AppConfig,
+  sessionId: string,
+): Promise<string | null> {
+  const cached = sessionDirectoryCache.get(sessionId);
+  if (cached) return cached;
+  const fetched = await fetchSessionDirectory(config, sessionId);
+  if (fetched) {
+    rememberSessionDirectory(sessionId, fetched);
+    return fetched;
+  }
+  return null;
+}
+
 // Test-only: reset cache between scenarios.
 export function _resetSessionDirectoryCache(): void {
   sessionDirectoryCache.clear();
