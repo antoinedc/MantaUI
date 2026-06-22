@@ -43,6 +43,7 @@ import {
   formatTokens,
   formatBytes,
   formatDuration,
+  formatClockTime,
   ctxStageColor,
   filterCommands,
   dedupeAgainstBuiltins,
@@ -989,13 +990,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setScheduleError(null);
   }, [sessionId]);
 
-  // While the schedules card is open: fetch once + poll every 10s so a
-  // model-created or just-fired job appears without reopening. Refetch-driven
+  // Keep the toolbar schedule count fresh whether or not the card is open:
+  // fetch once on mount/session-change, then poll. The card being open speeds
+  // the poll up (10s) for snappy create/fire feedback; while closed a slower
+  // 30s background poll keeps the "(N)" count current so a model-created job
+  // shows up without the user having to open the card first. Refetch-driven
   // (no bus event) so it behaves identically on desktop and mobile.
   useEffect(() => {
-    if (!showSchedules) return;
     void refreshSchedules();
-    const poll = setInterval(() => void refreshSchedules(), 10_000);
+    const intervalMs = showSchedules ? 10_000 : 30_000;
+    const poll = setInterval(() => void refreshSchedules(), intervalMs);
     return () => clearInterval(poll);
   }, [showSchedules, refreshSchedules]);
 
@@ -2506,24 +2510,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     }
   }, [sessionId]);
 
-  const deleteSession = useCallback(async () => {
-    if (!tmuxSession || windowIndex == null) return;
-    const ok = window.confirm(
-      "Delete this session? This will remove the chat history on the server and close this window. Cannot be undone.",
-    );
-    if (!ok) return;
-    setSendError(null);
-    try {
-      await window.api.opencodeDeleteSession({
-        sessionId,
-        sessionName: tmuxSession,
-        windowIndex,
-      });
-      await refresh();
-    } catch (e) {
-      setSendError(String((e as Error)?.message ?? e));
-    }
-  }, [sessionId, tmuxSession, windowIndex, refresh]);
+  // Session deletion lives in the sidebar (desktop) and the mobile ⋯ sheet —
+  // it was removed from the composer status bar to declutter. The IPC
+  // (window.api.opencodeDeleteSession) is still wired for those paths.
 
   // ===== Auto-rename =====
   //
@@ -4128,7 +4117,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         branch={branch}
         refreshing={refreshing}
         modelLabel={modelLabel}
-        showThinking={showThinking}
         chatAutoAllow={chatAutoAllow}
         setChatAutoAllow={setChatAutoAllow}
         voiceEnabled={voiceEnabled}
@@ -4147,12 +4135,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         activeModel={activeModel}
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
-        canFork={!!tmuxSession}
-        canDelete={tmuxSession != null && windowIndex != null}
         scheduleCount={schedules.length}
-        onFork={forkSession}
-        onCompact={compactSession}
-        onDelete={deleteSession}
         onSchedules={() => setShowSchedules((v) => !v)}
         typeaheadOpen={typeahead != null && typeaheadRows.length > 0}
         typeaheadExactMatch={(() => {
@@ -4738,54 +4721,24 @@ const ScheduledTasksCard = memo(function ScheduledTasksCard({
   );
 });
 
+// SessionToolbar — footer affordances. fork / compact / delete moved out of the
+// footer (they live in the header ⋯ menu); only the ⏰ schedules toggle remains
+// here so its live count is always visible next to the composer.
 function SessionToolbar({
-  canFork,
-  canDelete,
   scheduleCount,
-  onFork,
-  onCompact,
-  onDelete,
   onSchedules,
 }: {
-  canFork: boolean;
-  canDelete: boolean;
   scheduleCount: number;
-  onFork: () => void;
-  onCompact: () => void;
-  onDelete: () => void;
   onSchedules: () => void;
 }) {
   return (
     <span className="flex items-center gap-1 text-[10px]">
-      <button
-        onClick={onFork}
-        disabled={!canFork}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted disabled:opacity-40 disabled:hover:text-text-faint"
-        title="Fork — copy this session's history into a new window"
-      >
-        ⑂ fork
-      </button>
-      <button
-        onClick={onCompact}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
-        title="Compact — summarize to free context"
-      >
-        ⌥ compact
-      </button>
       <button
         onClick={onSchedules}
         className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
         title="View / cancel scheduled tasks"
       >
         ⏰ schedules{scheduleCount > 0 ? ` (${scheduleCount})` : ""}
-      </button>
-      <button
-        onClick={onDelete}
-        disabled={!canDelete}
-        className="px-1.5 py-px rounded text-text-faint hover:text-red-300 disabled:opacity-40 disabled:hover:text-text-faint"
-        title="Delete this session and close the window"
-      >
-        ✕ delete
       </button>
     </span>
   );
@@ -5398,7 +5351,6 @@ function InputArea({
   branch,
   refreshing,
   modelLabel,
-  showThinking,
   chatAutoAllow,
   setChatAutoAllow,
   voiceEnabled,
@@ -5417,12 +5369,7 @@ function InputArea({
   activeModel,
   onOpenModels,
   onSelectModel,
-  canFork,
-  canDelete,
   scheduleCount,
-  onFork,
-  onCompact,
-  onDelete,
   onSchedules,
   typeaheadOpen,
   typeaheadExactMatch,
@@ -5443,7 +5390,6 @@ function InputArea({
   branch: string | null;
   refreshing: boolean;
   modelLabel: string | null;
-  showThinking: boolean;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   // Voice (Groq STT). When voiceEnabled=false the MicButton is hidden so
@@ -5480,12 +5426,7 @@ function InputArea({
   activeModel: OpencodeModel | null;
   onOpenModels: () => void;
   onSelectModel: (m: ModelSelection | null) => void;
-  canFork: boolean;
-  canDelete: boolean;
   scheduleCount: number;
-  onFork: () => void;
-  onCompact: () => void;
-  onDelete: () => void;
   onSchedules: () => void;
   typeaheadOpen: boolean;
   typeaheadExactMatch: boolean;
@@ -5740,23 +5681,20 @@ function InputArea({
         </span>
         <span className="shrink-0 flex items-center gap-3">
           <SessionToolbar
-            canFork={canFork}
-            canDelete={canDelete}
             scheduleCount={scheduleCount}
-            onFork={onFork}
-            onCompact={onCompact}
-            onDelete={onDelete}
             onSchedules={onSchedules}
           />
-          <span className="text-[10px] text-text-faint">
-            {voiceActive
-              ? voiceProcessing
-                ? "transcribing… · esc cancels"
-                : "🎙 recording · ⏎ send · ctrl+m stop · esc cancel"
-              : running
-                ? "esc · interrupt"
-                : `${voiceEnabled ? "ctrl+m · voice · " : ""}ctrl+o · thinking ${showThinking ? "on" : "off"} · shift+⏎ newline · ⏎ send`}
-          </span>
+          {/* Transient status only — recording / interrupt feedback. The static */}
+          {/* keyboard-hint (shift+⏎ newline · ⏎ send) was removed to declutter. */}
+          {(voiceActive || running) && (
+            <span className="text-[10px] text-text-faint">
+              {voiceActive
+                ? voiceProcessing
+                  ? "transcribing… · esc cancels"
+                  : "🎙 recording · ⏎ send · ctrl+m stop · esc cancel"
+                : "esc · interrupt"}
+            </span>
+          )}
         </span>
       </div>
       {/* Trust toggle — its own line, more visible when ON. Below the footer */}
@@ -5872,6 +5810,27 @@ const MessageRow = memo(function MessageRow({
 }) {
   const isUser = msg.info.role === "user";
 
+  // Subtle wall-clock timestamp for each message/action. Sourced from the
+  // message's own time.created — no new prop, so the MessageRow memo chain is
+  // untouched. It sits at the row's top-left, absolutely positioned INSIDE the
+  // content box (left-0, not overflowing into the transcript's px-4 padding —
+  // that zone is clipped by the scroller's overflow). It stays out of the way
+  // (faint, fades in on hover) and never shifts the message layout.
+  const ts = formatClockTime(msg.info.time?.created);
+  const stampedRow = (children: React.ReactNode) => (
+    <div className="group relative">
+      {ts && (
+        <span
+          className="pointer-events-none absolute left-0 -top-2 z-10 select-none whitespace-nowrap text-[10px] leading-none tabular-nums text-text-faint opacity-0 group-hover:opacity-60 transition-opacity"
+          aria-hidden
+        >
+          {ts}
+        </span>
+      )}
+      {children}
+    </div>
+  );
+
   // User message: rendered as a single rounded gray bar so it reads as a
   // distinct "you said this" block instead of just text with a `>` prefix.
   // `›` is the dim left marker; continuation lines wrap inside the bar.
@@ -5885,7 +5844,7 @@ const MessageRow = memo(function MessageRow({
       .replace(/\s+$/, "");
     const fileParts = msg.parts.filter((p) => p.type === "file");
     if (!text && fileParts.length === 0) return null;
-    return (
+    return stampedRow(
       <div>
         {fileParts.length > 0 && (
           <div className="flex flex-wrap gap-1 mb-1 text-[11px]">
@@ -5924,7 +5883,7 @@ const MessageRow = memo(function MessageRow({
             </div>
           )
         )}
-      </div>
+      </div>,
     );
   }
 
@@ -5945,7 +5904,7 @@ const MessageRow = memo(function MessageRow({
   });
   if (visibleParts.length === 0) return null;
 
-  return (
+  return stampedRow(
     <div className="space-y-2">
       {visibleParts.map((p, i) => (
         <AssistantPart key={p.id} part={p} first={i === 0} showThinking={showThinking} />
@@ -6000,7 +5959,7 @@ const MessageRow = memo(function MessageRow({
       {persistentTodos && persistentTodos.length > 0 && (
         <ActiveTodos todos={persistentTodos} />
       )}
-    </div>
+    </div>,
   );
 });
 

@@ -8,6 +8,7 @@ import {
   formatTokens,
   formatBytes,
   formatDuration,
+  formatClockTime,
   ctxStageColor,
   filterCommands,
   dedupeAgainstBuiltins,
@@ -134,6 +135,27 @@ describe("formatDuration", () => {
     expect(formatDuration(3_600_000)).toBe("1h 0m 0s");
     expect(formatDuration(3_661_000)).toBe("1h 1m 1s");
     expect(formatDuration(7_384_000)).toBe("2h 3m 4s");
+  });
+});
+
+// ===== formatClockTime =====
+
+describe("formatClockTime", () => {
+  it("returns empty string for null/undefined/non-finite", () => {
+    expect(formatClockTime(null)).toBe("");
+    expect(formatClockTime(undefined)).toBe("");
+    expect(formatClockTime(NaN)).toBe("");
+    expect(formatClockTime(Infinity)).toBe("");
+  });
+
+  it("formats epoch ms as zero-padded 24h HH:MM (local time)", () => {
+    // Build a known local time so the test is timezone-independent.
+    const d = new Date(2026, 0, 2, 9, 5, 0); // 09:05 local
+    expect(formatClockTime(d.getTime())).toBe("09:05");
+    const d2 = new Date(2026, 0, 2, 23, 59, 0); // 23:59 local
+    expect(formatClockTime(d2.getTime())).toBe("23:59");
+    const d3 = new Date(2026, 0, 2, 0, 0, 0); // 00:00 local
+    expect(formatClockTime(d3.getTime())).toBe("00:00");
   });
 });
 

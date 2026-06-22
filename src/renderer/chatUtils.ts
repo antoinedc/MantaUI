@@ -125,6 +125,20 @@ export function formatDuration(ms: number): string {
   return `${s}s`;
 }
 
+// Wall-clock time for the subtle per-message timestamp gutter. Renders a
+// 24-hour "HH:MM" from an epoch-ms value. Returns "" for null/undefined or
+// non-finite input so the caller can render nothing without extra guards.
+// 24h is locale-stable and compact (5 chars) — important because the gutter
+// is fixed-width and sits left of every message.
+export function formatClockTime(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
 export function ctxStageColor(pct: number): string {
   if (pct < 50) return "#22c55e"; // green-500
   if (pct < 75) return "#eab308"; // yellow-500
