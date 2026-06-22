@@ -89,10 +89,13 @@ else
 fi
 
 CFG="$HOME/.config/opencode/opencode.jsonc"
+# Substring match accepts both the fork (opencode-claude-auth-bui) and the
+# upstream package (opencode-claude-auth) — see CLAUDE_AUTH_PLUGIN_ACCEPTED_BARES
+# in the merge logic above for why we intentionally accept either.
 if [ -f "$CFG" ] && grep -q 'opencode-claude-auth' "$CFG"; then
   echo "opencodeAuthPlugin=ok|configured"
 else
-  echo "opencodeAuthPlugin=fail|opencode-claude-auth plugin not in $CFG. Bootstrap will add it."
+  echo "opencodeAuthPlugin=fail|opencode-claude-auth(-bui) plugin not in $CFG. Bootstrap will add it."
 fi
 
 CRED="$HOME/.claude/.credentials.json"
@@ -217,8 +220,27 @@ fi
 // JSONC merge — pure (tested)
 // ---------------------------------------------------------------------------
 
-const CLAUDE_AUTH_PLUGIN = "opencode-claude-auth@latest";
-const CLAUDE_AUTH_PLUGIN_BARE = "opencode-claude-auth";
+// The plugin we write into a fresh opencode.jsonc. We use a fork of the
+// upstream `opencode-claude-auth` plugin that fixes a long-lived-process
+// recovery bug: in upstream, a single failed OAuth refresh clears the
+// in-memory accountCacheMap, after which every subsequent request throws
+// "credentials unavailable" until opencode-serve is restarted, even though
+// ~/.claude/.credentials.json on disk is healthy. Our fork (1.5.4-bui.1)
+// retries via refreshAccountsList() once before throwing, which restores
+// file-sourced accounts and lets the existing refresh path succeed.
+//
+// Source: https://github.com/antoinedc/opencode-claude-auth (fork of
+// griffinmartin/opencode-claude-auth). Published as opencode-claude-auth-bui
+// on npm. The bare-name MATCH list below makes the probe and the merge
+// accept either the fork OR the upstream package as "auth already wired,"
+// so existing users with the upstream plugin pinned don't get a duplicate
+// entry appended on re-bootstrap.
+const CLAUDE_AUTH_PLUGIN = "opencode-claude-auth-bui@1.5.4-bui.1";
+const CLAUDE_AUTH_PLUGIN_BARE = "opencode-claude-auth-bui";
+const CLAUDE_AUTH_PLUGIN_ACCEPTED_BARES: readonly string[] = [
+  CLAUDE_AUTH_PLUGIN_BARE,
+  "opencode-claude-auth",
+];
 
 /**
  * Strip single-line `//` JSONC comments while respecting string literals.
@@ -359,14 +381,17 @@ export function mergeOpencodeJsonc(existing: string): MergeResult {
   const pluginArray = Array.isArray(rawPlugin) ? rawPlugin : null;
 
   // Check if the auth plugin is already present in any form (pinned or
-  // unpinned). `pkg@version` and bare `pkg` both count.
+  // unpinned). `pkg@version` and bare `pkg` both count. Either the fork
+  // (opencode-claude-auth-bui) or the upstream (opencode-claude-auth) name
+  // is accepted — re-bootstrapping a remote that already runs upstream must
+  // NOT append a duplicate fork entry; the user's choice is respected.
   const alreadyPresent =
     pluginArray !== null &&
     pluginArray.some((entry) => {
       const s = asString(entry);
       if (!s) return false;
       const bareName = s.split("@")[0];
-      return bareName === CLAUDE_AUTH_PLUGIN_BARE;
+      return CLAUDE_AUTH_PLUGIN_ACCEPTED_BARES.includes(bareName);
     });
 
   if (alreadyPresent) {

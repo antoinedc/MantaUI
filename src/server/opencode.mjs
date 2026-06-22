@@ -61,6 +61,24 @@ function rememberSessionDirectory(sessionId, directory) {
   }
 }
 
+// Cache a session→directory WITHOUT opening a scoped stream. Used by the
+// subscribe bootstrap: we want existing sessions' dirs resolvable (so the
+// first prompt is fast) but we must NOT open a `/event?directory=` stream for
+// every session in the catalog. On a box with many opencode workspaces (e.g.
+// Multica), listSessions() returns ~100 dirs, and eagerly streaming each one
+// piled up hundreds of connections that buried opencode serve and made every
+// request crawl. Streams now open on demand via ensureStreamForDirectory when
+// a session is actually used (prompt / message fetch).
+function cacheSessionDirectoryQuiet(sessionId, directory) {
+  if (!sessionId || typeof directory !== "string" || directory.length === 0) return;
+  sessionDirectoryCache.set(sessionId, directory);
+}
+
+// Opens the scoped stream for a directory if a subscription is active. Set by
+// subscribeEvents (to its openFor); called by getSessionDirectoryQuery so an
+// in-use session's events arrive even though the bootstrap didn't pre-open it.
+let ensureStreamForDirectory = null;
+
 async function fetchSessionDirectory(sessionId) {
   try {
     const res = await fetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
@@ -77,16 +95,18 @@ async function getSessionDirectoryQuery(sessionId) {
   if (!dir) {
     const fetched = await fetchSessionDirectory(sessionId);
     if (fetched) {
-      // Route through rememberSessionDirectory (NOT a bare cache.set) so the
-      // directoryListeners fire and the SSE manager opens the scoped
-      // `/event?directory=` stream. Without this, an existing session
-      // resolved lazily on its first prompt never opens its stream, and
-      // opencode emits that prompt's events only on the scoped channel —
-      // they're lost and the session looks frozen. Mirrors the desktop fix
-      // in src/main/opencode.ts:getSessionDirectoryQuery.
       rememberSessionDirectory(sessionId, fetched);
       dir = fetched;
     }
+  }
+  // This session is genuinely being used (prompt / message fetch routes here),
+  // so ensure its scoped stream is open — covers BOTH the freshly-fetched dir
+  // and a dir that the bootstrap cached quietly (cacheSessionDirectoryQuiet
+  // doesn't open a stream). opencode emits this prompt's events only on the
+  // scoped channel; without the stream they're lost and the session looks
+  // frozen. Idempotent (openFor no-ops if already open).
+  if (dir && ensureStreamForDirectory) {
+    try { ensureStreamForDirectory(dir); } catch { /* non-fatal */ }
   }
   return dir ? `?directory=${encodeURIComponent(dir)}` : "";
 }
@@ -150,6 +170,12 @@ export async function createSession({ directory, title = "" }) {
  *  @param {string} sessionId
  */
 export async function listMessages(sessionId) {
+  // A web client fetching a session's transcript means that session is being
+  // viewed — ensure its scoped stream so live updates arrive. Resolving the
+  // dir (and opening the stream) is fire-and-forget so it doesn't delay the
+  // transcript fetch. Mirrors the desktop ChatPanel opening its stream on
+  // mount; without it, only sending a prompt would open the stream.
+  void getSessionDirectoryQuery(sessionId).catch(() => {});
   const url = `/session/${encodeURIComponent(sessionId)}/message`;
   const res = await fetch(apiUrl(url));
   if (!res.ok) {
@@ -750,21 +776,34 @@ export function subscribeEvents(onEvent) {
   // and any future event that opencode emits without a directory).
   openFor("", undefined);
 
-  // Auto-open scoped streams for newly-discovered directories.
+  // Auto-open scoped streams for newly-discovered directories (createSession /
+  // forkSession route through rememberSessionDirectory, which fires this).
   const listener = (dir) => {
     if (stopped || !dir) return;
     openFor(dir, dir);
   };
   directoryListeners.add(listener);
 
-  // Prime the cache from existing sessions so server-restart scenarios pick
-  // up streams for in-flight directories without needing a new session.
+  // Expose the on-demand opener so getSessionDirectoryQuery can open a stream
+  // the moment a session is actually used, rather than us pre-opening one for
+  // every session in the catalog.
+  ensureStreamForDirectory = (dir) => {
+    if (stopped || !dir) return;
+    openFor(dir, dir);
+  };
+
+  // Prime the dir cache from existing sessions so a prompt to a pre-existing
+  // session resolves its directory fast — but do NOT open a stream per
+  // session here. Streams open lazily when a session is used (see
+  // getSessionDirectoryQuery → ensureStreamForDirectory). This is the fix for
+  // the connection flood: on a many-workspace box, eagerly streaming every
+  // session in listSessions() opened hundreds of connections to opencode.
   (async () => {
     try {
       const sessions = await listSessions();
       for (const s of sessions || []) {
         if (s?.id && typeof s?.directory === "string") {
-          rememberSessionDirectory(s.id, s.directory);
+          cacheSessionDirectoryQuiet(s.id, s.directory);
         }
       }
     } catch { /* non-fatal: bootstrap is best-effort */ }
@@ -773,6 +812,7 @@ export function subscribeEvents(onEvent) {
   return () => {
     stopped = true;
     directoryListeners.delete(listener);
+    ensureStreamForDirectory = null;
     for (const stop of streams.values()) {
       try { stop(); } catch { /* ignore */ }
     }

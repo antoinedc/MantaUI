@@ -178,14 +178,14 @@ describe("mergeOpencodeJsonc", () => {
     const r = mergeOpencodeJsonc("");
     expect(r.changed).toBe(true);
     const cfg = parse(r.content);
-    expect(cfg.plugin).toEqual(["opencode-claude-auth@latest"]);
+    expect(cfg.plugin).toEqual(["opencode-claude-auth-bui@1.5.4-bui.1"]);
     expect(cfg.$schema).toBe("https://opencode.ai/config.json");
   });
 
   it("writes a minimal config when existing is only whitespace", () => {
     const r = mergeOpencodeJsonc("   \n  \n");
     expect(r.changed).toBe(true);
-    expect(parse(r.content).plugin).toEqual(["opencode-claude-auth@latest"]);
+    expect(parse(r.content).plugin).toEqual(["opencode-claude-auth-bui@1.5.4-bui.1"]);
   });
 
   it("appends auth plugin to an existing plugin array, preserving order", () => {
@@ -199,7 +199,7 @@ describe("mergeOpencodeJsonc", () => {
     const cfg = parse(r.content);
     expect(cfg.plugin).toEqual([
       "other-plugin@1.0",
-      "opencode-claude-auth@latest",
+      "opencode-claude-auth-bui@1.5.4-bui.1",
     ]);
     // Other top-level keys must be preserved verbatim.
     expect(cfg.model).toBe("anthropic/claude-opus-4-7");
@@ -214,12 +214,24 @@ describe("mergeOpencodeJsonc", () => {
     const r = mergeOpencodeJsonc(existing);
     expect(r.changed).toBe(true);
     const cfg = parse(r.content);
-    expect(cfg.plugin).toEqual(["opencode-claude-auth@latest"]);
+    expect(cfg.plugin).toEqual(["opencode-claude-auth-bui@1.5.4-bui.1"]);
     expect(cfg.model).toBe("anthropic/claude-opus-4-7");
     expect(cfg.keymap).toEqual({ quit: "ctrl+q" });
   });
 
-  it("is a no-op when the auth plugin is already present (pinned version)", () => {
+  it("is a no-op when the fork is already present (pinned version)", () => {
+    const existing = JSON.stringify({
+      plugin: ["opencode-claude-auth-bui@1.5.4-bui.1"],
+    });
+    const r = mergeOpencodeJsonc(existing);
+    expect(r.changed).toBe(false);
+    expect(parse(r.content).plugin).toEqual(["opencode-claude-auth-bui@1.5.4-bui.1"]);
+  });
+
+  it("is a no-op when the UPSTREAM plugin is already present — fork is NOT appended", () => {
+    // A user who already runs the upstream `opencode-claude-auth` must NOT
+    // get the fork appended on re-bootstrap. Both names are accepted as
+    // "auth is wired up"; the user's existing choice is respected.
     const existing = JSON.stringify({
       plugin: ["opencode-claude-auth@latest"],
     });
@@ -228,8 +240,7 @@ describe("mergeOpencodeJsonc", () => {
     expect(parse(r.content).plugin).toEqual(["opencode-claude-auth@latest"]);
   });
 
-  it("respects a user's custom pinned version of the plugin (no overwrite)", () => {
-    // User has pinned to an older version on purpose — don't bump it.
+  it("respects a user's custom pinned version of the upstream plugin (no overwrite)", () => {
     const existing = JSON.stringify({
       plugin: ["opencode-claude-auth@0.3.1"],
     });
@@ -238,9 +249,26 @@ describe("mergeOpencodeJsonc", () => {
     expect(parse(r.content).plugin).toEqual(["opencode-claude-auth@0.3.1"]);
   });
 
-  it("recognizes the plugin by bare package name (no @version suffix)", () => {
+  it("respects a user's custom pinned version of the fork (no overwrite)", () => {
+    const existing = JSON.stringify({
+      plugin: ["opencode-claude-auth-bui@2.0.0"],
+    });
+    const r = mergeOpencodeJsonc(existing);
+    expect(r.changed).toBe(false);
+    expect(parse(r.content).plugin).toEqual(["opencode-claude-auth-bui@2.0.0"]);
+  });
+
+  it("recognizes the upstream plugin by bare package name (no @version suffix)", () => {
     const existing = JSON.stringify({
       plugin: ["opencode-claude-auth"],
+    });
+    const r = mergeOpencodeJsonc(existing);
+    expect(r.changed).toBe(false);
+  });
+
+  it("recognizes the fork by bare package name (no @version suffix)", () => {
+    const existing = JSON.stringify({
+      plugin: ["opencode-claude-auth-bui"],
     });
     const r = mergeOpencodeJsonc(existing);
     expect(r.changed).toBe(false);
@@ -259,7 +287,7 @@ describe("mergeOpencodeJsonc", () => {
     const r = mergeOpencodeJsonc("{ this is not valid jsonc");
     expect(r.changed).toBe(true);
     expect(r.detail).toContain("unparseable");
-    expect(parse(r.content).plugin).toEqual(["opencode-claude-auth@latest"]);
+    expect(parse(r.content).plugin).toEqual(["opencode-claude-auth-bui@1.5.4-bui.1"]);
   });
 
   it("treats a non-array `plugin` field as no array and creates a new one", () => {
@@ -273,7 +301,7 @@ describe("mergeOpencodeJsonc", () => {
     // We REPLACE the malformed value with a fresh array — the alternative
     // (preserving the string) would yield an invalid config opencode would
     // reject. Other keys still preserved.
-    expect(cfg.plugin).toEqual(["opencode-claude-auth@latest"]);
+    expect(cfg.plugin).toEqual(["opencode-claude-auth-bui@1.5.4-bui.1"]);
     expect(cfg.other).toBe(42);
   });
 
