@@ -45,6 +45,28 @@ The preload bundle is built once at dev-server start; renderer HMR alone won't
 pick up new `window.api` methods. If you add an IPC channel and don't see it
 on `window.api`, you didn't restart.
 
+**MOBILE CHANGES NEED A REBUILD + COMMIT — source edits alone do NOTHING on a
+phone/browser.** The mobile/web client is served as a **pre-built static
+bundle** from `mobile/www/` (`src/server/index.mjs` `PUBLIC_DIR`), NOT live
+source. `mobile/www/` is **tracked in git** (not ignored). So any change that
+should reach mobile — `ChatPanel.tsx`, `mobile.css`, `src/renderer/**`, the
+service worker — requires:
+
+```
+npm run build:mobile        # rebuilds mobile/www/ (Vite, content-hashed assets)
+git add mobile/www && git commit && git push
+```
+
+Symptom if you skip this: you commit renderer/CSS changes, the desktop Electron
+app shows them (it runs Vite live), but the phone PWA looks unchanged — because
+the served bundle is stale. **No server restart is needed** — bui-server reads
+the static files per-request and sends `no-store` on `index.html` (so the next
+PWA launch / hard-refresh pulls the new content-hashed JS/CSS automatically).
+The service worker does NO asset caching (`mobile/www/sw.js`), so it isn't the
+culprit. To see changes on-device: force-quit + reopen the iOS PWA (or
+hard-refresh the browser). Desktop is unaffected by this — only the
+mobile/web client serves from `mobile/www/`.
+
 Git-synced (since 2026-05-16). Single source of truth:
 `git@github.com:antoinedc/better-ui.git` (private). Both the remote dev box
 (`dev@157.90.224.92:/home/dev/projects/better-ui`) and the Mac are clones
