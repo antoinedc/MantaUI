@@ -1663,3 +1663,161 @@ function ordinal(n: number): string {
   const v = n % 100;
   return s[(v - 20) % 10] ?? s[v] ?? s[0];
 }
+
+// --- Next-run computation (mirrors src/server/schedule.mjs cron semantics) ---
+//
+// The renderer computes the next fire time client-side because ScheduledJob has
+// no nextRun field. These two helpers are a faithful port of `parseField` +
+// `cronMatches` from the server so the displayed time matches when the server
+// will actually fire. cron is interpreted in LOCAL time (same as the box). Pure
+// + never throws.
+
+// Returns the set of allowed values for one cron field, or null for "*"
+// (wildcard), or undefined for an unparseable field. Port of schedule.mjs.
+function cronFieldSet(field: string, min: number, max: number): Set<number> | null | undefined {
+  if (field === "*") return null;
+  const allowed = new Set<number>();
+  for (const part of field.split(",")) {
+    let step = 1;
+    let body = part;
+    const slash = part.indexOf("/");
+    if (slash !== -1) {
+      body = part.slice(0, slash);
+      step = Number(part.slice(slash + 1));
+      if (!Number.isInteger(step) || step < 1) return undefined;
+    }
+    let lo: number;
+    let hi: number;
+    if (body === "*") {
+      lo = min;
+      hi = max;
+    } else if (body.includes("-")) {
+      const [a, b] = body.split("-");
+      lo = Number(a);
+      hi = Number(b);
+    } else {
+      lo = hi = Number(body);
+    }
+    if (!Number.isInteger(lo) || !Number.isInteger(hi)) return undefined;
+    if (lo < min || hi > max || lo > hi) return undefined;
+    for (let v = lo; v <= hi; v += step) allowed.add(v);
+  }
+  return allowed;
+}
+
+// Does `expr` fire at `date` (LOCAL time, minute granularity)? Port of
+// schedule.mjs cronMatches, including vixie either-match for DOM+DOW.
+function cronMatchesLocal(expr: string, date: Date): boolean {
+  const fields = String(expr).trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  const min = cronFieldSet(fields[0], 0, 59);
+  const hour = cronFieldSet(fields[1], 0, 23);
+  const dom = cronFieldSet(fields[2], 1, 31);
+  const month = cronFieldSet(fields[3], 1, 12);
+  let dow = cronFieldSet(fields[4], 0, 7);
+  if (
+    min === undefined || hour === undefined || dom === undefined ||
+    month === undefined || dow === undefined
+  )
+    return false;
+  if (dow && dow.has(7)) dow = new Set([...dow].map((d) => (d === 7 ? 0 : d)));
+
+  if (min && !min.has(date.getMinutes())) return false;
+  if (hour && !hour.has(date.getHours())) return false;
+  if (month && !month.has(date.getMonth() + 1)) return false;
+
+  const domRestricted = dom !== null;
+  const dowRestricted = dow !== null;
+  const dmonth = date.getDate();
+  const wday = date.getDay();
+  if (domRestricted && dowRestricted) return dom!.has(dmonth) || dow!.has(wday);
+  if (domRestricted) return dom!.has(dmonth);
+  if (dowRestricted) return dow!.has(wday);
+  return true;
+}
+
+// Next epoch-ms at which `expr` fires strictly AFTER `from` (default now).
+// Searches minute-by-minute up to ~366 days ahead (covers every 5-field cron,
+// including "0 0 29 2 *"). Returns null if the expression is invalid or no
+// match is found within the horizon. LOCAL time, matching the server poller.
+export function nextCronRun(expr: string, from: number = Date.now()): number | null {
+  const fields = String(expr ?? "").trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  // Validate up front so a bad field doesn't burn the whole search loop.
+  if (
+    cronFieldSet(fields[0], 0, 59) === undefined ||
+    cronFieldSet(fields[1], 0, 23) === undefined ||
+    cronFieldSet(fields[2], 1, 31) === undefined ||
+    cronFieldSet(fields[3], 1, 12) === undefined ||
+    cronFieldSet(fields[4], 0, 7) === undefined
+  )
+    return null;
+
+  // Start at the next whole minute after `from` (seconds zeroed) — a match at
+  // the current minute is "now/just-fired", not "next".
+  const d = new Date(from);
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1);
+  const HORIZON_MIN = 366 * 24 * 60;
+  for (let i = 0; i < HORIZON_MIN; i++) {
+    if (cronMatchesLocal(expr, d)) return d.getTime();
+    d.setMinutes(d.getMinutes() + 1);
+  }
+  return null;
+}
+
+// Compact relative + absolute label for a job's next run, e.g.
+// "in 4m", "in 2h", "tomorrow 09:00", "Mon 14:30", "Mar 3". Returns "" when
+// there's no upcoming run (invalid cron, or a one-shot already past).
+export function describeNextRun(
+  expr: string,
+  recurring = true,
+  from: number = Date.now(),
+): string {
+  const next = nextCronRun(expr, from);
+  if (next == null) return "";
+  // A non-recurring job that has no future match (its single time is in the
+  // past) returns null above; if it DOES have a future match we still show it.
+  void recurring;
+
+  const deltaMs = next - from;
+  const mins = Math.round(deltaMs / 60_000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const nd = new Date(next);
+  const hhmm = `${pad(nd.getHours())}:${pad(nd.getMinutes())}`;
+
+  if (mins < 1) return "in <1m";
+  if (mins < 60) return `in ${mins}m`;
+  if (mins < 60 * 6) {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `in ${h}h ${m}m` : `in ${h}h`;
+  }
+
+  // Same calendar day → just the time.
+  const fromD = new Date(from);
+  const sameDay =
+    nd.getFullYear() === fromD.getFullYear() &&
+    nd.getMonth() === fromD.getMonth() &&
+    nd.getDate() === fromD.getDate();
+  if (sameDay) return `today ${hhmm}`;
+
+  const tomorrow = new Date(from);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const isTomorrow =
+    nd.getFullYear() === tomorrow.getFullYear() &&
+    nd.getMonth() === tomorrow.getMonth() &&
+    nd.getDate() === tomorrow.getDate();
+  if (isTomorrow) return `tomorrow ${hhmm}`;
+
+  // Within a week → weekday + time. Beyond → month + day.
+  const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const MON_NAMES = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  if (deltaMs < 7 * 24 * 60 * 60_000) {
+    return `${DOW_NAMES[nd.getDay()]} ${hhmm}`;
+  }
+  return `${MON_NAMES[nd.getMonth()]} ${nd.getDate()} ${hhmm}`;
+}

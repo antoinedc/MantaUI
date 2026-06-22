@@ -85,6 +85,7 @@ import {
   buildTitleInstruction,
   sanitizeGeneratedTitle,
   describeCron,
+  describeNextRun,
   type TruncationKind,
   type ContextBreakdown,
   type StaleCacheResult,
@@ -3932,8 +3933,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
       {/* Scheduled-tasks management card. Toggled by the ⏰ toolbar button */}
       {/* (desktop) or the ⋯ sheet (mobile). Refetch-driven while open. */}
+      {/* pb-2 gives the card breathing room above the composer border so it */}
+      {/* doesn't sit flush against the chat divider. */}
       {showSchedules && (
-        <div className="shrink-0 px-4 pt-2">
+        <div className="shrink-0 px-4 pt-2 pb-2">
           <ScheduledTasksCard
             jobs={schedules}
             error={scheduleError}
@@ -4697,24 +4700,40 @@ const ScheduledTasksCard = memo(function ScheduledTasksCard({
       ) : jobs.length === 0 ? (
         <div className="text-text-muted">No scheduled tasks in this session.</div>
       ) : (
-        <div className="flex flex-col gap-1">
-          {jobs.map((j) => (
-            <div key={j.id} className="flex items-center gap-2">
-              <span className="text-text truncate flex-1" title={j.prompt}>
-                {j.label || j.prompt}
-              </span>
-              <span className="text-text-faint shrink-0 font-mono">
-                {describeCron(j.cron, j.recurring)}
-              </span>
-              <button
-                onClick={() => onDelete(j.id)}
-                className="shrink-0 px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30"
-                title="Cancel this scheduled task"
-              >
-                ✕
-              </button>
-            </div>
-          ))}
+        <div className="flex flex-col gap-1.5">
+          {jobs.map((j) => {
+            const next = describeNextRun(j.cron, j.recurring);
+            return (
+              <div key={j.id} className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="text-text truncate" title={j.prompt}>
+                    {j.label || j.prompt}
+                  </div>
+                  <div className="flex items-center gap-2 text-text-faint font-mono text-[11px]">
+                    <span className="shrink-0">
+                      {describeCron(j.cron, j.recurring)}
+                    </span>
+                    {next && (
+                      <span
+                        className="shrink-0 truncate"
+                        title="Next run"
+                        style={{ color: CLAUDE_ORANGE }}
+                      >
+                        · next {next}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => onDelete(j.id)}
+                  className="shrink-0 px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30"
+                  title="Cancel this scheduled task"
+                >
+                  ✕
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

@@ -53,6 +53,8 @@ import {
   isToolStepBoundary,
   isDrainAbortError,
   describeCron,
+  nextCronRun,
+  describeNextRun,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2428,5 +2430,74 @@ describe("describeCron", () => {
   });
   it("never throws", () => {
     expect(() => describeCron(null as unknown as string)).not.toThrow();
+  });
+});
+
+describe("nextCronRun", () => {
+  // Fixed local reference: Mon 2026-01-05 10:30:00 local.
+  const FROM = new Date(2026, 0, 5, 10, 30, 0).getTime();
+
+  it("returns null for invalid expressions", () => {
+    expect(nextCronRun("garbage", FROM)).toBeNull();
+    expect(nextCronRun("", FROM)).toBeNull();
+    expect(nextCronRun("60 0 * * *", FROM)).toBeNull(); // minute out of range
+    expect(nextCronRun("0 0 * *", FROM)).toBeNull(); // only 4 fields
+  });
+
+  it("every-5-min lands on the next 5-minute boundary after now", () => {
+    const next = nextCronRun("*/5 * * * *", FROM)!;
+    expect(new Date(next).getMinutes()).toBe(35); // 10:30 → next */5 is 10:35
+    expect(next).toBe(new Date(2026, 0, 5, 10, 35, 0).getTime());
+  });
+
+  it("daily at a later time today returns today's time", () => {
+    const next = nextCronRun("0 14 * * *", FROM)!;
+    expect(next).toBe(new Date(2026, 0, 5, 14, 0, 0).getTime());
+  });
+
+  it("daily at an earlier time rolls to tomorrow", () => {
+    const next = nextCronRun("0 9 * * *", FROM)!;
+    expect(next).toBe(new Date(2026, 0, 6, 9, 0, 0).getTime());
+  });
+
+  it("weekday cron skips the weekend (FROM is Monday)", () => {
+    // Next Tuesday 9:00 from Monday 10:30.
+    const next = nextCronRun("0 9 * * 2", FROM)!;
+    expect(new Date(next).getDay()).toBe(2);
+    expect(next).toBe(new Date(2026, 0, 6, 9, 0, 0).getTime());
+  });
+
+  it("does not return the current minute even if it matches", () => {
+    // FROM is exactly 10:30; "30 10 * * *" matches now but next must be > now.
+    const next = nextCronRun("30 10 * * *", FROM)!;
+    expect(next).toBe(new Date(2026, 0, 6, 10, 30, 0).getTime()); // tomorrow
+  });
+});
+
+describe("describeNextRun", () => {
+  const FROM = new Date(2026, 0, 5, 10, 30, 0).getTime();
+
+  it("returns empty for invalid cron", () => {
+    expect(describeNextRun("garbage", true, FROM)).toBe("");
+  });
+
+  it("uses relative minutes for soon runs", () => {
+    expect(describeNextRun("*/5 * * * *", true, FROM)).toBe("in 5m");
+  });
+
+  it("uses relative hours within 6h", () => {
+    expect(describeNextRun("30 13 * * *", true, FROM)).toBe("in 3h");
+  });
+
+  it("uses 'today HH:MM' for same-day runs beyond 6h", () => {
+    expect(describeNextRun("0 23 * * *", true, FROM)).toBe("today 23:00");
+  });
+
+  it("uses 'tomorrow HH:MM' for next-day runs", () => {
+    expect(describeNextRun("0 9 * * *", true, FROM)).toBe("tomorrow 09:00");
+  });
+
+  it("never throws on bad input", () => {
+    expect(() => describeNextRun(null as unknown as string, true, FROM)).not.toThrow();
   });
 });
