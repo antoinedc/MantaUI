@@ -313,13 +313,19 @@ the reusable "bui tools" pattern (for future tools like `ping`) is in
 `docs/bui-tools-scheduler.md`. Key facts:
 
 - **The AI's awareness comes from a GLOBAL opencode custom tool**, not bui code.
-  `docs/opencode-tools/schedule.ts` is symlinked into
+  `docs/opencode-tools/schedule.ts` is **COPIED** (not symlinked) into
   `~/.config/opencode/tools/schedule.ts` on the box; opencode auto-loads it for
   EVERY project/session/model. Multiple named exports → tools `schedule_create`,
   `schedule_list`, `schedule_cancel`. A guidance blurb appended to
   `~/.config/opencode/AGENTS.md` (from `docs/opencode-tools/AGENTS.md`) tells the
-  model when to reach for it. **Install/update requires restarting the
-  `bui-opencode` tmux session** so opencode re-scans `tools/`.
+  model when to reach for it. **DO NOT symlink the tool** — opencode resolves a
+  tool's imports relative to the file's REAL path, so a symlink back into the
+  repo (no `node_modules`) fails with `Cannot find module '@opencode-ai/plugin'`
+  and the tool silently never registers; a real copy resolves the import up the
+  tree to `~/.config/opencode/node_modules/`. **Install/update requires
+  `systemctl --user restart opencode-serve`** (opencode runs as that systemd
+  service, NOT a `bui-opencode` tmux session — that reference is stale) so it
+  re-scans `tools/`.
 - **The tool is a thin registrar** — it `fetch`es bui-server
   (`127.0.0.1:8787/api/schedule`, same box, no SSH hop) and returns immediately.
   `execute` must NOT sleep; the durable store + firing loop live server-side.
