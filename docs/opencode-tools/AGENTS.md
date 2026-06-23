@@ -39,3 +39,20 @@ it down early. `list_pages` shows all active pages.
 - `serve_page(subdomain, filePath, ttlHours?)` -> "Page served at https://<sub>.bui.antoinedc.com"
 - `stop_page(subdomain)` -> "Page <sub>.bui.antoinedc.com has been taken down."
 - `list_pages` -> bullet list of active pages with URLs and expiry times
+
+## bui peer-session awareness
+
+You have `peers_list` and `peers_inspect` tools to see what OTHER agent
+sessions in the same workspace (the sibling windows of your tmux session) are
+doing. Reach for them when you notice files changing under you, `git status`
+shifting, or otherwise suspect another agent is working alongside you and you
+want to know who, and on what — so you don't collide.
+
+- `peers_list` -> each peer's window name, type (chat/tui), branch, number of
+  uncommitted files, status (working/idle/blocked), and current activity.
+- `peers_inspect(target)` -> deep dive on one peer (by window name, index, or
+  session id): full `git status`, branch, and its recent transcript + todos
+  (chat sessions) or terminal tail (claude-TUI sessions).
+
+Typical flow: run `peers_list` first; if a peer is touching files you care
+about, `peers_inspect` it to see exactly what it's changing before you proceed.

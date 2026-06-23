@@ -29,6 +29,7 @@ import {
   unregisterPage,
   listPages,
 } from "./servePage.mjs";
+import { listPeers, inspectPeer } from "./peers.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -521,6 +522,39 @@ const server = createServer(async (req, res) => {
         const result = await unregisterPage(subdomain, { publish: (evt) => bus.publish(evt) });
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ deleted: result.deleted }));
+        return;
+      }
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+
+  // ---------- Peer-session awareness ----------
+  // GET /api/peers?sessionID=&directory=          → {ok, workspace, self, peers:[...]}
+  // GET /api/peers?sessionID=&directory=&target=  → {ok, peer:{...}} (deep inspect)
+  // Lets an opencode session see what OTHER sessions in the same workspace (tmux
+  // session) are doing. Called by the remote AI's global opencode `peers_list` /
+  // `peers_inspect` tools. See src/server/peers.mjs.
+  if (path === "/api/peers") {
+    try {
+      if (req.method === "GET") {
+        const sessionID = url.searchParams.get("sessionID") || undefined;
+        const directory = url.searchParams.get("directory") || undefined;
+        const target = url.searchParams.get("target") || undefined;
+        const result = target
+          ? await inspectPeer({ sessionID, directory, target })
+          : await listPeers({ sessionID, directory });
+        if (!result.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(result));
         return;
       }
       res.writeHead(405, { "content-type": "application/json" });

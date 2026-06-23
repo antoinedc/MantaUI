@@ -432,6 +432,54 @@ generates on the box. Follows the same "bui tools" pattern as the scheduler
 - Tests: `src/server/servePage.test.mjs` (`isValidSubdomain`, `extractSubdomain`,
   cleanup-sweep expiry, 10). Pure logic only.
 
+## Peer awareness — bui-native AI tool (`src/server/peers.mjs`)
+
+The third **bui-native opencode tool**: an opencode session can see what OTHER
+sessions in the SAME workspace are doing. Use case: an agent notices files /
+`git status` changing under it and wants to know which other agent is working
+alongside it, and on what — so they don't collide. Same "bui tools" pattern as
+schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
+
+- **Workspace = tmux session (bui project); peers = sibling windows.** The crux
+  is the `@bui-session-id` tmux user-option, surfaced by `tmux.listProjects()`
+  as `window.opencodeSessionId`. `resolveWorkspace(projects, sessionID,
+  directory)` (pure) finds the caller's window — by sessionID first, falling
+  back to a `paneCurrentPath === directory` match (covers subagent children
+  whose window isn't stamped). `selectPeers` returns the sibling windows.
+- **Global opencode tool**, `docs/opencode-tools/peers.ts`, **COPIED** (not
+  symlinked — same `@opencode-ai/plugin` gotcha) to
+  `~/.config/opencode/tools/peers.ts`. Two exports → `peers_list`,
+  `peers_inspect`. Guidance appended to `~/.config/opencode/AGENTS.md`.
+  **Install/update = `systemctl --user restart opencode-serve`.**
+- **Thin registrar, GET-only** — `fetch`es bui-server
+  `127.0.0.1:8787/api/peers?sessionID=&directory=[&target=]` (no SSH hop). No
+  durable state: peer data is computed live per call. `target` present →
+  inspect one peer; absent → list all.
+- **Per-peer data sources branch on window type:**
+  - chat-mode peer (`opencodeSessionId` set): `oc.listMessages` transcript +
+    `listPermissions`/`listQuestions`. Status via `classifyChatStatus`
+    (blocked-question > blocked-permission > working [last assistant turn has
+    no `time.completed`] > idle — best-effort, the server keeps no live
+    running flag). Activity via `describeChatActivity` (in-progress todo →
+    last assistant snippet → recent tool names).
+  - claude-TUI peer (`opencodeSessionId` null): `tmux capture-pane -S -40` +
+    `BUSY_RE` (copied from status.mjs — no coupling). `capture-pane` is BLANK
+    for chat-mode holder panes (`sleep infinity`), which is exactly why the
+    branch exists.
+  - git state (both): `git -C <cwd> status --porcelain` (`parseGitStatus`,
+    pure) + `oc.getVcsBranch(cwd)`. The uncommitted-file count is the headline
+    "another agent is touching files" signal.
+- **`peers_list`** → each peer's name, type, branch, gitChanges count, status,
+  one-line activity. **`peers_inspect(target)`** (by window name / index /
+  session id) → full git file list + branch, plus recent transcript turns +
+  todos (chat) or terminal pane tail (TUI).
+- **No UI card, no durable store, no bus event** — purely a live AI-facing
+  read tool (v1). No `peers:*` window.api channels; the desktop renderer
+  doesn't consume it.
+- Tests: `src/server/peers.test.mjs` (resolveWorkspace, selectPeers,
+  parseGitStatus, summarizeTranscript, classifyChatStatus, describeChatActivity,
+  recentTurns — 15). Pure logic only.
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what
