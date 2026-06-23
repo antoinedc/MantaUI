@@ -22,6 +22,13 @@ import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { startOutboxPoller } from "./outbox.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
+import {
+  startFileServer,
+  startCleanupPoller,
+  registerPage,
+  unregisterPage,
+  listPages,
+} from "./servePage.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -59,6 +66,18 @@ const { stop: stopSchedulePoller } = startSchedulePoller(
   },
   { intervalMs: 30000 },
 );
+
+// Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
+// serves HTML pages from ~/.bui-mobile/pages/<subdomain>/index.html. Caddy
+// reverse-proxies *.bui.antoinedc.com to this port. Pages are registered by
+// the remote AI's global opencode `serve_page` tool → POST /api/serve-page.
+// See src/server/servePage.mjs + docs/.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopFileServer } = startFileServer();
+
+// Cleanup sweep for expired pages (runs every 5 min).
+// eslint-disable-next-line no-unused-vars
+const { stop: stopServePageCleanup } = startCleanupPoller();
 
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.
@@ -436,6 +455,70 @@ const server = createServer(async (req, res) => {
           return;
         }
         const result = await deleteJob(id, { publish: (evt) => bus.publish(evt) });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ deleted: result.deleted }));
+        return;
+      }
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+
+  // ---------- Serve page (web page hosting) ----------
+  // POST   /api/serve-page        body {subdomain, filePath, ttlHours, sessionID}
+  //                             → {ok, url, subdomain, expiresAt} (400 bad request)
+  // GET    /api/serve-page        → {pages:[{subdomain, url, expiresAt, ...}]}
+  // DELETE /api/serve-page?subdomain= → {deleted:bool}
+  // Created by the remote AI's global opencode `serve_page` tool. Source files
+  // are copied into ~/.bui-mobile/pages/<subdomain>/index.html and served by the
+  // in-process file server on 127.0.0.1:20080. Caddy reverse-proxies
+  // *.bui.antoinedc.com to that port. Pages expire after TTL (default 24h).
+  if (path === "/api/serve-page") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await registerPage(
+          {
+            subdomain: body?.subdomain,
+            filePath: body?.filePath,
+            ttlHours: body?.ttlHours,
+            sessionID: body?.sessionID,
+          },
+          { publish: (evt) => bus.publish(evt) },
+        );
+        if (!result.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            url: result.url,
+            subdomain: result.subdomain,
+            expiresAt: result.expiresAt,
+          }),
+        );
+        return;
+      }
+      if (req.method === "GET") {
+        const pages = listPages();
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ pages }));
+        return;
+      }
+      if (req.method === "DELETE") {
+        const subdomain = url.searchParams.get("subdomain");
+        if (!subdomain) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "subdomain is required" }));
+          return;
+        }
+        const result = await unregisterPage(subdomain, { publish: (evt) => bus.publish(evt) });
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ deleted: result.deleted }));
         return;

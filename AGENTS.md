@@ -386,6 +386,52 @@ the reusable "bui tools" pattern (for future tools like `ping`) is in
 - Tests: `src/server/schedule.test.mjs` (cron + tick, 20) and `describeCron` in
   `chatUtils.test.ts` (10). Pure logic only.
 
+## Serve page — bui-native AI tool (`src/server/servePage.mjs`)
+
+The second **bui-native opencode tool**: the remote AI can publish a standalone
+HTML page to a public URL so it's reachable from anywhere (esp. the machine
+running the bui UI). Built for design previews / demos / mockups that opencode
+generates on the box. Follows the same "bui tools" pattern as the scheduler
+(`docs/bui-tools-scheduler.md`). Key facts:
+
+- **Global opencode tool**, `docs/opencode-tools/serve-page.ts`, **COPIED** (not
+  symlinked — same `@opencode-ai/plugin` import-resolution gotcha as schedule)
+  to `~/.config/opencode/tools/serve-page.ts`. Three named exports → tools
+  `serve_page`, `stop_page`, `list_pages`. Guidance appended to
+  `~/.config/opencode/AGENTS.md` from `docs/opencode-tools/AGENTS.md`.
+  **Install/update = `systemctl --user restart opencode-serve`.**
+- **Thin registrar** — `fetch`es bui-server `127.0.0.1:8787/api/serve-page`
+  (same box, no SSH hop), returns the public URL immediately. No long-running
+  work in `execute`.
+- **Server-owned + durable.** Registry in `~/.bui-mobile/serve-page.json`
+  (atomic writes). Source file is **COPIED** at register time into
+  `~/.bui-mobile/pages/<subdomain>/index.html` (stable snapshot — survives
+  `/tmp` cleanup; updating = re-call `serve_page` with the same subdomain).
+- **In-process file server on `127.0.0.1:20080`** (`createFileServer`/
+  `startFileServer`, started in `index.mjs` alongside the schedule poller).
+  Routes by **Host header**: `<sub>.bui.antoinedc.com` → that subdomain's
+  `index.html`. `extractSubdomain` (pure, tested) rejects non-matching hosts
+  and multi-level subdomains. Re-reads from disk per request with `no-store`,
+  so an overwrite of the page file is live immediately.
+- **TTL expiry** (default 24h, `ttlHours:0` = never). `startCleanupPoller`
+  sweeps every 5 min (`createCleanupSweep`, injectable load/save/now, inFlight
+  guard + `timer.unref()`), `rm`-ing expired page dirs. `stop_page` deletes
+  immediately. A request for a subdomain whose dir was deleted externally
+  prunes the stale registry entry.
+- **Public path is the system Caddy, NOT the Cloudflare tunnel.** Distinct from
+  bui's own `bui.useronda.com` tunnel. `/etc/caddy/Caddyfile` has a
+  `*.bui.antoinedc.com` block → `reverse_proxy 127.0.0.1:20080` with an **OVH
+  DNS-01 wildcard cert** (3-level subdomain, needs its own `tls { dns ovh … }`
+  block — not covered by the `*.dev` single-level wildcard). DNS: `*.bui`
+  A-record → `157.90.224.92` in the OVH `antoinedc.com` zone (OVH creds are
+  root-only at `/etc/caddy/ovh.env`; the python `ovh` module + passwordless
+  sudo were used to add the record). Caddy reload: `sudo systemctl reload caddy`.
+- **No UI card (v1).** Unlike the scheduler there's no ChatPanel management
+  card yet — the AI lists/stops via the tools. Port 20080 claimed in
+  `shared/ports/registry.md` (bui `20xxx` block).
+- Tests: `src/server/servePage.test.mjs` (`isValidSubdomain`, `extractSubdomain`,
+  cleanup-sweep expiry, 10). Pure logic only.
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what

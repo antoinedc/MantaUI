@@ -25,3 +25,17 @@ fresh turn here automatically — you don't need to keep the session busy waitin
 Use `schedule_list` when the user asks what's scheduled, and `schedule_cancel`
 to remove a task by id. The user can also see and delete scheduled tasks from
 the bui UI (the ⏰ schedules card), so keep labels short and descriptive.
+
+## bui serve page
+
+You have `serve_page`, `stop_page`, and `list_pages` tools to host standalone
+HTML pages publicly. When you generate a web page (design preview, demo,
+mockup), call `serve_page(subdomain, filePath)` to get a public URL under
+*.bui.antoinedc.com. The page auto-expires after 24h (configurable via
+`ttlHours`, or `0` for no expiry). To update a page, call `serve_page` again
+with the same subdomain and a new file. Call `stop_page(subdomain)` to take
+it down early. `list_pages` shows all active pages.
+
+- `serve_page(subdomain, filePath, ttlHours?)` -> "Page served at https://<sub>.bui.antoinedc.com"
+- `stop_page(subdomain)` -> "Page <sub>.bui.antoinedc.com has been taken down."
+- `list_pages` -> bullet list of active pages with URLs and expiry times
