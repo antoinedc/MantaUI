@@ -144,15 +144,42 @@ describe("setChatRunning / setChatAttention", () => {
       expect(useStore.getState().status.bui[0].attention).toBe(false);
     });
 
-    it("preserves a more-urgent attentionKind ('question') across a running → idle latch", () => {
-      // Question arrives first, then the turn ends with running:false.
+    it("downgrades a stale 'question' latch to amber 'idle' on running → idle while away", () => {
+      // A pending Question keeps the session BUSY, so reaching idle proves
+      // the block is gone — the red `?` is stale (its clearing
+      // question.replied event was missed). Downgrade to the soft amber
+      // "go check" signal instead of stranding the red `?` until the user
+      // opens the window.
       useStore.getState().setChatRunning("ses_chat", true);
       useStore.getState().setChatAttention("ses_chat", "question");
       useStore.getState().setChatRunning("ses_chat", false);
       const win = useStore.getState().status.bui[0];
       expect(win.attention).toBe(true);
-      // "question" wins over "idle" — the question is still the actionable
-      // signal, not "claude finished an unrelated step".
+      expect(win.attentionKind).toBe("idle");
+    });
+
+    it("clears a stale 'permission' latch entirely on running → idle while the user IS on the window", () => {
+      useStore.setState({
+        activeProjectName: "bui",
+        activeWindowByProject: { bui: 0 },
+      });
+      useStore.getState().setChatRunning("ses_chat", true);
+      useStore.getState().setChatAttention("ses_chat", "permission");
+      useStore.getState().setChatRunning("ses_chat", false);
+      const win = useStore.getState().status.bui[0];
+      expect(win.attention).toBe(false);
+      expect(win.attentionKind).toBeUndefined();
+    });
+
+    it("keeps the 'question' latch while the session is still running (busy)", () => {
+      // The downgrade ONLY fires on the running→idle transition. A
+      // running→running tick (busy heartbeat) must keep the red `?` — the
+      // question is genuinely still blocking.
+      useStore.getState().setChatRunning("ses_chat", true);
+      useStore.getState().setChatAttention("ses_chat", "question");
+      useStore.getState().setChatRunning("ses_chat", true);
+      const win = useStore.getState().status.bui[0];
+      expect(win.attention).toBe(true);
       expect(win.attentionKind).toBe("question");
     });
   });

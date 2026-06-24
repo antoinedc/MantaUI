@@ -324,13 +324,27 @@ export const useStore = create<State>((set, get) => ({
       // attention forward.
       const attentionNow = old?.attention ?? false;
       const attentionKindNow = old?.attentionKind;
-      const attention =
-        attentionNow || (wasRunning && !running && !isActiveHere);
+      const goingIdle = wasRunning && !running;
+      // Drop a stale blocking latch ("question"/"permission") on the
+      // running→idle transition. opencode keeps a session BUSY for the whole
+      // time it's blocked on a Question/permission tool (that's why attention
+      // OUTRANKS running in the sidebar), so reaching idle PROVES the block is
+      // gone. The matching question/permission.replied event normally clears
+      // the red ?/!, but that event is occasionally missed (reconnect /
+      // scoped-stream race), which used to strand the indicator until the user
+      // opened the window. Downgrade to the normal running→idle treatment:
+      // amber "go check" if the user is away, nothing if they're here.
+      const staleBlocking =
+        goingIdle &&
+        (attentionKindNow === "question" || attentionKindNow === "permission");
+      const attention = staleBlocking
+        ? !isActiveHere
+        : attentionNow || (goingIdle && !isActiveHere);
       // Preserve a more-urgent kind ("question"/"permission") if one is
-      // already latched; otherwise default to "idle" on the
-      // running→idle latch.
+      // already latched and NOT being cleared as stale; otherwise default to
+      // "idle" on the running→idle latch.
       const attentionKind: AttentionKind | undefined =
-        attentionKindNow && attentionKindNow !== "idle"
+        !staleBlocking && attentionKindNow && attentionKindNow !== "idle"
           ? attentionKindNow
           : attention
             ? "idle"
