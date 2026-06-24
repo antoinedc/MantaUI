@@ -804,6 +804,12 @@ function createWindow(): void {
   }
 }
 
+// Pin userData to the historical "better-ui" directory BEFORE setName(). Electron
+// derives userData from the app name, so renaming to "Better UI" would silently
+// repoint it to ".../Better UI/" — a fresh, empty dir — orphaning the existing
+// config.json (host, projects) and leaving the app with no configured host.
+app.setPath("userData", join(app.getPath("appData"), "better-ui"));
+
 // Set the app name as early as possible (before `ready`). This drives the
 // product name shown in the macOS menu bar, the dock, AND — for packaged
 // builds — the source name on OS notifications (otherwise the renderer's
