@@ -42,20 +42,33 @@ it down early. `list_pages` shows all active pages.
 
 ## bui peer-session awareness
 
-You have `peers_list` and `peers_inspect` tools to see what OTHER agent
-sessions in the same workspace (the sibling windows of your tmux session) are
-doing. Reach for them when you notice files changing under you, `git status`
-shifting, or otherwise suspect another agent is working alongside you and you
-want to know who, and on what — so you don't collide.
+You have `peers_list`, `peers_inspect`, and `peers_message` tools to see what
+OTHER agent sessions in the same workspace (the sibling windows of your tmux
+session) are doing, and to message them. Reach for them when you notice files
+changing under you, `git status` shifting, or otherwise suspect another agent
+is working alongside you and you want to know who, and on what — so you don't
+collide — or when you want to coordinate / hand off work to a peer.
 
 - `peers_list` -> each peer's window name, type (chat/tui), branch, number of
   uncommitted files, status (working/idle/blocked), and current activity.
 - `peers_inspect(target)` -> deep dive on one peer (by window name, index, or
   session id): full `git status`, branch, and its recent transcript + todos
   (chat sessions) or terminal tail (claude-TUI sessions).
+- `peers_message(target, message)` -> inject a message into a peer's chat as a
+  new turn (chat-mode peers only). Use to coordinate, hand off, ask a question,
+  or share a finding — e.g. "I just changed the API in src/x.ts, rebase before
+  you continue". The message is auto-prefixed with your session name + workspace
+  so the receiver knows it came from you.
 
 Typical flow: run `peers_list` first; if a peer is touching files you care
-about, `peers_inspect` it to see exactly what it's changing before you proceed.
+about, `peers_inspect` it to see exactly what it's changing before you proceed,
+or `peers_message` it to coordinate.
+
+**You can also RECEIVE messages from peers.** A peer's message arrives as an
+ordinary user turn prefixed with `[Message from peer agent session "<name>" in
+workspace "<ws>"]`. When you see that prefix, the turn came from another agent
+working alongside you — not from your user. Act on it as appropriate and, if a
+reply is warranted, send one back with `peers_message(target: "<name>", …)`.
 
 ## bui notifications
 

@@ -128,6 +128,25 @@ export function describeChatActivity(summary) {
   return "(no recent activity)";
 }
 
+// Wrap a peer-to-peer message with provenance context so the RECEIVING
+// session knows the turn came from another agent (not its user) and who/where
+// it came from. The receiving model treats this as an ordinary user turn, so
+// the framing must make the cross-session origin explicit and tell it how to
+// reply (the peers_message tool, targeting the sender's window name).
+export function formatPeerMessage({ fromName, fromWorkspace, text }) {
+  const from = fromName || "unknown";
+  const ws = fromWorkspace ? ` in workspace "${fromWorkspace}"` : "";
+  return [
+    `[Message from peer agent session "${from}"${ws}]`,
+    "",
+    String(text ?? "").trim(),
+    "",
+    `(This was sent by another agent working alongside you in the same ` +
+      `workspace — not by your user. To reply, use the peers_message tool ` +
+      `with target "${from}".)`,
+  ].join("\n");
+}
+
 // Recent transcript turns for the detailed inspect view.
 export function recentTurns(messages, limit = 6) {
   const turns = [];
@@ -315,5 +334,63 @@ export async function inspectPeer({ sessionID, directory, target }, deps = {}) {
       status: act.busy ? "working" : "idle",
       pane: act.full,
     },
+  };
+}
+
+// Send a message into a peer chat-mode session. Resolves the caller's
+// workspace, finds the target sibling window, and injects the message as a new
+// user turn into that peer's opencode session via sendPrompt — wrapped with
+// provenance context (formatPeerMessage) so the receiver knows it came from a
+// peer agent. Only chat-mode peers (opencodeSessionId set) can receive a
+// message; a claude-TUI peer has no opencode session to inject into.
+//
+// deps.listProjects / deps.sendPrompt are injectable for tests; they default
+// to the live tmux + opencode implementations.
+export async function sendPeerMessage({ sessionID, directory, target, message }, deps = {}) {
+  const listProjects = deps.listProjects || tmux.listProjects;
+  const sendPrompt = deps.sendPrompt || oc.sendPrompt;
+  if (!target) {
+    return { ok: false, error: "target is required (peer window name, index, or session id)" };
+  }
+  if (!message || !String(message).trim()) {
+    return { ok: false, error: "message is required" };
+  }
+  const projects = await listProjects();
+  const loc = resolveWorkspace(projects, sessionID, directory);
+  if (!loc) {
+    return { ok: false, error: "Could not locate your session in any tmux workspace." };
+  }
+  const peerWins = selectPeers(loc.project, loc.self);
+  const t = String(target).toLowerCase();
+  const w = peerWins.find(
+    (w) =>
+      w.name?.toLowerCase() === t ||
+      String(w.index) === t ||
+      w.opencodeSessionId === target,
+  );
+  if (!w) {
+    return {
+      ok: false,
+      error: `No peer matching "${target}". Peers: ${peerWins.map((w) => w.name).join(", ") || "(none)"}`,
+    };
+  }
+  if (!w.opencodeSessionId) {
+    return {
+      ok: false,
+      error: `Peer "${w.name}" is a terminal (claude-TUI) session — only chat-mode peers can receive a message.`,
+    };
+  }
+  const text = formatPeerMessage({
+    fromName: loc.self.name,
+    fromWorkspace: loc.project.tmuxSession,
+    text: String(message),
+  });
+  await sendPrompt({ sessionId: w.opencodeSessionId, text });
+  return {
+    ok: true,
+    workspace: loc.project.tmuxSession,
+    from: loc.self.name,
+    to: w.name,
+    targetSessionId: w.opencodeSessionId,
   };
 }

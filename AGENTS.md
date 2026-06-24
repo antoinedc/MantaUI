@@ -435,9 +435,10 @@ generates on the box. Follows the same "bui tools" pattern as the scheduler
 ## Peer awareness — bui-native AI tool (`src/server/peers.mjs`)
 
 The third **bui-native opencode tool**: an opencode session can see what OTHER
-sessions in the SAME workspace are doing. Use case: an agent notices files /
-`git status` changing under it and wants to know which other agent is working
-alongside it, and on what — so they don't collide. Same "bui tools" pattern as
+sessions in the SAME workspace are doing AND send them messages. Use case: an
+agent notices files / `git status` changing under it and wants to know which
+other agent is working alongside it (so they don't collide), or wants to
+coordinate / hand off work to a peer. Same "bui tools" pattern as
 schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
 
 - **Workspace = tmux session (bui project); peers = sibling windows.** The crux
@@ -448,13 +449,16 @@ schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
   whose window isn't stamped). `selectPeers` returns the sibling windows.
 - **Global opencode tool**, `docs/opencode-tools/peers.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` gotcha) to
-  `~/.config/opencode/tools/peers.ts`. Two exports → `peers_list`,
-  `peers_inspect`. Guidance appended to `~/.config/opencode/AGENTS.md`.
+  `~/.config/opencode/tools/peers.ts`. Three exports → `peers_list`,
+  `peers_inspect`, `peers_message`. Guidance appended to
+  `~/.config/opencode/AGENTS.md`.
   **Install/update = `systemctl --user restart opencode-serve`.**
-- **Thin registrar, GET-only** — `fetch`es bui-server
-  `127.0.0.1:8787/api/peers?sessionID=&directory=[&target=]` (no SSH hop). No
-  durable state: peer data is computed live per call. `target` present →
-  inspect one peer; absent → list all.
+- **Thin registrar** — `fetch`es bui-server (no SSH hop). `peers_list` /
+  `peers_inspect` GET `/api/peers?sessionID=&directory=[&target=]` (`target`
+  present → inspect one; absent → list all). `peers_message` POSTs
+  `/api/peers {sessionID, directory, target, message}`. No durable state: peer
+  data is computed live per call; messaging is fire-and-forget into the peer's
+  session.
 - **Per-peer data sources branch on window type:**
   - chat-mode peer (`opencodeSessionId` set): `oc.listMessages` transcript +
     `listPermissions`/`listQuestions`. Status via `classifyChatStatus`
@@ -473,12 +477,23 @@ schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
   one-line activity. **`peers_inspect(target)`** (by window name / index /
   session id) → full git file list + branch, plus recent transcript turns +
   todos (chat) or terminal pane tail (TUI).
+- **`peers_message(target, message)`** → injects `message` as a new user turn
+  into the target peer's opencode session via `oc.sendPrompt`. Chat-mode peers
+  ONLY — a claude-TUI peer (`opencodeSessionId` null) has no session to inject
+  into and is rejected. `sendPeerMessage` resolves the target the same way as
+  `inspectPeer` (name / index / session id), then wraps the body with
+  `formatPeerMessage` (pure) so the RECEIVER sees a `[Message from peer agent
+  session "<name>" in workspace "<ws>"]` prefix — the cross-session origin is
+  explicit and the receiver is told to reply via `peers_message`. The receiving
+  side needs no code: the wrapped text arrives as an ordinary user turn through
+  the normal SSE path. Guidance in `docs/opencode-tools/AGENTS.md` tells every
+  session it may receive such messages.
 - **No UI card, no durable store, no bus event** — purely a live AI-facing
-  read tool (v1). No `peers:*` window.api channels; the desktop renderer
-  doesn't consume it.
+  read + message tool (v1). No `peers:*` window.api channels; the desktop
+  renderer doesn't consume it.
 - Tests: `src/server/peers.test.mjs` (resolveWorkspace, selectPeers,
   parseGitStatus, summarizeTranscript, classifyChatStatus, describeChatActivity,
-  recentTurns — 15). Pure logic only.
+  recentTurns, formatPeerMessage, sendPeerMessage — 20). Pure logic only.
 
 ## Notifications + the `notify` tool (`src/server/push.mjs`)
 

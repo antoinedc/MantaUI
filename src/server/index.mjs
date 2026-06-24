@@ -29,7 +29,7 @@ import {
   unregisterPage,
   listPages,
 } from "./servePage.mjs";
-import { listPeers, inspectPeer } from "./peers.mjs";
+import { listPeers, inspectPeer, sendPeerMessage } from "./peers.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -578,11 +578,15 @@ const server = createServer(async (req, res) => {
   }
 
   // ---------- Peer-session awareness ----------
-  // GET /api/peers?sessionID=&directory=          → {ok, workspace, self, peers:[...]}
-  // GET /api/peers?sessionID=&directory=&target=  → {ok, peer:{...}} (deep inspect)
+  // GET  /api/peers?sessionID=&directory=          → {ok, workspace, self, peers:[...]}
+  // GET  /api/peers?sessionID=&directory=&target=  → {ok, peer:{...}} (deep inspect)
+  // POST /api/peers  body {sessionID, directory, target, message}
+  //                  → {ok, workspace, from, to, targetSessionId} (inject a
+  //                    message into a peer chat session as a new turn)
   // Lets an opencode session see what OTHER sessions in the same workspace (tmux
-  // session) are doing. Called by the remote AI's global opencode `peers_list` /
-  // `peers_inspect` tools. See src/server/peers.mjs.
+  // session) are doing, and message them. Called by the remote AI's global
+  // opencode `peers_list` / `peers_inspect` / `peers_message` tools.
+  // See src/server/peers.mjs.
   if (path === "/api/peers") {
     try {
       if (req.method === "GET") {
@@ -592,6 +596,23 @@ const server = createServer(async (req, res) => {
         const result = target
           ? await inspectPeer({ sessionID, directory, target })
           : await listPeers({ sessionID, directory });
+        if (!result.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(result));
+        return;
+      }
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await sendPeerMessage({
+          sessionID: body?.sessionID,
+          directory: body?.directory,
+          target: body?.target,
+          message: body?.message,
+        });
         if (!result.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: result.error }));

@@ -804,6 +804,14 @@ function createWindow(): void {
   }
 }
 
+// Set the app name as early as possible (before `ready`). This drives the
+// product name shown in the macOS menu bar, the dock, AND — for packaged
+// builds — the source name on OS notifications (otherwise the renderer's
+// Web Notification API attributes them to the bundle, i.e. "Electron" in dev).
+// `appUserModelId` does the equivalent for Windows toast attribution.
+app.setName("Better UI");
+app.setAppUserModelId("com.betterui.app");
+
 app.whenReady().then(() => {
   config = loadConfig();
   // Cross-device shared-settings sync: read the live config, and when a newer

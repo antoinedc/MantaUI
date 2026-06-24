@@ -6,11 +6,18 @@
 // then `systemctl --user restart opencode-serve` so opencode re-scans tools/.
 //
 // These tools let THIS session see what OTHER sessions in the same workspace
-// (tmux session) are doing — useful when you notice files / git status changing
-// and suspect another agent is working alongside you. They are THIN registrars:
-// each GETs bui-server (127.0.0.1:8787/api/peers, same box, no SSH hop), which
-// resolves the tmux workspace and queries each peer's opencode transcript or
-// tmux pane. See src/server/peers.mjs.
+// (tmux session) are doing AND send them messages — useful when you notice
+// files / git status changing and suspect another agent is working alongside
+// you, or when you want to hand off / coordinate with a peer agent. They are
+// THIN registrars: each hits bui-server (127.0.0.1:8787/api/peers, same box, no
+// SSH hop), which resolves the tmux workspace and queries each peer's opencode
+// transcript or tmux pane, or injects a message into a peer's chat session.
+// See src/server/peers.mjs.
+//
+// Note: any session may RECEIVE a message from a peer. It arrives as a normal
+// user turn prefixed with `[Message from peer agent session "<name>" …]` so you
+// can tell it came from another agent (not your user) and reply with
+// peers_message if appropriate.
 
 import { tool } from "@opencode-ai/plugin";
 
@@ -18,8 +25,12 @@ const BUI_SERVER = process.env.BUI_SERVER_URL || "http://127.0.0.1:8787";
 
 const z = tool.schema;
 
-async function call(path: string): Promise<any> {
-  const res = await fetch(`${BUI_SERVER}${path}`);
+async function call(path: string, method = "GET", body?: unknown): Promise<any> {
+  const res = await fetch(`${BUI_SERVER}${path}`, {
+    method,
+    headers: body ? { "content-type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
   const text = await res.text();
   let json: any = {};
   try {
@@ -120,5 +131,34 @@ export const inspect = tool({
     }
 
     return out.join("\n");
+  },
+});
+
+export const message = tool({
+  description: [
+    "Send a message to ANOTHER agent session in your workspace (a sibling tmux",
+    "window). The message is injected into that peer's chat as a new turn,",
+    "prefixed with context about who sent it (your session name + workspace) so",
+    "the receiving agent knows it came from a peer, not its user. Use to",
+    "coordinate, hand off work, ask a question, or share a finding with another",
+    "agent — e.g. 'I just changed the API in src/x.ts, rebase before you",
+    "continue'. Identify the peer by its window name, window index, or opencode",
+    "session id (all shown by peers_list). Only chat-mode peers can receive a",
+    "message; terminal (claude-TUI) peers cannot.",
+  ].join(" "),
+  args: {
+    target: z
+      .string()
+      .describe("The peer to message: its window name, window index, or session id."),
+    message: z.string().describe("The message text to deliver to the peer agent."),
+  },
+  async execute(args, context) {
+    const result = await call("/api/peers", "POST", {
+      target: args.target,
+      message: args.message,
+      sessionID: context?.sessionID,
+      directory: context?.directory,
+    });
+    return `Message delivered to peer "${result.to}" in workspace "${result.workspace}". It will appear as a new turn in that session.`;
   },
 });
