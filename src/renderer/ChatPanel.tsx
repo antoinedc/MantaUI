@@ -103,6 +103,11 @@ type Attachment = {
   status: "uploading" | "ready" | "error";
   errorMsg?: string;
   source: "drop" | "paste" | "mention"; // "drop"/"paste" = scp'd to ~/.bui-uploads, "mention" = path from /find/file
+  // When true this chip is NOT sent as a multimodal FilePart (the model
+  // can't decode it — csv/code/text/etc). Instead its remote path is
+  // appended to the outgoing message as `@<path>` so the AI reads it with
+  // its Read tool. Keeps the composer clean instead of dumping the raw path.
+  asPathRef?: boolean;
 };
 
 // Agent mention emitted by @-mention typeahead. We track the inserted slice
@@ -2059,19 +2064,34 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   }, [isActive]);
 
   const submit = useCallback(async () => {
-    const text = input.trim();
-    if (!text) return;
     // Block submit while any attachment is still uploading — easy to forget
     // a file is mid-transfer when the input is short.
     if (attachments.some((a) => a.status === "uploading")) {
       setSendError("Wait for attachments to finish uploading.");
       return;
     }
+    // Non-media chips (csv/code/text/…) ride along as `@<remote-path>`
+    // tokens appended to the message text — the AI reads them with its Read
+    // tool. This keeps the composer clean (the chip is the only visible
+    // affordance) instead of dumping the raw path into the textarea on drop.
+    const pathRefAttachments = attachments.filter(
+      (a) => a.status === "ready" && !!a.remotePath && a.asPathRef,
+    );
+    const pathRefText = pathRefAttachments.map((a) => `@${a.remotePath}`).join(" ");
+    const typed = input.trim();
+    const text = pathRefText ? (typed ? `${typed} ${pathRefText}` : pathRefText) : typed;
+    if (!text) return;
     // If the AI is already running, push to the queue instead of aborting.
     // Items are sent automatically one at a time as running flips to false.
     if (running) {
       setMessageQueue((q) => [...q, text]);
       setInput("");
+      // The path refs are now baked into the queued text; drop their chips so
+      // they aren't appended a second time on the next submit.
+      if (pathRefAttachments.length > 0) {
+        const ids = new Set(pathRefAttachments.map((a) => a.id));
+        setAttachments((prev) => prev.filter((a) => !ids.has(a.id)));
+      }
       return;
     }
     setSendError(null);
@@ -2189,8 +2209,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     const knownCommand =
       cmdName && commands ? commands.find((c) => c.name === cmdName) : null;
 
+    // Only media chips become multimodal FileParts; path-ref chips were
+    // already folded into `text` above.
     const readyAttachments = attachments
-      .filter((a) => a.status === "ready" && a.remotePath)
+      .filter((a) => a.status === "ready" && a.remotePath && !a.asPathRef)
       .map((a) => ({
         remotePath: a.remotePath!,
         mime: a.mime,
@@ -2940,41 +2962,35 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       const list = Array.from(files);
       if (list.length === 0) return;
 
-      // Split by mime. Image/PDF: send as FilePart (multimodal models need
-      // bytes; the AI's Read tool can't decode an image). Everything else:
-      // upload for AI accessibility, then drop the path into the textarea
-      // as `@<absolute-path>` — agent-native pattern, the AI uses Read if
-      // it actually needs the content.
-      type Pending = { file: File; lp: string; mime: string; asAttachment: boolean };
+      // Every dropped file gets a chip card. Split by mime decides HOW it's
+      // sent at submit, not WHETHER it shows a chip:
+      //   - Image/PDF/audio/video → multimodal FilePart (bytes the model decodes).
+      //   - Everything else (csv/code/text/…) → `asPathRef` chip; its remote
+      //     path is appended to the outgoing message as `@<path>` at submit so
+      //     the AI reads it with its Read tool. The path no longer pollutes the
+      //     composer — the chip is the user-visible affordance.
+      type Pending = { file: File; lp: string; mime: string; asPathRef: boolean; id: string };
       const pending: Pending[] = [];
       for (const f of list) {
         const lp = window.api.getPathForFile(f);
         if (!lp) continue;
         const mime = f.type || guessMime(f.name);
-        const mode = mimeToInputMode(mime);
-        // FilePart-eligible mimes: image, pdf, video, audio. Everything
-        // else goes path-as-text.
-        const asAttachment = mode !== "other";
-        pending.push({ file: f, lp, mime, asAttachment });
+        const asPathRef = mimeToInputMode(mime) === "other";
+        const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        pending.push({ file: f, lp, mime, asPathRef, id });
       }
       if (pending.length === 0) return;
 
-      // Pre-upload chip placeholders for the FilePart-bound entries only.
-      const chipIds: string[] = [];
-      const newChips: Attachment[] = [];
-      for (const p of pending) {
-        if (!p.asAttachment) continue;
-        const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-        chipIds.push(id);
-        newChips.push({
-          id,
-          filename: p.file.name,
-          mime: p.mime,
-          status: "uploading",
-          source: "drop",
-        });
-      }
-      if (newChips.length > 0) setAttachments((prev) => [...prev, ...newChips]);
+      // Pre-upload chip placeholders for ALL entries.
+      const newChips: Attachment[] = pending.map((p) => ({
+        id: p.id,
+        filename: p.file.name,
+        mime: p.mime,
+        status: "uploading",
+        source: "drop",
+        asPathRef: p.asPathRef,
+      }));
+      setAttachments((prev) => [...prev, ...newChips]);
 
       // Upload all pending files in one batch (cheaper round-trip).
       const allLocalPaths = pending.map((p) => p.lp);
@@ -2986,41 +3002,26 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         });
       } catch (e) {
         const msg = String((e as Error)?.message ?? e);
-        if (chipIds.length > 0) {
-          setAttachments((prev) =>
-            prev.map((a) =>
-              chipIds.includes(a.id) ? { ...a, status: "error", errorMsg: msg } : a,
-            ),
-          );
-        } else {
-          setSendError(msg);
-        }
+        const ids = new Set(pending.map((p) => p.id));
+        setAttachments((prev) =>
+          prev.map((a) => (ids.has(a.id) ? { ...a, status: "error", errorMsg: msg } : a)),
+        );
         return;
       }
 
-      // Wire results back to chips (FilePart entries) and append text
-      // references (path-only entries).
-      let chipCursor = 0;
-      const pathRefs: string[] = [];
+      // Wire each upload result back to its chip.
       for (let i = 0; i < pending.length; i++) {
         const rp = remotePaths[i];
-        if (!rp) continue;
-        if (pending[i].asAttachment) {
-          const id = chipIds[chipCursor++];
-          setAttachments((prev) =>
-            prev.map((a) => (a.id === id ? { ...a, status: "ready", remotePath: rp } : a)),
-          );
-        } else {
-          pathRefs.push(rp);
-        }
-      }
-      if (pathRefs.length > 0) {
-        // Insert each path as a `@<abs-path>` token at the end of the
-        // current input. Keeps the cursor wherever the user left it.
-        setInput((prev) => {
-          const sep = prev.length === 0 || prev.endsWith(" ") || prev.endsWith("\n") ? "" : " ";
-          return prev + sep + pathRefs.map((p) => `@${p}`).join(" ") + " ";
-        });
+        const { id } = pending[i];
+        setAttachments((prev) =>
+          prev.map((a) =>
+            a.id === id
+              ? rp
+                ? { ...a, status: "ready", remotePath: rp }
+                : { ...a, status: "error", errorMsg: "Upload returned no path" }
+              : a,
+          ),
+        );
       }
     },
     [tmuxSession],
