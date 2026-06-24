@@ -480,6 +480,55 @@ schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
   parseGitStatus, summarizeTranscript, classifyChatStatus, describeChatActivity,
   recentTurns — 15). Pure logic only.
 
+## Notifications + the `notify` tool (`src/server/push.mjs`)
+
+The fourth **bui-native opencode tool** and the first with a **desktop OS
+notification leg** alongside the existing mobile Web Push. Full design +
+routing matrix + scenarios in `docs/bui-tools-notify.md`. Key facts:
+
+- **bui-server is the SINGLE notification router.** Every notification —
+  automatic opencode event (`firePush`) OR an AI `notify` call (`fireNotify`) —
+  runs through the pure `routeNotification(payload, presence, now)` in
+  `push.mjs`, which decides desktop / mobile / both / escalation knowing BOTH
+  device presences. This is what guarantees **no duplicates**: one place sees
+  everything. It SUBSUMES the old "suppress mobile done while active on desktop"
+  rule (that's now just one row of the matrix).
+- **Two transports, one router.** Mobile leg = Web Push (unchanged). Desktop leg
+  = `setDesktopSink(fn)` (injected by `index.mjs`) publishes a `desktopNotify`
+  bus envelope; the Electron app (`src/main/desktopNotify.ts`) consumes
+  bui-server's `GET /events` SSE **over the existing -L 18787 presence forward**,
+  relays the payload via `IPC.desktopNotify` → the renderer (`App.tsx`
+  `onDesktopNotify`) shows it with the `Notification` API. The desktop ignores
+  every other bus `kind` (it already gets opencode events from its own :4096
+  stream — re-consuming would double).
+- **The "am I viewing this session?" suppression is client-side on desktop.**
+  The server routes desktop-vs-mobile; the renderer does the final suppression
+  (focused AND `activeChatSessionId === payload.sessionId`) because it knows its
+  active session locally — no need to plumb it to the server. Mobile's
+  equivalent stays server-side (`/push/focus`) because a push can't be unsent.
+- **Tiers (Slack/Discord parity).** `notifTier`: **blocking**
+  (permission/question/error, or `notify` with `urgent:true`) → every device
+  now, no delay. **informational** ("done", normal `notify`) → desktop-first
+  ladder.
+- **Escalation = desktop-first, then mobile.** `ESCALATE_MS = 90_000`. When
+  desktop is **idle/away** (heartbeat fresh but `visible:false`) for an
+  informational notif: emit desktop now, schedule a mobile push 90s later keyed
+  by `tag`. Cancel on: desktop becomes **active** (`setDesktopPresence
+  visible:true` → `cancelAllEscalations`), the session resumes / its ask is
+  answered (`cancelEscalationsForSession` from the busy/reply branches in
+  `firePush`), or a same-`tag` re-notify supersedes. Desktop **gone** (TTL
+  lapsed) → mobile immediately (no desktop leg).
+- **The `notify` tool** (`docs/opencode-tools/notify.ts`, COPIED to
+  `~/.config/opencode/tools/`, restart `opencode-serve`) is a thin registrar →
+  `POST /api/notify {message, title?, urgent?, sessionID}` → `fireNotify`.
+  Session-tied: carries `context.sessionID` so it deep-links + dedupes
+  (`tag:"notify-<sid>"`). The model does NOT pick the device — the router does.
+- **No UI card (v1).** No `notify:*` window.api channels — it's AI-facing +
+  server-routed. DND/quiet-hours deferred to v2.
+- Tests: `src/server/push.test.mjs` — `routeNotification` matrix (active /
+  idle / gone × blocking / informational), `notifTier`, and escalation
+  schedule/cancel/supersede (11 new, 41 total). Pure logic only.
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what

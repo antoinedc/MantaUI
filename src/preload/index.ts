@@ -4,6 +4,7 @@ import {
   type AgentFileReady,
   type AppConfig,
   type BootstrapResult,
+  type DesktopNotifyPayload,
   type OpencodeAgent,
   type OpencodeCommand,
   type OpencodeEvent,
@@ -107,6 +108,15 @@ const api = {
     const listener = (_: unknown, cfg: AppConfig) => cb(cfg);
     ipcRenderer.on(IPC.configChanged, listener);
     return () => ipcRenderer.removeListener(IPC.configChanged, listener);
+  },
+
+  // bui-server's notification router decided the desktop should show an OS
+  // notification (relayed over the -L 18787 forward). The renderer shows it
+  // via the Notification API after a local "am I viewing this?" check.
+  onDesktopNotify: (cb: (payload: DesktopNotifyPayload) => void): (() => void) => {
+    const listener = (_: unknown, payload: DesktopNotifyPayload) => cb(payload);
+    ipcRenderer.on(IPC.desktopNotify, listener);
+    return () => ipcRenderer.removeListener(IPC.desktopNotify, listener);
   },
 
   uploadFiles: (input: { projectName: string; localPaths: string[] }): Promise<string[]> =>

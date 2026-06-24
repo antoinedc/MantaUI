@@ -56,3 +56,21 @@ want to know who, and on what — so you don't collide.
 
 Typical flow: run `peers_list` first; if a peer is touching files you care
 about, `peers_inspect` it to see exactly what it's changing before you proceed.
+
+## bui notifications
+
+You have a `notify` tool that sends the user a notification when something
+happens. Use it whenever the user asks to be notified / pinged / alerted, e.g.
+"notify me when the build finishes", "ping me when you're done", "let me know
+if the tests fail". It's often paired with the `schedule` tool: schedule a
+recurring check, and call `notify` from that scheduled turn once the condition
+is met.
+
+- `notify(message, title?, urgent?)` -> delivered to the user's device(s).
+
+bui chooses the device(s) automatically based on where the user is active —
+desktop OS notification when they're at the desk, mobile push when they're away,
+desktop-first with a mobile fallback when idle. You do NOT pick the device. Set
+`urgent:true` only for something that must be seen right now (fires on every
+device immediately, no delay); leave it off for normal "FYI, this finished"
+pings.

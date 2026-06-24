@@ -173,6 +173,19 @@ export type WindowStatus = {
   subagents: number;
 };
 
+// A desktop OS-notification directive, relayed from bui-server's notification
+// router (push.mjs) to the desktop renderer over the -L 18787 forward + IPC.
+// The renderer does the final "am I viewing this session right now?"
+// suppression and shows it via the Notification API. See docs/bui-tools-notify.md.
+export type DesktopNotifyPayload = {
+  kind: string; // "permission" | "question" | "error" | "done" | "notify"
+  title: string;
+  body: string;
+  sessionId: string | null;
+  tag: string;
+  urgent?: boolean;
+};
+
 export const IPC = {
   configGet: "config:get",
   configUpdate: "config:update",
@@ -255,6 +268,13 @@ export const IPC = {
   // Settings UI reflects the change without a manual refresh. Payload: the
   // full AppConfig.
   configChanged: "config:changed",
+
+  // main → renderer push: the bui-server notification router decided the
+  // desktop should show an OS notification. Relayed from the server's
+  // `desktopNotify` bus event over the -L 18787 forward. Payload:
+  // DesktopNotifyPayload. The renderer suppresses it if it's already viewing
+  // that session, else shows it via the Notification API + deep-links on click.
+  desktopNotify: "desktop:notify",
 
   // ---- opencode chat-mode ----
   // Fetch full transcript for a session id (one-shot HTTP call on the remote).

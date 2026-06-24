@@ -321,6 +321,10 @@ export const httpApi: Api = {
   // persist locally and the desktop pulls them on its next sync.
   onConfigChanged: () => () => {},
 
+  // Desktop OS-notification directives are a desktop-only IPC (the mobile PWA
+  // is notified via Web Push, not this channel). No-op on mobile.
+  onDesktopNotify: () => () => {},
+
   // -- file uploads --
   uploadFiles: (input) => rpc(IPC.uploadFiles, input),
 

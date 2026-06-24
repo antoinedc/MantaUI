@@ -5,6 +5,16 @@ import {
   buildSessionLabel,
   shouldSuppressForDesktop,
   shouldSuppressUnresolvedDone,
+  routeNotification,
+  notifTier,
+  fireNotify,
+  setDesktopPresence,
+  setDesktopSink,
+  cancelEscalationsForSession,
+  cancelAllEscalations,
+  _pendingEscalationTags,
+  _resetPushState,
+  ESCALATE_MS,
   DESKTOP_PRESENCE_TTL_MS,
   DESKTOP_GRACE_MS,
 } from "./push.mjs";
@@ -389,4 +399,122 @@ test("unrelated event → null", () => {
     classifyPushEvent({ type: "message.part.delta", properties: {} }, NOFOCUS),
     null,
   );
+});
+
+// ---------------------------------------------------------------------------
+// routeNotification — the single cross-device router
+// ---------------------------------------------------------------------------
+
+const T = 1_000_000_000;
+const dActive = { visible: true, lastSeen: T, lastActive: T }; // at the desk
+const dIdle = { visible: false, lastSeen: T, lastActive: 0 }; // app open, away
+const dGone = { visible: false, lastSeen: 0, lastActive: 0 }; // no heartbeat
+const noMobile = { focusSessionId: null, focusVisible: false };
+
+test("notifTier: blocking vs informational", () => {
+  assert.equal(notifTier({ kind: "permission" }), "blocking");
+  assert.equal(notifTier({ kind: "question" }), "blocking");
+  assert.equal(notifTier({ kind: "error" }), "blocking");
+  assert.equal(notifTier({ kind: "notify", urgent: true }), "blocking");
+  assert.equal(notifTier({ kind: "notify" }), "informational");
+  assert.equal(notifTier({ kind: "done" }), "informational");
+});
+
+test("route: informational + desktop active → desktop only", () => {
+  const r = routeNotification(
+    { kind: "done", sessionId: "ses_1" },
+    { desktop: dActive, ...noMobile },
+    T,
+  );
+  assert.deepEqual(r, { desktop: true, mobileNow: false, escalateAfterMs: null });
+});
+
+test("route: informational + desktop idle → desktop now, escalate mobile", () => {
+  const r = routeNotification(
+    { kind: "done", sessionId: "ses_1" },
+    { desktop: dIdle, ...noMobile },
+    T,
+  );
+  assert.equal(r.desktop, true);
+  assert.equal(r.mobileNow, false);
+  assert.equal(r.escalateAfterMs, ESCALATE_MS);
+});
+
+test("route: informational + desktop gone → mobile only", () => {
+  const r = routeNotification(
+    { kind: "done", sessionId: "ses_1" },
+    { desktop: dGone, ...noMobile },
+    T,
+  );
+  assert.deepEqual(r, { desktop: false, mobileNow: true, escalateAfterMs: null });
+});
+
+test("route: informational + mobile foreground on this session → no mobile, no escalation", () => {
+  const idle = routeNotification(
+    { kind: "done", sessionId: "ses_1" },
+    { desktop: dIdle, focusSessionId: "ses_1", focusVisible: true },
+    T,
+  );
+  assert.equal(idle.escalateAfterMs, null);
+  const gone = routeNotification(
+    { kind: "done", sessionId: "ses_1" },
+    { desktop: dGone, focusSessionId: "ses_1", focusVisible: true },
+    T,
+  );
+  assert.equal(gone.mobileNow, false);
+});
+
+test("route: blocking → both devices now (desktop + mobile), even when gone", () => {
+  const r = routeNotification(
+    { kind: "permission", sessionId: "ses_1" },
+    { desktop: dGone, ...noMobile },
+    T,
+  );
+  assert.deepEqual(r, { desktop: true, mobileNow: true, escalateAfterMs: null });
+});
+
+test("route: blocking + mobile viewing this session → desktop yes, mobile suppressed", () => {
+  const r = routeNotification(
+    { kind: "question", sessionId: "ses_1" },
+    { desktop: dGone, focusSessionId: "ses_1", focusVisible: true },
+    T,
+  );
+  assert.equal(r.desktop, true);
+  assert.equal(r.mobileNow, false);
+});
+
+// ---------------------------------------------------------------------------
+// Escalation lifecycle (stateful)
+// ---------------------------------------------------------------------------
+
+test("escalation: idle desktop schedules a mobile escalation; desktop-active cancels it", async () => {
+  _resetPushState();
+  setDesktopSink(() => {}); // no-op desktop leg
+  setDesktopPresence({ visible: false }); // fresh heartbeat, idle/away
+  await fireNotify({ message: "build done", sessionID: "ses_esc" });
+  assert.deepEqual(_pendingEscalationTags(), ["notify-ses_esc"]);
+  setDesktopPresence({ visible: true }); // user returns to the desk
+  assert.deepEqual(_pendingEscalationTags(), []);
+  _resetPushState();
+});
+
+test("escalation: answering one session cancels only its escalation", async () => {
+  _resetPushState();
+  setDesktopPresence({ visible: false });
+  await fireNotify({ message: "x", sessionID: "ses_a" });
+  await fireNotify({ message: "y", sessionID: "ses_b" });
+  assert.equal(_pendingEscalationTags().length, 2);
+  cancelEscalationsForSession("ses_a");
+  assert.deepEqual(_pendingEscalationTags(), ["notify-ses_b"]);
+  _resetPushState();
+});
+
+test("escalation: re-notify same tag supersedes (no duplicate timer)", async () => {
+  _resetPushState();
+  setDesktopPresence({ visible: false });
+  await fireNotify({ message: "first", sessionID: "ses_s" });
+  await fireNotify({ message: "second", sessionID: "ses_s" });
+  assert.deepEqual(_pendingEscalationTags(), ["notify-ses_s"]);
+  cancelAllEscalations();
+  _resetPushState();
 });

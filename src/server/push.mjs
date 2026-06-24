@@ -180,6 +180,10 @@ export function setDesktopPresence({ visible } = {}, now = Date.now()) {
     // grace window is measured from when the user last had it focused.
     lastActive: vis ? now : _desktop.lastActive,
   };
+  // The user is back at the desk → cancel any pending desktop→mobile
+  // escalations. They'll see the desktop notification (clicking it focuses the
+  // app, which trips this naturally); buzzing the phone now would duplicate.
+  if (vis) cancelAllEscalations();
   return _desktop;
 }
 
@@ -207,6 +211,84 @@ export function shouldSuppressForDesktop(desktop, now = Date.now()) {
   // desktop window-switch / brief blur doesn't immediately buzz the phone.
   if (now - (desktop.lastActive ?? 0) <= DESKTOP_GRACE_MS) return true;
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-device router (the single arbiter — see docs/bui-tools-notify.md)
+//
+// Every notification (automatic opencode event OR an AI `notify` call) runs
+// through `routeNotification`, which decides — knowing BOTH device presences —
+// whether it goes to desktop, mobile, both, or escalates desktop→mobile. This
+// is what guarantees "no duplicates": one place sees everything.
+// ---------------------------------------------------------------------------
+
+// How long a desktop-first informational notif waits before escalating to a
+// mobile push, when the desktop is idle/away (app open but no recent input).
+export const ESCALATE_MS = 90_000;
+
+/**
+ * Notification tier (Slack/Discord parity):
+ *  - "blocking": permission/question/error, or an urgent notify → reaches
+ *    every device immediately, never delayed or escalation-gated.
+ *  - "informational": "done" / normal notify → desktop-first ladder.
+ * @param {{kind?: string, urgent?: boolean}} payload
+ */
+export function notifTier(payload) {
+  const k = payload?.kind;
+  if (k === "permission" || k === "question" || k === "error") return "blocking";
+  if (k === "notify" && payload?.urgent) return "blocking";
+  return "informational";
+}
+
+/**
+ * Pure routing decision for one notification payload.
+ *
+ * @param {{kind?:string, urgent?:boolean, sessionId?:string|null}} payload
+ * @param {{ desktop:any, focusSessionId:string|null, focusVisible:boolean }} presence
+ * @param {number} now
+ * @returns {{ desktop:boolean, mobileNow:boolean, escalateAfterMs:number|null }}
+ *
+ * The `desktop:true` directive is "emit a desktop notification"; the Electron
+ * app does the final "am I literally viewing this session right now?"
+ * suppression locally (it knows its focused window + active session), so we
+ * don't plumb the desktop's session to the server. Mobile's "viewing this"
+ * suppression must be server-side (a push can't be un-sent) → `focus*`.
+ */
+export function routeNotification(payload, presence, now = Date.now()) {
+  const tier = notifTier(payload);
+  const desktop = presence?.desktop;
+  // Heartbeat fresh ⇒ the Mac app is reachable (even if the user is idle).
+  const reachable =
+    !!desktop && now - (desktop.lastSeen ?? 0) <= DESKTOP_PRESENCE_TTL_MS;
+  // Active ⇒ focused + recent input (or within the grace window), fresh.
+  const active = shouldSuppressForDesktop(desktop, now);
+  // Mobile is foregrounded ON this very session ⇒ the in-app UI already shows
+  // it; no push needed for this device.
+  const mobileViewingThis =
+    !!presence?.focusVisible &&
+    !!presence?.focusSessionId &&
+    presence.focusSessionId === payload?.sessionId;
+
+  if (tier === "blocking") {
+    // Both devices, now. Desktop client self-suppresses if viewing S.
+    return { desktop: true, mobileNow: !mobileViewingThis, escalateAfterMs: null };
+  }
+
+  // informational
+  if (active) {
+    // At the desk → desktop only.
+    return { desktop: true, mobileNow: false, escalateAfterMs: null };
+  }
+  if (reachable) {
+    // Idle/away but app open → desktop now, escalate to mobile if unhandled.
+    return {
+      desktop: true,
+      mobileNow: false,
+      escalateAfterMs: mobileViewingThis ? null : ESCALATE_MS,
+    };
+  }
+  // Desktop gone (no heartbeat) → mobile only.
+  return { desktop: false, mobileNow: !mobileViewingThis, escalateAfterMs: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +499,122 @@ const _busy = new Set();
 // (the question/permission push already told them to act).
 const _pending = new Set();
 
+// ---------------------------------------------------------------------------
+// Desktop sink + escalation state
+//
+// `_desktopSink` is injected by index.mjs and publishes a `desktopNotify` bus
+// envelope, which the Electron app consumes over the -L 18787 forward and
+// renders as an OS Notification. push.mjs stays decoupled from the bus (mirrors
+// how schedule.mjs takes an injected sendPrompt).
+// ---------------------------------------------------------------------------
+
+let _desktopSink = null;
+
+/** Inject the desktop notification sink (publishes to the bus). */
+export function setDesktopSink(fn) {
+  _desktopSink = typeof fn === "function" ? fn : null;
+}
+
+// Pending desktop→mobile escalations, keyed by notification tag. Each holds the
+// timer + the sessionId so we can cancel by session when the ask is answered.
+const _escalations = new Map();
+
+function cancelEscalation(tag) {
+  const e = _escalations.get(tag);
+  if (e) {
+    clearTimeout(e.timer);
+    _escalations.delete(tag);
+  }
+}
+
+/** Cancel every pending escalation (user returned to the desk). */
+export function cancelAllEscalations() {
+  for (const e of _escalations.values()) clearTimeout(e.timer);
+  _escalations.clear();
+}
+
+/** Cancel pending escalations for one session (the ask was answered/resumed). */
+export function cancelEscalationsForSession(sessionId) {
+  if (!sessionId) return;
+  for (const [tag, e] of _escalations) {
+    if (e.sessionId === sessionId) {
+      clearTimeout(e.timer);
+      _escalations.delete(tag);
+    }
+  }
+}
+
+/** Test hook: tags with a pending escalation timer. */
+export function _pendingEscalationTags() {
+  return [..._escalations.keys()];
+}
+
+/**
+ * Run a notification payload through the router and fire the chosen legs.
+ * Desktop leg = sink (immediate); mobile leg = push now OR an escalation timer.
+ */
+async function dispatchNotification(payload, now = Date.now()) {
+  const route = routeNotification(
+    payload,
+    {
+      desktop: _desktop,
+      focusSessionId: _focus.sessionId,
+      focusVisible: _focus.visible,
+    },
+    now,
+  );
+
+  // A re-notify for the same tag supersedes any pending escalation.
+  cancelEscalation(payload.tag);
+
+  console.log(
+    `[push] route kind=${payload.kind} sid=${payload.sessionId} ` +
+      `→ desktop=${route.desktop} mobileNow=${route.mobileNow} ` +
+      `escalateMs=${route.escalateAfterMs ?? "-"}`,
+  );
+
+  if (route.desktop && _desktopSink) {
+    try {
+      _desktopSink(payload);
+    } catch (e) {
+      console.warn("[push] desktop sink failed:", e?.message ?? e);
+    }
+  }
+
+  if (route.mobileNow) {
+    await sendPush(payload);
+  } else if (route.escalateAfterMs != null) {
+    const timer = setTimeout(() => {
+      _escalations.delete(payload.tag);
+      sendPush(payload).catch(() => {});
+    }, route.escalateAfterMs);
+    timer.unref?.();
+    _escalations.set(payload.tag, { timer, sessionId: payload.sessionId ?? null });
+  }
+}
+
+/**
+ * AI-triggered notification — the bui-native `notify` opencode tool POSTs here
+ * via POST /api/notify. Session-tied: carries the originating sessionID so it
+ * deep-links + dedupes like every other push.
+ *
+ * @param {{message:string, title?:string, urgent?:boolean, sessionID?:string}} args
+ */
+export async function fireNotify({ message, title, urgent, sessionID } = {}) {
+  const sid = typeof sessionID === "string" ? sessionID : null;
+  const label = await resolveSessionLabel(sid);
+  const payload = {
+    kind: "notify",
+    urgent: !!urgent,
+    title: title || label || "Notification",
+    body: typeof message === "string" ? message : "",
+    sessionId: sid,
+    tag: `notify-${sid ?? "global"}`,
+  };
+  await dispatchNotification(payload);
+  return { ok: true };
+}
+
 async function sendPush(payload) {
   await ensureVapid();
   const subs = await loadSubs();
@@ -461,6 +659,10 @@ export async function firePush(evt) {
       if ((t === "busy" || t === "retry") && sid) {
         _busy.add(sid);
         _pending.delete(sid);
+        // The session resumed → the user is acting on it; cancel any pending
+        // desktop→mobile escalation for it (don't buzz the phone for work
+        // that's already moving again).
+        cancelEscalationsForSession(sid);
       }
       return;
     }
@@ -476,6 +678,8 @@ export async function firePush(evt) {
         type === "permission.rejected"
       ) {
         _pending.delete(sid);
+        // The ask was answered → cancel its pending escalation.
+        cancelEscalationsForSession(sid);
       }
     }
 
@@ -527,27 +731,10 @@ export async function firePush(evt) {
       return;
     }
 
-    // Multi-device suppression: if the user is active on desktop, don't buzz
-    // their phone for a "done". Only "done" is suppressed — permission /
-    // question / error are blocking and surface on every device regardless
-    // (mirrors Slack/Discord still escalating mentions/DMs across devices).
-    if (payload.kind === "done") {
-      const now = Date.now();
-      const suppress = shouldSuppressForDesktop(_desktop, now);
-      console.log(
-        `[push] done sid=${sid} suppressForDesktop=${suppress} ` +
-          `desktop={visible:${_desktop.visible},ageSeen:${
-            _desktop.lastSeen ? Math.round((now - _desktop.lastSeen) / 1000) : "∞"
-          }s,ageActive:${
-            _desktop.lastActive
-              ? Math.round((now - _desktop.lastActive) / 1000)
-              : "∞"
-          }s}`,
-      );
-      if (suppress) return;
-    }
-
-    await sendPush(payload);
+    // Route across devices (desktop / mobile / escalation). The router
+    // subsumes the old "suppress mobile done while active on desktop" rule and
+    // adds the desktop leg + desktop-first escalation. See routeNotification.
+    await dispatchNotification(payload);
   } catch (e) {
     console.warn("[push] firePush error:", e?.message ?? e);
   }
@@ -557,6 +744,8 @@ export async function firePush(evt) {
 export function _resetPushState() {
   _busy.clear();
   _pending.clear();
+  cancelAllEscalations();
+  _desktopSink = null;
   _focus = { sessionId: null, visible: false };
   _desktop = { visible: false, lastSeen: 0, lastActive: 0 };
 }

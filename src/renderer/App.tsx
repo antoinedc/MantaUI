@@ -38,6 +38,13 @@ export function App() {
   const activeChatSessionId = activeWin?.opencodeSessionId ?? null;
   if (activeChatSessionId) visitedChats.current.add(activeChatSessionId);
 
+  // Latest projects + active session for the desktop-notification handler,
+  // so its subscription doesn't churn on every render.
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+  const activeChatRef = useRef(activeChatSessionId);
+  activeChatRef.current = activeChatSessionId;
+
   useEffect(() => {
     refresh();
   }, [refresh]);
@@ -178,6 +185,52 @@ export function App() {
     });
     return off;
   }, []);
+
+  // Desktop OS notifications. bui-server's router (push.mjs) decides WHICH
+  // device(s) get a notification (no duplicates) and relays a desktop directive
+  // over the -L 18787 forward → main → IPC here. We add the final local
+  // suppression — if this window is focused AND already showing that exact
+  // session, the user is looking at it, so don't pop an OS notification — then
+  // show it via the Notification API and deep-link to the session on click.
+  useEffect(() => {
+    if (!window.api.onDesktopNotify) return;
+    const off = window.api.onDesktopNotify((payload) => {
+      const sid = payload.sessionId;
+      if (document.hasFocus() && sid && activeChatRef.current === sid) return;
+      if (typeof Notification === "undefined") return;
+      const show = () => {
+        try {
+          const n = new Notification(payload.title || "Better UI", {
+            body: payload.body || "",
+            tag: payload.tag,
+          });
+          n.onclick = () => {
+            try {
+              window.focus();
+            } catch {
+              /* no-op */
+            }
+            if (!sid) return;
+            for (const p of projectsRef.current) {
+              const w = p.windows.find((win) => win.opencodeSessionId === sid);
+              if (w) {
+                setActive(p.tmuxSession, w.index);
+                break;
+              }
+            }
+          };
+        } catch {
+          /* Notification construction can throw if permission was revoked */
+        }
+      };
+      if (Notification.permission === "granted") show();
+      else if (Notification.permission !== "denied")
+        void Notification.requestPermission().then((perm) => {
+          if (perm === "granted") show();
+        });
+    });
+    return off;
+  }, [setActive]);
 
   // Without this, dropping a file anywhere outside the terminal area causes
   // Chromium to navigate the renderer to the file:// URL.

@@ -42,6 +42,14 @@ const PUBLIC_DIR = join(PROJECT_ROOT, "mobile", "www");
 const bus = createBus();
 const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
 
+// Desktop notification leg: the notification router (push.mjs) publishes a
+// `desktopNotify` bus envelope when it decides the desktop should be notified.
+// The Electron app subscribes to GET /events over its -L 18787 forward and
+// renders it as an OS Notification. push.mjs stays bus-decoupled via this sink.
+push.setDesktopSink((payload) =>
+  bus.publish({ kind: "desktopNotify", payload }),
+);
+
 // Periodically capture every tmux pane and push WindowStatus[] batches so the
 // mobile sidebar's activity/attention dots work (parity with desktop status.ts).
 // eslint-disable-next-line no-unused-vars
@@ -522,6 +530,42 @@ const server = createServer(async (req, res) => {
         const result = await unregisterPage(subdomain, { publish: (evt) => bus.publish(evt) });
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ deleted: result.deleted }));
+        return;
+      }
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+
+  // ---------- Notify (AI-triggered notification) ----------
+  // POST /api/notify  body {message, title?, urgent?, sessionID}
+  //                 → {ok:true}  (400 if message missing)
+  // Created by the remote AI's global opencode `notify` tool. Runs through the
+  // same cross-device router as opencode events (push.mjs fireNotify →
+  // routeNotification): desktop OS notification and/or mobile Web Push, with
+  // desktop-first escalation when away. See docs/bui-tools-notify.md.
+  if (path === "/api/notify") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const message = typeof body?.message === "string" ? body.message.trim() : "";
+        if (!message) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "message is required" }));
+          return;
+        }
+        await push.fireNotify({
+          message,
+          title: typeof body?.title === "string" ? body.title : undefined,
+          urgent: !!body?.urgent,
+          sessionID: body?.sessionID,
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
         return;
       }
       res.writeHead(405, { "content-type": "application/json" });

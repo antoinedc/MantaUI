@@ -83,6 +83,10 @@ import {
   stopDesktopPresence,
 } from "./desktopPresence.js";
 import {
+  startDesktopNotifications,
+  stopDesktopNotifications,
+} from "./desktopNotify.js";
+import {
   initSharedConfigSync,
   pushSharedConfig,
   pullSharedConfig,
@@ -826,6 +830,16 @@ app.whenReady().then(() => {
     // Report desktop focus to the mobile server so it suppresses redundant
     // mobile "done" pushes while the user is active on desktop.
     startDesktopPresence(() => config);
+    // Receive desktop OS-notification directives from bui-server's router
+    // (over the same -L 18787 forward) and relay them to the renderer.
+    startDesktopNotifications(
+      () => config,
+      (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(IPC.desktopNotify, payload);
+        }
+      },
+    );
     // Pull any newer shared settings made on mobile while desktop was closed.
     void pullSharedConfig().catch(() => {});
   });
@@ -850,6 +864,7 @@ app.on("before-quit", () => {
   stopScreenshotDetector();
   stopOutboxPoller();
   stopDesktopPresence();
+  stopDesktopNotifications();
   if (cleanupTimer) clearInterval(cleanupTimer);
   if (config.host) void teardownOpencodeForward(config).catch(() => {});
   killAll();
