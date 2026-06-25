@@ -263,6 +263,20 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                     >
                       Scheduled tasks
                     </button>
+                    <button
+                      onClick={() => {
+                        // Open the SecretsCard inside ChatPanel via the window
+                        // CustomEvent bridge (mirror of bui-open-schedules).
+                        window.dispatchEvent(
+                          new CustomEvent("bui-open-secrets", {
+                            detail: { sessionId: sid },
+                          }),
+                        );
+                        closeSheet();
+                      }}
+                    >
+                      Secrets
+                    </button>
                     <button className="danger" onClick={deleteSession}>
                       Delete session
                     </button>

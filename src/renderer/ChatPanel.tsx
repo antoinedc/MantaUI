@@ -28,6 +28,8 @@ import type {
   PermissionRequest,
   QuestionRequest,
   ScheduledJob,
+  SecretMeta,
+  SecretScope,
 } from "../shared/types";
 import { useStore } from "./store";
 import {
@@ -430,6 +432,26 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       })
       .catch((e: unknown) => {
         setScheduleError(e instanceof Error ? e.message : "schedule server unreachable");
+      });
+  }, [sessionId]);
+  // Secrets management (the 🔑 SecretsCard). Secrets are server-owned (the
+  // value never leaves the box; the AI reads them via the secret_* opencode
+  // tools). Here the user adds/edits/deletes via secrets:* window.api channels.
+  // list returns METADATA ONLY (no values). Refetch-driven like schedules.
+  // The card shows shared secrets + this session's scoped ones (sessionId is
+  // passed so the agent-visible view matches what tools will resolve).
+  const [showSecrets, setShowSecrets] = useState(false);
+  const [secrets, setSecrets] = useState<SecretMeta[]>([]);
+  const [secretError, setSecretError] = useState<string | null>(null);
+  const refreshSecrets = useCallback(() => {
+    return window.api
+      .secretsList(sessionId)
+      .then((list: SecretMeta[]) => {
+        setSecrets(Array.isArray(list) ? list : []);
+        setSecretError(null);
+      })
+      .catch((e: unknown) => {
+        setSecretError(e instanceof Error ? e.message : "secrets server unreachable");
       });
   }, [sessionId]);
   // Running mirrors opencode session status (busy/idle/retry). We feed it from
@@ -1008,6 +1030,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     const poll = setInterval(() => void refreshSchedules(), intervalMs);
     return () => clearInterval(poll);
   }, [showSchedules, refreshSchedules]);
+
+  // Secrets are only fetched while the card is open (no toolbar count badge to
+  // keep current in the background — unlike schedules). Refetch on open + 10s
+  // poll so a secret added on another device shows up.
+  useEffect(() => {
+    if (!showSecrets) return;
+    void refreshSecrets();
+    const poll = setInterval(() => void refreshSecrets(), 10_000);
+    return () => clearInterval(poll);
+  }, [showSecrets, refreshSecrets]);
 
   // Refresh permissions list. Called on any permission event.
   // Passes `sessionId` so the main process scopes the request to this
@@ -1951,6 +1983,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
     window.addEventListener("bui-open-schedules", onOpenSchedules);
     return () => window.removeEventListener("bui-open-schedules", onOpenSchedules);
+  }, [sessionId]);
+
+  // Mobile entry point for the secrets card (mirror of bui-open-schedules).
+  useEffect(() => {
+    const onOpenSecrets = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
+      if (detail?.sessionId === sessionId) setShowSecrets(true);
+    };
+    window.addEventListener("bui-open-secrets", onOpenSecrets);
+    return () => window.removeEventListener("bui-open-secrets", onOpenSecrets);
   }, [sessionId]);
 
   // Perform the deferred scroll once the question cards actually exist (cold
@@ -3958,6 +4000,47 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
+      {/* Secrets management card. Toggled by the 🔑 toolbar button (desktop) or */}
+      {/* the ⋯ sheet (mobile). The value never appears here — list is metadata */}
+      {/* only; agents read secrets via the secret_* opencode tools. */}
+      {showSecrets && (
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <SecretsCard
+            secrets={secrets}
+            error={secretError}
+            sessionId={sessionId}
+            onClose={() => setShowSecrets(false)}
+            onSave={(input) => {
+              return window.api
+                .secretsSet(input)
+                .then((r) => {
+                  if (r && r.ok === false) {
+                    setSecretError(r.error || "save failed");
+                    return false;
+                  }
+                  void refreshSecrets();
+                  setSecretError(null);
+                  return true;
+                })
+                .catch((e: unknown) => {
+                  setSecretError(e instanceof Error ? e.message : "save failed");
+                  return false;
+                });
+            }}
+            onDelete={(id) => {
+              setSecrets((prev) => prev.filter((s) => s.id !== id));
+              window.api
+                .secretsDelete(id)
+                .then(() => refreshSecrets())
+                .catch((e: unknown) => {
+                  setSecretError(e instanceof Error ? e.message : "delete failed");
+                  void refreshSecrets();
+                });
+            }}
+          />
+        </div>
+      )}
+
       {running && (
         <>
           <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
@@ -4141,6 +4224,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         onSelectModel={selectModel}
         scheduleCount={schedules.length}
         onSchedules={() => setShowSchedules((v) => !v)}
+        onSecrets={() => setShowSecrets((v) => !v)}
         typeaheadOpen={typeahead != null && typeaheadRows.length > 0}
         typeaheadExactMatch={(() => {
           if (!typeahead || typeaheadRows.length === 0) return false;
@@ -4741,15 +4825,214 @@ const ScheduledTasksCard = memo(function ScheduledTasksCard({
   );
 });
 
+// SecretsCard — pinned card above the composer for managing the secrets the
+// agent can use. The user types a key + value here; the value travels to the
+// box (renderer → IPC/RPC → bui-server store) and is NEVER returned or shown
+// again — the list is metadata only (key, scope, hint). Agents read secrets via
+// the secret_list / secret_provide opencode tools, which materialize the value
+// to a 0600 file on the box and hand the agent only the path, so the value
+// never enters the AI transcript. Modeled on ScheduledTasksCard so it renders
+// on desktop AND mobile with no mobile-CSS edits.
+const SecretsCard = memo(function SecretsCard({
+  secrets,
+  error,
+  sessionId,
+  onSave,
+  onDelete,
+  onClose,
+}: {
+  secrets: SecretMeta[];
+  error: string | null;
+  sessionId: string;
+  onSave: (input: {
+    key: string;
+    value: string;
+    scope: SecretScope;
+    sessionID?: string | null;
+    hint?: string;
+  }) => Promise<boolean>;
+  onDelete: (id: string) => void;
+  onClose: () => void;
+}) {
+  const [key, setKey] = useState("");
+  const [value, setValue] = useState("");
+  const [scope, setScope] = useState<SecretScope>("shared");
+  const [hint, setHint] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const keyValid = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key);
+  const canSave = keyValid && value.length > 0 && !saving;
+
+  const submit = () => {
+    if (!canSave) return;
+    setSaving(true);
+    void onSave({
+      key,
+      value,
+      scope,
+      // Pass sessionID for session scope (the owner) AND project scope (so the
+      // server resolves the workspace name from this chat's session).
+      sessionID: scope === "session" || scope === "project" ? sessionId : null,
+      hint: hint.trim() || undefined,
+    }).then((ok) => {
+      setSaving(false);
+      if (ok) {
+        // Clear value immediately (don't keep the secret in component state),
+        // and reset the form for the next entry.
+        setKey("");
+        setValue("");
+        setHint("");
+      }
+    });
+  };
+
+  return (
+    <div
+      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+    >
+      <div className="flex items-center gap-2 mb-1.5">
+        <span style={{ color: CLAUDE_ORANGE }}>🔑</span>
+        <span className="text-text">Secrets</span>
+        {secrets.length > 0 && <span className="text-text-faint">· {secrets.length}</span>}
+        <button
+          onClick={onClose}
+          className="ml-auto px-1 rounded text-text-faint hover:text-text-muted"
+          title="Close"
+        >
+          ×
+        </button>
+      </div>
+
+      {/* Add / update form */}
+      <div className="flex flex-col gap-1.5 mb-2">
+        <div className="flex flex-wrap gap-1.5">
+          <input
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            placeholder="KEY (e.g. GITHUB_PAT)"
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            className={`min-w-0 flex-1 rounded border bg-bg px-1.5 py-1 font-mono text-text outline-none ${
+              key && !keyValid ? "border-red-500/60" : "border-border"
+            }`}
+          />
+          <select
+            value={scope}
+            onChange={(e) => setScope(e.target.value as SecretScope)}
+            className="rounded border border-border bg-bg px-1.5 py-1 text-text outline-none"
+            title="shared = every session · project = every chat in this workspace · session = only this chat"
+          >
+            <option value="shared">shared</option>
+            <option value="project">this project</option>
+            <option value="session">this session</option>
+          </select>
+        </div>
+        <input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          placeholder="value (stored on the box; never shown again)"
+          type="password"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          className="w-full rounded border border-border bg-bg px-1.5 py-1 font-mono text-text outline-none"
+        />
+        <div className="flex flex-wrap gap-1.5">
+          <input
+            value={hint}
+            onChange={(e) => setHint(e.target.value)}
+            placeholder="hint for the agent (optional, e.g. 'git push token')"
+            className="min-w-0 flex-1 rounded border border-border bg-bg px-1.5 py-1 text-text outline-none"
+          />
+          <button
+            onClick={submit}
+            disabled={!canSave}
+            className="shrink-0 px-2 py-1 rounded border disabled:opacity-40"
+            style={{ borderColor: CLAUDE_ORANGE + "88", color: CLAUDE_ORANGE }}
+            title="Store this secret on the box"
+          >
+            {saving ? "saving…" : "Save"}
+          </button>
+        </div>
+        {key && !keyValid && (
+          <div className="text-red-400 text-[11px]">
+            Key must start with a letter/underscore, then letters/digits/underscores (max 64).
+          </div>
+        )}
+      </div>
+
+      {error && <div className="text-red-400 break-words mb-1">{error}</div>}
+
+      {/* Existing secrets (metadata only — no values) */}
+      {secrets.length === 0 ? (
+        <div className="text-text-muted">
+          No secrets yet. Add one above; the agent uses it via the secret_provide tool
+          without ever seeing the value.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1.5 border-t border-border pt-1.5">
+          {secrets.map((s) => (
+            <div key={s.id} className="flex items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-text font-mono truncate">{s.key}</span>
+                  <span
+                    className="shrink-0 rounded px-1 text-[10px] text-text-faint border border-border"
+                    title={
+                      s.scope === "shared"
+                        ? "Available to every session"
+                        : s.scope === "project"
+                          ? `Available to every chat in project "${s.project ?? ""}"`
+                          : "Available only to this session"
+                    }
+                  >
+                    {s.scope === "shared"
+                      ? "shared"
+                      : s.scope === "project"
+                        ? `project:${s.project ?? "?"}`
+                        : "session"}
+                  </span>
+                </div>
+                {s.hint && (
+                  <div className="text-text-faint text-[11px] truncate" title={s.hint}>
+                    {s.hint}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => onDelete(s.id)}
+                className="shrink-0 px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30"
+                title="Delete this secret"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
 // SessionToolbar — footer affordances. fork / compact / delete moved out of the
 // footer (they live in the header ⋯ menu); only the ⏰ schedules toggle remains
 // here so its live count is always visible next to the composer.
 function SessionToolbar({
   scheduleCount,
   onSchedules,
+  onSecrets,
 }: {
   scheduleCount: number;
   onSchedules: () => void;
+  onSecrets: () => void;
 }) {
   return (
     <span className="flex items-center gap-1 text-[10px]">
@@ -4759,6 +5042,13 @@ function SessionToolbar({
         title="View / cancel scheduled tasks"
       >
         ⏰ schedules{scheduleCount > 0 ? ` (${scheduleCount})` : ""}
+      </button>
+      <button
+        onClick={onSecrets}
+        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
+        title="Manage secrets the agent can use (values never enter the chat)"
+      >
+        🔑 secrets
       </button>
     </span>
   );
@@ -5391,6 +5681,7 @@ function InputArea({
   onSelectModel,
   scheduleCount,
   onSchedules,
+  onSecrets,
   typeaheadOpen,
   typeaheadExactMatch,
   onTypeaheadConfirm,
@@ -5448,6 +5739,7 @@ function InputArea({
   onSelectModel: (m: ModelSelection | null) => void;
   scheduleCount: number;
   onSchedules: () => void;
+  onSecrets: () => void;
   typeaheadOpen: boolean;
   typeaheadExactMatch: boolean;
   onTypeaheadConfirm: () => void;
@@ -5703,6 +5995,7 @@ function InputArea({
           <SessionToolbar
             scheduleCount={scheduleCount}
             onSchedules={onSchedules}
+            onSecrets={onSecrets}
           />
           {/* Transient status only — recording / interrupt feedback. The static */}
           {/* keyboard-hint (shift+⏎ newline · ⏎ send) was removed to declutter. */}

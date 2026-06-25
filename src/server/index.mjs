@@ -29,7 +29,8 @@ import {
   unregisterPage,
   listPages,
 } from "./servePage.mjs";
-import { listPeers, inspectPeer, sendPeerMessage } from "./peers.mjs";
+import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
+import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -41,6 +42,21 @@ const PUBLIC_DIR = join(PROJECT_ROOT, "mobile", "www");
 
 const bus = createBus();
 const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
+
+// Resolve a caller's bui project (tmux session) name from its opencode
+// sessionID and/or cwd, so project-scoped secrets resolve to the right
+// workspace. Reuses the same logic peers.mjs uses. Best-effort: returns null
+// if tmux is unreachable or the session/dir isn't matched.
+async function resolveProjectName({ sessionID, directory }) {
+  if (!sessionID && !directory) return null;
+  try {
+    const projects = await tmux.listProjects();
+    const ws = resolveWorkspace(projects, sessionID, directory);
+    return ws?.project?.tmuxSession ?? null;
+  } catch {
+    return null;
+  }
+}
 
 // Desktop notification leg: the notification router (push.mjs) publishes a
 // `desktopNotify` bus envelope when it decides the desktop should be notified.
@@ -620,6 +636,118 @@ const server = createServer(async (req, res) => {
         }
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(result));
+        return;
+      }
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+
+  // ---------- Secrets (secure key→value store) ----------
+  // The user stores secrets (a GitHub PAT, an API key…) via the bui UI; the
+  // value lives ONLY here on the box and is NEVER returned to the AI. The
+  // remote AI's global opencode `secret_list` / `secret_provide` tools read
+  // through here. `secret_provide` materializes the value to a 0600 file and
+  // returns ONLY the path, so nothing secret reaches the transcript.
+  //
+  // GET    /api/secrets?sessionID=         → {secrets:[meta...]}  (values stripped;
+  //                                          shared + this session's scoped)
+  // GET    /api/secrets?all=1              → {secrets:[meta...]}  (everything, for the
+  //                                          desktop "all" management view)
+  // POST   /api/secrets        body {key, value, scope, sessionID, hint}
+  //                                          → {ok, meta}  (400 bad input)  — UI only
+  // POST   /api/secrets/provide body {key, sessionID}
+  //                                          → {ok, path, key, hint}  — AI tool only
+  // DELETE /api/secrets?id=                → {deleted:bool}  — UI only
+  // Store mutations publish a `secrets.updated` bus event so the SecretsCard
+  // refetches live. See src/server/secrets.mjs.
+  if (path === "/api/secrets/provide") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const project = await resolveProjectName({
+          sessionID: body?.sessionID,
+          directory: body?.directory,
+        });
+        const result = await provideSecret({
+          key: body?.key,
+          sessionID: body?.sessionID,
+          project,
+        });
+        if (!result.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ path: result.path, key: result.key, hint: result.hint }));
+        return;
+      }
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+  if (path === "/api/secrets") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        // Project scope: use an explicit project (migration script) or resolve
+        // it from the caller's session/dir (the "this project" UI option).
+        let project = body?.project || null;
+        if (body?.scope === "project" && !project) {
+          project = await resolveProjectName({
+            sessionID: body?.sessionID,
+            directory: body?.directory,
+          });
+        }
+        const result = await setSecret(
+          {
+            key: body?.key,
+            value: body?.value,
+            scope: body?.scope,
+            sessionID: body?.sessionID,
+            project,
+            hint: body?.hint,
+          },
+          { publish: (evt) => bus.publish(evt) },
+        );
+        if (!result.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ meta: result.meta }));
+        return;
+      }
+      if (req.method === "GET") {
+        const sessionID = url.searchParams.get("sessionID") || undefined;
+        const directory = url.searchParams.get("directory") || undefined;
+        const all = url.searchParams.get("all") === "1";
+        const project = all ? null : await resolveProjectName({ sessionID, directory });
+        const secrets = listSecrets({ sessionID, project, includeAll: all });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ secrets }));
+        return;
+      }
+      if (req.method === "DELETE") {
+        const id = url.searchParams.get("id");
+        if (!id) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "id is required" }));
+          return;
+        }
+        const result = await deleteSecret(id, { publish: (evt) => bus.publish(evt) });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ deleted: result.deleted }));
         return;
       }
       res.writeHead(405, { "content-type": "application/json" });

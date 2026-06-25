@@ -3,6 +3,12 @@
 
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
+import {
+  listSecrets as secretsListStore,
+  setSecret as secretsSetStore,
+  deleteSecret as secretsDeleteStore,
+} from "./secrets.mjs";
+import { resolveWorkspace } from "./peers.mjs";
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -31,6 +37,19 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     const cfg = await local.configGet();
     const meta = cfg.projects?.find((p) => p.tmuxSession === sessionName);
     return (meta?.defaultCwd ?? "").trim() || trimmed || "~";
+  }
+
+  // Resolve a caller's bui project (tmux session) name from its opencode
+  // sessionID, for project-scoped secret resolution (mobile in-process path).
+  async function resolveProjectName(sessionID) {
+    if (!sessionID) return null;
+    try {
+      const projects = await tmux.listProjects();
+      const ws = resolveWorkspace(projects, sessionID, undefined);
+      return ws?.project?.tmuxSession ?? null;
+    } catch {
+      return null;
+    }
   }
 
   return {
@@ -285,6 +304,29 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // preload: ipcRenderer.invoke(IPC.scheduleDelete, id)  → args[0] = id
     "schedule:delete": (id) =>
       scheduleDeleteJob(id, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- secrets (bui-server owned; in-process on mobile) ----
+    // Mirror of desktop IPC.secretsList / secretsSet / secretsDelete. The store
+    // lives in src/server/secrets.mjs; the UI never sees secret VALUES — list
+    // returns metadata only. Mutations publish secrets.updated so the
+    // SecretsCard refetches live. There is no `provide` channel here: providing
+    // a secret to an agent is the opencode-tool path (POST /api/secrets/provide),
+    // never a UI action.
+    // preload: ipcRenderer.invoke(IPC.secretsList, sessionId, all) → args = [sessionId?, all?]
+    "secrets:list": async (sessionId, all) => {
+      const project = all ? null : await resolveProjectName(sessionId);
+      return secretsListStore({ sessionID: sessionId || undefined, project, includeAll: !!all });
+    },
+    // preload: ipcRenderer.invoke(IPC.secretsSet, input) → args[0] = {key,value,scope,sessionID,project,hint}
+    "secrets:set": async (input) => {
+      const i = input ?? {};
+      let project = i.project || null;
+      if (i.scope === "project" && !project) project = await resolveProjectName(i.sessionID);
+      return secretsSetStore({ ...i, project }, { publish: (evt) => bus.publish(evt) });
+    },
+    // preload: ipcRenderer.invoke(IPC.secretsDelete, id) → args[0] = id
+    "secrets:delete": (id) =>
+      secretsDeleteStore(id, { publish: (evt) => bus.publish(evt) }),
 
     // ---- pty channels (4 channels) ----
     //

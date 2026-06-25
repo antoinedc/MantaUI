@@ -87,3 +87,31 @@ desktop-first with a mobile fallback when idle. You do NOT pick the device. Set
 `urgent:true` only for something that must be seen right now (fires on every
 device immediately, no delay); leave it off for normal "FYI, this finished"
 pings.
+
+## bui secrets
+
+The user can hand you secrets (a GitHub PAT, an API key, …) through the bui
+Secrets card WITHOUT the value ever appearing in this transcript. You read them
+with two tools:
+
+- `secret_list` -> the secret NAMES available to this session (shared ones +
+  this session's own), each with its scope and an optional usage hint. NEVER
+  returns values.
+- `secret_provide(key)` -> bui writes that secret's value to a 0600 file on the
+  box and returns ONLY the file PATH (plus the hint).
+
+**THE GOLDEN RULE: use a secret strictly by reference, never by value.** A
+secret leaks the instant its value lands in your context — in a tool result, in
+a command you type, or in command OUTPUT you read back. So once you have the
+path from `secret_provide`, use `$(cat <path>)` inside the command that needs
+it and let the shell substitute it at run time:
+
+- `git push https://x-access-token:$(cat <path>)@github.com/owner/repo`
+- `curl -H "Authorization: Bearer $(cat <path>)" https://api.example.com`
+
+NEVER run `cat <path>` on its own, never `echo` the value, never paste it into a
+message — that defeats the whole point and leaks the secret. If the user asks
+"can you use my GitHub token", call `secret_list` to find it, then
+`secret_provide` to materialize it, then reference it as above. The user manages
+secrets (add / edit / delete) in the bui Secrets card — you cannot store
+secrets yourself (that would route the value through the transcript).

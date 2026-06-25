@@ -17,6 +17,8 @@ import {
   type Project,
   type ProjectMeta,
   type ScheduledJob,
+  type SecretMeta,
+  type SecretInput,
   type SpawnOptions,
   type PtyEvent,
   type TransportInfo,
@@ -272,6 +274,16 @@ const api = {
     ipcRenderer.invoke(IPC.scheduleList, sessionId),
   scheduleDelete: (id: string): Promise<{ deleted: boolean }> =>
     ipcRenderer.invoke(IPC.scheduleDelete, id),
+
+  // Secrets (bui-server owned; desktop reaches it over -L 18787). list returns
+  // METADATA ONLY (never values). set carries the value renderer → box (never
+  // through the AI). Agents read secrets via opencode tools, not these channels.
+  secretsList: (sessionId?: string, all?: boolean): Promise<SecretMeta[]> =>
+    ipcRenderer.invoke(IPC.secretsList, sessionId, all),
+  secretsSet: (input: SecretInput): Promise<{ ok: boolean; meta?: SecretMeta; error?: string }> =>
+    ipcRenderer.invoke(IPC.secretsSet, input),
+  secretsDelete: (id: string): Promise<{ deleted: boolean }> =>
+    ipcRenderer.invoke(IPC.secretsDelete, id),
 
   // Typeahead sources.
   opencodeCommands: (): Promise<OpencodeCommand[]> =>

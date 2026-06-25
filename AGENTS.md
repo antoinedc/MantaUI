@@ -544,6 +544,63 @@ routing matrix + scenarios in `docs/bui-tools-notify.md`. Key facts:
   idle / gone × blocking / informational), `notifTier`, and escalation
   schedule/cancel/supersede (11 new, 41 total). Pure logic only.
 
+## Secrets — bui-native AI tool (`src/server/secrets.mjs`)
+
+The fifth **bui-native opencode tool**: a secure key→value store so the user can
+hand a secret (a GitHub PAT, an API key…) to a working agent WITHOUT the value
+ever entering the AI transcript. Same "bui tools" pattern as schedule/serve-page/
+peers/notify. Key facts:
+
+- **THE INVARIANT: the store NEVER returns a value to the agent.** A secret
+  leaks the instant its value lands in the agent's context (a tool result, a
+  command the agent types, or command OUTPUT it reads). So `secret_list` returns
+  NAMES + hints only, and `secret_provide` MATERIALIZES the value to a 0600 file
+  on the box and returns ONLY the path. The agent uses it by reference —
+  `git push https://x-access-token:$(cat <path>)@github.com/…` — so the value is
+  substituted by the shell at run time and never printed. There is deliberately
+  **no `secret_get` and no `secret_set` tool**: storing is a HUMAN action via the
+  UI (else the value would route through the transcript).
+- **Two namespaces.** `shared` (every session) + `session` (scoped to one
+  opencode `sessionID`; a session-scoped key SHADOWS a shared key of the same
+  name for that session). `visibleSecrets` / `resolveSecret` (pure, tested)
+  implement the resolution; session wins over shared.
+- **Global opencode tool**, `docs/opencode-tools/secrets.ts`, **COPIED** (not
+  symlinked — same `@opencode-ai/plugin` gotcha) to
+  `~/.config/opencode/tools/secrets.ts`. Two exports → `secret_list`,
+  `secret_provide`. Guidance appended to `~/.config/opencode/AGENTS.md` from
+  `docs/opencode-tools/AGENTS.md` (## bui secrets). **Install/update =
+  `systemctl --user restart opencode-serve`.**
+- **Thin registrar** — `fetch`es bui-server (no SSH hop). `secret_list` GETs
+  `/api/secrets?sessionID=`; `secret_provide` POSTs `/api/secrets/provide
+  {key, sessionID}` → `{path, key, hint}`.
+- **Server-owned + durable.** Store `~/.bui-mobile/secrets.json` (atomic write,
+  chmod 0600). Materialized value files under `~/.bui-secrets/` (dir 0700, files
+  0600): shared → `<key>`, session → `sessions/<sessionID>/<key>`. `deleteSecret`
+  also removes the materialized file so a deleted secret can't be re-read off
+  disk.
+- **UI card**: `SecretsCard` in `ChatPanel.tsx` (pinned card above the composer,
+  modeled on `ScheduledTasksCard` → renders desktop AND mobile, no mobile-CSS
+  edits). Opened by the `🔑 secrets` button in `SessionToolbar` (desktop) or the
+  `Secrets` item in the mobile `⋯` sheet (`SessionScreen.tsx` → `bui-open-secrets`
+  window CustomEvent). The card has an add/edit form (key + value [type=password]
+  + scope + hint) and a metadata-only list (the value is cleared from component
+  state on save and never re-displayed). Refetch-driven (open + 10s poll).
+- **Transport: `secrets:*` channels** (mirror schedule's). Desktop reaches the
+  server store over the existing SSH `-L 18787` presence forward
+  (`src/main/secrets.ts`); mobile is in-process (`src/server/rpc.mjs` →
+  `secrets.mjs`). `window.api.secretsList/secretsSet/secretsDelete` wired across
+  all 6 sites. **list returns metadata only**; the value travels renderer → box
+  on set and never comes back.
+- **Migration**: `scripts/migrate-secrets.mjs` consolidates secrets scattered in
+  credential files (gh `hosts.yml`, `~/.aws/credentials`, `~/.netrc`,
+  `~/.modal.toml`) into the store. LEAK-SAFE: it runs on the box, reads each
+  source locally, and POSTs the value straight to bui-server — values NEVER pass
+  through the AI transcript (the script prints only key names + sources). Dry-run
+  by default; `--apply` to import. Canonical credential files are left untouched.
+- Tests: `src/server/secrets.test.mjs` (isValidKey, visibleSecrets shadowing,
+  resolveSecret precedence, materializedPath, CRUD round-trip, provideSecret
+  writes 0600 + returns path-not-value — 21). Pure/IO-injected logic only.
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what

@@ -96,6 +96,12 @@ import {
   listSchedules,
   deleteSchedule,
 } from "./schedule.js";
+import {
+  initSecretsClient,
+  listSecrets as listSecretsStore,
+  setSecret as setSecretStore,
+  deleteSecret as deleteSecretStore,
+} from "./secrets.js";
 // Plain-JS modules shared with the mobile server (src/server/*.mjs). The
 // bundler resolves .mjs imports here; main.process never sees them as TS.
 // Types live in groq.d.mts. Keep them dep-free so they stay portable across
@@ -832,6 +838,9 @@ app.whenReady().then(() => {
   // Scheduled-prompt management client (reaches the box's /api/schedule over
   // the -L 18787 forward). Jobs are server-owned; this only lists/deletes.
   initScheduleClient({ getConfig: () => config });
+  // Secret store client (reaches the box's /api/secrets over the -L 18787
+  // forward). Store is server-owned; this only lists/sets/deletes for the UI.
+  initSecretsClient({ getConfig: () => config });
   registerHandlers();
   createWindow();
   // Defer poller start until renderer is ready to receive events.
@@ -1378,6 +1387,14 @@ function registerHandlers(): void {
     listSchedules(sessionId),
   );
   ipcMain.handle(IPC.scheduleDelete, (_e, id: string) => deleteSchedule(id));
+
+  // Secrets (bui-server owned; reached over the -L 18787 forward). list yields
+  // metadata only; set carries the value Mac → box (never through the AI).
+  ipcMain.handle(IPC.secretsList, (_e, sessionId?: string, all?: boolean) =>
+    listSecretsStore(sessionId, all),
+  );
+  ipcMain.handle(IPC.secretsSet, (_e, input) => setSecretStore(input));
+  ipcMain.handle(IPC.secretsDelete, (_e, id: string) => deleteSecretStore(id));
 
   // Typeahead sources for @ and / mentions.
   ipcMain.handle(IPC.opencodeCommands, () => opencodeListCommands(config));

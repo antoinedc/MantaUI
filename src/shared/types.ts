@@ -377,7 +377,48 @@ export const IPC = {
   // mobile is in-process (src/server/rpc.mjs → schedule.mjs).
   scheduleList: "schedule:list", // (sessionId?) → ScheduledJob[]
   scheduleDelete: "schedule:delete", // (id) → { deleted: boolean }
+
+  // ---- secrets (bui-server owned) ----
+  // A secure key→value store on the box. The user adds/edits secrets in the
+  // SecretsCard UI; the VALUE never leaves the box and is never returned here
+  // (list yields metadata only). The remote AI reads secrets through its global
+  // `secret_list` / `secret_provide` opencode tools (POST /api/secrets/provide,
+  // which materializes the value to a 0600 file and returns only the path) —
+  // NOT through these UI channels. Desktop reaches the server store over its
+  // SSH -L 18787 forward (src/main/secrets.ts); mobile is in-process
+  // (src/server/rpc.mjs → secrets.mjs).
+  secretsList: "secrets:list", // (sessionId?, all?) → SecretMeta[]
+  secretsSet: "secrets:set", // (SecretInput) → { ok, meta? , error? }
+  secretsDelete: "secrets:delete", // (id) → { deleted: boolean }
 } as const;
+
+// A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
+// value (bui-server strips it; only secret_provide materializes the value, to a
+// 0600 file on the box). Store: ~/.bui-mobile/secrets.json.
+export type SecretScope = "shared" | "session" | "project";
+export type SecretMeta = {
+  id: string; // 8-char hex store id (used for delete)
+  key: string; // env-var-style name, e.g. "GITHUB_PAT"
+  scope: SecretScope; // shared = every session; session = one sessionID; project = one workspace
+  sessionID: string | null; // set when scope === "session"
+  project: string | null; // set when scope === "project" (bui/tmux workspace name)
+  hint: string; // optional human usage note (safe to show the agent)
+  hasValue: boolean; // a value is stored (always true for persisted secrets)
+  createdAt: number | null;
+  updatedAt: number | null;
+};
+
+// Input shape for secretsSet (UI → store). The value travels renderer → IPC →
+// box, never through the AI transcript. For scope === "project", the server
+// resolves the project name from sessionID when `project` is omitted.
+export type SecretInput = {
+  key: string;
+  value: string;
+  scope: SecretScope;
+  sessionID?: string | null;
+  project?: string | null;
+  hint?: string;
+};
 
 // A durable scheduled-prompt job (bui-server store: ~/.bui-mobile/schedule.json).
 export type ScheduledJob = {
