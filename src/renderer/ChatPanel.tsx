@@ -4763,8 +4763,27 @@ const ScheduledTasksCard = memo(function ScheduledTasksCard({
   onDelete: (id: string) => void;
   onClose: () => void;
 }) {
+  // Click-outside-to-dismiss: the close (×) button sits directly above the
+  // first row's cancel button, so a mis-tap on the close used to delete a job.
+  // Dismissing by clicking anywhere outside the card removes that hazard.
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (cardRef.current && !cardRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    // Defer registration to the next tick so the same click that opened the
+    // card (from the toolbar button) doesn't immediately close it.
+    const t = setTimeout(() => document.addEventListener("mousedown", onDown), 0);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [onClose]);
   return (
     <div
+      ref={cardRef}
       className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
       style={{ borderColor: CLAUDE_ORANGE + "55" }}
     >
@@ -4774,8 +4793,8 @@ const ScheduledTasksCard = memo(function ScheduledTasksCard({
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-1 rounded text-text-faint hover:text-text-muted"
-          title="Close"
+          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted text-[14px]"
+          title="Close (or click outside)"
         >
           ×
         </button>
@@ -4811,10 +4830,10 @@ const ScheduledTasksCard = memo(function ScheduledTasksCard({
                 </div>
                 <button
                   onClick={() => onDelete(j.id)}
-                  className="shrink-0 px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30"
+                  className="shrink-0 px-2 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30 text-[11px]"
                   title="Cancel this scheduled task"
                 >
-                  ✕
+                  Cancel
                 </button>
               </div>
             );
