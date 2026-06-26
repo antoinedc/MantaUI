@@ -48,9 +48,55 @@ async function getRegistration(): Promise<ServiceWorkerRegistration> {
   return navigator.serviceWorker.register("sw.js");
 }
 
+/** Mint a brand-new PushSubscription from the server's VAPID key. */
+async function createSubscription(
+  reg: ServiceWorkerRegistration,
+): Promise<PushSubscription> {
+  const res = await fetch(`${serverBase()}/push/vapid`);
+  if (!res.ok) throw new Error(`vapid fetch failed: ${res.status}`);
+  const { key } = (await res.json()) as { key: string };
+  if (!key) throw new Error("server returned no VAPID key");
+  return reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(key),
+  });
+}
+
+/** Upload a subscription to the box so the server can push to it. */
+async function uploadSubscription(sub: PushSubscription): Promise<void> {
+  const subRes = await fetch(`${serverBase()}/push/subscribe`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sub),
+  });
+  if (!subRes.ok) throw new Error(`subscribe upload failed: ${subRes.status}`);
+}
+
+/**
+ * Drop the current local subscription (if any) and tell the server to forget
+ * its endpoint. Used by both disable and the re-subscribe self-heal path.
+ */
+async function dropSubscription(
+  reg: ServiceWorkerRegistration,
+): Promise<void> {
+  const sub = await reg.pushManager.getSubscription();
+  if (!sub) return;
+  await fetch(`${serverBase()}/push/unsubscribe`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ endpoint: sub.endpoint }),
+  }).catch(() => {});
+  await sub.unsubscribe().catch(() => {});
+}
+
 /**
  * Request permission (must be called from a user gesture on iOS) and create +
  * upload a push subscription. Returns the resulting permission state.
+ *
+ * Reuses an existing local subscription if present — fast path for a first
+ * enable. To recover from a STALE/ghost subscription (iOS silently invalidated
+ * it but Apple still 201s the dead endpoint, so it can't be auto-detected), use
+ * `resubscribePush()` instead, which forces a fresh endpoint.
  */
 export async function enablePush(): Promise<PushState> {
   if (!isPushSupported()) return "unsupported";
@@ -63,23 +109,31 @@ export async function enablePush(): Promise<PushState> {
   await navigator.serviceWorker.ready;
 
   let sub = await reg.pushManager.getSubscription();
-  if (!sub) {
-    const res = await fetch(`${serverBase()}/push/vapid`);
-    if (!res.ok) throw new Error(`vapid fetch failed: ${res.status}`);
-    const { key } = (await res.json()) as { key: string };
-    if (!key) throw new Error("server returned no VAPID key");
-    sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(key),
-    });
-  }
+  if (!sub) sub = await createSubscription(reg);
+  await uploadSubscription(sub);
+  return "granted";
+}
 
-  const subRes = await fetch(`${serverBase()}/push/subscribe`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(sub),
-  });
-  if (!subRes.ok) throw new Error(`subscribe upload failed: ${subRes.status}`);
+/**
+ * Force a fresh subscription: drop any existing (possibly stale/ghost) local
+ * subscription first, then mint and upload a new one. This is the self-heal for
+ * the case where iOS rotated/invalidated the subscription on-device — Apple
+ * keeps returning 201 to the dead endpoint, so the server can't detect it and
+ * a plain `enablePush()` would just re-upload the same dead endpoint. Always
+ * yields a new endpoint that the device actually honors.
+ */
+export async function resubscribePush(): Promise<PushState> {
+  if (!isPushSupported()) return "unsupported";
+
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") return perm as PushState;
+
+  const reg = await getRegistration();
+  await navigator.serviceWorker.ready;
+
+  await dropSubscription(reg);
+  const sub = await createSubscription(reg);
+  await uploadSubscription(sub);
   return "granted";
 }
 
@@ -88,15 +142,7 @@ export async function disablePush(): Promise<void> {
   if (!isPushSupported()) return;
   try {
     const reg = await navigator.serviceWorker.getRegistration();
-    const sub = await reg?.pushManager.getSubscription();
-    if (sub) {
-      await fetch(`${serverBase()}/push/unsubscribe`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ endpoint: sub.endpoint }),
-      }).catch(() => {});
-      await sub.unsubscribe().catch(() => {});
-    }
+    if (reg) await dropSubscription(reg);
   } catch {
     /* best-effort */
   }

@@ -7,6 +7,7 @@ import {
   hasActiveSubscription,
   enablePush,
   disablePush,
+  resubscribePush,
 } from "./push";
 
 type Props = { onClose: () => void };
@@ -102,6 +103,30 @@ export function MobileSettings({ onClose }: Props) {
           );
         else setPushErr("Permission not granted.");
       }
+    } catch (e) {
+      setPushErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  // Self-heal a stale/ghost subscription: iOS can silently invalidate the
+  // device-side subscription (post-update / PWA offload) while Apple keeps
+  // 201-ing the dead endpoint, so it can't be auto-detected and a plain enable
+  // re-uploads the same dead endpoint. Force a fresh subscribe in one tap.
+  const resubscribe = async () => {
+    setPushErr(null);
+    setPushBusy(true);
+    try {
+      const state = await resubscribePush();
+      if (state === "granted") setPushOn(true);
+      else if (state === "denied")
+        setPushErr(
+          "Notifications are blocked. Enable them for this site in iOS Settings.",
+        );
+      else if (state === "unsupported")
+        setPushErr("Push needs the app installed to your home screen (iOS 16.4+).");
+      else setPushErr("Permission not granted.");
     } catch (e) {
       setPushErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -419,6 +444,17 @@ export function MobileSettings({ onClose }: Props) {
                   ? "Notifications on — tap to disable"
                   : "Enable notifications"}
             </button>
+            {pushOn && (
+              <button
+                onClick={resubscribe}
+                disabled={pushBusy}
+                className={`w-full px-3 py-1.5 text-xs rounded border border-border bg-bg-soft text-text-muted ${
+                  pushBusy ? "opacity-60" : ""
+                }`}
+              >
+                Not getting notifications? Re-subscribe
+              </button>
+            )}
             {pushErr && <div className="text-xs text-red-400">{pushErr}</div>}
           </section>
         )}
