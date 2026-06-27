@@ -487,6 +487,10 @@ export const httpApi: Api = {
   secretsSet: (input) => rpc(IPC.secretsSet, input),
   secretsDelete: (id) => rpc(IPC.secretsDelete, id),
 
+  // -- inbound webhooks (bui-server owned; in-process on mobile) --
+  webhookList: (sessionId) => rpc(IPC.webhookList, sessionId),
+  webhookDelete: (id) => rpc(IPC.webhookDelete, id),
+
   // -- typeahead --
   opencodeCommands: () => rpc(IPC.opencodeCommands),
   opencodeAgents: () => rpc(IPC.opencodeAgents),

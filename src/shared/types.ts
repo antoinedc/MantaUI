@@ -390,6 +390,16 @@ export const IPC = {
   secretsList: "secrets:list", // (sessionId?, all?) → SecretMeta[]
   secretsSet: "secrets:set", // (SecretInput) → { ok, meta? , error? }
   secretsDelete: "secrets:delete", // (id) → { deleted: boolean }
+
+  // ---- inbound webhooks (bui-server owned) ----
+  // External actors POST to a public /hook/<token> route to wake a chat session
+  // with an event (the push counterpart to scheduled polling). CREATED by the
+  // remote AI's global `webhook` opencode tool (which gets the URL + signing
+  // secret); the UI only LISTS + REVOKES (the secret is shown once at create,
+  // never re-exposed). Desktop reaches the server store over its SSH -L 18787
+  // forward (src/main/webhook.ts); mobile is in-process (rpc.mjs → webhooks.mjs).
+  webhookList: "webhook:list", // (sessionId?) → WebhookMeta[]
+  webhookDelete: "webhook:delete", // (id) → { deleted: boolean }
 } as const;
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
@@ -418,6 +428,21 @@ export type SecretInput = {
   sessionID?: string | null;
   project?: string | null;
   hint?: string;
+};
+
+// An inbound webhook's METADATA — what the UI and `webhook_list` see. NEVER
+// carries the signing secret (returned once at create, then stripped). Store:
+// ~/.bui-mobile/webhooks.json.
+export type WebhookMeta = {
+  id: string; // 8-char hex store id (used for delete)
+  label: string; // human label, e.g. "multica CAPO-123 done"
+  url: string | null; // public delivery URL (https://bui.useronda.com/hook/<token>)
+  unsigned: boolean; // true = no HMAC signature required (discouraged)
+  sessionID: string | null; // the session this hook wakes
+  instructions: string; // standing directive prepended to each delivery
+  createdAt: number | null;
+  lastDeliveredAt: number | null; // ms epoch of the last successful delivery
+  deliveries: number; // total deliveries
 };
 
 // A durable scheduled-prompt job (bui-server store: ~/.bui-mobile/schedule.json).

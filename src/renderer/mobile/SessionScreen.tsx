@@ -277,6 +277,20 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                     >
                       Secrets
                     </button>
+                    <button
+                      onClick={() => {
+                        // Open the WebhooksCard inside ChatPanel via the window
+                        // CustomEvent bridge (mirror of bui-open-schedules).
+                        window.dispatchEvent(
+                          new CustomEvent("bui-open-webhooks", {
+                            detail: { sessionId: sid },
+                          }),
+                        );
+                        closeSheet();
+                      }}
+                    >
+                      Webhooks
+                    </button>
                     <button className="danger" onClick={deleteSession}>
                       Delete session
                     </button>

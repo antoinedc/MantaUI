@@ -30,6 +30,7 @@ import type {
   ScheduledJob,
   SecretMeta,
   SecretScope,
+  WebhookMeta,
 } from "../shared/types";
 import { useStore } from "./store";
 import {
@@ -452,6 +453,25 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       })
       .catch((e: unknown) => {
         setSecretError(e instanceof Error ? e.message : "secrets server unreachable");
+      });
+  }, [sessionId]);
+  // Inbound-webhook management (the 🪝 WebhooksCard). Hooks are server-owned
+  // (external POSTs wake the session); here we only list + revoke via the
+  // webhook:* channels (creation is the AI's job via the `webhook` opencode
+  // tool, which returns the one-time signing secret). Refetch-driven like
+  // schedules/secrets. See docs/bui-tools-webhook.md.
+  const [showWebhooks, setShowWebhooks] = useState(false);
+  const [webhooks, setWebhooks] = useState<WebhookMeta[]>([]);
+  const [webhookError, setWebhookError] = useState<string | null>(null);
+  const refreshWebhooks = useCallback(() => {
+    return window.api
+      .webhookList(sessionId)
+      .then((list: WebhookMeta[]) => {
+        setWebhooks(Array.isArray(list) ? list : []);
+        setWebhookError(null);
+      })
+      .catch((e: unknown) => {
+        setWebhookError(e instanceof Error ? e.message : "webhook server unreachable");
       });
   }, [sessionId]);
   // Running mirrors opencode session status (busy/idle/retry). We feed it from
@@ -1040,6 +1060,23 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     const poll = setInterval(() => void refreshSecrets(), 10_000);
     return () => clearInterval(poll);
   }, [showSecrets, refreshSecrets]);
+
+  // Close the webhooks card + clear its state on session change.
+  useEffect(() => {
+    setShowWebhooks(false);
+    setWebhooks([]);
+    setWebhookError(null);
+  }, [sessionId]);
+
+  // Webhooks fetched only while the card is open (creation is agent-driven; the
+  // count isn't surfaced on the toolbar, so no background poll). Refetch on open
+  // + 10s poll so a model-created hook / a fresh delivery shows up.
+  useEffect(() => {
+    if (!showWebhooks) return;
+    void refreshWebhooks();
+    const poll = setInterval(() => void refreshWebhooks(), 10_000);
+    return () => clearInterval(poll);
+  }, [showWebhooks, refreshWebhooks]);
 
   // Refresh permissions list. Called on any permission event.
   // Passes `sessionId` so the main process scopes the request to this
@@ -1993,6 +2030,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
     window.addEventListener("bui-open-secrets", onOpenSecrets);
     return () => window.removeEventListener("bui-open-secrets", onOpenSecrets);
+  }, [sessionId]);
+
+  // Mobile entry point for the webhooks card (mirror of bui-open-schedules).
+  useEffect(() => {
+    const onOpenWebhooks = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
+      if (detail?.sessionId === sessionId) setShowWebhooks(true);
+    };
+    window.addEventListener("bui-open-webhooks", onOpenWebhooks);
+    return () => window.removeEventListener("bui-open-webhooks", onOpenWebhooks);
   }, [sessionId]);
 
   // Perform the deferred scroll once the question cards actually exist (cold
@@ -4041,6 +4088,29 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
+      {/* Inbound-webhook management card. Toggled by the 🪝 toolbar button */}
+      {/* (desktop) or the ⋯ sheet (mobile). List is metadata only (no signing */}
+      {/* secret); creation is the AI's job via the `webhook` opencode tool. */}
+      {showWebhooks && (
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <WebhooksCard
+            hooks={webhooks}
+            error={webhookError}
+            onClose={() => setShowWebhooks(false)}
+            onDelete={(id) => {
+              setWebhooks((prev) => prev.filter((h) => h.id !== id));
+              window.api
+                .webhookDelete(id)
+                .then(() => refreshWebhooks())
+                .catch((e: unknown) => {
+                  setWebhookError(e instanceof Error ? e.message : "delete failed");
+                  void refreshWebhooks();
+                });
+            }}
+          />
+        </div>
+      )}
+
       {running && (
         <>
           <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
@@ -4225,6 +4295,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         scheduleCount={schedules.length}
         onSchedules={() => setShowSchedules((v) => !v)}
         onSecrets={() => setShowSecrets((v) => !v)}
+        onWebhooks={() => setShowWebhooks((v) => !v)}
         typeaheadOpen={typeahead != null && typeaheadRows.length > 0}
         typeaheadExactMatch={(() => {
           if (!typeahead || typeaheadRows.length === 0) return false;
@@ -4844,6 +4915,123 @@ const ScheduledTasksCard = memo(function ScheduledTasksCard({
   );
 });
 
+// WebhooksCard — pinned card above the composer listing this session's inbound
+// webhooks (created by the AI's `webhook` opencode tool) with a per-row revoke.
+// A card (not a footer item) so it renders on BOTH desktop and mobile with no
+// mobile-CSS edits. List is metadata only — the signing secret is shown once at
+// create (in the agent's tool result) and never re-exposed here.
+// See docs/bui-tools-webhook.md.
+const WebhooksCard = memo(function WebhooksCard({
+  hooks,
+  error,
+  onDelete,
+  onClose,
+}: {
+  hooks: WebhookMeta[];
+  error: string | null;
+  onDelete: (id: string) => void;
+  onClose: () => void;
+}) {
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (cardRef.current && !cardRef.current.contains(e.target as Node)) onClose();
+    };
+    const t = setTimeout(() => document.addEventListener("mousedown", onDown), 0);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [onClose]);
+  const copyUrl = (url: string, id: string) => {
+    void navigator.clipboard?.writeText(url).then(
+      () => {
+        setCopied(id);
+        setTimeout(() => setCopied((c) => (c === id ? null : c)), 1500);
+      },
+      () => { /* clipboard blocked — no-op */ },
+    );
+  };
+  return (
+    <div
+      ref={cardRef}
+      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color: CLAUDE_ORANGE }}>🪝</span>
+        <span className="text-text">Webhooks</span>
+        {hooks.length > 0 && <span className="text-text-faint">· {hooks.length}</span>}
+        <button
+          onClick={onClose}
+          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted text-[14px]"
+          title="Close (or click outside)"
+        >
+          ×
+        </button>
+      </div>
+      {error ? (
+        <div className="text-red-400 break-words">{error}</div>
+      ) : hooks.length === 0 ? (
+        <div className="text-text-muted">
+          No webhooks in this session. Ask the agent to create one (e.g. “have
+          Multica ping this session when the task finishes”).
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {hooks.map((h) => {
+            const last =
+              h.lastDeliveredAt != null
+                ? `${new Date(h.lastDeliveredAt).toLocaleString()} · ${h.deliveries}×`
+                : "never fired";
+            return (
+              <div key={h.id} className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-text truncate" title={h.label}>
+                      {h.label}
+                    </span>
+                    {h.unsigned && (
+                      <span
+                        className="shrink-0 px-1 rounded text-red-400 border border-red-500/30 text-[10px]"
+                        title="No signature required — anyone with the URL can trigger this hook"
+                      >
+                        unsigned
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 text-text-faint font-mono text-[11px]">
+                    {h.url && (
+                      <button
+                        onClick={() => copyUrl(h.url as string, h.id)}
+                        className="shrink-0 truncate max-w-[200px] hover:text-text-muted underline decoration-dotted"
+                        title={`Copy delivery URL\n${h.url}`}
+                      >
+                        {copied === h.id ? "copied!" : h.url.replace(/^https?:\/\//, "")}
+                      </button>
+                    )}
+                    <span className="shrink-0 truncate" title="Last delivery">
+                      · {last}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => onDelete(h.id)}
+                  className="shrink-0 px-2 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30 text-[11px]"
+                  title="Revoke this webhook (further POSTs will 404)"
+                >
+                  Revoke
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+});
+
 // SecretsCard — pinned card above the composer for managing the secrets the
 // agent can use. The user types a key + value here; the value travels to the
 // box (renderer → IPC/RPC → bui-server store) and is NEVER returned or shown
@@ -5048,10 +5236,12 @@ function SessionToolbar({
   scheduleCount,
   onSchedules,
   onSecrets,
+  onWebhooks,
 }: {
   scheduleCount: number;
   onSchedules: () => void;
   onSecrets: () => void;
+  onWebhooks: () => void;
 }) {
   return (
     <span className="flex items-center gap-1 text-[10px]">
@@ -5068,6 +5258,13 @@ function SessionToolbar({
         title="Manage secrets the agent can use (values never enter the chat)"
       >
         🔑 secrets
+      </button>
+      <button
+        onClick={onWebhooks}
+        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
+        title="View / revoke inbound webhooks (external events that wake this session)"
+      >
+        🪝 webhooks
       </button>
     </span>
   );
@@ -5701,6 +5898,7 @@ function InputArea({
   scheduleCount,
   onSchedules,
   onSecrets,
+  onWebhooks,
   typeaheadOpen,
   typeaheadExactMatch,
   onTypeaheadConfirm,
@@ -5759,6 +5957,7 @@ function InputArea({
   scheduleCount: number;
   onSchedules: () => void;
   onSecrets: () => void;
+  onWebhooks: () => void;
   typeaheadOpen: boolean;
   typeaheadExactMatch: boolean;
   onTypeaheadConfirm: () => void;
@@ -6015,6 +6214,7 @@ function InputArea({
             scheduleCount={scheduleCount}
             onSchedules={onSchedules}
             onSecrets={onSecrets}
+            onWebhooks={onWebhooks}
           />
           {/* Transient status only — recording / interrupt feedback. The static */}
           {/* keyboard-hint (shift+⏎ newline · ⏎ send) was removed to declutter. */}

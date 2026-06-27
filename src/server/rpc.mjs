@@ -3,6 +3,7 @@
 
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
+import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
 import {
   listSecrets as secretsListStore,
   setSecret as secretsSetStore,
@@ -327,6 +328,17 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // preload: ipcRenderer.invoke(IPC.secretsDelete, id) → args[0] = id
     "secrets:delete": (id) =>
       secretsDeleteStore(id, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- inbound webhooks (bui-server owned; in-process on mobile) ----
+    // Mirror of desktop IPC.webhookList / webhookDelete. The registry + public
+    // delivery route live in src/server/webhooks.mjs; these just read/mutate it.
+    // list returns metadata only (no signing secret); creation is the AI's job
+    // via the global `webhook` opencode tool. Delete publishes webhook.updated.
+    // preload: ipcRenderer.invoke(IPC.webhookList, sessionId) → args[0] = sessionId?
+    "webhook:list": (sessionId) => webhookListHooks(sessionId || undefined),
+    // preload: ipcRenderer.invoke(IPC.webhookDelete, id) → args[0] = id
+    "webhook:delete": (id) =>
+      webhookDeleteHook(id, { publish: (evt) => bus.publish(evt) }),
 
     // ---- pty channels (4 channels) ----
     //

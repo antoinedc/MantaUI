@@ -19,6 +19,7 @@ import {
   type ScheduledJob,
   type SecretMeta,
   type SecretInput,
+  type WebhookMeta,
   type SpawnOptions,
   type PtyEvent,
   type TransportInfo,
@@ -284,6 +285,14 @@ const api = {
     ipcRenderer.invoke(IPC.secretsSet, input),
   secretsDelete: (id: string): Promise<{ deleted: boolean }> =>
     ipcRenderer.invoke(IPC.secretsDelete, id),
+
+  // Inbound webhooks (bui-server owned; desktop reaches it over -L 18787). list
+  // returns METADATA ONLY (no signing secret). Creation is the AI's job via the
+  // global `webhook` opencode tool, not a UI channel.
+  webhookList: (sessionId?: string): Promise<WebhookMeta[]> =>
+    ipcRenderer.invoke(IPC.webhookList, sessionId),
+  webhookDelete: (id: string): Promise<{ deleted: boolean }> =>
+    ipcRenderer.invoke(IPC.webhookDelete, id),
 
   // Typeahead sources.
   opencodeCommands: (): Promise<OpencodeCommand[]> =>

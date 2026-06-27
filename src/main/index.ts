@@ -102,6 +102,11 @@ import {
   setSecret as setSecretStore,
   deleteSecret as deleteSecretStore,
 } from "./secrets.js";
+import {
+  initWebhookClient,
+  listWebhooks,
+  deleteWebhook,
+} from "./webhook.js";
 // Plain-JS modules shared with the mobile server (src/server/*.mjs). The
 // bundler resolves .mjs imports here; main.process never sees them as TS.
 // Types live in groq.d.mts. Keep them dep-free so they stay portable across
@@ -841,6 +846,9 @@ app.whenReady().then(() => {
   // Secret store client (reaches the box's /api/secrets over the -L 18787
   // forward). Store is server-owned; this only lists/sets/deletes for the UI.
   initSecretsClient({ getConfig: () => config });
+  // Webhook registry client (reaches the box's /api/webhook over the -L 18787
+  // forward). Hooks are server-owned; this only lists/deletes for the UI.
+  initWebhookClient({ getConfig: () => config });
   registerHandlers();
   createWindow();
   // Defer poller start until renderer is ready to receive events.
@@ -1395,6 +1403,11 @@ function registerHandlers(): void {
   );
   ipcMain.handle(IPC.secretsSet, (_e, input) => setSecretStore(input));
   ipcMain.handle(IPC.secretsDelete, (_e, id: string) => deleteSecretStore(id));
+
+  // Inbound webhooks (bui-server owned; reached over the -L 18787 forward).
+  // list yields metadata only (no signing secret); creation is the AI's job.
+  ipcMain.handle(IPC.webhookList, (_e, sessionId?: string) => listWebhooks(sessionId));
+  ipcMain.handle(IPC.webhookDelete, (_e, id: string) => deleteWebhook(id));
 
   // Typeahead sources for @ and / mentions.
   ipcMain.handle(IPC.opencodeCommands, () => opencodeListCommands(config));

@@ -31,6 +31,7 @@ import {
 } from "./servePage.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
+import { createWebhookEngine, createHook, listHooks, deleteHook } from "./webhooks.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -92,6 +93,16 @@ const { stop: stopSchedulePoller } = startSchedulePoller(
   { intervalMs: 30000 },
 );
 
+// Inbound webhook engine: external actors POST to the public /hook/<token>
+// route (below) to wake a chat session with an event — the push counterpart to
+// the schedule poller. The engine owns the rate limiter + the defer-until-idle
+// queue, and tracks per-session busy state from the opencode event firehose
+// (observeEvent, called in the pump below). See src/server/webhooks.mjs + docs.
+const webhookEngine = createWebhookEngine({
+  sendPrompt: (args) => oc.sendPrompt(args),
+  publish: (evt) => bus.publish(evt),
+});
+
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
 // serves HTML pages from ~/.bui-mobile/pages/<subdomain>/index.html. Caddy
 // reverse-proxies *.bui.antoinedc.com to this port. Pages are registered by
@@ -122,6 +133,13 @@ const { stop: stopServePageCleanup } = startCleanupPoller();
 // rejects — the pump loop itself is unaffected.
 // eslint-disable-next-line no-unused-vars
 const stopOpencodePump = oc.subscribeEvents((evt) => {
+  // Track per-session busy state for the webhook defer-until-idle queue. Cheap,
+  // runs for every event; never throws into the pump.
+  try {
+    webhookEngine.observeEvent(evt);
+  } catch (e) {
+    console.warn("[webhook] observeEvent failed:", e?.message ?? e);
+  }
   if (evt && evt.type === "permission.asked") {
     (async () => {
       try {
@@ -249,6 +267,28 @@ function readJsonBody(req, limit = 64 * 1024) {
         reject(e);
       }
     });
+    req.on("error", reject);
+  });
+}
+
+// Read a request body as a raw UTF-8 string (NOT parsed). Webhook delivery
+// needs the EXACT bytes the sender signed to recompute the HMAC, so it can't go
+// through readJsonBody (which parses + would re-serialize). Capped like
+// readJsonBody.
+function readRawBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
     req.on("error", reject);
   });
 }
@@ -486,6 +526,104 @@ const server = createServer(async (req, res) => {
       }
       res.writeHead(405, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "method not allowed" }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+
+  // ---------- Inbound webhooks (management) ----------
+  // POST   /api/webhook        body {label, instructions, sessionID, directory,
+  //                            unsigned?} → {id, url, secret} (secret returned ONCE)
+  // GET    /api/webhook?sessionID=  → {hooks:[meta...]} (secret + token stripped)
+  // DELETE /api/webhook?id=    → {deleted:bool}
+  // Created by the remote AI's global opencode `webhook` tool; listed/deleted by
+  // the WebhooksCard UI (webhook:* window.api channels → rpc.mjs, and by the
+  // desktop over its SSH -L 18787 forward). The PUBLIC delivery route is
+  // POST /hook/<token> (separate, below). Store mutations publish a
+  // `webhook.updated` bus event so the card refetches live.
+  if (path === "/api/webhook") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await createHook(
+          {
+            label: body?.label,
+            instructions: body?.instructions,
+            sessionID: body?.sessionID,
+            directory: body?.directory,
+            unsigned: body?.unsigned,
+          },
+          { publish: (evt) => bus.publish(evt) },
+        );
+        if (!result.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({ id: result.hook.id, url: result.url, secret: result.secret }),
+        );
+        return;
+      }
+      if (req.method === "GET") {
+        const sessionID = url.searchParams.get("sessionID") || undefined;
+        const hooks = await listHooks(sessionID);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ hooks }));
+        return;
+      }
+      if (req.method === "DELETE") {
+        const id = url.searchParams.get("id");
+        if (!id) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "id is required" }));
+          return;
+        }
+        const result = await deleteHook(id, { publish: (evt) => bus.publish(evt) });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ deleted: result.deleted }));
+        return;
+      }
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+
+  // ---------- Inbound webhook delivery (PUBLIC) ----------
+  // POST /hook/<token>  — the ONLY externally-reachable bui route. The raw body
+  // is read verbatim (HMAC needs the exact bytes); the engine resolves the
+  // token, rate-limits, verifies the signature (unless the hook is unsigned),
+  // and wakes the session (or defers until idle if it's busy). Status codes:
+  // 200 delivered · 202 queued · 400 bad body · 401 bad sig · 404 unknown ·
+  // 429 rate-limited. See src/server/webhooks.mjs.
+  if (path.startsWith("/hook/")) {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+      return;
+    }
+    const token = path.slice("/hook/".length);
+    try {
+      const rawBody = await readRawBody(req);
+      const signatureHeader = req.headers["x-bui-signature"];
+      const result = await webhookEngine.deliver({
+        token,
+        rawBody,
+        signatureHeader: typeof signatureHeader === "string" ? signatureHeader : "",
+      });
+      res.writeHead(result.status, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify(
+          result.ok ? { ok: true, queued: !!result.queued } : { error: result.error },
+        ),
+      );
     } catch (e) {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: String(e?.message ?? e) }));
