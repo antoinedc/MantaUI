@@ -472,6 +472,10 @@ export const httpApi: Api = {
 
   // -- model picker --
   opencodeModels: () => rpc(IPC.opencodeModels),
+  opencodeGetProviders: () => rpc(IPC.opencodeGetProviders),
+  opencodeSetProviders: (ops) => rpc(IPC.opencodeSetProviders, ops),
+  opencodeDiscoverModels: (baseURL, apiKey) => rpc(IPC.opencodeDiscoverModels, baseURL, apiKey),
+  opencodeRestart: () => rpc(IPC.opencodeRestart),
   opencodeDefaultModel: () => rpc(IPC.opencodeDefaultModel),
   opencodeVcsBranch: (directory) => rpc(IPC.opencodeVcsBranch, directory),
 

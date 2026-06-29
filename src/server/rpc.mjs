@@ -222,6 +222,19 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // preload: ipcRenderer.invoke(IPC.opencodeModels)  → no args
     "opencode:models": () => oc.listModels(),
 
+    // Provider management stubs — editing is desktop-only for v1.
+    "opencode:get-providers": () => [],
+    "opencode:set-providers": () => ({
+      ok: false,
+      error: "Provider editing is available on the desktop app only.",
+    }),
+    "opencode:discover-models": () => ({
+      ok: false,
+      error: "unreachable",
+      detail: "Provider discovery is available on the desktop app only.",
+    }),
+    "opencode:restart": () => undefined,
+
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args
     "opencode:default-model": () => oc.getDefaultModel(),
 
