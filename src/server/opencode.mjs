@@ -184,6 +184,36 @@ export async function listMessages(sessionId) {
   return res.json();
 }
 
+/** Fetch a single message by id (GET /session/{id}/message/{messageID}).
+ *  Returns null on miss/error so the caller can fall back to a full refetch.
+ *  @param {string} sessionId
+ *  @param {string} messageId
+ */
+export async function getMessage(sessionId, messageId) {
+  try {
+    const url = `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`;
+    const res = await fetch(apiUrl(url));
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Reconcile a session's transcript.
+ *
+ *  The desktop main process keeps a per-session transcript cache and does a
+ *  fast tail-merge here. The mobile/web server is a stateless relay with no
+ *  such cache to merge against, so reconcile == a full pull. Mobile thus keeps
+ *  its current behavior (no regression); the incremental win is desktop-only,
+ *  where the cache exists. Kept as a distinct entry point so the renderer can
+ *  call one API on both platforms.
+ *  @param {string} sessionId
+ */
+export async function reconcileMessages(sessionId) {
+  return listMessages(sessionId);
+}
+
 /**
  * Send a user message (prompt_async — returns 204 immediately; response
  * streams via SSE). Model is per-prompt; omit to use opencode's default.

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore } from "./store";
+import { ProvidersCard } from "./ProvidersCard";
 import type {
   BootstrapResult,
   OpencodeModel,
@@ -607,6 +608,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
             </button>
           </div>
         </div>
+
+        <ProvidersCard />
 
         <div className="text-xs text-text-faint">
           Authentication uses your system ssh client (and ssh-agent / ~/.ssh/config). Make sure

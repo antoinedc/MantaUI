@@ -30,6 +30,9 @@ import {
   type VoiceTranscribeResult,
   type WindowStatus,
   type WorktreeInfo,
+  type ProviderEndpoint,
+  type DiscoverResult,
+  type ProviderInput,
 } from "../shared/types.js";
 
 type PromptModel = { providerID: string; modelID: string; variant?: string };
@@ -177,6 +180,17 @@ const api = {
     sessionId: string,
   ): Promise<OpencodeMessage[] | null> =>
     ipcRenderer.invoke(IPC.opencodeMessagesCached, sessionId),
+  // Tail-merge reconcile (fast) — returns the merged full transcript.
+  opencodeMessagesReconcile: (
+    sessionId: string,
+  ): Promise<OpencodeMessage[]> =>
+    ipcRenderer.invoke(IPC.opencodeMessagesReconcile, sessionId),
+  // Single-message fetch — returns null on miss so callers can fall back.
+  opencodeMessage: (
+    sessionId: string,
+    messageId: string,
+  ): Promise<OpencodeMessage | null> =>
+    ipcRenderer.invoke(IPC.opencodeMessage, sessionId, messageId),
   // Open/close the scoped SSE stream for a session. ChatPanel calls open on
   // mount and close on unmount so the main process only streams open sessions.
   opencodeOpenStream: (sessionId: string): Promise<void> =>
@@ -247,6 +261,15 @@ const api = {
     ipcRenderer.invoke(IPC.opencodeModels),
   opencodeDefaultModel: (): Promise<{ providerID: string; modelID: string } | null> =>
     ipcRenderer.invoke(IPC.opencodeDefaultModel),
+  opencodeGetProviders: (): Promise<ProviderEndpoint[]> =>
+    ipcRenderer.invoke(IPC.opencodeGetProviders),
+  opencodeSetProviders: (
+    ops: { upsert?: ProviderInput[]; remove?: string[] },
+  ): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.opencodeSetProviders, ops),
+  opencodeDiscoverModels: (baseURL: string, apiKey: string): Promise<DiscoverResult> =>
+    ipcRenderer.invoke(IPC.opencodeDiscoverModels, baseURL, apiKey),
+  opencodeRestart: (): Promise<void> => ipcRenderer.invoke(IPC.opencodeRestart),
   opencodeVcsBranch: (directory?: string): Promise<string | null> =>
     ipcRenderer.invoke(IPC.opencodeVcsBranch, directory),
 

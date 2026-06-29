@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
+import { ProvidersCard } from "../ProvidersCard";
 import type { OpencodeModel } from "../../shared/types";
 import {
   isPushSupported,
@@ -322,6 +323,8 @@ export function MobileSettings({ onClose }: Props) {
             per-session in the chat composer.
           </div>
         </section>
+
+        <ProvidersCard />
 
         {/* Cache TTL — two buttons, not a select, to match desktop affordance. */}
         <section className="space-y-2 pt-1 border-t border-border">

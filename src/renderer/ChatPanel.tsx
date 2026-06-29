@@ -593,7 +593,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // effect wires this on mount; the reactivation catch-up effect reads it.
   // (Shared so a catch-up can fire outside the SSE effect's local scope.)
   const scheduleRefetchRef = useRef<(() => void) | null>(null);
-
+  // Per-messageID debounce timers for the incremental splice path (live-turn
+  // single-message merge instead of a full transcript re-pull). Keyed by
+  // messageID so concurrent messages each coalesce independently.
+  const spliceTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
   // ===== Streamed-text delta buffer =====
   //
   // opencode emits `message.part.delta` events ~character-by-character for
@@ -939,7 +944,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       .catch(() => { /* cache miss / corrupt — fresh fetch will fill in */ });
 
     window.api
-      .opencodeMessages(sessionId)
+      // Reconcile via tail-merge instead of a full re-pull: on desktop this
+      // fetches only the recent tail (~16ms) and merges it into the disk-cached
+      // transcript, so a switch to a session with new events no longer blocks
+      // on a full (up-to-35s) download. Returns the merged FULL transcript
+      // (history is never truncated — falls back to a full pull on a cache gap).
+      // On mobile/web this is just a full pull (no server-side cache).
+      .opencodeMessagesReconcile(sessionId)
       .then((m) => {
         clearTimeout(refreshWatchdog);
         if (cancelled) return;
@@ -1249,6 +1260,68 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       }, 300);
     };
     scheduleRefetchRef.current = scheduleRefetch;
+
+    // Incremental splice: fetch ONE message by id and merge it into `messages`
+    // by id (replace if present, insert in time order if new), instead of
+    // re-pulling the entire (up-to-3 MB) transcript on every part-finalization
+    // event. This is the live-turn analog of the switch-time tail-merge.
+    //
+    // Per-message fetches are debounced+coalesced per messageID so a chatty
+    // part stream (many message.part.updated for the same message) collapses to
+    // one fetch. On a fetch miss (null) or an unmatched insert we fall back to
+    // the full scheduleRefetch so we can never get permanently out of sync.
+    const spliceMessage = (messageId: string) => {
+      if (!messageId) {
+        scheduleRefetch();
+        return;
+      }
+      // Inactive panels don't render — defer to the reactivation refetch, same
+      // policy as scheduleRefetch (avoids per-event ×K-panels fetch cost).
+      if (!isActiveRef.current) {
+        refetchOwedWhileInactive.current = true;
+        return;
+      }
+      const existing = spliceTimers.current.get(messageId);
+      if (existing) clearTimeout(existing);
+      spliceTimers.current.set(
+        messageId,
+        setTimeout(() => {
+          spliceTimers.current.delete(messageId);
+          window.api
+            .opencodeMessage(sessionId, messageId)
+            .then((msg) => {
+              if (!msg) {
+                // Miss — fall back to a full pull so we don't drop the update.
+                scheduleRefetch();
+                return;
+              }
+              setMessages((prev) => {
+                if (prev === null) return prev;
+                const idx = prev.findIndex((m) => m.info.id === msg.info.id);
+                if (idx >= 0) {
+                  const next = prev.slice();
+                  next[idx] = msg;
+                  return next;
+                }
+                // New message: insert in time order (it's usually the newest,
+                // so this is an append in the common case).
+                const t = msg.info.time?.created ?? 0;
+                const insertAt = prev.findIndex(
+                  (m) => (m.info.time?.created ?? 0) > t,
+                );
+                const next = prev.slice();
+                if (insertAt < 0) next.push(msg);
+                else next.splice(insertAt, 0, msg);
+                return next;
+              });
+              for (const cid of collectChildSessionIds([msg])) {
+                childSessionIds.current.add(cid);
+              }
+            })
+            .catch(() => scheduleRefetch());
+        }, 300),
+      );
+    };
 
     // Per-child debounced refetch — called when a known child's
     // message.part.* event arrives while its TaskBody is expanded. We
@@ -1738,18 +1811,38 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       }
 
       if (
-        ev.type === "session.idle" ||
-        ev.type === "session.status" ||
-        ev.type === "session.compacted" ||
-        ev.type === "session.error" ||
         ev.type === "message.part.updated" ||
         ev.type === "message.updated"
       ) {
-        // Force-flush any buffered text deltas before the refetch
-        // overwrites state. Without this, a still-buffered trailing
-        // paragraph would be discarded when the canonical transcript
-        // arrives (the server-side snapshot has the same content but the
-        // refetch races the buffer's max-age timer).
+        // Force-flush any buffered text deltas before the merge overwrites the
+        // affected message. Without this, a still-buffered trailing paragraph
+        // would be discarded when the canonical message arrives (the server
+        // snapshot has the same content but the fetch races the buffer's
+        // max-age timer).
+        flushPendingDeltas(true);
+        // Incremental: splice just the touched message instead of re-pulling
+        // the whole transcript. messageID lives at props.part.messageID for
+        // part events and props.info.id for message.updated. On an empty id we
+        // fall back to a full refetch inside spliceMessage.
+        const mid =
+          ev.type === "message.part.updated"
+            ? String(
+                (props.part as { messageID?: string } | undefined)?.messageID ??
+                  "",
+              )
+            : String(
+                (props.info as { id?: string } | undefined)?.id ?? "",
+              );
+        spliceMessage(mid);
+      } else if (
+        ev.type === "session.idle" ||
+        ev.type === "session.status" ||
+        ev.type === "session.compacted" ||
+        ev.type === "session.error"
+      ) {
+        // Session-lifecycle events carry no single messageID — a full refetch
+        // is the right tool (and these are infrequent vs part events). It also
+        // runs the isAssistantTurnComplete spinner self-heal.
         flushPendingDeltas(true);
         scheduleRefetch();
       }
@@ -1842,6 +1935,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       // effect will fetch fresh on first expand.
       for (const t of childRefetchTimers.current.values()) clearTimeout(t);
       childRefetchTimers.current.clear();
+      // Cancel any pending single-message splices for the same reason.
+      for (const t of spliceTimers.current.values()) clearTimeout(t);
+      spliceTimers.current.clear();
       // Force-flush whatever's still buffered on unmount/session change
       // so the user doesn't lose the final sentence of a turn when they
       // navigate away. (The new session's effect will clear the buffer

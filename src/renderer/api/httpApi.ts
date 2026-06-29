@@ -429,6 +429,10 @@ export const httpApi: Api = {
   opencodeMessages: (sessionId) => rpc(IPC.opencodeMessages, sessionId),
   opencodeMessagesCached: (sessionId) =>
     rpc(IPC.opencodeMessagesCached, sessionId),
+  opencodeMessagesReconcile: (sessionId) =>
+    rpc(IPC.opencodeMessagesReconcile, sessionId),
+  opencodeMessage: (sessionId, messageId) =>
+    rpc(IPC.opencodeMessage, sessionId, messageId),
   opencodeOpenStream: (sessionId) => rpc(IPC.opencodeOpenStream, sessionId),
   opencodeCloseStream: (sessionId) => rpc(IPC.opencodeCloseStream, sessionId),
   onOpencodeEvent: (cb) => on<OpencodeEvent>("opencode", cb),
@@ -468,6 +472,10 @@ export const httpApi: Api = {
 
   // -- model picker --
   opencodeModels: () => rpc(IPC.opencodeModels),
+  opencodeGetProviders: () => rpc(IPC.opencodeGetProviders),
+  opencodeSetProviders: (ops) => rpc(IPC.opencodeSetProviders, ops),
+  opencodeDiscoverModels: (baseURL, apiKey) => rpc(IPC.opencodeDiscoverModels, baseURL, apiKey),
+  opencodeRestart: () => rpc(IPC.opencodeRestart),
   opencodeDefaultModel: () => rpc(IPC.opencodeDefaultModel),
   opencodeVcsBranch: (directory) => rpc(IPC.opencodeVcsBranch, directory),
 

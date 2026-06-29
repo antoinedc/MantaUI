@@ -40,6 +40,8 @@ import { noteSessionActivity } from "./transcriptCache.js";
 import {
   listMessages as opencodeListMessages,
   getCachedMessages as opencodeGetCachedMessages,
+  reconcileMessages as opencodeReconcileMessages,
+  getMessage as opencodeGetMessage,
   subscribeEvents as opencodeSubscribeEvents,
   sendPrompt as opencodeSendPrompt,
   abortSession as opencodeAbortSession,
@@ -68,10 +70,16 @@ import {
   generateSessionTitle as opencodeGenerateTitle,
   eventTunnelRestart,
   teardownEventTunnel,
+  restartOpencode,
   type PromptModel,
   type PromptAttachment,
   type PromptAgentMention,
 } from "./opencode.js";
+import {
+  getProviderEndpoints as opencodeGetProviders,
+  setProviders as opencodeSetProviders,
+  discoverModels as opencodeDiscoverModels,
+} from "./providers.js";
 import {
   classifyStreamHealth,
   isSubstantiveFrame,
@@ -120,6 +128,7 @@ import {
   type Project,
   type ProjectMeta,
   type SpawnOptions,
+  type ProviderInput,
 } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -1234,6 +1243,19 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.opencodeMessagesCached, (_e, sessionId: string) =>
     opencodeGetCachedMessages(sessionId),
   );
+  // Reconcile a transcript via tail-merge (fast) instead of a full re-pull.
+  // Used on session-switch/reconnect: paint cache, then call this to fold in
+  // anything new. Returns the merged full transcript (history never truncated).
+  ipcMain.handle(IPC.opencodeMessagesReconcile, (_e, sessionId: string) =>
+    opencodeReconcileMessages(config, sessionId),
+  );
+  // Fetch a single message by id — used to splice a finalized/changed message
+  // into the renderer's transcript during a live turn (vs a full re-pull).
+  ipcMain.handle(
+    IPC.opencodeMessage,
+    (_e, sessionId: string, messageId: string) =>
+      opencodeGetMessage(config, sessionId, messageId),
+  );
 
   // Scoped-stream lifecycle. A ChatPanel calls openStream on mount and
   // closeStream on unmount; the main process refcounts per directory and only
@@ -1340,6 +1362,18 @@ function registerHandlers(): void {
   // response; opencode.listModels redacts before this leaves main.
   ipcMain.handle(IPC.opencodeModels, () => opencodeListModels(config));
   ipcMain.handle(IPC.opencodeDefaultModel, () => opencodeGetDefaultModel(config));
+  ipcMain.handle(IPC.opencodeGetProviders, () => opencodeGetProviders(config));
+  ipcMain.handle(
+    IPC.opencodeSetProviders,
+    (_e, ops: { upsert?: ProviderInput[]; remove?: string[] }) =>
+      opencodeSetProviders(config, ops),
+  );
+  ipcMain.handle(
+    IPC.opencodeDiscoverModels,
+    (_e, baseURL: string, apiKey: string) =>
+      opencodeDiscoverModels(config, baseURL, apiKey),
+  );
+  ipcMain.handle(IPC.opencodeRestart, () => restartOpencode(config));
   ipcMain.handle(IPC.opencodeVcsBranch, (_e, directory?: string) =>
     opencodeGetVcsBranch(config, directory),
   );
