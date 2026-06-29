@@ -4,6 +4,7 @@
 // /provider endpoint (see opencode.ts:listModels) — this file only edits config.
 import type { AppConfig, DiscoverResult, ProviderEndpoint, ProviderInput } from "../shared/types.js";
 import { runSshOnce, shellQuote } from "./pty.js";
+import { buildRemoteConfigWriteCmd } from "./remoteConfigWrite.js";
 
 // Parse the body of GET <baseURL>/models (OpenAI-compatible shape: { data: [{ id }] }).
 // Pure — no I/O — so it is unit-testable against fixture strings.
@@ -162,7 +163,6 @@ export async function setProviders(
   for (const input of ops.upsert ?? []) cfg = upsertProviderBlock(cfg, input);
   const content = JSON.stringify(cfg, null, 2);
   try {
-    const { buildRemoteConfigWriteCmd } = await import("./remoteConfigWrite.js");
     await runSshOnce(config, buildRemoteConfigWriteCmd(content, OPENCODE_JSONC));
     return { ok: true };
   } catch (e) {
