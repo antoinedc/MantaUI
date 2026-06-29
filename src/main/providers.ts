@@ -5,6 +5,7 @@
 import type { AppConfig, DiscoverResult, ProviderEndpoint, ProviderInput } from "../shared/types.js";
 import { runSshOnce, shellQuote } from "./pty.js";
 import { buildRemoteConfigWriteCmd } from "./remoteConfigWrite.js";
+import { stripLineComments } from "./setup.js";
 
 // Parse the body of GET <baseURL>/models (OpenAI-compatible shape: { data: [{ id }] }).
 // Pure — no I/O — so it is unit-testable against fixture strings.
@@ -128,16 +129,21 @@ export async function discoverModels(
   }
 }
 
-// Read opencode.jsonc from the box and parse it (strip // comments, like the
-// skill-URLs path in index.ts). Returns {} if the file is absent. THROWS if the
-// file exists but is unparseable — callers must NOT overwrite an unparseable
-// config (that was the 2026-05-18 corruption failure mode).
+// Read opencode.jsonc from the box and parse it. Returns {} if the file is
+// absent. THROWS if the file exists but is unparseable — callers must NOT
+// overwrite an unparseable config (that was the 2026-05-18 corruption mode).
+//
+// We use the string-literal-aware `stripLineComments` (from setup.ts), NOT a
+// naive `//`-to-EOL regex: every opencode.jsonc has `"$schema":
+// "https://opencode.ai/config.json"` (and provider `baseURL`s) whose `//`
+// inside a string would be eaten by the naive strip, truncating the string and
+// making JSON.parse throw on a perfectly valid config.
 async function readRemoteConfig(config: AppConfig): Promise<Cfg> {
   const { stdout } = await runSshOnce(
     config,
     `cat ${OPENCODE_JSONC} 2>/dev/null || echo '{}'`,
   );
-  const stripped = stdout.replace(/\/\/[^\n]*/g, "");
+  const stripped = stripLineComments(stdout);
   return JSON.parse(stripped) as Cfg; // intentional throw on malformed JSON
 }
 

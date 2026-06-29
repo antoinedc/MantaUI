@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseModelsResponse, upsertProviderBlock, removeProviderBlock, readProviderEndpoints } from "./providers.js";
+import { stripLineComments } from "./setup.js";
 
 describe("parseModelsResponse", () => {
   it("extracts ids from a valid OpenAI /v1/models body", () => {
@@ -129,5 +130,44 @@ describe("readProviderEndpoints", () => {
 
   it("returns [] when there is no provider key", () => {
     expect(readProviderEndpoints({ model: "anthropic/x" })).toEqual([]);
+  });
+});
+
+// Regression: readRemoteConfig parses opencode.jsonc by running it through
+// stripLineComments (string-literal-aware) then JSON.parse. A real config has
+// `"$schema": "https://opencode.ai/config.json"` and provider `baseURL`s whose
+// `//` lives INSIDE a string. A naive `//`-to-EOL strip truncates those strings
+// and makes JSON.parse throw on a valid config — which surfaced as an empty
+// providers list and every save failing with "unparseable, refusing to write".
+// This proves the strip used by readRemoteConfig preserves in-string `//`.
+describe("readRemoteConfig comment-strip regression (URLs in strings)", () => {
+  it("parses a realistic JSONC config with https:// URLs and // comments", () => {
+    const jsonc = `{
+  // top-level comment
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-opus-4-8",
+  "plugin": ["opencode-claude-auth-bui@1.5.4-bui.1"],
+  "provider": {
+    "voska": {
+      "npm": "@ai-sdk/openai-compatible", // openai-compatible
+      "name": "VoskaAI",
+      "options": { "baseURL": "https://api.voska.org/v1", "apiKey": "sk-x" },
+      "models": { "qwen3.6-27b": { "id": "qwen3.6-27b" } }
+    }
+  }
+}`;
+    const cfg = JSON.parse(stripLineComments(jsonc)) as Record<string, unknown>;
+    // The $schema URL must survive intact (not truncated to "https:").
+    expect(cfg.$schema).toBe("https://opencode.ai/config.json");
+    const eps = readProviderEndpoints(cfg);
+    expect(eps).toEqual([
+      {
+        id: "voska",
+        name: "VoskaAI",
+        baseURL: "https://api.voska.org/v1",
+        hasApiKey: true,
+        enabledModels: ["qwen3.6-27b"],
+      },
+    ]);
   });
 });
