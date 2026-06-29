@@ -167,11 +167,11 @@ export async function discoverModels(
     const { stdout } = await runSshOnce(config, cmd, { timeoutMs: 30000 });
     if (!stdout.trim()) return { ok: false, error: "unreachable", detail: "empty response" };
     return parseModelsResponse(stdout);
-  } catch {
-    // Do NOT surface the raw transport error: runSshOnce echoes a slice of the
-    // command, and even with the key moved to an env var we avoid leaking
-    // internal SSH plumbing strings to the user. Log for diagnosis instead.
-    console.warn("[providers] discovery failed for", url);
+  } catch (e) {
+    // Do NOT surface the raw transport error to the USER: it could include SSH
+    // plumbing strings. But log it main-side for diagnosis — safe now that the
+    // key lives in the BUI_PROV_KEY env var, not in the command string.
+    console.warn("[providers] discovery failed for", url, e);
     return { ok: false, error: "unreachable", detail: "could not reach the endpoint" };
   }
 }
