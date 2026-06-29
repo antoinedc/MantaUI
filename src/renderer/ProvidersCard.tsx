@@ -19,58 +19,87 @@ export function ProvidersCard() {
   useEffect(() => { load(); }, [load]);
 
   const refresh = useCallback(async (ep: ProviderEndpoint) => {
+    if (busy) return;
     setBusy(ep.id);
     setDiscoverError((e) => ({ ...e, [ep.id]: "" }));
     // apiKey "" => main re-reads the stored key for this endpoint (Refresh never
     // re-sends the secret).
-    const r: DiscoverResult = await window.api.opencodeDiscoverModels(ep.baseURL, "");
-    if (r.ok) {
-      setDiscovered((d) => ({ ...d, [ep.id]: r.models }));
-    } else {
-      setDiscoverError((e) => ({ ...e, [ep.id]: `${r.error}${r.detail ? `: ${r.detail}` : ""}` }));
+    try {
+      const r: DiscoverResult = await window.api.opencodeDiscoverModels(ep.baseURL, "");
+      if (r.ok) {
+        setDiscovered((d) => ({ ...d, [ep.id]: r.models }));
+      } else {
+        setDiscoverError((e) => ({ ...e, [ep.id]: `${r.error}${r.detail ? `: ${r.detail}` : ""}` }));
+      }
+    } catch (e) {
+      setDiscoverError((er) => ({ ...er, [ep.id]: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setBusy(null);
     }
-    setBusy(null);
-  }, []);
+  }, [busy]);
 
   const toggleModel = useCallback(async (ep: ProviderEndpoint, modelId: string) => {
+    if (busy) return;
     const enabled = ep.enabledModels.includes(modelId)
       ? ep.enabledModels.filter((m) => m !== modelId)
       : [...ep.enabledModels, modelId];
     setBusy(ep.id);
-    const res = await window.api.opencodeSetProviders({
-      upsert: [{ id: ep.id, name: ep.name, baseURL: ep.baseURL, enabledModels: enabled }],
-    });
-    setBusy(null);
-    if (!res.ok) { setGlobalError(res.error ?? "Save failed"); return; }
-    setRestartNeeded(true);
-    load();
-  }, [load]);
+    setGlobalError(null);
+    try {
+      const res = await window.api.opencodeSetProviders({
+        upsert: [{ id: ep.id, name: ep.name, baseURL: ep.baseURL, enabledModels: enabled }],
+      });
+      if (!res.ok) { setGlobalError(res.error ?? "Save failed"); return; }
+      setRestartNeeded(true);
+      load();
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [busy, load]);
 
   const addEndpoint = useCallback(async () => {
+    if (busy) return;
     const d = draft;
     if (!d.id.trim() || !d.baseURL.trim()) return;
     setBusy(d.id);
-    const res = await window.api.opencodeSetProviders({
-      upsert: [{
-        id: d.id.trim(), name: d.name.trim() || d.id.trim(),
-        baseURL: d.baseURL.trim(), apiKey: d.apiKey, enabledModels: [],
-      }],
-    });
-    setBusy(null);
-    if (!res.ok) { setGlobalError(res.error ?? "Add failed"); return; }
-    setDraft(EMPTY_DRAFT);
-    setRestartNeeded(true);
-    load();
-  }, [draft, load]);
+    setGlobalError(null);
+    try {
+      const res = await window.api.opencodeSetProviders({
+        upsert: [{
+          id: d.id.trim(), name: d.name.trim() || d.id.trim(),
+          baseURL: d.baseURL.trim(), apiKey: d.apiKey, enabledModels: [],
+        }],
+      });
+      if (!res.ok) { setGlobalError(res.error ?? "Add failed"); return; }
+      setDraft(EMPTY_DRAFT);
+      setRestartNeeded(true);
+      load();
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [busy, draft, load]);
 
   const removeEndpoint = useCallback(async (ep: ProviderEndpoint) => {
+    if (busy) return;
     setBusy(ep.id);
-    const res = await window.api.opencodeSetProviders({ remove: [ep.id] });
-    setBusy(null);
-    if (!res.ok) { setGlobalError(res.error ?? "Remove failed"); return; }
-    setRestartNeeded(true);
-    load();
-  }, [load]);
+    setGlobalError(null);
+    try {
+      const res = await window.api.opencodeSetProviders({ remove: [ep.id] });
+      if (!res.ok) { setGlobalError(res.error ?? "Remove failed"); return; }
+      setDiscovered((d) => { const { [ep.id]: _drop, ...rest } = d; return rest; });
+      setDiscoverError((er) => { const { [ep.id]: _drop, ...rest } = er; return rest; });
+      setRestartNeeded(true);
+      load();
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [busy, load]);
 
   const applyRestart = useCallback(async () => {
     await window.api.opencodeRestart();
@@ -133,19 +162,19 @@ export function ProvidersCard() {
         <div className="text-[10px] uppercase tracking-wider text-text-faint">Add endpoint</div>
         <input className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded"
           placeholder="id (e.g. voska)" value={draft.id}
-          onChange={(e) => setDraft({ ...draft, id: e.target.value })} />
+          onChange={(e) => setDraft((d) => ({ ...d, id: e.target.value }))} />
         <input className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded"
           placeholder="name (e.g. VoskaAI)" value={draft.name}
-          onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+          onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} />
         <input className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded"
           placeholder="baseURL (https://api.voska.org/v1)" value={draft.baseURL}
-          onChange={(e) => setDraft({ ...draft, baseURL: e.target.value })} />
+          onChange={(e) => setDraft((d) => ({ ...d, baseURL: e.target.value }))} />
         <input type="password" className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded"
           placeholder="API key" value={draft.apiKey}
-          onChange={(e) => setDraft({ ...draft, apiKey: e.target.value })} />
+          onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))} />
         <button
           onClick={addEndpoint}
-          disabled={!draft.id.trim() || !draft.baseURL.trim()}
+          disabled={!draft.id.trim() || !draft.baseURL.trim() || busy !== null}
           className="px-3 py-1 text-xs bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
         >
           Add
