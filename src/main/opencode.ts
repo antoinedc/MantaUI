@@ -231,6 +231,19 @@ export async function ensureRunning(config: AppConfig): Promise<void> {
   );
 }
 
+// Restart opencode so it reloads opencode.jsonc. Config changes (e.g. provider
+// edits) only take effect on (re)start. We kill the bui-opencode tmux session;
+// ensureRunning() then sees the server as down and spawns a fresh one, waiting
+// for /global/health before returning. Active sessions are briefly interrupted,
+// so callers MUST gate this behind explicit user consent (prompt-before-restart).
+export async function restartOpencode(config: AppConfig): Promise<void> {
+  await runSshOnce(
+    config,
+    `tmux kill-session -t ${BUI_OPENCODE_TMUX_SESSION} 2>/dev/null || true`,
+  );
+  await ensureRunning(config);
+}
+
 // ===== local SSH -L forward =====
 //
 // We attach `-L localPort:127.0.0.1:REMOTE_PORT` to the SAME ControlMaster
