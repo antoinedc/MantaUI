@@ -284,6 +284,17 @@ export const IPC = {
   // renderer to paint the chat panel instantly while the slow fresh fetch
   // runs in the background.
   opencodeMessagesCached: "opencode:messages-cached",
+  // Fetch a single message by id (GET /session/{id}/message/{messageID}, ~20–80ms).
+  // Used to splice a finalized/changed message into the renderer's transcript
+  // during a live turn instead of re-pulling the whole (up to 3 MB) transcript.
+  // Returns null on miss/error so the caller can fall back to a full refetch.
+  opencodeMessage: "opencode:message",
+  // Reconcile a session's transcript against the renderer's known message ids
+  // by fetching only the recent tail (GET .../message?limit=N) and merging it
+  // into the cached array. Returns the merged full transcript. Falls back to a
+  // full pull when the tail doesn't overlap the cache (a gap), so history is
+  // never truncated. Replaces the full refetch on session-switch/reconnect.
+  opencodeMessagesReconcile: "opencode:messages-reconcile",
   // Live SSE stream from opencode, forwarded raw to the renderer. Renderer
   // filters by sessionID in the event payload.
   opencodeEvent: "opencode:event",
@@ -313,6 +324,11 @@ export const IPC = {
   // Model picker: list available models on the remote opencode server (with
   // provider secrets stripped before forwarding).
   opencodeModels: "opencode:models",
+  // Provider management: list/set custom providers + discover models.
+  opencodeGetProviders: "opencode:get-providers",
+  opencodeSetProviders: "opencode:set-providers",
+  opencodeDiscoverModels: "opencode:discover-models",
+  opencodeRestart: "opencode:restart",
   // What opencode would use if prompt_async were called without a model.
   opencodeDefaultModel: "opencode:default-model",
   // Current VCS branch for a working directory. SSE `vcs.branch.updated`
@@ -581,6 +597,31 @@ export type OpencodeAgent = {
   mode?: string;          // "primary" | "subagent"
   native?: boolean;
   builtIn?: boolean;
+};
+
+// A custom provider entry as seen by the renderer (API key value is never
+// forwarded — only whether one is set).
+export type ProviderEndpoint = {
+  id: string;            // opencode provider id, e.g. "voska"
+  name: string;          // display name, e.g. "VoskaAI"
+  baseURL: string;       // e.g. "https://api.voska.org/v1"
+  hasApiKey: boolean;    // true if an apiKey is set; the value never leaves main
+  enabledModels: string[]; // model ids present in this provider's opencode `models` map
+};
+
+// Result of probing a provider's baseURL/key for available models.
+export type DiscoverResult =
+  | { ok: true; models: { id: string }[] }
+  | { ok: false; error: "unreachable" | "unauthorized" | "bad_response"; detail?: string };
+
+// Input the renderer sends to set/replace a single provider. apiKey is optional:
+// omitted/undefined means "keep the existing key"; empty string means "no key".
+export type ProviderInput = {
+  id: string;
+  name: string;
+  baseURL: string;
+  apiKey?: string;
+  enabledModels: string[];
 };
 
 // Trimmed view of an opencode model from GET /api/model. The wire format
