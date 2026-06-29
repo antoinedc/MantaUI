@@ -30,6 +30,9 @@ import {
   type VoiceTranscribeResult,
   type WindowStatus,
   type WorktreeInfo,
+  type ProviderEndpoint,
+  type DiscoverResult,
+  type ProviderInput,
 } from "../shared/types.js";
 
 type PromptModel = { providerID: string; modelID: string; variant?: string };
@@ -258,6 +261,15 @@ const api = {
     ipcRenderer.invoke(IPC.opencodeModels),
   opencodeDefaultModel: (): Promise<{ providerID: string; modelID: string } | null> =>
     ipcRenderer.invoke(IPC.opencodeDefaultModel),
+  opencodeGetProviders: (): Promise<ProviderEndpoint[]> =>
+    ipcRenderer.invoke(IPC.opencodeGetProviders),
+  opencodeSetProviders: (
+    ops: { upsert?: ProviderInput[]; remove?: string[] },
+  ): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.opencodeSetProviders, ops),
+  opencodeDiscoverModels: (baseURL: string, apiKey: string): Promise<DiscoverResult> =>
+    ipcRenderer.invoke(IPC.opencodeDiscoverModels, baseURL, apiKey),
+  opencodeRestart: (): Promise<void> => ipcRenderer.invoke(IPC.opencodeRestart),
   opencodeVcsBranch: (directory?: string): Promise<string | null> =>
     ipcRenderer.invoke(IPC.opencodeVcsBranch, directory),
 
