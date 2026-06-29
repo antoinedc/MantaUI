@@ -40,6 +40,8 @@ import { noteSessionActivity } from "./transcriptCache.js";
 import {
   listMessages as opencodeListMessages,
   getCachedMessages as opencodeGetCachedMessages,
+  reconcileMessages as opencodeReconcileMessages,
+  getMessage as opencodeGetMessage,
   subscribeEvents as opencodeSubscribeEvents,
   sendPrompt as opencodeSendPrompt,
   abortSession as opencodeAbortSession,
@@ -1233,6 +1235,19 @@ function registerHandlers(): void {
   // mount, then awaits opencodeMessages in the background for the refresh.
   ipcMain.handle(IPC.opencodeMessagesCached, (_e, sessionId: string) =>
     opencodeGetCachedMessages(sessionId),
+  );
+  // Reconcile a transcript via tail-merge (fast) instead of a full re-pull.
+  // Used on session-switch/reconnect: paint cache, then call this to fold in
+  // anything new. Returns the merged full transcript (history never truncated).
+  ipcMain.handle(IPC.opencodeMessagesReconcile, (_e, sessionId: string) =>
+    opencodeReconcileMessages(config, sessionId),
+  );
+  // Fetch a single message by id — used to splice a finalized/changed message
+  // into the renderer's transcript during a live turn (vs a full re-pull).
+  ipcMain.handle(
+    IPC.opencodeMessage,
+    (_e, sessionId: string, messageId: string) =>
+      opencodeGetMessage(config, sessionId, messageId),
   );
 
   // Scoped-stream lifecycle. A ChatPanel calls openStream on mount and

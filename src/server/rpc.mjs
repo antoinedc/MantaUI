@@ -181,6 +181,15 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // → args[0] = sessionId (string)
     "opencode:messages": (sessionId) => oc.listMessages(sessionId),
 
+    // Reconcile == full pull on the server (no transcript cache to merge
+    // against; the tail-merge win is desktop-only). Same renderer API on both.
+    "opencode:messages-reconcile": (sessionId) =>
+      oc.reconcileMessages(sessionId),
+
+    // Single-message fetch for live-turn splice (returns null on miss).
+    "opencode:message": (sessionId, messageId) =>
+      oc.getMessage(sessionId, messageId),
+
     // preload: ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
     // → args[0] = that object; opencode.mjs sendPrompt expects the same shape
     "opencode:prompt": (input) => oc.sendPrompt(input),

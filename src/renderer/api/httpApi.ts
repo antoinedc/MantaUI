@@ -429,6 +429,10 @@ export const httpApi: Api = {
   opencodeMessages: (sessionId) => rpc(IPC.opencodeMessages, sessionId),
   opencodeMessagesCached: (sessionId) =>
     rpc(IPC.opencodeMessagesCached, sessionId),
+  opencodeMessagesReconcile: (sessionId) =>
+    rpc(IPC.opencodeMessagesReconcile, sessionId),
+  opencodeMessage: (sessionId, messageId) =>
+    rpc(IPC.opencodeMessage, sessionId, messageId),
   opencodeOpenStream: (sessionId) => rpc(IPC.opencodeOpenStream, sessionId),
   opencodeCloseStream: (sessionId) => rpc(IPC.opencodeCloseStream, sessionId),
   onOpencodeEvent: (cb) => on<OpencodeEvent>("opencode", cb),

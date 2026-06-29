@@ -71,13 +71,15 @@ export function noteSessionActivity(sessionId: string): void {
 }
 
 export function getCachedTranscript(sessionId: string): OpencodeMessage[] | null {
-  // If live SSE events for this session arrived AFTER the last time we
-  // stored a fresh transcript, the cached copy is stale by definition —
-  // skip it and let the renderer show its loading state until the real
-  // fetch lands. Avoids the "remount shows pre-send state for 6s" bug.
-  const activity = lastActivityAt.get(sessionId);
-  const fresh = lastFreshAt.get(sessionId);
-  if (activity != null && (fresh == null || activity > fresh)) return null;
+  // Historically we returned null here when live SSE activity arrived after
+  // the last stored transcript, to avoid the "remount shows pre-send state for
+  // 6s" bug — but that meant EVERY switch to a session with new events painted
+  // a blank "Loading session…" while a full (up-to-35s) refetch ran. Now the
+  // renderer reconciles via a fast tail-merge (reconcileMessages), so the stale
+  // window is milliseconds: paint the cached transcript immediately regardless
+  // of staleness and let the reconcile fold in new messages. The `lastFreshAt`
+  // / `lastActivityAt` bookkeeping is kept (setCachedTranscript still records
+  // freshness) but no longer gates the read.
   // Memory hit first — avoids JSON.parse on every session switch within a run.
   const mem = memCache.get(sessionId);
   if (mem) return mem;

@@ -177,6 +177,17 @@ const api = {
     sessionId: string,
   ): Promise<OpencodeMessage[] | null> =>
     ipcRenderer.invoke(IPC.opencodeMessagesCached, sessionId),
+  // Tail-merge reconcile (fast) — returns the merged full transcript.
+  opencodeMessagesReconcile: (
+    sessionId: string,
+  ): Promise<OpencodeMessage[]> =>
+    ipcRenderer.invoke(IPC.opencodeMessagesReconcile, sessionId),
+  // Single-message fetch — returns null on miss so callers can fall back.
+  opencodeMessage: (
+    sessionId: string,
+    messageId: string,
+  ): Promise<OpencodeMessage | null> =>
+    ipcRenderer.invoke(IPC.opencodeMessage, sessionId, messageId),
   // Open/close the scoped SSE stream for a session. ChatPanel calls open on
   // mount and close on unmount so the main process only streams open sessions.
   opencodeOpenStream: (sessionId: string): Promise<void> =>

@@ -785,6 +785,103 @@ export function getCachedMessages(sessionId: string): OpencodeMessage[] | null {
   return getCachedTranscript(sessionId);
 }
 
+// Fetch ONE message by id. ~20–80ms regardless of transcript size (the full
+// list is O(transcript) because opencode re-serializes every part). The
+// renderer uses this to splice a finalized/changed message into its existing
+// transcript during a live turn instead of re-pulling the whole thing.
+// Returns null (never throws) so the caller can fall back to a full refetch.
+export async function getMessage(
+  config: AppConfig,
+  sessionId: string,
+  messageId: string,
+): Promise<OpencodeMessage | null> {
+  try {
+    await ensureForward(config);
+    const url = apiUrl(
+      config,
+      `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`,
+    );
+    const res = await forwardFetch(url);
+    if (!res.ok) return null;
+    return (await res.json()) as OpencodeMessage;
+  } catch {
+    return null;
+  }
+}
+
+// How many recent messages to pull when reconciling on switch/reconnect. Covers
+// "switched away briefly" — a turn or two of new activity. If the gap is larger
+// (no overlap with the cache), we fall back to a full pull so history is never
+// lost.
+const RECONCILE_TAIL_LIMIT = 30;
+
+// Merge `incoming` messages into `base` by id: replace changed, append new,
+// keep base-only messages. Ordered by time.created (id as a stable tiebreaker),
+// matching opencode's own ordering. Pure — no I/O.
+function mergeMessagesById(
+  base: OpencodeMessage[],
+  incoming: OpencodeMessage[],
+): OpencodeMessage[] {
+  const byId = new Map<string, OpencodeMessage>();
+  for (const m of base) byId.set(m.info.id, m);
+  for (const m of incoming) byId.set(m.info.id, m); // incoming wins on conflict
+  return [...byId.values()].sort((a, b) => {
+    const ta = a.info.time?.created ?? 0;
+    const tb = b.info.time?.created ?? 0;
+    if (ta !== tb) return ta - tb;
+    return a.info.id < b.info.id ? -1 : a.info.id > b.info.id ? 1 : 0;
+  });
+}
+
+// Reconcile a session's transcript without re-downloading the whole thing.
+// Strategy:
+//   1. No cache → full pull (cold open; nothing to merge against). Same as today.
+//   2. Cache present → fetch only the recent tail (limit=N, ~16ms). If the tail
+//      OVERLAPS the cache (we already know its oldest message id), the cache is
+//      contiguous with the tail: merge by id and we have the complete history.
+//   3. No overlap (session advanced > N messages while away) → full pull, so
+//      we never show a truncated transcript.
+// Always repopulates the disk cache via listMessages on the full-pull paths.
+export async function reconcileMessages(
+  config: AppConfig,
+  sessionId: string,
+): Promise<OpencodeMessage[]> {
+  const cached = getCachedTranscript(sessionId);
+  if (!cached || cached.length === 0) {
+    // Cold: full pull (also primes the cache via setCachedTranscript inside).
+    return listMessages(config, sessionId);
+  }
+  let tail: OpencodeMessage[];
+  try {
+    await ensureForward(config);
+    const url = apiUrl(
+      config,
+      `/session/${encodeURIComponent(sessionId)}/message?limit=${RECONCILE_TAIL_LIMIT}`,
+    );
+    const res = await forwardFetch(url);
+    if (!res.ok) return listMessages(config, sessionId);
+    tail = (await res.json()) as OpencodeMessage[];
+  } catch {
+    // Tail fetch failed — fall back to full (which itself may throw; let it,
+    // so the renderer surfaces the same error it would today).
+    return listMessages(config, sessionId);
+  }
+  if (!Array.isArray(tail) || tail.length === 0) return cached;
+  // Overlap check: does the tail reach back to something we already have? If
+  // the tail's oldest message is present in the cache (or the tail is shorter
+  // than the limit — meaning it IS the whole session), the cache + tail cover
+  // the full history. Otherwise there's a gap → full pull.
+  const cachedIds = new Set(cached.map((m) => m.info.id));
+  const tailReachesCache =
+    tail.length < RECONCILE_TAIL_LIMIT ||
+    tail.some((m) => cachedIds.has(m.info.id));
+  if (!tailReachesCache) return listMessages(config, sessionId);
+  const merged = mergeMessagesById(cached, tail);
+  // Persist the merged view so the next switch paints the up-to-date transcript.
+  setCachedTranscript(sessionId, merged);
+  return merged;
+}
+
 // Send a user message into the session.
 //
 // We use the v1 `prompt_async` endpoint (returns 204 immediately, the
