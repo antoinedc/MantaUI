@@ -17,11 +17,15 @@ export function parseModelsResponse(body: string): DiscoverResult {
     return { ok: false, error: "bad_response", detail: body.slice(0, 200) };
   }
   const obj = json as Record<string, unknown>;
-  // Auth errors come back as 200/4xx JSON with an `error` object on many gateways.
-  if (obj && typeof obj === "object" && "error" in obj) {
-    const errObj = obj.error as Record<string, unknown> | undefined;
-    const msg = errObj && typeof errObj.message === "string" ? errObj.message : "";
-    const code = errObj && typeof errObj.code === "string" ? errObj.code : "";
+  // Auth errors come back as 200/4xx JSON with an `error` object on many
+  // gateways. Gate on a truthy object: some OpenAI-compatible gateways return
+  // `{ data: [...], error: null }` on SUCCESS, and a bare `"error" in obj`
+  // check would mistreat that as a failure and discard the valid `data`.
+  const errObj = obj?.error;
+  if (errObj && typeof errObj === "object") {
+    const e = errObj as Record<string, unknown>;
+    const msg = typeof e.message === "string" ? e.message : "";
+    const code = typeof e.code === "string" ? e.code : "";
     if (/api key|unauthor|invalid_api_key|401/i.test(`${msg} ${code}`)) {
       return { ok: false, error: "unauthorized", detail: msg || code };
     }
@@ -77,20 +81,54 @@ export function removeProviderBlock(cfg: Cfg, id: string): Cfg {
   return { ...cfg, provider: providers };
 }
 
+// Strip any `user:pass@` userinfo from a URL so a credential embedded in the
+// baseURL (e.g. https://user:pass@host/v1) can't ride along to the renderer /
+// mobile client. Falls back to a regex if the URL doesn't parse.
+function stripUrlUserinfo(url: string): string {
+  try {
+    const u = new URL(url);
+    u.username = "";
+    u.password = "";
+    return u.toString();
+  } catch {
+    return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1");
+  }
+}
+
 // Project the config's provider map down to renderer-safe metadata. Never
-// includes the apiKey value — only whether one is present.
+// includes the apiKey value — only whether one is present — and scrubs any
+// credential embedded in the baseURL.
 export function readProviderEndpoints(cfg: Cfg): ProviderEndpoint[] {
   const providers = getProviderMap(cfg);
   return Object.entries(providers).map(([id, block]) => ({
     id,
     name: typeof block.name === "string" ? block.name : id,
-    baseURL: block.options?.baseURL ?? "",
+    baseURL: block.options?.baseURL ? stripUrlUserinfo(block.options.baseURL) : "",
     hasApiKey: Boolean(block.options?.apiKey),
     enabledModels: Object.keys(block.models ?? {}),
   }));
 }
 
 const OPENCODE_JSONC = "~/.config/opencode/opencode.jsonc";
+
+// Normalize a baseURL for equality: drop a trailing slash AND any userinfo, so
+// the value the renderer sends back (which readProviderEndpoints scrubbed of
+// `user:pass@`) still matches the stored, possibly-unscrubbed baseURL.
+const normBaseURL = (u: string): string => stripUrlUserinfo(u).replace(/\/$/, "");
+
+// Find the apiKey stored in opencode.jsonc for the provider whose baseURL
+// matches. Pure — unit-testable. Returns "" when no provider matches or the
+// matched one has no key. Backs the Refresh flow: the renderer sends an empty
+// key (never re-sending the secret), and we recover the stored one here by
+// baseURL.
+export function findStoredApiKey(cfg: Cfg, baseURL: string): string {
+  const providers = getProviderMap(cfg);
+  const target = normBaseURL(baseURL);
+  const match = Object.values(providers).find(
+    (b) => b.options?.baseURL && normBaseURL(b.options.baseURL) === target,
+  );
+  return match?.options?.apiKey ?? "";
+}
 
 // Query an OpenAI-compatible endpoint's /v1/models FROM THE BOX (not the Mac):
 // the box is where opencode reaches these endpoints, so discovery must reflect
@@ -101,31 +139,40 @@ export async function discoverModels(
   apiKey: string,
 ): Promise<DiscoverResult> {
   // Empty key from the renderer means "use the key already stored on the box"
-  // (Refresh on an existing endpoint never re-sends the secret). Re-read it from
-  // opencode.jsonc by matching the baseURL. New endpoints persist their key via
-  // Add before Refresh, so this same lookup finds it.
+  // (Refresh on an existing endpoint never re-sends the secret). New endpoints
+  // persist their key via Add before Refresh, so the lookup finds it.
   let key = apiKey;
   if (!key) {
     try {
-      const cfg = await readRemoteConfig(config);
-      const providers = getProviderMap(cfg);
-      const match = Object.values(providers).find(
-        (b) => b.options?.baseURL?.replace(/\/$/, "") === baseURL.replace(/\/$/, ""),
-      );
-      key = match?.options?.apiKey ?? "";
-    } catch {
-      /* fall through with empty key — endpoint may legitimately need none */
+      key = findStoredApiKey(await readRemoteConfig(config), baseURL);
+    } catch (e) {
+      // Best-effort recovery — an endpoint may legitimately need no key, so a
+      // failed re-read must not abort discovery (the curl below will surface a
+      // real auth/parse error). Log so a spurious `unauthorized` is debuggable.
+      console.warn("[providers] stored-key re-read failed; discovering with empty key:", e);
     }
   }
-  const url = `${baseURL.replace(/\/$/, "")}/models`;
+  const url = `${normBaseURL(baseURL)}/models`;
+  // Pass the key via an environment variable read by curl on the box, NOT inline
+  // in argv. This keeps the secret out of (a) the box's process list (`ps`) and
+  // (b) runSshOnce's error message, which echoes the first 80 chars of the
+  // command on timeout — argv-inlining the `Bearer <key>` header would leak it
+  // into `detail` and then into the UI / mobile RPC. `BUI_PROV_KEY` is exported
+  // for curl's child only; `-H "Authorization: Bearer $BUI_PROV_KEY"` is expanded
+  // by the remote shell, so the command string itself never contains the key.
   const cmd =
-    `curl -s --max-time 20 -H ${shellQuote(`Authorization: Bearer ${key}`)} ${shellQuote(url)}`;
+    `BUI_PROV_KEY=${shellQuote(key)} ` +
+    `curl -s --max-time 20 -H "Authorization: Bearer $BUI_PROV_KEY" ${shellQuote(url)}`;
   try {
     const { stdout } = await runSshOnce(config, cmd, { timeoutMs: 30000 });
     if (!stdout.trim()) return { ok: false, error: "unreachable", detail: "empty response" };
     return parseModelsResponse(stdout);
-  } catch (e) {
-    return { ok: false, error: "unreachable", detail: e instanceof Error ? e.message : String(e) };
+  } catch {
+    // Do NOT surface the raw transport error: runSshOnce echoes a slice of the
+    // command, and even with the key moved to an env var we avoid leaking
+    // internal SSH plumbing strings to the user. Log for diagnosis instead.
+    console.warn("[providers] discovery failed for", url);
+    return { ok: false, error: "unreachable", detail: "could not reach the endpoint" };
   }
 }
 
@@ -147,8 +194,28 @@ async function readRemoteConfig(config: AppConfig): Promise<Cfg> {
   return JSON.parse(stripped) as Cfg; // intentional throw on malformed JSON
 }
 
+// User-facing message for an unparseable on-box config. Shared by the read and
+// write paths so the UI says the same actionable thing either way.
+const UNPARSEABLE_CONFIG_MSG =
+  "opencode.jsonc on the box is unparseable — fix it manually first.";
+
 export async function getProviderEndpoints(config: AppConfig): Promise<ProviderEndpoint[]> {
-  const cfg = await readRemoteConfig(config);
+  let cfg: Cfg;
+  try {
+    cfg = await readRemoteConfig(config);
+  } catch (e) {
+    // Distinguish the two failure classes for the renderer, which otherwise
+    // collapses them into a deceptively-empty provider list:
+    //  - SyntaxError  → the config exists but is malformed (actionable message)
+    //  - anything else → SSH/transport failure (box unreachable)
+    // Re-throw a clear Error in both cases so the renderer can show it.
+    if (e instanceof SyntaxError) {
+      console.warn("[providers] opencode.jsonc unparseable on read:", e.message);
+      throw new Error(UNPARSEABLE_CONFIG_MSG);
+    }
+    console.warn("[providers] failed to read providers from the box:", e);
+    throw new Error("Couldn't reach the box to read providers.");
+  }
   return readProviderEndpoints(cfg);
 }
 
@@ -162,8 +229,11 @@ export async function setProviders(
   let cfg: Cfg;
   try {
     cfg = await readRemoteConfig(config);
-  } catch {
-    return { ok: false, error: "opencode.jsonc on the box is unparseable — refusing to overwrite it. Fix it manually first." };
+  } catch (e) {
+    console.warn("[providers] refusing to write — config unparseable/unreadable:", e);
+    // Refuse to overwrite: an unparseable read could mean a malformed config we
+    // must not clobber (the 2026-05-18 corruption mode).
+    return { ok: false, error: `${UNPARSEABLE_CONFIG_MSG} (refusing to overwrite)` };
   }
   for (const id of ops.remove ?? []) cfg = removeProviderBlock(cfg, id);
   for (const input of ops.upsert ?? []) cfg = upsertProviderBlock(cfg, input);
@@ -172,6 +242,7 @@ export async function setProviders(
     await runSshOnce(config, buildRemoteConfigWriteCmd(content, OPENCODE_JSONC));
     return { ok: true };
   } catch (e) {
+    console.warn("[providers] write failed:", e);
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }

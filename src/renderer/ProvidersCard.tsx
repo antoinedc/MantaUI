@@ -14,7 +14,16 @@ export function ProvidersCard() {
   const [globalError, setGlobalError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    window.api.opencodeGetProviders().then(setEndpoints).catch(() => setEndpoints([]));
+    window.api
+      .opencodeGetProviders()
+      .then((eps) => { setEndpoints(eps); setGlobalError(null); })
+      .catch((e) => {
+        // Don't collapse a failure into a deceptively-empty list: surface it.
+        // main translates the two cases into clear messages (unparseable config
+        // vs box unreachable); show whichever we got.
+        setEndpoints([]);
+        setGlobalError(e instanceof Error ? e.message : String(e));
+      });
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -101,10 +110,22 @@ export function ProvidersCard() {
     }
   }, [busy, load]);
 
+  const [restarting, setRestarting] = useState(false);
   const applyRestart = useCallback(async () => {
-    await window.api.opencodeRestart();
-    setRestartNeeded(false);
-  }, []);
+    if (restarting) return;
+    setRestarting(true);
+    setGlobalError(null);
+    try {
+      await window.api.opencodeRestart();
+      setRestartNeeded(false);
+    } catch (e) {
+      // A restart that killed the session but failed to bring opencode back is
+      // the worst-perceived outcome — never let it fail silently.
+      setGlobalError(`Restart failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRestarting(false);
+    }
+  }, [restarting]);
 
   return (
     <div className="space-y-2 pt-2 border-t border-border">
@@ -186,12 +207,12 @@ export function ProvidersCard() {
           <span className="flex-1 text-text-muted">
             Restart opencode now to apply? (interrupts active sessions)
           </span>
-          <button onClick={applyRestart}
-            className="px-2 py-1 bg-accent/20 border border-accent rounded text-text">
-            Apply Now
+          <button onClick={applyRestart} disabled={restarting}
+            className="px-2 py-1 bg-accent/20 border border-accent rounded text-text disabled:opacity-40">
+            {restarting ? "Restarting…" : "Apply Now"}
           </button>
-          <button onClick={() => setRestartNeeded(false)}
-            className="px-2 py-1 border border-border rounded text-text-muted">
+          <button onClick={() => setRestartNeeded(false)} disabled={restarting}
+            className="px-2 py-1 border border-border rounded text-text-muted disabled:opacity-40">
             Apply Later
           </button>
         </div>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseModelsResponse, upsertProviderBlock, removeProviderBlock, readProviderEndpoints } from "./providers.js";
+import { parseModelsResponse, upsertProviderBlock, removeProviderBlock, readProviderEndpoints, findStoredApiKey } from "./providers.js";
 import { stripLineComments } from "./setup.js";
 
 describe("parseModelsResponse", () => {
@@ -43,6 +43,11 @@ describe("parseModelsResponse", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toBe("bad_response");
   });
+
+  it("treats `error: null` alongside data as success (gateway success shape)", () => {
+    const body = JSON.stringify({ object: "list", error: null, data: [{ id: "m1" }] });
+    expect(parseModelsResponse(body)).toEqual({ ok: true, models: [{ id: "m1" }] });
+  });
 });
 
 describe("upsertProviderBlock", () => {
@@ -84,6 +89,60 @@ describe("upsertProviderBlock", () => {
     const p = (out.provider as Record<string, any>).voska;
     expect(p.options.apiKey).toBe("sk-old");
     expect(Object.keys(p.models)).toEqual(["qwen3.6-27b", "default"]);
+  });
+
+  it("CLEARS the apiKey when input apiKey is an empty string (distinct from undefined)", () => {
+    const withProv = upsertProviderBlock(base, {
+      id: "voska", name: "VoskaAI", baseURL: "https://api.voska.org/v1",
+      apiKey: "sk-old", enabledModels: ["qwen3.6-27b"],
+    });
+    const out = upsertProviderBlock(withProv, {
+      id: "voska", name: "VoskaAI", baseURL: "https://api.voska.org/v1",
+      apiKey: "", enabledModels: ["qwen3.6-27b"], // explicit empty = clear
+    });
+    const p = (out.provider as Record<string, any>).voska;
+    expect(p.options.apiKey).toBe("");
+  });
+});
+
+describe("findStoredApiKey", () => {
+  const cfg = {
+    provider: {
+      voska: {
+        npm: "@ai-sdk/openai-compatible",
+        options: { baseURL: "https://api.voska.org/v1", apiKey: "sk-voska" },
+        models: {},
+      },
+      other: {
+        npm: "@ai-sdk/openai-compatible",
+        options: { baseURL: "https://api.other.com/v1", apiKey: "sk-other" },
+        models: {},
+      },
+    },
+  };
+
+  it("recovers the key for an exact baseURL match", () => {
+    expect(findStoredApiKey(cfg, "https://api.voska.org/v1")).toBe("sk-voska");
+  });
+
+  it("matches trailing-slash-insensitively on either side", () => {
+    // stored without slash, queried with slash
+    expect(findStoredApiKey(cfg, "https://api.voska.org/v1/")).toBe("sk-voska");
+    // stored with slash, queried without
+    const slashCfg = {
+      provider: {
+        voska: { npm: "x", options: { baseURL: "https://api.voska.org/v1/", apiKey: "sk-s" }, models: {} },
+      },
+    };
+    expect(findStoredApiKey(slashCfg, "https://api.voska.org/v1")).toBe("sk-s");
+  });
+
+  it("returns '' when no provider baseURL matches", () => {
+    expect(findStoredApiKey(cfg, "https://api.nope.com/v1")).toBe("");
+  });
+
+  it("returns '' when there is no provider key", () => {
+    expect(findStoredApiKey({ model: "anthropic/x" }, "https://api.voska.org/v1")).toBe("");
   });
 });
 
@@ -130,6 +189,22 @@ describe("readProviderEndpoints", () => {
 
   it("returns [] when there is no provider key", () => {
     expect(readProviderEndpoints({ model: "anthropic/x" })).toEqual([]);
+  });
+
+  it("strips userinfo credentials embedded in baseURL", () => {
+    const cfg = {
+      provider: {
+        p: {
+          npm: "@ai-sdk/openai-compatible",
+          name: "P",
+          options: { baseURL: "https://user:s3cret@api.example.com/v1", apiKey: "k" },
+          models: { m: { id: "m" } },
+        },
+      },
+    };
+    const eps = readProviderEndpoints(cfg);
+    expect(eps[0].baseURL).toBe("https://api.example.com/v1");
+    expect(JSON.stringify(eps)).not.toContain("s3cret");
   });
 });
 
