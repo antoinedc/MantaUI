@@ -55,6 +55,7 @@ import {
   describeCron,
   nextCronRun,
   describeNextRun,
+  resolveToolOutput,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2499,5 +2500,53 @@ describe("describeNextRun", () => {
 
   it("never throws on bad input", () => {
     expect(() => describeNextRun(null as unknown as string, true, FROM)).not.toThrow();
+  });
+});
+
+describe("resolveToolOutput", () => {
+  it("returns the final output when status is completed", () => {
+    expect(
+      resolveToolOutput({ output: "done-line-1\ndone-line-2" }),
+    ).toBe("done-line-1\ndone-line-2");
+  });
+
+  it("falls back to metadata.output while running (no output field)", () => {
+    expect(
+      resolveToolOutput({ metadata: { output: "line-1\nline-2\n" } }),
+    ).toBe("line-1\nline-2\n");
+  });
+
+  it("prefers final output over metadata.output once both exist", () => {
+    // On completion opencode sets both; the final string is canonical.
+    expect(
+      resolveToolOutput({
+        output: "final",
+        metadata: { output: "partial" },
+      }),
+    ).toBe("final");
+  });
+
+  it("treats an empty-string output as absent and uses metadata.output", () => {
+    // Running parts can carry output:"" briefly; don't render a blank body
+    // when live progress is available.
+    expect(
+      resolveToolOutput({ output: "", metadata: { output: "tick-1\n" } }),
+    ).toBe("tick-1\n");
+  });
+
+  it("returns '' when neither output nor metadata.output is present", () => {
+    expect(resolveToolOutput({})).toBe("");
+    expect(resolveToolOutput({ metadata: {} })).toBe("");
+  });
+
+  it("ignores non-string metadata.output", () => {
+    expect(
+      resolveToolOutput({ metadata: { output: 42 as unknown as string } }),
+    ).toBe("");
+  });
+
+  it("never throws on null/undefined state", () => {
+    expect(resolveToolOutput(null)).toBe("");
+    expect(resolveToolOutput(undefined)).toBe("");
   });
 });

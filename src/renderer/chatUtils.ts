@@ -1821,3 +1821,32 @@ export function describeNextRun(
   }
   return `${MON_NAMES[nd.getMonth()]} ${nd.getDate()} ${hhmm}`;
 }
+
+// ===== Live tool output =====
+//
+// A tool part's *final* output lands in `state.output`, but that field only
+// exists once `state.status === "completed"` (see opencode's `ToolStateRunning`
+// vs `ToolStateCompleted` schemas — Running has no `output`). While a tool is
+// still running, opencode streams incremental stdout into
+// `state.metadata.output` instead, growing it via `message.part.updated`
+// events. Verified live against a long bash: `metadata.output` ticks up
+// `line-1\n` → `line-1\nline-2\n` → … before `status` flips to "completed".
+//
+// `resolveToolOutput` is the single source of truth every tool body uses so a
+// long-running command shows its latest lines as it works (instead of an empty
+// "· running" body) and the same ctrl+o expand mechanism applies. It prefers
+// the final `state.output` when present (completed / error), and falls back to
+// the live `state.metadata.output` while running. Returns "" when neither is a
+// non-empty string.
+export function resolveToolOutput(state: {
+  output?: unknown;
+  metadata?: Record<string, unknown> | undefined;
+} | null | undefined): string {
+  if (!state) return "";
+  if (typeof state.output === "string" && state.output.length > 0) {
+    return state.output;
+  }
+  const meta = state.metadata;
+  const live = meta && typeof meta.output === "string" ? meta.output : "";
+  return live;
+}

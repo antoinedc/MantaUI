@@ -89,6 +89,7 @@ import {
   sanitizeGeneratedTitle,
   describeCron,
   describeNextRun,
+  resolveToolOutput,
   type TruncationKind,
   type ContextBreakdown,
   type StaleCacheResult,
@@ -6843,9 +6844,13 @@ function ToolBody({
       return <WebFetchBody state={state} />;
     case "task":
       return <TaskBody state={state} />;
-    default:
-      // Unknown tool — show output (if any) as a generic block.
-      return state.output ? <ToolOutput output={state.output} /> : null;
+    default: {
+      // Unknown tool — show output (if any) as a generic block. Falls back to
+      // the live metadata.output stream while running so any long-running tool
+      // surfaces progress, not just bash/grep/read.
+      const output = resolveToolOutput(state);
+      return output ? <ToolOutput output={output} /> : null;
+    }
   }
 }
 
@@ -7038,7 +7043,7 @@ function TaskBody({ state }: { state: ToolState }) {
 // — because most Read calls aren't worth scrolling past. When verbose, render
 // the actual content (opencode's output is already line-numbered).
 function ReadBody({ state, verbose }: { state: ToolState; verbose: boolean }) {
-  const output = state.output ?? "";
+  const output = resolveToolOutput(state);
   const m = output.match(/<content>\n?([\s\S]*?)\n?<\/content>/);
   const body = m ? m[1] : output;
   const lineCount = body.split("\n").filter((l) => l.length > 0).length;
@@ -7057,7 +7062,10 @@ function ReadBody({ state, verbose }: { state: ToolState; verbose: boolean }) {
 // no boxed background. The command itself is already shown in the header via
 // state.title. Output is truncated to 5 lines by default; verbose expands.
 function BashBody({ state, verbose }: { state: ToolState; verbose: boolean }) {
-  const output = state.output ?? "";
+  // Prefer the final output; while running, fall back to the live
+  // metadata.output stream so a long command tails its latest lines instead
+  // of an empty "· running" body. Same ctrl+o (verbose) expand applies.
+  const output = resolveToolOutput(state);
   if (!output) return null;
   return <ConnectorOutput body={output} maxLines={verbose ? Infinity : 5} />;
 }
@@ -7116,7 +7124,7 @@ function GlobBody({ state }: { state: ToolState }) {
 function GrepBody({ state, verbose }: { state: ToolState; verbose: boolean }) {
   const input = state.input ?? {};
   const pattern = typeof input.pattern === "string" ? input.pattern : "";
-  const output = state.output ?? "";
+  const output = resolveToolOutput(state);
   const lines = output.split("\n").filter((l) => l.length > 0);
   if (!verbose) {
     return (
@@ -7177,7 +7185,7 @@ function TodoWriteBody({ state }: { state: ToolState }) {
 function WebFetchBody({ state }: { state: ToolState }) {
   const input = state.input ?? {};
   const url = typeof input.url === "string" ? input.url : "";
-  const output = state.output ?? "";
+  const output = resolveToolOutput(state);
   return (
     <div className="text-[12px] space-y-1">
       {url && (
