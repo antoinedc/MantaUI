@@ -102,7 +102,7 @@ export function runSshOnce(
   });
 }
 
-function shellQuote(s: string): string {
+export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
