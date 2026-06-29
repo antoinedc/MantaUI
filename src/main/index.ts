@@ -70,10 +70,16 @@ import {
   generateSessionTitle as opencodeGenerateTitle,
   eventTunnelRestart,
   teardownEventTunnel,
+  restartOpencode,
   type PromptModel,
   type PromptAttachment,
   type PromptAgentMention,
 } from "./opencode.js";
+import {
+  getProviderEndpoints as opencodeGetProviders,
+  setProviders as opencodeSetProviders,
+  discoverModels as opencodeDiscoverModels,
+} from "./providers.js";
 import {
   classifyStreamHealth,
   isSubstantiveFrame,
@@ -122,6 +128,7 @@ import {
   type Project,
   type ProjectMeta,
   type SpawnOptions,
+  type ProviderInput,
 } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -1355,6 +1362,18 @@ function registerHandlers(): void {
   // response; opencode.listModels redacts before this leaves main.
   ipcMain.handle(IPC.opencodeModels, () => opencodeListModels(config));
   ipcMain.handle(IPC.opencodeDefaultModel, () => opencodeGetDefaultModel(config));
+  ipcMain.handle(IPC.opencodeGetProviders, () => opencodeGetProviders(config));
+  ipcMain.handle(
+    IPC.opencodeSetProviders,
+    (_e, ops: { upsert?: ProviderInput[]; remove?: string[] }) =>
+      opencodeSetProviders(config, ops),
+  );
+  ipcMain.handle(
+    IPC.opencodeDiscoverModels,
+    (_e, baseURL: string, apiKey: string) =>
+      opencodeDiscoverModels(config, baseURL, apiKey),
+  );
+  ipcMain.handle(IPC.opencodeRestart, () => restartOpencode(config));
   ipcMain.handle(IPC.opencodeVcsBranch, (_e, directory?: string) =>
     opencodeGetVcsBranch(config, directory),
   );
