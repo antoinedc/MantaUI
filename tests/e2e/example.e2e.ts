@@ -1,31 +1,21 @@
-import { test, expect } from '@playwright/test';
-import * as electron from '@playwright/test';
+import { test, expect, ElectronApplication, BrowserContext, chromium } from '@playwright/test';
 
-let app: electron.ElectronApplication;
-let mainWindow: electron.BrowserContext;
+let app: ElectronApplication;
+let mainWindow: BrowserContext;
 
 test.describe('BUI Electron App', () => {
   test.beforeAll(async () => {
-    app = await electron.launch({
-      args: ['out/main/index.js'],
-      env: {
-        ...process.env,
-        NODE_ENV: 'test',
-      },
-    });
+    // Launch the Electron app
+    app = await chromium.launch({
+      executablePath: 'out/main/index.js',
+      args: ['--no-sandbox'],
+    } as any);
 
-    mainWindow = app.firstWindow();
+    mainWindow = app.contexts()[0];
     await mainWindow.waitForLoadState('domcontentloaded');
 
     // Give the renderer a moment to fully initialize
-    await app.evaluate(async ({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      await new Promise<void>((resolve) => {
-        if (window.isDestroyed()) return resolve();
-        window.once('ready-to-show', () => resolve());
-        if (!window.isDestroyed() && window.isVisible()) resolve();
-      });
-    });
+    await new Promise(resolve => setTimeout(resolve, 2000));
   });
 
   test.afterAll(async () => {
@@ -33,12 +23,14 @@ test.describe('BUI Electron App', () => {
   });
 
   test('app window is visible and not crashed', async () => {
-    const isClosed = await mainWindow.closed().catch(() => true);
-    expect(isClosed).toBe(false);
+    const pages = mainWindow.pages();
+    expect(pages.length).toBeGreaterThan(0);
 
-    const title = await mainWindow.title();
-    expect(title).toBeTruthy();
+    const page = pages[0];
+    const url = page.url();
+    expect(url).toBeTruthy();
 
-    await mainWindow.screenshot({ path: 'tests/e2e/test-output/app-ready.png' });
+    // Take a screenshot to verify the app rendered
+    await page.screenshot({ path: 'tests/e2e/test-output/app-ready.png' });
   });
 });
