@@ -28,7 +28,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
-    "@rollup/rollup-darwin-arm64": "4.60.3",
+    "@playwright/test": "^1.61.1",
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
