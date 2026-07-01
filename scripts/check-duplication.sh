@@ -46,5 +46,16 @@ echo '```'
 npx --yes jscpd "${CHANGED[@]}" --min-tokens 70 --reporters consoleFull --absolute 2>&1 \
   | tail -60 || true
 echo '```'
+echo
+
+echo "### Lint (ESLint, changed scope)"
+echo
+echo '```'
+if command -v npx &> /dev/null && [ -f "package.json" ] && grep -q '"eslint"' package.json; then
+  npx eslint --format compact "${CHANGED[@]}" 2>&1 | tail -40 || true
+else
+  echo "ESLint not installed or not in package.json — skipping."
+fi
+echo '```'
 
 exit 0
