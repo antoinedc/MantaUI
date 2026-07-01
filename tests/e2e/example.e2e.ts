@@ -1,29 +1,36 @@
-import { test, expect, ElectronApplication, BrowserContext, chromium } from '@playwright/test';
+import { test, expect, chromium, BrowserContext } from '@playwright/test';
+import { spawn } from 'child_process';
+import * as path from 'path';
 
-let app: ElectronApplication;
-let mainWindow: BrowserContext;
+let electronProcess: ReturnType<typeof spawn>;
+let context: BrowserContext;
 
 test.describe('BUI Electron App', () => {
   test.beforeAll(async () => {
-    // Launch the Electron app
-    app = await chromium.launch({
-      executablePath: 'out/main/index.js',
-      args: ['--no-sandbox'],
-    } as any);
+    // Start Electron with the built app
+    const electronPath = path.join(__dirname, '../../node_modules/.bin/electron');
+    const appPath = path.join(__dirname, '../../out/main/index.js');
 
-    mainWindow = app.contexts()[0];
-    await mainWindow.waitForLoadState('domcontentloaded');
+    electronProcess = spawn(electronPath, [appPath, '--no-sandbox', '--remote-debugging-port=9222'], {
+      env: { ...process.env, NODE_ENV: 'test' },
+    });
 
-    // Give the renderer a moment to fully initialize
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Wait for Electron to start and expose DevTools protocol
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Connect to the DevTools protocol
+    const browser = await chromium.connectOverCDP('http://localhost:9222');
+    context = browser.contexts()[0];
   });
 
   test.afterAll(async () => {
-    if (app) await app.close();
+    if (electronProcess) {
+      electronProcess.kill();
+    }
   });
 
   test('app window is visible and not crashed', async () => {
-    const pages = mainWindow.pages();
+    const pages = context.pages();
     expect(pages.length).toBeGreaterThan(0);
 
     const page = pages[0];
