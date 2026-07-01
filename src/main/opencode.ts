@@ -29,16 +29,12 @@
 
 import { spawn as cpSpawn } from "node:child_process";
 import { join as pathJoin } from "node:path";
+import { Agent as HttpAgent, request as httpRequest } from "node:http";
 import {
   runSshOnce,
   getBranch as getBranchSsh,
   expandRemotePath,
 } from "./pty.js";
-import {
-  decideEviction,
-  isPortForwardingFailure,
-  parseLsofListeners,
-} from "./forwardHeal.js";
 import {
   dropCachedTranscript,
   getCachedTranscript,
@@ -64,123 +60,199 @@ export const OPENCODE_SID_OPT = "@bui-session-id";
 const MOBILE_SERVER_REMOTE_PORT = 8787;
 export const PRESENCE_LOCAL_PORT = 18787;
 
-function localPort(config: AppConfig): number {
-  return config.opencodePort ?? 14096;
-}
-
 function sshTarget(config: AppConfig): string {
   return config.user ? `${config.user}@${config.host}` : config.host;
 }
 
-// ===== Dedicated event-stream tunnel =====
+// ===== Dedicated standalone tunnels (event stream + RPC) =====
 //
-// The SSE event stream rides its OWN `ssh -L -N` process, completely
-// separate from the shared ControlMaster the RPC/pty/-L-forward path uses.
-// Rationale (proven this session): a single ControlMaster multiplexing ~10
-// long-lived SSE streams + RPC + the forward goes half-dead after a network
-// transition — heartbeats trickle but substantive frames stall, and tearing
-// the master down to recover also disrupts RPC/pty. Isolating the event
-// transport means: (1) a degraded event tunnel can be killed + respawned
-// WITHOUT touching RPC/pty, and (2) recovery is a plain process restart
-// (fully verifiable on demand — see eventTunnelRestart), not ssh -O
-// surgery on a shared mux. NO ControlMaster here on purpose: a fresh
-// dedicated connection each time sidesteps the half-dead-mux failure mode
-// entirely for the stream that matters most.
+// Both the SSE event stream AND the RPC/HTTP side channel ride their OWN
+// `ssh -L -N` process, each completely separate from the shared ControlMaster
+// the pty path uses — and separate from EACH OTHER.
+//
+// Rationale (proven across multiple sessions): a single ControlMaster
+// multiplexing long-lived SSE streams + a churn of RPC fetches + tmux/status
+// polls saturates the one connection's channel servicing. It then goes
+// half-dead — TCP connects succeed and channels open, but responses never flow
+// (`curl localhost:14096/session` connects, sends, receives 0 bytes), while
+// plain tmux polls time out at 60s. A network transition (wifi change, sleep)
+// makes it worse: heartbeats trickle but substantive frames stall. Tearing the
+// shared master down to recover also disrupts pty.
+//
+// Isolating each transport on its own dedicated connection means: (1) RPC load
+// can't starve the event stream or tmux polls and vice versa; (2) a degraded
+// tunnel is recovered by a plain process restart, not `ssh -O` surgery on a
+// shared mux; (3) recovery is independently verifiable per transport. NO
+// ControlMaster on these on purpose — a fresh dedicated connection sidesteps
+// the half-dead-mux failure mode for the streams that matter most.
 const EVENT_LOCAL_PORT = 14097;
+const RPC_LOCAL_PORT = 14098;
 
-let eventTunnelProc: ReturnType<typeof cpSpawn> | null = null;
-let eventTunnelReady: Promise<void> | null = null;
+// A standalone `ssh -N -L <localPort>:127.0.0.1:<REMOTE_PORT>` tunnel with
+// spawn/ensure/restart lifecycle and health-gated readiness. Two instances:
+// one for the SSE event stream, one for the RPC side channel.
+function makeStandaloneTunnel(label: string, localPort: number) {
+  let proc: ReturnType<typeof cpSpawn> | null = null;
+  let ready: Promise<void> | null = null;
+  let supervisor: ReturnType<typeof setInterval> | null = null;
+  let lastConfig: AppConfig | null = null;
 
-function spawnEventTunnel(config: AppConfig): Promise<void> {
-  if (eventTunnelReady) return eventTunnelReady;
-  eventTunnelReady = new Promise<void>((resolve, reject) => {
-    if (!config.host) {
-      reject(new Error("No host configured"));
-      return;
-    }
-    const args = [
-      "-o", "ExitOnForwardFailure=yes",
-      "-o", "ServerAliveInterval=15",
-      "-o", "ServerAliveCountMax=3",
-      // No ControlMaster/ControlPath: this is a standalone connection.
-      "-o", "ControlMaster=no",
-      "-o", "ControlPath=none",
-      "-N",
-      "-L", `${EVENT_LOCAL_PORT}:127.0.0.1:${REMOTE_PORT}`,
-    ];
-    if (config.identityFile) args.push("-i", config.identityFile);
-    args.push(sshTarget(config));
-    const p = cpSpawn("ssh", args, { stdio: ["ignore", "ignore", "pipe"] });
-    eventTunnelProc = p;
-    let settled = false;
-    let stderr = "";
-    p.stderr.on("data", (b) => (stderr += b.toString()));
-    p.on("error", (e) => {
-      if (!settled) { settled = true; eventTunnelReady = null; reject(e); }
-    });
-    p.on("exit", (code) => {
-      eventTunnelProc = null;
-      eventTunnelReady = null;
-      if (!settled) {
-        settled = true;
-        reject(
-          new Error(
-            `event tunnel ssh exited ${code} before ready: ${stderr.trim()}`,
-          ),
-        );
+  function spawn(config: AppConfig): Promise<void> {
+    if (ready) return ready;
+    lastConfig = config;
+    ready = new Promise<void>((resolve, reject) => {
+      if (!config.host) {
+        ready = null;
+        reject(new Error("No host configured"));
+        return;
       }
-    });
-    // `-N` never prints on success; the forward is usable within a moment of
-    // the TCP connect. Poll the local port until opencode answers, then
-    // resolve. Bounded so a wedged connect rejects instead of hanging.
-    void (async () => {
-      for (let i = 0; i < 40; i++) {
-        if (settled) return;
-        try {
-          const res = await fetch(
-            `http://127.0.0.1:${EVENT_LOCAL_PORT}/global/health`,
-            { signal: AbortSignal.timeout(1000) },
+      const args = [
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        // No ControlMaster/ControlPath: this is a standalone connection.
+        "-o", "ControlMaster=no",
+        "-o", "ControlPath=none",
+        "-N",
+        // Bind the LOCAL forward on 127.0.0.1 explicitly. Without the bind
+        // address ssh binds the listener dual-stack (both ::1 and 127.0.0.1);
+        // after a network flap one family can end up refusing while the other
+        // still answers. We saw exactly that: `curl [::1]:14098/health` → 200
+        // but `curl 127.0.0.1:14098/health` → "Couldn't connect" (EADDRNOTAVAIL).
+        // Every connect site below (apiUrl, the event fetch, and this readiness
+        // poll) targets 127.0.0.1, so pin the bind to IPv4 too — one family,
+        // no split-brain listener.
+        "-L", `127.0.0.1:${localPort}:127.0.0.1:${REMOTE_PORT}`,
+      ];
+      if (config.identityFile) args.push("-i", config.identityFile);
+      args.push(sshTarget(config));
+      const p = cpSpawn("ssh", args, { stdio: ["ignore", "ignore", "pipe"] });
+      proc = p;
+      let settled = false;
+      let stderr = "";
+      p.stderr.on("data", (b) => (stderr += b.toString()));
+      p.on("error", (e) => {
+        if (!settled) { settled = true; ready = null; reject(e); }
+      });
+      p.on("exit", (code) => {
+        // ServerAliveCountMax trips on a dead link → ssh exits. Clearing `ready`
+        // makes the next ensure() respawn a fresh connection automatically,
+        // which is exactly the connectivity-loss recovery path.
+        proc = null;
+        ready = null;
+        if (!settled) {
+          settled = true;
+          reject(
+            new Error(`${label} tunnel ssh exited ${code} before ready: ${stderr.trim()}`),
           );
-          if (res.ok) { settled = true; resolve(); return; }
-        } catch { /* not up yet */ }
-        await new Promise((r) => setTimeout(r, 250));
+        }
+      });
+      // `-N` never prints on success; the forward is usable within a moment of
+      // the TCP connect. Poll the local port until opencode answers, then
+      // resolve. Bounded so a wedged connect rejects instead of hanging.
+      void (async () => {
+        for (let i = 0; i < 40; i++) {
+          if (settled) return;
+          try {
+            const res = await fetch(
+              `http://127.0.0.1:${localPort}/global/health`,
+              { signal: AbortSignal.timeout(1000) },
+            );
+            if (res.ok) { settled = true; resolve(); return; }
+          } catch { /* not up yet */ }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        if (!settled) {
+          settled = true;
+          ready = null;
+          try { p.kill(); } catch { /* already dead */ }
+          reject(new Error(`${label} tunnel did not become ready within 10s`));
+        }
+      })();
+    });
+    return ready;
+  }
+
+  // Independent supervisor: once started, it respawns the tunnel whenever it's
+  // down — WITHOUT waiting for an incoming request to drive ensure(). This is
+  // the connectivity-loss fix: when ssh exits (ServerAliveCountMax tripped on a
+  // dead link), proc/ready are nulled, and within one tick the supervisor boots
+  // a fresh connection. Previously recovery hung on the next forwardFetch, which
+  // could swallow the ensure() rejection and hammer a dead port (ECONNREFUSED)
+  // indefinitely if the UI had backed off. A short interval makes reconnect feel
+  // immediate; spawn() is a no-op when already live or spawning.
+  function startSupervisor(): void {
+    if (supervisor) return;
+    supervisor = setInterval(() => {
+      if (proc || ready || !lastConfig) return; // live, spawning, or no target
+      // Fire-and-forget; spawn() manages its own ready/proc state and a failed
+      // attempt simply leaves proc/ready null so the next tick retries.
+      void spawn(lastConfig).catch(() => {});
+    }, 2000);
+    // Don't keep the event loop alive solely for this timer.
+    if (typeof supervisor.unref === "function") supervisor.unref();
+  }
+
+  return {
+    port: localPort,
+    // Idempotent: reuse a live tunnel, (re)spawn if absent. Starts the
+    // supervisor so the tunnel stays up across connectivity drops regardless of
+    // request flow. Resilient to a stuck/rejected in-flight spawn: on failure it
+    // clears state and the supervisor (or next ensure) retries.
+    async ensure(config: AppConfig): Promise<void> {
+      lastConfig = config;
+      startSupervisor();
+      if (proc && ready) { await ready; return; }
+      try {
+        await spawn(config);
+      } catch (e) {
+        // Leave proc/ready null (spawn's handlers already did) so the supervisor
+        // retries; surface the error to this caller so it can fall back.
+        throw e;
       }
-      if (!settled) {
-        settled = true;
-        eventTunnelReady = null;
-        try { p.kill(); } catch { /* already dead */ }
-        reject(new Error("event tunnel did not become ready within 10s"));
-      }
-    })();
-  });
-  return eventTunnelReady;
+    },
+    // Recovery primitive: kill the tunnel so the supervisor (or next ensure)
+    // respawns a FRESH connection. No shared-mux collateral. Also the manual
+    // degradation hook for verification (simulate a dead transport).
+    restart(): void {
+      const p = proc;
+      proc = null;
+      ready = null;
+      if (p) { try { p.kill("SIGKILL"); } catch { /* already dead */ } }
+    },
+    // Fully stop: kill the tunnel AND the supervisor (e.g. host change clears
+    // lastConfig so the supervisor wouldn't respawn anyway, but stopping it is
+    // tidier).
+    stop(): void {
+      if (supervisor) { clearInterval(supervisor); supervisor = null; }
+      lastConfig = null;
+      const p = proc;
+      proc = null;
+      ready = null;
+      if (p) { try { p.kill("SIGKILL"); } catch { /* already dead */ } }
+    },
+    isLive(): boolean {
+      return proc !== null && ready !== null;
+    },
+  };
 }
 
-// Ensure the dedicated event tunnel is up. Idempotent: reuses a live one,
-// (re)spawns if absent. Called by subscribeEvents before each connect.
+const eventTunnel = makeStandaloneTunnel("event", EVENT_LOCAL_PORT);
+const rpcTunnel = makeStandaloneTunnel("rpc", RPC_LOCAL_PORT);
+
+// Ensure the dedicated event tunnel is up. Called by subscribeEvents before
+// each connect.
 export async function ensureEventTunnel(config: AppConfig): Promise<void> {
-  if (eventTunnelProc && eventTunnelReady) {
-    await eventTunnelReady;
-    return;
-  }
-  await spawnEventTunnel(config);
+  await eventTunnel.ensure(config);
 }
 
-// Recovery primitive: kill the dedicated event tunnel so the next
-// subscribeEvents respawns a FRESH connection. Replaces the ControlMaster
-// eviction for the event path — no shared-mux collateral. Also the manual
-// degradation hook for verification (simulate a dead event transport).
+// Recovery primitive for the event path (see makeStandaloneTunnel.restart).
 export function eventTunnelRestart(): void {
-  const p = eventTunnelProc;
-  eventTunnelProc = null;
-  eventTunnelReady = null;
-  if (p) {
-    try { p.kill("SIGKILL"); } catch { /* already dead */ }
-  }
+  eventTunnel.restart();
 }
 
 export function teardownEventTunnel(): void {
-  eventTunnelRestart();
+  eventTunnel.restart();
 }
 
 // ===== server lifecycle =====
@@ -283,154 +355,28 @@ function runSshControl(
   });
 }
 
-function sshControl(config: AppConfig, op: string, extra: string[] = []): Promise<void> {
-  return runSshControl(config, op, extra).then(({ code, stderr }) => {
-    if (code === 0) return;
-    // "Forward already exists" is a normal idempotent case for `-O forward`.
-    if (/already forwarded/i.test(stderr)) return;
-    throw new Error(`ssh -O ${op} exited ${code}: ${stderr.trim()}`);
-  });
-}
 
-// Ask ssh for its *effective* config and read back the expanded ControlPath
-// (the `%C` token resolved to a concrete /tmp/bui-cm-<hash>). This is the
-// socket the live master listens on; the orphan is any other bui socket.
-function resolveLiveSocket(config: AppConfig): Promise<string | null> {
-  return new Promise((resolve) => {
-    const args = [...controlArgs(config), "-G", sshTarget(config)];
-    const p = cpSpawn("ssh", args, { stdio: ["ignore", "pipe", "ignore"] });
-    let stdout = "";
-    p.stdout.on("data", (b) => (stdout += b.toString()));
-    p.on("error", () => resolve(null));
-    p.on("exit", () => {
-      const line = stdout
-        .split("\n")
-        .find((l) => l.toLowerCase().startsWith("controlpath "));
-      resolve(line ? line.slice("controlpath ".length).trim() : null);
-    });
-  });
-}
-
-function runCapture(cmd: string, args: string[]): Promise<string> {
-  return new Promise((resolve) => {
-    const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
-    let out = "";
-    p.stdout.on("data", (b) => (out += b.toString()));
-    p.on("error", () => resolve(""));
-    p.on("exit", () => resolve(out));
-  });
-}
-
-// Evict a stale ControlMaster from a previous app run that is still holding
-// the local forward port (kept alive by ControlPersist). Returns true if it
-// took an action that warrants retrying the forward.
-async function evictStaleForwardHolder(config: AppConfig): Promise<boolean> {
-  const port = localPort(config);
-  const lsofOut = await runCapture("lsof", [
-    "-nP",
-    `-iTCP:${port}`,
-    "-sTCP:LISTEN",
-    "-F",
-    "pcn",
-  ]);
-  const holders = parseLsofListeners(lsofOut);
-  if (holders.length === 0) return false;
-
-  // Full command line per pid so decideEviction can read each ssh's
-  // `-o ControlPath=...` and match it against the live socket.
-  const psByPid = new Map<number, string>();
-  for (const h of holders) {
-    const ps = await runCapture("ps", ["-o", "command=", "-p", String(h.pid)]);
-    psByPid.set(h.pid, ps.trim());
-  }
-
-  const liveSocket = await resolveLiveSocket(config);
-  if (!liveSocket) return false;
-
-  const decision = decideEviction(holders, psByPid, liveSocket);
-  if (decision.action === "evict") {
-    // `ssh -O exit` on the ORPHAN's own socket (not our controlArgs path):
-    // graceful master shutdown, which closes its listeners and frees the
-    // port. Target the socket explicitly so we never touch the live master.
-    await new Promise<void>((r) =>
-      cpSpawn(
-        "ssh",
-        [
-          "-o",
-          `ControlPath=${decision.socketPath}`,
-          "-O",
-          "exit",
-          sshTarget(config),
-        ],
-        { stdio: "ignore" },
-      )
-        .on("exit", () => r())
-        .on("error", () => r()),
-    );
-    return true;
-  }
-  if (decision.action === "foreign") {
-    throw new Error(
-      `opencode local port ${port} is held by another process ` +
-        `(pid ${decision.pid}, ${decision.command}). Close it or set a ` +
-        `different opencodePort in settings.`,
-    );
-  }
-  return false;
-}
-
-let forwarded = false;
-
-// Probe + rebuild on every call. A cached "we already forwarded once" boolean
-// lies after wifi drops, laptop sleep, or remote sshd restart — the master
-// socket is gone but the flag still says up, and every fetch lands on a dead
-// port. `ssh -O check` is ~1ms when the master is alive; we eat that cost to
-// keep the path self-healing. `-O forward` is idempotent (sshControl treats
-// "already forwarded" as success).
+// RPC now rides a DEDICATED standalone tunnel (see makeStandaloneTunnel), NOT a
+// `-L` forward attached to the shared pty ControlMaster. This isolates the
+// RPC-fetch churn from tmux/pty/status so neither starves the other — the root
+// cause of the recurring "sessions won't load / curl returns 0 bytes" mux
+// saturation. ensure() is idempotent and self-respawns if the tunnel died (e.g.
+// connectivity loss tripped ServerAliveCountMax), so this stays self-healing
+// after wifi drops / laptop sleep / remote sshd restart without an `-O check`.
 export async function ensureForward(config: AppConfig): Promise<void> {
-  try {
-    await sshControl(config, "check");
-  } catch {
-    // ControlMaster is gone (or never existed). Boot it via the same path
-    // runSshOnce uses elsewhere.
-    forwarded = false;
-    await runSshOnce(config, "true");
-  }
-  const spec = `${localPort(config)}:127.0.0.1:${REMOTE_PORT}`;
-  const first = await runSshControl(config, "forward", ["-L", spec]);
-  if (first.code === 0 || /already forwarded/i.test(first.stderr)) {
-    forwarded = true;
-    return;
-  }
-
-  // The forward was rejected. If it's specifically a port-binding failure,
-  // the usual cause is a stale ControlMaster from a previous app run still
-  // holding the port (ControlPersist outlives the killed instance). Evict
-  // that orphan and retry once. Any other failure is real — surface it.
-  if (isPortForwardingFailure(first.stderr)) {
-    const evicted = await evictStaleForwardHolder(config);
-    if (evicted) {
-      const retry = await runSshControl(config, "forward", ["-L", spec]);
-      if (retry.code === 0 || /already forwarded/i.test(retry.stderr)) {
-        forwarded = true;
-        return;
-      }
-      throw new Error(
-        `ssh -O forward exited ${retry.code} after evicting stale ` +
-          `master: ${retry.stderr.trim()}`,
-      );
-    }
-  }
-  throw new Error(
-    `ssh -O forward exited ${first.code}: ${first.stderr.trim()}`,
-  );
+  rememberForwardConfig(config);
+  await rpcTunnel.ensure(config);
 }
 
-export async function teardownForward(config: AppConfig): Promise<void> {
-  if (!forwarded) return;
-  const spec = `${localPort(config)}:127.0.0.1:${REMOTE_PORT}`;
-  await sshControl(config, "cancel", ["-L", spec]).catch(() => {});
-  forwarded = false;
+// Recovery primitive for the RPC path: kill the tunnel so the next
+// ensureForward()/forwardFetch respawns a fresh connection. Used on a fetch
+// failure that smells like a dead tunnel (connectivity loss / half-dead link).
+export function rpcTunnelRestart(): void {
+  rpcTunnel.restart();
+}
+
+export async function teardownForward(_config: AppConfig): Promise<void> {
+  rpcTunnel.stop();
 }
 
 // Best-effort `-L PRESENCE_LOCAL_PORT:127.0.0.1:8787` forward on the shared
@@ -452,38 +398,22 @@ export async function ensurePresenceForward(config: AppConfig): Promise<boolean>
   }
 }
 
+// Host/identity changed: tear down the rpc tunnel so the next ensureForward()
+// respawns it against the new target. The presence forward rides the shared
+// master; re-establish it on the next ensurePresenceForward() too.
 export function invalidateForward(): void {
-  forwarded = false;
-  // The presence forward rides the same master; when it dies, re-establish on
-  // the next ensurePresenceForward() too.
+  rpcTunnel.restart();
+  lastForwardConfig = null;
   presenceForwarded = false;
-}
-
-// Force-evict OUR OWN live ControlMaster, then mark the forward stale.
-//
-// `evictStaleForwardHolder` only fires on a port-bind failure and only
-// targets *orphan* sockets (a different master than the live one). It has
-// no answer for the half-dead-master case: the master we are actively
-// using passes `ssh -O check` and still services short calls, but has
-// stopped pumping long-lived SSE streams (see classifyStreamHealth in
-// forwardHeal.ts). The only recovery is to tear that master down so the
-// next ensureForward() boots a fresh one.
-//
-// `ssh -O exit` here uses controlArgs() → ControlPath=/tmp/bui-cm-%C, i.e.
-// it targets the master for THIS config's connection (the one we use), not
-// an orphan. Best-effort: if the socket is already gone, the next
-// ensureForward() rebuilds anyway.
-export async function forceEvictControlMaster(
-  config: AppConfig,
-): Promise<void> {
-  await runSshControl(config, "exit").catch(() => {});
-  forwarded = false;
 }
 
 // ===== HTTP client =====
 
-function apiUrl(config: AppConfig, path: string): string {
-  return `http://127.0.0.1:${localPort(config)}${path}`;
+// All RPC/HTTP side-channel calls target the DEDICATED rpc tunnel port, not the
+// shared-ControlMaster forward (localPort). This is what keeps RPC churn off the
+// pty/tmux mux. ensureForward() brings the tunnel up before any fetch runs.
+function apiUrl(_config: AppConfig, path: string): string {
+  return `http://127.0.0.1:${RPC_LOCAL_PORT}${path}`;
 }
 
 // ===== Side-channel backpressure =====
@@ -547,17 +477,150 @@ function releaseForwardSlot(): void {
 // whichever fires first.
 const FORWARD_FETCH_TIMEOUT_MS = 90_000;
 
+// Why NOT global `fetch` here:
+//
+// `fetch` (undici) keeps every connection it opens in a process-wide keep-alive
+// pool. The forward, however, is a localhost socket whose REMOTE end (opencode
+// on the box) closes idle connections after its own timeout. When the box closes
+// a pooled-but-idle socket, undici doesn't notice until it next tries to use it
+// — so the local half sits in CLOSE_WAIT. Under our polling load these CLOSE_WAITs
+// accumulate by the dozen, the connection saturates, new channels get accepted at
+// the TCP layer but never carry a response, and the side channel wedges:
+// `curl localhost:<port>/session` connects, sends, and receives 0 bytes.
+// Restarting the app only resets the timer — the pool refills in minutes.
+// (Diagnosed 2026-06-30: 16 ESTABLISHED + 117 CLOSE_WAIT.)
+//
+// Fix: a DEDICATED `keepAlive: false` http.Agent so each request gets its own
+// socket that is DESTROYED the instant the response is done — on success, error,
+// timeout, or abort. Nothing is ever pooled, so nothing can rot into CLOSE_WAIT.
+// `maxSockets` mirrors the semaphore cap as a second backstop. (This works in
+// concert with the dedicated rpc tunnel — see makeStandaloneTunnel — which keeps
+// this churn off the pty/tmux ControlMaster.)
+const forwardAgent = new HttpAgent({
+  keepAlive: false,
+  maxSockets: FORWARD_FETCH_MAX_CONCURRENCY,
+});
+
+// Last config seen by ensureForward — lets forwardFetch self-heal the rpc
+// tunnel (re-ensure / restart on a dead-tunnel error) without threading config
+// through every caller. Connectivity loss is the main trigger: ssh's
+// ServerAliveCountMax fells the tunnel, the in-flight fetch errors, and we
+// respawn for the next call.
+let lastForwardConfig: AppConfig | null = null;
+export function rememberForwardConfig(config: AppConfig): void {
+  lastForwardConfig = config;
+}
+
+// A fetch error that means "the tunnel is dead, respawn it" rather than "the
+// server returned an HTTP error" (those resolve, not reject). ECONNREFUSED =
+// tunnel down; timeout/abort = wedged or slow link; ECONNRESET = link dropped.
+//
+// EADDRNOTAVAIL/EHOSTUNREACH/ENETUNREACH/EADDRINUSE come from a NETWORK
+// TRANSITION (sleep/wake, wifi switch, VPN up/down) — the same event that
+// silently fells the ssh tunnel. On connect() to 127.0.0.1:<port> the OS can't
+// allocate/reach the local ephemeral socket and rejects with EADDRNOTAVAIL.
+// Without this, the error isn't classed as dead-tunnel, restart() never fires,
+// and EVERY later rpc call keeps hitting the corpse until a manual app restart
+// (the "connect EADDRNOTAVAIL 127.0.0.1:14098" the user sees on reconcile).
+export function isDeadTunnelError(e: unknown): boolean {
+  const code = (e as { code?: string })?.code;
+  const name = (e as { name?: string })?.name;
+  return (
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EPIPE" ||
+    code === "EADDRNOTAVAIL" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    code === "EADDRINUSE" ||
+    name === "AbortError" ||
+    name === "TimeoutError"
+  );
+}
+
+// Minimal `Response`-compatible surface: every caller uses only res.ok,
+// res.status, res.json(), res.text(). We buffer the body fully (these are small
+// JSON payloads, never streams — SSE uses a separate raw path) so the socket
+// closes before we resolve.
+type ForwardResponse = {
+  ok: boolean;
+  status: number;
+  json(): Promise<unknown>;
+  text(): Promise<string>;
+};
+
+function forwardRequestOnce(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal } | undefined,
+  signal: AbortSignal,
+): Promise<ForwardResponse> {
+  return new Promise<ForwardResponse>((resolve, reject) => {
+      const req = httpRequest(
+        url,
+        {
+          method: init?.method ?? "GET",
+          headers: init?.headers,
+          agent: forwardAgent,
+          signal,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c) => chunks.push(c as Buffer));
+          res.on("end", () => {
+            // Body fully read → socket is done. With keepAlive:false the agent
+            // destroys it now; belt-and-suspenders destroy() guards any path
+            // (e.g. a kept-alive proxy) that would otherwise pool it.
+            res.socket?.destroy();
+            const status = res.statusCode ?? 0;
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({
+              ok: status >= 200 && status < 300,
+              status,
+              text: async () => text,
+              json: async () => JSON.parse(text),
+            });
+          });
+          res.on("error", (e) => {
+            res.socket?.destroy();
+            reject(e);
+          });
+        },
+      );
+      // On abort/timeout, destroy() tears the socket down immediately — the
+      // whole reason we're not on undici's pool.
+      req.on("error", reject);
+      if (init?.body) req.write(init.body);
+      req.end();
+  });
+}
+
 async function forwardFetch(
   url: string,
-  init?: Parameters<typeof fetch>[1],
-): Promise<Response> {
+  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
+): Promise<ForwardResponse> {
+  // Make sure the dedicated rpc tunnel is up before we fetch. ensure() is
+  // idempotent and cheap when live; it respawns a tunnel that died (e.g.
+  // connectivity loss tripped ServerAliveCountMax). Best-effort — if there's no
+  // remembered config yet, the fetch still tries the port directly.
+  if (lastForwardConfig) {
+    await rpcTunnel.ensure(lastForwardConfig).catch(() => {});
+  }
   await acquireForwardSlot();
   const timeoutSignal = AbortSignal.timeout(FORWARD_FETCH_TIMEOUT_MS);
   const signal = init?.signal
     ? AbortSignal.any([init.signal, timeoutSignal])
     : timeoutSignal;
   try {
-    return await fetch(url, { ...init, signal });
+    return await forwardRequestOnce(url, init, signal);
+  } catch (e) {
+    // A dead-tunnel error means the standalone connection is gone or wedged
+    // (commonly after a network transition). Restart it so the NEXT call gets a
+    // fresh tunnel instead of repeatedly hammering a corpse. We surface this
+    // error to the caller (one failed request) rather than retrying inline —
+    // the caller's own refetch/SSE-reconnect cadence drives the retry, now onto
+    // a healthy tunnel.
+    if (isDeadTunnelError(e)) rpcTunnel.restart();
+    throw e;
   } finally {
     releaseForwardSlot();
   }
@@ -744,7 +807,7 @@ export async function createSession(
     ? await expandRemotePath(config, directory)
     : directory;
   const url = apiUrl(config, `/session?directory=${encodeURIComponent(absDir)}`);
-  let res: Response;
+  let res: ForwardResponse;
   try {
     res = await forwardFetch(url, {
       method: "POST",

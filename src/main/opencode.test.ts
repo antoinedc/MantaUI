@@ -1,5 +1,39 @@
 import { describe, it, expect } from "vitest";
-import { repairCorruptDirectory } from "./opencode";
+import { repairCorruptDirectory, isDeadTunnelError } from "./opencode";
+
+// The rpc/side-channel fetch self-heals by restarting the tunnel ONLY when the
+// error is classed as a dead tunnel. A network transition (sleep/wake, wifi
+// switch, VPN) fells the ssh tunnel and the next connect to 127.0.0.1:<port>
+// rejects with EADDRNOTAVAIL — which MUST be treated as dead-tunnel, else
+// restart() never fires and every later call keeps hitting the corpse (the
+// "connect EADDRNOTAVAIL 127.0.0.1:14098" the user hit on reconcile).
+describe("isDeadTunnelError", () => {
+  it("classes network-transition connect errors as dead tunnel", () => {
+    for (const code of [
+      "EADDRNOTAVAIL",
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "EPIPE",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "EADDRINUSE",
+    ]) {
+      expect(isDeadTunnelError({ code })).toBe(true);
+    }
+  });
+
+  it("classes abort/timeout (wedged/slow link) as dead tunnel", () => {
+    expect(isDeadTunnelError({ name: "AbortError" })).toBe(true);
+    expect(isDeadTunnelError({ name: "TimeoutError" })).toBe(true);
+  });
+
+  it("does not class a plain HTTP/logic error as dead tunnel", () => {
+    expect(isDeadTunnelError({ code: "ENOENT" })).toBe(false);
+    expect(isDeadTunnelError(new Error("boom"))).toBe(false);
+    expect(isDeadTunnelError(undefined)).toBe(false);
+    expect(isDeadTunnelError(null)).toBe(false);
+  });
+});
 
 // Regression: opencode persists `/home/<user>/~/...` when a session is created
 // with a tilde directory — it joins its cwd ($HOME) with the literal `~/...`.
