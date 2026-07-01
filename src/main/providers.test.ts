@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseModelsResponse, upsertProviderBlock, removeProviderBlock, readProviderEndpoints, findStoredApiKey } from "./providers.js";
+import { parseModelsResponse, upsertProviderBlock, removeProviderBlock, readProviderEndpoints, findStoredApiKey, droppedProviders } from "./providers.js";
 import { stripLineComments } from "./setup.js";
 
 describe("parseModelsResponse", () => {
@@ -244,5 +244,38 @@ describe("readRemoteConfig comment-strip regression (URLs in strings)", () => {
         enabledModels: ["qwen3.6-27b"],
       },
     ]);
+  });
+});
+
+// Regression (2026-07-01): a Refresh→check-model→Save wiped opencode.jsonc down
+// to an 85-byte skeleton, dropping every provider (voska, anthropic) + the
+// claude-auth plugin. Root cause: setProviders read a partial/empty config
+// under a degraded link, merged the upsert onto {}, and wrote the skeleton.
+// droppedProviders is the guard that catches this: any provider that existed
+// before and vanished after WITHOUT an explicit remove means the read was bad.
+describe("droppedProviders (non-destructive write guard)", () => {
+  it("flags providers that vanish without being removed (the wipe bug)", () => {
+    // before had anthropic+voska; a bad/empty read made after empty; no removes.
+    const before = { anthropic: {}, voska: {} };
+    const after = {}; // upsert merged onto an empty read
+    expect(droppedProviders(before, after, [])).toEqual(["anthropic", "voska"]);
+  });
+
+  it("does NOT flag a provider that was explicitly removed", () => {
+    const before = { anthropic: {}, voska: {} };
+    const after = { anthropic: {} }; // voska removed on purpose
+    expect(droppedProviders(before, after, ["voska"])).toEqual([]);
+  });
+
+  it("does NOT flag on a normal upsert that keeps everything", () => {
+    const before = { anthropic: {}, voska: {} };
+    const after = { anthropic: {}, voska: {} }; // toggled a model, both survive
+    expect(droppedProviders(before, after, [])).toEqual([]);
+  });
+
+  it("does NOT flag adding a brand-new provider to an empty config", () => {
+    const before = {}; // legitimately fresh config
+    const after = { voska: {} };
+    expect(droppedProviders(before, after, [])).toEqual([]);
   });
 });

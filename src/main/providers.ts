@@ -81,6 +81,21 @@ export function removeProviderBlock(cfg: Cfg, id: string): Cfg {
   return { ...cfg, provider: providers };
 }
 
+// Non-destructive-write guard (pure, unit-tested). Given the provider map read
+// BEFORE the merge and the map AFTER, plus the ids explicitly removed, return
+// the ids that vanished WITHOUT being asked to. A non-empty result means the
+// read was empty/partial and writing would silently wipe real providers — the
+// bug that ate the voska endpoint. Callers must refuse to write when this is
+// non-empty.
+export function droppedProviders(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  removed: Iterable<string>,
+): string[] {
+  const removeSet = new Set(removed);
+  return Object.keys(before).filter((id) => !removeSet.has(id) && !(id in after));
+}
+
 // Strip any `user:pass@` userinfo from a URL so a credential embedded in the
 // baseURL (e.g. https://user:pass@host/v1) can't ride along to the renderer /
 // mobile client. Falls back to a regex if the URL doesn't parse.
@@ -153,25 +168,34 @@ export async function discoverModels(
     }
   }
   const url = `${normBaseURL(baseURL)}/models`;
-  // Pass the key via an environment variable read by curl on the box, NOT inline
-  // in argv. This keeps the secret out of (a) the box's process list (`ps`) and
-  // (b) runSshOnce's error message, which echoes the first 80 chars of the
-  // command on timeout — argv-inlining the `Bearer <key>` header would leak it
-  // into `detail` and then into the UI / mobile RPC. `BUI_PROV_KEY` is exported
-  // for curl's child only; `-H "Authorization: Bearer $BUI_PROV_KEY"` is expanded
-  // by the remote shell, so the command string itself never contains the key.
+  // Pass the key via an environment variable read by curl on the box, NOT as a
+  // curl argv token — so the secret stays out of the box's process list (`ps`).
+  // It DOES appear in the command STRING (the `export`); the catch handler
+  // redacts BUI_PROV_KEY before logging and the user only sees a fixed message,
+  // so it never reaches ps, logs, the UI, or mobile RPC.
+  //
+  // IMPORTANT: the assignment MUST be a SEPARATE statement (`export VAR=…; curl
+  // …`), NOT the command-prefix form (`VAR=… curl …`). In the prefix form the
+  // shell does NOT expand `$VAR` within that same command's own arguments — the
+  // `$BUI_PROV_KEY` in the header would resolve to empty, sending a bare
+  // `Bearer ` and getting "Malformed API Key" from the gateway. (Verified.)
   const cmd =
-    `BUI_PROV_KEY=${shellQuote(key)} ` +
+    `export BUI_PROV_KEY=${shellQuote(key)}; ` +
     `curl -s --max-time 20 -H "Authorization: Bearer $BUI_PROV_KEY" ${shellQuote(url)}`;
   try {
     const { stdout } = await runSshOnce(config, cmd, { timeoutMs: 30000 });
     if (!stdout.trim()) return { ok: false, error: "unreachable", detail: "empty response" };
     return parseModelsResponse(stdout);
   } catch (e) {
-    // Do NOT surface the raw transport error to the USER: it could include SSH
-    // plumbing strings. But log it main-side for diagnosis — safe now that the
-    // key lives in the BUI_PROV_KEY env var, not in the command string.
-    console.warn("[providers] discovery failed for", url, e);
+    // Do NOT surface the raw transport error to the USER (fixed message below).
+    // runSshOnce echoes a slice of the command on timeout, and that slice can
+    // include the `export BUI_PROV_KEY='<key>'` prefix — so REDACT the key from
+    // anything we log, too. The user only ever sees the fixed detail.
+    const redacted = (e instanceof Error ? e.message : String(e)).replace(
+      /BUI_PROV_KEY=('([^']*)'|\S+)/g,
+      "BUI_PROV_KEY=<redacted>",
+    );
+    console.warn("[providers] discovery failed for", url, "—", redacted);
     return { ok: false, error: "unreachable", detail: "could not reach the endpoint" };
   }
 }
@@ -185,12 +209,39 @@ export async function discoverModels(
 // "https://opencode.ai/config.json"` (and provider `baseURL`s) whose `//`
 // inside a string would be eaten by the naive strip, truncating the string and
 // making JSON.parse throw on a perfectly valid config.
+// Sentinels frame the file body so a truncated/half-delivered `cat` (the box
+// or link cutting the stream mid-file — very real under the port-exhaustion
+// conditions that motivated all this) CANNOT masquerade as a complete config.
+// The body is only trusted when BOTH markers are present and the trailing one
+// is intact; otherwise we throw and callers refuse to overwrite. `__absent__`
+// distinguishes a genuinely missing file (→ {}) from a failed read (→ throw).
+const CFG_READ_BEGIN = "BUI_CFG_BEGIN_b3f1a9";
+const CFG_READ_END = "BUI_CFG_END_b3f1a9";
+
 async function readRemoteConfig(config: AppConfig): Promise<Cfg> {
+  // If the file is absent, print an explicit __absent__ marker (NOT `{}`, which
+  // is indistinguishable from a truncated read). Otherwise wrap the real body
+  // in begin/end sentinels so we can verify the whole file arrived.
   const { stdout } = await runSshOnce(
     config,
-    `cat ${OPENCODE_JSONC} 2>/dev/null || echo '{}'`,
+    `if [ -f ${OPENCODE_JSONC} ]; then ` +
+      `echo ${CFG_READ_BEGIN}; cat ${OPENCODE_JSONC}; echo; echo ${CFG_READ_END}; ` +
+      `else echo ${CFG_READ_BEGIN}__absent__${CFG_READ_END}; fi`,
   );
-  const stripped = stripLineComments(stdout);
+  const begin = stdout.indexOf(CFG_READ_BEGIN);
+  const end = stdout.lastIndexOf(CFG_READ_END);
+  if (begin < 0 || end < 0 || end < begin) {
+    // Neither a valid empty nor a valid full read arrived — treat as a failed
+    // read (transport truncation / wedged link), NOT as an empty config. This
+    // is the guard that stops a partial `cat` from clobbering the real file.
+    throw new Error("incomplete config read from box (missing framing markers)");
+  }
+  const body = stdout.slice(begin + CFG_READ_BEGIN.length, end).trim();
+  if (body === "__absent__") return {}; // file genuinely does not exist yet
+  if (body === "") {
+    throw new Error("empty config read from box (refusing to treat as {})");
+  }
+  const stripped = stripLineComments(body);
   return JSON.parse(stripped) as Cfg; // intentional throw on malformed JSON
 }
 
@@ -231,14 +282,52 @@ export async function setProviders(
     cfg = await readRemoteConfig(config);
   } catch (e) {
     console.warn("[providers] refusing to write — config unparseable/unreadable:", e);
-    // Refuse to overwrite: an unparseable read could mean a malformed config we
-    // must not clobber (the 2026-05-18 corruption mode).
+    // Refuse to overwrite: an unparseable OR incomplete/truncated read could
+    // mean a malformed config OR a half-delivered one — clobbering either loses
+    // the real file (the 2026-05-18 corruption + the 2026-07-01 provider-wipe
+    // mode). readRemoteConfig now throws on truncation, so this catch covers it.
     return { ok: false, error: `${UNPARSEABLE_CONFIG_MSG} (refusing to overwrite)` };
   }
+
+  // Snapshot what we read so we can prove the write is non-destructive. Any
+  // provider present here and NOT explicitly removed must survive into `cfg`.
+  const before = getProviderMap(cfg);
+  const removeIds = new Set(ops.remove ?? []);
+
   for (const id of ops.remove ?? []) cfg = removeProviderBlock(cfg, id);
   for (const input of ops.upsert ?? []) cfg = upsertProviderBlock(cfg, input);
+
+  // Non-destructive guard: the merged config MUST still contain every provider
+  // that existed and wasn't explicitly removed. If any silently vanished, the
+  // read was bad (empty/partial) and writing would wipe real providers —
+  // exactly the failure that ate the voska endpoint. Refuse rather than corrupt.
+  const after = getProviderMap(cfg);
+  const dropped = droppedProviders(before, after, removeIds);
+  if (dropped.length > 0) {
+    console.warn("[providers] refusing to write — would drop providers:", dropped);
+    return {
+      ok: false,
+      error: `Aborted: the write would have dropped provider(s) ${dropped.join(", ")} (stale/partial config read). Retry once the box is responsive.`,
+    };
+  }
+  // Second guard: an upsert that ends with ZERO providers is almost certainly a
+  // bad read (you don't add an endpoint and end up with none). Only a pure
+  // remove-to-empty is legitimate.
+  if (Object.keys(after).length === 0 && (ops.upsert?.length ?? 0) > 0) {
+    console.warn("[providers] refusing to write — upsert produced an empty provider map");
+    return { ok: false, error: "Aborted: config read looked empty (refusing to overwrite)." };
+  }
+
   const content = JSON.stringify(cfg, null, 2);
   try {
+    // Back up the current on-box file BEFORE overwriting, so a bad write is
+    // always recoverable from a timestamped copy (belt to the guards' braces).
+    // Best-effort: `[ -f ]` guards a first-time write; failure here doesn't
+    // block the write, but normally leaves opencode.jsonc.bui-bak-<ts>.
+    await runSshOnce(
+      config,
+      `f=${OPENCODE_JSONC}; [ -f "$f" ] && cp "$f" "$f.bui-bak-$(date +%Y%m%d-%H%M%S)" || true`,
+    ).catch((e) => console.warn("[providers] pre-write backup failed (continuing):", e));
     await runSshOnce(config, buildRemoteConfigWriteCmd(content, OPENCODE_JSONC));
     return { ok: true };
   } catch (e) {
