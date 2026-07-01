@@ -43,7 +43,6 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.MULTICA_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
-              "workspace_id": "264c89bb-4659-4570-af7b-5f8daaf87985",
               "status": "done"
             }')
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
