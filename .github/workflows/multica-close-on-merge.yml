@@ -39,11 +39,10 @@ jobs:
         shell: bash
         run: |
           RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-            "https://api.multica.ai/api/issues/${{ steps.extract.outputs.key }}" \
+            "https://api.multica.ai/api/issues/${{ steps.extract.outputs.key }}?workspace_id=264c89bb-4659-4570-af7b-5f8daaf87985" \
             -H "Authorization: Bearer ${{ secrets.MULTICA_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
-              "workspace_id": "264c89bb-4659-4570-af7b-5f8daaf87985",
               "status": "done"
             }')
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
