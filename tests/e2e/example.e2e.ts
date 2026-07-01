@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import * as path from 'path';
 
 test.describe('BUI Electron App Build Verification', () => {
@@ -33,7 +33,6 @@ test.describe('BUI Electron App Build Verification', () => {
     const rendererAssets = path.join(process.cwd(), 'out/renderer/assets');
     expect(existsSync(rendererAssets)).toBe(true);
 
-    const { readdirSync } = require('fs');
     const files = readdirSync(rendererAssets);
     expect(files.length).toBeGreaterThan(0);
   });
