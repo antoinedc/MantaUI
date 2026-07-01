@@ -39,7 +39,7 @@ jobs:
         shell: bash
         run: |
           RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-            "https://multica.useronda.com/api/issues/${{ steps.extract.outputs.key }}" \
+            "https://multica.ai/api/issues/${{ steps.extract.outputs.key }}" \
             -H "Authorization: Bearer ${{ secrets.MULTICA_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
@@ -69,10 +69,10 @@ jobs:
 
             // Post comment via Multica API if available
             try {
-              const resp = await fetch("https://multica.useronda.com/api/issues/" + key + "/comments", {
+              const resp = await fetch("https://multica.ai/api/issues/" + key + "/comments", {
                 method: "POST",
                 headers: {
-                  "Content-Type": "application/json",
+                  "Content-Type: application/json",
                   "Authorization": "Bearer " + process.env.MULTICA_TOKEN,
                 },
                 body: JSON.stringify({
