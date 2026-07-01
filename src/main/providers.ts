@@ -218,7 +218,7 @@ export async function discoverModels(
 const CFG_READ_BEGIN = "BUI_CFG_BEGIN_b3f1a9";
 const CFG_READ_END = "BUI_CFG_END_b3f1a9";
 
-async function readRemoteConfig(config: AppConfig): Promise<Cfg> {
+export async function readRemoteConfig(config: AppConfig): Promise<Cfg> {
   // If the file is absent, print an explicit __absent__ marker (NOT `{}`, which
   // is indistinguishable from a truncated read). Otherwise wrap the real body
   // in begin/end sentinels so we can verify the whole file arrived.
@@ -320,18 +320,68 @@ export async function setProviders(
 
   const content = JSON.stringify(cfg, null, 2);
   try {
-    // Back up the current on-box file BEFORE overwriting, so a bad write is
-    // always recoverable from a timestamped copy (belt to the guards' braces).
-    // Best-effort: `[ -f ]` guards a first-time write; failure here doesn't
-    // block the write, but normally leaves opencode.jsonc.bui-bak-<ts>.
-    await runSshOnce(
-      config,
-      `f=${OPENCODE_JSONC}; [ -f "$f" ] && cp "$f" "$f.bui-bak-$(date +%Y%m%d-%H%M%S)" || true`,
-    ).catch((e) => console.warn("[providers] pre-write backup failed (continuing):", e));
-    await runSshOnce(config, buildRemoteConfigWriteCmd(content, OPENCODE_JSONC));
+    await writeRemoteConfigSafe(config, content);
     return { ok: true };
   } catch (e) {
     console.warn("[providers] write failed:", e);
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// Back up the current on-box file BEFORE overwriting (timestamped .bui-bak-*),
+// then write `content` verbatim via the tested heredoc builder. Every
+// opencode.jsonc write in the app MUST go through here so a bad write is always
+// recoverable. Best-effort backup: `[ -f ]` guards a first-time write; failure
+// there doesn't block the write.
+export async function writeRemoteConfigSafe(
+  config: AppConfig,
+  content: string,
+): Promise<void> {
+  await runSshOnce(
+    config,
+    `f=${OPENCODE_JSONC}; [ -f "$f" ] && cp "$f" "$f.bui-bak-$(date +%Y%m%d-%H%M%S)" || true`,
+  ).catch((e) => console.warn("[config] pre-write backup failed (continuing):", e));
+  await runSshOnce(config, buildRemoteConfigWriteCmd(content, OPENCODE_JSONC));
+}
+
+// Safely patch top-level keys of opencode.jsonc without clobbering anything
+// else. Reads via the framed/comment-aware readRemoteConfig (THROWS on a
+// truncated/empty read — the caller then keeps the file untouched), applies
+// `mutate`, and refuses to write if the result would drop any top-level key
+// that existed before and wasn't part of the patch. This is the shared
+// safe path for non-provider settings writes (e.g. skills.urls) that used to
+// have their own naive read-merge-write and wiped the whole config on a bad
+// read (2026-07-01 skills-registry wipe: the 37-byte {skills:{urls}} file).
+export async function patchRemoteConfig(
+  config: AppConfig,
+  mutate: (cfg: Cfg) => Cfg,
+  opts: { patchedKeys: string[] } = { patchedKeys: [] },
+): Promise<{ ok: boolean; error?: string }> {
+  let cfg: Cfg;
+  try {
+    cfg = await readRemoteConfig(config);
+  } catch (e) {
+    console.warn("[config] refusing to patch — config unreadable/incomplete:", e);
+    return { ok: false, error: `${UNPARSEABLE_CONFIG_MSG} (refusing to overwrite)` };
+  }
+  const beforeKeys = Object.keys(cfg);
+  const patched = new Set(opts.patchedKeys);
+  const next = mutate(cfg);
+  // Guard: any top-level key that existed and is NOT one we deliberately
+  // patched must survive. A vanished key means the read was bad → refuse.
+  const dropped = beforeKeys.filter((k) => !patched.has(k) && !(k in next));
+  if (dropped.length > 0) {
+    console.warn("[config] refusing to patch — would drop keys:", dropped);
+    return {
+      ok: false,
+      error: `Aborted: config patch would drop key(s) ${dropped.join(", ")} (stale/partial read).`,
+    };
+  }
+  try {
+    await writeRemoteConfigSafe(config, JSON.stringify(next, null, 2));
+    return { ok: true };
+  } catch (e) {
+    console.warn("[config] patch write failed:", e);
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }

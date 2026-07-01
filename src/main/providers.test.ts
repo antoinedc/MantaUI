@@ -279,3 +279,31 @@ describe("droppedProviders (non-destructive write guard)", () => {
     expect(droppedProviders(before, after, [])).toEqual([]);
   });
 });
+
+// Regression (2026-07-01 pt.2): the skills-registry writer in index.ts had its
+// OWN naive read-merge-write (`cat || echo '{}'` + naive //-strip). On a bad
+// read it wrote `{skills:{urls:[]}}` — the 37-byte file that wiped the provider
+// + plugin the providers path had just correctly saved. patchRemoteConfig's
+// key-drop guard uses the SAME shape as droppedProviders but over top-level
+// keys: a skills patch must never drop provider/plugin/$schema/model.
+describe("patchRemoteConfig top-level key-drop guard (skills wipe regression)", () => {
+  // Mirror the guard's pure core: keys present before, not in patchedKeys, gone after.
+  const keyGuard = (before: object, after: object, patchedKeys: string[]) =>
+    Object.keys(before).filter((k) => !patchedKeys.includes(k) && !(k in after));
+
+  it("flags provider/plugin vanishing when only skills was meant to change", () => {
+    const before = { $schema: "…", provider: {}, plugin: [], skills: {} };
+    const after = { skills: { urls: [] } }; // bad read → everything else gone
+    expect(keyGuard(before, after, ["skills"])).toEqual(["$schema", "provider", "plugin"]);
+  });
+
+  it("passes a clean skills patch that keeps every other key", () => {
+    const before = { $schema: "…", provider: { voska: {} }, plugin: ["p"], skills: { urls: [] } };
+    const after = { $schema: "…", provider: { voska: {} }, plugin: ["p"], skills: { urls: ["u"] } };
+    expect(keyGuard(before, after, ["skills"])).toEqual([]);
+  });
+
+  it("passes writing skills into a genuinely empty config", () => {
+    expect(keyGuard({}, { skills: { urls: [] } }, ["skills"])).toEqual([]);
+  });
+});

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig } from "./config.js";
 import {
   killAll,
+  exitControlMaster,
+  evictBuiMasterOrphans,
   killPty,
   listPathCompletions,
   listWorktrees,
@@ -31,7 +33,6 @@ import {
   listOutbox,
   pullToDownloads,
   writePty,
-  runSshOnce,
 } from "./pty.js";
 import { info as transportInfo, invalidate as invalidateTransport } from "./transport.js";
 import { probe as setupProbe, bootstrap as setupBootstrap } from "./setup.js";
@@ -79,13 +80,13 @@ import {
   getProviderEndpoints as opencodeGetProviders,
   setProviders as opencodeSetProviders,
   discoverModels as opencodeDiscoverModels,
+  patchRemoteConfig,
 } from "./providers.js";
 import {
   classifyStreamHealth,
   isSubstantiveFrame,
   STREAM_STALL_MS,
 } from "./forwardHeal.js";
-import { buildRemoteConfigWriteCmd } from "./remoteConfigWrite.js";
 import {
   startDesktopPresence,
   stopDesktopPresence,
@@ -817,6 +818,50 @@ function createWindow(): void {
     return { action: "deny" };
   });
 
+  // A renderer reload (Cmd-R) re-runs the renderer bootstrap — which re-opens
+  // SSE subscriptions and re-issues forward-dependent fetches — but the main
+  // process keeps the PRE-reload bus/forwards alive. Without an explicit
+  // teardown the two generations stack: extra SSE streams + forwarded sockets
+  // accumulate per reload until something saturates (the user's "Cmd-R keeps
+  // breaking everything"). `did-start-navigation` with isSameDocument=false and
+  // the same URL is a reload — tear the bus down here so the post-reload
+  // did-finish... re-runs against a clean slate. (startOpencodeBus already
+  // stop-then-starts; this also covers the standalone tunnels via stopOpencodeBus
+  // → teardownEventTunnel.)
+  mainWindow.webContents.on(
+    "did-start-navigation",
+    (...navArgs: unknown[]) => {
+      // Electron 31 passes the deprecated positional signature
+      // (event, url, isInPlace, isMainFrame, ...). Newer Electron passes a
+      // single `details` object ({ isSameDocument, isMainFrame }). Read both so
+      // an upgrade doesn't silently break this.
+      const first = navArgs[0] as
+        | { isSameDocument?: boolean; isMainFrame?: boolean }
+        | undefined;
+      let sameDoc: boolean;
+      let mainFrame: boolean;
+      if (first && typeof first === "object" && "isMainFrame" in first) {
+        sameDoc = !!first.isSameDocument;
+        mainFrame = !!first.isMainFrame;
+      } else {
+        sameDoc = !!navArgs[2]; // isInPlace
+        mainFrame = !!navArgs[3];
+      }
+      // A real main-frame navigation/reload (not a hash/pushState change) is
+      // about to re-bootstrap the renderer. Tear the bus down so the post-load
+      // handler restarts it on a clean slate instead of stacking a second
+      // generation of SSE streams + forwarded sockets.
+      if (!mainFrame || sameDoc) return;
+      stopOpencodeBus();
+    },
+  );
+  // Re-arm the post-load startup on EVERY load (not just the first), so a reload
+  // brings the bus/pollers back up cleanly after the teardown above.
+  mainWindow.webContents.on("did-finish-load", () => {
+    startPollerIfReady();
+    startOpencodeBus();
+  });
+
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
@@ -840,6 +885,13 @@ app.setAppUserModelId("com.betterui.app");
 
 app.whenReady().then(() => {
   config = loadConfig();
+  // Startup hygiene: kill any orphaned bui ControlMaster `[mux]` processes left
+  // by a prior run/crash before we establish our own. Without this, a racing
+  // relaunch stacks masters (each holding a pile of forwarded sockets) until the
+  // local ephemeral-port range is exhausted and no new ssh can connect. Fire and
+  // forget — it's best-effort and bounded; the first runSshOnce will (re)build a
+  // fresh master after the strays are gone.
+  void evictBuiMasterOrphans();
   // Cross-device shared-settings sync: read the live config, and when a newer
   // snapshot is pulled from the mobile server, commit it + tell the renderer.
   initSharedConfigSync({
@@ -860,10 +912,10 @@ app.whenReady().then(() => {
   initWebhookClient({ getConfig: () => config });
   registerHandlers();
   createWindow();
-  // Defer poller start until renderer is ready to receive events.
+  // ONE-TIME setup (does not need to re-run on a renderer reload). The poller +
+  // opencode bus are started by the per-load `did-finish-load` handler in
+  // createWindow() instead, so they come back cleanly after a Cmd-R teardown.
   mainWindow?.webContents.once("did-finish-load", () => {
-    startPollerIfReady();
-    startOpencodeBus();
     scheduleUploadCleanup();
     startScreenshotDetector();
     startOutboxPoller();
@@ -908,6 +960,11 @@ app.on("before-quit", () => {
   if (cleanupTimer) clearInterval(cleanupTimer);
   if (config.host) void teardownOpencodeForward(config).catch(() => {});
   killAll();
+  // Exit OUR ControlMaster instead of letting ControlPersist=10m leak it. A
+  // persisted master that a racing relaunch can't re-attach to becomes an orphan
+  // holding forwarded sockets — accumulate enough and the local ephemeral-port
+  // range exhausts. Explicit exit frees its sockets now.
+  if (config.host) void exitControlMaster(config).catch(() => {});
 });
 
 // Compose tmux state + local metadata into the Project view used by the UI.
@@ -962,51 +1019,34 @@ function registerHandlers(): void {
     ) {
       scheduleUploadCleanup();
     }
-    // Skill registry URLs → write skills.urls into remote opencode.jsonc so
-    // opencode picks them up on next startup. We read the existing file first
-    // to preserve all other settings, then patch only the skills.urls key.
+    // Skill registry URLs → patch ONLY skills.urls in remote opencode.jsonc so
+    // opencode picks them up on next startup. Routed through patchRemoteConfig,
+    // which reads via the framed/comment-aware reader (THROWS on a truncated or
+    // empty read instead of degrading to {}), backs the file up, and REFUSES to
+    // write if any other top-level key (provider, plugin, model, $schema) would
+    // vanish. The previous inline read-merge-write here used
+    // `cat … || echo '{}'` + a naive `//`-strip that ate `https://` in strings;
+    // on a bad read it wrote `{skills:{urls:[]}}` and wiped the whole config
+    // (2026-07-01: the 37-byte file that kept clobbering the voska provider).
     if ("skillRegistryUrls" in patch && next.host) {
-      try {
-        const urls = next.skillRegistryUrls ?? [];
-        // Read current remote config (may not exist yet — that's fine)
-        const readResult = await runSshOnce(
-          next,
-          `cat ~/.config/opencode/opencode.jsonc 2>/dev/null || echo '{}'`,
-        );
-        let existing: Record<string, unknown> = {};
-        try {
-          // Strip JSONC comments before parsing (simple single-line // strip)
-          const stripped = readResult.stdout.replace(/\/\/[^\n]*/g, "");
-          existing = JSON.parse(stripped);
-        } catch {
-          // Unparseable — start fresh, preserving the file's plugin entry at least
-        }
-        // Merge: patch only skills.urls; keep everything else untouched
-        const merged = {
-          ...existing,
+      const urls = next.skillRegistryUrls ?? [];
+      const res = await patchRemoteConfig(
+        next,
+        (cfg) => ({
+          ...cfg,
           skills: {
-            ...(typeof existing.skills === "object" && existing.skills !== null ? existing.skills as Record<string, unknown> : {}),
+            ...(typeof cfg.skills === "object" && cfg.skills !== null
+              ? (cfg.skills as Record<string, unknown>)
+              : {}),
             urls,
           },
-        };
-        const content = JSON.stringify(merged, null, 2);
-        // Write the JSON bytes UNCHANGED. The previous code did
-        // `printf '%s' ${JSON.stringify(content)}` — double-encoding the
-        // already-stringified JSON, which wrote literal backslash-n /
-        // escaped-quote garbage and produced an invalid opencode.jsonc that
-        // stopped opencode from starting (2026-05-18 incident). The pure,
-        // tested builder emits a single-quoted heredoc so arbitrary JSON
-        // passes through byte-for-byte. See remoteConfigWrite.ts.
-        await runSshOnce(
-          next,
-          buildRemoteConfigWriteCmd(
-            content,
-            "~/.config/opencode/opencode.jsonc",
-          ),
-        );
-      } catch (e) {
-        // Non-fatal — user can still add URLs manually
-        console.error("Failed to write skill registry URLs to remote opencode.jsonc:", e);
+        }),
+        { patchedKeys: ["skills"] },
+      );
+      if (!res.ok) {
+        // Non-fatal — user can still add URLs manually. Crucially we DID NOT
+        // overwrite the config, so no other settings were lost.
+        console.error("Failed to write skill registry URLs (config left untouched):", res.error);
       }
     }
     // Push the shareable subset to the mobile server so the other device picks
