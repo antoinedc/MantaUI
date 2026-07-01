@@ -25,7 +25,7 @@ test.describe('BUI Electron App Build Verification', () => {
     expect(existsSync(rendererHtml)).toBe(true);
 
     const content = readFileSync(rendererHtml, 'utf-8');
-    expect(content).toContain('<!DOCTYPE html>');
+    expect(content.toLowerCase()).toContain('<!doctype html>');
     expect(content).toContain('<div');
   });
 
@@ -33,7 +33,8 @@ test.describe('BUI Electron App Build Verification', () => {
     const rendererAssets = path.join(process.cwd(), 'out/renderer/assets');
     expect(existsSync(rendererAssets)).toBe(true);
 
-    const files = require('fs').readdirSync(rendererAssets);
+    const { readdirSync } = require('fs');
+    const files = readdirSync(rendererAssets);
     expect(files.length).toBeGreaterThan(0);
   });
 });
