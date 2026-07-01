@@ -6729,12 +6729,32 @@ const ToolOutput = memo(function ToolOutput({ output }: { output: string }) {
     /^---\s/.test(output) ||
     /\n---\s/.test(output) ||
     /(^|\n)@@ /.test(output);
+  // Pin-to-bottom: as a long-running task streams more output, keep the latest
+  // lines visible (newest at the bottom, oldest scroll up out of view). Only
+  // auto-scroll when the user is already at the bottom so a manual scroll-up to
+  // inspect earlier output isn't yanked back down on the next chunk.
+  const preRef = useRef<HTMLPreElement | null>(null);
+  const pinnedRef = useRef(true);
+  useLayoutEffect(() => {
+    const el = preRef.current;
+    if (el && pinnedRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [output]);
   if (looksLikeDiff) {
     return <UnifiedDiff text={output} />;
   }
   // Plain code/text output — small monospace block, scroll on overflow.
   return (
-    <pre className="text-[12px] bg-bg-soft border border-border rounded px-2 py-1 max-h-64 overflow-auto whitespace-pre">
+    <pre
+      ref={preRef}
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        pinnedRef.current =
+          el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+      }}
+      className="text-[12px] bg-bg-soft border border-border rounded px-2 py-1 max-h-64 overflow-auto whitespace-pre"
+    >
       <code>{output}</code>
     </pre>
   );
@@ -7070,33 +7090,37 @@ function BashBody({ state, verbose }: { state: ToolState; verbose: boolean }) {
   return <ConnectorOutput body={output} maxLines={verbose ? Infinity : 5} />;
 }
 
-// Shared renderer for the "⎿ output\n  more lines\n  … +N more (ctrl+o)" style.
-// Used by Bash and (any future tool wanting the same look).
+// Shared renderer for the "⎿ … +N more (ctrl+o)\n  output\n  more lines" style.
+// Used by Bash and (any future tool wanting the same look). When the body is
+// taller than maxLines we keep the LATEST lines: oldest scroll up out of view
+// behind the "+N more" notice and the newest line stays at the bottom. This
+// matches how a terminal tails a long-running command's output.
 function ConnectorOutput({ body, maxLines }: { body: string; maxLines: number }) {
   const lines = body.split("\n");
   const visibleCount = Math.min(lines.length, maxLines);
-  const visible = lines.slice(0, visibleCount);
   const hidden = lines.length - visibleCount;
+  // Take the tail (latest lines), not the head.
+  const visible = lines.slice(lines.length - visibleCount);
   return (
     <div className="text-[12px] font-mono leading-snug">
+      {hidden > 0 && (
+        <div className="flex">
+          <span className="select-none w-4 shrink-0 text-text-faint">⎿</span>
+          <span className="text-text-faint">
+            … +{hidden} earlier line{hidden === 1 ? "" : "s"} (ctrl+o to expand)
+          </span>
+        </div>
+      )}
       {visible.map((l, i) => (
         <div key={i} className="flex">
           <span className="select-none w-4 shrink-0 text-text-faint">
-            {i === 0 ? "⎿" : " "}
+            {hidden === 0 && i === 0 ? "⎿" : " "}
           </span>
           <span className="flex-1 whitespace-pre-wrap break-all text-text-muted">
             {l || " "}
           </span>
         </div>
       ))}
-      {hidden > 0 && (
-        <div className="flex">
-          <span className="select-none w-4 shrink-0"> </span>
-          <span className="text-text-faint">
-            … +{hidden} line{hidden === 1 ? "" : "s"} (ctrl+o to expand)
-          </span>
-        </div>
-      )}
     </div>
   );
 }

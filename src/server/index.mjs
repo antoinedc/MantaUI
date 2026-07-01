@@ -31,7 +31,19 @@ import {
 } from "./servePage.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
-import { createWebhookEngine, createHook, listHooks, deleteHook } from "./webhooks.mjs";
+import {
+  createWebhookEngine,
+  createHook,
+  listHooks,
+  deleteHook,
+  createRateLimiter,
+} from "./webhooks.mjs";
+import {
+  ensureAuth,
+  createAuthEngine,
+  AUTH_RL_CAPACITY,
+  AUTH_RL_REFILL_PER_SEC,
+} from "./auth.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -102,6 +114,31 @@ const webhookEngine = createWebhookEngine({
   sendPrompt: (args) => oc.sendPrompt(args),
   publish: (evt) => bus.publish(evt),
 });
+
+// Single-box auth gate (M1, job zero). Every request must carry the box_token
+// as `Authorization: Bearer <token>` except the pairing handshake (/auth/*) and
+// the public webhook delivery leg (/hook/<token>, self-authenticated). The box
+// identity ({box_id, box_token}) is generated + persisted 0600 on first run.
+//
+// Enforcement is ON by default. BUI_AUTH_DISABLED=1 is an escape hatch for an
+// existing self-hoster mid-upgrade who hasn't paired yet — it disables the gate
+// and prints a loud warning. New deployments should never set it.
+const authEnforced = process.env.BUI_AUTH_DISABLED !== "1";
+const boxAuth = await ensureAuth();
+const authEngine = createAuthEngine({ auth: boxAuth, enforce: authEnforced });
+// Rate limiter for the unauthenticated /auth/* surface (the brute-force target).
+const authRateLimit = createRateLimiter({
+  capacity: AUTH_RL_CAPACITY,
+  refillPerSec: AUTH_RL_REFILL_PER_SEC,
+});
+if (!authEnforced) {
+  console.warn(
+    "[auth] ⚠️  BUI_AUTH_DISABLED=1 — the box server is UNAUTHENTICATED. " +
+      "Anyone who can reach this port has full access. Unset it and pair a device.",
+  );
+} else {
+  console.log(`[auth] gate enabled — box_id ${boxAuth.box_id}`);
+}
 
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
 // serves HTML pages from ~/.bui-mobile/pages/<subdomain>/index.html. Caddy
@@ -397,9 +434,100 @@ const server = createServer(async (req, res) => {
   // answer CORS preflight so the mobile WebView's fetch() isn't blocked.
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Filename");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, X-Filename, Authorization",
+  );
   if (req.method === "OPTIONS") {
     res.writeHead(204).end();
+    return;
+  }
+
+  // ---------- Auth pairing handshake (UNAUTHENTICATED, rate-limited) ----------
+  // GET  /auth/pair            → {pairing_code, box_id, expiresAt}
+  //                              Mint a one-time, ~5-min code. The desktop shows
+  //                              it (and encodes box_id+code in a QR for mobile).
+  // POST /auth/claim {pairing_code} → {box_token, box_id}
+  //                              Exchange a valid code for the bearer token.
+  //                              One-time; 403 on wrong/expired/reused code.
+  // These are the ONLY pre-token surface, so they're the brute-force target and
+  // are throttled by a shared token-bucket limiter (per client IP). See auth.mjs.
+  if (path === "/auth/pair" || path === "/auth/claim") {
+    const ip =
+      (typeof req.headers["x-forwarded-for"] === "string" &&
+        req.headers["x-forwarded-for"].split(",")[0].trim()) ||
+      req.socket?.remoteAddress ||
+      "unknown";
+    if (!authRateLimit(ip)) {
+      res.writeHead(429, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "rate limited" }));
+      return;
+    }
+    try {
+      if (req.method === "GET" && path === "/auth/pair") {
+        const result = authEngine.pair();
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            pairing_code: result.pairing_code,
+            box_id: result.box_id,
+            expiresAt: result.expiresAt,
+          }),
+        );
+        return;
+      }
+      if (req.method === "POST" && path === "/auth/claim") {
+        const body = await readJsonBody(req);
+        const result = authEngine.claim({ pairing_code: body?.pairing_code });
+        if (!result.ok) {
+          res.writeHead(result.status ?? 400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ box_token: result.box_token, box_id: result.box_id }));
+        return;
+      }
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    }
+    return;
+  }
+
+  // ---------- Auth gate ----------
+  // Every route below this line requires a valid box_token, EXCEPT the public
+  // webhook delivery leg (/hook/<token>, self-authenticated via its own
+  // token+HMAC). /auth/* handled above; OPTIONS handled above. When the gate is
+  // disabled (BUI_AUTH_DISABLED=1) authorize() allows everything.
+  {
+    const gate = authEngine.authorize({
+      method: req.method,
+      path,
+      authorization: req.headers["authorization"],
+    });
+    if (!gate.ok) {
+      res.writeHead(gate.status, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: gate.error }));
+      return;
+    }
+  }
+
+  // ---------- Auth status (AUTHENTICATED) ----------
+  // GET /auth/status → {authenticated:true, box_id, enforced}
+  // Reaching here means the gate already passed, so the caller is authenticated
+  // (or the gate is disabled). Lets a paired client confirm its token still works.
+  if (req.method === "GET" && path === "/auth/status") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        authenticated: true,
+        box_id: authEngine.box_id,
+        enforced: authEngine.enforce,
+      }),
+    );
     return;
   }
 
@@ -1001,6 +1129,26 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+  // Auth gate for WS upgrades. Browsers can't set an Authorization header on a
+  // WebSocket, so the token also travels as a ?token= query param; non-browser
+  // clients may still use the header. Both /events and /pty are gated. Reject
+  // with an HTTP 401 handshake response before the upgrade completes.
+  const wsAuth = authEngine.authorize({
+    method: "GET",
+    path: url.pathname,
+    authorization:
+      req.headers["authorization"] ||
+      (url.searchParams.get("token")
+        ? `Bearer ${url.searchParams.get("token")}`
+        : ""),
+  });
+  if (!wsAuth.ok) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
   if (url.pathname === "/events") {
     // Live event stream over WS (SSE alternative for iOS standalone PWAs,
     // which can't reliably receive EventSource). Same bus + envelope.
