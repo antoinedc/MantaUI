@@ -15,6 +15,8 @@ import {
   ensureAuth,
   createPairingRegistry,
   createAuthEngine,
+  isLoopbackAddress,
+  isLocalDirectRequest,
 } from "./auth.mjs";
 
 const HEX32 = "0123456789abcdef0123456789abcdef";
@@ -320,4 +322,74 @@ test("claim rejects an expired code", () => {
   const r = eng.claim({ pairing_code });
   assert.equal(r.ok, false);
   assert.equal(r.status, 403);
+});
+
+// ----------------------------------------------------------------------------
+// isLoopbackAddress / isLocalDirectRequest — REGRESSION for the /auth/pair hole
+// (unauthenticated remote minting = box_token theft in 2 requests)
+// ----------------------------------------------------------------------------
+
+test("isLoopbackAddress accepts v4/v6 loopback forms only", () => {
+  assert.equal(isLoopbackAddress("127.0.0.1"), true);
+  assert.equal(isLoopbackAddress("127.1.2.3"), true); // whole /8
+  assert.equal(isLoopbackAddress("::1"), true);
+  assert.equal(isLoopbackAddress("::ffff:127.0.0.1"), true); // v4-mapped
+  assert.equal(isLoopbackAddress("::FFFF:127.0.0.1"), true); // case-insensitive
+  assert.equal(isLoopbackAddress("192.168.1.10"), false);
+  assert.equal(isLoopbackAddress("10.0.0.1"), false);
+  assert.equal(isLoopbackAddress("::ffff:10.0.0.1"), false);
+  assert.equal(isLoopbackAddress("1270.0.0.1"), false);
+  assert.equal(isLoopbackAddress(""), false);
+  assert.equal(isLoopbackAddress(null), false);
+  assert.equal(isLoopbackAddress(undefined), false);
+});
+
+test("isLocalDirectRequest allows a clean loopback request", () => {
+  assert.equal(
+    isLocalDirectRequest({ remoteAddress: "127.0.0.1", headers: {} }),
+    true,
+  );
+  assert.equal(
+    isLocalDirectRequest({
+      remoteAddress: "::1",
+      headers: { "user-agent": "curl/8.0", accept: "*/*" },
+    }),
+    true,
+  );
+});
+
+test("isLocalDirectRequest rejects non-loopback sockets", () => {
+  assert.equal(
+    isLocalDirectRequest({ remoteAddress: "192.168.1.50", headers: {} }),
+    false,
+  );
+  assert.equal(isLocalDirectRequest({ remoteAddress: undefined, headers: {} }), false);
+  assert.equal(isLocalDirectRequest({}), false);
+  assert.equal(isLocalDirectRequest(), false);
+});
+
+test("REGRESSION: loopback + proxy forwarding headers is NOT local (cloudflared)", () => {
+  // cloudflared runs ON the box and proxies public traffic to 127.0.0.1:8787 —
+  // the socket is loopback but the tunnel edge injects these headers, and an
+  // external attacker cannot strip them. Each one alone must flip the verdict.
+  const base = { remoteAddress: "127.0.0.1" };
+  for (const h of [
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+    "cf-connecting-ip",
+    "cf-ray",
+    "forwarded",
+  ]) {
+    assert.equal(
+      isLocalDirectRequest({ ...base, headers: { [h]: "203.0.113.7" } }),
+      false,
+      `header ${h} must mark the request non-local`,
+    );
+  }
+  // empty-string header value does not count as forwarded
+  assert.equal(
+    isLocalDirectRequest({ ...base, headers: { "x-forwarded-for": "" } }),
+    true,
+  );
 });

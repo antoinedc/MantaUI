@@ -114,6 +114,51 @@ export function isExemptPath(path) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Local-only gate for minting pairing codes
+// ---------------------------------------------------------------------------
+//
+// GET /auth/pair must be callable ONLY from the box itself (the `bui pair` CLI,
+// or a channel that terminates on the box like the desktop's SSH -L forward).
+// A bare loopback check is NOT enough: cloudflared runs on this box and proxies
+// PUBLIC traffic to 127.0.0.1:8787, so tunnel requests also arrive with a
+// loopback remoteAddress. What distinguishes them is the forwarding headers the
+// tunnel edge injects (cf-connecting-ip, x-forwarded-for, ...) — an external
+// attacker cannot strip those, and a genuine local curl never carries them.
+//
+// So "local" = loopback socket AND zero forwarding headers. Do NOT "improve"
+// this by trusting x-forwarded-for contents — spoofable on direct connections.
+
+// Loopback = 127.0.0.0/8 (v4), ::1 (v6), or the v4-mapped form ::ffff:127.x.
+export function isLoopbackAddress(addr) {
+  if (typeof addr !== "string" || !addr) return false;
+  let a = addr.toLowerCase();
+  if (a.startsWith("::ffff:")) a = a.slice("::ffff:".length);
+  if (a === "::1") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
+}
+
+// Headers that any reverse proxy / tunnel in front of us injects. Presence of
+// ANY of them means the request did not originate on this box, regardless of
+// the socket address.
+export const FORWARDING_HEADERS = [
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-real-ip",
+  "cf-connecting-ip",
+  "cf-ray",
+  "forwarded",
+];
+
+export function isLocalDirectRequest({ remoteAddress, headers } = {}) {
+  if (!isLoopbackAddress(remoteAddress)) return false;
+  const h = headers && typeof headers === "object" ? headers : {};
+  for (const name of FORWARDING_HEADERS) {
+    if (h[name] != null && h[name] !== "") return false;
+  }
+  return true;
+}
+
 // Static SPA-shell / PWA asset paths that must load WITHOUT a token, so the
 // pairing UI can render before the client holds a box_token. These carry no
 // user data — the actual data flows through the gated /api, /rpc, /events, /pty

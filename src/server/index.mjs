@@ -41,6 +41,7 @@ import {
 import {
   ensureAuth,
   createAuthEngine,
+  isLocalDirectRequest,
   AUTH_RL_CAPACITY,
   AUTH_RL_REFILL_PER_SEC,
 } from "./auth.mjs";
@@ -465,6 +466,25 @@ const server = createServer(async (req, res) => {
     }
     try {
       if (req.method === "GET" && path === "/auth/pair") {
+        // Minting a code is LOCAL-ONLY (the `bui pair` CLI / SSH forward).
+        // Remote-reachable minting would let anyone claim the box_token in two
+        // requests. Loopback alone is insufficient — cloudflared proxies public
+        // traffic from 127.0.0.1 — so also reject proxy-injected forwarding
+        // headers. See isLocalDirectRequest in auth.mjs.
+        if (
+          !isLocalDirectRequest({
+            remoteAddress: req.socket?.remoteAddress,
+            headers: req.headers,
+          })
+        ) {
+          res.writeHead(403, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "pairing codes can only be minted from the box itself (run `bui pair` locally)",
+            }),
+          );
+          return;
+        }
         const result = authEngine.pair();
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
