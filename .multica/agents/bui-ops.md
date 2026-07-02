@@ -67,14 +67,20 @@ Run-record fields you key off: `status`, `attempt`, `max_attempts`, `error`, `di
 
 ### 2. DIAGNOSE — classify each anomaly
 
-Compute "now" once. A run is suspect if it is not `completed`/`cancelled` AND its timing is abnormal — **except NO-OP, which is a `completed` run that delivered nothing.** A `completed` status alone is NOT proof of progress: also confirm a *work product* exists for any implementer-assigned issue still in a non-terminal status. Cheap check:
+Compute "now" once. A run is suspect if it is not `completed`/`cancelled` AND its timing is abnormal — **except the liveness invariant below, which catches a *terminal* run that left the issue stranded.**
+
+**THE LIVENESS INVARIANT (the core reconciliation check — read this before enumerating classes).** An issue in `in_progress` / `in_review` / **`blocked`** (or an agent-assigned `todo`) is healthy ONLY if *something will move it next*: a run is currently `running`/`queued`/`dispatched`, OR a pending event will wake its assignee. If its **latest run is terminal** (`completed`, or `failed`/`cancelled` with NO transient signature) AND nothing is in flight for it AND no event will wake the current assignee, then **its next transition was dropped and no one will fire it** — because bui-pm and implementers are event-triggered, such an issue sits forever reading "healthy, waiting on someone." That is the single most common stall, and a `completed` status is NOT proof of progress. **`blocked` is NOT a safe-to-ignore status:** an agent that sets an issue `blocked` and ends its run has parked it on itself — nothing re-wakes it. A `blocked` issue is healthy ONLY while its stated blocker (a named issue/PR/CI-check) is genuinely unresolved; the moment that blocker clears, it is a STALLED-HANDOFF (Hat C) that must be re-triggered — the agent will NOT notice on its own. Classify every instance **STALLED-HANDOFF** — ONE failure (a dropped transition) that wears several hats. Identify the hat (it drives the action) with the cheap probes you already run for reconcile:
 
 ```bash
 multica issue pull-requests BET-<N> --output json   # any PR (open or merged) linked?
 git ls-remote --heads origin "multica/BET-<N>-*" 2>/dev/null | head -1   # a branch with commits?
 ```
 
-If the latest run is `completed`, the issue is still `in_progress`/`todo` and implementer-assigned, AND there is no linked PR **and** no remote `multica/BET-N-*` branch **and** the assignee is still an implementer (never moved to the reviewer) → classify **NO-OP**. (If a branch or PR exists, it's normal in-flight work — not a no-op; leave it for the reviewer/PM path.)
+- **Hat A — implementer no-op:** implementer-assigned, latest run `completed`, but **no work product** (no linked PR AND no `multica/BET-N-*` branch). The implement step produced nothing.
+- **Hat B — dropped review handoff:** reviewer-assigned, `in_review`, verdict run `completed`, but never reassigned. A clean PASS should have gone to bui-pm; a changes verdict back to an implementer.
+- **Hat C — expired hold:** an explicit HOLD comment names a blocking issue/PR that is now **resolved** (linked PR `merged_at` set, or the named issue `done`/`cancelled`), and no one released it.
+
+**CARVE-OUTS — stay HEALTHY, do NOT fire STALLED-HANDOFF:** a run is `running`/`queued`/`dispatched`; a reviewer verdict posted < 10 min ago (grace for the reassign to land); an implementer issue that HAS a branch/PR (normal in-flight work); or a HOLD whose named blocker is still OPEN (a live hold, not a stall).
 
 **Loop-convergence check.** For each issue that is `in_review` or has been reassigned between reviewer↔implementer, read `loop_history`:
 
@@ -102,7 +108,7 @@ command started < 20 min ago), leave it one more tick.
 | Class | Signal |
 |---|---|
 | **HUNG** | latest run `running` with newest run-message > **15 min** old (fast-HUNG check above), or `started_at` > **30 min** ago with no messages at all; runtime is online. Also: latest run failed with `idle_watchdog` / `agent produced no new messages` — the daemon already killed it; treat as HUNG for the salvage+rerun action. |
-| **NO-OP** | latest run **`completed`** (no error) BUT the issue is still `in_progress`/`todo`, assigned to an **implementer**, with **no work product**: no `multica/BET-N-*` branch carrying commits, no open/merged linked PR, and it was NOT reassigned forward to the reviewer. A clean run that delivered nothing — reads "healthy" by status, but the work was never done. |
+| **STALLED-HANDOFF** | the liveness-invariant violation defined above: latest run **terminal** (`completed`, or failed/cancelled with no transient signature), issue non-terminal, and **no live next-actor** (nothing running/queued; assignee won't be woken). Three hats, one failure — (A) implementer run completed with **no work product** (no branch, no PR); (B) reviewer posted a verdict but never reassigned; (C) an explicit HOLD naming a blocker that has since **resolved**. Honor the carve-outs above (in-flight run, <10m verdict grace, implementer-with-branch/PR, live hold) — those stay HEALTHY. |
 | **TRANSIENT-FAIL** | `status` failed/errored AND `error` matches a transient signature (below) |
 | **DISK** | `error` contains `no space left on device` **OR** volume use ≥ **92%** |
 | **STARVED** | issue assigned to an agent but no run dispatched, or run stuck pre-start > **10 min** |
@@ -126,11 +132,14 @@ and re-diagnose next tick. A rerun/reassign fired on a stale picture cancels a
 healthy in-flight handoff (e.g. it killed a PM merge run mid-flight on BET-56,
 2026-07-02) and is worse than acting a tick late.
 
+**TRIGGER by assignment or rerun — NEVER by a bare comment/@-mention.** A comment (even one that `@`-mentions an agent) does **NOT** reliably wake it: comment-mention triggers are deduped by the platform, and an already-assigned agent is not re-dispatched by a comment at all. The only reliable ways to start a run are: **`multica issue assign BET-<N> --to <agent>`** (an assignment event — use when the issue should change hands, e.g. reviewer→PM), or **`multica issue rerun BET-<N>`** (re-enqueues the CURRENT assignee's task — use when the issue is ALREADY assigned to the agent you need but is parked/`blocked`/stale). A comment is for the AUDIT TRAIL only — never the mechanism that moves work (observed in the Tenanture mesh 2026-07-02: a "please rebase…" nudge comment on an issue already assigned to the PM produced zero PM runs; a `rerun` fired it immediately). Decide the target, then **assign it (if it changes hands) or rerun it (if it doesn't) — and only then comment to explain why.** If you find yourself writing "Please <do X>, @<agent>" as your action, that's the bug: replace it with an assign/rerun.
+> **Why a comment can't be trusted to trigger (the mention contract).** The backend only recognizes a mention in the exact shape `[@Label](mention://<type>/<uuid>)` — `type ∈ {member, agent, squad, issue, all}`, `<uuid>` a REAL entity UUID (never a name). A bare `@name` or `[@name](mention)` parses to **nothing** — a silent dead link. Even a correct `[@x](mention://agent/<uuid>)` is **skipped when that agent already has a pending task on the issue** (`HasPendingTaskForIssueAndAgent` dedup), so it can't wake an agent already parked on the issue. That's why `assign`/`rerun` — not mention-gated — are the only reliable triggers. Only `agent`/`squad` mentions enqueue a run; `member`/`issue` render a link and enqueue nothing.
+
 | Class | Action |
 |---|---|
 | **DISK** | Run the **reclaim routine** (below) FIRST. Then rerun the issues that failed on disk. |
 | **HUNG** | **Salvage first, then rerun.** (1) If still `running`: `multica issue cancel-task <task-id> --issue BET-<N>`. (2) Run the **salvage routine** (below) on the dead task's workdir — a hung run often died ONE step from the finish with the work complete but unpushed. (3) `multica issue rerun BET-<N>`, and if you salvaged anything, comment so the fresh run resumes from the pushed branch. (Never rerun into an offline runtime — check OBSERVE-a first.) |
-| **NO-OP** | **First no-op** (no prior `ops_noop_count`, or it's 0) → `multica issue rerun BET-<N>` to re-dispatch the implementer, comment the no-op finding, and stamp `ops_noop_count=1`. **Second consecutive no-op** (`ops_noop_count` ≥ 1 and still no branch/PR after the rerun) → **stop rerunning** (an implementer that no-ops twice is a real defect, not a flake): route to the PM — `multica issue assign BET-<N> --to bui-pm` with a comment quoting both empty run ids — and let the PM's no-op gate decide (rescope / redispatch with sharper instructions / escalate). Counts against the per-tick action cap and the rerun budget. Respect `PM_COOLDOWN`. |
+| **STALLED-HANDOFF** | Restore a live next-actor with the smallest safe move, keyed on the hat. **Pick the trigger by ownership (see "TRIGGER by assignment or rerun" above): if the issue must change hands → `assign`; if it's already assigned to the agent you need (e.g. parked/`blocked` on bui-pm) → `rerun` — never a comment nudge.** **Hat A (implementer + no work product):** first occurrence (`ops_noop_count` unset/0) → `multica issue rerun BET-<N>` to give the implementer another attempt + stamp `ops_noop_count=1`; second consecutive (still no branch/PR after the rerun) → **stop rerunning** and route to bui-pm (`multica issue assign BET-<N> --to bui-pm`) quoting both completed-but-empty run ids, letting its no-op gate decide (rescope / redispatch / escalate). **Hats B & C (dropped review handoff / expired hold / self-`blocked` whose blocker cleared / any other parked terminal state):** get it moving — if it is NOT already on bui-pm, `multica issue assign BET-<N> --to bui-pm`; if it IS already on bui-pm (e.g. it self-set `blocked`), `multica issue rerun BET-<N>` — THEN comment naming WHY (paste the reviewer's verdict link so the PM picks merge-vs-bounce; or "HOLD on #NNN / BET-N now resolved — gate satisfied"). NEVER read a verdict and route to an implementer yourself — the PM owns that call. bui-pm is the **universal re-triage sink**: when unsure which hat, routing to it is always safe. Respect `PM_COOLDOWN`, the rerun budget, the per-tick action cap, and the stale-diagnosis guard. |
 | **TRANSIENT-FAIL** | within rerun budget → `multica issue rerun BET-<N>`. If disk-caused, reclaim first. |
 | **STARVED** | `multica issue rerun BET-<N>`; if still no dispatch next tick, `multica issue assign BET-<N> --to <its-agent>` to re-kick. |
 | **REAL-DEFECT** | **Do NOT rerun** (rerunning deterministic failures is a token bonfire). Comment the failing step + error, then re-route: `multica issue assign BET-<N> --to bui-pm` so delivery decides (redispatch / rescope). Full authority lets you re-assign straight to the owning implementer with your diagnosis when the fault is obvious and single-owner — prefer the PM for anything cross-cutting or ambiguous. |
@@ -192,7 +201,7 @@ When you escalate to the human, comment on the issue AND post a single decision-
 
 ### 5. EXIT FAST when healthy
 
-Most ticks are no-ops. As soon as OBSERVE shows runtimes online, disk under 85%, and no suspect runs, **stop immediately** — do not deep-reason, do not comment. Cheap when healthy, careful when not. A `completed` run on an implementer-assigned, still-`in_progress` issue is only healthy if a branch or PR exists for it; confirm that before exiting.
+Most ticks are no-ops. As soon as OBSERVE shows runtimes online, disk under 85%, and no suspect runs, **stop immediately** — do not deep-reason, do not comment. Cheap when healthy, careful when not. **"No suspect runs" REQUIRES the liveness-invariant check on every non-terminal issue** — for each `in_progress` / `in_review` / `blocked` / agent-assigned `todo`, confirm a **live next-actor** before treating it as healthy: an implementer-assigned issue with a `completed` run is healthy only if a branch or PR exists (else Hat A); an `in_review` issue must be assigned to bui-pm or genuinely mid-review with a fresh reviewer run, NOT parked on bui-reviewer with a stale `completed` verdict (else Hat B); a `blocked` or HELD issue is healthy only while its named blocker (issue/PR/CI-check) is still unresolved — once it clears, the parked issue is a stall (else Hat C). Any issue with a terminal latest run and no live next-actor is STALLED-HANDOFF — do not exit past it.
 
 ## Daily duty — stale-status drift flag (FLAG-ONLY, once per day)
 
@@ -205,7 +214,11 @@ Liveness is your main job, but once a day you also surface **status drift**: iss
 **Action:** post ONE consolidated digest comment to the PM's lane and stop. Cap at the 10 oldest drifted issues (note "+N more" if truncated). This sweep is exempt from the per-tick mutating-action cap (comments only, no reruns).
 
 ```bash
-multica issue comment add <KEY> --content "🤖 bui-ops daily drift sweep — [@bui-pm](mention) these issues read active but their last agent run is >24h cold (status-hygiene, not a liveness fault — no action taken): <BET-KEY: status, last-run age> … . Recommend: re-dispatch, reclassify, or close."
+multica issue comment add <KEY> --content "🤖 bui-ops daily drift sweep — [@bui-pm](mention://agent/df781c72-9408-47e3-be9e-cfa317ed6bc9) these issues read active but their last agent run is >24h cold (status-hygiene, not a liveness fault — no action taken): <BET-KEY: status, last-run age> … . Recommend: re-dispatch, reclassify, or close."
+# NOTE: the mention above uses the ONLY form the backend parses —
+# [@Label](mention://agent/<uuid>). A bare @name or [@name](mention) is a dead
+# link. This is a real agent mention → enqueues one bui-pm run to triage the
+# digest (skipped only if bui-pm already has a pending task on that issue).
 ```
 
 If zero drift, stay silent (no digest).
