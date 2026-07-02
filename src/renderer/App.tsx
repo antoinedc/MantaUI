@@ -70,7 +70,24 @@ export function App() {
   activeChatRef.current = activeChatSessionId;
 
   useEffect(() => {
-    refresh();
+    // Bootstrap. In HTTP mode (paired to a bui-server) refresh() can reject
+    // with AuthRequiredError when the box answers 401 — a revoked/rotated
+    // box_token mid-session. Route that to the pairing screen (onboarding step
+    // 1) instead of letting the app sit dead with no sessions and no
+    // explanation. relaunchOnboarding() forces the full-screen flow open even
+    // for an otherwise-"http" config; a successful re-claim persists a fresh
+    // token and finishOnboarding() re-runs the bootstrap. SSH mode never throws
+    // this (no Bearer gate), so this is a no-op there.
+    refresh().catch((e: unknown) => {
+      const isAuth =
+        (e as { name?: string })?.name === "AuthRequiredError" ||
+        (e as { status?: number })?.status === 401;
+      if (isAuth) {
+        void useStore.getState().relaunchOnboarding();
+      }
+      // Non-auth bootstrap failures (SSH unreachable, etc.) keep the existing
+      // behavior — the app renders its empty/needs-config state.
+    });
   }, [refresh]);
 
   useEffect(() => {

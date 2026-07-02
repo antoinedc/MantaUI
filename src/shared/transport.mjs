@@ -49,6 +49,53 @@ export function resolveTransportMode(config) {
   return "onboarding";
 }
 
+// ---------------------------------------------------------------------------
+// Desktop transport SELECTION (BET-49-T6 / BET-58)
+// ---------------------------------------------------------------------------
+//
+// On the DESKTOP (Electron), the preload bridge always sets window.api — that's
+// the legacy SSH+tmux transport. But once a user pairs to a bui-server, their
+// config resolves to "http" and the desktop should talk to that server over the
+// SAME httpApi client the mobile/web build uses (Bearer token, /rpc, /events
+// WS), NOT the SSH bridge. So the presence of window.api is NOT sufficient to
+// pick the transport — the resolved config mode decides.
+//
+// `selectDesktopTransport` is the single, pure decision:
+//   • "http"    — config is paired (valid boxToken) → install httpApi as
+//                 window.api, keeping the real preload for Electron-local
+//                 affordances (clipboard, reveal-in-folder, OS notifications).
+//   • "preload" — everything else (SSH mode, onboarding, skipped) → keep the
+//                 preload bridge exactly as before. SSH users are unaffected.
+//
+// `hasPreload` is passed in (the caller checks `!!window.api`) so this stays
+// framework-free and unit-testable. When there is NO preload at all (the mobile
+// /web build), the caller never reaches here — main.tsx branches on that first.
+export function selectDesktopTransport(config, hasPreload) {
+  // No preload → not a desktop context; the mobile/web entry path owns this.
+  // Defensive: report "http" so a caller that mis-invokes us still gets the
+  // server-backed client rather than a non-existent preload.
+  if (!hasPreload) return "http";
+  return resolveTransportMode(config) === "http" ? "http" : "preload";
+}
+
+// The two localStorage keys the httpApi client reads for its base URL + token
+// (see src/renderer/api/httpApi.ts serverBase()/clientToken(): "bui_server" and
+// "bui_token"). On the desktop the paired credentials live in config.json
+// (serverUrl + boxToken), not localStorage — so before installing httpApi we
+// SEED these keys from config. Pure: returns the {key,value} pairs to write so
+// the seeding is testable without a DOM. Returns null when the config isn't a
+// valid paired http config (missing serverUrl or an invalid boxToken), so the
+// caller can refuse to install a broken client.
+export function desktopHttpClientSeed(config) {
+  const cfg = config && typeof config === "object" ? config : {};
+  const serverUrl = typeof cfg.serverUrl === "string" ? cfg.serverUrl.trim() : "";
+  if (serverUrl === "" || !isValidBoxToken(cfg.boxToken)) return null;
+  return {
+    bui_server: serverUrl.replace(/\/+$/, ""),
+    bui_token: cfg.boxToken,
+  };
+}
+
 // Validate + normalize the JSON body of a successful POST /auth/claim response.
 // The server returns { ok, box_token, box_id } (see src/server/auth.mjs claim()).
 // We only trust it once BOTH tokens match the 32-hex shape — a wrong shape means

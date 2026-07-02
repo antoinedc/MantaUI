@@ -3,6 +3,8 @@ import {
   isValidBoxToken,
   resolveTransportMode,
   parseClaimResponse,
+  selectDesktopTransport,
+  desktopHttpClientSeed,
 } from "./transport.mjs";
 
 // A well-formed 32-lowercase-hex token (128 bits).
@@ -148,5 +150,57 @@ describe("parseClaimResponse", () => {
     expect(parseClaimResponse("string")).toEqual({ ok: false, error: "invalid_response" });
     expect(parseClaimResponse(42)).toEqual({ ok: false, error: "invalid_response" });
     expect(parseClaimResponse([])).toEqual({ ok: false, error: "invalid_response" });
+  });
+});
+
+describe("selectDesktopTransport (BET-58)", () => {
+  const paired = { boxToken: HEX32, serverUrl: "http://box:8787" };
+  const sshCfg = { host: "1.2.3.4", user: "dev" };
+
+  it("returns 'http' for a paired config when preload is present", () => {
+    expect(selectDesktopTransport(paired, true)).toBe("http");
+  });
+  it("returns 'preload' for an SSH-mode config (host set, no token)", () => {
+    expect(selectDesktopTransport(sshCfg, true)).toBe("preload");
+  });
+  it("returns 'preload' for an onboarding config (nothing set)", () => {
+    expect(selectDesktopTransport({}, true)).toBe("preload");
+  });
+  it("returns 'preload' for a skipped-onboarding config", () => {
+    expect(selectDesktopTransport({ onboardingSkipped: true }, true)).toBe("preload");
+  });
+  it("SSH users are unaffected even if a stale serverUrl lingers without a token", () => {
+    expect(selectDesktopTransport({ host: "1.2.3.4", serverUrl: "http://box:8787" }, true)).toBe(
+      "preload",
+    );
+  });
+  it("no preload → 'http' (mobile/web path; defensive)", () => {
+    expect(selectDesktopTransport(paired, false)).toBe("http");
+    expect(selectDesktopTransport({}, false)).toBe("http");
+  });
+});
+
+describe("desktopHttpClientSeed (BET-58)", () => {
+  it("returns the localStorage seed for a valid paired config", () => {
+    expect(
+      desktopHttpClientSeed({ boxToken: HEX32, serverUrl: "http://box:8787" }),
+    ).toEqual({ bui_server: "http://box:8787", bui_token: HEX32 });
+  });
+  it("trims trailing slashes from serverUrl", () => {
+    expect(
+      desktopHttpClientSeed({ boxToken: HEX32, serverUrl: "http://box:8787///" }),
+    ).toEqual({ bui_server: "http://box:8787", bui_token: HEX32 });
+  });
+  it("returns null when boxToken is missing/invalid", () => {
+    expect(desktopHttpClientSeed({ serverUrl: "http://box:8787" })).toBeNull();
+    expect(desktopHttpClientSeed({ serverUrl: "http://box:8787", boxToken: "nope" })).toBeNull();
+  });
+  it("returns null when serverUrl is empty/missing", () => {
+    expect(desktopHttpClientSeed({ boxToken: HEX32 })).toBeNull();
+    expect(desktopHttpClientSeed({ boxToken: HEX32, serverUrl: "   " })).toBeNull();
+  });
+  it("returns null for non-object input", () => {
+    expect(desktopHttpClientSeed(null)).toBeNull();
+    expect(desktopHttpClientSeed("x" as never)).toBeNull();
   });
 });
