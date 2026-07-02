@@ -58,7 +58,7 @@ const api = {
 
   // tmux operations on the remote
   tmuxList: (): Promise<Project[]> => ipcRenderer.invoke(IPC.tmuxList),
-  tmuxNewSession: (input: { name: string; cwd: string; windowName?: string; chatMode?: boolean }): Promise<Project[]> =>
+  tmuxNewSession: (input: { name: string; cwd: string; windowName?: string; chatMode?: boolean; createDir?: boolean }): Promise<Project[]> =>
     ipcRenderer.invoke(IPC.tmuxNewSession, input),
   tmuxNewWindow: (input: { sessionName: string; windowName: string; cwd?: string; chatMode?: boolean }): Promise<Project[]> =>
     ipcRenderer.invoke(IPC.tmuxNewWindow, input),

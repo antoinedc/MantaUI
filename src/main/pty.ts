@@ -969,6 +969,17 @@ export async function remoteDirExists(config: AppConfig, cwd: string): Promise<b
   }
 }
 
+// mkdir -p the remote directory, expanding a leading ~ against the remote
+// $HOME (pathQuote handles that — a single-quoted tilde would create a literal
+// "~" dir). Used by the onboarding first-project step so a missing
+// ~/projects/<name> is created before tmux new-session -c runs (tmux silently
+// falls back to $HOME for a non-existent -c dir, so the mkdir must happen
+// first). Rejects on mkdir failure (e.g. permission denied) so the caller can
+// render an inline error.
+export async function mkdirRemote(config: AppConfig, cwd: string): Promise<void> {
+  await runSshOnce(config, `mkdir -p ${pathQuote(cwd)}`);
+}
+
 // ===== Long-lived attached PTYs (1 per project) =====
 
 const ptys = new Map<string, IPty>();
