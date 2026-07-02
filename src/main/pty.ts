@@ -2,7 +2,7 @@ import { spawn as ptySpawnNative, type IPty } from "node-pty";
 import { spawn as cpSpawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join as pathJoin, basename as pathBasename } from "node:path";
-import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, unlinkSync, existsSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { shell } from "electron";
 import { BrowserWindow } from "electron";
@@ -102,6 +102,68 @@ export function runSshOnce(
   });
 }
 
+// Gracefully shut down OUR ControlMaster for this config. `ControlPersist=10m`
+// means the master outlives the app by 10 minutes — so without this, every
+// quit/relaunch (and the Cmd-R reload churn) can leave the prior master alive.
+// A racing relaunch that can't attach to the dying socket spawns a *fresh*
+// master, and these stack: we observed 7 orphaned `bui-cm [mux]` processes
+// holding 1,160 forwarded sockets, exhausting the local ephemeral-port range
+// until no new ssh could connect. Exiting explicitly on quit closes the master's
+// listeners and frees its sockets immediately. Best-effort + bounded.
+export function exitControlMaster(config: AppConfig): Promise<void> {
+  return new Promise((resolve) => {
+    if (!config.host) return resolve();
+    const args = [...sshBaseArgs(config), "-O", "exit", sshTarget(config)];
+    const proc = cpSpawn("ssh", args, { stdio: "ignore" });
+    const timer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+      resolve();
+    }, 5_000);
+    proc.on("exit", () => { clearTimeout(timer); resolve(); });
+    proc.on("error", () => { clearTimeout(timer); resolve(); });
+  });
+}
+
+// Startup hygiene: kill any stray bui ControlMaster `[mux]` processes left over
+// from a prior run/crash/reload before we establish our own. Each orphan holds
+// a pile of forwarded sockets (its `-L` forwards' CLOSE_WAITs); left to
+// accumulate they exhaust local ephemeral ports. We match ONLY our own
+// `bui-cm-` masters (the socket-path marker `ssh` rewrites into the mux
+// process's command line) so we never touch a user's unrelated ssh. Also
+// removes stale `bui-cm-*` sockets. Best-effort, synchronous-ish, bounded.
+export function evictBuiMasterOrphans(): Promise<void> {
+  return new Promise((resolve) => {
+    // `pgrep -f` finds the `ssh: /tmp/bui-cm-<hash> [mux]` master processes.
+    const pgrep = cpSpawn("pgrep", ["-f", "bui-cm-.*\\[mux\\]"], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let out = "";
+    pgrep.stdout.on("data", (b) => (out += b.toString()));
+    const done = () => {
+      const pids = out.split("\n").map((s) => s.trim()).filter(Boolean);
+      for (const pid of pids) {
+        const n = Number(pid);
+        if (Number.isInteger(n) && n > 0) {
+          try { process.kill(n, "SIGKILL"); } catch { /* already gone */ }
+        }
+      }
+      // Remove any leftover bui control sockets so `ControlMaster=auto` builds a
+      // fresh master instead of racing a dead socket.
+      try {
+        for (const f of readdirSync(CONTROL_DIR)) {
+          if (f.startsWith("bui-cm-")) {
+            try { unlinkSync(pathJoin(CONTROL_DIR, f)); } catch { /* ignore */ }
+          }
+        }
+      } catch { /* CONTROL_DIR unreadable — ignore */ }
+      resolve();
+    };
+    const timer = setTimeout(done, 3_000);
+    pgrep.on("exit", () => { clearTimeout(timer); done(); });
+    pgrep.on("error", () => { clearTimeout(timer); done(); });
+  });
+}
+
 export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
@@ -193,6 +255,37 @@ export function invalidateTmuxListCache(): void {
   tmuxListCache = null;
 }
 
+// Classify the result of `ssh -O check` on our ControlMaster. Healthy iff ssh
+// exited 0 (OpenSSH prints "Master running (pid=N)" and returns 0 for a live
+// master; any dead/absent socket exits non-zero). A null exit code means ssh
+// itself couldn't be spawned — treat as not-healthy so we fall through to
+// eviction rather than trusting a phantom master. Pure + exported so the
+// empty-result recovery branch in tmuxListUncached is unit-tested without
+// spawning ssh. See isMissingSessionError for the same test seam.
+export function isHealthyControlMaster(result: {
+  code: number | null;
+  stderr: string;
+}): boolean {
+  return result.code === 0;
+}
+
+// Run `ssh -O check` against our ControlMaster, returning the raw exit code +
+// stderr (never throws). Mirrors opencode.ts:runSshControl but scoped to pty's
+// own socket so we don't cross-import. Used only by the empty-result recovery
+// path below.
+function checkControlMaster(
+  config: AppConfig,
+): Promise<{ code: number | null; stderr: string }> {
+  return new Promise((resolve) => {
+    const args = [...sshBaseArgs(config), "-O", "check", sshTarget(config)];
+    const p = cpSpawn("ssh", args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    p.stderr.on("data", (b) => (stderr += b.toString()));
+    p.on("error", () => resolve({ code: null, stderr }));
+    p.on("exit", (code) => resolve({ code, stderr }));
+  });
+}
+
 export async function tmuxList(config: AppConfig): Promise<TmuxSession[]> {
   if (!config.host) return [];
   if (tmuxListCache && Date.now() - tmuxListCache.at < TMUX_LIST_TTL_MS) {
@@ -223,11 +316,24 @@ async function tmuxListUncached(config: AppConfig): Promise<TmuxSession[]> {
 
   // Don't swallow stderr — if tmux is broken on the remote we want to know.
   // `|| [ $? -eq 1 ]` lets the "no server" exit code (1) pass without erroring.
-  const sessRes = await runSshOnce(
-    config,
-    `tmux list-sessions -F '${sessFmt}' || [ $? -eq 1 ]`,
-  );
-  if (!sessRes.stdout.trim()) return [];
+  const listSessions = () =>
+    runSshOnce(config, `tmux list-sessions -F '${sessFmt}' || [ $? -eq 1 ]`);
+  let sessRes = await listSessions();
+  if (!sessRes.stdout.trim()) {
+    // Empty stdout is ambiguous: either the box genuinely has no sessions, or a
+    // connectivity blip left a stale ControlMaster that new commands attach to
+    // but read zero bytes back from — the "empty sidebar with a healthy box"
+    // failure. `evictBuiMasterOrphans` only runs at app startup, so a mid-
+    // session drop silently blanks the sidebar until relaunch. Disambiguate:
+    // probe the master with `-O check`; if it's dead, evict the orphan(s) +
+    // socket and retry once so `ControlMaster=auto` rebuilds a fresh master.
+    const health = await checkControlMaster(config);
+    if (!isHealthyControlMaster(health)) {
+      await evictBuiMasterOrphans();
+      sessRes = await listSessions();
+    }
+    if (!sessRes.stdout.trim()) return [];
+  }
 
   const [winRes, paneRes] = await Promise.all([
     runSshOnce(config, `tmux list-windows -a -F '${winFmt}' || [ $? -eq 1 ]`),

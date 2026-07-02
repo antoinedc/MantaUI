@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isMissingSessionError } from "./pty.js";
+import { isMissingSessionError, isHealthyControlMaster } from "./pty.js";
 
 // `tmuxNewWindow` auto-heals by recreating the project's tmux session when
 // the user's previous session was destroyed (server restart, manual kill,
@@ -59,5 +59,44 @@ describe("isMissingSessionError", () => {
     expect(isMissingSessionError("can't find session: x", "x")).toBe(false);
     expect(isMissingSessionError(null, "x")).toBe(false);
     expect(isMissingSessionError(undefined, "x")).toBe(false);
+  });
+});
+
+// When tmuxList's list-sessions returns EMPTY stdout, that's ambiguous: either
+// the box genuinely has no sessions, OR a connectivity blip left a stale
+// ControlMaster that new commands attach to but get zero bytes back from (the
+// "empty sidebar with a healthy box" failure). We disambiguate with
+// `ssh -O check`; this classifier decides whether that check says the master
+// is alive. False → evict + retry once before trusting the empty result.
+
+describe("isHealthyControlMaster", () => {
+  it("reports healthy when -O check exits 0 (master running)", () => {
+    // OpenSSH prints "Master running (pid=NNNN)" to stderr on a live master.
+    expect(
+      isHealthyControlMaster({ code: 0, stderr: "Master running (pid=48268)" }),
+    ).toBe(true);
+  });
+
+  it("reports unhealthy when the control socket is gone", () => {
+    // We deleted the socket (or connectivity dropped it): non-zero exit.
+    expect(
+      isHealthyControlMaster({
+        code: 255,
+        stderr:
+          "Control socket connect(/tmp/bui-cm-abc): No such file or directory",
+      }),
+    ).toBe(false);
+  });
+
+  it("reports unhealthy when no master exists yet", () => {
+    expect(
+      isHealthyControlMaster({ code: 255, stderr: "No ControlPath specified" }),
+    ).toBe(false);
+  });
+
+  it("reports unhealthy when ssh could not be spawned (null exit code)", () => {
+    // cpSpawn 'error' path resolves with code null — treat as not-healthy so
+    // we fall through to eviction rather than trusting a phantom master.
+    expect(isHealthyControlMaster({ code: null, stderr: "" })).toBe(false);
   });
 });
