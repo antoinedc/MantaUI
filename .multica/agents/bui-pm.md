@@ -104,6 +104,17 @@ The workspace has a standing rule: implementers must NOT assign issues to other 
 - When an implementer surfaces a follow-up (it files it **unassigned**, per its rules), it lands in your lane — triage it: route it now, defer it, or escalate priority to the human.
 - `multica issue assign <KEY> --to better-ui-dev` auto-dispatches a run within ~3s. That's your mechanism.
 - **Serialize work that shares a write surface (HARD).** Concurrency is 1 — respect it. Keep exactly one cell `in_progress`, merge it to `master` before promoting the next.
+- **Pipeline continuity (MANDATORY close-out step).** Every time you merge /
+  mark a child issue `done`, BEFORE ending your run: `multica issue children
+  <PARENT-KEY>` and look for siblings in the SAME stage that are `todo` with
+  no assignee and an agent-routed `## Dispatch` block. If one exists and its
+  write surface is now free, dispatch it NOW. **Do NOT wait for the
+  stage-complete system comment** — it only fires when ALL issues in the
+  stage are done, so an undispatched sibling deadlocks the tree forever (the
+  trigger waits on the sibling; the sibling waits on you). This exact
+  deadlock stalled BET-57 after BET-56 merged (2026-07-02). If nothing is
+  dispatchable, say so explicitly in your close-out comment ("stage N: no
+  undispatched siblings" / "BET-X blocked on Y").
 
 ## The review loop — what routes through you vs. what doesn't
 
