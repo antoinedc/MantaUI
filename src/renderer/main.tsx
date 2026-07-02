@@ -51,19 +51,25 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
     const seed = desktopHttpClientSeed(config);
     if (seed) {
       // Seed the two localStorage keys httpApi reads for its base URL + token.
+      let seeded = true;
       try {
         localStorage.setItem("bui_server", seed.bui_server);
         localStorage.setItem("bui_token", seed.bui_token);
       } catch (e) {
         // localStorage unavailable is fatal for http mode (httpApi can't read
         // its base) — fall back to preload rather than a 401-looping client.
+        // Do NOT return here: chooseDesktopTransport must fall through so boot()
+        // still renders. We simply leave window.api as the preload bridge by
+        // skipping the httpApi swap below.
         console.warn("[bui] localStorage seed failed; using preload transport:", e);
-        return;
+        seeded = false;
       }
-      // Preserve the real preload for Electron-local affordances, then install
-      // httpApi as the primary window.api.
-      (window as unknown as { __buiPreload: Api }).__buiPreload = realPreload;
-      (window as unknown as { api: Api }).api = httpApi as unknown as Api;
+      if (seeded) {
+        // Preserve the real preload for Electron-local affordances, then install
+        // httpApi as the primary window.api.
+        (window as unknown as { __buiPreload: Api }).__buiPreload = realPreload;
+        (window as unknown as { api: Api }).api = httpApi as unknown as Api;
+      }
     }
     // If seed is null the config claimed http mode but lacks a usable
     // serverUrl/token — leave the preload bridge in place (safer than a broken
