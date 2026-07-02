@@ -10,6 +10,7 @@ import {
   openaiKeyError,
   type ProviderDraft,
 } from "./providersStepLogic";
+import { PlusIcon, StepFooter } from "./onboardingUi";
 
 // ProvidersStep.tsx — Step 2 (Providers) of the desktop onboarding shell
 // (BET-49-T4). Mounts into Onboarding.tsx's step-2 slot.
@@ -107,24 +108,7 @@ export function ProvidersStep({
       />
 
       {/* Footer: Back (left) + Continue (right). Continue gated on ≥1 connected. */}
-      <div className="flex items-center justify-between gap-3 mt-8">
-        <button
-          onClick={onBack}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-md text-sm text-text-muted hover:text-text transition-colors"
-        >
-          <ArrowLeft />
-          Back
-        </button>
-        <button
-          onClick={onContinue}
-          disabled={!canContinue}
-          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md text-sm font-medium text-bg transition-opacity disabled:opacity-40"
-          style={{ background: ACCENT }}
-        >
-          Continue
-          <ArrowRight />
-        </button>
-      </div>
+      <StepFooter onBack={onBack} onContinue={onContinue} continueDisabled={!canContinue} />
     </div>
   );
 }
@@ -265,6 +249,34 @@ function ProviderCard({
   );
 }
 
+// Shared write path for both add-provider forms: upsert via the existing
+// setProviders code path, then restart opencode so /provider re-auths and the
+// card flips to connected (+ the new models reach Step 3). Returns an error
+// string to surface, or null on success (after which it calls onDone). Keeping
+// this single orchestration means OpenAiForm/CustomForm differ only in
+// validation + payload — no duplicated try/catch/restart plumbing.
+async function saveProviderAndRestart(
+  provider: { id: string; name: string; baseURL: string; apiKey: string; enabledModels: string[] },
+  labels: { saveFailed: string; restartFailedPrefix: string },
+  onDone: () => Promise<void>,
+): Promise<string | null> {
+  try {
+    const res = await window.api.opencodeSetProviders({ upsert: [provider] });
+    if (!res.ok) return res.error ?? labels.saveFailed;
+    // Restart failure is non-fatal to the config write, but surface it (the
+    // card just won't flip until a manual restart).
+    try {
+      await window.api.opencodeRestart();
+    } catch (e) {
+      return `${labels.restartFailedPrefix}: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    await onDone();
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
 // OpenAI: only a key is needed (baseURL pinned to OPENAI_BASE_URL). Writes via
 // the existing setProviders path, then restarts opencode so the key auths and
 // the card flips to connected.
@@ -281,39 +293,13 @@ function OpenAiForm({ onDone }: { onDone: () => Promise<void> }) {
     }
     setBusy(true);
     setError(null);
-    try {
-      const res = await window.api.opencodeSetProviders({
-        upsert: [
-          {
-            id: OPENAI_ID,
-            name: "OpenAI",
-            baseURL: OPENAI_BASE_URL,
-            apiKey: apiKey.trim(),
-            enabledModels: [],
-          },
-        ],
-      });
-      if (!res.ok) {
-        setError(res.error ?? "Couldn't save the OpenAI key.");
-        return;
-      }
-      // Restart so /provider re-auths and OpenAI shows as connected + its
-      // models reach Step 3. Failure here is non-fatal to the config write,
-      // but surface it (the card just won't flip until a manual restart).
-      try {
-        await window.api.opencodeRestart();
-      } catch (e) {
-        setError(
-          `Key saved, but restarting opencode failed: ${e instanceof Error ? e.message : String(e)}`,
-        );
-        return;
-      }
-      await onDone();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+    const err = await saveProviderAndRestart(
+      { id: OPENAI_ID, name: "OpenAI", baseURL: OPENAI_BASE_URL, apiKey: apiKey.trim(), enabledModels: [] },
+      { saveFailed: "Couldn't save the OpenAI key.", restartFailedPrefix: "Key saved, but restarting opencode failed" },
+      onDone,
+    );
+    if (err) setError(err);
+    setBusy(false);
   };
 
   return (
@@ -354,36 +340,19 @@ function CustomForm({ onDone }: { onDone: () => Promise<void> }) {
     }
     setBusy(true);
     setError(null);
-    try {
-      const res = await window.api.opencodeSetProviders({
-        upsert: [
-          {
-            id: draft.id.trim(),
-            name: draft.name.trim() || draft.id.trim(),
-            baseURL: draft.baseURL.trim(),
-            apiKey: draft.apiKey,
-            enabledModels: [],
-          },
-        ],
-      });
-      if (!res.ok) {
-        setError(res.error ?? "Couldn't save the provider.");
-        return;
-      }
-      try {
-        await window.api.opencodeRestart();
-      } catch (e) {
-        setError(
-          `Provider saved, but restarting opencode failed: ${e instanceof Error ? e.message : String(e)}`,
-        );
-        return;
-      }
-      await onDone();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+    const err = await saveProviderAndRestart(
+      {
+        id: draft.id.trim(),
+        name: draft.name.trim() || draft.id.trim(),
+        baseURL: draft.baseURL.trim(),
+        apiKey: draft.apiKey,
+        enabledModels: [],
+      },
+      { saveFailed: "Couldn't save the provider.", restartFailedPrefix: "Provider saved, but restarting opencode failed" },
+      onDone,
+    );
+    if (err) setError(err);
+    setBusy(false);
   };
 
   return (
@@ -500,28 +469,4 @@ function FormSubmit({
   );
 }
 
-function PlusIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
-      <line x1="12" y1="5" x2="12" y2="19" />
-      <line x1="5" y1="12" x2="19" y2="12" />
-    </svg>
-  );
-}
 
-function ArrowRight() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
-      <path d="M5 12h14" />
-      <path d="m12 5 7 7-7 7" />
-    </svg>
-  );
-}
-
-function ArrowLeft() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
-      <path d="m15 18-6-6 6-6" />
-    </svg>
-  );
-}

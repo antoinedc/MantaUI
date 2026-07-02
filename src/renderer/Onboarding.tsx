@@ -12,6 +12,7 @@ import { useStore } from "./store";
 import { PairStep } from "./PairStep";
 import { ProvidersStep } from "./ProvidersStep";
 import { ModelStep } from "./ModelStep";
+import { ArrowRight, CheckIcon, StepFooter } from "./onboardingUi";
 
 // Onboarding.tsx — full-screen M6.2 onboarding shell (BET-49-T3).
 //
@@ -43,55 +44,6 @@ import { ModelStep } from "./ModelStep";
 //            normal shell WITHOUT an app restart.
 
 const ACCENT = "#7c9cff"; // matches the app's Tailwind `accent` token (see tailwind.config)
-
-function CheckIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-}
-
-function ArrowRight() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="w-4 h-4"
-    >
-      <path d="M5 12h14" />
-      <path d="m12 5 7 7-7 7" />
-    </svg>
-  );
-}
-
-function ArrowLeft() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="w-4 h-4"
-    >
-      <path d="m15 18-6-6 6-6" />
-    </svg>
-  );
-}
 
 // One progress dot + (optionally) the connector leading into it.
 function ProgressRail({ current }: { current: OnboardingPosition }) {
@@ -283,25 +235,14 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             1–3 (PairStep / ProvidersStep / ModelStep each render their own
             footer). Only Step 4 uses this generic footer, until BET-49-T5. */}
         {!isSuccess && pos !== 1 && pos !== 2 && pos !== 3 && (
-          <div className="flex items-center justify-between gap-3 mt-8">
-            {/* pos is always 4 here (steps 1–3 render their own footers, success
-                is excluded), so canGoBack is always true — Back is the left slot. */}
-            <button
-              onClick={goBack}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-md text-sm text-text-muted hover:text-text transition-colors"
-            >
-              <ArrowLeft />
-              Back
-            </button>
-            <button
-              onClick={goNext}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md text-sm font-medium text-bg"
-              style={{ background: ACCENT }}
-            >
-              {pos === LAST_STEP ? "Create project" : "Continue"}
-              <ArrowRight />
-            </button>
-          </div>
+          // pos is always 4 here (steps 1–3 render their own footers, success
+          // is excluded), so Back is always available — the shared StepFooter's
+          // Back-left / primary-right layout matches the per-step footers.
+          <StepFooter
+            onBack={goBack}
+            onContinue={goNext}
+            continueLabel={pos === LAST_STEP ? "Create project" : "Continue"}
+          />
         )}
       </div>
     </div>
