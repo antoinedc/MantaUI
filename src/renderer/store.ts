@@ -146,6 +146,21 @@ type State = {
   setAgentFileToast: (t: AgentFileReady | null) => void;
 };
 
+// Session ids whose pending question/permission state has already been replayed.
+// replayChatAttention re-runs whenever the chat-session set changes (a new
+// window appears), but it must only query the DELTA — querying the full set
+// every time fanned out /question + /permission per session and, with 100+
+// sessions, flooded the SSH forward into CLOSE_WAIT saturation (the side channel
+// wedged; sessions stopped loading). Bounding each run to never-seen sessions
+// keeps the fan-out proportional to what actually changed.
+const replayedSessionIds = new Set<string>();
+
+// Test-only: clear the replay-dedup set so each case starts fresh (the set is
+// module state, like useStore itself, and must be reset between tests).
+export function __resetReplayedSessionIds(): void {
+  replayedSessionIds.clear();
+}
+
 export const useStore = create<State>((set, get) => ({
   loaded: false,
   host: "",
@@ -443,11 +458,17 @@ export const useStore = create<State>((set, get) => ({
     const sessionIds = new Set<string>();
     for (const p of projects) {
       for (const w of p.windows) {
-        if (w.opencodeSessionId) sessionIds.add(w.opencodeSessionId);
+        // Only query sessions we have NOT already replayed — repeated calls
+        // (one per chat-session-set change) must cost only the delta, never a
+        // full re-spray across every session. See replayedSessionIds above.
+        if (w.opencodeSessionId && !replayedSessionIds.has(w.opencodeSessionId)) {
+          sessionIds.add(w.opencodeSessionId);
+        }
       }
     }
     if (sessionIds.size === 0) return;
     if (!window.api.opencodeQuestions && !window.api.opencodePermissions) return;
+    for (const sid of sessionIds) replayedSessionIds.add(sid);
     await Promise.all(
       [...sessionIds].map(async (sid) => {
         try {

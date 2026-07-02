@@ -69,7 +69,15 @@ export function App() {
     .join(",");
   useEffect(() => {
     if (!chatSessionKey) return;
-    void useStore.getState().replayChatAttention();
+    // Debounce: at startup the projects tree fills in over several mutations,
+    // each bumping chatSessionKey. Coalesce them into a single replay so we
+    // don't fan out /question + /permission across the (now-delta-scoped) set
+    // multiple times in a burst. replayChatAttention itself only queries
+    // never-seen sessions, so this is purely to smooth the startup storm.
+    const t = setTimeout(() => {
+      void useStore.getState().replayChatAttention();
+    }, 500);
+    return () => clearTimeout(t);
   }, [chatSessionKey]);
 
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel

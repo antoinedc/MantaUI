@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { resolveSessionOwner, useStore } from "./store";
+import { resolveSessionOwner, useStore, __resetReplayedSessionIds } from "./store";
 import type { Project } from "../shared/types";
 
 function proj(over: Partial<Project> & { tmuxSession: string }): Project {
@@ -363,6 +363,7 @@ describe("replayChatAttention", () => {
   let permissionCalls: string[];
 
   beforeEach(() => {
+    __resetReplayedSessionIds();
     questionsBySid = {};
     permissionsBySid = {};
     questionCalls = [];
@@ -446,6 +447,19 @@ describe("replayChatAttention", () => {
     await useStore.getState().replayChatAttention();
     expect(questionCalls.sort()).toEqual(["ses_p", "ses_q"]);
     expect(permissionCalls.sort()).toEqual(["ses_p", "ses_q"]);
+  });
+
+  it("only queries each session once across repeated calls (delta-scoped)", async () => {
+    // The fix for the SSH-forward CLOSE_WAIT flood: a second replay (e.g. when
+    // the chat-session set changes) must NOT re-spray /question + /permission
+    // across already-seen sessions.
+    await useStore.getState().replayChatAttention();
+    expect(questionCalls.sort()).toEqual(["ses_p", "ses_q"]);
+    questionCalls.length = 0;
+    permissionCalls.length = 0;
+    await useStore.getState().replayChatAttention();
+    expect(questionCalls).toEqual([]);
+    expect(permissionCalls).toEqual([]);
   });
 
   it("is resilient to a per-session fetch rejection", async () => {
