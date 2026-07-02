@@ -390,6 +390,16 @@ export const IPC = {
   voiceTranscribe: "voice:transcribe",
   voiceClassifyCommand: "voice:classify-command",
 
+  // ---- onboarding pairing (BET-49) ----
+  // Exchange a 6-digit pairing code for the box's { boxToken, boxId } via
+  // POST <serverUrl>/auth/claim, and on success persist { serverUrl, boxId,
+  // boxToken } to config (which flips transport mode to "http"). Distinct from
+  // the mobile client's own claim (renderer/api/httpApi submitPairingCode →
+  // localStorage): desktop main owns the fetch so it can write config.json.
+  // Input: { serverUrl, code }. Result: the classified ClaimOutcome
+  // (src/shared/claim.mjs) — never throws for a normal auth failure.
+  authClaim: "auth:claim",
+
   // ---- setup wizard ----
   // One-shot diagnostic over SSH: returns the status of every remote
   // prerequisite bui depends on (ssh reachable, tmux installed, opencode
@@ -514,6 +524,19 @@ export type AgentFileReady = {
   autoPulled: boolean;
   // Saved local absolute path — only set when autoPulled is true.
   localPath?: string;
+};
+
+// ----- Onboarding pairing (BET-49) -----
+
+// Input for the desktop auth:claim channel. `serverUrl` is the base URL of the
+// bui-server to pair with (e.g. "http://box.example:8787"); `code` is the
+// 6-digit pairing code minted on the box (`bui pair`). On success main persists
+// { serverUrl, boxId, boxToken } to config. The typed OUTCOME lives in
+// src/shared/claim.mjs (ClaimOutcome) — imported by preload/main directly so
+// types.ts stays dependency-free.
+export type AuthClaimInput = {
+  serverUrl: string;
+  code: string;
 };
 
 // ----- Setup probe / bootstrap -----

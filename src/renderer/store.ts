@@ -130,6 +130,11 @@ type State = {
   finishOnboarding: () => Promise<void>;
   applyProjects: (projects: Project[]) => void;
   applyConfig: (c: AppConfig) => void;
+  // Reflect a successful onboarding claim (BET-49-T2) into store state so
+  // resolveTransportMode reads "http" immediately. main already persisted these
+  // to config.json via the auth:claim handler; this just mirrors them so the
+  // onboarding shell can advance without a full config re-read.
+  applyPairing: (p: { serverUrl: string; boxId: string; boxToken: string }) => void;
   applyStatusBatch: (batch: WindowStatus[]) => void;
   // Chat-mode running state driven by opencode SSE (session.status /
   // session.idle / session.error). The PTY-pane poller can't see chat
@@ -317,6 +322,9 @@ export const useStore = create<State>((set, get) => ({
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       voiceCommandModel: c.voiceCommandModel ?? "",
     }),
+
+  applyPairing: (p) =>
+    set({ serverUrl: p.serverUrl, boxId: p.boxId, boxToken: p.boxToken }),
 
   setChatAutoAllow: async (v) => {
     set({ chatAutoAllow: v });

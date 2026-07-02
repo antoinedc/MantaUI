@@ -35,6 +35,7 @@ import {
 } from "./pty.js";
 import { info as transportInfo, invalidate as invalidateTransport } from "./transport.js";
 import { probe as setupProbe, bootstrap as setupBootstrap } from "./setup.js";
+import { claimPairing } from "./auth.js";
 import { startStatusPoller, stopStatusPoller } from "./status.js";
 import { noteSessionActivity } from "./transcriptCache.js";
 import {
@@ -125,6 +126,7 @@ import {
   IPC,
   type AppConfig,
   type AgentFileReady,
+  type AuthClaimInput,
   type Project,
   type ProjectMeta,
   type SpawnOptions,
@@ -1200,6 +1202,15 @@ function registerHandlers(): void {
   // persisted).
   ipcMain.handle(IPC.setupProbe, () => setupProbe(config));
   ipcMain.handle(IPC.setupBootstrap, () => setupBootstrap(config));
+
+  // Onboarding pairing (BET-49): POST <serverUrl>/auth/claim, and on success
+  // persist { serverUrl, boxId, boxToken } to config (via commit — which also
+  // saves config.json). Presence of the valid boxToken flips transport to
+  // "http" on the renderer's next config read. Returns a classified outcome;
+  // an auth failure is a normal { ok:false }, not a thrown IPC error.
+  ipcMain.handle(IPC.authClaim, (_e, input: AuthClaimInput) =>
+    claimPairing(input, (patch) => commit(patch)),
+  );
 
   // Voice / speech-to-text via Groq. Audio bytes are captured by the
   // renderer (MediaRecorder) and shipped here so the API key never lives

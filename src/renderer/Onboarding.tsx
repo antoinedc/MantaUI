@@ -3,7 +3,6 @@ import {
   ONBOARDING_STEPS,
   STEP_LABELS,
   LAST_STEP,
-  canGoBack,
   nextPosition,
   prevPosition,
   resolveInitialStep,
@@ -11,6 +10,7 @@ import {
   type OnboardingStep,
 } from "./onboardingUtils";
 import { useStore } from "./store";
+import { PairStep } from "./PairStep";
 
 // Onboarding.tsx — full-screen M6.2 onboarding shell (BET-49-T3).
 //
@@ -20,13 +20,18 @@ import { useStore } from "./store";
 // escape hatch, and the terminal success screen.
 //
 // Does NOT own the per-step bodies:
-//   - Step 1 (Pair)          → BET-49-T2
+//   - Step 1 (Pair)          → BET-49-T2 (PairStep.tsx — now mounted below)
 //   - Steps 2–3 (Providers/Model) → BET-49-T4
 //   - Step 4 (First project) → BET-49-T5
-// Those land as their own components mounted into the `renderStepBody` slots
-// below; until then each slot shows a labelled placeholder so the shell,
-// navigation, gating, resume, and skip are all reviewable/testable on their
-// own. The step model + resume math live in onboardingUtils.ts (pure, tested).
+// Those land as their own components mounted into the step-body slots below;
+// steps 2–4 still show a labelled placeholder until their tasks land. The step
+// model + resume math live in onboardingUtils.ts (pure, tested).
+//
+// Step 1 is special: PairStep owns its OWN footer (Skip setup + Connect), per
+// docs/onboarding/mockup.html, because "Connect" must run the pairing claim and
+// only advance on success — the shell's generic goNext footer can't express
+// that. So the shell hides its footer on step 1 and lets PairStep drive
+// advancement (onPaired → goNext) and skipping (onSkip → skip).
 //
 // Props:
 //   onDone — called when onboarding completes (success screen "Open bui") OR is
@@ -162,16 +167,11 @@ function StepPlaceholder({
   );
 }
 
-function stepBody(step: OnboardingStep) {
+// Placeholder bodies for steps 2–4 (their own tasks). Step 1 (Pair) is rendered
+// by PairStep in the component below — it needs the shell's goNext/skip
+// callbacks, which module-level stepBody can't see.
+function stepBody(step: Exclude<OnboardingStep, 1>) {
   switch (step) {
-    case 1:
-      return (
-        <StepPlaceholder
-          title="Connect to your server"
-          subtitle="Enter the 6-digit pairing code shown on your VPS terminal to establish a secure connection."
-          note="Pairing (Step 1) is delivered by BET-49-T2 and mounts here."
-        />
-      );
     case 2:
       return (
         <StepPlaceholder
@@ -274,38 +274,36 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                   <ArrowRight />
                 </button>
               </div>
+            ) : pos === 1 ? (
+              // Step 1 (Pair) owns its own footer (Skip setup + Connect), so it
+              // gets goNext/skip directly and the shell footer is suppressed
+              // below. A successful claim advances; skip drops to the app.
+              <PairStep onPaired={goNext} onSkip={skip} />
             ) : (
               stepBody(pos)
             )}
           </div>
         </div>
 
-        {/* Footer nav (hidden on the success screen — it has its own button). */}
-        {!isSuccess && (
+        {/* Footer nav. Hidden on the success screen (own button) AND on step 1
+            (PairStep renders its own Skip setup + Connect footer). */}
+        {!isSuccess && pos !== 1 && (
           <div className="flex items-center justify-between gap-3 mt-8">
-            {canGoBack(pos) ? (
-              <button
-                onClick={goBack}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-md text-sm text-text-muted hover:text-text transition-colors"
-              >
-                <ArrowLeft />
-                Back
-              </button>
-            ) : (
-              // Step 1: the back slot holds "Skip setup" instead of Back.
-              <button
-                onClick={skip}
-                className="px-3.5 py-2.5 rounded-md text-sm text-text-muted hover:text-text transition-colors"
-              >
-                Skip setup
-              </button>
-            )}
+            {/* pos is always 2–4 here (step 1 renders its own footer, success is
+                excluded), so canGoBack is always true — Back is the left slot. */}
+            <button
+              onClick={goBack}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-md text-sm text-text-muted hover:text-text transition-colors"
+            >
+              <ArrowLeft />
+              Back
+            </button>
             <button
               onClick={goNext}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md text-sm font-medium text-bg"
               style={{ background: ACCENT }}
             >
-              {pos === LAST_STEP ? "Create project" : pos === 1 ? "Connect" : "Continue"}
+              {pos === LAST_STEP ? "Create project" : "Continue"}
               <ArrowRight />
             </button>
           </div>

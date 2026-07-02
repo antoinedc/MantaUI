@@ -14,102 +14,25 @@
 //   • pairingReducer                   — the form state machine (idle →
 //                                        submitting → error, and back)
 //
-// The token-shape validation + success-body parsing is delegated to the shared
-// parseClaimResponse (src/shared/transport.mjs) — the single source of truth
-// the desktop onboarding (BET-49) also uses — so a malformed box_token can
-// never be persisted from either entry point.
+// The input contract + HTTP-outcome classification now live in the shared,
+// process-boundary-safe src/shared/claim.mjs (so the desktop main process can
+// classify the same way without importing renderer code). This module
+// re-exports them for the mobile client's existing call sites + tests, and adds
+// the mobile-only form state machine (pairingReducer) on top.
 
-import { parseClaimResponse } from "../../shared/transport.mjs";
+export {
+  normalizeCode,
+  isSubmittableCode,
+  classifyClaimResult,
+  networkFailure,
+} from "../../shared/claim.mjs";
+import { isSubmittableCode, normalizeCode } from "../../shared/claim.mjs";
+import type { ClaimFailureKind, ClaimOutcome } from "../../shared/claim.mjs";
 
-// A pairing code is exactly 6 decimal digits (mirrors the server's
-// isValidPairingCode in src/server/auth.mjs — kept in sync so the client
-// rejects an obviously-wrong code before spending a round-trip + a rate-limit
-// token on it).
-const PAIRING_CODE_RE = /^[0-9]{6}$/;
-
-/**
- * Normalize raw <input> text into a candidate pairing code: strip every
- * non-digit (so spaces / dashes a user types or a paste carries are dropped)
- * and clamp to the first 6 digits. Pure — safe to call on every keystroke.
- */
-export function normalizeCode(raw: string): string {
-  return String(raw ?? "").replace(/\D+/g, "").slice(0, 6);
-}
-
-/** True when `code` is exactly 6 digits — i.e. worth POSTing to /auth/claim. */
-export function isSubmittableCode(code: string): boolean {
-  return PAIRING_CODE_RE.test(code);
-}
-
-// ---------------------------------------------------------------------------
-// Claim-result classification
-// ---------------------------------------------------------------------------
-
-/** Why a claim attempt failed, mapped to a stable UI category. */
-export type ClaimFailureKind =
-  | "wrong_code" // 400/403 — invalid / expired / already-used code
-  | "rate_limited" // 429 — too many attempts
-  | "invalid_response" // 200 but body wasn't a valid { box_token, box_id }
-  | "network" // fetch rejected / server unreachable
-  | "server_error"; // 5xx or any other unexpected status
-
-export type ClaimResult =
-  | { ok: true; boxToken: string; boxId: string }
-  | { ok: false; kind: ClaimFailureKind; message: string };
-
-// User-facing copy for each failure category. Kept short — rendered inline
-// under the code input.
-const FAILURE_MESSAGE: Record<ClaimFailureKind, string> = {
-  wrong_code: "That code didn't work. Check it and try again.",
-  rate_limited: "Too many attempts. Wait a moment and try again.",
-  invalid_response: "Unexpected response from the server. Try again.",
-  network: "Couldn't reach the server. Check your connection.",
-  server_error: "The server had a problem. Try again.",
-};
-
-function fail(kind: ClaimFailureKind): ClaimResult {
-  return { ok: false, kind, message: FAILURE_MESSAGE[kind] };
-}
-
-/**
- * Classify a POST /auth/claim outcome into a typed ClaimResult. Pure: the
- * caller performs the fetch and hands the parsed pieces here.
- *
- * Server contract (src/server/auth.mjs claim() + index.mjs):
- *   200 { box_token, box_id } — success (validated via parseClaimResponse)
- *   400 { error }             — malformed pairing code (shape rejected server-side)
- *   403 { error }             — wrong / expired / already-used code
- *   429 { error }             — rate limited (too many attempts)
- *   5xx                       — server error
- *
- * 400 and 403 collapse to `wrong_code`: the server deliberately returns 403 for
- * every guess (no partial-progress leak), and a 400 here means our own
- * client-side 6-digit guard was bypassed — either way the actionable message
- * for the user is "that code didn't work."
- *
- * @param status  HTTP status code (0 or negative may be used by a caller to
- *                signal a network-level failure; prefer classifyNetworkError).
- * @param body    Parsed JSON body, or null when the body was absent/unparsable.
- */
-export function classifyClaimResult(status: number, body: unknown): ClaimResult {
-  if (status === 200) {
-    const parsed = parseClaimResponse(body);
-    if (parsed.ok) return { ok: true, boxToken: parsed.boxToken, boxId: parsed.boxId };
-    return fail("invalid_response");
-  }
-  if (status === 429) return fail("rate_limited");
-  if (status === 400 || status === 403) return fail("wrong_code");
-  if (status >= 500) return fail("server_error");
-  // Any other status (401/404/…) is an unexpected server state, not a wrong
-  // code — surface it as a generic server error rather than blaming the user's
-  // input.
-  return fail("server_error");
-}
-
-/** Result for a fetch that never produced an HTTP response (offline, DNS, …). */
-export function networkFailure(): ClaimResult {
-  return fail("network");
-}
+// Historical alias: the mobile client + tests refer to the classified outcome
+// as `ClaimResult`. `ClaimOutcome` is the shared name; keep both in sync.
+export type { ClaimFailureKind };
+export type ClaimResult = ClaimOutcome;
 
 // ---------------------------------------------------------------------------
 // Pairing form state machine
