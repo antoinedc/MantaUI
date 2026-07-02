@@ -23,13 +23,26 @@ export function initSecretsClient(deps: { getConfig: () => AppConfig }): void {
 
 // One JSON request to the box's /api/secrets over the forward. Rejects on any
 // failure so the IPC caller can surface an error to the renderer.
+//
+// AUTH: like schedule.ts, the M1 auth gate (src/server/auth.mjs) gates /api/*,
+// so we must send `Authorization: Bearer <box_token>`. The token is the
+// boxToken persisted in config by the pairing claim (src/main/auth.ts); absent
+// (never paired) → header-less request → server 401 → error toast, which is the
+// correct signal to pair the box first.
 function requestSecrets<T>(
   method: "GET" | "POST" | "DELETE",
   search: string,
   body?: unknown,
+  boxToken?: string,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : JSON.stringify(body);
+    const headers: Record<string, string> = {};
+    if (payload) {
+      headers["content-type"] = "application/json";
+      headers["content-length"] = String(Buffer.byteLength(payload));
+    }
+    if (boxToken) headers["authorization"] = `Bearer ${boxToken}`;
     const req = request(
       {
         host: "127.0.0.1",
@@ -37,9 +50,7 @@ function requestSecrets<T>(
         path: `/api/secrets${search}`,
         method,
         timeout: 4000,
-        headers: payload
-          ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }
-          : undefined,
+        headers,
       },
       (res) => {
         let raw = "";
@@ -76,12 +87,12 @@ function requestSecrets<T>(
   });
 }
 
-async function withForward<T>(fn: () => Promise<T>): Promise<T> {
+async function withForward<T>(fn: (cfg: AppConfig) => Promise<T>): Promise<T> {
   const cfg = getConfig?.();
   if (!cfg || !cfg.host) throw new Error("secrets server unreachable");
   await ensureForward(cfg).catch(() => {});
   await ensurePresenceForward(cfg);
-  return fn();
+  return fn(cfg);
 }
 
 export async function listSecrets(sessionId?: string, all?: boolean): Promise<SecretMeta[]> {
@@ -89,8 +100,8 @@ export async function listSecrets(sessionId?: string, all?: boolean): Promise<Se
   if (sessionId) params.set("sessionID", sessionId);
   if (all) params.set("all", "1");
   const search = params.toString() ? `?${params.toString()}` : "";
-  const result = await withForward(() =>
-    requestSecrets<{ secrets: SecretMeta[] }>("GET", search),
+  const result = await withForward((cfg) =>
+    requestSecrets<{ secrets: SecretMeta[] }>("GET", search, undefined, cfg.boxToken),
   );
   return Array.isArray(result.secrets) ? result.secrets : [];
 }
@@ -100,8 +111,8 @@ export async function setSecret(
 ): Promise<{ ok: boolean; meta?: SecretMeta; error?: string }> {
   // The server returns { meta } with 200 on success, or { error } with 400 (→
   // requestSecrets rejects). So a resolved value always means success.
-  return withForward(() =>
-    requestSecrets<{ meta?: SecretMeta }>("POST", "", input).then((r) => ({
+  return withForward((cfg) =>
+    requestSecrets<{ meta?: SecretMeta }>("POST", "", input, cfg.boxToken).then((r) => ({
       ok: true as const,
       meta: r.meta,
     })),
@@ -109,7 +120,12 @@ export async function setSecret(
 }
 
 export async function deleteSecret(id: string): Promise<{ deleted: boolean }> {
-  return withForward(() =>
-    requestSecrets<{ deleted: boolean }>("DELETE", `?id=${encodeURIComponent(id)}`),
+  return withForward((cfg) =>
+    requestSecrets<{ deleted: boolean }>(
+      "DELETE",
+      `?id=${encodeURIComponent(id)}`,
+      undefined,
+      cfg.boxToken,
+    ),
   );
 }

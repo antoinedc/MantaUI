@@ -25,8 +25,23 @@ export function initScheduleClient(deps: { getConfig: () => AppConfig }): void {
 // failure (forward down, server down, non-2xx) so the IPC caller can surface
 // an error to the renderer (unlike shared-config sync, schedule management is
 // user-initiated and the user should know it didn't work).
-function requestSchedule<T>(method: "GET" | "DELETE", search: string): Promise<T> {
+//
+// AUTH: since the M1 auth gate (src/server/auth.mjs) the box's /api/* routes
+// require `Authorization: Bearer <box_token>`. Even over the trusted SSH -L
+// 18787 forward (which terminates on the box as a local-direct request), the
+// gate exempts only /auth/pair + /auth/claim — /api/schedule is gated. We send
+// the boxToken persisted in config by the pairing claim (src/main/auth.ts). If
+// it's absent (never paired), the request goes out header-less and the server
+// answers 401 — surfaced to the user as the same "manage from desktop failed"
+// error, which is correct: you must pair the box before you can manage it.
+function requestSchedule<T>(
+  method: "GET" | "DELETE",
+  search: string,
+  boxToken?: string,
+): Promise<T> {
   return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = {};
+    if (boxToken) headers["authorization"] = `Bearer ${boxToken}`;
     const req = request(
       {
         host: "127.0.0.1",
@@ -34,6 +49,7 @@ function requestSchedule<T>(method: "GET" | "DELETE", search: string): Promise<T
         path: `/api/schedule${search}`,
         method,
         timeout: 4000,
+        headers,
       },
       (res) => {
         let raw = "";
@@ -61,27 +77,32 @@ function requestSchedule<T>(method: "GET" | "DELETE", search: string): Promise<T
   });
 }
 
-// Bring the SSH ControlMaster + -L 18787 forward up, then run fn. Mirrors
-// sharedConfigSync.withForward, but RETHROWS so the IPC handler can report
-// failure to the renderer.
-async function withForward<T>(fn: () => Promise<T>): Promise<T> {
+// Bring the SSH ControlMaster + -L 18787 forward up, then run fn with the
+// current config. Mirrors sharedConfigSync.withForward, but RETHROWS so the IPC
+// handler can report failure to the renderer. Passes the resolved config into
+// fn so callers can read the boxToken for the Bearer header.
+async function withForward<T>(fn: (cfg: AppConfig) => Promise<T>): Promise<T> {
   const cfg = getConfig?.();
   if (!cfg || !cfg.host) throw new Error("schedule server unreachable");
   await ensureForward(cfg).catch(() => {});
   await ensurePresenceForward(cfg);
-  return fn();
+  return fn(cfg);
 }
 
 export async function listSchedules(sessionId?: string): Promise<ScheduledJob[]> {
   const search = sessionId ? `?sessionID=${encodeURIComponent(sessionId)}` : "";
-  const result = await withForward(() =>
-    requestSchedule<{ jobs: ScheduledJob[] }>("GET", search),
+  const result = await withForward((cfg) =>
+    requestSchedule<{ jobs: ScheduledJob[] }>("GET", search, cfg.boxToken),
   );
   return Array.isArray(result.jobs) ? result.jobs : [];
 }
 
 export async function deleteSchedule(id: string): Promise<{ deleted: boolean }> {
-  return withForward(() =>
-    requestSchedule<{ deleted: boolean }>("DELETE", `?id=${encodeURIComponent(id)}`),
+  return withForward((cfg) =>
+    requestSchedule<{ deleted: boolean }>(
+      "DELETE",
+      `?id=${encodeURIComponent(id)}`,
+      cfg.boxToken,
+    ),
   );
 }
