@@ -7,10 +7,11 @@ import {
   prevPosition,
   resolveInitialStep,
   type OnboardingPosition,
-  type OnboardingStep,
 } from "./onboardingUtils";
 import { useStore } from "./store";
 import { PairStep } from "./PairStep";
+import { ProvidersStep } from "./ProvidersStep";
+import { ModelStep } from "./ModelStep";
 
 // Onboarding.tsx — full-screen M6.2 onboarding shell (BET-49-T3).
 //
@@ -20,18 +21,22 @@ import { PairStep } from "./PairStep";
 // escape hatch, and the terminal success screen.
 //
 // Does NOT own the per-step bodies:
-//   - Step 1 (Pair)          → BET-49-T2 (PairStep.tsx — now mounted below)
-//   - Steps 2–3 (Providers/Model) → BET-49-T4
-//   - Step 4 (First project) → BET-49-T5
-// Those land as their own components mounted into the step-body slots below;
-// steps 2–4 still show a labelled placeholder until their tasks land. The step
-// model + resume math live in onboardingUtils.ts (pure, tested).
+//   - Step 1 (Pair)          → BET-49-T2 (PairStep.tsx — mounted below)
+//   - Steps 2–3 (Providers/Model) → BET-49-T4 (ProvidersStep/ModelStep — mounted below)
+//   - Step 4 (First project) → BET-49-T5 (still a labelled placeholder)
+// Those land as their own components mounted into the step-body slots below.
+// The step model + resume math live in onboardingUtils.ts (pure, tested).
 //
-// Step 1 is special: PairStep owns its OWN footer (Skip setup + Connect), per
-// docs/onboarding/mockup.html, because "Connect" must run the pairing claim and
-// only advance on success — the shell's generic goNext footer can't express
-// that. So the shell hides its footer on step 1 and lets PairStep drive
-// advancement (onPaired → goNext) and skipping (onSkip → skip).
+// Steps 1–3 own their OWN footers (per docs/onboarding/mockup.html), because
+// each has a gate the shell's generic goNext footer can't express:
+//   - Step 1 (Pair): "Connect" must run the pairing claim and only advance on
+//     success; the back slot is "Skip setup", not "Back".
+//   - Step 2 (Providers): "Continue" is gated on ≥1 connected provider.
+//   - Step 3 (Model): "Continue" is gated on a selection AND persists it before
+//     advancing.
+// So the shell hides its footer for steps 1–3 and lets each component drive
+// advancement (goNext) and back navigation (goBack)/skip. Only step 4 uses the
+// shell's generic Back + Continue footer (until BET-49-T5 replaces it).
 //
 // Props:
 //   onDone — called when onboarding completes (success screen "Open bui") OR is
@@ -146,7 +151,8 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
   );
 }
 
-// Placeholder body for a not-yet-implemented step. Removed as T2/T4/T5 land.
+// Placeholder body for a not-yet-implemented step (only step 4 now). Removed as
+// T5 lands.
 function StepPlaceholder({
   title,
   subtitle,
@@ -167,36 +173,17 @@ function StepPlaceholder({
   );
 }
 
-// Placeholder bodies for steps 2–4 (their own tasks). Step 1 (Pair) is rendered
-// by PairStep in the component below — it needs the shell's goNext/skip
-// callbacks, which module-level stepBody can't see.
-function stepBody(step: Exclude<OnboardingStep, 1>) {
-  switch (step) {
-    case 2:
-      return (
-        <StepPlaceholder
-          title="Choose your providers"
-          subtitle="Select the AI providers you want to use. You can add more later."
-          note="Provider selection (Step 2) is delivered by BET-49-T4 and mounts here."
-        />
-      );
-    case 3:
-      return (
-        <StepPlaceholder
-          title="Pick your default model"
-          subtitle="This model will power your new chat sessions. You can switch anytime."
-          note="Model picker (Step 3) is delivered by BET-49-T4 and mounts here."
-        />
-      );
-    case 4:
-      return (
-        <StepPlaceholder
-          title="Create your first project"
-          subtitle="Start a new project to begin chatting with your AI."
-          note="First-project creation (Step 4) is delivered by BET-49-T5 and mounts here."
-        />
-      );
-  }
+// Placeholder body for step 4 (its own task, BET-49-T5). Steps 1–3 are rendered
+// by their own components in the render switch below — they need the shell's
+// goNext/goBack/skip callbacks, which a module-level function can't see.
+function step4Body() {
+  return (
+    <StepPlaceholder
+      title="Create your first project"
+      subtitle="Start a new project to begin chatting with your AI."
+      note="First-project creation (Step 4) is delivered by BET-49-T5 and mounts here."
+    />
+  );
 }
 
 export function Onboarding({ onDone }: { onDone: () => void }) {
@@ -279,18 +266,27 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               // gets goNext/skip directly and the shell footer is suppressed
               // below. A successful claim advances; skip drops to the app.
               <PairStep onPaired={goNext} onSkip={skip} />
+            ) : pos === 2 ? (
+              // Step 2 (Providers) owns its own footer (Back + Continue gated on
+              // ≥1 connected provider). Shell footer suppressed below.
+              <ProvidersStep onNext={goNext} onBack={goBack} />
+            ) : pos === 3 ? (
+              // Step 3 (Model) owns its own footer (Back + Continue gated on a
+              // selection, persists defaultModel before advancing).
+              <ModelStep onNext={goNext} onBack={goBack} />
             ) : (
-              stepBody(pos)
+              step4Body()
             )}
           </div>
         </div>
 
-        {/* Footer nav. Hidden on the success screen (own button) AND on step 1
-            (PairStep renders its own Skip setup + Connect footer). */}
-        {!isSuccess && pos !== 1 && (
+        {/* Footer nav. Hidden on the success screen (own button) AND on steps
+            1–3 (each renders its own footer with its own gate). Only step 4 uses
+            the shell's generic Back + Continue footer. */}
+        {!isSuccess && pos === LAST_STEP && (
           <div className="flex items-center justify-between gap-3 mt-8">
-            {/* pos is always 2–4 here (step 1 renders its own footer, success is
-                excluded), so canGoBack is always true — Back is the left slot. */}
+            {/* Only step 4 reaches here (steps 1–3 render their own footers,
+                success is excluded), so Back is always the left slot. */}
             <button
               onClick={goBack}
               className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-md text-sm text-text-muted hover:text-text transition-colors"
@@ -303,7 +299,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md text-sm font-medium text-bg"
               style={{ background: ACCENT }}
             >
-              {pos === LAST_STEP ? "Create project" : "Continue"}
+              Create project
               <ArrowRight />
             </button>
           </div>
