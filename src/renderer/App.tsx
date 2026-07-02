@@ -3,7 +3,9 @@ import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
 import { Settings } from "./Settings";
+import { Onboarding } from "./Onboarding";
 import { useStore, flatSessions } from "./store";
+import { resolveTransportMode } from "../shared/transport.mjs";
 
 export function App() {
   const {
@@ -16,7 +18,18 @@ export function App() {
     setActive,
     refresh,
     applyStatusBatch,
+    onboardingForced,
+    finishOnboarding,
+    configSnapshot,
   } = useStore();
+
+  // Entry gating: a fresh config (no host, no boxToken, not skipped) resolves
+  // to "onboarding" → show the full-screen flow instead of the normal shell.
+  // "Run setup again" (Settings) sets onboardingForced to re-show it even for
+  // an already-paired/host config. SSH-mode configs (host set) NEVER onboard.
+  // Gate on `loaded` so we never flash onboarding before config arrives.
+  const showOnboarding =
+    loaded && (onboardingForced || resolveTransportMode(configSnapshot()) === "onboarding");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const sidebarRef = useRef<SidebarHandle>(null);
 
@@ -247,9 +260,13 @@ export function App() {
     };
   }, []);
 
+  // Auto-open Settings for a legacy SSH config that's missing its host — but
+  // NOT while onboarding is showing (the flow owns the screen) and NOT for a
+  // paired HTTP-mode config (boxToken set, host intentionally empty).
   useEffect(() => {
-    if (loaded && !host) setSettingsOpen(true);
-  }, [loaded, host]);
+    if (loaded && !host && !showOnboarding && resolveTransportMode(configSnapshot()) === "ssh")
+      setSettingsOpen(true);
+  }, [loaded, host, showOnboarding, configSnapshot]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -380,6 +397,13 @@ export function App() {
     if (user && activeCwdRaw === `/home/${user}`) return "~";
     return activeCwdRaw;
   })();
+
+  // Full-screen onboarding replaces the entire shell (no sidebar/header/footer).
+  // finishOnboarding clears the force flag + re-reads config → normal shell,
+  // no app restart.
+  if (showOnboarding) {
+    return <Onboarding onDone={() => void finishOnboarding()} />;
+  }
 
   return (
     <div className="h-full w-full flex bg-bg text-text">

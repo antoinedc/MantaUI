@@ -52,6 +52,20 @@ type State = {
   host: string;
   user?: string;
   identityFile?: string;
+  // ----- HTTP/relay transport + onboarding (M6, BET-49) -----
+  // Mirrored from AppConfig so App.tsx can resolve the transport mode
+  // (resolveTransportMode) and the onboarding shell can resume. `boxToken`
+  // presence flips transport to HTTP; `onboardingSkipped` suppresses the
+  // onboarding flow on an otherwise-empty config.
+  serverUrl: string;
+  boxId: string;
+  boxToken: string;
+  onboardingSkipped: boolean;
+  // True when the user explicitly re-launched onboarding from Settings
+  // ("Run setup again"). This FORCES the onboarding shell even for a config
+  // that would otherwise resolve to "http"/"ssh" mode (e.g. an already-paired
+  // box). Cleared when the flow completes or is skipped. Not persisted.
+  onboardingForced: boolean;
   transportPreference: "auto" | "mosh" | "ssh";
   uploadCleanupHours: number;
   chatAutoAllow: boolean;
@@ -97,9 +111,23 @@ type State = {
   agentFileToast: AgentFileReady | null;
   // ----- derived selectors -----
   activeSession: () => ActiveSession | null;
+  // A minimal AppConfig-shaped snapshot of the onboarding-relevant fields,
+  // for the pure helpers in shared/transport (resolveTransportMode) and
+  // onboardingUtils (resolveInitialStep). Avoids threading the raw config
+  // object through the store just for onboarding.
+  configSnapshot: () => Partial<AppConfig>;
   // ----- mutations -----
   setActive: (projectName: string, windowIndex?: number) => void;
   refresh: () => Promise<void>;
+  // Onboarding lifecycle. `skipOnboarding` persists onboardingSkipped (so the
+  // flow doesn't re-trigger) and clears the forced flag. `relaunchOnboarding`
+  // clears onboardingSkipped and sets the forced flag so App re-renders the
+  // shell ("Run setup again" in Settings). `finishOnboarding` clears the
+  // forced flag + re-reads config so the app drops to the normal shell
+  // without a restart.
+  skipOnboarding: () => Promise<void>;
+  relaunchOnboarding: () => Promise<void>;
+  finishOnboarding: () => Promise<void>;
   applyProjects: (projects: Project[]) => void;
   applyConfig: (c: AppConfig) => void;
   applyStatusBatch: (batch: WindowStatus[]) => void;
@@ -151,6 +179,11 @@ export const useStore = create<State>((set, get) => ({
   host: "",
   user: undefined,
   identityFile: undefined,
+  serverUrl: "",
+  boxId: "",
+  boxToken: "",
+  onboardingSkipped: false,
+  onboardingForced: false,
   transportPreference: "auto",
   uploadCleanupHours: 1,
   chatAutoAllow: false,
@@ -171,6 +204,22 @@ export const useStore = create<State>((set, get) => ({
   status: {},
   screenshotToast: null,
   agentFileToast: null,
+
+  configSnapshot: () => {
+    const s = get();
+    return {
+      host: s.host,
+      serverUrl: s.serverUrl,
+      boxId: s.boxId,
+      boxToken: s.boxToken,
+      onboardingSkipped: s.onboardingSkipped,
+      defaultModel: s.defaultModel ?? undefined,
+      projects: s.projects.map((p) => ({
+        tmuxSession: p.tmuxSession,
+        defaultCwd: p.defaultCwd,
+      })),
+    };
+  },
 
   activeSession: () => {
     const s = get();
@@ -222,12 +271,39 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  skipOnboarding: async () => {
+    set({ onboardingSkipped: true, onboardingForced: false });
+    const next = await window.api.configUpdate({ onboardingSkipped: true });
+    // Reconcile with what main actually saved (error/reject paths).
+    set({ onboardingSkipped: next.onboardingSkipped ?? false });
+  },
+
+  relaunchOnboarding: async () => {
+    // Clear the persisted skip flag and force the shell open, even if the
+    // config would otherwise resolve to http/ssh mode (already paired).
+    set({ onboardingSkipped: false, onboardingForced: true });
+    const next = await window.api.configUpdate({ onboardingSkipped: false });
+    set({ onboardingSkipped: next.onboardingSkipped ?? false });
+  },
+
+  finishOnboarding: async () => {
+    // Drop the force flag and re-read config so the app transitions to the
+    // normal shell without an app restart (picks up boxToken/projects the
+    // per-step components persisted).
+    set({ onboardingForced: false });
+    await get().refresh();
+  },
+
   applyConfig: (c) =>
     set({
       loaded: true,
       host: c.host,
       user: c.user,
       identityFile: c.identityFile,
+      serverUrl: c.serverUrl ?? "",
+      boxId: c.boxId ?? "",
+      boxToken: c.boxToken ?? "",
+      onboardingSkipped: c.onboardingSkipped ?? false,
       transportPreference: c.transport ?? "auto",
       uploadCleanupHours: c.uploadCleanupHours ?? 1,
       chatAutoAllow: c.chatAutoAllow ?? false,
