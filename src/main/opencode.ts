@@ -28,17 +28,19 @@
 // the wire. No OPENCODE_SERVER_PASSWORD configured.
 
 import { spawn as cpSpawn } from "node:child_process";
-import { join as pathJoin } from "node:path";
 import {
   runSshOnce,
   getBranch as getBranchSsh,
   expandRemotePath,
 } from "./pty.js";
+import { isPortForwardingFailure } from "./net/forwardHeal.js";
 import {
-  decideEviction,
-  isPortForwardingFailure,
-  parseLsofListeners,
-} from "./forwardHeal.js";
+  SshTransport,
+  evictOrphanForwardHolder,
+  controlArgs,
+  sshTarget,
+} from "./net/sshTransport.js";
+import { ConnectionManager } from "../shared/net/connectionManager.js";
 import {
   dropCachedTranscript,
   getCachedTranscript,
@@ -68,9 +70,8 @@ function localPort(config: AppConfig): number {
   return config.opencodePort ?? 14096;
 }
 
-function sshTarget(config: AppConfig): string {
-  return config.user ? `${config.user}@${config.host}` : config.host;
-}
+// `sshTarget` and `controlArgs` are imported from ./net/sshTransport.js — the
+// single source of truth for the shared ControlMaster args (BET-46.3).
 
 // ===== Dedicated event-stream tunnel =====
 //
@@ -249,19 +250,9 @@ export async function restartOpencode(config: AppConfig): Promise<void> {
 // We attach `-L localPort:127.0.0.1:REMOTE_PORT` to the SAME ControlMaster
 // connection pty.ts uses, via `ssh -O forward`. Cancel is symmetric.
 
-// Must match pty.ts's CONTROL_PATH exactly so we share its ControlMaster.
-// `/tmp` (not tmpdir()) because macOS tmpdir() overflows the sun_path limit.
-const CONTROL_PATH = pathJoin("/tmp", "bui-cm-%C");
-
-function controlArgs(config: AppConfig): string[] {
-  const args = [
-    "-o", "ControlMaster=auto",
-    "-o", `ControlPath=${CONTROL_PATH}`,
-    "-o", "ControlPersist=10m",
-  ];
-  if (config.identityFile) args.push("-i", config.identityFile);
-  return args;
-}
+// The shared-ControlMaster args (ControlPath=/tmp/bui-cm-%C, ControlPersist=10m)
+// now live in ./net/sshTransport.js (`controlArgs`) — the single source of
+// truth pty.ts, the SshTransport, and this forward path all use.
 
 type SshControlResult = { code: number | null; stderr: string };
 
@@ -292,91 +283,78 @@ function sshControl(config: AppConfig, op: string, extra: string[] = []): Promis
   });
 }
 
-// Ask ssh for its *effective* config and read back the expanded ControlPath
-// (the `%C` token resolved to a concrete /tmp/bui-cm-<hash>). This is the
-// socket the live master listens on; the orphan is any other bui socket.
-function resolveLiveSocket(config: AppConfig): Promise<string | null> {
-  return new Promise((resolve) => {
-    const args = [...controlArgs(config), "-G", sshTarget(config)];
-    const p = cpSpawn("ssh", args, { stdio: ["ignore", "pipe", "ignore"] });
-    let stdout = "";
-    p.stdout.on("data", (b) => (stdout += b.toString()));
-    p.on("error", () => resolve(null));
-    p.on("exit", () => {
-      const line = stdout
-        .split("\n")
-        .find((l) => l.toLowerCase().startsWith("controlpath "));
-      resolve(line ? line.slice("controlpath ".length).trim() : null);
-    });
-  });
-}
-
-function runCapture(cmd: string, args: string[]): Promise<string> {
-  return new Promise((resolve) => {
-    const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
-    let out = "";
-    p.stdout.on("data", (b) => (out += b.toString()));
-    p.on("error", () => resolve(""));
-    p.on("exit", () => resolve(out));
-  });
-}
-
 // Evict a stale ControlMaster from a previous app run that is still holding
-// the local forward port (kept alive by ControlPersist). Returns true if it
-// took an action that warrants retrying the forward.
+// the local forward port (kept alive by ControlPersist). The lsof/ps/decision
+// logic now lives in ./net/sshTransport.js (`evictOrphanForwardHolder`), shared
+// with the SshTransport (BET-46.3). Returns true if it took an action that
+// warrants retrying the forward; throws on a foreign (non-bui) holder.
 async function evictStaleForwardHolder(config: AppConfig): Promise<boolean> {
   const port = localPort(config);
-  const lsofOut = await runCapture("lsof", [
-    "-nP",
-    `-iTCP:${port}`,
-    "-sTCP:LISTEN",
-    "-F",
-    "pcn",
-  ]);
-  const holders = parseLsofListeners(lsofOut);
-  if (holders.length === 0) return false;
-
-  // Full command line per pid so decideEviction can read each ssh's
-  // `-o ControlPath=...` and match it against the live socket.
-  const psByPid = new Map<number, string>();
-  for (const h of holders) {
-    const ps = await runCapture("ps", ["-o", "command=", "-p", String(h.pid)]);
-    psByPid.set(h.pid, ps.trim());
-  }
-
-  const liveSocket = await resolveLiveSocket(config);
-  if (!liveSocket) return false;
-
-  const decision = decideEviction(holders, psByPid, liveSocket);
-  if (decision.action === "evict") {
-    // `ssh -O exit` on the ORPHAN's own socket (not our controlArgs path):
-    // graceful master shutdown, which closes its listeners and frees the
-    // port. Target the socket explicitly so we never touch the live master.
-    await new Promise<void>((r) =>
-      cpSpawn(
-        "ssh",
-        [
-          "-o",
-          `ControlPath=${decision.socketPath}`,
-          "-O",
-          "exit",
-          sshTarget(config),
-        ],
-        { stdio: "ignore" },
-      )
-        .on("exit", () => r())
-        .on("error", () => r()),
-    );
-    return true;
-  }
-  if (decision.action === "foreign") {
+  const outcome = await evictOrphanForwardHolder(config, port);
+  if ("foreign" in outcome) {
     throw new Error(
       `opencode local port ${port} is held by another process ` +
-        `(pid ${decision.pid}, ${decision.command}). Close it or set a ` +
+        `(pid ${outcome.pid}, ${outcome.command}). Close it or set a ` +
         `different opencodePort in settings.`,
     );
   }
-  return false;
+  return outcome.evicted;
+}
+
+// ===== ControlMaster via ConnectionManager =====
+//
+// The shared SSH ControlMaster is now owned by a ConnectionManager wrapping an
+// SshTransport (BET-46.3). `ensureForward` asks the manager to (re)open the
+// master before attaching the `-L` forward, replacing the ad-hoc inline
+// `ssh -O check` + `runSshOnce("true")` boot it used to do. This is a plumbing
+// swap: same master, same ControlPath, same reconnect outcomes the user sees.
+//
+// A single manager is kept per host (the app is single-box). `masterConfig`
+// tracks which config the current manager was built for so a host change
+// rebuilds it.
+let master: ConnectionManager | null = null;
+let masterConfig: AppConfig | null = null;
+
+function masterKey(config: AppConfig): string {
+  return `${config.user ?? ""}@${config.host}:${config.identityFile ?? ""}`;
+}
+
+function getMaster(config: AppConfig): ConnectionManager {
+  if (master && masterConfig && masterKey(masterConfig) === masterKey(config)) {
+    return master;
+  }
+  master = new ConnectionManager({ transport: new SshTransport(config) });
+  masterConfig = config;
+  return master;
+}
+
+// Ensure the shared ControlMaster is live, preserving the pre-BET-46.3
+// "probe on EVERY call, boot on failure" contract (a cached "up" flag lies
+// after wifi drops / sleep / remote sshd restart). We keep the cheap
+// `ssh -O check` probe here; only when it reports no live master do we drive
+// the ConnectionManager to (re)open the transport, which boots the socket the
+// same way `runSshOnce("true")` did. Routing the boot through the manager is
+// the plumbing swap; the probe-every-call self-heal is unchanged.
+// Returns true if the master had to be (re)booted (was not already live), so
+// the caller can invalidate its cached forward flag exactly as the old inline
+// path did.
+async function ensureMaster(config: AppConfig): Promise<boolean> {
+  const mgr = getMaster(config);
+  let alive = true;
+  try {
+    await sshControl(config, "check");
+  } catch {
+    alive = false;
+  }
+  if (alive) return false;
+  // Master is gone. If the manager thinks it is still connected, close it so
+  // connect() will legally re-open (connect() is a no-op past `idle`/`closed`).
+  const st = mgr.getState().state;
+  if (st !== "idle" && st !== "closed") {
+    await mgr.disconnect("master-gone");
+  }
+  await mgr.connect();
+  return true;
 }
 
 let forwarded = false;
@@ -388,13 +366,20 @@ let forwarded = false;
 // keep the path self-healing. `-O forward` is idempotent (sshControl treats
 // "already forwarded" as success).
 export async function ensureForward(config: AppConfig): Promise<void> {
+  // Ensure the shared ControlMaster is live via the ConnectionManager, which
+  // wraps the SshTransport. `SshTransport.open()` does the same `ssh -O check`
+  // and, if the master is gone, the same trivial `ssh … true` boot this used to
+  // do inline — a behavior-preserving plumbing swap (BET-46.3). A closed/idle
+  // manager reconnects; an already-connected one is a cheap no-op check.
   try {
-    await sshControl(config, "check");
+    // Rebooted master → the old -L forward is gone with it; invalidate the flag
+    // (matches the pre-BET-46.3 catch block that reset it on a failed check).
+    if (await ensureMaster(config)) forwarded = false;
   } catch {
-    // ControlMaster is gone (or never existed). Boot it via the same path
-    // runSshOnce uses elsewhere.
+    // The manager couldn't open a master (host unreachable, etc). Fall through:
+    // the `-O forward` below fails the same way it did before and surfaces the
+    // real error. Reset the cached flag so a later call re-probes from scratch.
     forwarded = false;
-    await runSshOnce(config, "true");
   }
   const spec = `${localPort(config)}:127.0.0.1:${REMOTE_PORT}`;
   const first = await runSshControl(config, "forward", ["-L", spec]);
@@ -469,14 +454,16 @@ export function invalidateForward(): void {
 // forwardHeal.ts). The only recovery is to tear that master down so the
 // next ensureForward() boots a fresh one.
 //
-// `ssh -O exit` here uses controlArgs() → ControlPath=/tmp/bui-cm-%C, i.e.
-// it targets the master for THIS config's connection (the one we use), not
-// an orphan. Best-effort: if the socket is already gone, the next
-// ensureForward() rebuilds anyway.
+// The teardown routes through the ConnectionManager's disconnect(), which calls
+// SshTransport.close() → `ssh -O exit` on controlArgs() → ControlPath=/tmp/
+// bui-cm-%C, i.e. it targets the master for THIS config's connection (the one
+// we use), not an orphan. Leaving the manager `closed` means the next
+// ensureForward()→ensureMaster() reconnect()s a fresh master. Best-effort: if
+// the socket is already gone, the next ensureForward() rebuilds anyway.
 export async function forceEvictControlMaster(
   config: AppConfig,
 ): Promise<void> {
-  await runSshControl(config, "exit").catch(() => {});
+  await getMaster(config).disconnect("forced-evict").catch(() => {});
   forwarded = false;
 }
 
