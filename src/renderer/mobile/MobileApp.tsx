@@ -3,7 +3,9 @@ import { useStore, resolveSessionOwner } from "../store";
 import { SessionListScreen } from "./SessionListScreen";
 import { SessionScreen } from "./SessionScreen";
 import { MobileSettings } from "./MobileSettings";
+import { PairingScreen } from "./PairingScreen";
 import { reportFocus } from "./push";
+import { AuthRequiredError } from "../api/httpApi";
 
 type Nav =
   | { screen: "list" }
@@ -20,6 +22,11 @@ export function MobileApp() {
 
   const [nav, setNav] = useState<Nav>({ screen: "list" });
   const [bootError, setBootError] = useState<string | null>(null);
+  // True when bui-server answered the bootstrap with 401 (unpaired, or a stored
+  // token was revoked/rotated). Routes the whole app to the pairing screen
+  // instead of the session list — this IS the re-pair path too, since a rotated
+  // token 401s exactly like a fresh browser.
+  const [authRequired, setAuthRequired] = useState(false);
 
   // The opencode session id of the on-screen chat (null on list/settings or a
   // terminal window). Drives push focus-suppression: the server skips the
@@ -36,9 +43,24 @@ export function MobileApp() {
   // no SSH layer; the box can simply be unreachable).
   const doRefresh = () => {
     setBootError(null);
-    refresh().catch((e: unknown) =>
-      setBootError(e instanceof Error ? e.message : "Could not reach the server."),
-    );
+    refresh().catch((e: unknown) => {
+      // A 401 from the box means we're unpaired (or the stored token was
+      // revoked/rotated) — route to the pairing screen instead of the generic
+      // "could not reach the server" error, which offers only a dead Retry.
+      if (e instanceof AuthRequiredError || (e as { name?: string })?.name === "AuthRequiredError") {
+        setAuthRequired(true);
+        return;
+      }
+      setBootError(e instanceof Error ? e.message : "Could not reach the server.");
+    });
+  };
+
+  // Called by PairingScreen after a successful claim (token already persisted).
+  // Drop the gate and re-run the bootstrap so the session list loads with the
+  // now-valid Bearer credential.
+  const onPaired = () => {
+    setAuthRequired(false);
+    doRefresh();
   };
   useEffect(() => {
     doRefresh();
@@ -262,6 +284,10 @@ export function MobileApp() {
     const t = e.changedTouches[0];
     if (t.clientX - s.x > 60 && Math.abs(t.clientY - s.y) < 50) goList();
   };
+
+  if (authRequired) {
+    return <PairingScreen onPaired={onPaired} />;
+  }
 
   if (bootError) {
     return (
