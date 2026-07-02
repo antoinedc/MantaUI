@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>bui — Onboarding</title>
+  <style>
+    :root {
+      --bg-primary: #0a0a0b;
+      --bg-secondary: #141416;
+      --bg-tertiary: #1c1c20;
+      --bg-elevated: #242428;
+      --border-primary: #2a2a2e;
+      --border-secondary: #333338;
+      --text-primary: #f0f0f2;
+      --text-secondary: #a0a0a8;
+      --text-tertiary: #6e6e76;
+      --accent: #6c5ce7;
+      --accent-hover: #7c6ef7;
+      --accent-glow: rgba(108, 92, 231, 0.15);
+      --success: #22c55e;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --transition: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+      --transition-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ── Container ────────────────────────────────────── */
+    .onboarding {
+      width: 100%;
+      max-width: 720px;
+      padding: 32px 24px;
+    }
+
+    /* ── Header ───────────────────────────────────────── */
+    .header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+
+    .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 32px;
+    }
+
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, var(--accent), #a78bfa);
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .logo-icon svg {
+      width: 20px;
+      height: 20px;
+      color: white;
+    }
+
+    .logo-text {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+      color: var(--text-primary);
+    }
+
+    /* ── Progress ─────────────────────────────────────── */
+    .progress {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+      margin-bottom: 8px;
+    }
+
+    .progress-step {
+      display: flex;
+      align-items: center;
+      gap: 0;
+    }
+
+    .step-dot {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 600;
+      transition: all var(--transition);
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .step-dot.inactive {
+      background: var(--bg-tertiary);
+      color: var(--text-tertiary);
+      border: 1.5px solid var(--border-primary);
+    }
+
+    .step-dot.active {
+      background: var(--accent);
+      color: white;
+      border: 1.5px solid var(--accent);
+      box-shadow: 0 0 0 4px var(--accent-glow), 0 2px 8px rgba(108, 92, 231, 0.3);
+    }
+
+    .step-dot.completed {
+      background: var(--accent);
+      color: white;
+      border: 1.5px solid var(--accent);
+    }
+
+    .step-dot.completed svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    .step-connector {
+      width: 64px;
+      height: 2px;
+      background: var(--border-primary);
+      transition: background var(--transition);
+      flex-shrink: 0;
+    }
+
+    .step-connector.active {
+      background: var(--accent);
+    }
+
+    .step-labels {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      margin-top: 12px;
+    }
+
+    .step-label {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      transition: color var(--transition);
+      min-width: 60px;
+      text-align: center;
+    }
+
+    .step-label.active {
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    .step-label.completed {
+      color: var(--text-tertiary);
+    }
+
+    /* ── Step panels ──────────────────────────────────── */
+    .steps-container {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .step-panel {
+      display: none;
+      animation: fadeSlideIn var(--transition-slow) forwards;
+    }
+
+    .step-panel.active {
+      display: block;
+    }
+
+    @keyframes fadeSlideIn {
+      from {
+        opacity: 0;
+        transform: translateY(12px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    /* ── Typography ───────────────────────────────────── */
+    .step-title {
+      font-size: 24px;
+      font-weight: 600;
+      letter-spacing: -0.4px;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+    }
+
+    .step-subtitle {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      margin-bottom: 32px;
+      max-width: 440px;
+    }
+
+    /* ── Form elements ────────────────────────────────── */
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+    }
+
+    .form-input {
+      width: 100%;
+      padding: 12px 16px;
+      background: var(--bg-secondary);
+      border: 1.5px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      color: var(--text-primary);
+      font-size: 15px;
+      font-family: inherit;
+      transition: all var(--transition);
+      outline: none;
+    }
+
+    .form-input:hover {
+      border-color: var(--border-secondary);
+    }
+
+    .form-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .form-input::placeholder {
+      color: var(--text-tertiary);
+    }
+
+    .code-input {
+      font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+      font-size: 28px;
+      text-align: center;
+      letter-spacing: 12px;
+      padding: 16px;
+      border-radius: var(--radius-lg);
+    }
+
+    .form-hint {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      margin-top: 8px;
+      line-height: 1.5;
+    }
+
+    .form-link {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 500;
+      transition: color var(--transition);
+    }
+
+    .form-link:hover {
+      color: var(--accent-hover);
+    }
+
+    /* ── Buttons ──────────────────────────────────────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 11px 22px;
+      font-size: 14px;
+      font-weight: 500;
+      font-family: inherit;
+      border-radius: var(--radius-md);
+      border: none;
+      cursor: pointer;
+      transition: all var(--transition);
+      outline: none;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      box-shadow: 0 4px 12px rgba(108, 92, 231, 0.35);
+      transform: translateY(-0.5px);
+    }
+
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn-secondary {
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      border: 1.5px solid var(--border-primary);
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      border-color: var(--border-secondary);
+    }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-secondary);
+      padding: 11px 14px;
+    }
+
+    .btn-ghost:hover {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+
+    .btn-sm {
+      padding: 8px 14px;
+      font-size: 13px;
+    }
+
+    .btn svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .btn-group {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 32px;
+      gap: 12px;
+    }
+
+    .btn-group-right {
+      justify-content: flex-end;
+    }
+
+    /* ── Provider cards (simplified, no colors) ───────── */
+    .provider-list {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .provider-card {
+      flex: 1;
+      background: var(--bg-secondary);
+      border: 1.5px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      transition: all var(--transition);
+      cursor: pointer;
+      text-align: center;
+    }
+
+    .provider-card:hover {
+      border-color: var(--border-secondary);
+      background: var(--bg-tertiary);
+    }
+
+    .provider-card.selected {
+      border-color: var(--accent);
+      background: var(--bg-tertiary);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .provider-card.disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+
+    .provider-card.disabled:hover {
+      border-color: var(--border-primary);
+      background: var(--bg-secondary);
+      box-shadow: none;
+    }
+
+    .provider-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-elevated);
+      border: 1.5px solid var(--border-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      transition: all var(--transition);
+    }
+
+    .provider-card.selected .provider-icon {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .provider-card.disabled .provider-icon {
+      background: var(--bg-primary);
+      border-color: var(--border-primary);
+    }
+
+    .provider-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .provider-status {
+      font-size: 11px;
+      color: var(--text-tertiary);
+    }
+
+    .provider-status.connected {
+      color: var(--success);
+    }
+
+    .provider-status.disconnected {
+      color: var(--text-tertiary);
+    }
+
+    /* ── Add provider ─────────────────────────────────── */
+    .add-provider {
+      margin-top: 0;
+      padding: 12px 16px;
+      border: 1.5px dashed var(--border-secondary);
+      border-radius: var(--radius-md);
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all var(--transition);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+    }
+
+    .add-provider:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-glow);
+    }
+
+    .add-provider svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    /* ── Model picker ─────────────────────────────────── */
+    .model-cards {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .model-card {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 16px;
+      background: var(--bg-secondary);
+      border: 1.5px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+
+    .model-card:hover {
+      border-color: var(--border-secondary);
+      background: var(--bg-tertiary);
+    }
+
+    .model-card.selected {
+      border-color: var(--accent);
+      background: var(--bg-tertiary);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .model-card-radio {
+      width: 18px;
+      height: 18px;
+      border: 1.5px solid var(--border-secondary);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all var(--transition);
+    }
+
+    .model-card.selected .model-card-radio {
+      border-color: var(--accent);
+    }
+
+    .model-card.selected .model-card-radio::after {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    .model-card-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .model-card-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+
+    .model-card-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 3px;
+    }
+
+    .model-card-meta span {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    .model-card-meta .dot {
+      width: 3px;
+      height: 3px;
+      border-radius: 50%;
+      background: var(--text-tertiary);
+    }
+
+    /* ── Project step ─────────────────────────────────── */
+    .dir-hint {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      margin-top: 6px;
+      line-height: 1.5;
+    }
+
+    .dir-hint strong {
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    /* ── Welcome / success ────────────────────────────── */
+    .success-panel {
+      text-align: center;
+      padding: 20px 0;
+    }
+
+    .success-icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: rgba(34, 197, 94, 0.1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 20px;
+    }
+
+    .success-icon svg {
+      width: 28px;
+      height: 28px;
+      color: var(--success);
+    }
+
+    .success-title {
+      font-size: 22px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .success-subtitle {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      max-width: 380px;
+      margin: 0 auto 28px;
+    }
+
+    /* ── Responsive ───────────────────────────────────── */
+    @media (max-width: 600px) {
+      .onboarding {
+        padding: 24px 16px;
+      }
+
+      .step-connector {
+        width: 32px;
+      }
+
+      .step-labels {
+        gap: 8px;
+      }
+
+      .step-label {
+        font-size: 11px;
+        min-width: 48px;
+      }
+
+      .step-title {
+        font-size: 20px;
+      }
+
+      .provider-list {
+        flex-direction: column;
+      }
+    }
+
+    /* ── Utility ──────────────────────────────────────── */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="onboarding">
+    <!-- Header -->
+    <div class="header">
+      <div class="logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+            <path d="M2 17l10 5 10-5"/>
+            <path d="M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <span class="logo-text">bui</span>
+      </div>
+
+      <!-- Progress indicator -->
+      <div class="progress" id="progress">
+        <div class="progress-step">
+          <div class="step-dot active" id="dot-1">1</div>
+        </div>
+        <div class="step-connector" id="conn-1"></div>
+        <div class="progress-step">
+          <div class="step-dot inactive" id="dot-2">2</div>
+        </div>
+        <div class="step-connector" id="conn-2"></div>
+        <div class="progress-step">
+          <div class="step-dot inactive" id="dot-3">3</div>
+        </div>
+        <div class="step-connector" id="conn-3"></div>
+        <div class="progress-step">
+          <div class="step-dot inactive" id="dot-4">4</div>
+        </div>
+      </div>
+      <div class="step-labels">
+        <div class="step-label active" id="label-1">Connect</div>
+        <div class="step-label" id="label-2">Providers</div>
+        <div class="step-label" id="label-3">Model</div>
+        <div class="step-label" id="label-4">Project</div>
+      </div>
+    </div>
+
+    <!-- Steps -->
+    <div class="steps-container">
+
+      <!-- STEP 1: Connect -->
+      <div class="step-panel active" id="step-1">
+        <h2 class="step-title">Connect to your server</h2>
+        <p class="step-subtitle">Enter the 6-digit pairing code shown on your VPS terminal to establish a secure connection.</p>
+
+        <div class="form-group">
+          <label class="form-label" for="pair-code">Pairing code</label>
+          <input
+            type="text"
+            id="pair-code"
+            class="form-input code-input"
+            placeholder="000000"
+            maxlength="6"
+            value="847291"
+            autocomplete="one-time-code"
+          >
+          <div class="form-hint">
+            Found in your terminal after running <code style="color:var(--text-secondary);background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;font-size:11px;">bui pair</code>
+          </div>
+        </div>
+
+        <div class="btn-group btn-group-right">
+          <button class="btn btn-ghost" onclick="showStep(0)">Skip setup</button>
+          <button class="btn btn-primary" onclick="goNext()">
+            Connect
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- STEP 2: Providers -->
+      <div class="step-panel" id="step-2">
+        <h2 class="step-title">Choose your providers</h2>
+        <p class="step-subtitle">Select the AI providers you want to use. You can add more later.</p>
+
+        <div class="provider-list">
+          <!-- Anthropic -->
+          <div class="provider-card selected" onclick="toggleProvider(this)">
+            <div class="provider-icon">A</div>
+            <div>
+              <div class="provider-name">Anthropic</div>
+              <div class="provider-status connected">Connected</div>
+            </div>
+          </div>
+
+          <!-- OpenAI -->
+          <div class="provider-card disabled" onclick="return false">
+            <div class="provider-icon">O</div>
+            <div>
+              <div class="provider-name">OpenAI</div>
+              <div class="provider-status disconnected">Not connected</div>
+            </div>
+          </div>
+
+          <!-- Custom -->
+          <div class="provider-card" onclick="alert('Add custom provider form would open here')">
+            <div class="provider-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </div>
+            <div>
+              <div class="provider-name">Custom</div>
+              <div class="provider-status">Add provider</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-ghost" onclick="goBack()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+            Back
+          </button>
+          <button class="btn btn-primary" onclick="goNext()">
+            Continue
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- STEP 3: Model -->
+      <div class="step-panel" id="step-3">
+        <h2 class="step-title">Pick your default model</h2>
+        <p class="step-subtitle">This model will power your new chat sessions. You can switch anytime.</p>
+
+        <div class="model-cards">
+          <div class="model-card selected" onclick="selectModel(this)">
+            <div class="model-card-radio"></div>
+            <div class="model-card-info">
+              <div class="model-card-name">claude-sonnet-4-6</div>
+              <div class="model-card-meta">
+                <span>Anthropic</span>
+                <span class="dot"></span>
+                <span>200K context</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="model-card" onclick="selectModel(this)">
+            <div class="model-card-radio"></div>
+            <div class="model-card-info">
+              <div class="model-card-name">claude-opus-4-7</div>
+              <div class="model-card-meta">
+                <span>Anthropic</span>
+                <span class="dot"></span>
+                <span>200K context</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="model-card" onclick="selectModel(this)">
+            <div class="model-card-radio"></div>
+            <div class="model-card-info">
+              <div class="model-card-name">deepseek-chat</div>
+              <div class="model-card-meta">
+                <span>DeepSeek</span>
+                <span class="dot"></span>
+                <span>128K context</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="model-card" onclick="selectModel(this)">
+            <div class="model-card-radio"></div>
+            <div class="model-card-info">
+              <div class="model-card-name">claude-haiku-4-5</div>
+              <div class="model-card-meta">
+                <span>Anthropic</span>
+                <span class="dot"></span>
+                <span>200K context</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-ghost" onclick="goBack()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+            Back
+          </button>
+          <button class="btn btn-primary" onclick="goNext()">
+            Continue
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- STEP 4: Project -->
+      <div class="step-panel" id="step-4">
+        <h2 class="step-title">Create your first project</h2>
+        <p class="step-subtitle">Start a new project to begin chatting with your AI.</p>
+
+        <div class="form-group">
+          <label class="form-label" for="project-name">Project name</label>
+          <input
+            type="text"
+            id="project-name"
+            class="form-input"
+            placeholder="my-project"
+          >
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="project-path">Working directory</label>
+          <input
+            type="text"
+            id="project-path"
+            class="form-input"
+            placeholder="/home/user/projects"
+            value="/home/dev/projects"
+          >
+          <div class="dir-hint">
+            If the directory doesn't exist, it will be <strong>created automatically</strong>.
+          </div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-ghost" onclick="goBack()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+            Back
+          </button>
+          <button class="btn btn-primary" onclick="goNext()">
+            Create project
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- STEP 5: Success -->
+      <div class="step-panel" id="step-done">
+        <div class="success-panel">
+          <div class="success-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          </div>
+          <h2 class="success-title">You're all set!</h2>
+          <p class="success-subtitle">
+            Your server is connected, providers are configured, and your first project is ready. Start chatting with your AI assistant.
+          </p>
+          <button class="btn btn-primary" onclick="location.reload()">
+            Open bui
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    let currentStep = 1;
+    const totalSteps = 4;
+
+    function updateProgress(step) {
+      for (let i = 1; i <= totalSteps; i++) {
+        const dot = document.getElementById('dot-' + i);
+        const label = document.getElementById('label-' + i);
+        const conn = document.getElementById('conn-' + (i - 1));
+
+        dot.className = 'step-dot';
+        label.className = 'step-label';
+
+        if (i < step) {
+          dot.classList.add('completed');
+          dot.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+          label.classList.add('completed');
+        } else if (i === step) {
+          dot.classList.add('active');
+          dot.textContent = i;
+          label.classList.add('active');
+        } else {
+          dot.classList.add('inactive');
+          dot.textContent = i;
+        }
+
+        if (conn) {
+          conn.className = 'step-connector' + (i < step ? ' active' : '');
+        }
+      }
+    }
+
+    function showStep(step) {
+      // Hide all panels
+      document.querySelectorAll('.step-panel').forEach(p => p.classList.remove('active'));
+
+      if (step > totalSteps) {
+        // Show success
+        document.getElementById('step-done').classList.add('active');
+        return;
+      }
+
+      document.getElementById('step-' + step).classList.add('active');
+      currentStep = step;
+      updateProgress(step);
+    }
+
+    function goNext() {
+      if (currentStep < totalSteps) {
+        showStep(currentStep + 1);
+      } else {
+        showStep(totalSteps + 1);
+      }
+    }
+
+    function goBack() {
+      if (currentStep > 1) {
+        showStep(currentStep - 1);
+      }
+    }
+
+    function toggleProvider(card) {
+      if (card.classList.contains('disabled')) return;
+      card.classList.toggle('selected');
+    }
+
+    function selectModel(card) {
+      document.querySelectorAll('.model-card').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+    }
+
+    // Initialize
+    updateProgress(1);
+  </script>
+</body>
+</html>
