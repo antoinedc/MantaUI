@@ -17,6 +17,52 @@ import type { OpencodeMessage, OpencodeModel } from "../shared/types";
 // brand the chat panel without touching the rest of bui's blue accent.
 export const CLAUDE_ORANGE = "#d97757";
 
+// In-flight attachments tracked alongside the textarea content. Each chip
+// rendered above the input maps to one entry; `status` drives the chip
+// appearance (uploading spinner vs. ready vs. error).
+export type Attachment = {
+  id: string;                       // local id for keyed rendering / removal
+  filename: string;
+  remotePath?: string;              // set when upload finished or @-mention resolved
+  mime: string;
+  status: "uploading" | "ready" | "error";
+  errorMsg?: string;
+  source: "drop" | "paste" | "mention"; // "drop"/"paste" = scp'd to ~/.bui-uploads, "mention" = path from /find/file
+  // When true this chip is NOT sent as a multimodal FilePart (the model
+  // can't decode it — csv/code/text/etc). Instead its remote path is
+  // appended to the outgoing message as `@<path>` so the AI reads it with
+  // its Read tool. Keeps the composer clean instead of dumping the raw path.
+  asPathRef?: boolean;
+};
+
+// Agent mention emitted by @-mention typeahead. We track the inserted slice
+// of the textarea so we can compute {value, start, end} for the wire format
+// at submit time, after the user may have edited around it.
+export type AgentMention = {
+  id: string;
+  name: string;
+};
+
+// Active typeahead popup state. The renderer tracks what we're matching and
+// the [start, end) slice of the input string that the popup overlays — on
+// selection we replace that slice with the canonical insertion text.
+export type TypeaheadState = {
+  mode: "file" | "agent" | "command";
+  query: string;
+  anchorStart: number;
+  anchorEnd: number;
+  selectedIdx: number;
+};
+
+// A single row rendered in the typeahead popup. `kind` matches the trigger
+// mode; `key` is the canonical identifier (path / name) we'll insert.
+export type TypeaheadRow = {
+  kind: "file" | "agent" | "command";
+  key: string;
+  primary: string;            // user-visible label, e.g. "@src/foo" or "/init"
+  secondary?: string;         // dim caption: command description / agent description
+};
+
 // Token accounting surfaced by the running indicator / context bar.
 export type TokenUsage = {
   total?: number;
