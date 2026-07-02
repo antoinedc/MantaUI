@@ -180,6 +180,43 @@ export function isPublicAssetPath(path) {
 }
 
 // ---------------------------------------------------------------------------
+// Query-param token fallback for header-less clients (/events + /pty ONLY)
+// ---------------------------------------------------------------------------
+//
+// Browsers cannot set an Authorization header on a WebSocket handshake (or on
+// an EventSource), so the two streaming routes accept the box_token as a
+// ?token=<box_token> query param instead. This is DELIBERATELY limited to
+// /events and /pty: every other route must present a real Bearer header, so a
+// token can never leak into a proxy/referrer log for a normal data request.
+//
+// Pure + testable: given a path, the Authorization header value, and the raw
+// ?token= query value, return the effective Authorization value to feed into
+// authorize(). The header always wins when present (non-browser clients keep
+// using it); the query token is honored only as a fallback and only on the two
+// allowlisted stream paths.
+export const QUERY_TOKEN_PATHS = new Set(["/events", "/pty"]);
+
+export function queryTokenAllowedForPath(path) {
+  return QUERY_TOKEN_PATHS.has(path);
+}
+
+export function authorizationForRequest(path, headerValue, queryToken) {
+  // A real Authorization header always takes precedence, on any route.
+  if (typeof headerValue === "string" && headerValue.trim() !== "") {
+    return headerValue;
+  }
+  // No header: fall back to ?token= ONLY on the allowlisted stream paths.
+  if (
+    queryTokenAllowedForPath(path) &&
+    typeof queryToken === "string" &&
+    queryToken !== ""
+  ) {
+    return `Bearer ${queryToken}`;
+  }
+  return "";
+}
+
+// ---------------------------------------------------------------------------
 // Token / code generation
 // ---------------------------------------------------------------------------
 

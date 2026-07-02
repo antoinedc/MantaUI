@@ -42,6 +42,7 @@ import {
   ensureAuth,
   createAuthEngine,
   isLocalDirectRequest,
+  authorizationForRequest,
   AUTH_RL_CAPACITY,
   AUTH_RL_REFILL_PER_SEC,
 } from "./auth.mjs";
@@ -523,10 +524,18 @@ const server = createServer(async (req, res) => {
   // token+HMAC). /auth/* handled above; OPTIONS handled above. When the gate is
   // disabled (BUI_AUTH_DISABLED=1) authorize() allows everything.
   {
+    // The HTTP /events route can also be consumed as an EventSource (SSE) by a
+    // non-WS client, which likewise can't set an Authorization header — so honor
+    // the ?token= fallback here too, scoped to /events + /pty ONLY. Every other
+    // route ignores ?token= and still requires a real Bearer header.
     const gate = authEngine.authorize({
       method: req.method,
       path,
-      authorization: req.headers["authorization"],
+      authorization: authorizationForRequest(
+        path,
+        req.headers["authorization"],
+        url.searchParams.get("token"),
+      ),
     });
     if (!gate.ok) {
       res.writeHead(gate.status, { "content-type": "application/json" });
@@ -1152,16 +1161,18 @@ server.on("upgrade", (req, socket, head) => {
 
   // Auth gate for WS upgrades. Browsers can't set an Authorization header on a
   // WebSocket, so the token also travels as a ?token= query param; non-browser
-  // clients may still use the header. Both /events and /pty are gated. Reject
-  // with an HTTP 401 handshake response before the upgrade completes.
+  // clients may still use the header. Both /events and /pty are gated. The
+  // ?token= fallback is scoped to /events + /pty ONLY by authorizationForRequest
+  // (a header always wins; the query token is honored only on those two stream
+  // paths). Reject with an HTTP 401 handshake response before the upgrade.
   const wsAuth = authEngine.authorize({
     method: "GET",
     path: url.pathname,
-    authorization:
-      req.headers["authorization"] ||
-      (url.searchParams.get("token")
-        ? `Bearer ${url.searchParams.get("token")}`
-        : ""),
+    authorization: authorizationForRequest(
+      url.pathname,
+      req.headers["authorization"],
+      url.searchParams.get("token"),
+    ),
   });
   if (!wsAuth.ok) {
     socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");

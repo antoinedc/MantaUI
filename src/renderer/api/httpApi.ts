@@ -37,6 +37,82 @@ export function serverBase(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Bearer-token plumbing (M1 auth gate, BET-51)
+// ---------------------------------------------------------------------------
+//
+// bui-server now gates every data route behind a single shared box_token,
+// presented as `Authorization: Bearer <box_token>`. The token is obtained via
+// the pairing handshake (POST /auth/claim, done by M1-T2's pairing UI) and
+// persisted client-side in localStorage["bui_token"] — a sibling of the
+// existing localStorage["bui_server"] key.
+//
+// Two request families:
+//   • fetch (/rpc, /api/*) — can set headers → send the Bearer header.
+//   • WebSocket (/events, and the /pty terminal WS) — the browser WebSocket
+//     API can't set request headers, so the token rides as a ?token= query
+//     param instead. The server accepts ?token= on /events + /pty ONLY.
+//
+// The helpers below are pure (no fetch, no DOM beyond the injected token) so
+// the request-building logic is unit-testable without a live server.
+
+/** Storage key holding the box_token (sibling of "bui_server"). */
+export const TOKEN_KEY = "bui_token";
+
+/**
+ * Thrown when the server rejects a request with HTTP 401 (missing/invalid
+ * box_token). The UI layer (M1-T2) catches this to route the user to the
+ * pairing screen. Distinguishable from a generic network/RPC Error via
+ * `instanceof AuthRequiredError` (and the `name` field for cross-realm safety).
+ */
+export class AuthRequiredError extends Error {
+  readonly status = 401 as const;
+  constructor(message = "authentication required") {
+    super(message);
+    this.name = "AuthRequiredError";
+    // Restore prototype chain for `instanceof` under transpiled ES5 targets.
+    Object.setPrototypeOf(this, AuthRequiredError.prototype);
+  }
+}
+
+/** Read the persisted box_token, or null when unpaired. */
+export function clientToken(): string | null {
+  try {
+    const t = localStorage.getItem(TOKEN_KEY);
+    return t && t.length > 0 ? t : null;
+  } catch {
+    // localStorage unavailable (private mode / SSR) — treat as unpaired.
+    return null;
+  }
+}
+
+/**
+ * Build the headers for a fetch request, attaching the Bearer token when one
+ * is present. Pure: pass the token in explicitly so this is testable without
+ * touching localStorage. A missing token yields no Authorization header (the
+ * request still goes out; the server answers 401 and the caller surfaces
+ * AuthRequiredError so the UI can pair).
+ */
+export function authHeaders(
+  token: string | null,
+  base: Record<string, string> = {},
+): Record<string, string> {
+  const h: Record<string, string> = { ...base };
+  if (token) h["authorization"] = `Bearer ${token}`;
+  return h;
+}
+
+/**
+ * Append `?token=<box_token>` to a WebSocket URL (browsers can't set headers
+ * on a WS handshake). Preserves any existing query string. Pure. A null token
+ * returns the URL unchanged (server answers 401 on the handshake).
+ */
+export function withTokenParam(url: string, token: string | null): string {
+  if (!token) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
+// ---------------------------------------------------------------------------
 // Generic JSON-RPC helper
 // ---------------------------------------------------------------------------
 
@@ -45,10 +121,14 @@ async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
     `${serverBase()}/rpc/${encodeURIComponent(channel)}`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: authHeaders(clientToken(), { "content-type": "application/json" }),
       body: JSON.stringify({ args }),
     },
   );
+  // 401 → unpaired / stale token. Surface a distinguishable error so the UI
+  // layer (M1-T2) can route to the pairing screen instead of showing a raw
+  // "HTTP 401" toast.
+  if (res.status === 401) throw new AuthRequiredError();
   let json: { result?: unknown; error?: string } = {};
   try { json = await res.json(); } catch { /* non-JSON body (proxy/HTML error) */ }
   if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
@@ -135,8 +215,14 @@ function fireResync() {
 // WS URL: same origin as serverBase(), http→ws / https→wss. Same-origin so
 // it rides the same (Cloudflare) tunnel the page came from — the /pty WS
 // proves WS tunnels reliably here, including in the iOS standalone PWA.
+//
+// Browsers can't set an Authorization header on a WebSocket handshake, so the
+// box_token rides as a ?token= query param — the server accepts ?token= on
+// /events (and /pty) only. Appended last so it survives if the base URL ever
+// carries its own query string.
 function wsUrl(): string {
-  return serverBase().replace(/^http/, "ws") + "/events";
+  const base = serverBase().replace(/^http/, "ws") + "/events";
+  return withTokenParam(base, clientToken());
 }
 
 // (Re)create the shared events WebSocket. Idempotent: a socket that is OPEN
@@ -344,12 +430,13 @@ export const httpApi: Api = {
     const url = `${serverBase()}/api/upload?session=${encodeURIComponent(projectName)}`;
     const res = await fetch(url, {
       method: "POST",
-      headers: {
+      headers: authHeaders(clientToken(), {
         "x-filename": encodeURIComponent(filename),
         "content-type": "application/octet-stream",
-      },
+      }),
       body: buffer,
     });
+    if (res.status === 401) throw new AuthRequiredError();
     let json: { path?: string; error?: string } = {};
     try { json = (await res.json()) as { path?: string; error?: string }; } catch { /* non-JSON body (proxy/HTML error) */ }
     if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
@@ -378,14 +465,32 @@ export const httpApi: Api = {
   agentPullFile: async (remotePath) => {
     try {
       const url = `${serverBase()}/api/download?path=${encodeURIComponent(remotePath)}`;
+      // /api/download is a gated data route, but an <a download> element can't
+      // carry an Authorization header (and ?token= is scoped to /events + /pty
+      // only). Fetch the bytes with the Bearer header, then hand a blob: URL to
+      // a synthetic <a> so the browser saves it. Falls back to a direct <a href>
+      // when unpaired (server answers 401 there — nothing to save).
+      const res = await fetch(url, {
+        method: "GET",
+        headers: authHeaders(clientToken()),
+      });
+      if (res.status === 401) throw new AuthRequiredError();
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
+      a.href = objectUrl;
       a.download = remotePath.split("/").pop() ?? "file";
       a.rel = "noreferrer";
       document.body.appendChild(a);
       a.click();
       a.remove();
-    } catch {
+      // Revoke on the next tick so the click has a chance to start the save.
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch (e) {
+      // Re-throw auth errors so the UI can route to pairing; swallow the rest
+      // (a failed download trigger is non-fatal to the chat flow).
+      if (e instanceof AuthRequiredError) throw e;
       /* download trigger failed — non-fatal */
     }
     return "";

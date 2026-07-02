@@ -17,6 +17,9 @@ import {
   createAuthEngine,
   isLoopbackAddress,
   isLocalDirectRequest,
+  queryTokenAllowedForPath,
+  authorizationForRequest,
+  QUERY_TOKEN_PATHS,
 } from "./auth.mjs";
 
 const HEX32 = "0123456789abcdef0123456789abcdef";
@@ -116,6 +119,66 @@ test("isPublicAssetPath allows the SPA shell + PWA assets", () => {
   assert.equal(isPublicAssetPath("/rpc/tmux"), false);
   assert.equal(isPublicAssetPath("/events"), false);
   assert.equal(isPublicAssetPath(null), false);
+});
+
+// ----------------------------------------------------------------------------
+// query-param token fallback — /events + /pty ONLY (BET-51)
+// ----------------------------------------------------------------------------
+
+test("queryTokenAllowedForPath allows ONLY /events and /pty", () => {
+  assert.equal(queryTokenAllowedForPath("/events"), true);
+  assert.equal(queryTokenAllowedForPath("/pty"), true);
+  // every other route must present a real Bearer header
+  assert.equal(queryTokenAllowedForPath("/api/projects"), false);
+  assert.equal(queryTokenAllowedForPath("/rpc/tmux"), false);
+  assert.equal(queryTokenAllowedForPath("/auth/status"), false);
+  assert.equal(queryTokenAllowedForPath("/"), false);
+  assert.equal(queryTokenAllowedForPath("/events/../api/projects"), false);
+  // exactly the two paths, nothing more
+  assert.deepEqual([...QUERY_TOKEN_PATHS].sort(), ["/events", "/pty"]);
+});
+
+test("authorizationForRequest: header always wins on any route", () => {
+  // A real header is passed through verbatim regardless of path or query token.
+  assert.equal(
+    authorizationForRequest("/api/projects", `Bearer ${HEX32}`, "ignored"),
+    `Bearer ${HEX32}`,
+  );
+  assert.equal(
+    authorizationForRequest("/events", `Bearer ${HEX32}`, HEX32B),
+    `Bearer ${HEX32}`,
+  );
+  // whitespace-only header is treated as absent → falls through to query rules
+  assert.equal(authorizationForRequest("/events", "   ", HEX32), `Bearer ${HEX32}`);
+});
+
+test("authorizationForRequest: ?token= honored ONLY on /events + /pty", () => {
+  // stream paths: query token becomes a Bearer value
+  assert.equal(authorizationForRequest("/events", "", HEX32), `Bearer ${HEX32}`);
+  assert.equal(authorizationForRequest("/pty", undefined, HEX32), `Bearer ${HEX32}`);
+  // any other route ignores ?token= entirely → empty (gate then 401s)
+  assert.equal(authorizationForRequest("/api/projects", "", HEX32), "");
+  assert.equal(authorizationForRequest("/rpc/tmux", null, HEX32), "");
+  assert.equal(authorizationForRequest("/auth/status", "", HEX32), "");
+});
+
+test("authorizationForRequest: no header + no query token → empty", () => {
+  assert.equal(authorizationForRequest("/events", "", ""), "");
+  assert.equal(authorizationForRequest("/events", undefined, undefined), "");
+  assert.equal(authorizationForRequest("/pty", null, null), "");
+  assert.equal(authorizationForRequest("/api/projects", "", ""), "");
+});
+
+test("authorizationForRequest result feeds authorize() end-to-end", () => {
+  const eng = createAuthEngine({ auth: AUTH });
+  // valid ?token= on /events → authorized
+  const okAuth = authorizationForRequest("/events", "", AUTH.box_token);
+  assert.equal(eng.authorize({ method: "GET", path: "/events", authorization: okAuth }).ok, true);
+  // same token as ?token= on a NON-stream route → not applied → 401
+  const blockedAuth = authorizationForRequest("/api/projects", "", AUTH.box_token);
+  const blocked = eng.authorize({ method: "GET", path: "/api/projects", authorization: blockedAuth });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.status, 401);
 });
 
 // ----------------------------------------------------------------------------
