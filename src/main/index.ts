@@ -9,6 +9,7 @@ import {
   killPty,
   listPathCompletions,
   listWorktrees,
+  mkdirRemote,
   remoteDirExists,
   resizePty,
   spawnPty,
@@ -1035,13 +1036,27 @@ function registerHandlers(): void {
 
   ipcMain.handle(
     IPC.tmuxNewSession,
-    async (_e, input: { name: string; cwd: string; windowName?: string; chatMode?: boolean }) => {
+    async (
+      _e,
+      input: { name: string; cwd: string; windowName?: string; chatMode?: boolean; createDir?: boolean },
+    ) => {
       if (!input.name.trim()) throw new Error("Project name is required");
       const cwd = input.cwd.trim() || "~";
       if (!(await remoteDirExists(config, cwd))) {
-        throw new Error(
-          `Directory does not exist on ${config.host}: ${cwd}\n\nCheck the path — tmux silently falls back to $HOME otherwise.`,
-        );
+        // Onboarding's first-project step (BET-49-T5) opts into auto-creation
+        // via createDir: the user is naming a fresh project, so a missing
+        // ~/projects/<name> should be created, not rejected. The Sidebar's
+        // normal create path leaves createDir unset and keeps the strict
+        // "directory must exist" guard that surfaces path typos. tmux's -c
+        // silently falls back to $HOME for a non-existent dir, so we mkdir -p
+        // FIRST (failure → inline error on the caller).
+        if (input.createDir) {
+          await mkdirRemote(config, cwd);
+        } else {
+          throw new Error(
+            `Directory does not exist on ${config.host}: ${cwd}\n\nCheck the path — tmux silently falls back to $HOME otherwise.`,
+          );
+        }
       }
       await tmuxNewSession(config, input.name.trim(), cwd, input.windowName, input.chatMode === true);
       // Persist defaultCwd locally so future sessions in this project get the same.

@@ -98,6 +98,7 @@ export function StepFooter({
   return (
     <div className="flex items-center justify-between gap-3 mt-8">
       <button
+        type="button"
         onClick={onBack}
         className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-md text-sm text-text-muted hover:text-text transition-colors"
       >
@@ -105,6 +106,7 @@ export function StepFooter({
         Back
       </button>
       <button
+        type="button"
         onClick={onContinue}
         disabled={continueDisabled}
         className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md text-sm font-medium text-bg transition-opacity disabled:opacity-40"

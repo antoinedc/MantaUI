@@ -12,7 +12,8 @@ import { useStore } from "./store";
 import { PairStep } from "./PairStep";
 import { ProvidersStep } from "./ProvidersStep";
 import { ModelStep } from "./ModelStep";
-import { ArrowRight, CheckIcon, StepFooter } from "./onboardingUi";
+import { FirstProjectStep } from "./FirstProjectStep";
+import { ArrowRight, CheckIcon } from "./onboardingUi";
 
 // Onboarding.tsx — full-screen M6.2 onboarding shell (BET-49-T3).
 //
@@ -25,18 +26,19 @@ import { ArrowRight, CheckIcon, StepFooter } from "./onboardingUi";
 //   - Step 1 (Pair)          → BET-49-T2 (PairStep.tsx — mounted below)
 //   - Step 2 (Providers)     → BET-49-T4 (ProvidersStep.tsx — mounted below)
 //   - Step 3 (Model)         → BET-49-T4 (ModelStep.tsx — mounted below)
-//   - Step 4 (First project) → BET-49-T5 (placeholder until it lands)
+//   - Step 4 (First project) → BET-49-T5 (FirstProjectStep.tsx — mounted below)
 // Those land as their own components mounted into the step-body slots below.
 // The step model + resume math live in onboardingUtils.ts (pure, tested).
 //
-// Steps 1–3 each own their OWN footer (per docs/onboarding/mockup.html), because
+// Every step owns its OWN footer (per docs/onboarding/mockup.html), because
 // each has a gated/side-effecting primary action the shell's generic goNext
-// footer can't express: Step 1's "Connect" must run the pairing claim and only
-// advance on success; Step 2's "Continue" is gated on ≥1 connected provider;
-// Step 3's "Continue" is gated on a model selection. So the shell hides its
-// footer on steps 1–3 and lets each step drive advancement (onContinue/onPaired
-// → goNext), back-nav (onBack → goBack), and skipping (onSkip → skip). Step 4
-// still uses the shell's generic footer until BET-49-T5 replaces it.
+// footer can't express: Step 1's "Connect" runs the pairing claim and only
+// advances on success; Step 2's "Continue" is gated on ≥1 connected provider;
+// Step 3's "Continue" is gated on a model selection; Step 4's "Create project"
+// runs project creation and only advances (to success) once it succeeds. So the
+// shell hides its footer entirely and lets each step drive advancement
+// (onContinue/onPaired/onCreated → goNext), back-nav (onBack → goBack), and
+// skipping (onSkip → skip).
 //
 // Props:
 //   onDone — called when onboarding completes (success screen "Open bui") OR is
@@ -100,43 +102,6 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
       </div>
     </div>
   );
-}
-
-// Placeholder body for a not-yet-implemented step. Removed as T2/T4/T5 land.
-function StepPlaceholder({
-  title,
-  subtitle,
-  note,
-}: {
-  title: string;
-  subtitle: string;
-  note: string;
-}) {
-  return (
-    <div>
-      <h2 className="text-2xl font-semibold tracking-tight text-text mb-1.5">{title}</h2>
-      <p className="text-sm text-text-muted leading-relaxed mb-8 max-w-md">{subtitle}</p>
-      <div className="rounded-lg border border-dashed border-border bg-bg-soft p-6 text-sm text-text-faint">
-        {note}
-      </div>
-    </div>
-  );
-}
-
-// Placeholder body for Step 4 (BET-49-T5). Steps 1–3 are rendered by their own
-// components in the render below — they need the shell's goNext/goBack/skip
-// callbacks, which this module-level helper can't see.
-function stepBody(step: 4) {
-  switch (step) {
-    case 4:
-      return (
-        <StepPlaceholder
-          title="Create your first project"
-          subtitle="Start a new project to begin chatting with your AI."
-          note="First-project creation (Step 4) is delivered by BET-49-T5 and mounts here."
-        />
-      );
-  }
 }
 
 export function Onboarding({ onDone }: { onDone: () => void }) {
@@ -226,24 +191,12 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               // Step 3 (Model) owns its footer (Back + gated Continue).
               <ModelStep onBack={goBack} onContinue={goNext} />
             ) : (
-              stepBody(pos)
+              // Step 4 (First project) owns its footer (Back + gated Create
+              // project). onCreated advances to the success screen.
+              <FirstProjectStep onBack={goBack} onCreated={goNext} />
             )}
           </div>
         </div>
-
-        {/* Footer nav. Hidden on the success screen (own button) AND on steps
-            1–3 (PairStep / ProvidersStep / ModelStep each render their own
-            footer). Only Step 4 uses this generic footer, until BET-49-T5. */}
-        {!isSuccess && pos !== 1 && pos !== 2 && pos !== 3 && (
-          // pos is always 4 here (steps 1–3 render their own footers, success
-          // is excluded), so Back is always available — the shared StepFooter's
-          // Back-left / primary-right layout matches the per-step footers.
-          <StepFooter
-            onBack={goBack}
-            onContinue={goNext}
-            continueLabel={pos === LAST_STEP ? "Create project" : "Continue"}
-          />
-        )}
       </div>
     </div>
   );

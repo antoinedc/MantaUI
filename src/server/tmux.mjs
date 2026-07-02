@@ -1,6 +1,21 @@
 import { spawn as cpSpawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
 
 const FS = "\t";
+
+// Expand a leading ~ against this process's $HOME. The mobile server runs ON
+// the box, so a `~/projects/x` cwd is a real local path here. Without this a
+// literal mkdir("~/projects/x") would create a directory named "~" — the same
+// tilde-corruption chokepoint documented for opencode session.create. Mirrors
+// expandTilde in src/server/opencode.mjs (kept local — that one isn't exported).
+export function expandTildePath(p) {
+  if (typeof p !== "string" || !p.startsWith("~")) return p;
+  const home = homedir();
+  if (p === "~") return home;
+  if (p.startsWith("~/")) return home + "/" + p.slice(2);
+  return p; // ~user form — leave for the shell, not ours to guess
+}
 
 export function run(cmd, args) {
   return new Promise((resolve, reject) => {
@@ -68,7 +83,15 @@ export function isMissingSessionError(err, sessionName) {
   return false;
 }
 
-export async function newSession({ name, cwd, windowName }) {
+export async function newSession({ name, cwd, windowName, createDir }) {
+  // Onboarding's first-project step opts into auto-creation via createDir: a
+  // missing ~/projects/<name> should be created, not silently swallowed. tmux
+  // new-session -c falls back to $HOME for a non-existent dir, so the mkdir -p
+  // must run FIRST. mkdir failure (e.g. permission denied) rejects here so the
+  // caller renders an inline error. The Sidebar path leaves createDir unset.
+  if (createDir && cwd) {
+    await mkdir(expandTildePath(cwd), { recursive: true });
+  }
   await run("tmux", ["new-session", "-d", "-s", name, "-c", cwd ?? ".",
     ...(windowName ? ["-n", windowName] : [])]);
   await applySessionSurvivability(name);
