@@ -12,6 +12,26 @@ export type AppConfig = {
   user?: string;
   identityFile?: string;
   projects: ProjectMeta[];
+  // ----- HTTP/relay transport (M6 onboarding, BET-49) -----
+  // Base URL of the bui-server the desktop pairs with, e.g.
+  // "http://box.example:8787" (or a relay URL later). Set during onboarding
+  // step 1 (pairing) alongside boxId/boxToken. Presence of boxToken — NOT this
+  // — is what flips transport mode to HTTP; this is where to reach the box.
+  // Absent/empty on legacy SSH configs.
+  serverUrl?: string;
+  // 32-hex (128-bit) opaque box pseudonym returned by POST /auth/claim.
+  // Displayed in QR/UI; maps to nothing human. Absent/empty pre-pairing.
+  boxId?: string;
+  // 32-hex (128-bit) bearer secret returned by POST /auth/claim. Sent as
+  // `Authorization: Bearer <boxToken>` on every HTTP-mode request. Stored
+  // plaintext like other bui credentials. When set, transport mode is "http".
+  // Absent/empty on legacy SSH configs (which keep using `host`).
+  boxToken?: string;
+  // True once the user explicitly skipped the onboarding flow, so it doesn't
+  // re-trigger on every launch of an otherwise-empty config (no host, no
+  // boxToken, no projects). Re-runnable from Settings ("Run setup again").
+  // Default false / absent.
+  onboardingSkipped?: boolean;
   // Transport selection. "auto" picks mosh if both ends have it, ssh otherwise.
   // "mosh" / "ssh" force one regardless of detection.
   transport?: "auto" | "mosh" | "ssh";
