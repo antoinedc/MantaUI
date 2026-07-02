@@ -135,7 +135,7 @@ describe("EventBatcher — batching + rate-limit/coalesce", () => {
     t.advance();
 
     expect(out).toHaveLength(1);
-    expect((out[0] as { seq: number }).seq).toBe(3); // the last event object survives
+    expect((out[0] as unknown as { seq: number }).seq).toBe(3); // the last event object survives
   });
 
   it("does NOT coalesce deltas across different parts/sessions", () => {
