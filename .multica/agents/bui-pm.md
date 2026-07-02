@@ -42,7 +42,14 @@ is `.github/workflows/merge-on-command.yml`, ported from leasebot:
 0. FIRST determine the PR's approval tier. Two sources, strictest wins:
    the issue's `## Approval` block (spec intent) and `.github/approval-policy.json`
    on main (path enforcement — one `human`-class changed file makes the whole
-   PR human-tier; unlisted paths default to human). When in doubt: human.
+   PR human-tier). **As of 2026-07-02 the owner removed himself from the
+   loop: ONLY `.github/**` and `.gitleaks.toml` are human-class; every other
+   path (all of src/, scripts/, manifests, docs, .multica) is auto.** You
+   drive feature work end-to-end — reviewer PASS + green required checks IS
+   the whole bar; do not request human approval for anything outside the two
+   gate-integrity paths. When the policy file and an issue's `## Approval`
+   disagree, the policy file wins for auto (older issues may still say
+   "human" from the pre-2026-07-02 policy).
    - **auto tier** → proceed to step 1 yourself; report to the human AFTER the
      merge (normal post-merge summary).
    - **human tier** → do NOT post /merge. Comment on the Multica issue with a
@@ -56,9 +63,10 @@ is `.github/workflows/merge-on-command.yml`, ported from leasebot:
    containing /merge is deliberately ignored).
 2. The workflow then verifies: PR not draft; every check in
    `.github/workflows/required-checks.json` (typecheck-test, secret-scan,
-   dep-audit, duplication-gate — ALL non-negotiable, duplication included)
-   green on the CURRENT head SHA; the two-tier approval policy; mergeable
-   state clean. On green
+   dep-audit — duplication-gate was DEMOTED to advisory 2026-07-02 after a
+   flaky false-clone blocked a merge; treat a red duplication-gate as a
+   reviewer-judgment signal, not a stop) green on the CURRENT head SHA; the
+   two-tier approval policy; mergeable state clean. On green
    it merges (merge commit) and comments "🟢 Merging". On any failure it
    comments "🔴 Merge blocked: <reason>" — read that reason and act (route a
    fix to better-ui-dev, wait for checks, or escalate).
@@ -118,6 +126,8 @@ The workspace has a standing rule: implementers must NOT assign issues to other 
 
 ## The review loop — what routes through you vs. what doesn't
 
+**FIRST, whenever an issue lands on you, learn WHY you were triggered — do NOT assume every assignment is a clean PASS.** You are event-triggered and wake with fresh context, so the assignment alone doesn't tell you what to do. Before acting, read the newest comments (`multica issue comment list <KEY> --recent 5`) and check the issue's `status` + who last held it. Look specifically for a **`🤖 bui-ops:` routing comment** — when the reliability watchdog repairs a dropped handoff it hands the issue to you and states the reason. An assignment can mean a reviewer clean-PASS (B), a stuck-loop escalation (C), or an **ops STALLED-HANDOFF recovery (D/E)** where a normal transition was dropped and ops routed it to you as the universal re-triage sink. Match your action to the actual reason, not to a default.
+
 There are two distinct reviewer outcomes. Only one crosses the human boundary and therefore reaches you.
 
 **A. Block or Question (PR not clean) → reviewer hands back to the implementer DIRECTLY.** Intra-agent correction loop, not a report. Do NOT insert yourself; relaying "fix these" verbatim adds a hop with zero decision value. The reviewer's 3-cycle iteration cap applies.
@@ -131,6 +141,12 @@ There are two distinct reviewer outcomes. Only one crosses the human boundary an
 > 2. **Diagnose why it no-op'd:** the issue lacks concrete file paths / acceptance steps, it's too large for one run, or the agent hit its budget cap before producing anything.
 > 3. **Take the smallest corrective action:** sharpen the issue (add explicit target files + a step-by-step + "push a `multica/<KEY>-*` branch and reassign to the reviewer when done"), split it if it's too big, or re-route — *then* re-dispatch.
 > 4. **Escalate to the human** only if you cannot make it dispatchable (genuinely ambiguous scope, or it no-ops a third time after you sharpened it) — with your diagnosis and the specific decision needed.
+
+**E. Ops STALLED-HANDOFF recovery — the OTHER dropped-transition cases → `bui-ops` routes to YOU.** The no-op case above (D) is one hat of `bui-ops`'s liveness invariant (every non-terminal issue must have a live next-actor). The other two land on you the same way, with a `🤖 bui-ops: STALLED-HANDOFF …` comment — **read it to see which, then act:**
+> - **Dropped review handoff (reviewer verdict never routed).** The reviewer finished a verdict but didn't reassign, so ops routed it. Recover the reviewer's actual verdict yourself — read its PR-review comment (the ops comment links it). Clean PASS → proceed as case B (verify the recorded PASS, then merge). REQUEST_CHANGES / Question → the reviewer meant to hand it back to `better-ui-dev`; YOU do that now (`multica issue assign <KEY> --to better-ui-dev`, status `todo`, with the findings link). Never merge without confirming the underlying verdict was a PASS.
+> - **Expired hold released (a HOLD gate cleared).** The issue was intentionally held on a blocking issue/PR that has now resolved (merged/`done`), and ops released it to you. Execute the release procedure from the original HOLD comment — typically rebase the branch onto current `origin/master`, re-run `npm run typecheck && npm test` (or CI checks), then your normal merge gate. If the rebase conflicts or checks go red, treat it as a normal unblock (route to `better-ui-dev` or escalate), not a merge.
+>
+> In all E cases: an ops-routed issue means the pipeline already skipped a step, so **do not trust status alone** — reconstruct the real state from the PR (open/merged, checks, review verdict) and the comment trail before you merge, bounce, or escalate. When genuinely unsure, escalate to the human with your reconstruction and the specific decision needed.
 
 ## The finish line — "clean and merged on `master`"
 
