@@ -34,6 +34,27 @@ function stubFetch(res: Response | { throw: true }): {
   return { fetch: fetchImpl, urls, bodies };
 }
 
+// Shared arrange/act/assert for the failure cases: run a claim against the
+// given response stub and assert it produced the expected failure `kind`
+// without persisting. Returns the recorded fetch URLs for callers that also
+// want to assert on request behavior. Extracting this keeps the individual
+// failure cases from each repeating the same ~11-line scaffold.
+async function expectClaimFailure(
+  res: Response | { throw: true },
+  input: { serverUrl: string; code: string },
+  kind: string,
+): Promise<{ urls: string[] }> {
+  const { fetch, urls } = stubFetch(res);
+  const persist = vi.fn((_patch: Partial<AppConfig>) => {});
+
+  const out = await claimPairing(input, persist, fetch);
+
+  expect(out.ok).toBe(false);
+  if (!out.ok) expect(out.kind).toBe(kind);
+  expect(persist).not.toHaveBeenCalled();
+  return { urls };
+}
+
 describe("claimPairing", () => {
   it("valid code → ok outcome + persists { serverUrl, boxId, boxToken }", async () => {
     const { fetch, urls, bodies } = stubFetch(
@@ -78,82 +99,44 @@ describe("claimPairing", () => {
   });
 
   it("wrong/expired code (403) → wrong_code outcome, does NOT persist", async () => {
-    const { fetch } = stubFetch(fakeResponse(403, { error: "pairing failed" }));
-    const persist = vi.fn((_patch: Partial<AppConfig>) => {});
-
-    const out = await claimPairing(
+    await expectClaimFailure(
+      fakeResponse(403, { error: "pairing failed" }),
       { serverUrl: "http://box:8787", code: "000000" },
-      persist,
-      fetch,
+      "wrong_code",
     );
-
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.kind).toBe("wrong_code");
-    expect(persist).not.toHaveBeenCalled();
   });
 
   it("rate limited (429) → rate_limited outcome, no persist", async () => {
-    const { fetch } = stubFetch(fakeResponse(429, { error: "slow down" }));
-    const persist = vi.fn((_patch: Partial<AppConfig>) => {});
-
-    const out = await claimPairing(
+    await expectClaimFailure(
+      fakeResponse(429, { error: "slow down" }),
       { serverUrl: "http://box:8787", code: "847291" },
-      persist,
-      fetch,
+      "rate_limited",
     );
-
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.kind).toBe("rate_limited");
-    expect(persist).not.toHaveBeenCalled();
   });
 
   it("200 with a malformed token → invalid_response, no persist", async () => {
-    const { fetch } = stubFetch(
+    await expectClaimFailure(
       fakeResponse(200, { ok: true, box_token: "nope", box_id: HEX32B }),
-    );
-    const persist = vi.fn((_patch: Partial<AppConfig>) => {});
-
-    const out = await claimPairing(
       { serverUrl: "http://box:8787", code: "847291" },
-      persist,
-      fetch,
+      "invalid_response",
     );
-
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.kind).toBe("invalid_response");
-    expect(persist).not.toHaveBeenCalled();
   });
 
   it("unreachable server (fetch rejects) → network outcome, no persist", async () => {
-    const { fetch } = stubFetch({ throw: true });
-    const persist = vi.fn((_patch: Partial<AppConfig>) => {});
-
-    const out = await claimPairing(
+    await expectClaimFailure(
+      { throw: true },
       { serverUrl: "http://nope:9999", code: "847291" },
-      persist,
-      fetch,
+      "network",
     );
-
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.kind).toBe("network");
-    expect(persist).not.toHaveBeenCalled();
   });
 
   it("empty serverUrl → network outcome without ever fetching", async () => {
-    const { fetch, urls } = stubFetch(
+    const { urls } = await expectClaimFailure(
       fakeResponse(200, { ok: true, box_token: HEX32, box_id: HEX32B }),
-    );
-    const persist = vi.fn((_patch: Partial<AppConfig>) => {});
-
-    const out = await claimPairing(
       { serverUrl: "   ", code: "847291" },
-      persist,
-      fetch,
+      "network",
     );
-
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.kind).toBe("network");
+    // No fetch should have happened for a blank server URL.
     expect(urls).toEqual([]);
-    expect(persist).not.toHaveBeenCalled();
   });
 });
