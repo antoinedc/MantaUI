@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings Redesign — All Tabs</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a1a;
+      color: #e0e0e0;
+      padding: 20px;
+    }
+    h1 {
+      text-align: center;
+      margin-bottom: 20px;
+      font-size: 20px;
+      color: #fff;
+    }
+    .mockup-container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: #2a2a2a;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid #444;
+    }
+    .mockup-header {
+      background: #333;
+      padding: 12px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #444;
+    }
+    .mockup-header h2 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+    }
+    .mockup-header .close {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      background: #444;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 12px;
+      color: #999;
+    }
+    .mockup-layout {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      min-height: 700px;
+    }
+    .mockup-sidebar {
+      background: #252525;
+      border-right: 1px solid #444;
+      padding: 12px 0;
+    }
+    .mockup-sidebar-item {
+      padding: 8px 16px;
+      font-size: 12px;
+      color: #999;
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      transition: all 0.15s;
+    }
+    .mockup-sidebar-item:hover {
+      background: #333;
+      color: #ccc;
+    }
+    .mockup-sidebar-item.active {
+      background: #2a2a2a;
+      color: #fff;
+      border-left-color: #007bff;
+    }
+    .mockup-content {
+      padding: 16px;
+      overflow-y: auto;
+    }
+    .mockup-content h3 {
+      font-size: 16px;
+      margin-bottom: 16px;
+      color: #fff;
+      font-weight: 600;
+    }
+    .mockup-section {
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #333;
+    }
+    .mockup-section:last-child { border-bottom: none; }
+    .mockup-section label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: #ccc;
+      margin-bottom: 6px;
+    }
+    .mockup-section input, .mockup-section select {
+      width: 100%;
+      padding: 8px 10px;
+      background: #1a1a1a;
+      border: 1px solid #555;
+      border-radius: 4px;
+      color: #e0e0e0;
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+    .mockup-section .hint {
+      font-size: 11px;
+      color: #888;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+    .mockup-section .btn {
+      padding: 6px 12px;
+      background: #444;
+      border: 1px solid #555;
+      border-radius: 4px;
+      color: #ccc;
+      font-size: 12px;
+      cursor: pointer;
+      margin-right: 6px;
+    }
+    .mockup-section .btn:hover { background: #555; }
+    .mockup-section .btn.primary {
+      background: #007bff;
+      border-color: #007bff;
+      color: #fff;
+    }
+    .mockup-section .status-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      margin-bottom: 4px;
+    }
+    .mockup-section .status-item .icon {
+      width: 14px;
+      text-align: center;
+      font-size: 10px;
+    }
+    .mockup-section .status-item.ok { color: #51cf66; }
+    .mockup-section .status-item.fail { color: #ff6b6b; }
+    .mockup-divider {
+      height: 1px;
+      background: #333;
+      margin: 12px 0;
+    }
+    .mockup-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid #333;
+    }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    
+    /* Grid layouts */
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .grid-2 .mockup-section { margin-bottom: 0; }
+    
+    /* Toggle switch */
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #ccc;
+      margin-bottom: 6px;
+    }
+    .toggle input { width: auto; }
+    
+    /* Badge */
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      background: #444;
+      border-radius: 3px;
+      font-size: 10px;
+      color: #999;
+      margin-left: 6px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Settings Redesign — All Tabs</h1>
+  
+  <div class="mockup-container">
+    <div class="mockup-header">
+      <h2>Settings</h2>
+      <div class="close">✕</div>
+    </div>
+    
+    <div class="mockup-layout">
+      <div class="mockup-sidebar">
+        <div class="mockup-sidebar-item active" onclick="showTab('connection')">Connection</div>
+        <div class="mockup-sidebar-item" onclick="showTab('ai')">AI</div>
+        <div class="mockup-sidebar-item" onclick="showTab('voice')">Voice</div>
+        <div class="mockup-sidebar-item" onclick="showTab('files')">Files</div>
+        <div class="mockup-sidebar-item" onclick="showTab('general')">General</div>
+      </div>
+      
+      <div class="mockup-content">
+        <!-- CONNECTION TAB -->
+        <div id="tab-connection" class="tab-content active">
+          <h3>Connection</h3>
+          
+          <div class="mockup-section">
+            <label>Mode</label>
+            <div style="display: flex; gap: 12px;">
+              <label style="display: flex; align-items: center; gap: 5px; font-weight: normal; cursor: pointer; font-size: 12px;">
+                <input type="radio" name="mode" style="width: auto;"> Relay
+              </label>
+              <label style="display: flex; align-items: center; gap: 5px; font-weight: normal; cursor: pointer; font-size: 12px;">
+                <input type="radio" name="mode" checked style="width: auto;"> SSH
+              </label>
+            </div>
+          </div>
+          
+          <div class="mockup-section">
+            <label>Remote host</label>
+            <input type="text" placeholder="hostname or IP" value="157.90.224.92">
+          </div>
+          
+          <div class="grid-2">
+            <div class="mockup-section">
+              <label>User (optional)</label>
+              <input type="text" placeholder="user" value="dev">
+            </div>
+            <div class="mockup-section">
+              <label>Identity file</label>
+              <input type="text" placeholder="~/.ssh/id_ed25519">
+            </div>
+          </div>
+          
+          <div class="mockup-section">
+            <label>Transport</label>
+            <select>
+              <option>Auto (mosh if available)</option>
+              <option>Mosh — force</option>
+              <option selected>SSH — force</option>
+            </select>
+            <div class="hint">Mosh on Mac: no · mosh-server on remote: no.</div>
+          </div>
+          
+          <div class="mockup-divider"></div>
+          
+          <div class="mockup-section">
+            <label style="font-size: 13px; margin-bottom: 8px;">Connection & remote setup</label>
+            <div class="hint" style="margin-bottom: 8px;">Verify the remote has everything bui needs.</div>
+            
+            <div style="display: flex; gap: 6px; margin-bottom: 10px;">
+              <button class="btn">Test connection</button>
+              <button class="btn">Bootstrap remote</button>
+            </div>
+            
+            <div class="status-item ok"><span class="icon">✓</span> <strong>SSH</strong> <span style="color: #888;">connected</span></div>
+            <div class="status-item ok"><span class="icon">✓</span> <strong>tmux</strong> <span style="color: #888;">3.4</span></div>
+            <div class="status-item ok"><span class="icon">✓</span> <strong>opencode</strong> <span style="color: #888;">2026.6.0</span></div>
+            <div class="status-item ok"><span class="icon">✓</span> <strong>Auth plugin</strong> <span style="color: #888;">configured</span></div>
+            <div class="status-item fail"><span class="icon">✗</span> <strong>Anthropic</strong> <span style="color: #888;">not signed in</span></div>
+          </div>
+          
+          <div class="mockup-divider"></div>
+          
+          <div class="mockup-section">
+            <label style="font-size: 13px; margin-bottom: 6px;">Remote tmux config</label>
+            <div class="hint" style="margin-bottom: 8px;">Opt-in. Appends bui-optimized settings to <code>~/.tmux.conf</code>.</div>
+            
+            <div style="font-size: 11px; margin-bottom: 8px;">
+              Status: <span style="color: #51cf66;">bui-managed</span> · backup <span style="color: #ccc;">available</span>
+            </div>
+            
+            <div style="display: flex; gap: 6px;">
+              <button class="btn">Set up tmux config</button>
+              <button class="btn">Restore previous</button>
+            </div>
+          </div>
+          
+          <div class="mockup-footer">
+            <button class="btn">Cancel</button>
+            <button class="btn primary">Save</button>
+          </div>
+        </div>
+        
+        <!-- AI TAB -->
+        <div id="tab-ai" class="tab-content">
+          <h3>AI</h3>
+          
+          <div class="mockup-section">
+            <label>Default model</label>
+            <select>
+              <option>opencode default</option>
+              <option selected>claude-sonnet-4-6 (anthropic)</option>
+              <option>claude-opus-4-7 (anthropic)</option>
+              <option>gpt-4o (openai)</option>
+              <option>deepseek-chat (deepseek)</option>
+            </select>
+            <div class="hint">Applied to every new/cleared chat session.</div>
+          </div>
+          
+          <div class="mockup-section">
+            <label>Prompt cache TTL</label>
+            <div style="display: flex; gap: 6px;">
+              <button class="btn" style="flex: 1;">5 minutes</button>
+              <button class="btn primary" style="flex: 1;">1 hour</button>
+            </div>
+            <div class="hint">How long Anthropic keeps a session's prompt cache warm between requests.</div>
+          </div>
+          
+          <div class="mockup-divider"></div>
+          
+          <div class="mockup-section">
+            <label style="font-size: 13px; margin-bottom: 8px;">Providers</label>
+            
+            <div style="border: 1px solid #444; border-radius: 4px; padding: 10px; margin-bottom: 8px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <div>
+                  <div style="font-size: 12px; font-weight: 500;">anthropic</div>
+                  <div style="font-size: 10px; color: #888;">https://api.anthropic.com/v1</div>
+                </div>
+                <div style="display: flex; gap: 6px;">
+                  <button class="btn">Refresh</button>
+                  <button class="btn">✕</button>
+                </div>
+              </div>
+              <div style="font-size: 11px; color: #51cf66; margin-bottom: 8px;">✓ Connected</div>
+              <div style="display: flex; flex-direction: column; gap: 4px;">
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer;">
+                  <input type="checkbox" checked style="width: auto;"> claude-sonnet-4-6
+                </label>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer;">
+                  <input type="checkbox" checked style="width: auto;"> claude-opus-4-7
+                </label>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer;">
+                  <input type="checkbox" style="width: auto;"> claude-haiku-4-5
+                </label>
+              </div>
+            </div>
+            
+            <div style="border: 1px solid #444; border-radius: 4px; padding: 10px; margin-bottom: 8px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <div>
+                  <div style="font-size: 12px; font-weight: 500;">deepseek</div>
+                  <div style="font-size: 10px; color: #888;">https://api.deepseek.com/v1</div>
+                </div>
+                <div style="display: flex; gap: 6px;">
+                  <button class="btn">Refresh</button>
+                  <button class="btn">✕</button>
+                </div>
+              </div>
+              <div style="font-size: 11px; color: #51cf66; margin-bottom: 8px;">✓ Connected</div>
+              <div style="display: flex; flex-direction: column; gap: 4px;">
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer;">
+                  <input type="checkbox" checked style="width: auto;"> deepseek-chat
+                </label>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer;">
+                  <input type="checkbox" style="width: auto;"> deepseek-coder
+                </label>
+              </div>
+            </div>
+            
+            <div style="border: 1px solid #444; border-radius: 4px; padding: 10px; opacity: 0.6;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <div>
+                  <div style="font-size: 12px; font-weight: 500;">openai</div>
+                  <div style="font-size: 10px; color: #888;">https://api.openai.com/v1</div>
+                </div>
+                <div style="display: flex; gap: 6px;">
+                  <button class="btn">Refresh</button>
+                  <button class="btn">✕</button>
+                </div>
+              </div>
+              <div style="font-size: 11px; color: #ff6b6b; margin-bottom: 8px;">✗ Not connected — add API key</div>
+            </div>
+          </div>
+          
+          <div class="mockup-section">
+            <label style="font-size: 13px; margin-bottom: 8px;">Add provider</label>
+            <div class="grid-2">
+              <div>
+                <input type="text" placeholder="ID (e.g. openai)">
+                <input type="text" placeholder="Name (e.g. OpenAI)">
+              </div>
+              <div>
+                <input type="text" placeholder="baseURL">
+                <input type="password" placeholder="API key">
+              </div>
+            </div>
+            <button class="btn" style="margin-top: 6px;">Add provider</button>
+          </div>
+          
+          <div class="mockup-divider"></div>
+          
+          <div class="mockup-section">
+            <label style="font-size: 13px; margin-bottom: 8px;">Skill registries</label>
+            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+              <code style="flex: 1; font-size: 11px; background: #1a1a1a; padding: 4px 8px; border-radius: 3px; border: 1px solid #444; color: #999;">https://antoinedc.github.io/bui-skills</code>
+              <button class="btn">✕</button>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <input type="text" placeholder="https://example.com/skills" style="flex: 1; margin-bottom: 0;">
+              <button class="btn">Add</button>
+            </div>
+          </div>
+          
+          <div class="mockup-footer">
+            <button class="btn">Cancel</button>
+            <button class="btn primary">Save</button>
+          </div>
+        </div>
+        
+        <!-- VOICE TAB -->
+        <div id="tab-voice" class="tab-content">
+          <h3>Voice</h3>
+          
+          <div class="mockup-section">
+            <label>Push-to-talk dictation</label>
+            <div class="hint" style="margin-bottom: 10px;">
+              Press <kbd style="background: #444; padding: 2px 4px; border-radius: 2px; font-size: 10px;">ctrl+m</kbd> to record, <kbd style="background: #444; padding: 2px 4px; border-radius: 2px; font-size: 10px;">⏎</kbd> to send, <kbd style="background: #444; padding: 2px 4px; border-radius: 2px; font-size: 10px;">esc</kbd> to cancel.
+              Get a key at <a href="#" style="color: #007bff; text-decoration: none;">console.groq.com/keys</a> (free tier).
+            </div>
+          </div>
+          
+          <div class="mockup-section">
+            <label>Groq API key</label>
+            <input type="password" placeholder="gsk_…" value="gsk_********************************">
+          </div>
+          
+          <div class="grid-2">
+            <div class="mockup-section">
+              <label>Transcription model</label>
+              <input type="text" value="whisper-large-v3-turbo">
+            </div>
+            <div class="mockup-section">
+              <label>Command classifier model</label>
+              <input type="text" value="llama-3.1-8b-instant">
+            </div>
+          </div>
+          
+          <div class="mockup-footer">
+            <button class="btn">Cancel</button>
+            <button class="btn primary">Save</button>
+          </div>
+        </div>
+        
+        <!-- FILES TAB -->
+        <div id="tab-files" class="tab-content">
+          <h3>Files</h3>
+          
+          <div class="mockup-section">
+            <label>Upload cleanup</label>
+            <input type="number" value="1" style="max-width: 120px;">
+            <span style="font-size: 12px; color: #888; margin-left: 6px;">hours</span>
+            <div class="hint">Sweeps <code>~/.bui-uploads</code> on the remote, removing drag-and-drop batches older than this. <code>0</code> disables.</div>
+          </div>
+          
+          <div class="mockup-divider"></div>
+          
+          <div class="mockup-section">
+            <label style="font-size: 13px; margin-bottom: 8px;">Agent file delivery</label>
+            <div class="toggle">
+              <input type="checkbox" checked>
+              <span>Auto-save files the AI sends</span>
+            </div>
+            <div class="hint" style="margin-bottom: 10px;">
+              When the AI drops a file in <code>~/.bui-outbox</code> on the remote, save it to your downloads folder without asking. Off = a toast asks before each file is saved.
+            </div>
+            
+            <label style="margin-top: 8px;">Downloads directory</label>
+            <input type="text" placeholder="~/Downloads (default)" value="~/Downloads">
+            <div class="hint">Absolute path; leave empty for your OS Downloads folder.</div>
+          </div>
+          
+          <div class="mockup-footer">
+            <button class="btn">Cancel</button>
+            <button class="btn primary">Save</button>
+          </div>
+        </div>
+        
+        <!-- GENERAL TAB -->
+        <div id="tab-general" class="tab-content">
+          <h3>General</h3>
+          
+          <div class="mockup-section">
+            <div class="toggle">
+              <input type="checkbox">
+              <span>Auto-rename sessions</span>
+            </div>
+            <div class="hint">
+              Every few turns, ask the model for a 1-2 word title and rename the chat window to match the current work. Overwrites the window name, including names you set by hand.
+            </div>
+          </div>
+          
+          <div class="mockup-divider"></div>
+          
+          <div class="mockup-section">
+            <label style="font-size: 13px; margin-bottom: 8px;">About</label>
+            <div style="font-size: 12px; color: #ccc; line-height: 1.6;">
+              <div style="margin-bottom: 4px;"><strong>bui</strong> v0.1.0 (build 123)</div>
+              <div style="color: #888; margin-bottom: 8px;">Open-source. Built with Electron + React.</div>
+              <div style="display: flex; gap: 12px;">
+                <a href="#" style="color: #007bff; text-decoration: none; font-size: 12px;">Documentation →</a>
+                <a href="#" style="color: #007bff; text-decoration: none; font-size: 12px;">GitHub →</a>
+              </div>
+            </div>
+          </div>
+          
+          <div class="mockup-footer">
+            <button class="btn">Cancel</button>
+            <button class="btn primary">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    function showTab(tabName) {
+      // Hide all tabs
+      document.querySelectorAll('.tab-content').forEach(el => {
+        el.classList.remove('active');
+      });
+      
+      // Remove active from all sidebar items
+      document.querySelectorAll('.mockup-sidebar-item').forEach(el => {
+        el.classList.remove('active');
+      });
+      
+      // Show selected tab
+      document.getElementById('tab-' + tabName).classList.add('active');
+      
+      // Set active sidebar item
+      event.target.classList.add('active');
+    }
+  </script>
+</body>
+</html>
