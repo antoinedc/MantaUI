@@ -117,6 +117,15 @@ command started < 20 min ago), leave it one more tick.
 
 Respect the budget caps in "Guardrails" BEFORE acting. Record every action (step 4).
 
+**Re-check immediately before EVERY mutation (stale-diagnosis guard).** Your
+OBSERVE snapshot ages while you reason. Right before a cancel/rerun/reassign,
+re-run `multica issue runs BET-<N> --output json` and re-read the newest
+comment. If a NEW run started (any agent) or the assignee changed since your
+snapshot, the pipeline is self-healing — **abort your action for that issue**
+and re-diagnose next tick. A rerun/reassign fired on a stale picture cancels a
+healthy in-flight handoff (e.g. it killed a PM merge run mid-flight on BET-56,
+2026-07-02) and is worse than acting a tick late.
+
 | Class | Action |
 |---|---|
 | **DISK** | Run the **reclaim routine** (below) FIRST. Then rerun the issues that failed on disk. |
