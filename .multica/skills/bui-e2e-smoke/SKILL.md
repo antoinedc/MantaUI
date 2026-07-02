@@ -14,6 +14,15 @@ regression (sidebar collapsed onto nothing, chat panel off-screen) all pass a
 green build and green unit tests. A text fetch cannot see any of these. A real
 Electron renderer can. This skill is that renderer.
 
+> **PUSH YOUR BRANCH BEFORE RUNNING THIS GATE.** The Electron launch below can
+> hang (first-run download, a wedged renderer, no display teardown) long enough
+> to trip multica's 30-min "no new messages" force-stop. If you ran this gate
+> *before* `git push`, that timeout discards your entire implementation — the
+> workdir is ephemeral and the rerun starts from a clean `origin` clone. Per
+> `bui-pr-workflow` step 8, your committed work must already be on `origin`
+> before you get here. If it isn't, `git push -u origin <branch>` NOW, then run
+> the gate. Push any post-gate fixes again afterward.
+
 > **You CAN run this — do not claim you can't.** Playwright's `electron.launch`
 > spawns the actual built app. On the FIRST call it does a one-time Electron
 > fetch + launch (~15-30s) — that is normal init, not a failure; wait for it.

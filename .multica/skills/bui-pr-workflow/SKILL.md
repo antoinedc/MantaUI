@@ -46,7 +46,23 @@ The standard implementer workflow for the BUI agents.
    on the task branch. Match the scope to where the change lives
    (`main`, `renderer`, `preload`, `server`, `mobile`, `ipc`, `electron`, etc.).
 
-8. Push: `git push -u origin multica/BET-N-<slug>`.
+8. **Push IMMEDIATELY after your first commit — before any further
+   verification (the e2e-smoke gate, extra manual checks, self-check).**
+   `git push -u origin multica/BET-N-<slug>`.
+
+   **Why this ordering is load-bearing (do NOT defer the push):** each
+   multica run executes in a *fresh, ephemeral workdir* that is discarded
+   when the run ends. A run that times out (e.g. the e2e-smoke Electron
+   launch hangs → 30-min "no new messages" force-stop) throws away every
+   uncommitted/unpushed change with it — and the **rerun starts from a
+   clean `origin` clone, so it cannot resume your work**. A completed
+   implementation that only lived in the workdir is lost, and the loop
+   redoes it from scratch (or never converges). Pushing the branch the
+   moment you have a green `typecheck && test` (step 6) makes the work
+   durable: even if verification later hangs, the rerun — or a human —
+   picks up your pushed branch and continues. **Push early, push often:**
+   after the e2e-smoke gate or any follow-up commits, push again. The
+   branch on `origin` is the only thing that survives a run.
 
 9. Open draft PR: `gh pr create --draft --base master`. Body must include
    typecheck result, test result, any cross-cutting follow-ups (e.g.
