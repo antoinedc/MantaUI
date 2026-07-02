@@ -460,3 +460,37 @@ describe("replayChatAttention", () => {
     expect(useStore.getState().status.bui[1].attentionKind).toBe("permission");
   });
 });
+
+describe("setDefaultModel (onboarding Step 3 + Settings)", () => {
+  beforeEach(() => {
+    useStore.setState({ defaultModel: null });
+  });
+
+  it("optimistically sets, persists via configUpdate, and reconciles", async () => {
+    const patches: Array<Record<string, unknown>> = [];
+    (globalThis as unknown as { window: { api: Record<string, unknown> } }).window = {
+      api: {
+        // Echo the patch back (main's success path returns the saved config).
+        configUpdate: async (patch: Record<string, unknown>) => {
+          patches.push(patch);
+          return { defaultModel: patch.defaultModel };
+        },
+      },
+    };
+    const model = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+    await useStore.getState().setDefaultModel(model);
+    expect(patches).toEqual([{ defaultModel: model }]);
+    expect(useStore.getState().defaultModel).toEqual(model);
+  });
+
+  it("reconciles to null when main drops the field (reject path)", async () => {
+    (globalThis as unknown as { window: { api: Record<string, unknown> } }).window = {
+      api: {
+        // Simulate main NOT persisting defaultModel (returns config without it).
+        configUpdate: async () => ({}),
+      },
+    };
+    await useStore.getState().setDefaultModel({ providerID: "openai", modelID: "gpt-4o" });
+    expect(useStore.getState().defaultModel).toBeNull();
+  });
+});

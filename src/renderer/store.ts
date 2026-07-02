@@ -128,6 +128,11 @@ type State = {
   skipOnboarding: () => Promise<void>;
   relaunchOnboarding: () => Promise<void>;
   finishOnboarding: () => Promise<void>;
+  // Persist the global default model (onboarding Step 3 + Settings share this
+  // config field). Optimistic set + configUpdate + reconcile, matching the
+  // other config setters. New/cleared sessions inherit it (see ChatPanel's
+  // configDefaultModel), so it must survive restart — hence the config write.
+  setDefaultModel: (model: { providerID: string; modelID: string }) => Promise<void>;
   applyProjects: (projects: Project[]) => void;
   applyConfig: (c: AppConfig) => void;
   // Reflect a successful onboarding claim (BET-49-T2) into store state so
@@ -325,6 +330,13 @@ export const useStore = create<State>((set, get) => ({
 
   applyPairing: (p) =>
     set({ serverUrl: p.serverUrl, boxId: p.boxId, boxToken: p.boxToken }),
+
+  setDefaultModel: async (model) => {
+    set({ defaultModel: model });
+    const next = await window.api.configUpdate({ defaultModel: model });
+    // Reconcile with what main actually saved (handles error/reject paths).
+    set({ defaultModel: next.defaultModel ?? null });
+  },
 
   setChatAutoAllow: async (v) => {
     set({ chatAutoAllow: v });
