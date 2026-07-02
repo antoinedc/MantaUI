@@ -667,6 +667,24 @@ export function Settings({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
+        {/* Re-run the full-screen onboarding flow. Clears the persisted
+            onboardingSkipped flag and forces the shell open (BET-49-T3). Full
+            Settings redesign lands in M6.3; this is the minimal placement. */}
+        <div className="flex items-center justify-between border-t border-border pt-3">
+          <div className="text-xs text-text-faint">
+            Re-run the guided setup (pairing, providers, first project).
+          </div>
+          <button
+            onClick={() => {
+              void useStore.getState().relaunchOnboarding();
+              onClose();
+            }}
+            className="text-xs px-3 py-1.5 rounded bg-bg-soft border border-border text-text-muted hover:text-text shrink-0"
+          >
+            Run setup again
+          </button>
+        </div>
+
         {saveError && (
           <div className="text-xs text-red-400 text-right">
             Couldn't save: {saveError}
