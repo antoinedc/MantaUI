@@ -11,6 +11,7 @@ import {
   networkFailure,
   type ClaimResult,
 } from "../mobile/pairingLogic.js";
+import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
 
 // ---------------------------------------------------------------------------
 // Server base URL resolution (3 deployment contexts):
@@ -223,25 +224,16 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
 // PWAs can't reliably receive EventSource, but WebSockets work there (the
 // /pty WS already tunnels fine in the installed PWA). Server exposes the
 // same {kind,payload} envelope on a /events WS.
-let es: WebSocket | null = null;
-// WS has no built-in auto-reconnect (EventSource did). Track a backoff timer
-// and the current backoff delay (ms; doubles per failed attempt, capped,
-// reset to 0 on a healthy onopen).
-let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let _backoff = 0;
+//
+// WS has no built-in auto-reconnect (EventSource did). The reconnect state
+// machine — backoff, "never permanently abandon", resync-on-reconnect — lives
+// in the shared WsReconnectController (src/renderer/net/wsTransport.ts), built
+// on the shared ExponentialBackoff (BET-46.1). This module just wires the live
+// WebSocket + browser timers into it and dispatches parsed frames to listeners.
+let _controller: WsReconnectController | null = null;
 
-// ---------------------------------------------------------------------------
-// Reconnect-resync state.
-// ---------------------------------------------------------------------------
-
-// Set to true after the first onerror so we know the NEXT onopen is a
-// reconnect (not the initial connect).  Reset to false after firing the resync
-// so rapid flapping doesn't spam listeners — the next genuine reconnect after
-// another onerror will set it again.
-let _hadError = false;
-
-// Guard: only fire the resync once per reconnect event even if onopen somehow
-// fires multiple times in quick succession.
+// Guard: only fire the resync once per reconnect event even if onReconnect
+// somehow fires multiple times in quick succession.
 let _resyncing = false;
 
 /**
@@ -295,115 +287,71 @@ function wsUrl(): string {
   return withTokenParam(base, clientToken());
 }
 
-// (Re)create the shared events WebSocket. Idempotent: a socket that is OPEN
-// or CONNECTING is left alone; only a missing/CLOSING/CLOSED one is
-// (re)opened. Listeners live in the module `listeners` map (not bound to the
-// socket), so swapping `es` is transparent to every on() consumer. The
-// {kind,payload} frame is byte-identical to the old SSE envelope, so the
-// dispatch body is unchanged.
-//
-// GOTCHA: serverBase() can throw if localStorage["bui_server"] is unset on
-// a non-localhost page (mobile/web descope — fail-fast intent). This
-// function is called synchronously from on() inside React useEffects, so
-// an uncaught throw white-screens the renderer with no recovery path.
-// Catch the throw here, log once, and let the next openStream() call
-// retry (the user typically fixes it by entering a server URL and
-// reloading). The `bootError` from refresh() carries the user-facing
-// message; we just need to not crash before that surfaces.
-function openStream() {
-  if (es && (es.readyState === WebSocket.OPEN || es.readyState === WebSocket.CONNECTING)) {
-    return;
-  }
-  if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
-  if (es) {
-    try { es.close(); } catch { /* already dead */ }
-  }
-  let url: string;
+// Dispatch one parsed {kind,payload} frame to its listeners. The frame is
+// byte-identical to the old SSE envelope, so this is unchanged from before the
+// controller refactor. Non-JSON / control frames are ignored.
+function dispatchFrame(data: unknown) {
   try {
-    url = wsUrl();
-  } catch (e) {
-    // No server URL configured. Log once for DevTools and bail — refresh()
-    // will produce its own bootError that the UI renders.
-    console.warn(
-      "[bui] events WebSocket not opened:",
-      e instanceof Error ? e.message : String(e),
-    );
-    return;
+    const { kind, payload } = JSON.parse(data as string) as {
+      kind: Kind;
+      payload: unknown;
+    };
+    const set = listeners[kind];
+    if (set) for (const fn of set) fn(payload);
+  } catch {
+    // non-JSON / control frame — ignore
   }
-  es = new WebSocket(url);
-  es.onmessage = (m) => {
-    try {
-      const { kind, payload } = JSON.parse(m.data as string) as {
-        kind: Kind;
-        payload: unknown;
-      };
-      const set = listeners[kind];
-      if (set) for (const fn of set) fn(payload);
-    } catch {
-      // non-JSON / control frame — ignore
-    }
-  };
-  const drop = () => {
-    // WebSocket has NO built-in auto-reconnect (EventSource did). Mark the
-    // drop and ALWAYS schedule an explicit reconnect with bounded backoff.
-    //
-    // We intentionally do NOT bail when `listeners` is momentarily empty.
-    // iOS standalone PWAs kill the first socket within seconds of a cold
-    // launch — frequently BEFORE React mounts and subscribes. An earlier
-    // "no listeners → give up" guard made that race permanent: the socket
-    // died pre-subscription, reconnect was abandoned, and the app stayed
-    // static forever (worked in Safari, which doesn't early-kill sockets).
-    // ensureStream() is only ever called from on() (i.e. while a listener
-    // is being added), so a listener will exist shortly; keep the socket
-    // alive so it's ready. _backoff caps the retry interval; onopen's
-    // _hadError path refetches whatever was missed.
-    _hadError = true;
-    if (_reconnectTimer) return;
-    _backoff = Math.min(_backoff ? _backoff * 2 : 1000, 15000);
-    _reconnectTimer = setTimeout(() => {
-      _reconnectTimer = null;
-      openStream();
-    }, _backoff);
-  };
-  es.onerror = drop;
-  es.onclose = drop;
-  es.onopen = () => {
-    _backoff = 0; // healthy connection — reset backoff for any future drop
-    if (_hadError) {
-      // Reconnect after a drop — refetch state that may have changed while
-      // disconnected (existing resync path, unchanged).
-      _hadError = false;
-      fireResync();
-    }
-    // else: initial connect — initial load already fetches.
-  };
+}
+
+// The shared reconnect controller: backoff, "never permanently abandon", and
+// resync-on-reconnect all live in WsReconnectController now. This module owns
+// only the wiring — the live WebSocket constructor, the frame dispatch, and
+// the resync trigger.
+//
+// GOTCHA: serverBase() (inside wsUrl()) can throw if localStorage["bui_server"]
+// is unset on a non-localhost page (mobile/web descope — fail-fast intent).
+// on() is called synchronously from React useEffects, so an uncaught throw
+// white-screens the renderer. The controller catches url() throws, reports
+// `closed` (no retry loop), and calls onConfigError — we log once there.
+function getController(): WsReconnectController {
+  if (_controller) return _controller;
+  _controller = new WsReconnectController({
+    url: wsUrl,
+    // A real DOM WebSocket structurally satisfies WsLike (readyState + the
+    // on*/close members the controller touches). The onmessage event type
+    // differs (MessageEvent vs {data}), so cast through unknown.
+    create: (url) => new WebSocket(url) as unknown as WsLike,
+    onMessage: dispatchFrame,
+    onReconnect: fireResync,
+    onConfigError: (e) =>
+      console.warn(
+        "[bui] events WebSocket not opened:",
+        e instanceof Error ? e.message : String(e),
+      ),
+  });
+  return _controller;
 }
 
 // iOS suspends an installed standalone PWA when backgrounded / screen-locked.
 // It kills the connection and (in standalone) often fires nothing on resume,
 // leaving the socket dead with no events — app "opens once then goes static".
 // On return to foreground (visibilitychange→visible) or bfcache restore
-// (pageshow), if the socket isn't live, reopen it. _hadError makes the fresh
-// onopen drive fireResync() (single resync trigger — don't also call it here).
+// (pageshow), if the socket isn't live, reopen it and force a resync of state
+// missed while backgrounded (markReconnectAndEnsure).
 let _resumeWatchdogInstalled = false;
 function installResumeWatchdog() {
   if (_resumeWatchdogInstalled) return;
   _resumeWatchdogInstalled = true;
   const recover = () => {
     if (document.visibilityState !== "visible") return;
-    const live =
-      es && (es.readyState === WebSocket.OPEN || es.readyState === WebSocket.CONNECTING);
-    if (!live) {
-      _hadError = true; // make the next onopen fire the resync
-      openStream();
-    }
+    getController().markReconnectAndEnsure();
   };
   document.addEventListener("visibilitychange", recover);
   window.addEventListener("pageshow", recover);
 }
 
 function ensureStream() {
-  openStream();
+  getController().ensure();
   installResumeWatchdog();
 }
 

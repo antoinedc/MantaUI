@@ -87,6 +87,7 @@ import {
   isSubstantiveFrame,
   STREAM_STALL_MS,
 } from "./forwardHeal.js";
+import { EventBatcher } from "./eventBatcher.js";
 import { buildRemoteConfigWriteCmd } from "./remoteConfigWrite.js";
 import {
   startDesktopPresence,
@@ -197,6 +198,25 @@ function startPollerIfReady(): void {
 let opencodeBusStopped = true;
 const opencodeStreams = new Map<string, () => void>(); // key: "" (global) or dir
 let unsubscribeDirAdded: (() => void) | null = null;
+
+// Backpressure pump for the opencode → renderer event stream (BET-46.4).
+// opencode can flood the renderer (delta storms, vcs churn); the batcher
+// buffers non-high-priority events for a short window and runs the shared
+// coalesce/drop/rate-limit policy (applyBackpressure, BET-46.1) over each
+// batch before IPC-forwarding survivors. permission.asked / question.asked are
+// NEVER buffered, coalesced, or dropped — they flush the batch and emit
+// immediately (Risk #2). One batcher for the whole bus: the coalesce key
+// includes sessionID, so cross-session deltas never collapse into each other.
+const opencodeEventBatcher = new EventBatcher({
+  emit: (ev) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC.opencodeEvent, ev);
+    }
+  },
+  // permission.asked/question.asked are already forced high-priority by the
+  // primitive; naming them here keeps the immediate-emit path explicit.
+  highPriorityTypes: ["permission.asked", "question.asked"],
+});
 
 // Refcount of open ChatPanels per scoped directory. A scoped stream is kept
 // alive while ≥1 panel for that dir is mounted and is torn down when the last
@@ -317,6 +337,9 @@ function stopOpencodeBus(): void {
   opencodeStreams.clear();
   streamReady.clear();
   activeWorkByDir.clear();
+  // Cancel any pending backpressure flush + discard the buffer — no consumers
+  // once the bus stops.
+  opencodeEventBatcher.stop();
   // Tear down the dedicated event tunnel — no consumers once the bus stops.
   teardownEventTunnel();
 }
@@ -502,9 +525,9 @@ function ensureOpencodeStream(directory: string): void {
                 // Fall back to manual approval: forward the event so the
                 // renderer can render the card (mirrors the mobile pump).
                 // Without this a failed auto-allow silently hangs the turn.
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                  mainWindow.webContents.send(IPC.opencodeEvent, ev);
-                }
+                // permission.asked is high-priority → the batcher emits it
+                // immediately (never buffered/dropped).
+                opencodeEventBatcher.push(ev);
               });
             }
             // Suppress forwarding on the success path — the renderer doesn't
@@ -513,9 +536,11 @@ function ensureOpencodeStream(directory: string): void {
             continue;
           }
 
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send(IPC.opencodeEvent, ev);
-          }
+          // Route through the backpressure batcher: high-priority events
+          // (permission.asked / question.asked) emit immediately; everything
+          // else is coalesced/rate-limited over a short window before the
+          // IPC send to the renderer.
+          opencodeEventBatcher.push(ev);
         }
       } catch (e) {
         // Server might not be up yet — fine, retry. We don't proactively
