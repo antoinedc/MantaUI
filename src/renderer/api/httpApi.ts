@@ -147,16 +147,28 @@ export function clearClientToken(): void {
  * owns only the fetch + the transport-level error → networkFailure() mapping.
  */
 export async function submitPairingCode(code: string): Promise<ClaimResult> {
+  return claimAgainst(serverBase(), code);
+}
+
+/**
+ * POST a pairing `code` to `<base>/auth/claim`, classify the outcome via the
+ * shared classifier, and persist the token (mobile token store) on success.
+ * Shared by the mobile pairing screen (base = serverBase()) and the Api
+ * `authClaim` channel (base = the caller-supplied serverUrl). Trailing slashes
+ * on `base` are trimmed so "http://box/" and "http://box" behave identically.
+ */
+async function claimAgainst(base: string, code: string): Promise<ClaimResult> {
+  const url = `${base.replace(/\/+$/, "")}/auth/claim`;
   let res: Response;
   try {
-    res = await fetch(`${serverBase()}/auth/claim`, {
+    res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ pairing_code: code }),
     });
   } catch {
-    // fetch rejects (offline / DNS / TLS / serverBase() throwing) — no HTTP
-    // response reached us.
+    // fetch rejects (offline / DNS / TLS / bad URL) — no HTTP response reached
+    // us.
     return networkFailure();
   }
   let body: unknown = null;
@@ -450,6 +462,15 @@ export const httpApi: Api = {
   // Desktop wires the real implementation through Electron IPC.
   setupProbe: () => rpc(IPC.setupProbe),
   setupBootstrap: () => rpc(IPC.setupBootstrap),
+
+  // -- onboarding pairing --
+  // The desktop onboarding shell (BET-49) drives this; the mobile/web client
+  // has its own PairingScreen. We still implement it honestly so the Api
+  // contract holds on both transports: POST <serverUrl>/auth/claim, classify
+  // with the shared helper, and on success persist the token to the mobile
+  // token store. (No config.json write here — that's a desktop-main concern;
+  // the mobile client authenticates via the localStorage Bearer token.)
+  authClaim: (input) => claimAgainst(input.serverUrl, input.code),
 
   // -- clipboard --
   clipboardWriteText: (text) => rpc(IPC.clipboardWriteText, text),

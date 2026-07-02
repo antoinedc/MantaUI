@@ -3,6 +3,7 @@ import {
   IPC,
   type AgentFileReady,
   type AppConfig,
+  type AuthClaimInput,
   type BootstrapResult,
   type DesktopNotifyPayload,
   type OpencodeAgent,
@@ -34,6 +35,7 @@ import {
   type DiscoverResult,
   type ProviderInput,
 } from "../shared/types.js";
+import type { ClaimOutcome } from "../shared/claim.mjs";
 
 type PromptModel = { providerID: string; modelID: string; variant?: string };
 type PromptAttachment = { remotePath: string; mime: string; filename?: string };
@@ -86,6 +88,14 @@ const api = {
   // structured results the Settings UI renders.
   setupProbe: (): Promise<ProbeResult> => ipcRenderer.invoke(IPC.setupProbe),
   setupBootstrap: (): Promise<BootstrapResult> => ipcRenderer.invoke(IPC.setupBootstrap),
+
+  // Onboarding pairing (BET-49): exchange a 6-digit code for the box's tokens
+  // via POST <serverUrl>/auth/claim. On success main persists
+  // { serverUrl, boxId, boxToken } to config (flipping transport to "http").
+  // Resolves to a classified ClaimOutcome — a wrong/expired code is a normal
+  // { ok:false } result, NOT a rejected promise.
+  authClaim: (input: AuthClaimInput): Promise<ClaimOutcome> =>
+    ipcRenderer.invoke(IPC.authClaim, input),
 
   // Voice (Groq STT + lightweight classifier). Main owns the API key;
   // renderer only ships audio bytes / transcripts.
