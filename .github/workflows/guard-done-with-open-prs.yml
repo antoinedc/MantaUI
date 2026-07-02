@@ -1,0 +1,52 @@
+name: Reconcile done issues with open PRs
+
+# Scheduled reconciler that detects and reverts issues marked `done` while
+# their linked PR is still open or draft. Resolves the TEN-89 post-mortem gap
+# (TEN-125).
+#
+# Why scheduled (not event-triggered): Multica status changes happen on the
+# Multica platform and do NOT fire GitHub issue events. A scheduled scan is
+# the only way to detect the mismatch from a GitHub Actions workflow.
+#
+# Approach:
+#   1. Fetch all open PRs from GitHub.
+#   2. Extract unique TEN-N issue keys from PR titles and branch names.
+#   3. For each key, query the Multica API for the issue status.
+#   4. If status is `done` while PRs are still open/draft -> violation.
+#   5. For each violation: post a blocking comment on the Multica issue,
+#      revert status `done` -> `in_review`.
+#
+# Runs every 15 minutes. Most runs are no-op (zero violations).
+# Failure policy: API errors are logged as warnings; the job exits 0.
+# A violation that wasn't reverted is retried on the next schedule tick.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  reconcile:
+    runs-on: self-hosted
+    env:
+      MULTICA_TOKEN: ${{ secrets.MULTICA_TOKEN }}
+      MULTICA_WORKSPACE_ID: 264c89bb-4659-4570-af7b-5f8daaf87985
+      MULTICA_API_URL: https://api.multica.ai
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Guard - MULTICA_TOKEN configured
+        if: ${{ env.MULTICA_TOKEN != '' }}
+        run: echo "token=true" >> "$GITHUB_OUTPUT"
+        id: guard
+
+      - name: Run reconciliation
+        if: steps.guard.outputs.token == 'true'
+        run: python3 .github/scripts/reconcile-done-prs.py

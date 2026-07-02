@@ -1,0 +1,72 @@
+name: Red-check watchdog notify
+
+# When CI fails on an AGENT-authored PR, ping the bui-ops watchdog
+# autopilot immediately (instead of waiting up to 10 min for its scheduled
+# poll) so it can diagnose RED-CHECK and route the fix to bui-pm — within
+# the watchdog's existing caps (2 reruns/issue/6h, 15-min PM cooldown).
+#
+# Why workflow_run: the CI job needs to finish (so its conclusion is known)
+# before we can act on a failure. This runs after the `CI` workflow completes.
+# better-ui adaptation: bui has no App identity (agents author as @antoinedc),
+# so agent PRs are recognized by their `multica/` branch prefix instead of the
+# author login — Multica-dispatched implementers always branch as
+# multica/BET-N-slug. Human PRs are the human's problem, not the mesh's.
+#
+# The webhook URL (which embeds an unguessable token) is stored in the repo
+# secret MULTICA_WATCHDOG_WEBHOOK — never inlined. If the secret is absent the
+# step is a no-op (the scheduled poll still covers it).
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  notify-on-red:
+    # Only when CI actually failed.
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: self-hosted
+    steps:
+      - name: Ping watchdog if the failing PR is agent-authored
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEBHOOK: ${{ secrets.MULTICA_WATCHDOG_WEBHOOK }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "::notice::MULTICA_WATCHDOG_WEBHOOK not set — relying on the scheduled watchdog poll. No-op."
+            exit 0
+          fi
+
+          # Resolve the PR from the CI run's head branch.
+          # workflow_run.head_sha is the merge-ref commit (for same-repo PRs), NOT
+          # the branch tip — so commits/<sha>/pulls returns nothing.
+          # Using pulls?head=<owner>:<branch> finds the PR reliably.
+          pr_number="$(gh api "repos/${REPO}/pulls?head=${REPO%/*}:${HEAD_BRANCH}&state=open" \
+            --jq '[.[] | select(.state=="open")][0].number // empty' 2>/dev/null || true)"
+          if [ -z "$pr_number" ]; then
+            echo "::notice::No open PR found for branch ${HEAD_BRANCH}; nothing to notify."
+            exit 0
+          fi
+
+          # Branch prefix already established agent-ness; just resolve the tip SHA.
+          head_sha="$(gh pr view "$pr_number" --repo "$REPO" --json headCommitOid --jq .headCommitOid 2>/dev/null || echo unknown)"
+
+          echo "::notice::Agent PR #${pr_number} failed CI — pinging bui-ops watchdog."
+          code="$(curl -s -o /tmp/wh_resp -w '%{http_code}' -X POST "$WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{\"source\":\"github-actions\",\"reason\":\"red-required-check\",\"repo\":\"${REPO}\",\"pr\":${pr_number},\"head_sha\":\"${head_sha}\",\"ci_run\":${RUN_ID}}")"
+          echo "webhook HTTP ${code}"
+          head -c 300 /tmp/wh_resp || true
+          # Don't fail the workflow if the webhook is unreachable — the scheduled
+          # poll is the backstop.
+          if [ "$code" -ge 300 ]; then
+            echo "::warning::Watchdog webhook returned ${code}; the 10-min scheduled poll will still catch it."
+          fi

@@ -1,0 +1,303 @@
+name: Merge on /merge command
+
+# Branch-protection substitute for GitHub Free on private repos.
+#
+# Background: GitHub Free does not enforce branch protection or rulesets on
+# private repos — the configuration saves but the UI's "Merge" button still
+# works on red PRs. This workflow replaces the merge button with a `/merge`
+# PR comment that only succeeds when every gate is green.
+#
+# Trigger contract
+# ----------------
+# Fires on `issue_comment.created` and only proceeds when ALL of:
+#   - the comment is on a PR (`issue.pull_request` present),
+#   - the entire trimmed body matches `^\s*/merge\s*$` (case-insensitive) — a
+#     trailing line "please /merge after CI" must NOT trigger,
+#   - the commenter is `@antoinedc` — only the human can merge.
+#
+# Gate sequence (each block prints a comment on failure; first failure wins)
+#   1. PR not draft
+#   2. Every required check name in `.github/workflows/required-checks.json`
+#      has `conclusion == "success"` on the PR's current head SHA. Anything
+#      else (`failure`, `cancelled`, `timed_out`, `action_required`, missing,
+#      or `null` for in-progress) blocks.
+#   3. Approval gate, with author-aware branching:
+#        - if the PR author is `@antoinedc`, the gate is waived — the `/merge`
+#          command from the human gatekeeper on their own PR IS structurally
+#          the approval (GitHub refuses self-approval via the review API);
+#        - otherwise (agent-authored PR) require at least one APPROVED review
+#          from `@antoinedc` where the most recent review per reviewer wins.
+#      The commenter is already restricted to `@antoinedc` by the trigger
+#      filter, so the waive branch can't be exercised by anyone else.
+#   4. `mergeable: true` and `mergeable_state` in `{clean, unstable}`. `dirty`
+#      means rebase needed.
+#
+# On all-green: `gh pr merge <n> --merge` (matches repo convention of merge
+# commits). On any failure: post a comment explaining what blocked.
+#
+# Resolved-conversations enforcement is deferred (too many edge cases for v1).
+# Auto-merge-on-green is intentionally out of scope — `/merge` is an explicit
+# intent gesture, not a "merge whenever the last gate clears" rule.
+#
+# better-ui adaptation (2026-07-02, ported from leasebot): there is NO bui
+# GitHub App identity yet — ALL commits/PRs/comments (human and agents alike)
+# author as @antoinedc, so Gate 3's author-aware branch currently always waives
+# (same as leasebot pre-App). KNOWN LIMITATION: an agent posting /merge is
+# indistinguishable from the human. The gate still enforces required-checks-
+# green + not-draft + mergeable-clean on every merge, which is the part GitHub
+# Free won't do on a private repo. Upgrade path when it matters: mint a bui
+# GitHub App (mirror TEN-312/313), switch agent gh auth to it, and Gate 3
+# becomes load-bearing with zero workflow changes — the bui-agent[bot] login is
+# already in the trigger filter below.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: merge-on-command-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    # Fast-path filter so the job doesn't even spin up for unrelated comments.
+    # The body match here is intentionally loose; the strict regex check is
+    # repeated below in the trigger step so the workflow run records the
+    # precise reason it was a no-op.
+    # `/merge` may come from the human maintainer (`antoinedc`) OR the agent App
+    # (`bui-agent[bot]`). Agents ARE allowed to merge — the protection is
+    # not "humans only merge" but "no SELF-APPROVAL": Gate 3 below requires a
+    # real @antoinedc approving review for any PR NOT authored by the human, so
+    # an agent can only complete a merge AFTER a human has reviewed it. (Pre-App,
+    # agents authored AND /merge'd as antoinedc, self-waiving Gate 3 — that hole
+    # is what the distinct App identity closes. TEN-312/TEN-313.)
+    if: >-
+      github.event.issue.pull_request != null &&
+      (github.event.comment.user.login == 'antoinedc' ||
+       github.event.comment.user.login == 'bui-agent[bot]') &&
+      contains(github.event.comment.body, '/merge')
+    runs-on: self-hosted
+    steps:
+      - name: Validate trigger (strict regex)
+        id: trigger
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          # Match the ENTIRE comment body (not per-line) against
+          # `\s*/merge\s*` case-insensitively. `grep -E ^...$` anchors to
+          # lines, so a multi-line comment with `/merge` on its own line
+          # would slip through — use Python `re.fullmatch` with DOTALL
+          # so `\s` covers newlines and the whole body must match.
+          match=$(python3 -c "import os, re; print('true' if re.fullmatch(r'\s*/merge\s*', os.environ['BODY'], re.IGNORECASE | re.DOTALL) else 'false')")
+          echo "match=$match" >> "$GITHUB_OUTPUT"
+          if [ "$match" != "true" ]; then
+            echo "::notice::Comment contains '/merge' but is not exactly '/merge'; skipping."
+          fi
+
+      - name: Checkout (for required-checks.json)
+        if: steps.trigger.outputs.match == 'true'
+        # Intentionally NO `ref:` — resolves to the default branch (`main`).
+        # The required-checks list MUST come from main so a PR cannot edit
+        # `required-checks.json` to bypass its own gates. Do not "fix" this
+        # to `github.event.issue.pull_request.head.sha`.
+        uses: actions/checkout@v4
+
+      - name: Run merge gate
+        if: steps.trigger.outputs.match == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          pr = os.environ["PR_NUMBER"]
+          repo = os.environ["REPO"]
+          actor = os.environ["ACTOR"]
+
+          def gh(*args, check=True):
+              return subprocess.run(
+                  ["gh", *args],
+                  check=check,
+                  capture_output=True,
+                  text=True,
+              )
+
+          def gh_out(*args):
+              return gh(*args).stdout
+
+          def post(msg: str) -> None:
+              # Comment back on the PR. The workflow's own bot user is
+              # `github-actions[bot]`, whose comments do not match the
+              # `actor == 'antoinedc'` trigger filter — no spam loop.
+              gh(
+                  "api",
+                  "--method", "POST",
+                  f"repos/{repo}/issues/{pr}/comments",
+                  "-f", f"body={msg}",
+              )
+
+          def block(reason: str) -> None:
+              post(f"🔴 Merge blocked: {reason}")
+              print(f"BLOCKED: {reason}")
+              sys.exit(1)
+
+          # ── Fetch PR ────────────────────────────────────────────────────
+          pr_json = json.loads(gh_out(
+              "api",
+              f"repos/{repo}/pulls/{pr}",
+          ))
+          head_sha = pr_json["head"]["sha"]
+          is_draft = pr_json.get("draft", False)
+          mergeable = pr_json.get("mergeable")
+          mergeable_state = pr_json.get("mergeable_state", "unknown")
+          pr_author = ((pr_json.get("user") or {}).get("login")) or ""
+          print(f"PR #{pr} head={head_sha} draft={is_draft} author={pr_author} "
+                f"mergeable={mergeable} mergeable_state={mergeable_state}")
+
+          # ── Gate 1: not draft ───────────────────────────────────────────
+          if is_draft:
+              block("PR is draft — flip to ready first.")
+
+          # ── Gate 2: required checks all green on current head SHA ───────
+          with open(".github/workflows/required-checks.json", "r", encoding="utf-8") as fh:
+              required = set(json.load(fh)["required_checks"])
+
+          runs_json = json.loads(gh_out(
+              "api",
+              f"repos/{repo}/commits/{head_sha}/check-runs",
+              "--paginate",
+          ))
+          if isinstance(runs_json, list):
+              all_runs = []
+              for page in runs_json:
+                  all_runs.extend(page.get("check_runs", []))
+          else:
+              all_runs = runs_json.get("check_runs", [])
+
+          # Keep only the latest run per check name (most recent `started_at`).
+          latest_by_name: dict[str, dict] = {}
+          for run in all_runs:
+              name = run.get("name")
+              if not name:
+                  continue
+              prev = latest_by_name.get(name)
+              ts = run.get("started_at") or ""
+              if prev is None or ts >= (prev.get("started_at") or ""):
+                  latest_by_name[name] = run
+
+          missing = []
+          failed = []
+          pending = []
+          for name in sorted(required):
+              run = latest_by_name.get(name)
+              if run is None:
+                  missing.append(name)
+                  continue
+              conclusion = run.get("conclusion")
+              status = run.get("status")
+              if conclusion == "success":
+                  continue
+              if status != "completed" or conclusion is None:
+                  pending.append(name)
+              else:
+                  failed.append(f"{name} ({conclusion})")
+
+          if missing or failed or pending:
+              parts = []
+              if failed:
+                  parts.append("failing: " + ", ".join(failed))
+              if pending:
+                  parts.append("still running: " + ", ".join(pending))
+              if missing:
+                  parts.append("not reported on head " + head_sha[:7] + ": " + ", ".join(missing))
+              block("required checks not green — " + "; ".join(parts) + ".")
+
+          # ── Gate 3: approving review (author-aware) ─────────────────────
+          # This is the anti-self-approval gate. Agents ARE allowed to /merge,
+          # but only AFTER a human has reviewed.
+          # The waive applies ONLY to a PR the human @antoinedc authored: GitHub
+          # refuses self-approval, so the human's own `/merge` IS the approval.
+          # Agent-authored PRs are authored by `bui-agent[bot]` (the App
+          # identity), NOT antoinedc, so they fall through to the else branch and
+          # REQUIRE a real @antoinedc approving review — an agent can complete a
+          # merge it requested, but cannot self-approve its own work. This closes
+          # the old hole where agents authored AND /merge'd as antoinedc, hitting
+          # this waive with zero review.
+          if pr_author == "antoinedc":
+              print(
+                  "::notice::Gate 3 waived — PR authored by the human @antoinedc; "
+                  "/merge IS the approval."
+              )
+          else:
+              reviews = json.loads(gh_out(
+                  "api",
+                  f"repos/{repo}/pulls/{pr}/reviews",
+                  "--paginate",
+              ))
+              if isinstance(reviews, list) and reviews and isinstance(reviews[0], list):
+                  flat = []
+                  for page in reviews:
+                      flat.extend(page)
+                  reviews = flat
+              latest_review: dict[str, tuple[str, str]] = {}
+              for r in reviews:
+                  user = (r.get("user") or {}).get("login")
+                  state = r.get("state")
+                  ts = r.get("submitted_at") or ""
+                  if not user or state in (None, "COMMENTED"):
+                      continue
+                  prev = latest_review.get(user)
+                  if prev is None or ts >= prev[1]:
+                      latest_review[user] = (state, ts)
+
+              approver_logins = {u for u, (st, _) in latest_review.items() if st == "APPROVED"}
+              if "antoinedc" not in approver_logins:
+                  block("approving review from `@antoinedc` required.")
+
+          # ── Gate 4: mergeable + clean state ─────────────────────────────
+          if mergeable is None:
+              # GitHub returns `null` when it hasn't computed mergeability
+              # yet (common right after a push). Surface as a soft block —
+              # the human can re-post `/merge` once the API settles.
+              block(
+                  "GitHub is still computing mergeability (`mergeable: null`). "
+                  "Wait a few seconds and re-post `/merge`."
+              )
+          if mergeable is False:
+              block(f"GitHub reports `mergeable: false` (state: {mergeable_state}). Rebase and retry.")
+          if mergeable_state == "dirty":
+              block("merge conflicts present — rebase on `main` and retry.")
+          if mergeable_state not in ("clean", "unstable"):
+              block(
+                  f"PR `mergeable_state` is `{mergeable_state}` (need `clean` or `unstable`). "
+                  "Try again in a moment, or rebase if this persists."
+              )
+
+          # ── All green: merge ────────────────────────────────────────────
+          print(f"All gates green for PR #{pr}, requested by @{actor}. Merging...")
+          merge = subprocess.run(
+              ["gh", "pr", "merge", str(pr), "--merge", "--repo", repo],
+              capture_output=True,
+              text=True,
+          )
+          if merge.returncode != 0:
+              err = (merge.stderr or merge.stdout or "").strip()
+              # 250-char head so the comment stays readable.
+              block(f"`gh pr merge` failed: {err[:250]}")
+
+          post("🟢 Merging — all gates passed.")
+          print("Merged.")
+          PY
