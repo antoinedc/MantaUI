@@ -370,6 +370,31 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 // ---------------------------------------------------------------------------
 // httpApi — implements every method of the Api type.
 // ---------------------------------------------------------------------------
+//
+// DESKTOP HTTP-MODE DEGRADATION AUDIT (BET-58). When the desktop runs in
+// "http" mode this object becomes window.api (the real preload is preserved as
+// window.__buiPreload for Electron-local affordances). Because httpApi
+// implements the FULL Api type (typecheck-enforced), no renderer call can hit
+// an undefined method — the worst case is a documented no-op, never a crash.
+// The scp-dependent / OS-integration features degrade as follows:
+//
+//   • peekRemoteFile        → /rpc (server reads its OWN local file; the server
+//                             IS the box, so no scp hop is needed — WORKS).
+//   • uploadFiles / uploadBuffer (drag-in) → /api/upload over Bearer — WORKS.
+//   • getPathForFile (drag-in path extract) → "" (no Electron webUtils here);
+//                             drag-in still works via uploadBuffer's byte path.
+//   • agentPullFile (outbox) → browser download via /api/download — WORKS;
+//     revealInFolder        → no-op (no OS file manager to reveal into).
+//   • openExternal (chat links) → window.open (the WebView is a browser) — WORKS.
+//   • clipboardWriteText / clipboardReadImage → routed to the server RPC no-ops;
+//     OSC52 desktop-clipboard sync is a preload-only affordance and silently
+//     degrades (the terminal still functions).
+//   • onScreenshotDetected / onDesktopNotify → subscription no-ops (these are
+//     Mac-desktop signals; the http client simply never receives them).
+//
+// None of these throw. If a future feature MUST use the real preload in http
+// mode (e.g. OS clipboard), reach it explicitly via window.__buiPreload rather
+// than assuming window.api is the preload.
 
 export const httpApi: Api = {
   // -- config --
