@@ -49,6 +49,27 @@ jobs:
       - name: Test (vitest + node:test)
         run: npm test
 
+  # STRICT blocking duplication gate (owner decision 2026-07-02) — required
+  # check. Any jscpd clone among changed files fails; exemptions only via the
+  # human-approval-class scripts/duplication-gate-ignore.txt. The advisory
+  # anti-spaghetti sticky comment remains the reviewer's judgment layer.
+  duplication-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: self-hosted
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Strict duplication gate
+        run: bash scripts/check-duplication-gate.sh "origin/${{ github.base_ref }}"
+
   # Restored from the pre-existing ci.yml (65bfc0f) — the BET-9 e2e smoke gate.
   # NOT in required-checks.json (Electron+Xvfb on the runner is flakier than
   # the deterministic gates); the PM treats a red e2e-smoke as a judgment call,

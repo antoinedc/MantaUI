@@ -1,0 +1,47 @@
+{
+  "_comment": [
+    "Two-tier merge policy — consumed by merge-on-command.yml (read from MAIN,",
+    "never from the PR head, so a PR cannot reclassify its own paths).",
+    "",
+    "Rules are evaluated per changed file, FIRST MATCH WINS (fnmatch globs).",
+    "A PR's class is the STRICTEST class of any changed file: one 'human' file",
+    "makes the whole PR human-approval. Files matching no rule default to",
+    "'human' (safe default).",
+    "",
+    "class semantics:",
+    "  auto  — the PM (bui-agent[bot]) may /merge on green without a human.",
+    "  human — only @antoinedc's /merge passes; the PM must request approval.",
+    "",
+    "Rationale per human rule: CI/workflow files gate everything (self-",
+    "modification = gate bypass); scripts run on the box; package manifests",
+    "are the supply chain; auth/webhooks/secrets/index are the security",
+    "boundary of the exposed server; pty/transport execute on remote hosts;",
+    "opencode-tools ship instructions to every AI session; .multica rewires",
+    "the agents themselves."
+  ],
+  "rules": [
+    { "pattern": ".github/**", "class": "human" },
+    { "pattern": "scripts/**", "class": "human" },
+    { "pattern": ".gitleaks.toml", "class": "human" },
+    { "pattern": ".multica/**", "class": "human" },
+    { "pattern": "package.json", "class": "human" },
+    { "pattern": "package-lock.json", "class": "human" },
+    { "pattern": "mobile/package.json", "class": "human" },
+    { "pattern": "src/server/auth.mjs", "class": "human" },
+    { "pattern": "src/server/webhooks.mjs", "class": "human" },
+    { "pattern": "src/server/secrets.mjs", "class": "human" },
+    { "pattern": "src/server/index.mjs", "class": "human" },
+    { "pattern": "src/main/pty.ts", "class": "human" },
+    { "pattern": "src/main/transport.ts", "class": "human" },
+    { "pattern": "docs/opencode-tools/**", "class": "human" },
+
+    { "pattern": "src/renderer/**", "class": "auto" },
+    { "pattern": "src/shared/**", "class": "auto" },
+    { "pattern": "src/preload/**", "class": "auto" },
+    { "pattern": "src/main/**", "class": "auto" },
+    { "pattern": "src/server/**", "class": "auto" },
+    { "pattern": "mobile/**", "class": "auto" },
+    { "pattern": "docs/**", "class": "auto" },
+    { "pattern": "*.md", "class": "auto" }
+  ]
+}

@@ -39,12 +39,26 @@ This repo is private on GitHub Free: branch protection DOES NOT ENFORCE (the
 UI saves rules but the merge button stays live on red PRs). The enforced gate
 is `.github/workflows/merge-on-command.yml`, ported from leasebot:
 
-1. When a PR is reviewer-PASSed and you would previously have merged: post a
-   PR comment that is EXACTLY `/merge` (nothing else in the body — a sentence
+0. FIRST determine the PR's approval tier. Two sources, strictest wins:
+   the issue's `## Approval` block (spec intent) and `.github/approval-policy.json`
+   on main (path enforcement — one `human`-class changed file makes the whole
+   PR human-tier; unlisted paths default to human). When in doubt: human.
+   - **auto tier** → proceed to step 1 yourself; report to the human AFTER the
+     merge (normal post-merge summary).
+   - **human tier** → do NOT post /merge. Comment on the Multica issue with a
+     merge-request summary (what changed, why it's human-class, checks state,
+     PR link), set the issue to `in_review`, and WAIT for @antoinedc to either
+     post /merge himself or tell you to proceed. The merge workflow enforces
+     this server-side — an agent /merge on a human-tier PR bounces with 🔴 —
+     but a bounce you predicted is noise; ask first.
+1. When a PR is reviewer-PASSed and the tier allows you to act: post a PR
+   comment that is EXACTLY `/merge` (nothing else in the body — a sentence
    containing /merge is deliberately ignored).
 2. The workflow then verifies: PR not draft; every check in
    `.github/workflows/required-checks.json` (typecheck-test, secret-scan,
-   dep-audit) green on the CURRENT head SHA; mergeable state clean. On green
+   dep-audit, duplication-gate — ALL non-negotiable, duplication included)
+   green on the CURRENT head SHA; the two-tier approval policy; mergeable
+   state clean. On green
    it merges (merge commit) and comments "🟢 Merging". On any failure it
    comments "🔴 Merge blocked: <reason>" — read that reason and act (route a
    fix to better-ui-dev, wait for checks, or escalate).

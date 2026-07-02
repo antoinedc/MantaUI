@@ -1,0 +1,10 @@
+# duplication-gate exemptions — ONLY the documented intentional mirrors.
+# AGENTS.md: desktop and mobile transports deliberately mirror each other
+# ("Both code paths share the same contract; when changing one, change the
+# other"). Everything else must pass the strict gate.
+#
+# This file is HUMAN-approval class (scripts/**): agent PRs cannot widen it.
+src/server/opencode.mjs
+src/main/opencode.ts
+src/server/rpc.mjs
+src/renderer/api/httpApi.ts

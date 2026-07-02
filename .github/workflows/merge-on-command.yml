@@ -21,14 +21,10 @@ name: Merge on /merge command
 #      has `conclusion == "success"` on the PR's current head SHA. Anything
 #      else (`failure`, `cancelled`, `timed_out`, `action_required`, missing,
 #      or `null` for in-progress) blocks.
-#   3. Approval gate, with author-aware branching:
-#        - if the PR author is `@antoinedc`, the gate is waived — the `/merge`
-#          command from the human gatekeeper on their own PR IS structurally
-#          the approval (GitHub refuses self-approval via the review API);
-#        - otherwise (agent-authored PR) require at least one APPROVED review
-#          from `@antoinedc` where the most recent review per reviewer wins.
-#      The commenter is already restricted to `@antoinedc` by the trigger
-#      filter, so the waive branch can't be exercised by anyone else.
+#   3. TWO-TIER approval policy (.github/approval-policy.json, read from
+#      main): /merge from @antoinedc passes any class; /merge from
+#      bui-agent[bot] passes ONLY when every changed file classes as "auto" —
+#      one "human"-class path blocks with the list needing human sign-off.
 #   4. `mergeable: true` and `mergeable_state` in `{clean, unstable}`. `dirty`
 #      means rebase needed.
 #
@@ -225,47 +221,53 @@ jobs:
                   parts.append("not reported on head " + head_sha[:7] + ": " + ", ".join(missing))
               block("required checks not green — " + "; ".join(parts) + ".")
 
-          # ── Gate 3: approving review (author-aware) ─────────────────────
-          # This is the anti-self-approval gate. Agents ARE allowed to /merge,
-          # but only AFTER a human has reviewed.
-          # The waive applies ONLY to a PR the human @antoinedc authored: GitHub
-          # refuses self-approval, so the human's own `/merge` IS the approval.
-          # Agent-authored PRs are authored by `bui-agent[bot]` (the App
-          # identity), NOT antoinedc, so they fall through to the else branch and
-          # REQUIRE a real @antoinedc approving review — an agent can complete a
-          # merge it requested, but cannot self-approve its own work. This closes
-          # the old hole where agents authored AND /merge'd as antoinedc, hitting
-          # this waive with zero review.
-          if pr_author == "antoinedc":
-              print(
-                  "::notice::Gate 3 waived — PR authored by the human @antoinedc; "
-                  "/merge IS the approval."
-              )
-          else:
-              reviews = json.loads(gh_out(
-                  "api",
-                  f"repos/{repo}/pulls/{pr}/reviews",
-                  "--paginate",
-              ))
-              if isinstance(reviews, list) and reviews and isinstance(reviews[0], list):
-                  flat = []
-                  for page in reviews:
-                      flat.extend(page)
-                  reviews = flat
-              latest_review: dict[str, tuple[str, str]] = {}
-              for r in reviews:
-                  user = (r.get("user") or {}).get("login")
-                  state = r.get("state")
-                  ts = r.get("submitted_at") or ""
-                  if not user or state in (None, "COMMENTED"):
-                      continue
-                  prev = latest_review.get(user)
-                  if prev is None or ts >= prev[1]:
-                      latest_review[user] = (state, ts)
+          # ── Gate 3: TWO-TIER APPROVAL POLICY (better-ui, 2026-07-02) ────
+          # Replaces leasebot's review-approval gate. Per-path classes come
+          # from .github/approval-policy.json ON MAIN (checked out above —
+          # anti-tamper, same trick as required-checks.json):
+          #   - /merge from the human @antoinedc → merges ANY class (the
+          #     command is the approval).
+          #   - /merge from the agent identity (bui-agent[bot]) → allowed ONLY
+          #     when EVERY changed file classes as "auto". One "human"-class
+          #     file blocks with the list of paths needing sign-off.
+          # Until the bui App identity is live, agents share the antoinedc
+          # login, so this gate cannot distinguish them — PM discipline (its
+          # instructions) is the interim control, and this branch becomes
+          # load-bearing the moment agent gh auth switches to the App.
+          from fnmatch import fnmatch
 
-              approver_logins = {u for u, (st, _) in latest_review.items() if st == "APPROVED"}
-              if "antoinedc" not in approver_logins:
-                  block("approving review from `@antoinedc` required.")
+          with open(".github/approval-policy.json", "r", encoding="utf-8") as fh:
+              policy = json.load(fh)["rules"]
+
+          def classify(path: str) -> str:
+              for rule in policy:
+                  if fnmatch(path, rule["pattern"]):
+                      return rule["class"]
+              return "human"  # unlisted paths default to the strict class
+
+          files_json = json.loads(gh_out(
+              "api",
+              f"repos/{repo}/pulls/{pr}/files",
+              "--paginate",
+          ))
+          if isinstance(files_json, list) and files_json and isinstance(files_json[0], list):
+              flat_files = []
+              for page in files_json:
+                  flat_files.extend(page)
+              files_json = flat_files
+          changed_paths = [f["filename"] for f in files_json]
+          human_paths = sorted(p for p in changed_paths if classify(p) == "human")
+
+          if actor == "antoinedc":
+              print("::notice::Gate 3 — human /merge; approval inherent for all classes.")
+          elif not human_paths:
+              print("::notice::Gate 3 — agent /merge; all changed paths class as auto.")
+          else:
+              block(
+                  "this PR touches HUMAN-approval paths and needs @antoinedc's own "
+                  "`/merge`: " + ", ".join(f"`{p}`" for p in human_paths[:15])
+                  + (f" (+{len(human_paths)-15} more)" if len(human_paths) > 15 else "")
+              )
 
           # ── Gate 4: mergeable + clean state ─────────────────────────────
           if mergeable is None:

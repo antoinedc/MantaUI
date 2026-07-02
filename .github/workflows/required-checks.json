@@ -2,6 +2,7 @@
   "required_checks": [
     "typecheck-test",
     "secret-scan",
-    "dep-audit"
+    "dep-audit",
+    "duplication-gate"
   ]
 }
