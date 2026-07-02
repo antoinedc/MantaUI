@@ -25,3 +25,20 @@ export function resolveTransportMode(
 
 // Validate + normalize the JSON body of a POST /auth/claim response.
 export function parseClaimResponse(json: unknown): ClaimResult;
+
+// Which client the DESKTOP should install as window.api (BET-58):
+//   "http"    — paired config → the httpApi server client (keep preload for
+//               Electron-local affordances under window.__buiPreload)
+//   "preload" — SSH/onboarding/skipped → the legacy preload bridge
+// `hasPreload` is `!!window.api` (Electron sets it; the mobile build doesn't).
+export function selectDesktopTransport(
+  config: Partial<AppConfig> | null | undefined,
+  hasPreload: boolean,
+): "http" | "preload";
+
+// The localStorage keys httpApi reads (bui_server / bui_token), seeded from a
+// paired desktop config's serverUrl + boxToken. Returns null when the config
+// isn't a usable paired-http config (missing serverUrl or invalid boxToken).
+export function desktopHttpClientSeed(
+  config: Partial<AppConfig> | null | undefined,
+): { bui_server: string; bui_token: string } | null;
