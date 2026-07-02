@@ -6,6 +6,11 @@ import {
   type WindowStatus,
 } from "../../shared/types.js";
 import type { Api } from "../../preload/index.js";
+import {
+  classifyClaimResult,
+  networkFailure,
+  type ClaimResult,
+} from "../mobile/pairingLogic.js";
 
 // ---------------------------------------------------------------------------
 // Server base URL resolution (3 deployment contexts):
@@ -110,6 +115,59 @@ export function withTokenParam(url: string, token: string | null): string {
   if (!token) return url;
   const sep = url.includes("?") ? "&" : "?";
   return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
+/**
+ * Persist the box_token so subsequent rpc/upload/download/WS calls authenticate.
+ * Sibling of localStorage["bui_server"]. Wrapped so a private-mode / disabled
+ * localStorage throws a clear error the pairing UI can surface rather than
+ * silently "succeeding" and then 401-looping.
+ */
+export function saveClientToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+/** Clear the persisted box_token (re-pair path: revoked/rotated token). */
+export function clearClientToken(): void {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* localStorage unavailable — nothing to clear */
+  }
+}
+
+/**
+ * Exchange a 6-digit pairing code for the box_token via POST /auth/claim, and
+ * classify the outcome into a typed {@link ClaimResult}. The claim endpoint is
+ * one of the two unauthenticated bootstrap routes (see src/server/auth.mjs), so
+ * this does NOT attach the Bearer header. On success the token is persisted
+ * here (single write-site) before the result is returned.
+ *
+ * Pure classification lives in pairingLogic.classifyClaimResult; this function
+ * owns only the fetch + the transport-level error → networkFailure() mapping.
+ */
+export async function submitPairingCode(code: string): Promise<ClaimResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${serverBase()}/auth/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pairing_code: code }),
+    });
+  } catch {
+    // fetch rejects (offline / DNS / TLS / serverBase() throwing) — no HTTP
+    // response reached us.
+    return networkFailure();
+  }
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    /* non-JSON body (proxy/HTML error page) — leave null; classify by status */
+  }
+  const result = classifyClaimResult(res.status, body);
+  if (result.ok) saveClientToken(result.boxToken);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
