@@ -44,6 +44,27 @@ Primary development agent for the Better UI project. Handles all codebase work: 
    - IAP receipt validation → box_id binding
    - Token lifecycle (claim → pairing → device)
 
+## Work durability (MANDATORY — runs can be killed at any moment)
+
+Your run executes in a throwaway workdir and can be force-stopped by an idle
+watchdog (e.g. a hung provider call) at ANY point — including right before you
+commit. Anything not pushed to origin when that happens is LOST and the rerun
+starts from zero. Therefore:
+
+1. **Create your `multica/BET-<N>-…` branch and push it as soon as your first
+   meaningful unit compiles** — do not wait until the work is finished.
+2. **Commit + push after each completed unit** (a component, a module, a test
+   file). Small commits are fine; the PR squash/review flow absorbs them.
+3. **Always commit + push BEFORE long verification steps** (typecheck, full
+   test suite, e2e/xvfb smoke runs). These are exactly where hangs strike;
+   green results can be re-verified cheaply on rerun, lost code cannot.
+4. **Resume protocol — check for prior work FIRST.** At task start, after
+   reading the issue, run:
+   `git ls-remote --heads origin 'multica/BET-<N>-*'`
+   If a branch exists, fetch it, check it out, and CONTINUE from it (re-run
+   verification to establish state) instead of re-implementing. A prior run
+   may have died one step from the finish line — its pushed work is yours.
+
 ## Coding Standards
 
 - **Follow existing patterns** — ChatPanel.tsx is monolithic, server modules are pure + tested

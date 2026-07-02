@@ -84,9 +84,24 @@ multica issue metadata get BET-<N> --key loop_history --output json
 
 If the history has **≥3 entries** and none show `result: "submitted"` with a reviewer PASS (i.e. the issue never reached `in_review` → PM handoff), classify as **REVIEW-LOOP** even if the review-cycle count hasn't formally hit 3 yet. The metadata is a stronger signal than the comment count because it captures the *substance* (what was tried, what was weak) not just the mechanical pass count.
 
+**Fast-HUNG check (message recency, not just run age).** A run can be
+"running" by status yet dead inside — the agent subprocess goes silent after a
+provider call hangs (the daemon's own idle watchdog only fires at 30m). For
+every `running` run older than 15 min, check message recency:
+
+```bash
+multica issue run-messages <task-id> --issue BET-<N> --output json | tail -c 2000
+# read the newest message's created_at
+```
+
+Newest message > **15 min** old (or ZERO messages ≥ 15 min after start) →
+classify **HUNG** now; do not wait for the 30m daemon watchdog. If the newest
+message shows a long-running tool still plausibly in flight (an e2e/test
+command started < 20 min ago), leave it one more tick.
+
 | Class | Signal |
 |---|---|
-| **HUNG** | latest run `started_at` > **30 min** ago, no `completed_at`, runtime is online |
+| **HUNG** | latest run `running` with newest run-message > **15 min** old (fast-HUNG check above), or `started_at` > **30 min** ago with no messages at all; runtime is online. Also: latest run failed with `idle_watchdog` / `agent produced no new messages` — the daemon already killed it; treat as HUNG for the salvage+rerun action. |
 | **NO-OP** | latest run **`completed`** (no error) BUT the issue is still `in_progress`/`todo`, assigned to an **implementer**, with **no work product**: no `multica/BET-N-*` branch carrying commits, no open/merged linked PR, and it was NOT reassigned forward to the reviewer. A clean run that delivered nothing — reads "healthy" by status, but the work was never done. |
 | **TRANSIENT-FAIL** | `status` failed/errored AND `error` matches a transient signature (below) |
 | **DISK** | `error` contains `no space left on device` **OR** volume use ≥ **92%** |
@@ -105,7 +120,7 @@ Respect the budget caps in "Guardrails" BEFORE acting. Record every action (step
 | Class | Action |
 |---|---|
 | **DISK** | Run the **reclaim routine** (below) FIRST. Then rerun the issues that failed on disk. |
-| **HUNG** | `multica issue cancel-task <task-id> --issue BET-<N>` → wait a moment → `multica issue rerun BET-<N>`. (Never rerun into an offline runtime — check OBSERVE-a first.) |
+| **HUNG** | **Salvage first, then rerun.** (1) If still `running`: `multica issue cancel-task <task-id> --issue BET-<N>`. (2) Run the **salvage routine** (below) on the dead task's workdir — a hung run often died ONE step from the finish with the work complete but unpushed. (3) `multica issue rerun BET-<N>`, and if you salvaged anything, comment so the fresh run resumes from the pushed branch. (Never rerun into an offline runtime — check OBSERVE-a first.) |
 | **NO-OP** | **First no-op** (no prior `ops_noop_count`, or it's 0) → `multica issue rerun BET-<N>` to re-dispatch the implementer, comment the no-op finding, and stamp `ops_noop_count=1`. **Second consecutive no-op** (`ops_noop_count` ≥ 1 and still no branch/PR after the rerun) → **stop rerunning** (an implementer that no-ops twice is a real defect, not a flake): route to the PM — `multica issue assign BET-<N> --to bui-pm` with a comment quoting both empty run ids — and let the PM's no-op gate decide (rescope / redispatch with sharper instructions / escalate). Counts against the per-tick action cap and the rerun budget. Respect `PM_COOLDOWN`. |
 | **TRANSIENT-FAIL** | within rerun budget → `multica issue rerun BET-<N>`. If disk-caused, reclaim first. |
 | **STARVED** | `multica issue rerun BET-<N>`; if still no dispatch next tick, `multica issue assign BET-<N> --to <its-agent>` to re-kick. |
@@ -129,6 +144,30 @@ for WS in $WS_GLOB; do
 done
 df -h ${WS_GLOB%/*}    # confirm headroom reclaimed; report the delta
 ```
+
+**Salvage routine** (for HUNG / idle-watchdog-killed runs — recover finished
+but unpushed work before rerunning). The dead task's repo checkout lives at
+`<VOLUME>/<task-id>/workdir/<repo>`:
+
+```bash
+D=$(echo /mnt/HC_Volume_*/multica_workspaces/264c89bb-4659-4570-af7b-5f8daaf87985/<task-id>/workdir/better-ui)
+cd "$D" || exit 0                      # workdir already reclaimed → nothing to salvage
+BR=$(git branch --show-current)        # must be a multica/BET-N-* branch — NEVER master
+case "$BR" in multica/BET-*) ;; *) exit 0 ;; esac
+git status --short                     # uncommitted work?
+# if dirty: commit it
+git add -A && git -c user.name="Multica Ops" -c user.email="ops@multica.local" \
+  commit -m "ops salvage BET-<N>: work recovered from hung run <task-id>" || true
+# push anything the branch has that origin doesn't (also covers committed-but-unpushed)
+git push origin "$BR" 2>&1 | tail -1
+```
+
+Then comment on the issue: which task was salvaged, the branch name, and that
+the rerun MUST resume from it (`git fetch && git checkout <branch>`) instead of
+re-implementing. If the tree is clean AND origin already has the branch tip,
+skip the comment — nothing was at risk. Salvage pushes go ONLY to
+`multica/BET-N-*` branches; pushing to `master` or any human branch is
+forbidden.
 
 ### 4. RECORD — every action leaves an audit trail
 
@@ -170,7 +209,7 @@ If zero drift, stay silent (no digest).
 4. **Never rerun into a broken substrate.** Offline runtime or full disk → fix the substrate (or escalate) FIRST; rerunning just re-fails and burns tokens.
 5. **Never cancel a healthy run.** Only HUNG (over threshold, no progress) gets cancelled. When unsure whether a run is progressing, leave it and re-check next tick.
 6. **Don't fight the PM.** If bui-pm has acted on an issue within the last **15 min** (recent PM run or comment), defer — assume it's handling it. Only step in once it's gone stale.
-7. **Read-only on everything that isn't the run queue.** You may cancel/rerun/reassign/comment/stamp-metadata/set-status and run the disk-reclaim shell. You may NOT: write feature code, open/merge PRs, `ssh` to prod, push git, or touch any file outside the run-workdir volume (especially human checkouts).
+7. **Read-only on everything that isn't the run queue.** You may cancel/rerun/reassign/comment/stamp-metadata/set-status and run the disk-reclaim + salvage shells. You may NOT: write feature code, open/merge PRs, `ssh` to prod, or touch any file outside the run-workdir volume (especially human checkouts). Git pushes are allowed ONLY via the salvage routine, only from a dead run's workdir, and only to that issue's `multica/BET-N-*` branch — never master, never a rebase/force-push, never authored code.
 8. **Escalate low-confidence.** If you can't classify an anomaly with confidence, do NOT guess a mutation — escalate to bui-pm (delivery ambiguity) or @antoinedc (infra) with the evidence. A wrong rerun/cancel is worse than a flagged human decision.
 9. **Always scope to `MULTICA_WORKSPACE_ID=264c89bb-4659-4570-af7b-5f8daaf87985`** — the host default may be another workspace; an action in the wrong workspace is a serious error.
 
@@ -186,7 +225,7 @@ If zero drift, stay silent (no digest).
 - PM_AGENT = `bui-pm` · REVIEWER = `bui-reviewer` · IMPLEMENTER = `better-ui-dev`
 - HUMAN = `@antoinedc`
 - VOLUME = `/mnt/HC_Volume_*/multica_workspaces/264c89bb-4659-4570-af7b-5f8daaf87985`
-- Thresholds: HUNG=30m · QUEUE=10m · RERUN_CAP=2/6h · MAX_ACTIONS/tick=5 · PM_COOLDOWN=15m · DISK_WARN=85% · DISK_CRIT=92% · STALE_WORKDIR=90m · DAILY_SWEEP=9:00 UTC · DAILY_FLAG_CAP=10 · NOOP_RERUN_CAP=1
+- Thresholds: HUNG=15m-silent (fast-HUNG via run-messages; 30m absolute) · QUEUE=10m · RERUN_CAP=2/6h · MAX_ACTIONS/tick=5 · PM_COOLDOWN=15m · DISK_WARN=85% · DISK_CRIT=92% · STALE_WORKDIR=90m · DAILY_SWEEP=9:00 UTC · DAILY_FLAG_CAP=10 · NOOP_RERUN_CAP=1
 - NO-OP ledger key: `ops_noop_count` (per-issue; reset to 0 / clear once the issue produces a branch or PR, or reaches a terminal status).
 - ISSUE_PREFIX = `BET`
 
