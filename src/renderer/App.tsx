@@ -28,8 +28,19 @@ export function App() {
   // "Run setup again" (Settings) sets onboardingForced to re-show it even for
   // an already-paired/host config. SSH-mode configs (host set) NEVER onboard.
   // Gate on `loaded` so we never flash onboarding before config arrives.
-  const showOnboarding =
+  const enterOnboarding =
     loaded && (onboardingForced || resolveTransportMode(configSnapshot()) === "onboarding");
+  // LATCH: once the flow is open, keep it mounted until the user explicitly
+  // finishes or skips (finishOnboarding / skipOnboarding call onDone). Without
+  // this, Step 1's successful pairing writes a boxToken → resolveTransportMode
+  // flips to "http" → enterOnboarding goes false → App would tear the flow down
+  // mid-way, and Steps 2–4 (providers/model/project) would be unreachable. The
+  // latch is cleared in onDone (below), which re-reads config for the shell.
+  const [onboardingLatched, setOnboardingLatched] = useState(false);
+  useEffect(() => {
+    if (enterOnboarding && !onboardingLatched) setOnboardingLatched(true);
+  }, [enterOnboarding, onboardingLatched]);
+  const showOnboarding = enterOnboarding || onboardingLatched;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const sidebarRef = useRef<SidebarHandle>(null);
 
@@ -402,7 +413,17 @@ export function App() {
   // finishOnboarding clears the force flag + re-reads config → normal shell,
   // no app restart.
   if (showOnboarding) {
-    return <Onboarding onDone={() => void finishOnboarding()} />;
+    return (
+      <Onboarding
+        onDone={() => {
+          // Clear the latch first so App drops to the normal shell once
+          // finishOnboarding re-reads config (or skipOnboarding persisted the
+          // opt-out). Both paths route through onDone.
+          setOnboardingLatched(false);
+          void finishOnboarding();
+        }}
+      />
+    );
   }
 
   return (
