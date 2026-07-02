@@ -1,109 +1,68 @@
-name: Anti-Spaghetti (Duplication Check)
+# Anti-spaghetti detector — ported from leasebot/tenanture. NON-BLOCKING by
+# design and deliberately NOT in required-checks.json: jscpd on a diff is noisy
+# (coincidental clones, the intentional desktop/mobile transport mirrors), so a
+# hard gate would block nearly every PR. This computes the signal ONCE and
+# posts it as a sticky PR comment; the bui-reviewer agent READS that comment
+# and exercises judgment (Block / Question / Nit / nothing). CI never decides.
+#
+# Detector logic lives in scripts/check-duplication.sh (single source of
+# computation) so the reviewer can run the identical script as a fallback when
+# the comment is missing.
+
+name: anti-spaghetti
 
 on:
   pull_request:
     branches: [main]
 
-permissions:
-  pull-requests: write
+concurrency:
+  group: anti-spaghetti-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
-  detect:
-    name: Duplication Detection
-    runs-on: [self-hosted, linux]
-    timeout-minutes: 15
-    # This is a signal, never a gate — always succeed
-    continue-on-error: true
+  duplication-report:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write # to post/update the sticky report comment
     steps:
-      - name: Checkout
+      - name: Checkout (full history for merge-base diff)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: 20
+          cache: npm
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run duplication check
-        id: check
-        shell: bash
+      - name: Run duplication detector
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
+          # Never fail the job on detector output — signal, not a gate.
+          bash scripts/check-duplication.sh "origin/${{ github.base_ref }}" \
+            > /tmp/anti-spaghetti-report.md 2>&1 || true
+          echo "Report written ($(wc -l < /tmp/anti-spaghetti-report.md) lines)."
 
-          # Get list of changed .ts/.tsx files in the PR
-          CHANGED_FILES=$(git diff --name-only "$BASE" "$HEAD" -- '*.ts' '*.tsx' 2>/dev/null)
-
-          if [[ -z "$CHANGED_FILES" ]]; then
-            echo "No TypeScript files changed. Skipping."
-            echo "report=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Run the duplication script on changed files
-          OUTPUT=$(scripts/check-duplication.sh "$BASE" "$HEAD" 2>&1) || true
-          echo "$OUTPUT"
-
-          if echo "$OUTPUT" | grep -q "DUPLICATES FOUND\|duplicate\|Duplication detected"; then
-            echo "has_duplicates=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_duplicates=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "report<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$OUTPUT" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-      - name: Post PR comment
-        if: steps.check.outputs.has_duplicates == 'true'
+      - name: Post / update sticky PR comment
         uses: actions/github-script@v7
         with:
           script: |
-            const report = `${{ steps.check.outputs.report }}`;
-            const prNumber = context.payload.pull_request.number;
-            const marker = "<!-- anti-spaghetti-report -->";
-
-            // Check if we already posted a comment
-            const { data: existing } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/anti-spaghetti-report.md', 'utf8');
+            const marker = '<!-- anti-spaghetti-report -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
             });
-
-            const existingComment = existing.find(c => c.body && c.body.includes(marker));
-
-            const body = [
-              marker,
-              "## 🍝 Duplication Detected",
-              "",
-              "The duplication checker found potential code duplication in this PR.",
-              "This is a **signal**, not a failure — review the findings and refactor if needed.",
-              "",
-              "```",
-              report,
-              "```",
-              "",
-              "> Run `scripts/check-duplication.sh` locally for full details.",
-            ].join("\n");
-
-            if (existingComment) {
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
               await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existingComment.id,
-                body: body,
+                owner, repo, comment_id: existing.id, body,
               });
-              console.log("Updated existing anti-spaghetti comment.");
             } else {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body: body,
+                owner, repo, issue_number, body,
               });
-              console.log("Posted new anti-spaghetti comment.");
             }

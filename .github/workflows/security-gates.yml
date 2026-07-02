@@ -1,0 +1,63 @@
+# Security gates — ported from leasebot/tenanture. Both jobs are REQUIRED
+# checks (required-checks.json + branch protection).
+#
+#   secret-scan — gitleaks over the full history. Allowlist in .gitleaks.toml
+#     covers ONLY the built mobile/www bundles (verified false positives);
+#     real source is fully scanned. THE reason this repo needs it: agents
+#     write most commits now, and an agent pasting a live token into code or
+#     docs must fail deterministically, not depend on reviewer attention.
+#
+#   dep-audit — npm audit scoped to PRODUCTION deps at high+. Dev toolchain
+#     advisories (vite/electron chain) are chronic noise with breaking-change
+#     fixes; shipped-code advisories are the signal. ws DoS (GHSA-96hv-2xvq-fx4p)
+#     was fixed when this gate landed.
+
+name: security-gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    runs-on: self-hosted
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets (gitleaks)
+        run: |
+          if ! command -v gitleaks >/dev/null 2>&1; then
+            GITLEAKS_VERSION=8.24.3
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz -C /tmp/
+            sudo mv /tmp/gitleaks /usr/local/bin/gitleaks || mv /tmp/gitleaks "$HOME/.local/bin/gitleaks"
+          fi
+          gitleaks detect --source . --config .gitleaks.toml --log-level=warn \
+            --exit-code 1 --report-format json --report-path gitleaks-report.json \
+            || { cat gitleaks-report.json; exit 1; }
+
+  dep-audit:
+    runs-on: self-hosted
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Audit production dependencies (high+)
+        run: npm audit --omit=dev --audit-level=high

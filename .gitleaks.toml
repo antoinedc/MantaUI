@@ -1,0 +1,14 @@
+# gitleaks config for better-ui — consumed by .github/workflows/security-gates.yml
+#
+# Allowlist rationale (verified 2026-07-02 over full history: 56 findings, ALL
+# the same false positive): the built Vite bundles in mobile/www/assets/ are
+# minified JS whose high-entropy identifier patterns (e.g. `i.TwoKeyMap=...`)
+# trip the generic-api-key rule. The bundles are BUILD OUTPUT tracked in git by
+# design (AGENTS.md: mobile serves a prebuilt bundle) — their SOURCE
+# (src/renderer/**) stays fully scanned, so a real key hardcoded into renderer
+# code is still caught before it ever compiles into a bundle.
+
+[whitelist]
+paths = [
+  '''mobile/www/assets/.*''',
+]

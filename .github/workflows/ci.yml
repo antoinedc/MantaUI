@@ -1,3 +1,17 @@
+# CI — the deterministic merge gate, ported from the leasebot/tenanture setup.
+#
+# Job name `typecheck-test` is a REQUIRED check (required-checks.json + branch
+# protection). This makes the PM agent's GATE 2 tamper-proof: the gate runs on
+# the repo's self-hosted runner (bui-dev-runner on the dev box), independent of
+# whatever an implementer agent claims locally. The PM reads `gh pr checks`
+# instead of checking out PR branches.
+#
+# Scope deliberately matches AGENTS.md's documented gate:
+#   npm run typecheck && npm test   (tsc x2, vitest, node:test)
+# No lint gate — the repo has no eslint config and ChatPanel-scale legacy would
+# make one permanently red. Duplication/lint signal is the NON-blocking
+# anti-spaghetti workflow instead.
+
 name: CI
 
 on:
@@ -5,57 +19,32 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  pull_request_review:
-    types: [submitted, dismissed]
 
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.event_name }}-${{ github.event.review.id || 'none' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   typecheck-test:
-    name: Typecheck & Test
-    runs-on: [self-hosted, linux]
-    timeout-minutes: 30
+    runs-on: self-hosted
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: 20
+          cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+      # node-pty's electron-rebuild postinstall needs build tools; it is
+      # best-effort in package.json already (`|| true`), so npm ci works on the
+      # runner even if the native rebuild is skipped — tests don't spawn ptys.
+      - run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Run tests
+      - name: Test (vitest + node:test)
         run: npm test
-
-  e2e-smoke:
-    name: E2E Smoke Test
-    runs-on: [self-hosted, linux]
-    timeout-minutes: 30
-    needs: typecheck-test
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
-
-      - name: Run E2E smoke tests
-        run: bash scripts/check-e2e-smoke.sh

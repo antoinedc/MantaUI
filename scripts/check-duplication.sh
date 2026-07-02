@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
-# Anti-spaghetti detector pass — the deterministic half of the duplication
-# discipline encoded in the reviewer workflow.
+# Anti-spaghetti detector pass — ported from leasebot/tenanture. The
+# deterministic half of the duplication/dead-code discipline: LLM implementers
+# tend to re-implement instead of reuse; deterministic tools in the harness
+# catch that more reliably than instructions alone.
 #
-# This is a SIGNAL, not a gate. It NEVER exits non-zero on findings — it only
-# emits a structured markdown report to stdout for a human or the reviewer
-# agent to read and exercise judgment on. The CI job that calls it is
-# non-blocking and is NOT in `required-checks.json`.
+# This is a SIGNAL, not a gate. It NEVER exits non-zero on findings — it emits
+# a markdown report for the bui-reviewer agent (or a human) to exercise
+# judgment on. The CI job that calls it (.github/workflows/anti-spaghetti.yml)
+# is non-blocking and NOT in required-checks.json.
 #
-# Tool: jscpd (copy-paste, pulled on demand via npx — not a repo dep).
+# better-ui adaptations vs the leasebot original:
+#   - scans .ts/.tsx/.mjs (server modules are .mjs here), excludes mobile/www
+#     build output and content-hashed assets
+#   - NO eslint section: this repo has no eslint config (the dep is present but
+#     unconfigured). If a flat config lands later, restore the diff-scoped lint
+#     section from the leasebot script verbatim.
+#   - reviewer guidance names this repo's known intentional near-twins
+#     (desktop/mobile transport mirrors — see AGENTS.md "when changing one,
+#     change the other").
 #
 # Usage:
 #   scripts/check-duplication.sh [BASE_REF]   (BASE_REF defaults to origin/main)
@@ -20,23 +30,25 @@ cd "$ROOT"
 
 MERGE_BASE="$(git merge-base "$BASE_REF" HEAD 2>/dev/null || echo "$BASE_REF")"
 mapfile -t CHANGED < <(git diff --name-only --diff-filter=d "$MERGE_BASE"...HEAD 2>/dev/null \
-  | grep -E '\.(ts|tsx|mjs)$' || true)
+  | grep -E '\.(ts|tsx|mjs)$' \
+  | grep -v '^mobile/www/' || true)
 
 echo "<!-- anti-spaghetti-report -->"
 echo "## Anti-spaghetti detector report"
 echo
 echo "_Signal, not a gate. The reviewer applies judgment — discount coincidental"
-echo "clones (drizzle query chains, test fixtures, Electron boilerplate) and"
-echo "intentional structural duplicates (parallel config files, themed entry"
-echo "points). Only act on duplication of the **same business logic** this PR"
-echo "introduced, or dead code it left behind._"
+echo "clones (test fixtures, tmux format strings) and the **intentional**"
+echo "desktop/mobile transport mirrors (src/main/opencode.ts ↔"
+echo "src/server/opencode.mjs and friends — AGENTS.md says 'when changing one,"
+echo "change the other'). Only act on duplication of the same business logic"
+echo "this PR introduced, or dead code it left behind._"
 echo
 echo "- Base ref: \`${BASE_REF}\` (merge-base \`$(git rev-parse --short "$MERGE_BASE" 2>/dev/null || echo '?')\`)"
-echo "- Changed files: **${#CHANGED[@]}**"
+echo "- Changed \`.ts/.tsx/.mjs\` files (excl. mobile/www): **${#CHANGED[@]}**"
 echo
 
 if [ "${#CHANGED[@]}" -eq 0 ]; then
-  echo "No TypeScript/JS files changed — nothing to scan."
+  echo "No TypeScript/module files changed — nothing to scan."
   exit 0
 fi
 
@@ -45,17 +57,6 @@ echo
 echo '```'
 npx --yes jscpd "${CHANGED[@]}" --min-tokens 70 --reporters consoleFull --absolute 2>&1 \
   | tail -60 || true
-echo '```'
-echo
-
-echo "### Lint (ESLint, changed scope)"
-echo
-echo '```'
-if command -v npx &> /dev/null && [ -f "package.json" ] && grep -q '"eslint"' package.json; then
-  npx eslint --format compact "${CHANGED[@]}" 2>&1 | tail -40 || true
-else
-  echo "ESLint not installed or not in package.json — skipping."
-fi
 echo '```'
 
 exit 0
