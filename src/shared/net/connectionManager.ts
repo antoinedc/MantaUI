@@ -126,6 +126,7 @@ export class ConnectionManager {
         return;
       }
     }
+    this.transition({ state: "connecting", attempt: 1 });
     await this.attemptOpen(1);
   }
 
@@ -146,11 +147,17 @@ export class ConnectionManager {
   // --- internal ---------------------------------------------------------
 
   /**
-   * Attempt to open the transport. On failure, schedule a backoff-delayed
-   * retry via the reconnecting state. `attempt` is 1-indexed for reporting.
+   * Attempt to open the transport, from whatever state we are currently in
+   * (`connecting` for the first attempt, `reconnecting` for retries — both are
+   * legal edges into `connected`). On failure, schedule a backoff-delayed retry
+   * via the `reconnecting` state. `attempt` is 1-indexed for reporting.
+   *
+   * The state machine has no `reconnecting → connecting` edge on purpose, so a
+   * retry must NOT re-enter `connecting`; the caller sets the entry state
+   * (`connect()` → `connecting`; `scheduleReconnect()` → `reconnecting`) and
+   * this method only handles the open outcome.
    */
   private async attemptOpen(attempt: number): Promise<void> {
-    this.transition({ state: "connecting", attempt });
     const myEpoch = this.epoch;
     try {
       await this.transport.open();
