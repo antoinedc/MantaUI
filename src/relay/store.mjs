@@ -20,24 +20,30 @@
 //                 entitlement) is Stage 5. We store the raw receipt + parsed
 //                 fields so Stage 5 has somewhere to put them.
 //
-// DATASTORE CHOICE — node:sqlite (built in).
-//   The runner is Node 22 (see `node --version` == v22.x), whose `node:sqlite`
-//   ships `DatabaseSync`. We prefer it over a `better-sqlite3` native dependency
-//   because it needs no compile step, no postinstall rebuild, and no addition to
-//   package.json — a smaller surface for an OSS relay that self-hosters build.
-//   `node:sqlite` is still flagged experimental (it prints an Experimental
-//   warning), which is acceptable for the relay process (not the desktop app).
-//   If a future runtime lacks `node:sqlite`, swap the `openDatabase` helper below
-//   to `better-sqlite3` — every query in this file uses the tiny shared subset
-//   (`.exec`, `.prepare(...).run/get/all`) both libraries implement, so the
-//   swap is localized to one function.
+// DATASTORE CHOICE — better-sqlite3.
+//   We originally reached for the built-in `node:sqlite` (`DatabaseSync`), but
+//   it only exists on Node 22.5+. CI pins Node 20 (`.github/workflows/ci.yml`,
+//   `node-version: 20`), where `node:sqlite` throws ERR_UNKNOWN_BUILTIN_MODULE
+//   and both relay test files fail. The issue scope anticipated exactly this:
+//   "Prefer node:sqlite ... fall back to better-sqlite3 as a dep only if
+//   node:sqlite is unavailable." On the enforced pipeline (Node 20) it IS
+//   unavailable, so we use `better-sqlite3` — a synchronous SQLite binding that
+//   works on both Node 20 and 22. It is a native module, but the relay runs on
+//   Node (not Electron), so no electron-rebuild is needed; npm's default install
+//   builds it (prebuilt binaries cover the common platforms).
+//
+//   Every query in this file uses the tiny shared subset both bindings
+//   implement — `.exec`, `.prepare(...).run/get/all`, and EXPLAIN QUERY PLAN
+//   rows exposing `.detail` — so the driver choice is confined to the
+//   `openDatabase` helper below (the one seam). If a future runtime standardizes
+//   on `node:sqlite`, swap that single function back to `new DatabaseSync(path)`.
 //
 // TESTABILITY: `openStore({ path })` accepts ":memory:" (default) for an
 // in-memory DB that leaves no fs artifacts, or a file path for a persistent
 // store. Migrations are idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so
 // opening an existing DB is a no-op re-apply, never a destructive one.
 
-import { DatabaseSync } from "node:sqlite";
+import Database from "better-sqlite3";
 import { isValidToken } from "../server/webhooks.mjs";
 
 // ---------------------------------------------------------------------------
@@ -87,12 +93,13 @@ CREATE INDEX IF NOT EXISTS idx_receipts_expires ON receipts(expires_at);
 `;
 
 // ---------------------------------------------------------------------------
-// Low-level DB open (the one node:sqlite-specific seam)
+// Low-level DB open (the one driver-specific seam)
 // ---------------------------------------------------------------------------
 
 function openDatabase(path) {
-  // ":memory:" is node:sqlite's in-memory database sentinel.
-  const db = new DatabaseSync(path);
+  // ":memory:" is better-sqlite3's in-memory database sentinel (same as
+  // node:sqlite), leaving no fs artifacts.
+  const db = new Database(path);
   // Enforce the FKs we declared (SQLite defaults them OFF per-connection).
   db.exec("PRAGMA foreign_keys = ON;");
   return db;
@@ -323,7 +330,7 @@ export function openStore({ path = ":memory:", now = () => Date.now() } = {}) {
 
 function assertBoxId(boxId) {
   if (!isValidToken(boxId)) {
-    throw new Error("store: invalid box_id (want 32 hex chars)");
+    throw new Error("store: invalid box_id (want 32 lowercase hex chars)");
   }
 }
 

@@ -211,7 +211,13 @@ export function wsTransport(ws, { onError } = {}) {
  */
 export function createRelayServer(opts = {}) {
   const {
-    port = Number(process.env.RELAY_PORT) || DEFAULT_RELAY_PORT,
+    // Honor an explicit RELAY_PORT=0 (ephemeral port, useful in tests/dev);
+    // only fall back to the default when the env var is unset or empty. A plain
+    // `Number(...) || DEFAULT` would wrongly treat "0" as falsy and override it.
+    port =
+      process.env.RELAY_PORT !== undefined && process.env.RELAY_PORT !== ""
+        ? Number(process.env.RELAY_PORT)
+        : DEFAULT_RELAY_PORT,
     host = process.env.RELAY_HOST || "0.0.0.0",
     storePath,
     verifyBox,

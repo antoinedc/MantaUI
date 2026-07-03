@@ -21,6 +21,7 @@
     "build:mobile": "vite build --config electron.vite.config.mobile.ts"
   },
   "dependencies": {
+    "better-sqlite3": "^11.10.0",
     "node-pty": "^1.0.0",
     "prism-react-renderer": "^2.4.1",
     "react-markdown": "^10.1.0",
