@@ -6,6 +6,7 @@ import { Settings } from "./Settings";
 import { Onboarding } from "./Onboarding";
 import { useStore, flatSessions } from "./store";
 import { resolveTransportMode } from "../shared/transport.mjs";
+import { getBuiPreload } from "./preloadAccess";
 
 export function App() {
   const {
@@ -119,8 +120,11 @@ export function App() {
   // used to register its own listener, so a single detection fanned out into
   // N toasts (one per mounted chat). Now the toast lives in the store, the
   // active ChatPanel renders it, and accept/dismiss clear it globally.
+  // Routes through the typed preload accessor so it no-ops on mobile/web.
   useEffect(() => {
-    const off = window.api.onScreenshotDetected((ev) => {
+    const preload = getBuiPreload();
+    if (!preload) return;
+    const off = preload.onScreenshotDetected((ev) => {
       useStore.getState().setScreenshotToast(ev);
     });
     return off;

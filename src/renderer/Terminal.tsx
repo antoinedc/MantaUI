@@ -5,6 +5,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { getBuiPreload } from "./preloadAccess";
 
 type Props = {
   projectName: string;
@@ -66,7 +67,9 @@ export function Terminal({ projectName, active }: Props) {
     // URLs → open in the user's default browser via Electron main.
     term.loadAddon(
       new WebLinksAddon((_event, uri) => {
-        window.api.openExternal(uri).catch((e) => console.warn("openExternal failed:", e));
+        getBuiPreload()?.openExternal(uri).catch((e) =>
+          console.warn("openExternal failed:", e),
+        );
       }),
     );
 
@@ -124,7 +127,7 @@ export function Terminal({ projectName, active }: Props) {
       try {
         const text = atob(payload);
         console.log("[osc52] -> clipboard:", JSON.stringify(text.slice(0, 80)));
-        window.api.clipboardWriteText(text);
+        getBuiPreload()?.clipboardWriteText(text);
         return true;
       } catch (e) {
         console.warn("[osc52] decode failed:", e);

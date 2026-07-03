@@ -14,6 +14,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components as MarkdownComponents } from "react-markdown";
 import { CLAUDE_ORANGE } from "./chatShared";
+import { getBuiPreload } from "./preloadAccess";
 
 // Streamed-fence resilience: while a code block is still streaming, the
 // closing ``` hasn't arrived yet. Without a recovery step, remark sees the
@@ -83,9 +84,10 @@ const MD_COMPONENTS: MarkdownComponents = {
         className="underline"
         style={{ color: CLAUDE_ORANGE }}
         onClick={(e) => {
-          if (window.api.openExternal && href) {
+          const preload = getBuiPreload();
+          if (preload && href) {
             e.preventDefault();
-            window.api.openExternal(href);
+            preload.openExternal(href);
           }
         }}
         {...rest}
