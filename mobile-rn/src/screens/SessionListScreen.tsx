@@ -68,11 +68,16 @@ export function SessionListScreen({ navigation, route }: Props) {
   }, [load]);
 
   function onRowPress(row: SessionRowVM) {
-    // M3.2 is read-only: opening a live session (streaming transcript) lands in
-    // a later milestone. Surface that clearly instead of a dead tap.
+    // Chat windows open the read-only live transcript (M3.5-1). Terminal
+    // windows have no opencode transcript to stream — PTY mirroring is a later
+    // slice, so surface that clearly instead of a dead tap.
+    if (row.kind === "chat" && row.opencodeSessionId) {
+      navigation.navigate("Session", { credentials, session: row });
+      return;
+    }
     Alert.alert(
       row.title,
-      "Live sessions open in a future update. This preview shows your sessions read-only.",
+      "Terminal windows open in a future update. Tap a chat session to view its live transcript.",
     );
   }
 

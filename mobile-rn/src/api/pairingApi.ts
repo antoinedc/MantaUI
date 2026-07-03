@@ -15,6 +15,7 @@ import {
   type ClaimResult,
 } from "../pure/claim";
 import { mapSessionRows, type SessionRowVM, type StatusMap } from "../pure/sessionList";
+import { mapTranscript, type TranscriptVM } from "../pure/transcript";
 import { saveCredentials } from "./credentials";
 
 /** Strip trailing slashes so "http://box/" and "http://box" behave identically. */
@@ -117,4 +118,20 @@ export async function fetchSessionList(
 ): Promise<SessionRowVM[]> {
   const raw = await rpc<unknown>(base, token, "tmux:list");
   return mapSessionRows(raw, statuses);
+}
+
+/**
+ * Fetch a chat session's transcript from the box's `opencode:messages` channel
+ * (arg = opencode session id) and map it to the detail-screen view model. This
+ * reuses the same generic `rpc()` helper as the session list — the box relays
+ * it straight to opencode's `GET /session/{id}/message` (src/server/rpc.mjs →
+ * opencode.listMessages). Read-only; live updates arrive over `/events`.
+ */
+export async function fetchTranscript(
+  base: string,
+  token: string,
+  opencodeSessionId: string,
+): Promise<TranscriptVM> {
+  const raw = await rpc<unknown>(base, token, "opencode:messages", opencodeSessionId);
+  return mapTranscript(raw);
 }
