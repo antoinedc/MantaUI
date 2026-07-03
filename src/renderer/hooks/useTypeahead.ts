@@ -46,6 +46,8 @@ export type Typeahead = {
   setTypeahead: React.Dispatch<React.SetStateAction<TypeaheadState | null>>;
   // Popup rows — the filtered result list the popup renders.
   typeaheadRows: TypeaheadRow[];
+  // Available opencode commands (loaded on demand).
+  commands: OpencodeCommand[] | null;
   // Callbacks.
   onTypeaheadSelect: (row: TypeaheadRow) => void;
   onTypeaheadHover: (idx: number) => void;
@@ -311,6 +313,7 @@ export function useTypeahead(params: {
     typeahead,
     setTypeahead,
     typeaheadRows,
+    commands,
     onTypeaheadSelect: applyTypeahead,
     onTypeaheadHover: () => {}, // no-op; hover is handled by InputArea
     onTypeaheadConfirm: () => {}, // no-op; confirm is handled by InputArea

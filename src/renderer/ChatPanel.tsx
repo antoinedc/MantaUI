@@ -45,6 +45,7 @@ import {
   modelSupportsAttachments,
   readSavedModel,
   writeSavedModel,
+  type AgentMention,
   type Attachment,
   type ModelSelection,
   type TaskContextValue,
@@ -179,11 +180,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     childSessionIds,
     childMessages,
     setChildMessages,
+    expandedTasks,
     expandedTasksRef,
     childMessagesRef,
     scheduleRefetchRef,
     isActiveRef,
     refetchOwedWhileInactive,
+    prevScrollHeight,
     questionCardRef,
     wantQuestionScroll,
     flushPendingDeltas,
@@ -208,9 +211,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setPermissions,
     questions,
     setQuestions,
+    stepTokens,
     todosDismissed,
+    setTodosDismissed,
+    liveTodos,
     branch,
     setBranch,
+    liveChildStatus,
+    commandByMessageId,
+    finishByMessageId,
+    retryInfo,
+    compactionState,
     drainAbortRef,
   } = useSseBus({
     sessionId,
@@ -272,6 +283,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Pending attachments (chips above input) + agent @-mentions waiting to be
   // serialized into FilePart / AgentPart on next submit. Cleared on success.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // Agent @-mentions state — populated by useTypeahead, consumed by submit.
+  const [agentMentions, setAgentMentions] = useState<AgentMention[]>([]);
   // Ephemeral system notice (e.g. /help output) rendered above the input.
   // Cleared on dismiss or on next session change.
   const [systemNotice, setSystemNotice] = useState<string | null>(null);
@@ -1371,6 +1384,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     typeahead,
     setTypeahead: setTypeaheadFromHook,
     typeaheadRows,
+    commands,
     onTypeaheadSelect,
     onTypeaheadHover,
     onTypeaheadConfirm,
