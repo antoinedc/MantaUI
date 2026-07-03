@@ -70,7 +70,10 @@ describe("forwardFetch connection pool", () => {
 
   it("is keep-alive and capped at the semaphore concurrency (16)", () => {
     const agent = _getForwardAgent();
-    expect(agent.keepAlive).toBe(true);
+    // `keepAlive` is a runtime property of http.Agent not reflected in the
+    // installed @types/node Agent type, so read it through a narrow cast.
+    const keepAlive = (agent as unknown as { keepAlive?: boolean }).keepAlive;
+    expect(keepAlive).toBe(true);
     expect(agent.maxSockets).toBe(EXPECTED_MAX);
     expect(agent.maxFreeSockets).toBe(EXPECTED_MAX);
   });
