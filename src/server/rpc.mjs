@@ -10,6 +10,7 @@ import {
   deleteSecret as secretsDeleteStore,
 } from "./secrets.mjs";
 import { resolveWorkspace } from "./peers.mjs";
+import * as providers from "./providers.mjs";
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -222,17 +223,20 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // preload: ipcRenderer.invoke(IPC.opencodeModels)  → no args
     "opencode:models": () => oc.listModels(),
 
-    // Provider management stubs — editing is desktop-only for v1.
-    "opencode:get-providers": () => [],
-    "opencode:set-providers": () => ({
-      ok: false,
-      error: "Provider editing is available on the desktop app only.",
-    }),
-    "opencode:discover-models": () => ({
-      ok: false,
-      error: "unreachable",
-      detail: "Provider discovery is available on the desktop app only.",
-    }),
+    // Provider management — now served from the server (BET-82.3).
+    // get-providers: fetch opencode's /provider endpoint (all providers,
+    // connected set, defaults). Returns the raw shape { all, connected, default }.
+    "opencode:get-providers": () => providers.getProviders(),
+
+    // discover-models: query an OpenAI-compatible endpoint's /models.
+    // Args: { baseURL, apiKey? } — apiKey may be "" (use stored key).
+    "opencode:discover-models": (input) =>
+      providers.discoverModels(input?.baseURL ?? "", input?.apiKey ?? ""),
+
+    // set-providers: apply upsert/remove mutations to opencode.jsonc.
+    // Args: { upsert?: ProviderInput[], remove?: string[] }
+    "opencode:set-providers": (input) =>
+      providers.setProviders(input ?? {}),
     "opencode:restart": () => undefined,
 
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args
