@@ -44,8 +44,8 @@ export function appendToBuffer(buffer: PtyBuffer, raw: string): PtyBuffer {
       newLines.push(currentLine);
       currentLine = "";
     } else if (char === "\r") {
-      // Carriage return: move to start of current line (don't push yet)
-      // The line content stays the same, just the cursor moves
+      // Carriage return: move cursor to column 0, overwrite from there
+      currentLine = "";
     } else if (char === "\b") {
       // Backspace: remove last character from current line
       currentLine = currentLine.slice(0, -1);

@@ -68,10 +68,7 @@ export function TerminalScreen(_props: Props) {
     handle.onData((data) => {
       if (unmounted) return;
       setBuffer((prev) => appendToBuffer(prev, data));
-      // Auto-scroll to bottom on new output
-      setTimeout(() => {
-        scrollRef.current?.scrollToEnd({ animated: true });
-      }, 50);
+      // Auto-scroll is handled by onContentSizeChange below.
     });
 
     handle.onClose((reason) => {
@@ -100,10 +97,10 @@ export function TerminalScreen(_props: Props) {
   }, [credentials.serverUrl, credentials.boxToken, sessionName, windowIdx]);
 
   const handleSend = () => {
-    const text = input.trimEnd(); // Keep trailing spaces, but remove trailing newline
-    if (!text) return;
-    // Send with a newline so the remote shell sees it as a complete command
-    ptyRef.current?.write(text + "\n");
+    if (!input) return;
+    // Send exactly what the user typed (preserving intentional trailing whitespace)
+    // plus a newline so the remote shell sees it as a complete command.
+    ptyRef.current?.write(input + "\n");
     setInput("");
   };
 

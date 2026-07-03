@@ -37,11 +37,18 @@ describe("appendToBuffer", () => {
 
   it("handles carriage return", () => {
     const buf = createPtyBuffer(10);
-    // "abc\r" should move cursor to start, but we don't overwrite until \n
+    // "abc\r" — \\r resets currentLine to "" (cursor moves to col 0)
     const next = appendToBuffer(buf, "abc\r");
-    // The line is in currentLine (not yet complete)
-    expect(next.currentLine).toBe("abc");
+    expect(next.currentLine).toBe("");
     expect(next.lines).toEqual([]);
+  });
+
+  it("handles carriage return followed by overwrite", () => {
+    const buf = createPtyBuffer(10);
+    // "abc\rdef\n" should result in "def" (\\r moves cursor to col 0, def overwrites)
+    const next = appendToBuffer(buf, "abc\rdef\n");
+    expect(next.lines).toEqual(["def"]);
+    expect(next.currentLine).toBe("");
   });
 
   it("handles backspace", () => {
