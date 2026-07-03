@@ -13,7 +13,9 @@
     "rename:dev": "bash scripts/rename-dev-app.sh",
     "postinstall": "electron-rebuild -f -w node-pty || true; bash scripts/rename-dev-app.sh || true",
     "mobile": "node src/server/index.mjs",
-    "test": "vitest run && node --test src/server/*.test.mjs",
+    "pair": "node scripts/bui-pair.mjs",
+    "pack": "node scripts/release/pack.mjs",
+    "test": "vitest run && node --test src/server/*.test.mjs scripts/*.test.mjs",
     "test:server": "node --test src/server/*.test.mjs",
     "test:watch": "vitest",
     "build:mobile": "vite build --config electron.vite.config.mobile.ts"
