@@ -35,6 +35,7 @@ import {
   hydrateQuestion,
   classifyScrollForPin,
   detectCommandFromText,
+  formatBytes,
   type StaleCacheResult,
 } from "./chatUtils";
 import {
@@ -177,6 +178,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     scrollRef,
     pinnedToBottom,
     stickToBottom,
+    refreshing,
     childSessionIds,
     childMessages,
     setChildMessages,
@@ -301,7 +303,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const setAgentFileToast = useStore((s) => s.setAgentFileToast);
   const [agentFileSaving, setAgentFileSaving] = useState(false);
   // Per-child loading/error state for the lazy fetch on expand.
-  const [childFetchState, setChildFetchState] = useState<
+  const [childFetchState] = useState<
     Map<string, "loading" | "error">
   >(() => new Map());
   // Ref mirrors of the child-state maps so `toggleTaskExpand` can read
@@ -314,8 +316,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   useEffect(() => {
     liveChildStatusRef.current = liveChildStatus;
   }, [liveChildStatus]);
-  // Compaction clear timer.
-  const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Compaction clear timer is owned by useSseBus.
 
   // Initial load + reload whenever sessionId changes.
   // Most state resets are now handled by the extracted hooks (useTranscriptState
@@ -347,12 +348,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
   }, [sessionId, cwd]);
 
-  // (schedule / secrets / webhook poll + reset effects moved to
-  // useSessionResources — see the `resources` hook call above.)
-
   // Refresh permissions list. Called on any permission event.
-  // Passes `sessionId` so the main process scopes the request to this
-  // session's workspace directory (see opencodePermissions in opencode.ts).
   const refreshPermissions = useCallback(() => {
     window.api
       .opencodePermissions(sessionId)
@@ -363,17 +359,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   }, [sessionId]);
 
   // Refresh question list. Called on any question event.
-  //
-  // `hydrateQuestion` (defined above the component) normalizes the server's
-  // QuestionRequest shape into the renderer's QuestionLike: in particular,
-  // it copies the server's `id` (which is the `que_…`) into our `requestId`
-  // field. Without this, a card rendered from the GET-hydrate path looks
-  // visually correct but the reply handler errors with "reply token was not
-  // captured" because `q.requestId` is undefined — even though the `que_`
-  // is sitting right there in `q.id`. (Live SSE events carry both shapes:
-  // applyQuestionEvent fills `requestId` from `p.id` explicitly; the GET
-  // path was the regression introduced by the workspace-scope fix making
-  // GET authoritative.)
+  // `hydrateQuestion` normalizes the server's QuestionRequest shape — in
+  // particular, it copies the server's `id` (the `que_…`) into our `requestId`
+  // field, which is required for the reply handler.
   const refreshQuestions = useCallback(() => {
     window.api
       .opencodeQuestions(sessionId)
@@ -542,16 +530,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   }, [isActive]);
 
   const submit = useCallback(async () => {
-    // Block submit while any attachment is still uploading — easy to forget
-    // a file is mid-transfer when the input is short.
+    // Block submit while any attachment is still uploading.
     if (attachments.some((a) => a.status === "uploading")) {
       setSendError("Wait for attachments to finish uploading.");
       return;
     }
-    // Non-media chips (csv/code/text/…) ride along as `@<remote-path>`
-    // tokens appended to the message text — the AI reads them with its Read
-    // tool. This keeps the composer clean (the chip is the only visible
-    // affordance) instead of dumping the raw path into the textarea on drop.
+    // Non-media chips ride along as `@<remote-path>` tokens appended to the
+    // message text — the AI reads them with its Read tool.
     const pathRefAttachments = attachments.filter(
       (a) => a.status === "ready" && !!a.remotePath && a.asPathRef,
     );
@@ -560,12 +545,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     const text = pathRefText ? (typed ? `${typed} ${pathRefText}` : pathRefText) : typed;
     if (!text) return;
     // If the AI is already running, push to the queue instead of aborting.
-    // Items are sent automatically one at a time as running flips to false.
     if (running) {
       setMessageQueue((q) => [...q, text]);
       setInput("");
-      // The path refs are now baked into the queued text; drop their chips so
-      // they aren't appended a second time on the next submit.
+      // Drop path-ref chips so they aren't appended a second time on next submit.
       if (pathRefAttachments.length > 0) {
         const ids = new Set(pathRefAttachments.map((a) => a.id));
         setAttachments((prev) => prev.filter((a) => !ids.has(a.id)));
@@ -576,42 +559,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setScreenshotToast(null);
     setRunning(true); // optimistic — session.status will confirm
     setInput("");
-    // Snap the branch indicator to current truth on every submit. The 5s
-    // poll catches terminal-side checkouts eventually, but the user is
-    // most likely to notice a wrong branch right when they hit enter.
+    // Snap the branch indicator to current truth on every submit.
     window.api
       .opencodeVcsBranch(cwd)
       .then((b) => setBranch(b))
       .catch(() => { /* non-fatal */ });
-    // If the pinned todo list is fully terminal (every item completed or
-    // cancelled), the user has acknowledged the previous turn's work by
-    // starting a new one — hide the stale checklist until opencode writes a
-    // fresh list. todo.updated resets this so a follow-up TodoWrite still
-    // surfaces normally.
+    // If the pinned todo list is fully terminal, hide the stale checklist.
     if (activeTodos && allTodosTerminal(activeTodos)) {
       setTodosDismissed(true);
     }
 
-    // Optimistic transcript append — show the user's message NOW so they
-    // see their input land in the conversation while the server is still
-    // routing the call. The next message-refetch (triggered by SSE) will
-    // overwrite `messages` entirely with the canonical state, so this
-    // entry is naturally replaced (no manual dedupe needed). On error we
-    // strip it by id in the catch block.
-    //
-    // Force-pin to bottom BEFORE the setMessages commit so the
-    // [messages, liveTodos] layout effect snaps to the freshly-appended
-    // turn even if the user had scrolled up to read history. This is the
-    // only legitimate force-pin path — the previous design fired on every
-    // `running` false→true edge, which incorrectly yanked the viewport on
-    // every busy/idle oscillation during multi-step turns.
-    //
-    // Reset `prevScrollHeight.current = 0` so the layout effect's
-    // `wasAtBottomBeforeCommit` short-circuits to true (its first-commit
-    // branch). Without this, a user who had scrolled mid-history before
-    // submitting a new turn would still NOT auto-scroll to their own
-    // optimistic message, because the pre-commit dist would correctly
-    // read "above threshold."
+    // Optimistic transcript append — show the user's message NOW. The next
+    // message-refetch (triggered by SSE) will overwrite `messages` entirely
+    // with the canonical state. Force-pin to bottom BEFORE the commit so the
+    // layout effect snaps to the freshly-appended turn.
     pinnedToBottom.current = true;
     prevScrollHeight.current = 0;
     const optimisticUserId = `optimistic-user-${Date.now()}`;
@@ -635,11 +596,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       },
     ]);
 
-    // Slash-command path. Order:
-    //   1. bui-local builtins (/clear, /fork, /compact, /help) — handled
-    //      entirely in the renderer; opencode never sees them.
-    //   2. opencode commands (from GET /command) — routed to runCommand.
-    //   3. Everything else falls through as a normal prompt.
+    // Slash-command path: bui-local builtins → opencode commands → normal prompt.
     const slashMatch = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
     const cmdName = slashMatch ? slashMatch[1] : null;
 
@@ -685,7 +642,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     }
 
     const knownCommand =
-      cmdName && commands ? commands.find((c) => c.name === cmdName) : null;
+      cmdName && commandsRef.current ? commandsRef.current.find((c) => c.name === cmdName) : null;
 
     // Only media chips become multimodal FileParts; path-ref chips were
     // already folded into `text` above.
@@ -779,7 +736,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
       );
     }
-  }, [input, running, sessionId, modelOverride, attachments, agentMentions, commands]);
+  }, [input, running, sessionId, modelOverride, attachments, agentMentions]);
 
   // Always-current ref to submit — lets the queued-message effect call the
   // latest version without adding submit to the effect's dependency array
@@ -816,36 +773,21 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   const replyPermission = useCallback(
     async (requestId: string, reply: "once" | "always" | "reject") => {
-      // Optimistically drop this request so the card disappears immediately;
-      // the SSE permission.replied event will reconcile if anything diverges.
+      // Optimistically drop this request so the card disappears immediately.
       setPermissions((prev) => prev.filter((p) => p.id !== requestId));
-      // Clear the sidebar attention dot immediately. We otherwise rely on the
-      // SSE permission.replied round-trip to clear it, but that event is
-      // occasionally missed (reconnect window, scoped-stream race) which
-      // leaves the red `!` stuck forever. Answering the card IS the user
-      // resolving the block, so clear locally and let SSE reconcile.
+      // Clear the sidebar attention dot immediately — the SSE round-trip can
+      // be missed, leaving the red `!` stuck.
       useStore.getState().setChatAttention(sessionId, null);
       try {
-        // Pass `sessionId` so the reply lands on this session's workspace
-        // scope — without it the server silently routes to the default
-        // workspace and the permission never clears (verified live).
         await window.api.opencodePermissionReply(requestId, reply, sessionId);
       } catch (e) {
         setSendError(String((e as Error)?.message ?? e));
-        // Re-pull on failure so the card comes back if reply didn't land.
         refreshPermissions();
       }
     },
     [refreshPermissions, sessionId],
   );
 
-  // opencode's reply/reject API is keyed STRICTLY on the `que_…` requestID
-  // (validated server-side: `Expected a string starting with "que"`). Our
-  // canonical `q.id` is the tool callID (for event/transcript dedup), so we
-  // must send `q.requestId` — the `que_` captured from the question.asked
-  // event — to the API, while still filtering UI state by `q.id`. A question
-  // with no requestId (e.g. transcript-only recovery) is NOT answerable in
-  // opencode v1.15 and isn't surfaced (see the mount path).
   const replyQuestion = useCallback(
     async (q: QuestionRequest, answers: string[][]) => {
       const que = q.requestId;
@@ -857,15 +799,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         return;
       }
       setQuestions((prev) => prev.filter((x) => x.id !== q.id));
-      // Clear the sidebar attention dot immediately (see replyPermission) —
-      // don't wait on the question.replied SSE round-trip, which can be
-      // missed and leave the red `?` stuck.
+      // Clear the sidebar attention dot immediately.
       useStore.getState().setChatAttention(q.sessionID, null);
       try {
-        // Pass sessionID so the main process scopes the reply with
-        // ?directory= — opencode's /question endpoints are directory-scoped
-        // (like prompt_async); an unscoped reply 200s but never resumes the
-        // blocked tool, hanging the agent in "processing".
         await window.api.opencodeQuestionReply(que, answers, q.sessionID);
       } catch (e) {
         setSendError(String((e as Error)?.message ?? e));
@@ -879,7 +815,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     async (q: QuestionRequest) => {
       const que = q.requestId;
       setQuestions((prev) => prev.filter((x) => x.id !== q.id));
-      // Clear the sidebar attention dot immediately (see replyPermission).
       useStore.getState().setChatAttention(q.sessionID, null);
       if (!que) return; // nothing to tell the server; just clear the card
       try {
@@ -891,8 +826,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     },
     [refreshQuestions],
   );
-
-
 
   // Pre-fetch models + default on session mount so the footer shows the
   // actual model (not just "opencode") before the first response, and the
@@ -934,6 +867,31 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   }, [models, modelOverride, defaultModel]);
   const currentModelSupportsAttachments = modelSupportsAttachments(activeModel);
   const currentModelName = activeModel?.name ?? "this model";
+
+  // ===== Typeahead (extracted to useTypeahead) =====
+  // Declared after currentModelName so it's available in the hook params.
+  const {
+    typeahead,
+    setTypeahead: setTypeaheadFromHook,
+    typeaheadRows,
+    commands,
+    onTypeaheadSelect: applyTypeahead,
+    onTypeaheadMove: moveTypeaheadSelection,
+    updateInput,
+  } = useTypeahead({
+    input,
+    setInput,
+    inputRef,
+    cwd,
+    currentModelSupportsAttachments,
+    currentModelName,
+    agentMentions,
+    setAgentMentions,
+  });
+  // Ref to commands so submit can access it without being in deps (commands
+  // is defined after submit in the file, but submit needs the latest value).
+  const commandsRef = useRef(commands);
+  commandsRef.current = commands;
 
   // If a saved modelOverride references a model that isn't in the current
   // list of connected models (common after switching providers or fixing
@@ -999,27 +957,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // (window.api.opencodeDeleteSession) is still wired for those paths.
 
   // ===== Auto-rename =====
-  //
-  // When AppConfig.autoRenameSessions is on, derive a short tmux window name
-  // from the conversation every Nth completed user turn (AUTO_RENAME_EVERY_N_
-  // TURNS) and ALWAYS overwrite the current name. The title is generated by a
-  // throwaway opencode session (the user's own model — no Groq key) via the
-  // opencodeGenerateTitle IPC; chatUtils helpers build the prompt input and
-  // sanitize the reply. This is the SOLE auto-rename path; it works on desktop
-  // and mobile because ChatPanel is shared.
-  //
-  // Cadence/guards:
-  //  - Fires only on the running true→false edge (a turn just completed), so
-  //    we read a settled transcript, not a mid-stream one.
-  //  - `lastAutoRenamedTurnRef` ensures one rename per qualifying turn count
-  //    even though the effect re-runs on every `messages`/`running` change.
-  //  - `autoRenameInFlightRef` prevents overlapping ~9s generations.
-  //  - Refs reset on session change so a fresh session starts counting over.
+  // Derives a short tmux window name from the conversation every Nth completed
+  // user turn. Title is generated by a throwaway opencode session via the
+  // opencodeGenerateTitle IPC. Works on desktop and mobile because ChatPanel
+  // is shared.
   const prevRunningForRenameRef = useRef(false);
   const lastAutoRenamedTurnRef = useRef(0);
   const autoRenameInFlightRef = useRef(false);
-  // Armed on the turn-completed edge, consumed once the transcript settles.
-  // See the two-effect rationale below.
   const pendingRenameRef = useRef(false);
 
   useEffect(() => {
@@ -1030,35 +974,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     pendingRenameRef.current = false;
   }, [sessionId]);
 
-  // ARM on the running true→false edge. We must NOT evaluate the transcript
-  // here: `messages` is updated by a 300ms-debounced refetch (scheduleRefetch),
-  // so at the instant `running` flips the transcript is still STALE — it's
-  // missing the turn that just completed (or off-by-one on the count). The old
-  // single-effect design read `countUserTurns(messages)` right on the edge,
-  // saw the wrong count, returned, and then when the refetch landed the edge
-  // was already consumed (wasRunning=false) — so the rename never fired. This
-  // effect only flips the pending flag; the evaluation runs below once the
-  // settled transcript arrives.
+  // ARM on the running true→false edge. The transcript is STALE here
+  // (300ms-debounced refetch), so we only flip the pending flag; evaluation
+  // runs below once the settled transcript arrives.
   useEffect(() => {
     const wasRunning = prevRunningForRenameRef.current;
     prevRunningForRenameRef.current = running;
-    // Arm on the completed edge. Re-running on a new turn (false→true) DIS-arms
-    // any rename still pending from the prior turn — its window has closed and
-    // the next completed edge will re-arm with the newer transcript.
     if (wasRunning && !running) pendingRenameRef.current = true;
     else if (!wasRunning && running) pendingRenameRef.current = false;
   }, [running]);
 
   // EVALUATE when a rename is armed AND the transcript is settled. Runs on
   // every `messages` change while not running, so it catches the post-edge
-  // refetch that carries the just-completed turn. We do NOT clear the pending
-  // flag on a no-match pass: the first pass after the edge sees a STALE
-  // transcript (refetch is 300ms-debounced) whose turn count hasn't advanced,
-  // so it legitimately won't match the cadence — leaving the flag armed lets
-  // the refetch's `messages` update re-trigger this effect with the settled
-  // count. The flag is cleared only when we actually fire a rename, or when a
-  // new turn starts (the disarm above). `lastAutoRenamedTurnRef` still bounds
-  // us to one rename per qualifying turn count.
+  // refetch. The flag is cleared only when we actually fire a rename, or when
+  // a new turn starts (the disarm above).
   useEffect(() => {
     if (running) return;
     if (!pendingRenameRef.current) return;
@@ -1107,7 +1036,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     voiceRecording,
     voiceProcessing,
     voiceRecorder,
-    dispatchVoiceAction,
   } = useVoice({
     input,
     setInput,
@@ -1122,7 +1050,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     compactSession,
     forkSession,
     abort,
-    replyPermission,
+    replyPermission: (id: string, reply: string) => replyPermission(id, reply as "once" | "always" | "reject"),
     replyQuestion,
     rejectQuestion,
     submitRef,
@@ -1378,33 +1306,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     },
     [addDroppedFiles],
   );
-
-  // ===== Typeahead (extracted to useTypeahead) =====
-  const {
-    typeahead,
-    setTypeahead: setTypeaheadFromHook,
-    typeaheadRows,
-    commands,
-    onTypeaheadSelect,
-    onTypeaheadHover,
-    onTypeaheadConfirm,
-    onTypeaheadMove,
-    onTypeaheadCancel,
-    typeaheadOpen,
-    typeaheadExactMatch,
-    updateInput,
-    onHistoryUp,
-    onHistoryDown,
-  } = useTypeahead({
-    input,
-    setInput,
-    inputRef,
-    cwd,
-    currentModelSupportsAttachments,
-    currentModelName,
-    agentMentions,
-    setAgentMentions,
-  });
 
   // Prompt-history navigation (Up/Down) + the typing path that exits history
   // mode. Self-contained hook; see useInputHistory. The hook also returns
@@ -2021,7 +1922,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         typeaheadRows={typeaheadRows}
         onTypeaheadSelect={applyTypeahead}
         onTypeaheadHover={(idx) =>
-          setTypeahead((prev) => (prev ? { ...prev, selectedIdx: idx } : prev))
+          setTypeaheadFromHook((prev) => (prev ? { ...prev, selectedIdx: idx } : prev))
         }
         input={input}
         setInput={updateInputWithHistoryReset}
@@ -2039,7 +1940,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         voiceMode={voiceRecorder.mode}
         voiceRecording={voiceRecording}
         voiceProcessing={voiceProcessing}
-        startVoice={voiceRecorder.start}
+        startVoice={(mode) => { voiceRecorder.start(mode); return Promise.resolve(); }}
         stopVoice={voiceRecorder.stop}
         cancelVoice={voiceRecorder.cancel}
         tokens={latestTokens}
@@ -2070,7 +1971,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           }
         }}
         onTypeaheadMove={moveTypeaheadSelection}
-        onTypeaheadCancel={() => setTypeahead(null)}
+        onTypeaheadCancel={() => setTypeaheadFromHook(null)}
         onHistoryUp={() => navigateHistory(-1)}
         onHistoryDown={() => navigateHistory(1)}
         onQueuePop={() => {

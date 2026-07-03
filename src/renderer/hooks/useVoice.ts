@@ -15,10 +15,10 @@
 // No Electron-only deps — only `window.api.*`, which the mobile HTTP server
 // shims.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { VoiceAction } from "../../shared/types";
 import { useVoiceRecorder, fuzzyMatchModel, resolveQuestionAnswer } from "../voice";
-import type { VoicePhase, VoiceResult, VoiceMode } from "../voice";
+import type { VoicePhase, VoiceMode } from "../voice";
 import { findLast } from "../chatShared";
 
 export type Voice = {
@@ -114,12 +114,12 @@ export function useVoice(params: {
         }
         case "submit": {
           setInput(action.text);
-          setTimeout(() => submitRef.current(), 0);
+          setTimeout(() => submitRef.current?.(), 0);
           return;
         }
         case "clear":
           setInput("/clear");
-          setTimeout(() => submitRef.current(), 0);
+          setTimeout(() => submitRef.current?.(), 0);
           return;
         case "compact": compactSession(); return;
         case "fork":    forkSession();    return;
@@ -218,7 +218,7 @@ export function useVoice(params: {
         dispatchVoiceAction({ kind: "append", text: r.text });
         if (submitAfterTranscribeRef.current) {
           submitAfterTranscribeRef.current = false;
-          setTimeout(() => submitRef.current(), 0);
+          setTimeout(() => submitRef.current?.(), 0);
         }
       } else {
         dispatchVoiceAction(r.classify.action);

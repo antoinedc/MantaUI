@@ -16,9 +16,6 @@ import {
   installMockApi,
   resetStore,
   mount,
-  emitAndFlush,
-  type MockApi,
-  type MockEventBus,
   type Harness,
 } from "../testHarness";
 
@@ -31,12 +28,10 @@ const PROPS = {
 };
 
 describe("useTypeahead via ChatPanel", () => {
-  let api: MockApi;
-  let bus: MockEventBus;
   let h: Harness | null = null;
 
   beforeEach(() => {
-    ({ api, bus } = installMockApi());
+    installMockApi();
     resetStore();
   });
 
@@ -74,9 +69,6 @@ describe("useTypeahead via ChatPanel", () => {
     await h.flush();
 
     // The typeahead popup should be visible (it renders as a div with class)
-    const popup = h.container.querySelector("[class*='typeahead']") ||
-                  h.container.querySelector("[class*='popup']") ||
-                  h.container.querySelector("[class*='dropdown']");
     // We don't assert exact visibility since the CSS class names may vary,
     // but we verify the component didn't crash and the textarea has "/" in it.
     expect(textarea.value).toBe("/");

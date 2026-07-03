@@ -95,9 +95,7 @@ export function useTranscriptState(params: {
   useEffect(() => {
     childMessagesRef.current = childMessages;
   }, [childMessages]);
-  const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
-    new Map(),
-  );
+  // childRefetchTimers are managed by the ChatPanel caller (see scheduleChildRefetch param).
   const questionCardRef = useRef<HTMLDivElement>(null);
   const wantQuestionScroll = useRef(false);
   const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

@@ -59,10 +59,8 @@ import {
   shouldDropEventForSessionFilter,
   registerChildSessionFromCreated,
   isDrainAbortError,
-  isAssistantTurnComplete,
   shouldAbortForQueuedDrain,
-  hydrateQuestion,
-  applyQuestionEvent,
+  collectChildSessionIds,
   type PendingDelta,
 } from "../chatUtils";
 import type { TokenUsage } from "../chatShared";
@@ -100,7 +98,7 @@ export type SseBus = {
   submit: () => void;
   submitRef: React.RefObject<() => void>;
   abort: () => void;
-  replyPermission: (id: string, reply: string) => void;
+  replyPermission: (id: string, reply: "once" | "always" | "reject") => void;
   replyQuestion: (q: QuestionRequest, answers: string[][]) => void;
   rejectQuestion: (q: QuestionRequest) => void;
   refreshPermissions: () => Promise<void>;
@@ -131,30 +129,21 @@ export function useSseBus(params: {
 }): SseBus {
   const {
     sessionId,
-    cwd,
     setMessages,
     scheduleRefetch,
     spliceMessage,
     scheduleChildRefetch,
     childSessionIds,
-    childMessagesRef,
     expandedTasksRef,
-    childRefetchTimers,
     isActiveRef,
     refetchOwedWhileInactive,
     pendingDeltas,
     flushPendingDeltas,
     scheduleFlush,
     oldestPendingAt,
-    FLUSH_MAX_AGE_MS,
     submit,
     submitRef,
     setInput,
-    compactSession,
-    forkSession,
-    selectModel,
-    setChatAttention,
-    setChatSubagents,
   } = params;
 
   const [running, setRunning] = useState(false);
@@ -218,15 +207,16 @@ export function useSseBus(params: {
   }, [sessionId]);
 
   const replyPermission = useCallback(
-    (id: string, reply: string) => {
-      void window.api.opencodePermissionReply?.(sessionId, id, reply);
+    (id: string, reply: "once" | "always" | "reject") => {
+      void window.api.opencodePermissionReply?.(id, reply, sessionId);
     },
     [sessionId],
   );
 
   const replyQuestion = useCallback(
     (q: QuestionRequest, answers: string[][]) => {
-      void window.api.opencodeQuestionReply?.(sessionId, q.id, answers);
+      if (!q.requestId) return;
+      void window.api.opencodeQuestionReply?.(q.requestId, answers, q.sessionID);
     },
     [sessionId],
   );
@@ -430,7 +420,10 @@ export function useSseBus(params: {
             input: usage.input ?? 0,
             output: usage.output ?? 0,
             reasoning: usage.reasoning ?? 0,
-            cache: usage.cache ?? { read: 0, write: 0 },
+            cache: {
+              read: usage.cache?.read ?? 0,
+              write: usage.cache?.write ?? 0,
+            },
             cost,
           });
         }

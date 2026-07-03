@@ -81,9 +81,9 @@ export function useTypeahead(params: {
     cwd,
     currentModelSupportsAttachments,
     currentModelName,
-    agentMentions,
     setAgentMentions,
   } = params;
+  // agentMentions consumed via setAgentMentions in applyTypeahead (agent mode)
 
   const [typeahead, setTypeahead] = useState<TypeaheadState | null>(null);
   const [commands, setCommands] = useState<OpencodeCommand[] | null>(null);
@@ -195,7 +195,7 @@ export function useTypeahead(params: {
     if (!typeahead) return [];
     const q = typeahead.query.toLowerCase();
     if (typeahead.mode === "command") {
-      const builtins = filterCommands(BUI_BUILTIN_COMMANDS, q).map((c) => ({
+      const builtins = filterCommands([...BUI_BUILTIN_COMMANDS], q).map((c) => ({
         kind: "command" as const,
         key: c.name,
         primary: `/${c.name}`,
