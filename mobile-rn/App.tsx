@@ -19,6 +19,7 @@ import { PairingScreen } from "./src/screens/PairingScreen";
 import { SessionListScreen } from "./src/screens/SessionListScreen";
 import { SessionDetailScreen } from "./src/screens/SessionDetailScreen";
 import { SettingsScreen } from "./src/screens/SettingsScreen";
+import { TerminalScreen } from "./src/screens/TerminalScreen";
 import type { SessionRowVM } from "./src/pure/sessionList";
 import { colors } from "./src/theme";
 
@@ -26,6 +27,7 @@ export type RootStackParamList = {
   Pairing: undefined;
   Sessions: { credentials: StoredCredentials };
   Session: { credentials: StoredCredentials; session: SessionRowVM };
+  Terminal: { credentials: StoredCredentials; session: SessionRowVM };
   Settings: { credentials: StoredCredentials };
 };
 
@@ -96,6 +98,11 @@ export default function App() {
               name="Session"
               component={SessionDetailScreen}
               options={{ title: "Session" }}
+            />
+            <Stack.Screen
+              name="Terminal"
+              component={TerminalScreen}
+              options={{ title: "Terminal" }}
             />
             <Stack.Screen
               name="Settings"

@@ -68,16 +68,24 @@ export function SessionListScreen({ navigation, route }: Props) {
   }, [load]);
 
   function onRowPress(row: SessionRowVM) {
-    // Chat windows open the read-only live transcript (M3.5-1). Terminal
-    // windows have no opencode transcript to stream — PTY mirroring is a later
-    // slice, so surface that clearly instead of a dead tap.
+    // Chat windows open the live transcript view (M3.5-1). Terminal windows
+    // open the PTY terminal (M5).
     if (row.kind === "chat" && row.opencodeSessionId) {
+      navigation.navigate("Session", { credentials, session: row });
+      return;
+    }
+    if (row.kind === "terminal") {
+      navigation.navigate("Terminal", { credentials, session: row });
+      return;
+    }
+    // Fallback: if we don't know the kind, try chat first.
+    if (row.opencodeSessionId) {
       navigation.navigate("Session", { credentials, session: row });
       return;
     }
     Alert.alert(
       row.title,
-      "Terminal windows open in a future update. Tap a chat session to view its live transcript.",
+      "This session type isn't supported yet.",
     );
   }
 
