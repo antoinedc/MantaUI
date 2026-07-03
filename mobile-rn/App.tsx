@@ -9,7 +9,7 @@
 // onPaired(creds) to persist + navigate.
 
 import { useEffect, useState } from "react";
-import { ActivityIndicator, StyleSheet, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -18,6 +18,7 @@ import { loadCredentials, type StoredCredentials } from "./src/api/credentials";
 import { PairingScreen } from "./src/screens/PairingScreen";
 import { SessionListScreen } from "./src/screens/SessionListScreen";
 import { SessionDetailScreen } from "./src/screens/SessionDetailScreen";
+import { SettingsScreen } from "./src/screens/SettingsScreen";
 import type { SessionRowVM } from "./src/pure/sessionList";
 import { colors } from "./src/theme";
 
@@ -25,6 +26,7 @@ export type RootStackParamList = {
   Pairing: undefined;
   Sessions: { credentials: StoredCredentials };
   Session: { credentials: StoredCredentials; session: SessionRowVM };
+  Settings: { credentials: StoredCredentials };
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -74,12 +76,31 @@ export default function App() {
               name="Sessions"
               component={SessionListScreen}
               initialParams={{ credentials: initial }}
-              options={{ title: "Sessions" }}
+              options={({ navigation }) => ({
+                title: "Sessions",
+                headerRight: () => (
+                  <Pressable
+                    onPress={() =>
+                      navigation.navigate("Settings", { credentials: initial })
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel="Settings"
+                    hitSlop={12}
+                  >
+                    <Text style={styles.headerGear}>⚙</Text>
+                  </Pressable>
+                ),
+              })}
             />
             <Stack.Screen
               name="Session"
               component={SessionDetailScreen}
               options={{ title: "Session" }}
+            />
+            <Stack.Screen
+              name="Settings"
+              component={SettingsScreen}
+              options={{ title: "Settings" }}
             />
           </>
         ) : (
@@ -101,4 +122,5 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: colors.bg,
   },
+  headerGear: { color: colors.text, fontSize: 20 },
 });

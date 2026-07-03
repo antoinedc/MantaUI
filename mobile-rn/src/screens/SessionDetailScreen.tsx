@@ -14,13 +14,15 @@
 // the pure ../pure/{transcript,events,composer,interaction} modules; this
 // component owns fetch + socket + render.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   RefreshControl,
   StyleSheet,
   Text,
@@ -31,6 +33,7 @@ import type { RootStackParamList } from "../../App";
 import {
   AuthRequiredError,
   abortSession,
+  dispatchSessionAction,
   fetchPermissions,
   fetchQuestions,
   fetchTranscript,
@@ -39,6 +42,11 @@ import {
   replyQuestion,
   sendPrompt,
 } from "../api/pairingApi";
+import {
+  availableActions,
+  resolveSessionAction,
+  type SessionActionKind,
+} from "../pure/sessionActions";
 import { clearCredentials } from "../api/credentials";
 import { subscribeOpencodeEvents } from "../api/eventsClient";
 import {
@@ -83,10 +91,85 @@ export function SessionDetailScreen({ navigation, route }: Props) {
   // bottom, so scrolling up to read history isn't yanked back on each event.
   const atBottomRef = useRef(true);
 
-  // Set the header to the session title.
-  useEffect(() => {
-    navigation.setOptions({ title: session.title });
-  }, [navigation, session.title]);
+  // A session action (new/fork/compact) in flight — disables the header menu.
+  const [actionBusy, setActionBusy] = useState(false);
+
+  // Run a session action: resolve the channel+payload with the pure module,
+  // dispatch it, and surface the outcome. "new" resets the conversation on this
+  // window; "fork" spawns a new window on the box; "compact" summarizes context
+  // in place. All are best-effort — a failure alerts rather than crashing.
+  const runAction = useCallback(
+    async (kind: SessionActionKind) => {
+      const request = resolveSessionAction(kind, session);
+      if (!request) return;
+      setActionBusy(true);
+      try {
+        await dispatchSessionAction(
+          credentials.serverUrl,
+          credentials.boxToken,
+          request,
+        );
+        if (kind === "new") {
+          // The window now holds a fresh session id; the transcript we're
+          // showing is stale. Reload it (the box re-stamped the same window).
+          void load("refresh");
+        } else if (kind === "fork") {
+          Alert.alert("Forked", "A new window was created on your box.");
+        } else if (kind === "compact") {
+          Alert.alert("Compacting", "The session context is being summarized.");
+        }
+      } catch (e) {
+        if (e instanceof AuthRequiredError) {
+          await clearCredentials();
+          navigation.replace("Pairing");
+          return;
+        }
+        Alert.alert("Couldn't complete that", e instanceof Error ? e.message : "Try again.");
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [credentials.serverUrl, credentials.boxToken, session, navigation],
+  );
+
+  const onMenuPress = useCallback(() => {
+    const actions = availableActions(session);
+    if (actions.length === 0) return;
+    const label: Record<SessionActionKind, string> = {
+      new: "New chat (clear)",
+      clear: "Clear",
+      fork: "Fork to new window",
+      compact: "Compact context",
+    };
+    Alert.alert("Session actions", session.title, [
+      ...actions.map((a) => ({
+        text: label[a],
+        onPress: () => void runAction(a),
+      })),
+      { text: "Cancel", style: "cancel" as const },
+    ]);
+  }, [session, runAction]);
+
+  // Set the header title + the actions menu button.
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      title: session.title,
+      headerRight:
+        availableActions(session).length > 0
+          ? () => (
+              <Pressable
+                onPress={onMenuPress}
+                disabled={actionBusy}
+                accessibilityRole="button"
+                accessibilityLabel="Session actions"
+                hitSlop={12}
+              >
+                <Text style={[styles.headerMenu, actionBusy && styles.headerMenuBusy]}>⋯</Text>
+              </Pressable>
+            )
+          : undefined,
+    });
+  }, [navigation, session, onMenuPress, actionBusy]);
 
   const load = useCallback(
     async (mode: "initial" | "refresh") => {
@@ -478,4 +561,6 @@ const styles = StyleSheet.create({
     textAlign: "center",
     paddingVertical: 8,
   },
+  headerMenu: { color: colors.text, fontSize: 24, fontWeight: "700" },
+  headerMenuBusy: { opacity: 0.4 },
 });

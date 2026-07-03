@@ -23,6 +23,12 @@ import {
   type PermissionVM,
   type QuestionVM,
 } from "../pure/interaction";
+import {
+  mapModelGroups,
+  type DefaultModel,
+  type ProviderGroupVM,
+} from "../pure/modelPicker";
+import type { SessionActionRequest } from "../pure/sessionActions";
 import { saveCredentials } from "./credentials";
 
 /** Strip trailing slashes so "http://box/" and "http://box" behave identically. */
@@ -265,4 +271,96 @@ export async function rejectQuestion(
     requestId,
     sessionId,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Model picker (Settings) — connected models + default selection
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch the current default model from the box's `opencode:default-model`
+ * channel (src/server/rpc.mjs → oc.getDefaultModel()). Returns `null` when no
+ * provider is connected / no default is set. The box already strips secrets.
+ */
+export async function fetchDefaultModel(
+  base: string,
+  token: string,
+): Promise<DefaultModel | null> {
+  const raw = await rpc<unknown>(base, token, "opencode:default-model");
+  if (!raw || typeof raw !== "object") return null;
+  const providerID = (raw as { providerID?: unknown }).providerID;
+  const modelID = (raw as { modelID?: unknown }).modelID;
+  if (typeof providerID !== "string" || typeof modelID !== "string") return null;
+  return { providerID, modelID };
+}
+
+/**
+ * Fetch the connected-provider model list from the box's `opencode:models`
+ * channel (src/server/rpc.mjs → oc.listModels(), a flat array already filtered
+ * to providers with credentials) and map it — with the current default — into
+ * the provider-grouped picker view model. Both round-trips run in parallel; the
+ * pure `mapModelGroups` marks the selected row.
+ *
+ * NOTE: we use `opencode:models`, not `opencode:get-providers`. The latter is a
+ * desktop-only stub that returns `[]` on the box (rpc.mjs line 226); the desktop
+ * onboarding ModelStep likewise sources its list from `opencodeModels()`.
+ */
+export async function fetchModelGroups(
+  base: string,
+  token: string,
+): Promise<{ groups: ProviderGroupVM[]; current: DefaultModel | null }> {
+  const [rawModels, current] = await Promise.all([
+    rpc<unknown>(base, token, "opencode:models"),
+    fetchDefaultModel(base, token),
+  ]);
+  return { groups: mapModelGroups(rawModels, current), current };
+}
+
+/**
+ * Persist the chosen default model via `config:update({ defaultModel })` — the
+ * SAME config write the desktop store's setDefaultModel performs
+ * (src/renderer/store.ts). The box merges + persists and returns the full
+ * config; we read back the reconciled `defaultModel` so a rejected/clamped
+ * write is reflected (mirrors the desktop's reconcile step).
+ */
+export async function setDefaultModel(
+  base: string,
+  token: string,
+  model: DefaultModel,
+): Promise<DefaultModel | null> {
+  const cfg = await rpc<{ defaultModel?: unknown }>(base, token, "config:update", {
+    defaultModel: model,
+  });
+  const saved = cfg?.defaultModel;
+  if (!saved || typeof saved !== "object") return null;
+  const providerID = (saved as { providerID?: unknown }).providerID;
+  const modelID = (saved as { modelID?: unknown }).modelID;
+  if (typeof providerID !== "string" || typeof modelID !== "string") return null;
+  return { providerID, modelID };
+}
+
+// ---------------------------------------------------------------------------
+// Session actions — new / clear / fork / compact
+// ---------------------------------------------------------------------------
+
+/**
+ * Dispatch a resolved session action (from the pure `resolveSessionAction`) to
+ * its box RPC channel. `clear`/`fork` send a single object arg; `compact` sends
+ * the raw sessionId as a positional arg — the pure resolver already picked the
+ * channel + payload shape, so this just adapts the positional form. Returns the
+ * box's raw result (e.g. `{ newSessionId, projects }` for clear/fork) so the
+ * caller can refresh its list; typed `unknown` because each channel differs.
+ */
+export async function dispatchSessionAction(
+  base: string,
+  token: string,
+  request: SessionActionRequest,
+): Promise<unknown> {
+  if (request.channel === "opencode:compact-session") {
+    // compact takes the raw sessionId positionally.
+    const { sessionId } = request.payload as { sessionId: string };
+    return rpc<unknown>(base, token, request.channel, sessionId);
+  }
+  // clear / fork take a single object payload.
+  return rpc<unknown>(base, token, request.channel, request.payload);
 }
