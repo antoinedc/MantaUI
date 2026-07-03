@@ -13,18 +13,13 @@
 // No Electron-only deps — only `window.api.*` (the mobile HTTP server will
 // shim that surface).
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  OpencodeEvent,
-  OpencodeMessage,
   OpencodeModel,
-  PermissionRequest,
   QuestionRequest,
 } from "../shared/types";
 import { useStore } from "./store";
 import {
-  classifyFinish,
-  describeTruncation,
   allTodosTerminal,
   selectActiveTodos,
   selectCacheTtlMs,
@@ -32,13 +27,14 @@ import {
   computeStaleCache,
   STALE_CACHE_MIN_TOKENS,
   countRunningSubagents,
-  classifyScrollForPin,
-  wasAtBottomBeforeCommit,
   shouldAutoRename,
   countUserTurns,
   buildTitlePromptInput,
   buildTitleInstruction,
   sanitizeGeneratedTitle,
+  hydrateQuestion,
+  classifyScrollForPin,
+  detectCommandFromText,
   type StaleCacheResult,
 } from "./chatUtils";
 import {
@@ -161,6 +157,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Prompt-history navigation (Up/Down cycles past prompts, terminal-style) is
   // owned by useInputHistory — see the hook call after `updateInput` below.
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Per-child debounce timers for refetching child transcripts when their
+  // expanded card is receiving SSE traffic. Keyed by childSessionId. 300ms
+  // matches the parent's scheduleRefetch debounce so behavior is uniform.
+  const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
+  // Forward declaration: submitRef is defined later (depends on submit), but
+  // useSseBus needs it now for the drain effect.
+  const submitRef = useRef<() => void>(() => {});
+  // Input state must be declared before useSseBus (which needs setInput).
+  const [input, setInput] = useState("");
 
   // ===== Transcript state (extracted to useTranscriptState) =====
   const {
@@ -169,27 +176,24 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     scrollRef,
     pinnedToBottom,
     stickToBottom,
-    refreshing,
-    setRefreshing,
     childSessionIds,
     childMessages,
     setChildMessages,
-    expandedTasks,
-    setExpandedTasks,
     expandedTasksRef,
     childMessagesRef,
     scheduleRefetchRef,
     isActiveRef,
     refetchOwedWhileInactive,
-    prevScrollHeight,
     questionCardRef,
     wantQuestionScroll,
     flushPendingDeltas,
     scheduleFlush,
     scheduleRefetch,
     spliceMessage,
-    fetchChildTranscript,
     toggleTaskExpand,
+    pendingDeltas,
+    oldestPendingAt,
+    FLUSH_MAX_AGE_MS,
   } = useTranscriptState({ sessionId, isActive });
 
   // ===== SSE bus state (extracted to useSseBus) =====
@@ -204,22 +208,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setPermissions,
     questions,
     setQuestions,
-    stepTokens,
-    setStepTokens,
-    compactionState,
-    setCompactionState,
-    liveTodos,
-    setLiveTodos,
     todosDismissed,
-    setTodosDismissed,
-    retryInfo,
-    setRetryInfo,
-    finishByMessageId,
-    setFinishByMessageId,
-    commandByMessageId,
-    setCommandByMessageId,
-    liveChildStatus,
-    setLiveChildStatus,
     branch,
     setBranch,
     drainAbortRef,
@@ -261,18 +250,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     oldestPendingAt,
     FLUSH_MAX_AGE_MS,
     submit: () => {}, // placeholder — ChatPanel's submit is used below
-    submitRef: submitRef as React.RefObject<() => void>,
-    compactSession,
-    forkSession,
-    selectModel,
-    setChatAttention: (v: boolean) => { /* no-op — sidebar attention is cleared in replyPermission/replyQuestion */ },
-    setChatSubagents,
+    submitRef,
+    setInput,
   });
 
   // ===== ChatPanel-own state (not extracted to hooks) =====
   const [error, setError] = useState<string | null>(null);
   const [showThinking, setShowThinking] = useState(false);
-  const [input, setInput] = useState("");
   // Available models + server default (pre-fetched on mount, not lazy — so
   // the footer can show a meaningful model name before the first response,
   // and clicking the picker doesn't flash a "Loading…" row). Selection is
@@ -317,12 +301,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   useEffect(() => {
     liveChildStatusRef.current = liveChildStatus;
   }, [liveChildStatus]);
-  // Per-child debounce timers for refetching child transcripts when their
-  // expanded card is receiving SSE traffic. Keyed by childSessionId. 300ms
-  // matches the parent's scheduleRefetch debounce so behavior is uniform.
-  const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
-    new Map(),
-  );
   // Compaction clear timer.
   const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -395,945 +373,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       )
       .catch(() => { /* keep last-known — v2-only endpoint */ });
   }, [sessionId]);
-
-  // Subscribe to the global opencode event stream; filter by sessionID.
-  useEffect(() => {
-    // ===== Buffered text-delta flush =====
-    //
-    // Applies as much of each pending delta as can be safely flushed
-    // (i.e. everything up to the deepest section boundary) into
-    // `messages` state in ONE setMessages call, then keeps any trailing
-    // not-yet-bounded text in the buffer for the next round.
-    //
-    // `force=true` flushes everything regardless of boundaries — used on
-    // step-ended, part-updated, session-idle, and the max-age timeout.
-    // Returns the count of partIDs that couldn't be matched against any
-    // part in `messages` (race: delta arrived before snapshot); caller
-    // schedules a refetch if any unmatched.
-    const flushPendingDeltas = (force: boolean): number => {
-      const buf = pendingDeltas.current;
-      if (buf.size === 0) return 0;
-      // Build the to-flush map: for each pending part, slice off either
-      // the longest bounded prefix (normal) or the whole buffer (force).
-      const toApply = new Map<string, PendingDelta>();
-      for (const [partID, d] of buf) {
-        if (force) {
-          toApply.set(partID, d);
-          continue;
-        }
-        const idx = findFlushBoundary(d.text);
-        if (idx <= 0) continue;
-        toApply.set(partID, { ...d, text: d.text.slice(0, idx) });
-        // Keep the unbounded remainder in the buffer.
-        const remainder = d.text.slice(idx);
-        if (remainder.length > 0) {
-          buf.set(partID, { ...d, text: remainder });
-        } else {
-          buf.delete(partID);
-        }
-      }
-      if (force) buf.clear();
-      if (toApply.size === 0) return 0;
-      let unmatchedCount = 0;
-      setMessages((prev) => {
-        const { messages: next, unmatched } = mergeBufferedDeltas(
-          prev,
-          toApply,
-        );
-        unmatchedCount = unmatched.length;
-        return next ?? prev;
-      });
-      // If the buffer is now empty (force, or every entry flushed
-      // cleanly), reset the age clock; otherwise leave it ticking so
-      // the trailing remainder still has a deadline.
-      if (buf.size === 0) oldestPendingAt.current = null;
-      return unmatchedCount;
-    };
-
-    // Schedule a flush check soon. Uses two timers conceptually:
-    //   - A short (16ms) "boundary check" tick after each delta so we
-    //     react quickly when a boundary character lands, without doing
-    //     a full setMessages on every keystroke-equivalent.
-    //   - The age-based force flush handled inline by checking
-    //     `oldestPendingAt` against FLUSH_MAX_AGE_MS.
-    // Both share a single setTimeout slot.
-    const scheduleFlush = () => {
-      if (flushTimer.current) return;
-      const now = Date.now();
-      const age =
-        oldestPendingAt.current != null ? now - oldestPendingAt.current : 0;
-      const delay = Math.max(0, Math.min(16, FLUSH_MAX_AGE_MS - age));
-      flushTimer.current = setTimeout(() => {
-        flushTimer.current = null;
-        const now2 = Date.now();
-        const aged =
-          oldestPendingAt.current != null &&
-          now2 - oldestPendingAt.current >= FLUSH_MAX_AGE_MS;
-        const unmatched = flushPendingDeltas(aged);
-        if (unmatched > 0) scheduleRefetchRef.current?.();
-        // If anything is still buffered (trailing remainder), keep
-        // checking — but only if the buffer is actually still aging.
-        if (pendingDeltas.current.size > 0) {
-          // Either we just sliced off a prefix and the remainder is
-          // waiting for its own boundary, or aged=true cleared
-          // everything. Defensive: reschedule only if there's content.
-          scheduleFlush();
-        }
-      }, delay);
-    };
-
-    // scheduleRefetchRef is a component-level useRef (declared near
-    // refetchTimer). scheduleFlush calls it before scheduleRefetch is
-    // defined below; the reactivation catch-up effect also reads it.
-    const scheduleRefetch = () => {
-      // Inactive panels don't render their transcript (App.tsx hides them
-      // with display:none) — skip the expensive full re-pull + re-render and
-      // just remember we owe one. The reactivation effect pulls fresh on
-      // becoming visible. Live sidebar state (running/attention/todos) is set
-      // by the other branches of the handler, which still run. This is the
-      // primary fix for the per-event ×K-panels cost that grows over a
-      // session as more chat windows are opened.
-      if (!isActiveRef.current) {
-        refetchOwedWhileInactive.current = true;
-        return;
-      }
-      if (refetchTimer.current) clearTimeout(refetchTimer.current);
-      refetchTimer.current = setTimeout(() => {
-        refetchTimer.current = null;
-        window.api
-          .opencodeMessages(sessionId)
-          .then((m) => {
-            setMessages(m);
-            // Re-seed the subagent allowlist on every refetch — covers
-            // children spawned by a turn that completed entirely in
-            // between event subscriptions (rare, but possible after a
-            // reconnect window).
-            for (const cid of collectChildSessionIds(m)) {
-              childSessionIds.current.add(cid);
-            }
-            // Self-heal a stuck spinner. `running` is normally cleared by
-            // the live `session.idle` / `session.status{idle}` event — but
-            // if the scoped event stream dropped after the first post-resume
-            // frame and before that idle (half-dead dedicated tunnel, the
-            // "got a first line then hangs" failure), opencode never
-            // re-emits idle for the now-idle session on reconnect. The
-            // reconnect DOES trigger this refetch, and the completed turn is
-            // in `m` — so recompute "done" from the authoritative transcript
-            // (assistant `time.completed`) and clear the orphaned spinner.
-            // One-way: only clears, never sets running true (that stays
-            // event/optimistic-send driven), so it can't race an in-flight
-            // turn — an active turn has no completion stamp on its last
-            // message, or a trailing user message, both → not complete.
-            if (isAssistantTurnComplete(m)) setRunning(false);
-          })
-          .catch(() => { /* keep last-known state */ });
-      }, 300);
-    };
-    scheduleRefetchRef.current = scheduleRefetch;
-
-    // Incremental splice: fetch ONE message by id and merge it into `messages`
-    // by id (replace if present, insert in time order if new), instead of
-    // re-pulling the entire (up-to-3 MB) transcript on every part-finalization
-    // event. This is the live-turn analog of the switch-time tail-merge.
-    //
-    // Per-message fetches are debounced+coalesced per messageID so a chatty
-    // part stream (many message.part.updated for the same message) collapses to
-    // one fetch. On a fetch miss (null) or an unmatched insert we fall back to
-    // the full scheduleRefetch so we can never get permanently out of sync.
-    const spliceMessage = (messageId: string) => {
-      if (!messageId) {
-        scheduleRefetch();
-        return;
-      }
-      // Inactive panels don't render — defer to the reactivation refetch, same
-      // policy as scheduleRefetch (avoids per-event ×K-panels fetch cost).
-      if (!isActiveRef.current) {
-        refetchOwedWhileInactive.current = true;
-        return;
-      }
-      const existing = spliceTimers.current.get(messageId);
-      if (existing) clearTimeout(existing);
-      spliceTimers.current.set(
-        messageId,
-        setTimeout(() => {
-          spliceTimers.current.delete(messageId);
-          window.api
-            .opencodeMessage(sessionId, messageId)
-            .then((msg) => {
-              if (!msg) {
-                // Miss — fall back to a full pull so we don't drop the update.
-                scheduleRefetch();
-                return;
-              }
-              setMessages((prev) => {
-                if (prev === null) return prev;
-                const idx = prev.findIndex((m) => m.info.id === msg.info.id);
-                if (idx >= 0) {
-                  const next = prev.slice();
-                  next[idx] = msg;
-                  return next;
-                }
-                // New message: insert in time order (it's usually the newest,
-                // so this is an append in the common case).
-                const t = msg.info.time?.created ?? 0;
-                const insertAt = prev.findIndex(
-                  (m) => (m.info.time?.created ?? 0) > t,
-                );
-                const next = prev.slice();
-                if (insertAt < 0) next.push(msg);
-                else next.splice(insertAt, 0, msg);
-                return next;
-              });
-              for (const cid of collectChildSessionIds([msg])) {
-                childSessionIds.current.add(cid);
-              }
-            })
-            .catch(() => scheduleRefetch());
-        }, 300),
-      );
-    };
-
-    // Per-child debounced refetch — called when a known child's
-    // message.part.* event arrives while its TaskBody is expanded. We
-    // re-pull the FULL child transcript instead of merging deltas inline
-    // because subagent transcripts are typically short (one task = one
-    // turn), and pure-refetch sidesteps the buffered-delta-buffer's
-    // parent-keyed state.
-    const scheduleChildRefetch = (childId: string) => {
-      const existing = childRefetchTimers.current.get(childId);
-      if (existing) clearTimeout(existing);
-      const t = setTimeout(() => {
-        childRefetchTimers.current.delete(childId);
-        window.api
-          .opencodeMessages(childId)
-          .then((m) => {
-            setChildMessages((prev) => {
-              const next = new Map(prev);
-              next.set(childId, m);
-              return next;
-            });
-          })
-          .catch(() => { /* non-fatal */ });
-      }, 300);
-      childRefetchTimers.current.set(childId, t);
-    };
-
-    // Issue a drain-abort if a prompt is queued and we haven't already this
-    // turn. Called at every real mid-turn step boundary (a completed tool
-    // part) AND the legacy step.ended fallback. Idempotent: drainAbortRef
-    // gates re-entrancy so multiple boundaries before the abort POST lands
-    // only fire one abort. The abort flips the turn idle (via the swallowed
-    // MessageAbortedError / session.idle), and the [running, messageQueue]
-    // effect then submits the queued prompt as a fresh turn.
-    const maybeDrainQueuedPrompt = () => {
-      if (!shouldAbortForQueuedDrain(messageQueueRef.current.length, drainAbortRef.current)) {
-        return;
-      }
-      drainAbortRef.current = true;
-      void window.api.opencodeAbort(sessionId).catch(() => {
-        // Abort POST failed — re-arm so a later boundary can retry, and fall
-        // back to the slower idle-drain in the meantime.
-        drainAbortRef.current = false;
-      });
-    };
-
-    const off = window.api.onOpencodeEvent((ev: OpencodeEvent) => {
-      const props = ev.properties ?? {};
-      // Per-session guard for transcript/state events (message.*, todo.*,
-      // etc.) that only matter for the currently-viewed session.
-      //
-      // EXEMPTION: question.*/permission.* lifecycle events must bypass this.
-      // Their `properties` is the QuestionRequest/PermissionRequest itself,
-      // so `props.sessionID` is the QUESTION's session — which differs from
-      // the viewed `sessionId` whenever the user isn't already on that exact
-      // session. The handlers below (refreshQuestions/refreshPermissions)
-      // already self-filter by sessionID after re-fetching, so pre-dropping
-      // here just means the refresh trigger never fires and the card never
-      // appears. opencode also emits question.asked ONLY on the scoped
-      // `?directory=` stream, so the mount-time poll alone can't cover a
-      // mid-turn question — the live event MUST get through. (Root cause of
-      // "questions never appear".)
-      // Per-session guard. Events for OUR session always pass; events for a
-      // known CHILD subagent session (in childSessionIds allowlist) are
-      // routed to the subagent-handling branch below; everything else with a
-      // non-matching sessionID is dropped — UNLESS it's a self-filtering
-      // lifecycle event (question.*/permission.*, whose own handlers
-      // re-filter after the refresh trigger they cause).
-      const evSessionID = typeof props.sessionID === "string" ? props.sessionID : "";
-
-      // Register a NEW subagent child id BEFORE the per-session filter
-      // runs — see registerChildSessionFromCreated's docstring for the
-      // ordering rationale (the filter would otherwise drop the very
-      // event we'd use to enlarge the allowlist).
-      registerChildSessionFromCreated(
-        ev as { type: string; properties?: { info?: { id?: string; parentID?: string } } },
-        sessionId,
-        childSessionIds.current,
-      );
-
-      if (shouldDropEventForSessionFilter(
-        ev as { type: string; properties?: { sessionID?: string } },
-        sessionId,
-        childSessionIds.current,
-      )) {
-        return;
-      }
-      const isChildEvent =
-        evSessionID.length > 0 &&
-        evSessionID !== sessionId &&
-        childSessionIds.current.has(evSessionID);
-
-      // ===== Subagent child-session event routing =====
-      //
-      // For events scoped to a known child, only a narrow set actually
-      // matters for the inline TaskBody renderer: message-shape updates
-      // (so the expanded card stays live), session lifecycle (so the
-      // header badge flips running→idle), and session.created (which we
-      // also use to enlarge the allowlist for grandchildren). Everything
-      // else (compaction, todo.updated, vcs.branch.updated on child, etc.)
-      // is intentionally ignored — TaskBody is read-only, no point routing
-      // them into a separate state pipeline.
-      if (isChildEvent) {
-        if (
-          ev.type === "message.part.updated" ||
-          ev.type === "message.part.delta" ||
-          ev.type === "message.updated" ||
-          ev.type === "message.part.removed" ||
-          ev.type === "message.removed"
-        ) {
-          // Only refetch children whose card is expanded — keeps idle
-          // panels cheap and avoids re-rendering subagent transcripts the
-          // user isn't looking at. The expanded card has the partID's
-          // parent message in its state; without that part, deltas would
-          // accumulate orphaned in `pendingDeltas`.
-          //
-          // Coalesce per-child via a small debounce. Without it, a chatty
-          // subagent (one streaming delta every ~30ms) would re-fetch its
-          // full transcript on every event.
-          if (expandedTasksRef.current.has(evSessionID)) {
-            scheduleChildRefetch(evSessionID);
-          }
-          return;
-        }
-        if (ev.type === "session.idle") {
-          setLiveChildStatus((prev) => {
-            if (prev.get(evSessionID) === "idle") return prev;
-            const next = new Map(prev);
-            next.set(evSessionID, "idle");
-            return next;
-          });
-          // The parent's task tool part status snapshot is what users
-          // actually see in the collapsed card — re-fetch the parent so
-          // its state.status flips from "running" to "completed". Otherwise
-          // the badge keeps spinning until the next parent SSE event.
-          scheduleRefetch();
-          return;
-        }
-        if (ev.type === "session.status") {
-          const t = (props.status as { type?: string } | undefined)?.type;
-          if (t === "busy" || t === "retry") {
-            setLiveChildStatus((prev) => {
-              if (prev.get(evSessionID) === "running") return prev;
-              const next = new Map(prev);
-              next.set(evSessionID, "running");
-              return next;
-            });
-          } else if (t === "idle") {
-            setLiveChildStatus((prev) => {
-              if (prev.get(evSessionID) === "idle") return prev;
-              const next = new Map(prev);
-              next.set(evSessionID, "idle");
-              return next;
-            });
-            scheduleRefetch();
-          }
-          return;
-        }
-        // Any other child-scoped event is dropped — handled above or not
-        // needed for read-only subagent UI.
-        return;
-      }
-
-      if (ev.type === "message.part.delta") {
-        const partID = String(props.partID ?? "");
-        const messageID = String(props.messageID ?? "");
-        const field = String(props.field ?? "text");
-        const delta = String(props.delta ?? "");
-        if (!partID || !delta) return;
-
-        // Inactive panel: don't buffer/flush deltas (flushing re-renders the
-        // streaming message, which the user can't see). The catch-up refetch
-        // on reactivation pulls the canonical transcript, which already
-        // contains this streamed text — so dropping the live delta loses
-        // nothing visible. Mark the owed refetch so reactivation repaints.
-        if (!isActiveRef.current) {
-          refetchOwedWhileInactive.current = true;
-          return;
-        }
-
-        // Buffer the delta instead of applying it immediately. The flush
-        // helper will slice off the longest prefix ending at a section
-        // boundary (paragraph break outside a code block, or a closing
-        // ``` fence) and apply only that to state — keeping any trailing
-        // half-formed content out of React until it's complete. See
-        // `findFlushBoundary` (chatUtils.ts) for the boundary rules and
-        // FLUSH_MAX_AGE_MS for the long-paragraph fallback.
-        //
-        // Different (partID, field) pairs need separate buffer entries
-        // — a reasoning part and a text part can stream concurrently
-        // and they go to different `field` keys on different `partID`s.
-        // The key is partID alone because opencode only ever streams
-        // one field per part at a time (reasoning parts stream `text`
-        // just like text parts do).
-        const existing = pendingDeltas.current.get(partID);
-        if (existing && existing.field === field) {
-          existing.text += delta;
-        } else {
-          pendingDeltas.current.set(partID, { messageID, field, text: delta });
-        }
-        if (oldestPendingAt.current == null) {
-          oldestPendingAt.current = Date.now();
-        }
-        scheduleFlush();
-        return;
-      }
-
-      // Mirror server-reported running state. session.status carries a nested
-      // {type: "idle"|"busy"|"retry"} discriminator; session.idle is sugar.
-      if (ev.type === "session.idle") {
-        setRunning(false);
-      }
-      if (ev.type === "session.status") {
-        const status = props.status as
-          | {
-              type?: string;
-              attempt?: number;
-              message?: string;
-              next?: number;
-              action?: {
-                reason?: string;
-                provider?: string;
-                title?: string;
-                message?: string;
-                label?: string;
-                link?: string;
-              };
-            }
-          | undefined;
-        const type = status?.type;
-        if (type === "busy" || type === "retry") setRunning(true);
-        else if (type === "idle") setRunning(false);
-        // Retry is a transient state between busy attempts — surface attempt
-        // count + actionable hint so the user knows the AI hasn't stalled.
-        if (type === "retry") {
-          setRetryInfo({
-            attempt: status?.attempt ?? 0,
-            message: status?.message ?? "",
-            next: status?.next ?? 0,
-            action:
-              status?.action
-                ? {
-                    title: status.action.title ?? "",
-                    message: status.action.message ?? "",
-                    label: status.action.label ?? "",
-                    link: status.action.link,
-                  }
-                : undefined,
-          });
-        } else if (type === "busy" || type === "idle") {
-          setRetryInfo(null);
-        }
-      }
-
-      // Server-side prompt failure (model not found, provider down, etc).
-      // Without surfacing this the renderer just sits at "running" forever
-      // and the user thinks the AI isn't replying. opencode v2 names the
-      // error class on `err.name`; prepend a context-appropriate prefix so
-      // the user can tell auth failures from context overflows at a glance.
-      if (ev.type === "session.error") {
-        const err = (props.error as { data?: { message?: string }; name?: string } | undefined);
-        const raw = err?.data?.message ?? err?.name ?? "Unknown server error";
-        // Drain-initiated abort: we aborted this turn ourselves to make room
-        // for a queued prompt. Swallow the MessageAbortedError silently — no
-        // banner — and just flip idle so the [running, messageQueue] effect
-        // submits the queued prompt. (session.idle usually also fires, but
-        // flipping here is the safety net if it doesn't.) Leave drainAbortRef
-        // set; the drain effect clears it when the queued prompt lands.
-        if (isDrainAbortError(err?.name, drainAbortRef.current)) {
-          setRunning(false);
-          return;
-        }
-        let msg: string;
-        switch (err?.name) {
-          case "ProviderAuthError":
-            msg = `Auth error: ${raw}`;
-            break;
-          case "ContextOverflowError":
-            msg = `Context full — try /compact: ${raw}`;
-            break;
-          case "MessageOutputLengthError":
-            msg = "Response truncated (hit output limit)";
-            break;
-          case "StructuredOutputError":
-            msg = `Structured output failed: ${raw}`;
-            break;
-          case "ApiError":
-            msg = `API error: ${raw}`;
-            break;
-          default:
-            // MessageAbortedError, UnknownError, and anything we don't have a
-            // specific phrasing for falls through to the raw message.
-            msg = raw;
-        }
-        setSendError(msg);
-        setRunning(false);
-      }
-
-      // Live token/cost snapshot at every step boundary. The transcript-
-      // derived latestTokens lags by one re-fetch cycle (we only refetch on
-      // message.part.updated / .updated), so the footer goes stale during a
-      // long tool roundtrip. step.ended fires after each reasoning/tool step
-      // with the cumulative usage — feed it straight into stepTokens.
-      if (ev.type === "session.next.step.ended") {
-        // A step ending means the assistant's narration for this step is
-        // complete — flush any buffered tail (a final sentence/paragraph
-        // that didn't end with a paragraph break) so the user sees it
-        // before the next step starts (often a tool call).
-        flushPendingDeltas(true);
-
-        // Queued-prompt drain (FALLBACK path). The PRIMARY trigger is a
-        // completed tool part in the message.part.updated handler below,
-        // because `session.next.step.ended` is NOT emitted by the deployed
-        // opencode build (verified live — see isToolStepBoundary's note in
-        // chatUtils.ts). This block stays as a no-cost fallback for builds
-        // that DO emit step.ended: maybeDrainQueuedPrompt is idempotent
-        // (drainAbortRef guards re-entrancy), so having both triggers is safe.
-        maybeDrainQueuedPrompt();
-
-        const tokens = props.tokens as TokenUsage | undefined;
-        const cost = typeof props.cost === "number" ? props.cost : 0;
-        if (tokens) {
-          setStepTokens({
-            input: tokens.input ?? 0,
-            output: tokens.output ?? 0,
-            reasoning: tokens.reasoning ?? 0,
-            cache: {
-              read: tokens.cache?.read ?? 0,
-              write: tokens.cache?.write ?? 0,
-            },
-            cost,
-          });
-        }
-        // Finish-reason inspection. Opencode normalizes provider-native
-        // stop_reason / finish_reason values into `properties.finish`.
-        // classifyFinish() returns null for benign finishes (end_turn,
-        // tool_use, etc.) so the badge map only grows on real truncations.
-        //
-        // For "max_tokens" we also peek at the last part of the assistant
-        // message to detect the silently-fatal mid-tool-call case: when the
-        // model was emitting a tool_use JSON block and got cut off, the
-        // call is incomplete and the agent loop would otherwise try to
-        // execute invalid JSON. Promoting it to "tool-cutoff" gives the
-        // user a distinct badge + clearer remediation.
-        const finishRaw =
-          typeof props.finish === "string" ? props.finish : null;
-        const stepMsgId =
-          typeof props.messageID === "string" ? props.messageID : null;
-        if (finishRaw && stepMsgId) {
-          // Find the message and check whether its last non-trivial part is
-          // an incomplete tool_use. We look at the current `messages` array
-          // via the setter closure to avoid stale-closure issues.
-          let lastPartIsToolUse = false;
-          setMessages((prevMsgs) => {
-            if (!prevMsgs) return prevMsgs;
-            const m = prevMsgs.find((mm) => mm.info.id === stepMsgId);
-            if (m) {
-              for (let i = m.parts.length - 1; i >= 0; i--) {
-                const p = m.parts[i];
-                if (p.type === "step-start" || p.type === "step-finish") continue;
-                lastPartIsToolUse = p.type === "tool";
-                break;
-              }
-            }
-            return prevMsgs;
-          });
-          const kind = classifyFinish(finishRaw, { lastPartIsToolUse });
-          if (kind) {
-            setFinishByMessageId((prev) => {
-              if (prev.get(stepMsgId) === kind) return prev;
-              const next = new Map(prev);
-              next.set(stepMsgId, kind);
-              return next;
-            });
-            // Also keep the legacy soft-banner so this change is additive:
-            // a per-message badge is more discoverable but the dismissable
-            // banner remains the loud signal for the active turn. Banner
-            // copy is now finish-aware. Don't clobber a more-specific
-            // session.error.
-            const desc = describeTruncation(kind);
-            setSendError((prev) => prev ?? `Response ${desc.label}`);
-          }
-        }
-      }
-
-      // Live compaction progress. Without surfacing these events the user
-      // fires /compact, sees nothing for several seconds, then the
-      // transcript abruptly shrinks. .started → "Compacting…", .delta
-      // appends fragments of the summary, .ended sets the final text and
-      // we hold the "Compacted" confirmation briefly before clearing (the
-      // session.compacted re-fetch will already have updated the transcript).
-      if (ev.type === "session.next.compaction.started") {
-        if (compactionClearTimer.current) {
-          clearTimeout(compactionClearTimer.current);
-          compactionClearTimer.current = null;
-        }
-        setCompactionState({
-          reason: String(props.reason ?? ""),
-          text: "",
-          phase: "running",
-        });
-      }
-      if (ev.type === "session.next.compaction.delta") {
-        const frag = String(props.text ?? "");
-        setCompactionState((prev) =>
-          prev ? { ...prev, text: prev.text + frag } : prev,
-        );
-      }
-      if (ev.type === "session.next.compaction.ended") {
-        const finalText = String(props.text ?? "");
-        setCompactionState((prev) =>
-          prev
-            ? { ...prev, text: finalText || prev.text, phase: "done" }
-            : { reason: "", text: finalText, phase: "done" },
-        );
-        if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
-        compactionClearTimer.current = setTimeout(() => {
-          setCompactionState(null);
-          compactionClearTimer.current = null;
-        }, 2500);
-      }
-
-      // Branch indicator — vcs.branch.updated has no sessionID so it bypasses
-      // the early filter at the top of the handler. opencode emits one event
-      // per worker on every branch change; for the chat footer we just want
-      // the latest value (`branch?` is unset when the dir leaves a git repo).
-      if (ev.type === "vcs.branch.updated") {
-        const b = props.branch;
-        setBranch(typeof b === "string" ? b : null);
-      }
-
-      // Live TodoWrite mirror — opencode fires todo.updated whenever the
-      // tool stores a new list. The transcript-scraped activeTodos lags by
-      // one re-fetch cycle and only sees the final state; this gives us the
-      // intermediate ticks (e.g. one task flipping to in_progress).
-      if (ev.type === "todo.updated") {
-        const todos = props.todos as
-          | Array<{ content?: unknown; status?: unknown; priority?: unknown }>
-          | undefined;
-        if (Array.isArray(todos)) {
-          setLiveTodos(
-            todos.map((t) => ({
-              content: String(t.content ?? ""),
-              status: String(t.status ?? "pending"),
-              priority: String(t.priority ?? ""),
-            })),
-          );
-          // New activity from the model — clear any prior user dismissal so
-          // the refreshed list (even if itself fully completed) is shown.
-          setTodosDismissed(false);
-        }
-      }
-
-      // Slash-command provenance. opencode emits this when it accepts a
-      // /command POST and creates the assistant turn that will hold the
-      // response. The event's `messageID` is the NEW ASSISTANT turn id, not
-      // the user message that holds the expanded template body — the user
-      // message sits immediately before it in the transcript. We key the
-      // map by assistant-id and resolve to the user-id at render time (see
-      // the messages.map(...) site where `cmdInfo` is computed via idx+1).
-      if (ev.type === "command.executed") {
-        const p = ev.properties as {
-          name?: string;
-          messageID?: string;
-          arguments?: string;
-        };
-        if (typeof p.messageID === "string" && typeof p.name === "string") {
-          const messageID = p.messageID;
-          const name = p.name;
-          const argumentsStr = typeof p.arguments === "string" ? p.arguments : "";
-          setCommandByMessageId((m) => {
-            const next = new Map(m);
-            next.set(messageID, { name, arguments: argumentsStr });
-            return next;
-          });
-        }
-      }
-
-      // PRIMARY queued-prompt drain trigger. A tool part flipping to a
-      // terminal status ("completed"/"error") is the only reliable mid-turn
-      // step boundary the deployed opencode emits (session.next.step.ended
-      // never fires — see isToolStepBoundary). The model just finished a tool
-      // round-trip and is about to think/call again, so aborting here cleanly
-      // ends the turn and lets the queued prompt go out as a fresh one rather
-      // than waiting for the whole (possibly many-step) turn to complete.
-      if (ev.type === "message.part.updated" && isToolStepBoundary(props.part)) {
-        maybeDrainQueuedPrompt();
-      }
-
-      if (
-        ev.type === "message.part.updated" ||
-        ev.type === "message.updated"
-      ) {
-        // Force-flush any buffered text deltas before the merge overwrites the
-        // affected message. Without this, a still-buffered trailing paragraph
-        // would be discarded when the canonical message arrives (the server
-        // snapshot has the same content but the fetch races the buffer's
-        // max-age timer).
-        flushPendingDeltas(true);
-        // Incremental: splice just the touched message instead of re-pulling
-        // the whole transcript. messageID lives at props.part.messageID for
-        // part events and props.info.id for message.updated. On an empty id we
-        // fall back to a full refetch inside spliceMessage.
-        const mid =
-          ev.type === "message.part.updated"
-            ? String(
-                (props.part as { messageID?: string } | undefined)?.messageID ??
-                  "",
-              )
-            : String(
-                (props.info as { id?: string } | undefined)?.id ?? "",
-              );
-        spliceMessage(mid);
-      } else if (
-        ev.type === "session.idle" ||
-        ev.type === "session.status" ||
-        ev.type === "session.compacted" ||
-        ev.type === "session.error"
-      ) {
-        // Session-lifecycle events carry no single messageID — a full refetch
-        // is the right tool (and these are infrequent vs part events). It also
-        // runs the isAssistantTurnComplete spinner self-heal.
-        flushPendingDeltas(true);
-        scheduleRefetch();
-      }
-
-      // Transport (re)connect resync. opencode emits `server.connected` as
-      // the first frame of EVERY SSE connection — including the fresh one
-      // the main-process bus opens after a dropped/stalled scoped stream.
-      // It carries no sessionID (transport frame, bypasses the per-session
-      // guard like vcs.branch.updated). This is the ONLY event guaranteed
-      // to arrive after a reconnect when the turn already finished
-      // server-side: the missed `session.idle` is never re-emitted for an
-      // already-idle session, and an idle reconnected stream otherwise
-      // produces only heartbeats (no refetch trigger). Refetching here
-      // re-pulls the canonical transcript; the isAssistantTurnComplete
-      // check in scheduleRefetch then clears any spinner orphaned by the
-      // drop. Root-cause fix for "UI stuck on spinner after the turn
-      // completed server-side" (HANDOFF-sse-ui-completion-gap).
-      //
-      // ALSO re-pull questions + permissions. Long-running tools (e.g. a
-      // bash that takes >45s) produce no substantive frames while running,
-      // so the bus watchdog tears the stream down. If a `question.asked`
-      // or `permission.asked` fires DURING the reconnect window, the live
-      // event is lost — the card never appears and the session looks stuck
-      // even after the workspace-scope fix landed. Resyncing both lists on
-      // every reconnect closes the gap: any pending entry the server has
-      // for this session re-hydrates and the existing renderers handle it.
-      if (ev.type === "server.connected") {
-        scheduleRefetch();
-        refreshQuestions();
-        refreshPermissions();
-      }
-
-      // Queue drain. The actual submit happens in the [running, messageQueue]
-      // effect below the moment `running` flips false. Idle is reached either
-      // by a turn finishing naturally OR by the step-boundary drain-abort in
-      // the session.next.step.ended handler above: as soon as a prompt is
-      // queued, we abort the in-flight turn at the next step boundary instead
-      // of waiting for the whole (possibly many-step) turn to end. The
-      // resulting MessageAbortedError is tagged via drainAbortRef and
-      // swallowed by the session.error handler, so the swap is invisible —
-      // the queue just advances and the new prompt starts processing.
-      //
-      // Posting a prompt mid-turn WITHOUT a preceding abort is what produced
-      // the old "MessageAbortedError banner + aborted assistant message"
-      // artifact — opencode aborts implicitly to start the new turn. The
-      // explicit abort + error suppression here is what makes that clean.
-
-      // Permission lifecycle — refresh the inline approval list so the card
-      // appears/disappears in real time as opencode requests/closes them.
-      if (ev.type === "permission.asked" || ev.type === "permission.replied") {
-        refreshPermissions();
-        // permission.replied implies the matching tool just unstuck — pull
-        // the canonical message state so the ToolPart re-renders as running.
-        if (ev.type === "permission.replied") scheduleRefetch();
-      }
-
-      // Question lifecycle. opencode v1.15 delivers the FULL question in the
-      // `question.asked` event payload (properties is a QuestionRequest);
-      // `GET /question` stays empty for live questions, so the old
-      // refreshQuestions() re-poll set the list to [] and the card never
-      // appeared (regression since 1a5a336). Drive state from the event
-      // payload itself — see applyQuestionEvent (chatUtils, tested).
-      if (
-        ev.type === "question.asked" ||
-        ev.type === "question.replied" ||
-        ev.type === "question.rejected"
-      ) {
-        setQuestions((prev) =>
-          applyQuestionEvent(
-            prev,
-            ev.type,
-            ev.properties,
-            sessionId,
-          ) as QuestionRequest[],
-        );
-        if (ev.type === "question.replied" || ev.type === "question.rejected") {
-          scheduleRefetch();
-        }
-      }
-    });
-
-    return () => {
-      off();
-      if (refetchTimer.current) clearTimeout(refetchTimer.current);
-      if (compactionClearTimer.current) {
-        clearTimeout(compactionClearTimer.current);
-        compactionClearTimer.current = null;
-      }
-      // Cancel any pending child transcript refetches; the next session's
-      // effect will fetch fresh on first expand.
-      for (const t of childRefetchTimers.current.values()) clearTimeout(t);
-      childRefetchTimers.current.clear();
-      // Cancel any pending single-message splices for the same reason.
-      for (const t of spliceTimers.current.values()) clearTimeout(t);
-      spliceTimers.current.clear();
-      // Force-flush whatever's still buffered on unmount/session change
-      // so the user doesn't lose the final sentence of a turn when they
-      // navigate away. (The new session's effect will clear the buffer
-      // again on its own initial-load reset.)
-      if (flushTimer.current) {
-        clearTimeout(flushTimer.current);
-        flushTimer.current = null;
-      }
-      if (pendingDeltas.current.size > 0) {
-        flushPendingDeltas(true);
-      }
-    };
-  }, [sessionId]);
-
-  // Pinned-to-bottom detection — derive pin state from the PRE-commit DOM,
-  // not from event-cached state.
-  //
-  // Prior designs and the bug they each hit:
-  //
-  //   v1 (pre-631b03e): symmetric 80px threshold. A 30px scroll-up left
-  //     dist=30 < 80, the next delta saw `pinned === true`, snap. Lost.
-  //
-  //   v2 (631b03e): tight 8px re-pin + wheel/touch/key "intent" un-pin.
-  //     wheel-up explicitly unpinned regardless of distance, fixing v1.
-  //     Missed scrollbar-handle drag (no wheel/touch/key) and got snapped
-  //     by the `running` false→true edge effect on busy/idle oscillations.
-  //
-  //   v3 (f1b7341): single 8px symmetric threshold + one `scroll` listener.
-  //     Right idea, wrong substrate. `scroll` events are dispatched
-  //     asynchronously (rAF-batched in modern browsers), but
-  //     setMessages → render → effect is synchronous in the SAME task. So
-  //     this sequence eats the user's scroll-up during active streaming:
-  //
-  //       1. User wheels up 50px. scrollTop drops synchronously.
-  //       2. Streaming delta lands in the same tick. setMessages fires.
-  //       3. Effect runs with stale `pinned == true` from the LAST scroll
-  //          event, calls stickToBottom, scrollTop = scrollHeight.
-  //       4. Only NOW does the queued scroll event for the wheel-up
-  //          dispatch. It observes dist=0 (post-snap) and reaffirms
-  //          `pinned == true`. The user's wheel-up is silently erased.
-  //
-  //     During heavy streaming (deltas every few ms) this happens on
-  //     virtually every wheel attempt, hence "still jumping to bottom."
-  //
-  // v4 (here): the post-commit stick decision reads the live DOM in a
-  // `useLayoutEffect` (synchronous post-commit, pre-paint) and computes
-  // pre-commit distance against the PREVIOUS render's scrollHeight:
-  //
-  //     prevDist = max(0, prevScrollHeight - scrollTop - clientHeight)
-  //
-  // `scrollTop` is preserved by the browser when content is appended, so
-  // this is the user's actual position before the new rows landed. No
-  // event timing, no stale ref. The `scroll` listener is kept as a
-  // back-channel for callers that need the boolean outside the messages
-  // commit (the RunningIndicator `atBottom` prop, the resizeInput
-  // re-stick, the isActive re-pin), but it is no longer load-bearing for
-  // the streaming case.
-  //
-  // Force-pin paths stay explicit and limited to user actions: `submit()`
-  // sets `pinnedToBottom.current = true` AND resets
-  // `prevScrollHeight.current = 0` (so the next layout effect sticks
-  // unconditionally via the prevScrollHeight=0 → pin branch in
-  // `wasAtBottomBeforeCommit`). Queue drains route through the same
-  // submit() path, so they inherit this force-pin for free.
-  const stickToBottom = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, []);
-  // Tracks the scrollHeight as of the last completed commit. The layout
-  // effect compares this against the live DOM to derive whether the user
-  // WAS pinned before the new content landed. Reset to 0 on session
-  // change and on explicit force-pin (submit).
-  const prevScrollHeight = useRef(0);
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const onScroll = () => {
-      pinnedToBottom.current = classifyScrollForPin({
-        scrollHeight: el.scrollHeight,
-        scrollTop: el.scrollTop,
-        clientHeight: el.clientHeight,
-      });
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      el.removeEventListener("scroll", onScroll);
-    };
-  }, []);
-
-  // Reset prevScrollHeight when the session id changes — the new session's
-  // first messages commit must pin unconditionally (the initial render's
-  // scrollHeight is 0 anyway, but being explicit guards against effect
-  // ordering surprises if anything else resets `messages` to null first).
-  useEffect(() => {
-    prevScrollHeight.current = 0;
-    pinnedToBottom.current = true;
-  }, [sessionId]);
-
-  // On every messages / liveTodos commit: if the user WAS at the tail
-  // before this commit grew the container, glue to the new tail. Layout
-  // effect — runs synchronously post-commit, pre-paint, so the user never
-  // sees the brief mid-frame where the viewport is partway down.
-  //
-  // The decision uses `prevScrollHeight.current` (the height as of the
-  // last commit), NOT a cached pin boolean. `scrollTop` in the live DOM is
-  // unchanged by appending content, so `prevScrollHeight - scrollTop -
-  // clientHeight` is the user's actual pre-commit distance from bottom.
-  // This is robust against the v3 streaming-snap-back race because we
-  // never consult the async-dispatched scroll event for stick decisions.
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const wasPinned = wasAtBottomBeforeCommit(
-      prevScrollHeight.current,
-      el.scrollTop,
-      el.clientHeight,
-    );
-    if (wasPinned) {
-      el.scrollTop = el.scrollHeight;
-      pinnedToBottom.current = true;
-    } else {
-      pinnedToBottom.current = false;
-    }
-    prevScrollHeight.current = el.scrollHeight;
-  }, [messages, liveTodos, questions]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -1732,7 +771,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Always-current ref to submit — lets the queued-message effect call the
   // latest version without adding submit to the effect's dependency array
   // (which would re-arm the effect on every keystroke).
-  const submitRef = useRef<() => void>(() => {});
   submitRef.current = submit;
 
   // When the AI goes idle (running flips false) and there are queued

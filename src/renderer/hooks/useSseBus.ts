@@ -95,6 +95,8 @@ export type SseBus = {
   liveChildStatus: Map<string, "running" | "idle">;
   setLiveChildStatus: React.Dispatch<React.SetStateAction<Map<string, "running" | "idle">>>;
   drainAbortRef: React.MutableRefObject<boolean>;
+  branch: string | null;
+  setBranch: React.Dispatch<React.SetStateAction<string | null>>;
   submit: () => void;
   submitRef: React.RefObject<() => void>;
   abort: () => void;
@@ -126,11 +128,6 @@ export function useSseBus(params: {
   submit: () => void;
   submitRef: React.RefObject<() => void>;
   setInput: (v: string) => void;
-  compactSession: () => void;
-  forkSession: () => void;
-  selectModel: (m: { providerID: string; modelID: string }) => void;
-  setChatAttention: (v: boolean) => void;
-  setChatSubagents: (v: number) => void;
 }): SseBus {
   const {
     sessionId,
