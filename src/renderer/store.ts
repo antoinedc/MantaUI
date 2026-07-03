@@ -8,6 +8,7 @@ import type {
   TransportInfo,
   WindowStatus,
 } from "../shared/types";
+import type { ConnectionState } from "../shared/net/state.js";
 
 // "Active session" in our UI = (projectName, windowIndex) tuple
 export type ActiveSession = {
@@ -117,6 +118,11 @@ type State = {
   // updateDownloaded event). Guarded — the mobile httpApi shim's
   // onAutoUpdate* are no-ops, so this is desktop-only.
   updatePrompt: { version: string; releaseName?: string } | null;
+  // Live events-WebSocket connection state (from the shared
+  // ConnectionState machine). Surface to the UI so a title-bar pill can
+  // show "reconnecting…" when the link is down. Updated by the httpApi
+  // reconnect controller via setConnectionState; read by App.tsx.
+  connectionState: ConnectionState;
   // ----- derived selectors -----
   activeSession: () => ActiveSession | null;
   // A minimal AppConfig-shaped snapshot of the onboarding-relevant fields,
@@ -191,6 +197,7 @@ type State = {
   setScreenshotToast: (t: ScreenshotToast | null) => void;
   setAgentFileToast: (t: AgentFileReady | null) => void;
   setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
+  setConnectionState: (s: ConnectionState) => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -224,6 +231,7 @@ export const useStore = create<State>((set, get) => ({
   screenshotToast: null,
   agentFileToast: null,
   updatePrompt: null,
+  connectionState: { state: "idle" },
 
   configSnapshot: () => {
     const s = get();
@@ -364,6 +372,7 @@ export const useStore = create<State>((set, get) => ({
   setScreenshotToast: (t) => set({ screenshotToast: t }),
   setAgentFileToast: (t) => set({ agentFileToast: t }),
   setUpdatePrompt: (p) => set({ updatePrompt: p }),
+  setConnectionState: (s) => set({ connectionState: s }),
 
   applyStatusBatch: (batch) =>
     set((prev) => {
