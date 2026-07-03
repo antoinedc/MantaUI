@@ -36,9 +36,81 @@ Then:
   URL (e.g. `http://192.168.1.10:8787`) and the 6-digit code from
   `npm run pair` on the box.
 
-A signed device build (EAS profiles / TestFlight) is **stage 3 (BET-75)** and is
-intentionally out of scope here — everything above runs without an Apple
+## Device / TestFlight builds (EAS)
+
+This box is Linux and can't compile iOS, so device builds run on **Expo
+Application Services (EAS Build)** — cloud macOS builders. The build/submit
+config lives in [`eas.json`](./eas.json) with three profiles:
+
+| Profile | Purpose | iOS output | Apple account needed? |
+|---|---|---|---|
+| `development` | Dev client, hot reload | **simulator** `.app` | No |
+| `preview` | Internal QA / demo | **simulator** `.app` | No |
+| `production` | Store / TestFlight | signed device `.ipa` | **Yes** |
+
+The `development` and `preview` profiles set `ios.simulator: true`, so they build
+a simulator `.app` that needs **no Apple credentials** — that's the CI-friendly
+sanity build. Only `production` (a signed device binary) requires an Apple
 Developer account.
+
+### One-time setup
+
+```bash
+cd mobile-rn
+npm install
+npm install -g eas-cli          # or: npx eas-cli@latest ...
+eas login                       # interactive; or export EXPO_TOKEN=<token> for CI
+eas init                        # links this app to an Expo project (writes extra.eas.projectId into app.json)
+```
+
+`EXPO_TOKEN` (an Expo access token, created at https://expo.dev under Account →
+Access Tokens) lets `eas` run **non-interactively** from this box — set it
+instead of `eas login` for scripted/CI runs.
+
+### Build
+
+```bash
+# No Apple account — simulator build (runs on the iOS simulator):
+eas build --platform ios --profile preview
+
+# Signed device / TestFlight build (requires Apple Developer membership):
+eas build --platform ios --profile production
+```
+
+The first `production` build prompts EAS to create the iOS Distribution
+certificate + provisioning profile for you (EAS-managed credentials); it needs
+you to be logged into an Apple account with an active **Apple Developer Program**
+membership.
+
+### Submit to TestFlight
+
+```bash
+eas submit -p ios --profile production --latest
+```
+
+`eas submit` uploads the built `.ipa` to App Store Connect / TestFlight. The
+`submit.production.ios` block in `eas.json` reads the **App Store Connect API
+key** from env (never committed) — set these before submitting:
+
+| Env var | What | Where it comes from |
+|---|---|---|
+| `ASC_API_KEY_PATH` | Path to the `.p8` API key file | App Store Connect → Users and Access → Integrations → App Store Connect API |
+| `ASC_API_KEY_ID` | Key ID for that `.p8` | same page |
+| `ASC_API_KEY_ISSUER_ID` | Issuer ID for your ASC account | same page |
+
+Store the `.p8` and IDs as **EAS secrets** (`eas secret:create`) or export them
+in the shell for a one-off submit — do **not** commit them to the repo.
+
+### EAS free tier
+
+EAS Build's free tier uses a **shared build queue** (builds wait behind paid
+users) and caps **builds per month**. That's fine for the occasional TestFlight
+build here — `eas.json` intentionally does **not** request paid priority builds.
+Expect a queue wait on free-tier builds.
+
+A signed `production` build/submit is **human-blocked** on the Apple artifacts
+above (Developer membership, `EXPO_TOKEN`, ASC API key). This slice ships the
+config + docs; the actual signed run is an operator step.
 
 ## Verify without a simulator (this repo's CI path)
 
