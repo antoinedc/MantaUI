@@ -1,0 +1,34 @@
+{
+  "expo": {
+    "name": "bui",
+    "slug": "bui",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "scheme": "bui",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "com.antoinedc.bui",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "bui uses the camera to scan the pairing QR code shown by the desktop app."
+      }
+    },
+    "android": {
+      "package": "com.antoinedc.bui",
+      "permissions": ["CAMERA"]
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "bui uses the camera to scan the pairing QR code shown by the desktop app."
+        }
+      ],
+      "expo-secure-store"
+    ]
+  }
+}

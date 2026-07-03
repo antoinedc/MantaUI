@@ -1,0 +1,32 @@
+{
+  "name": "bui-mobile-rn",
+  "version": "0.0.1",
+  "private": true,
+  "description": "bui mobile app (Expo React Native) — QR pairing + read-only session list (M3.2, BET-74)",
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@react-navigation/native": "^7.0.14",
+    "@react-navigation/native-stack": "^7.2.0",
+    "expo": "~52.0.0",
+    "expo-camera": "~16.0.0",
+    "expo-secure-store": "~14.0.0",
+    "expo-status-bar": "~2.0.0",
+    "react": "18.3.1",
+    "react-native": "0.76.5",
+    "react-native-safe-area-context": "4.12.0",
+    "react-native-screens": "~4.4.0"
+  },
+  "devDependencies": {
+    "@types/react": "~18.3.12",
+    "typescript": "~5.3.3",
+    "vitest": "^4.1.6"
+  }
+}
