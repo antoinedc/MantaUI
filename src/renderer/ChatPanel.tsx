@@ -87,9 +87,9 @@ import {
 import { RunningIndicator } from "./MessageRow";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
-import { AttachmentStrip, InputArea, TypeaheadPopup } from "./InputArea";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { Transcript } from "./Transcript";
+import { Composer } from "./Composer";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
@@ -3924,36 +3924,15 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
-      {/* Attachment chips strip — only when something pending. */}
-      {attachments.length > 0 && (
-        <AttachmentStrip
-          attachments={attachments}
-          onRemove={removeAttachment}
-        />
-      )}
-
-      {/* Typeahead popup — shown the moment typeahead state is set, even */}
-      {/* if the result list is still loading. Empty rows render a small */}
-      {/* "Searching…" placeholder so the user sees instant feedback. */}
-      {typeahead && (
-        <TypeaheadPopup
-          rows={typeaheadRows}
-          selectedIdx={Math.min(typeahead.selectedIdx, Math.max(0, typeaheadRows.length - 1))}
-          onSelect={applyTypeahead}
-          onHover={(idx) =>
-            setTypeahead((prev) => (prev ? { ...prev, selectedIdx: idx } : prev))
-          }
-          emptyHint={
-            typeahead.mode === "file"
-              ? "Searching…"
-              : typeahead.mode === "agent"
-                ? "No matching agents"
-                : "No matching commands"
-          }
-        />
-      )}
-
-      <InputArea
+      <Composer
+        attachments={attachments}
+        onRemoveAttachment={removeAttachment}
+        typeahead={typeahead}
+        typeaheadRows={typeaheadRows}
+        onTypeaheadSelect={applyTypeahead}
+        onTypeaheadHover={(idx) =>
+          setTypeahead((prev) => (prev ? { ...prev, selectedIdx: idx } : prev))
+        }
         input={input}
         setInput={updateInputWithHistoryReset}
         inputRef={inputRef}

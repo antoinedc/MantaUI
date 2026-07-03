@@ -225,3 +225,73 @@ describe("ChatPanel transcript rendering", () => {
     expect(text).not.toContain("Welcome. Type a message below to start.");
   });
 });
+
+// ===== Composer submit (via the mounted ChatPanel) =====
+//
+// Verifies the extracted <Composer> is wired to the submit path: typing into
+// the textarea and pressing Enter routes through window.api.opencodePrompt
+// with the session id + typed text. This is the "Composer → submit → message
+// added" integration test called for by BET-63.
+describe("ChatPanel composer submit", () => {
+  let api: MockApi;
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  // Set a controlled <textarea>'s value the way React expects (native setter
+  // + input event) so onChange fires and the component's `input` state updates.
+  function typeInto(el: HTMLTextAreaElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("calls opencodePrompt when the user types and presses Enter", async () => {
+    ({ api } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const textarea = h.container.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+
+    await act(async () => {
+      typeInto(textarea as HTMLTextAreaElement, "ship it");
+    });
+    await act(async () => {
+      (textarea as HTMLTextAreaElement).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    await h.flush();
+
+    const calls = api.calls.opencodePrompt ?? [];
+    expect(calls.length).toBeGreaterThan(0);
+    // opencodePrompt(sessionId, text, ...)
+    expect(calls[0][0]).toBe("ses_test");
+    expect(calls[0][1]).toBe("ship it");
+  });
+
+  it("does not submit an empty composer on Enter", async () => {
+    ({ api } = installMockApi());
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    await h.flush();
+    expect(api.calls.opencodePrompt?.length ?? 0).toBe(0);
+  });
+});
