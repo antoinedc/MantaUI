@@ -1,14 +1,16 @@
 # bui mobile (Expo React Native)
 
 The bui mobile app — a native iOS/Android client built with **Expo** (managed
-workflow, TypeScript). This is the M3 milestone (BET-37) stage 2 scaffold:
-**QR pairing + a read-only session list**, provable on **Expo Go / iOS
-simulator** with **zero Apple credentials**.
+workflow, TypeScript). This is the M3 milestone (BET-37): **QR pairing, a
+session list, a live interactive transcript, settings/re-pair/model-picker, and
+a push-registration scaffold** — all provable on **Expo Go / iOS simulator**
+with **zero Apple credentials**.
 
 - Bundle identifier: `com.antoinedc.bui` (iOS + Android)
 - Framework: Expo SDK 52 + React Navigation (native-stack)
 - QR scan: `expo-camera`
 - Secure token storage: `expo-secure-store` (iOS Keychain / Android Keystore)
+- Push token: `expo-notifications` (scaffold — see [Push notifications](#push-notifications-scaffold))
 
 ## What it does
 
@@ -17,9 +19,38 @@ simulator** with **zero Apple credentials**.
    fallback for Expo Go on a simulator, which has no camera). On success the
    box_token is stored in the device keychain.
 2. **Session list screen** — calls the box's `tmux:list` RPC (Bearer
-   box_token) and renders a **read-only** list of sessions: title +
-   running/idle dot, grouped by project. Tapping a row shows a placeholder —
-   live transcript streaming is a later milestone (M5).
+   box_token) and renders a list of sessions: title + running/idle dot, grouped
+   by project. Tapping a chat row opens its live transcript. A ⚙ header button
+   opens **Settings**.
+3. **Session detail screen** — fetches the transcript (`opencode:messages`),
+   streams live updates over `/events`, and lets you send prompts
+   (`opencode:prompt`) with Permission/Question cards. A ⋯ header menu exposes
+   **session actions**: New chat / clear (`opencode:clear-session`), Fork to a
+   new window (`opencode:fork-session`), and Compact context
+   (`opencode:compact-session`).
+4. **Settings screen** — shows the paired **server URL + box ID** (read-only),
+   a **Re-pair / disconnect** action (clears the keychain credentials → back to
+   Pairing), a **default model picker** (connected models from
+   `opencode:models`, current default from `opencode:default-model`, persisted
+   via `config:update({ defaultModel })` — the same write the desktop uses), and
+   an **Enable notifications** button that runs the push-registration scaffold.
+
+### Push notifications (scaffold)
+
+The Settings screen's **Enable notifications** button runs the full registration
+flow — request permission via `expo-notifications`, obtain the Expo push token,
+then hand it to `registerPushToken(token)`. That call is **a no-op when no push
+backend is configured** (the default), so the whole flow compiles, runs on the
+simulator/Expo Go, and is unit-tested **without an APNs key**. With no backend it
+resolves to `{ kind: "unconfigured", token }` — the token is obtained but not
+sent.
+
+> **M5 dependency (human-blocked on the APNs `.p8`):** live native APNs/FCM
+> delivery is deliberately **not** wired here. To turn it on, set
+> `PushConfig.endpoint` (in `src/api/push.ts`) to the operated relay's
+> registration URL and wire the delivery leg on the box/relay. That step needs
+> the operator's Apple artifacts (already tracked on BET-75). The registration
+> flow proven in this slice does not change when M5 lands.
 
 ## Run it (Expo Go / simulator)
 
@@ -35,6 +66,16 @@ Then:
 - On a simulator (no camera), use the **manual entry** fields: paste your box
   URL (e.g. `http://192.168.1.10:8787`) and the 6-digit code from
   `npm run pair` on the box.
+
+Once paired you can exercise each feature on the simulator:
+- **Sessions** — tap a chat row to open its live transcript; the ⚙ header
+  button opens Settings.
+- **Session detail** — send a prompt; use the ⋯ header menu for New chat / Fork
+  / Compact.
+- **Settings** — review the server URL + box ID, pick a **default model** (tap a
+  model to persist it), tap **Enable notifications** (resolves to
+  "unconfigured" on the simulator — no APNs key needed), or **Re-pair /
+  disconnect** to clear credentials and return to Pairing.
 
 ## Device / TestFlight builds (EAS)
 
@@ -134,7 +175,7 @@ logic without needing the RN app's own `node_modules` for the pure layer.
 ```
 mobile-rn/
   app.json            Expo config (name "bui", bundle id com.antoinedc.bui, camera perms)
-  App.tsx             Navigation root (Pairing ↔ Sessions), launch-time credential check
+  App.tsx             Navigation root (Pairing ↔ Sessions ↔ Session ↔ Settings)
   index.ts            Expo entry (registerRootComponent)
   src/
     pure/             Framework-free, unit-tested logic (no fetch/camera/keychain):
@@ -142,13 +183,29 @@ mobile-rn/
       claim.ts          /auth/claim outcome classification (ported shared classifier)
       scanWiring.ts     decoded-QR → pair-or-error decision; camera availability
       sessionList.ts    raw tmux:list JSON → FlatList view model
+      transcript.ts     raw opencode messages/events → transcript view model
+      composer.ts       send-gate (can-submit, prepare text)
+      events.ts         /events envelope parse + reconnect/backoff decisions
+      interaction.ts    permission/question card hydration + event application
+      modelPicker.ts    raw opencode:models JSON → grouped picker VM + default match
+      sessionActions.ts new/clear/fork/compact → channel+payload decision
+      push.ts           push-registration decisions (permission gate, classify, body)
       __tests__/        vitest specs for each pure module
     api/              Impure side effects:
-      pairingApi.ts     fetch: POST /auth/claim, POST /rpc/<channel> (Bearer)
+      pairingApi.ts     fetch: /auth/claim, /rpc/<channel> (Bearer) — incl. models,
+                        default-model (config:update), session actions
       credentials.ts    expo-secure-store read/write of { serverUrl, boxId, boxToken }
+      eventsClient.ts   /events WebSocket client (backoff reconnect, session filter)
+      push.ts           registration flow: expo-notifications permission + token →
+                        registerPushToken (POST or no-op) — see Push notifications
+      __tests__/        vitest specs for the impure glue (injected fakes)
     screens/          RN screens:
-      PairingScreen.tsx    QR scan (expo-camera) + manual fallback
-      SessionListScreen.tsx  read-only FlatList of sessions
+      PairingScreen.tsx      QR scan (expo-camera) + manual fallback
+      SessionListScreen.tsx  FlatList of sessions
+      SessionDetailScreen.tsx  live transcript + composer + cards + ⋯ actions
+      SettingsScreen.tsx     server/box read-only, re-pair, model picker, push
+      Composer.tsx           prompt input + Send/Stop
+      cards/                 PermissionCard / QuestionCard
     theme.ts          shared dark palette
 ```
 
