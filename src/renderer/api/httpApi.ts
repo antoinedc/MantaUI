@@ -13,6 +13,8 @@ import {
   type ClaimResult,
 } from "../mobile/pairingLogic.js";
 import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
+import { getBuiPreload } from "../preloadAccess.js";
+import { useStore } from "../store.js";
 
 // ---------------------------------------------------------------------------
 // Server base URL resolution (3 deployment contexts):
@@ -324,6 +326,7 @@ function getController(): WsReconnectController {
     create: (url) => new WebSocket(url) as unknown as WsLike,
     onMessage: dispatchFrame,
     onReconnect: fireResync,
+    onState: (s) => useStore.getState().setConnectionState(s),
     onConfigError: (e) =>
       console.warn(
         "[bui] events WebSocket not opened:",
@@ -573,8 +576,25 @@ export const httpApi: Api = {
    * silently swallowed every chat link click — this restores that behavior.
    * Returns Promise<void> to match the desktop signature; the open call is
    * fire-and-forget.
+   *
+   * Electron HTTP-mode note: the main process installs a
+   * `setWindowOpenHandler` that returns `{ action: "deny" }`, so
+   * `window.open` from the renderer is blocked. We route through the typed
+   * preload accessor (`window.__buiPreload.openExternal`) when it's present
+   * (Electron HTTP mode), which goes through IPC to `shell.openExternal`.
+   * On mobile/web there is no preload, so we fall back to `window.open`
+   * which works because the WebView IS the browser.
    */
   openExternal: async (url) => {
+    const preload = getBuiPreload();
+    if (preload) {
+      try {
+        await preload.openExternal(url);
+        return;
+      } catch {
+        /* preload openExternal failed — fall through to window.open */
+      }
+    }
     try {
       window.open(url, "_blank", "noreferrer");
     } catch {

@@ -7,6 +7,7 @@ import { Onboarding } from "./Onboarding";
 import { useStore, flatSessions } from "./store";
 import { resolveTransportMode } from "../shared/transport.mjs";
 import { getBuiPreload } from "./preloadAccess";
+import { describe as describeConnection } from "../shared/net/state.js";
 
 export function App() {
   const {
@@ -24,6 +25,7 @@ export function App() {
     configSnapshot,
     updatePrompt,
     setUpdatePrompt,
+    connectionState,
   } = useStore();
 
   // Entry gating: a fresh config (no host, no boxToken, not skipped) resolves
@@ -510,6 +512,20 @@ export function App() {
                 {activeWinName && ` / ${activeWinName}`}
               </span>
             )}
+            {/* Connection status pill — only shown when the events WS is in a
+                non-connected state (reconnecting / stalled / closed). The
+                controller fires onState on every transition, so this reflects
+                live state without polling. Hidden in SSH mode (no WS) and
+                when connected (no signal needed). */}
+            {connectionState.state !== "connected" &&
+              connectionState.state !== "idle" && (
+                <span
+                  className="shrink-0 text-text-faint"
+                  title={describeConnection(connectionState)}
+                >
+                  · {describeConnection(connectionState)}
+                </span>
+              )}
             {/* Active cwd — last segment in the chain so it can shrink and */}
             {/* truncate when the title bar is narrow. `direction:rtl` keeps */}
             {/* the *tail* of the path visible (the meaningful subdir name) */}

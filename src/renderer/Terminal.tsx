@@ -7,6 +7,34 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { getBuiPreload } from "./preloadAccess";
 
+/**
+ * Handle an OSC 52 escape sequence: decode the base64 payload and write the
+ * result to the system clipboard. Routes through the typed preload accessor
+ * on desktop (Electron IPC → main-process clipboard), falling back to
+ * `navigator.clipboard` on mobile/web where there is no preload.
+ *
+ * Returns true if the sequence was handled (valid payload, decode succeeded),
+ * false otherwise (no `;` separator, query request `?`, or decode failure).
+ * Pure: no DOM, no side effects beyond the clipboard write. Testable in
+ * isolation by passing a custom clipboard writer.
+ */
+export function handleOsc52(
+  data: string,
+  writeText: (text: string) => void | Promise<void>,
+): boolean {
+  const semi = data.indexOf(";");
+  if (semi < 0) return false;
+  const payload = data.slice(semi + 1);
+  if (!payload || payload === "?") return false;
+  try {
+    const text = atob(payload);
+    writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 type Props = {
   projectName: string;
   active: boolean;
@@ -118,21 +146,27 @@ export function Terminal({ projectName, active }: Props) {
     // ourselves instead of using @xterm/addon-clipboard because that addon
     // calls navigator.clipboard.writeText, which Electron silently blocks
     // for non-user-gesture writes (and OSC 52 arrives async, no gesture).
+    //
+    // On desktop (Electron), `getBuiPreload()?.clipboardWriteText` routes
+    // through IPC to the main-process `clipboard.writeText`. On mobile/web
+    // there is no preload, so we fall back to `navigator.clipboard` which
+    // works in modern browsers (the browser grants clipboard write on
+    // insecure contexts only after user gesture, but most mobile browsers
+    // allow it from service-worker-registered PWAs and the Capacitor APK).
     term.parser.registerOscHandler(52, (data) => {
       console.log("[osc52]", JSON.stringify(data.slice(0, 120)));
-      const semi = data.indexOf(";");
-      if (semi < 0) return false;
-      const payload = data.slice(semi + 1);
-      if (!payload || payload === "?") return false;
-      try {
-        const text = atob(payload);
+      const handled = handleOsc52(data, (text) => {
         console.log("[osc52] -> clipboard:", JSON.stringify(text.slice(0, 80)));
-        getBuiPreload()?.clipboardWriteText(text);
-        return true;
-      } catch (e) {
-        console.warn("[osc52] decode failed:", e);
-        return false;
-      }
+        const preload = getBuiPreload();
+        if (preload) {
+          preload.clipboardWriteText(text);
+        } else {
+          navigator.clipboard.writeText(text).catch(() => {
+            /* clipboard write failed — non-fatal, OSC 52 is best-effort */
+          });
+        }
+      });
+      return handled;
     });
     term.unicode.activeVersion = "11";
 
