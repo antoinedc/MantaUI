@@ -12,6 +12,9 @@ export const colors = {
   accent: "#3b82f6",
   accentText: "#ffffff",
   danger: "#ef4444",
+  dangerBg: "#1a0a0a",
   running: "#22c55e",
   idle: "#6b7280",
+  terminalBg: "#0d1117",
+  terminalText: "#c9d1d9",
 };
