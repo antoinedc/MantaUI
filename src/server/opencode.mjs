@@ -48,8 +48,26 @@ export function _getOcAgent() {
   return ocAgent;
 }
 
+// The transport ocFetch uses. Production = the pooled http.request impl below
+// (`pooledOcRequest`). Tests can swap in a `(url, init) => Promise<Response>`
+// stub via `_setOcTransport` so they intercept requests without a live server
+// (the old tests mocked globalThis.fetch, which the pooled path bypasses).
+let ocTransport = null; // lazily set to pooledOcRequest after it's defined
+
+/** Test-only: override the transport ocFetch dispatches through. Pass null to
+ *  restore the default pooled transport. */
+export function _setOcTransport(fn) {
+  ocTransport = fn;
+}
+
+/** Test-only: exercise the real pooled transport directly (bypasses any
+ *  installed test stub) so a socket-reuse test can hit a live local server. */
+export function _pooledOcRequest(url, init) {
+  return pooledOcRequest(url, init);
+}
+
 // A `fetch` replacement for opencode's NON-STREAMING endpoints that routes the
-// request through the keep-alive pool above via node:http.request.
+// request through the keep-alive pool via node:http.request (or a test stub).
 //
 // NOTE: undici's global `fetch` does NOT honor the classic `agent` option (nor
 // can we pass a pooled undici `dispatcher` — the Node-bundled undici isn't a
@@ -61,6 +79,10 @@ export function _getOcAgent() {
 // `.status` / `.json()` / `.text()` unchanged. Same technique as the desktop
 // pooledRequest in src/main/opencode.ts.
 function ocFetch(url, init) {
+  return (ocTransport ?? pooledOcRequest)(url, init);
+}
+
+function pooledOcRequest(url, init) {
   return new Promise((resolve, reject) => {
     const method = (init?.method ?? "GET").toString();
     const headers = {};
