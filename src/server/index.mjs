@@ -592,6 +592,70 @@ const server = createServer(async (req, res) => {
     return handleDownload(req, res, url);
   }
 
+  // ---------- File peek (HTTP-mode desktop) ----------
+  // GET /api/peek?path=<url-encoded-absolute-path>
+  // Streams the file bytes back to the caller. The desktop main process
+  // fetches this, writes to a temp file, and opens with shell.openPath.
+  // Path is resolved against the caller's home dir (~ expansion) and
+  // constrained to stay inside it (path-traversal guard). Content-Type is
+  // inferred from the file extension; falls back to application/octet-stream.
+  if (req.method === "GET" && path === "/api/peek") {
+    const raw = url.searchParams.get("path") ?? "";
+    if (!raw) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "path is required" }));
+      return;
+    }
+    // Expand ~ to $HOME so callers can pass ~/foo/bar.
+    let resolved = raw;
+    if (resolved === "~") resolved = homedir() + "/";
+    else if (resolved.startsWith("~/")) resolved = homedir() + resolved.slice(1);
+    else resolved = resolve(resolved);
+    // Guard: resolved path must stay inside the user's home dir.
+    const home = homedir() + "/";
+    if (resolved !== home && !resolved.startsWith(home)) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "path outside home directory" }));
+      return;
+    }
+    let s;
+    try {
+      s = await stat(resolved);
+    } catch (e) {
+      if (e?.code === "ENOENT") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "not found" }));
+        return;
+      }
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      return;
+    }
+    if (!s.isFile()) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not a file" }));
+      return;
+    }
+    const ext = extname(resolved);
+    const contentType = MIME[ext] ?? "application/octet-stream";
+    res.writeHead(200, {
+      "content-type": contentType,
+      "content-length": String(s.size),
+      "content-disposition": `inline; filename="${basename(resolved).replace(/"/g, "")}"`,
+    });
+    try {
+      await pipeline(createReadStream(resolved), res);
+    } catch (e) {
+      if (!res.headersSent) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      } else {
+        res.destroy();
+      }
+    }
+    return;
+  }
+
   // ---------- Cross-device shared-settings sync ----------
   // GET  /api/shared-config → the device-independent subset of config + its
   //                           LWW timestamp (so desktop can pull mobile edits).

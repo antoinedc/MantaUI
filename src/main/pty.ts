@@ -6,6 +6,8 @@ import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { shell } from "electron";
 import { BrowserWindow } from "electron";
+import { request as httpRequest } from "node:http";
+import { URL } from "node:url";
 import {
   IPC,
   type AppConfig,
@@ -657,6 +659,89 @@ export async function peekRemoteFile(config: AppConfig, remotePath: string): Pro
   await scpDownload(config, remotePath, localPath);
   const err = await shell.openPath(localPath);
   if (err) throw new Error(err);
+}
+
+// HTTP-mode peek: fetch the file from the bui-server's /api/peek route,
+// write to a temp file, and open with the user's default app. The server
+// IS the remote box, so no scp hop is needed — the server reads the file
+// directly and streams the bytes back. The desktop main process handles
+// the download + open so the renderer never touches raw file bytes.
+//
+// config must have serverUrl + boxToken set (i.e. resolveTransportMode === "http").
+export async function peekRemoteFileHttp(config: AppConfig, remotePath: string): Promise<void> {
+  if (!config.serverUrl) throw new Error("No server URL configured");
+  if (!config.boxToken) throw new Error("No box token configured");
+  if (!remotePath) throw new Error("Empty path");
+
+  const serverBase = config.serverUrl.replace(/\/+$/, "");
+  const urlStr = `${serverBase}/api/peek?path=${encodeURIComponent(remotePath)}`;
+
+  const bytes = await httpGetArrayBuffer(urlStr, config.boxToken);
+  if (!bytes || bytes.byteLength === 0) throw new Error("Empty file or server error");
+
+  // Write to a temp file in the peek cache dir (same location as SSH-mode
+  // peek, so repeated clicks on the same file reuse the cache).
+  const key = createHash("sha1")
+    .update(`http|${serverBase}|${remotePath}`)
+    .digest("hex")
+    .slice(0, 16);
+  const cacheDir = pathJoin(tmpdir(), "bui-peek", key);
+  mkdirSync(cacheDir, { recursive: true });
+  const localPath = pathJoin(cacheDir, pathBasename(remotePath) || "file");
+  writeFileSync(localPath, Buffer.from(bytes));
+
+  const err = await shell.openPath(localPath);
+  if (err) throw new Error(err);
+}
+
+// Fetch a URL and return the response body as an ArrayBuffer. Sends the
+// box_token as a Bearer Authorization header. Timeouts after 15s to avoid
+// hanging on an unresponsive server.
+function httpGetArrayBuffer(urlStr: string, boxToken: string): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(urlStr);
+    const req = httpRequest(
+      {
+        host: parsed.hostname,
+        port: parsed.port || 80,
+        path: parsed.pathname + parsed.search,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${boxToken}`,
+        },
+        timeout: 15_000,
+      },
+      (res) => {
+        if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+          let raw = "";
+          res.setEncoding("utf-8");
+          res.on("data", (c) => (raw += c));
+          res.on("end", () => {
+            try {
+              const body = JSON.parse(raw);
+              reject(new Error(body?.error ?? `HTTP ${res.statusCode}`));
+            } catch {
+              reject(new Error(`HTTP ${res.statusCode}`));
+            }
+          });
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on("data", (c) => chunks.push(c as Buffer));
+        res.on("end", () => {
+          const buf = Buffer.concat(chunks);
+          resolve(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+        });
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("peek request timed out"));
+    });
+    req.end();
+  });
 }
 
 function scpDownload(

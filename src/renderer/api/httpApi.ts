@@ -511,7 +511,17 @@ export const httpApi: Api = {
   getPathForFile: (_file: File): string => "",
 
   // -- misc --
-  peekRemoteFile: (remotePath) => rpc(IPC.peekRemoteFile, remotePath),
+  // Desktop HTTP-mode: route through window.__buiPreload so the main process
+  // can fetch from /api/peek and open the file with shell.openPath (the
+  // renderer has no direct shell access). Falls back to the RPC channel for
+  // mobile/web where the server IS the box and reads the file natively.
+  peekRemoteFile: async (remotePath) => {
+    const preload = (window as { __buiPreload?: { peekRemoteFileHttp?: (p: string) => Promise<void> } }).__buiPreload;
+    if (preload?.peekRemoteFileHttp) {
+      return preload.peekRemoteFileHttp(remotePath);
+    }
+    return rpc(IPC.peekRemoteFile, remotePath);
+  },
 
   // -- agent → device file push (outbox) --
   // The mobile server's outbox poller (src/server/outbox.mjs) publishes
