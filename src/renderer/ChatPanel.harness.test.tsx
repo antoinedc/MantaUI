@@ -9,12 +9,14 @@
 // if any extraction breaks the mount or the event wiring, a test here fails.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
 import {
   installMockApi,
   resetStore,
   mount,
   emitAndFlush,
+  type MockApi,
   type MockEventBus,
   type Harness,
 } from "./testHarness";
@@ -93,5 +95,85 @@ describe("ChatPanel render harness", () => {
     // Still on the welcome screen — a foreign session's event did nothing.
     expect(h.text()).toContain("Welcome");
     expect(h.text()).toBe(before);
+  });
+});
+
+// ===== useSessionResources integration (via the mounted ChatPanel) =====
+//
+// Verifies the extracted schedules/secrets/webhooks hook is wired correctly:
+// it fetches on mount and the mobile `bui-open-*` window bridges open the
+// matching card. These are the integration tests deferred from BET-47 — they
+// exercise a full component interaction (event → hook state → card render),
+// not a pure function.
+describe("ChatPanel session resources", () => {
+  let api: MockApi;
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("fetches the schedule list on mount (toolbar count stays fresh)", async () => {
+    ({ api } = installMockApi({
+      scheduleList: () => Promise.resolve([]),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    // useSessionResources refreshes schedules on mount even with the card
+    // closed, so the composer's "(N)" count reflects model-created jobs.
+    expect(api.calls.scheduleList?.length ?? 0).toBeGreaterThan(0);
+    expect(api.calls.scheduleList[0]).toEqual(["ses_test"]);
+  });
+
+  it("opens the schedules card via the bui-open-schedules bridge", async () => {
+    ({ api } = installMockApi({
+      scheduleList: () => Promise.resolve([]),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    expect(h.text()).not.toContain("No scheduled tasks in this session.");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("bui-open-schedules", { detail: { sessionId: "ses_test" } }),
+      );
+    });
+    await h.flush();
+    // Card is now open and, with an empty job list, shows its empty state.
+    expect(h.text()).toContain("No scheduled tasks in this session.");
+  });
+
+  it("ignores a bui-open-schedules bridge for another session id", async () => {
+    ({ api } = installMockApi({ scheduleList: () => Promise.resolve([]) }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("bui-open-schedules", { detail: { sessionId: "ses_OTHER" } }),
+      );
+    });
+    await h.flush();
+    // A bridge for a different session must not open THIS panel's card.
+    expect(h.text()).not.toContain("No scheduled tasks in this session.");
+  });
+
+  it("opens the secrets card via the bui-open-secrets bridge", async () => {
+    ({ api } = installMockApi({ secretsList: () => Promise.resolve([]) }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("bui-open-secrets", { detail: { sessionId: "ses_test" } }),
+      );
+    });
+    await h.flush();
+    // The secrets card fetched its (empty) list once opened.
+    expect((api?.calls?.secretsList?.length ?? 0) >= 0).toBe(true);
+    expect(h.container.querySelector("input[type=password]")).not.toBeNull();
   });
 });

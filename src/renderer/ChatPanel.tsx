@@ -22,9 +22,6 @@ import type {
   OpencodeModel,
   PermissionRequest,
   QuestionRequest,
-  ScheduledJob,
-  SecretMeta,
-  WebhookMeta,
 } from "../shared/types";
 import { useStore } from "./store";
 import {
@@ -92,6 +89,7 @@ import { ActiveTodos, MessageRow, RunningIndicator } from "./MessageRow";
 import { CompactionCard, PermissionCard, QuestionCard, RetryCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { AttachmentStrip, InputArea, TypeaheadPopup } from "./InputArea";
+import { useSessionResources } from "./hooks/useSessionResources";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
@@ -172,64 +170,34 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Reasoning ("Thinking…") visibility — hidden by default to keep the
   // transcript focused on results. Ctrl+O toggles like Claude Code's TUI.
   const [showThinking, setShowThinking] = useState(false);
-  // Scheduled-prompt management (the ⏰ ScheduledTasksCard). Jobs are
-  // server-owned (bui-server fires them); here we only list + delete via the
-  // schedule:* window.api channels. Refetch-driven (open + open-poll + post-
-  // delete) — NOT a bus event, because desktop's renderer isn't wired to the
-  // server bus. See docs/bui-tools-scheduler.md.
-  const [showSchedules, setShowSchedules] = useState(false);
-  const [schedules, setSchedules] = useState<ScheduledJob[]>([]);
-  const [scheduleError, setScheduleError] = useState<string | null>(null);
-  const refreshSchedules = useCallback(() => {
-    return window.api
-      .scheduleList(sessionId)
-      .then((jobs: ScheduledJob[]) => {
-        setSchedules(Array.isArray(jobs) ? jobs : []);
-        setScheduleError(null);
-      })
-      .catch((e: unknown) => {
-        setScheduleError(e instanceof Error ? e.message : "schedule server unreachable");
-      });
-  }, [sessionId]);
-  // Secrets management (the 🔑 SecretsCard). Secrets are server-owned (the
-  // value never leaves the box; the AI reads them via the secret_* opencode
-  // tools). Here the user adds/edits/deletes via secrets:* window.api channels.
-  // list returns METADATA ONLY (no values). Refetch-driven like schedules.
-  // The card shows shared secrets + this session's scoped ones (sessionId is
-  // passed so the agent-visible view matches what tools will resolve).
-  const [showSecrets, setShowSecrets] = useState(false);
-  const [secrets, setSecrets] = useState<SecretMeta[]>([]);
-  const [secretError, setSecretError] = useState<string | null>(null);
-  const refreshSecrets = useCallback(() => {
-    return window.api
-      .secretsList(sessionId)
-      .then((list: SecretMeta[]) => {
-        setSecrets(Array.isArray(list) ? list : []);
-        setSecretError(null);
-      })
-      .catch((e: unknown) => {
-        setSecretError(e instanceof Error ? e.message : "secrets server unreachable");
-      });
-  }, [sessionId]);
-  // Inbound-webhook management (the 🪝 WebhooksCard). Hooks are server-owned
-  // (external POSTs wake the session); here we only list + revoke via the
-  // webhook:* channels (creation is the AI's job via the `webhook` opencode
-  // tool, which returns the one-time signing secret). Refetch-driven like
-  // schedules/secrets. See docs/bui-tools-webhook.md.
-  const [showWebhooks, setShowWebhooks] = useState(false);
-  const [webhooks, setWebhooks] = useState<WebhookMeta[]>([]);
-  const [webhookError, setWebhookError] = useState<string | null>(null);
-  const refreshWebhooks = useCallback(() => {
-    return window.api
-      .webhookList(sessionId)
-      .then((list: WebhookMeta[]) => {
-        setWebhooks(Array.isArray(list) ? list : []);
-        setWebhookError(null);
-      })
-      .catch((e: unknown) => {
-        setWebhookError(e instanceof Error ? e.message : "webhook server unreachable");
-      });
-  }, [sessionId]);
+  // Server-owned resource cards (⏰ schedules, 🔑 secrets, 🪝 webhooks) —
+  // state, refresh callbacks, poll effects, session resets, and the mobile
+  // `bui-open-*` window-event bridges. Extracted to a self-contained hook
+  // (BET-63) because none of it touches the SSE / pin-to-bottom / message core.
+  const resources = useSessionResources(sessionId);
+  const {
+    showSchedules,
+    setShowSchedules,
+    schedules,
+    setSchedules,
+    scheduleError,
+    setScheduleError,
+    refreshSchedules,
+    showSecrets,
+    setShowSecrets,
+    secrets,
+    setSecrets,
+    secretError,
+    setSecretError,
+    refreshSecrets,
+    showWebhooks,
+    setShowWebhooks,
+    webhooks,
+    setWebhooks,
+    webhookError,
+    setWebhookError,
+    refreshWebhooks,
+  } = resources;
   // Running mirrors opencode session status (busy/idle/retry). We feed it from
   // session.status events for accuracy, but also set it optimistically on send
   // so the UI flips to "Stop" instantly rather than waiting for the next event.
@@ -798,52 +766,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
   }, [sessionId, cwd]);
 
-  // Close the schedules card + clear its state on session change.
-  useEffect(() => {
-    setShowSchedules(false);
-    setSchedules([]);
-    setScheduleError(null);
-  }, [sessionId]);
-
-  // Keep the toolbar schedule count fresh whether or not the card is open:
-  // fetch once on mount/session-change, then poll. The card being open speeds
-  // the poll up (10s) for snappy create/fire feedback; while closed a slower
-  // 30s background poll keeps the "(N)" count current so a model-created job
-  // shows up without the user having to open the card first. Refetch-driven
-  // (no bus event) so it behaves identically on desktop and mobile.
-  useEffect(() => {
-    void refreshSchedules();
-    const intervalMs = showSchedules ? 10_000 : 30_000;
-    const poll = setInterval(() => void refreshSchedules(), intervalMs);
-    return () => clearInterval(poll);
-  }, [showSchedules, refreshSchedules]);
-
-  // Secrets are only fetched while the card is open (no toolbar count badge to
-  // keep current in the background — unlike schedules). Refetch on open + 10s
-  // poll so a secret added on another device shows up.
-  useEffect(() => {
-    if (!showSecrets) return;
-    void refreshSecrets();
-    const poll = setInterval(() => void refreshSecrets(), 10_000);
-    return () => clearInterval(poll);
-  }, [showSecrets, refreshSecrets]);
-
-  // Close the webhooks card + clear its state on session change.
-  useEffect(() => {
-    setShowWebhooks(false);
-    setWebhooks([]);
-    setWebhookError(null);
-  }, [sessionId]);
-
-  // Webhooks fetched only while the card is open (creation is agent-driven; the
-  // count isn't surfaced on the toolbar, so no background poll). Refetch on open
-  // + 10s poll so a model-created hook / a fresh delivery shows up.
-  useEffect(() => {
-    if (!showWebhooks) return;
-    void refreshWebhooks();
-    const poll = setInterval(() => void refreshWebhooks(), 10_000);
-    return () => clearInterval(poll);
-  }, [showWebhooks, refreshWebhooks]);
+  // (schedule / secrets / webhook poll + reset effects moved to
+  // useSessionResources — see the `resources` hook call above.)
 
   // Refresh permissions list. Called on any permission event.
   // Passes `sessionId` so the main process scopes the request to this
@@ -1862,37 +1786,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  // Mobile entry point for the schedules card: the ⋯ sheet (outside ChatPanel)
-  // dispatches a window CustomEvent rather than reaching into this component's
-  // state. Mirrors the bui-scroll-to-question bridge above.
-  useEffect(() => {
-    const onOpenSchedules = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowSchedules(true);
-    };
-    window.addEventListener("bui-open-schedules", onOpenSchedules);
-    return () => window.removeEventListener("bui-open-schedules", onOpenSchedules);
-  }, [sessionId]);
-
-  // Mobile entry point for the secrets card (mirror of bui-open-schedules).
-  useEffect(() => {
-    const onOpenSecrets = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowSecrets(true);
-    };
-    window.addEventListener("bui-open-secrets", onOpenSecrets);
-    return () => window.removeEventListener("bui-open-secrets", onOpenSecrets);
-  }, [sessionId]);
-
-  // Mobile entry point for the webhooks card (mirror of bui-open-schedules).
-  useEffect(() => {
-    const onOpenWebhooks = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowWebhooks(true);
-    };
-    window.addEventListener("bui-open-webhooks", onOpenWebhooks);
-    return () => window.removeEventListener("bui-open-webhooks", onOpenWebhooks);
-  }, [sessionId]);
+  // (bui-open-schedules / -secrets / -webhooks mobile bridges moved to
+  // useSessionResources.)
 
   // Perform the deferred scroll once the question cards actually exist (cold
   // start: questions arrive via the async fetch after this panel mounts).
