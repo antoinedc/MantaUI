@@ -84,8 +84,9 @@ function normalizeStatus(status: string): PushPermissionStatus {
  * inject a fake provider instead.
  */
 async function loadNotifications(): Promise<NotificationsProvider> {
-  // @ts-expect-error — expo-notifications ships its own types at runtime; the
-  // dynamic import keeps it out of the module graph for non-push code + tests.
+  // expo-notifications ships its own types at runtime; the dynamic import keeps
+  // it out of the module graph for non-push code + tests. The cast below adapts
+  // the module to our narrow NotificationsProvider interface.
   const mod = await import("expo-notifications");
   return mod as unknown as NotificationsProvider;
 }
