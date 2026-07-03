@@ -322,14 +322,35 @@ export function Terminal({ projectName, active }: Props) {
     dragDepth.current = 0;
     setDragOver(false);
     const files = Array.from(e.dataTransfer.files);
-    const localPaths = files
-      .map((f) => window.api.getPathForFile(f))
-      .filter((p) => p);
-    if (localPaths.length === 0) return;
+    if (files.length === 0) return;
+    // Two transports, per file: an OS path (Electron preload webUtils) rides
+    // the batch scp bridge; no path (desktop HTTP mode / browser —
+    // getPathForFile returns "") falls back to shipping the File's bytes via
+    // uploadBuffer, same as ChatPanel's drop/paste byte path.
+    const withPaths: string[] = [];
+    const byteFiles: File[] = [];
+    for (const f of files) {
+      const lp = window.api.getPathForFile(f);
+      if (lp) withPaths.push(lp);
+      else byteFiles.push(f);
+    }
     setUploading(true);
     try {
-      const remotePaths = await window.api.uploadFiles({ projectName, localPaths });
-      const text = remotePaths.map(quoteForPrompt).join(" ") + " ";
+      const remotePaths: string[] = [];
+      if (withPaths.length > 0) {
+        remotePaths.push(
+          ...(await window.api.uploadFiles({ projectName, localPaths: withPaths })),
+        );
+      }
+      for (const f of byteFiles) {
+        const buffer = await f.arrayBuffer();
+        remotePaths.push(
+          await window.api.uploadBuffer({ projectName, filename: f.name, buffer }),
+        );
+      }
+      const uploaded = remotePaths.filter((p) => p);
+      if (uploaded.length === 0) return;
+      const text = uploaded.map(quoteForPrompt).join(" ") + " ";
       window.api.ptyWrite(projectName, text);
       termRef.current?.focus();
     } catch (err) {

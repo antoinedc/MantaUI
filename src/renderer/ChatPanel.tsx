@@ -1061,10 +1061,15 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   // ===== Drag-drop attachments =====
   //
-  // Files dropped anywhere on the panel are scp'd to ~/.bui-uploads/<session>/
-  // via the existing uploadFiles bridge. Each file gets a chip above the
-  // input. The chip shows "uploading" until the IPC returns, then "ready".
-  // Failures keep the chip with an error tooltip so the user can retry.
+  // Files dropped anywhere on the panel are shipped to ~/.bui-uploads/<session>/
+  // and each gets a chip above the input ("uploading" → "ready"; failures keep
+  // the chip with an error tooltip). TWO transports, decided per file:
+  //   - OS path available (Electron preload's webUtils via getPathForFile) →
+  //     batch scp through the uploadFiles bridge (desktop SSH mode).
+  //   - No OS path (desktop HTTP mode / mobile browser: getPathForFile returns
+  //     "") → read the File's bytes and POST them through uploadBuffer, the
+  //     same byte path paste already uses. Without this fallback a drop in
+  //     HTTP mode silently discarded every file.
 
   const addDroppedFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -1079,17 +1084,18 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       //     path is appended to the outgoing message as `@<path>` at submit so
       //     the AI reads it with its Read tool. The path no longer pollutes the
       //     composer — the chip is the user-visible affordance.
+      // `lp === ""` means "no OS path" → the file rides the byte path below.
       type Pending = { file: File; lp: string; mime: string; asPathRef: boolean; id: string };
-      const pending: Pending[] = [];
-      for (const f of list) {
-        const lp = window.api.getPathForFile(f);
-        if (!lp) continue;
+      const pending: Pending[] = list.map((f) => {
         const mime = f.type || guessMime(f.name);
-        const asPathRef = mimeToInputMode(mime) === "other";
-        const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-        pending.push({ file: f, lp, mime, asPathRef, id });
-      }
-      if (pending.length === 0) return;
+        return {
+          file: f,
+          lp: window.api.getPathForFile(f),
+          mime,
+          asPathRef: mimeToInputMode(mime) === "other",
+          id: `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        };
+      });
 
       // Pre-upload chip placeholders for ALL entries.
       const newChips: Attachment[] = pending.map((p) => ({
@@ -1102,37 +1108,55 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       }));
       setAttachments((prev) => [...prev, ...newChips]);
 
-      // Upload all pending files in one batch (cheaper round-trip).
-      const allLocalPaths = pending.map((p) => p.lp);
-      let remotePaths: string[] = [];
-      try {
-        remotePaths = await window.api.uploadFiles({
-          projectName: tmuxSession,
-          localPaths: allLocalPaths,
-        });
-      } catch (e) {
-        const msg = String((e as Error)?.message ?? e);
-        const ids = new Set(pending.map((p) => p.id));
-        setAttachments((prev) =>
-          prev.map((a) => (ids.has(a.id) ? { ...a, status: "error", errorMsg: msg } : a)),
-        );
-        return;
-      }
-
-      // Wire each upload result back to its chip.
-      for (let i = 0; i < pending.length; i++) {
-        const rp = remotePaths[i];
-        const { id } = pending[i];
+      const settleChip = (id: string, rp: string | null, errorMsg?: string) => {
         setAttachments((prev) =>
           prev.map((a) =>
             a.id === id
               ? rp
                 ? { ...a, status: "ready", remotePath: rp }
-                : { ...a, status: "error", errorMsg: "Upload returned no path" }
+                : { ...a, status: "error", errorMsg: errorMsg ?? "Upload returned no path" }
               : a,
           ),
         );
-      }
+      };
+
+      // Path-based entries upload in one batch (cheaper round-trip).
+      const pathPending = pending.filter((p) => p.lp);
+      const pathBatch = (async () => {
+        if (pathPending.length === 0) return;
+        let remotePaths: string[] = [];
+        try {
+          remotePaths = await window.api.uploadFiles({
+            projectName: tmuxSession,
+            localPaths: pathPending.map((p) => p.lp),
+          });
+        } catch (e) {
+          const msg = String((e as Error)?.message ?? e);
+          for (const p of pathPending) settleChip(p.id, null, msg);
+          return;
+        }
+        pathPending.forEach((p, i) => settleChip(p.id, remotePaths[i] ?? null));
+      })();
+
+      // Byte-based entries upload individually (each File's bytes → uploadBuffer).
+      const bytePending = pending.filter((p) => !p.lp);
+      const byteBatch = Promise.all(
+        bytePending.map(async (p) => {
+          try {
+            const buffer = await p.file.arrayBuffer();
+            const rp = await window.api.uploadBuffer({
+              projectName: tmuxSession,
+              filename: p.file.name,
+              buffer,
+            });
+            settleChip(p.id, rp || null);
+          } catch (e) {
+            settleChip(p.id, null, String((e as Error)?.message ?? e));
+          }
+        }),
+      );
+
+      await Promise.all([pathBatch, byteBatch]);
     },
     [tmuxSession],
   );

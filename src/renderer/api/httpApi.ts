@@ -381,9 +381,14 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 //
 //   • peekRemoteFile        → /rpc (server reads its OWN local file; the server
 //                             IS the box, so no scp hop is needed — WORKS).
-//   • uploadFiles / uploadBuffer (drag-in) → /api/upload over Bearer — WORKS.
-//   • getPathForFile (drag-in path extract) → "" (no Electron webUtils here);
-//                             drag-in still works via uploadBuffer's byte path.
+//   • uploadBuffer (drag-in / paste bytes) → /api/upload over Bearer — WORKS.
+//   • uploadFiles (path-based scp batch) → server-side stub returning [] (a
+//     client-local OS path is meaningless to the server) — callers MUST NOT
+//     route files here in http mode.
+//   • getPathForFile (drag-in path extract) → "" (no Electron webUtils here).
+//     Drop handlers (ChatPanel addDroppedFiles, Terminal onDrop) treat "" as
+//     "no OS path" and fall back to uploadBuffer's byte path — that fallback
+//     is what makes drag-in work in http mode; don't remove it.
 //   • agentPullFile (outbox) → browser download via /api/download — WORKS;
 //     revealInFolder        → no-op (no OS file manager to reveal into).
 //   • openExternal (chat links) → window.open (the WebView is a browser) — WORKS.
