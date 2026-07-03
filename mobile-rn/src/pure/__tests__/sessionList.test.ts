@@ -39,6 +39,13 @@ describe("mapSessionRows", () => {
     for (const r of mapSessionRows(RAW)) expect(r.status).toBe("idle");
   });
 
+  it("carries opencodeSessionId through (null for terminals)", () => {
+    const rows = mapSessionRows(RAW);
+    expect(rows[0].opencodeSessionId).toBe("sess_abc"); // chat
+    expect(rows[1].opencodeSessionId).toBeNull(); // terminal
+    expect(rows[2].opencodeSessionId).toBe("sess_def"); // chat
+  });
+
   it("applies running status from the status map by session+windowIndex", () => {
     const rows = mapSessionRows(RAW, {
       "better-ui": { 0: true, 1: false },

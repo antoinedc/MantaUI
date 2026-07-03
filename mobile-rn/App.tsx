@@ -17,11 +17,14 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { loadCredentials, type StoredCredentials } from "./src/api/credentials";
 import { PairingScreen } from "./src/screens/PairingScreen";
 import { SessionListScreen } from "./src/screens/SessionListScreen";
+import { SessionDetailScreen } from "./src/screens/SessionDetailScreen";
+import type { SessionRowVM } from "./src/pure/sessionList";
 import { colors } from "./src/theme";
 
 export type RootStackParamList = {
   Pairing: undefined;
   Sessions: { credentials: StoredCredentials };
+  Session: { credentials: StoredCredentials; session: SessionRowVM };
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -66,12 +69,19 @@ export default function App() {
         }}
       >
         {initial ? (
-          <Stack.Screen
-            name="Sessions"
-            component={SessionListScreen}
-            initialParams={{ credentials: initial }}
-            options={{ title: "Sessions" }}
-          />
+          <>
+            <Stack.Screen
+              name="Sessions"
+              component={SessionListScreen}
+              initialParams={{ credentials: initial }}
+              options={{ title: "Sessions" }}
+            />
+            <Stack.Screen
+              name="Session"
+              component={SessionDetailScreen}
+              options={{ title: "Session" }}
+            />
+          </>
         ) : (
           <Stack.Screen
             name="Pairing"

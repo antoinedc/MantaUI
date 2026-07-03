@@ -44,6 +44,12 @@ export interface SessionRowVM {
   kind: "chat" | "terminal";
   /** Running vs idle, from the status map (default idle). */
   status: "running" | "idle";
+  /**
+   * The opencode session id backing a "chat" window (null for terminals).
+   * Carried through so the detail screen can fetch that session's transcript
+   * (`opencode:messages`) and filter its `/events` stream. Absent → terminal.
+   */
+  opencodeSessionId: string | null;
 }
 
 /** A section (one project) with its rows, for a sectioned FlatList. */
@@ -83,7 +89,8 @@ export function mapSessionRows(
       const index = (w as RawWindow).index;
       const name = (w as RawWindow).name;
       if (typeof index !== "number" || typeof name !== "string") continue;
-      const kind = (w as RawWindow).opencodeSessionId ? "chat" : "terminal";
+      const ocSessionId = (w as RawWindow).opencodeSessionId ?? null;
+      const kind = ocSessionId ? "chat" : "terminal";
       rows.push({
         key: `${project}:${index}`,
         project,
@@ -91,6 +98,7 @@ export function mapSessionRows(
         title: name,
         kind,
         status: isRunning(statuses, project, index) ? "running" : "idle",
+        opencodeSessionId: typeof ocSessionId === "string" ? ocSessionId : null,
       });
     }
   }
