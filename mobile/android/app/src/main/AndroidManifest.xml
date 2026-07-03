@@ -40,4 +40,10 @@
          error via setSendError. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- QR pairing (BET-74). @capacitor-community/barcode-scanner opens the
+         device camera to decode the desktop's "Pair phone" QR. The plugin
+         requests this at runtime via checkPermission({ force: true }) the first
+         time the user taps "Scan QR code"; if denied, the renderer degrades to
+         the manual 6-digit code entry. -->
+    <uses-permission android:name="android.permission.CAMERA" />
 </manifest>

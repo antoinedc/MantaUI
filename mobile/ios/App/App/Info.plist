@@ -56,5 +56,12 @@
 	     prompt. Shown verbatim in the system permission dialog. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>bui uses the microphone to capture voice prompts for the AI assistant.</string>
+	<!-- QR pairing (BET-74). iOS requires this string before
+	     @capacitor-community/barcode-scanner can open the camera to decode the
+	     desktop's pairing QR; without it the scan API rejects before showing any
+	     prompt. Shown verbatim in the system permission dialog. If denied, the
+	     app degrades to manual 6-digit code entry. -->
+	<key>NSCameraUsageDescription</key>
+	<string>bui uses the camera to scan the pairing QR code shown on your computer.</string>
 </dict>
 </plist>

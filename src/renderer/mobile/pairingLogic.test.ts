@@ -7,6 +7,7 @@ import {
   pairingReducer,
   initialPairingState,
   canSubmit,
+  scanFailMessage,
   type PairingState,
 } from "./pairingLogic.js";
 
@@ -178,6 +179,32 @@ describe("pairingReducer", () => {
     expect(next.status).toBe("error");
     expect(next.error).toBe(result.message);
     expect(next.code).toBe("123456");
+  });
+
+  it("scanFail moves to error with the reason's message, preserving any typed code", () => {
+    const typed: PairingState = { code: "1234", status: "idle", error: null };
+    const next = pairingReducer(typed, { type: "scanFail", reason: "invalid" });
+    expect(next.status).toBe("error");
+    expect(next.error).toBe(scanFailMessage("invalid"));
+    expect(next.code).toBe("1234"); // partial manual code left usable
+  });
+
+  it("scanFail surfaces a distinct message per reason", () => {
+    for (const reason of ["invalid", "denied", "unavailable"] as const) {
+      const next = pairingReducer(initialPairingState, { type: "scanFail", reason });
+      expect(next.status).toBe("error");
+      expect(next.error).toBe(scanFailMessage(reason));
+    }
+    // The three messages are actually different strings.
+    const msgs = new Set(
+      (["invalid", "denied", "unavailable"] as const).map(scanFailMessage),
+    );
+    expect(msgs.size).toBe(3);
+  });
+
+  it("scanFail is ignored while a claim is already submitting", () => {
+    const inflight: PairingState = { code: "123456", status: "submitting", error: null };
+    expect(pairingReducer(inflight, { type: "scanFail", reason: "denied" })).toBe(inflight);
   });
 
   it("full happy path: type → submit → success", () => {

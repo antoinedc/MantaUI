@@ -128,6 +128,19 @@ export function saveClientToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token);
 }
 
+/**
+ * Persist the server base URL that `serverBase()` reads (localStorage["bui_server"]).
+ * Written by the QR auto-connect path (BET-74): a scanned pairing payload carries
+ * the box's server URL, so we store it here — the single write-site for that key —
+ * before submitting the claim, exactly as a power user would via Settings. The URL
+ * is stored verbatim (already normalized by parsePairPayload); `serverBase()`
+ * trims trailing slashes on read. Wrapped so a private-mode / disabled
+ * localStorage throws a clear error the pairing UI can surface.
+ */
+export function saveServerBase(url: string): void {
+  localStorage.setItem("bui_server", url);
+}
+
 /** Clear the persisted box_token (re-pair path: revoked/rotated token). */
 export function clearClientToken(): void {
   try {

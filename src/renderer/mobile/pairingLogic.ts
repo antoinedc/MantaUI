@@ -55,7 +55,34 @@ export type PairingAction =
   | { type: "edit"; raw: string }
   | { type: "submit" }
   | { type: "success" }
-  | { type: "fail"; result: Extract<ClaimResult, { ok: false }> };
+  | { type: "fail"; result: Extract<ClaimResult, { ok: false }> }
+  | { type: "scanFail"; reason: ScanFailReason };
+
+// ---------------------------------------------------------------------------
+// QR scan failure → inline message (BET-74)
+// ---------------------------------------------------------------------------
+//
+// The scan path (PairingScreen "Scan QR code" button) can fail three ways
+// before we ever reach the claim: a decoded string that isn't a bui pairing QR,
+// a refused camera permission, or no native scanner at all (browser/PWA). Each
+// maps to a distinct inline message; the manual 6-digit input stays usable in
+// every case. Kept here (pure) so the "scan failed → error" transition is
+// unit-tested like the rest of the reducer.
+
+/** Why the scan branch failed, from the caller's point of view. */
+export type ScanFailReason = "invalid" | "denied" | "unavailable";
+
+/** Human message shown inline for each scan failure reason. */
+export function scanFailMessage(reason: ScanFailReason): string {
+  switch (reason) {
+    case "invalid":
+      return "Not a bui pairing QR — enter the code manually.";
+    case "denied":
+      return "Camera permission needed — enter the code manually.";
+    case "unavailable":
+      return "Scanning not available — enter the code manually.";
+  }
+}
 
 export const initialPairingState: PairingState = {
   code: "",
@@ -95,6 +122,13 @@ export function pairingReducer(
     }
     case "fail": {
       return { ...state, status: "error", error: action.result.message };
+    }
+    case "scanFail": {
+      // A scan attempt failed before any claim; surface the reason inline and
+      // leave the manual code (if any) untouched so the user can keep typing.
+      // Ignored mid-flight (a claim is already in progress).
+      if (state.status === "submitting") return state;
+      return { ...state, status: "error", error: scanFailMessage(action.reason) };
     }
     default:
       return state;
