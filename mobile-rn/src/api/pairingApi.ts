@@ -16,6 +16,13 @@ import {
 } from "../pure/claim";
 import { mapSessionRows, type SessionRowVM, type StatusMap } from "../pure/sessionList";
 import { mapTranscript, type TranscriptVM } from "../pure/transcript";
+import {
+  hydratePermission,
+  hydrateQuestion,
+  type PermissionReply,
+  type PermissionVM,
+  type QuestionVM,
+} from "../pure/interaction";
 import { saveCredentials } from "./credentials";
 
 /** Strip trailing slashes so "http://box/" and "http://box" behave identically. */
@@ -134,4 +141,128 @@ export async function fetchTranscript(
 ): Promise<TranscriptVM> {
   const raw = await rpc<unknown>(base, token, "opencode:messages", opencodeSessionId);
   return mapTranscript(raw);
+}
+
+/**
+ * Send a prompt into a session via the box's `opencode:prompt` channel. The box
+ * relays it to opencode's `POST /session/{id}/prompt_async` (src/server/
+ * opencode.mjs sendPrompt), which builds the text part and scopes the turn to
+ * the session's worktree. We pass only `{ sessionId, text }` — the box uses the
+ * session's default model when none is supplied. The caller has already gated
+ * `text` through the pure composer module (trimmed, non-empty, not mid-turn).
+ */
+export async function sendPrompt(
+  base: string,
+  token: string,
+  sessionId: string,
+  text: string,
+): Promise<void> {
+  await rpc<void>(base, token, "opencode:prompt", { sessionId, text });
+}
+
+/**
+ * Abort the running generation for a session via `opencode:abort`. Idempotent
+ * on the box; used by the composer's Stop button while a turn is running.
+ */
+export async function abortSession(
+  base: string,
+  token: string,
+  sessionId: string,
+): Promise<void> {
+  await rpc<void>(base, token, "opencode:abort", sessionId);
+}
+
+/**
+ * Fetch pending tool-approval permissions for a session (`opencode:permissions`,
+ * scoped to the session so non-default-directory sessions return their pending
+ * entries — see the server comment). Maps each raw row to the card VM via the
+ * pure hydrator, dropping any without a usable id.
+ */
+export async function fetchPermissions(
+  base: string,
+  token: string,
+  sessionId: string,
+): Promise<PermissionVM[]> {
+  const raw = await rpc<unknown>(base, token, "opencode:permissions", sessionId);
+  if (!Array.isArray(raw)) return [];
+  const out: PermissionVM[] = [];
+  for (const row of raw) {
+    const vm = hydratePermission((row ?? {}) as Record<string, unknown>);
+    if (vm) out.push(vm);
+  }
+  return out;
+}
+
+/**
+ * Reply to a permission request (`opencode:permission-reply`). `requestId` is
+ * the `per_…` id the opencode reply API requires (carried on the card VM);
+ * `reply` is one of once / always / reject. Scoped by sessionId so the reply
+ * lands on the pending entry's workspace.
+ */
+export async function replyPermission(
+  base: string,
+  token: string,
+  requestId: string,
+  reply: PermissionReply,
+  sessionId: string,
+): Promise<void> {
+  await rpc<void>(base, token, "opencode:permission-reply", {
+    requestId,
+    reply,
+    sessionId,
+  });
+}
+
+/**
+ * Fetch pending Question-tool requests for a session (`opencode:questions`,
+ * session-scoped). Maps each raw row to the card VM via the pure hydrator.
+ */
+export async function fetchQuestions(
+  base: string,
+  token: string,
+  sessionId: string,
+): Promise<QuestionVM[]> {
+  const raw = await rpc<unknown>(base, token, "opencode:questions", sessionId);
+  if (!Array.isArray(raw)) return [];
+  const out: QuestionVM[] = [];
+  for (const row of raw) {
+    const vm = hydrateQuestion((row ?? {}) as Record<string, unknown>);
+    if (vm) out.push(vm);
+  }
+  return out;
+}
+
+/**
+ * Reply to a Question-tool request (`opencode:question-reply`). `requestId` is
+ * the `que_…` id (carried on the card VM); `answers` is one string[] per
+ * question, built by the pure `buildQuestionAnswers`.
+ */
+export async function replyQuestion(
+  base: string,
+  token: string,
+  requestId: string,
+  answers: string[][],
+  sessionId: string,
+): Promise<void> {
+  await rpc<void>(base, token, "opencode:question-reply", {
+    requestId,
+    answers,
+    sessionId,
+  });
+}
+
+/**
+ * Reject (dismiss) a Question-tool request without answering
+ * (`opencode:question-reject`).
+ */
+export async function rejectQuestion(
+  base: string,
+  token: string,
+  requestId: string,
+  sessionId: string,
+): Promise<void> {
+  await rpc<void>(base, token, "opencode:question-reject", {
+    requestId,
+    sessionId,
+  });
 }
