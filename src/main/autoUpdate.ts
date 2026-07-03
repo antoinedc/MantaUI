@@ -3,7 +3,7 @@
 // Uses electron-updater's autoUpdater to:
 //   1. Check for updates on app launch (after a short delay to avoid blocking startup)
 //   2. Download updates silently in the background
-//   3. Notify the user when an update is ready to install
+//   3. Notify the renderer when an update is ready to install (via IPC)
 //   4. Restart the app after the user confirms installation
 //
 // Update server: GitHub Releases (configured in electron-builder.yml).
@@ -11,7 +11,8 @@
 // because there's no signed artifact to verify against.
 
 import { autoUpdater } from "electron-updater";
-import { app } from "electron";
+import { app, BrowserWindow, ipcMain } from "electron";
+import { IPC } from "../shared/types.js";
 
 // Disable auto-download so we can prompt the user before installing.
 // This gives us a chance to show a "Restart to update" dialog.
@@ -27,6 +28,7 @@ autoUpdater.on("checking-for-update", () => {
 
 autoUpdater.on("update-available", (info) => {
   console.log(`[auto-update] Update available: ${info.version}`);
+  notifyRenderer("updateAvailable", info);
 });
 
 autoUpdater.on("update-not-available", () => {
@@ -35,12 +37,37 @@ autoUpdater.on("update-not-available", () => {
 
 autoUpdater.on("update-downloaded", (info) => {
   console.log(`[auto-update] Update downloaded: ${info.version}`);
-  // The renderer will be notified via IPC to show the "Restart to update" dialog.
-  // The actual restart happens when the user clicks "Restart" in the UI.
+  // Tell the renderer to show the "Restart to update" prompt.
+  notifyRenderer("updateDownloaded", info);
 });
 
 autoUpdater.on("error", (err) => {
   console.warn("[auto-update] Update error:", err.message);
+});
+
+/**
+ * Send an update event to the renderer via IPC.
+ * Safe to call before mainWindow exists — the event is simply dropped.
+ */
+function notifyRenderer(event: string, info: unknown): void {
+  const windows = BrowserWindow.getAllWindows();
+  for (const win of windows) {
+    if (!win.isDestroyed()) {
+      const channel = event === "updateAvailable"
+        ? IPC.autoUpdateAvailable
+        : IPC.autoUpdateDownloaded;
+      win.webContents.send(channel, info);
+    }
+  }
+}
+
+// IPC handlers: renderer calls these to trigger download / quit-and-install.
+ipcMain.handle(IPC.autoUpdateDownload, () => {
+  autoUpdater.downloadUpdate();
+});
+
+ipcMain.handle(IPC.autoUpdateInstall, () => {
+  autoUpdater.quitAndInstall();
 });
 
 /**
@@ -56,18 +83,4 @@ export function checkForUpdates(): void {
   }
 
   void autoUpdater.checkForUpdates();
-}
-
-/**
- * Download the available update. Called after the user confirms.
- */
-export function downloadUpdate(): void {
-  autoUpdater.downloadUpdate();
-}
-
-/**
- * Quit and install the downloaded update. Called after the user confirms.
- */
-export function quitAndInstall(): void {
-  autoUpdater.quitAndInstall();
 }

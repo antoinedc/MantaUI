@@ -446,6 +446,17 @@ export const IPC = {
   // forward (src/main/webhook.ts); mobile is in-process (rpc.mjs → webhooks.mjs).
   webhookList: "webhook:list", // (sessionId?) → WebhookMeta[]
   webhookDelete: "webhook:delete", // (id) → { deleted: boolean }
+
+  // ---- auto-update (electron-updater) ----
+  // Desktop-only. Main checks for updates on launch, downloads silently in the
+  // background, then pushes updateAvailable / updateDownloaded events to the
+  // renderer. The renderer shows a "Restart to update" prompt when the download
+  // completes. The renderer calls autoUpdateDownload / autoUpdateInstall to
+  // trigger the download and the restart, respectively.
+  autoUpdateDownload: "autoUpdate:download",          // renderer → main: trigger download
+  autoUpdateInstall: "autoUpdate:install",            // renderer → main: trigger restart+install
+  autoUpdateAvailable: "autoUpdate:available",        // main → renderer: an update is available
+  autoUpdateDownloaded: "autoUpdate:downloaded",      // main → renderer: update is ready to install
 } as const;
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
