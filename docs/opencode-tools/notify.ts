@@ -15,15 +15,44 @@
 // docs/bui-tools-scheduler.md for the general "bui tools" pattern.
 
 import { tool } from "@opencode-ai/plugin";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const BUI_SERVER = process.env.BUI_SERVER_URL || "http://127.0.0.1:8787";
+
+// bui-server enforces `Authorization: Bearer <box_token>` on every /api route
+// (M1 auth gate — src/server/auth.mjs). These tools run on the SAME box as the
+// same user as bui-server, so they read the token straight from the server's
+// own auth store (~/.bui-mobile/auth.json, 0600). Re-read on every call (one
+// tiny local file) so a token rotation never requires an opencode-serve
+// restart. BUI_BOX_TOKEN env overrides for tests/dev.
+function boxToken(): string | null {
+  const fromEnv = process.env.BUI_BOX_TOKEN;
+  if (fromEnv) return fromEnv;
+  try {
+    const raw = readFileSync(join(homedir(), ".bui-mobile", "auth.json"), "utf-8");
+    const tok = JSON.parse(raw)?.box_token;
+    return typeof tok === "string" && /^[0-9a-f]{32}$/.test(tok) ? tok : null;
+  } catch {
+    return null; // no store yet (auth disabled / first run) → send no header
+  }
+}
+
+function authHeaders(body?: unknown): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (body) headers["content-type"] = "application/json";
+  const tok = boxToken();
+  if (tok) headers["authorization"] = `Bearer ${tok}`;
+  return headers;
+}
 
 const z = tool.schema;
 
 async function call(method: string, path: string, body?: unknown): Promise<any> {
   const res = await fetch(`${BUI_SERVER}${path}`, {
     method,
-    headers: body ? { "content-type": "application/json" } : undefined,
+    headers: authHeaders(body),
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();

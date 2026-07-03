@@ -201,7 +201,22 @@ from a phone or browser with nothing installed on the device.
 enabled — mirrors `src/main/index.ts` opencodeBusLoop. Config file is
 `~/.bui-mobile/config.json`; atomic writes (temp-rename pattern).
 
-**No auth in v1.** Default bind `0.0.0.0:8787`. Internet access is now a
+**Auth (M1, live since 2026-07-02).** bui-server enforces
+`Authorization: Bearer <box_token>` on EVERY data route (`/rpc`, `/events`,
+`/pty`, `/api/*`, `/push/*`) — `src/server/auth.mjs`, gate wired in
+`index.mjs`. Only `/auth/pair` (loopback-only mint), `/auth/claim`, and
+`/hook/<token>` are exempt. Token store: `~/.bui-mobile/auth.json` (0600).
+Devices pair via a 6-digit one-time code (`curl -s
+http://127.0.0.1:8787/auth/pair` ON the box, then enter the code in the
+device's pairing screen); rollout runbook in `docs/auth-enforcement-rollout.md`.
+Escape hatch: `BUI_AUTH_DISABLED=1` (temporary only). **GOTCHA — the
+bui-native opencode tools (`docs/opencode-tools/*.ts`) must send this Bearer
+header too**: each tool's `boxToken()` reads `~/.bui-mobile/auth.json` directly
+(same box, same user) per call. When the gate first shipped the tools had no
+auth plumbing and EVERY tool call failed "unauthorized" — if you add a new bui
+tool, copy the `boxToken()`/`authHeaders()` helpers, or it will 401.
+Browsers can't set headers on WS/EventSource, so `/events` + `/pty` (ONLY)
+also accept `?token=`. Default bind `127.0.0.1:8787`. Internet access is a
 **named Cloudflare tunnel on QUIC**, run by **systemd --user** on the box
 (`dev@157.90.224.92`), surviving reboots via `loginctl enable-linger dev`:
 
