@@ -1,6 +1,7 @@
 import {
   IPC,
   type AgentFileReady,
+  type AuthPairResult,
   type OpencodeEvent,
   type PtyEvent,
   type WindowStatus,
@@ -444,6 +445,11 @@ export const httpApi: Api = {
   // token store. (No config.json write here — that's a desktop-main concern;
   // the mobile client authenticates via the localStorage Bearer token.)
   authClaim: (input) => claimAgainst(input.serverUrl, input.code),
+
+  // Mobile pairing code mint (BET-80): GET /auth/pair. Desktop routes through
+  // the SSH tunnel via IPC (window.api.authPair); mobile calls this directly.
+  // Returns { pairingCode, boxId, expiresAt } or { error }.
+  authPair: () => rpc<AuthPairResult>(IPC.authPair),
 
   // -- clipboard --
   clipboardWriteText: (text) => rpc(IPC.clipboardWriteText, text),

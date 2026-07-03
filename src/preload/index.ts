@@ -4,6 +4,7 @@ import {
   type AgentFileReady,
   type AppConfig,
   type AuthClaimInput,
+  type AuthPairResult,
   type BootstrapResult,
   type DesktopNotifyPayload,
   type OpencodeAgent,
@@ -96,6 +97,13 @@ const api = {
   // { ok:false } result, NOT a rejected promise.
   authClaim: (input: AuthClaimInput): Promise<ClaimOutcome> =>
     ipcRenderer.invoke(IPC.authClaim, input),
+
+  // Mobile pairing code mint (BET-80): GET /auth/pair over the SSH tunnel.
+  // Returns { pairingCode, boxId, expiresAt } for the desktop to render as a
+  // QR. Resolves to an AuthPairResult — a failure is { ok:false, error }, NOT
+  // a rejected promise.
+  authPair: (): Promise<AuthPairResult> =>
+    ipcRenderer.invoke(IPC.authPair),
 
   // Voice (Groq STT + lightweight classifier). Main owns the API key;
   // renderer only ships audio bytes / transcripts.
