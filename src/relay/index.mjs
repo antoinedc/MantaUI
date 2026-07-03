@@ -33,10 +33,21 @@
 import { WebSocketServer } from "ws";
 import { isValidToken, createRateLimiter } from "../server/webhooks.mjs";
 import { tokenMatches } from "../server/auth.mjs";
-import { RoutingTable, encodeFrame, decodeFrame, FRAME_TYPES } from "./protocol.mjs";
+import {
+  RoutingTable,
+  PendingRequests,
+  encodeFrame,
+  decodeFrame,
+  FRAME_TYPES,
+} from "./protocol.mjs";
 import { openStore, BOX_STATUS } from "./store.mjs";
 
 export const DEFAULT_RELAY_PORT = 20787;
+
+// Default timeout (ms) for a phone→box proxied request. A box that never
+// answers must not leak a pending entry / hang the phone HTTP response forever;
+// the correlation rejects with a timeout and the proxy maps that to a 504.
+export const PROXY_REQUEST_TIMEOUT_MS = 30000;
 
 // Rate limit for the UNAUTHENTICATED dial-in handshake — the only pre-auth
 // surface a box hits. Keyed by remote IP. A genuine box reconnects a handful of
@@ -251,6 +262,14 @@ export function createRelayServer(opts = {}) {
   // tests can assert no open handles remain.
   const connections = new Set();
 
+  // Per-box request/response correlation. The Stage-4 phone→box proxy sends a
+  // REQUEST frame down a box's tunnel and awaits the matching RESPONSE; this map
+  // holds the PendingRequests instance for each live box so the box socket's
+  // inbound RESPONSE/ERROR frames resolve/reject the right promise. Keyed by the
+  // live transport (not box_id) so a stale socket's late frames can't settle a
+  // fresh reconnect's pending requests.
+  const pendingByTransport = new Map(); // transport -> PendingRequests
+
   /**
    * Handle a single verified/authenticated box connection. Wires the ws into a
    * transport, registers it in the RoutingTable, persists the box row online,
@@ -262,27 +281,61 @@ export function createRelayServer(opts = {}) {
     });
     connections.add(ws);
 
+    // Correlation for phone→box proxied requests routed over THIS socket.
+    const pending = new PendingRequests({ now });
+    pendingByTransport.set(transport, pending);
+
     // Register the live socket (evicts+closes any stale socket for this box).
     routing.register(boxId, transport);
     // Persist: box seen + online.
     store.upsertBox(boxId, { status: BOX_STATUS.ONLINE, at: now() });
     log(`[relay] box ${short(boxId)} connected (${routing.size} online)`);
 
-    // Reply to liveness PINGs so a box can measure the tunnel is alive. This is
-    // the only frame this slice reacts to; REQUEST/STREAM routing is Stage 4.
+    // Route inbound frames from the box:
+    //   - PING     → answer with a PONG (liveness).
+    //   - RESPONSE → resolve the matching proxied phone request.
+    //   - ERROR    → reject the matching proxied phone request (if it carries an
+    //                in-flight id); a bare error is logged, not fatal.
+    // STREAM_* box→phone routing is exercised by the proxy's stream path in a
+    // later slice; a stream frame with no matching consumer is simply ignored
+    // here (never misrouted).
     ws.on("message", (data) => {
       const frame = decodeFrame(data);
-      if (frame && frame.type === FRAME_TYPES.PING) {
-        transport.send({ type: FRAME_TYPES.PONG, id: frame.id });
+      if (!frame) return;
+      switch (frame.type) {
+        case FRAME_TYPES.PING:
+          transport.send({ type: FRAME_TYPES.PONG, id: frame.id });
+          break;
+        case FRAME_TYPES.RESPONSE:
+          pending.resolve(frame);
+          break;
+        case FRAME_TYPES.ERROR:
+          if (!pending.rejectFromError(frame)) {
+            warn(`[relay] box ${short(boxId)} error: ${frame.message || frame.code || "unknown"}`);
+          }
+          break;
+        default:
+          break;
       }
     });
 
     const cleanup = () => {
       connections.delete(ws);
+      // Fail every in-flight proxied request on this socket so no phone HTTP
+      // response hangs across a box disconnect, then drop the correlation map.
+      pending.rejectAll(new Error("box tunnel closed"));
+      pendingByTransport.delete(transport);
       // Only unregister if THIS socket is still the registered one (a fast
       // reconnect may have already replaced us — don't clobber the fresh one).
       routing.unregister(boxId, transport);
-      store.setBoxStatus(boxId, BOX_STATUS.OFFLINE, { at: now() });
+      // Persisting offline status can race relay shutdown (close() terminates
+      // sockets, whose 'close' fires cleanup AFTER store.close()). Swallow a
+      // closed-store throw so a shutdown-time disconnect can't crash the process.
+      try {
+        store.setBoxStatus(boxId, BOX_STATUS.OFFLINE, { at: now() });
+      } catch {
+        /* store already closed during shutdown */
+      }
       log(`[relay] box ${short(boxId)} disconnected (${routing.size} online)`);
     };
     ws.on("close", cleanup);
@@ -290,6 +343,48 @@ export function createRelayServer(opts = {}) {
       // ws emits 'error' then 'close'; cleanup runs on close. Swallow here so an
       // errored socket doesn't crash the process.
     });
+  }
+
+  /**
+   * Proxy a single phone→box request over the box's live tunnel and resolve with
+   * the box's { status, headers, body } RESPONSE. This is the correlation core
+   * the Stage-4 phone-facing proxy (api.mjs) calls; it owns framing + timeout so
+   * the HTTP layer stays transport-agnostic.
+   *
+   * Rejects with `err.code === "no_tunnel"` when the box has no live socket (the
+   * caller maps that to 503), or with a timeout Error when the box never answers
+   * within `timeoutMs` (caller maps that to 504).
+   *
+   * @param {string} boxId
+   * @param {{method:string,path:string,headers?:object,body?:string}} req
+   * @param {{timeoutMs?:number}} [opts]
+   * @returns {Promise<{status:number,headers?:object,body?:string}>}
+   */
+  function proxyRequest(boxId, req, { timeoutMs = PROXY_REQUEST_TIMEOUT_MS } = {}) {
+    const transport = routing.lookup(boxId);
+    if (!transport) {
+      const err = new Error(`box ${short(boxId)} has no live tunnel`);
+      err.code = "no_tunnel";
+      return Promise.reject(err);
+    }
+    const pending = pendingByTransport.get(transport);
+    if (!pending) {
+      // Shouldn't happen (every live transport gets a PendingRequests), but be
+      // defensive rather than throw synchronously into the HTTP handler.
+      const err = new Error(`box ${short(boxId)} has no correlation channel`);
+      err.code = "no_tunnel";
+      return Promise.reject(err);
+    }
+    const { id, promise } = pending.create({ timeoutMs });
+    transport.send({
+      type: FRAME_TYPES.REQUEST,
+      id,
+      method: req.method,
+      path: req.path,
+      ...(req.headers ? { headers: req.headers } : {}),
+      ...(req.body != null ? { body: req.body } : {}),
+    });
+    return promise;
   }
 
   // The connection handler: runs AFTER the ws handshake completes. We do the
@@ -340,6 +435,15 @@ export function createRelayServer(opts = {}) {
   }
 
   async function close() {
+    // Fail any in-flight proxied requests so nothing hangs, then close sockets.
+    for (const pending of pendingByTransport.values()) {
+      try {
+        pending.rejectAll(new Error("relay shutting down"));
+      } catch {
+        /* ignore */
+      }
+    }
+    pendingByTransport.clear();
     // Close every live box socket, then the server, then the store.
     for (const ws of [...connections]) {
       try {
@@ -370,6 +474,8 @@ export function createRelayServer(opts = {}) {
     host,
     start,
     close,
+    // phone→box request correlation (Stage-4 phone-facing proxy calls this)
+    proxyRequest,
     // exposed for tests / Stage 4 wiring
     _onConnection: onConnection,
     _acceptBox: acceptBox,
