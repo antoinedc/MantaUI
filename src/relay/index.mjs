@@ -328,7 +328,14 @@ export function createRelayServer(opts = {}) {
       // Only unregister if THIS socket is still the registered one (a fast
       // reconnect may have already replaced us — don't clobber the fresh one).
       routing.unregister(boxId, transport);
-      store.setBoxStatus(boxId, BOX_STATUS.OFFLINE, { at: now() });
+      // Persisting offline status can race relay shutdown (close() terminates
+      // sockets, whose 'close' fires cleanup AFTER store.close()). Swallow a
+      // closed-store throw so a shutdown-time disconnect can't crash the process.
+      try {
+        store.setBoxStatus(boxId, BOX_STATUS.OFFLINE, { at: now() });
+      } catch {
+        /* store already closed during shutdown */
+      }
       log(`[relay] box ${short(boxId)} disconnected (${routing.size} online)`);
     };
     ws.on("close", cleanup);
