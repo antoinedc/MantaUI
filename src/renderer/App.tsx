@@ -21,6 +21,8 @@ export function App() {
     onboardingForced,
     finishOnboarding,
     configSnapshot,
+    updatePrompt,
+    setUpdatePrompt,
   } = useStore();
 
   // Entry gating: a fresh config (no host, no boxToken, not skipped) resolves
@@ -144,6 +146,25 @@ export function App() {
     if (!window.api.onConfigChanged) return;
     const off = window.api.onConfigChanged((cfg) => {
       useStore.getState().applyConfig(cfg);
+    });
+    return off;
+  }, []);
+
+  // Auto-update: main checks for updates on launch and pushes
+  // updateAvailable / updateDownloaded events to the renderer. We only care
+  // about updateDownloaded (an update is ready to install) — updateAvailable
+  // just means a check happened and there's something newer, but we don't
+  // prompt until the download completes. The renderer stores the version
+  // info in the global store so the active shell renders the "Restart to
+  // update" bar. Guarded — the mobile httpApi shim's onAutoUpdate* are
+  // no-ops (desktop-only feature).
+  useEffect(() => {
+    if (!window.api.onAutoUpdateDownloaded) return;
+    const off = window.api.onAutoUpdateDownloaded((info) => {
+      useStore.getState().setUpdatePrompt({
+        version: info.version,
+        releaseName: info.releaseName,
+      });
     });
     return off;
   }, []);
@@ -447,6 +468,35 @@ export function App() {
     <div className="h-full w-full flex bg-bg text-text">
       <Sidebar ref={sidebarRef} onOpenSettings={() => setSettingsOpen(true)} />
       <main className="flex-1 flex flex-col min-w-0">
+        {/* Auto-update prompt bar. Shown when main has downloaded a new
+            version and is waiting for the user to restart. Positioned at the
+            top of the main area so it's visible regardless of which panel
+            is active. Dismissed by the × button (clears store state). */}
+        {!showOnboarding && updatePrompt && (
+          <div className="shrink-0 bg-accent/10 border-b border-accent/30 px-3 py-1.5 text-[12px] text-text flex items-center gap-2">
+            <span className="flex-1 truncate">
+              Update available:{" "}
+              <span className="font-medium text-text">
+                {updatePrompt.releaseName || updatePrompt.version}
+              </span>
+            </span>
+            <button
+              onClick={() => {
+                void window.api.autoUpdateInstall();
+              }}
+              className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium"
+            >
+              Restart to update
+            </button>
+            <button
+              onClick={() => setUpdatePrompt(null)}
+              className="shrink-0 text-text-faint hover:text-text leading-none"
+              title="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        )}
         <div className="titlebar-drag h-10 border-b border-border flex items-center px-3 gap-2 min-w-0">
           <div className="text-xs text-text-muted flex items-center gap-2 min-w-0">
             <span className="shrink-0">{host ? host : "Not configured"}</span>
