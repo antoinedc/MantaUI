@@ -89,6 +89,10 @@ import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
+import { useTranscriptState } from "./hooks/useTranscriptState";
+import { useSseBus } from "./hooks/useSseBus";
+import { useVoice } from "./hooks/useVoice";
+import { useTypeahead } from "./hooks/useTypeahead";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
 
@@ -155,22 +159,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // bui doesn't set the real cache_control.ttl on requests; this is the
   // user's claim about what opencode is sending. See AppConfig comment.
   const cacheTtl = useStore((s) => s.cacheTtl);
-  const [messages, setMessages] = useState<OpencodeMessage[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // True from session-switch until the fresh transcript fetch resolves. Lets
-  // the footer hint at "refreshing…" while we render the cached transcript.
-  // opencode's GET /session/{id}/message is 20–35s on large sessions, so
-  // this window is real and worth surfacing.
-  const [refreshing, setRefreshing] = useState(false);
-  // Pending permission requests for THIS session. Polled on mount and refreshed
-  // on permission.asked / permission.replied events.
-  const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
-  // Pending question requests for THIS session. Polled on mount and refreshed
-  // on question.asked / question.replied / question.rejected events.
-  const [questions, setQuestions] = useState<QuestionRequest[]>([]);
-  // Reasoning ("Thinking…") visibility — hidden by default to keep the
-  // transcript focused on results. Ctrl+O toggles like Claude Code's TUI.
-  const [showThinking, setShowThinking] = useState(false);
   // Server-owned resource cards (⏰ schedules, 🔑 secrets, 🪝 webhooks) —
   // state, refresh callbacks, poll effects, session resets, and the mobile
   // `bui-open-*` window-event bridges. Extracted to a self-contained hook
@@ -199,30 +187,140 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setWebhookError,
     refreshWebhooks,
   } = resources;
-  // Running mirrors opencode session status (busy/idle/retry). We feed it from
-  // session.status events for accuracy, but also set it optimistically on send
-  // so the UI flips to "Stop" instantly rather than waiting for the next event.
-  const [running, setRunning] = useState(false);
+  // Screenshot detection toast — global, lives in the store. App.tsx owns
+  // the single ipcRenderer subscription; this panel reads + clears it.
+  // Only the active panel renders it (gated below by `isActive`).
+  const screenshotToast = useStore((s) => s.screenshotToast);
+  const setScreenshotToast = useStore((s) => s.setScreenshotToast);
+  // Agent → laptop file push toast (single global instance, like screenshots).
+  const agentFileToast = useStore((s) => s.agentFileToast);
+  const setAgentFileToast = useStore((s) => s.setAgentFileToast);
+  const [agentFileSaving, setAgentFileSaving] = useState(false);
+  const setChatSubagents = useStore((s) => s.setChatSubagents);
+  // Prompt-history navigation (Up/Down cycles past prompts, terminal-style) is
+  // owned by useInputHistory — see the hook call after `updateInput` below.
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // ===== Transcript state (extracted to useTranscriptState) =====
+  const {
+    messages,
+    setMessages,
+    scrollRef,
+    pinnedToBottom,
+    stickToBottom,
+    refreshing,
+    setRefreshing,
+    childSessionIds,
+    childMessages,
+    setChildMessages,
+    expandedTasks,
+    setExpandedTasks,
+    expandedTasksRef,
+    childMessagesRef,
+    scheduleRefetchRef,
+    isActiveRef,
+    refetchOwedWhileInactive,
+    prevScrollHeight,
+    questionCardRef,
+    wantQuestionScroll,
+    flushPendingDeltas,
+    scheduleFlush,
+    scheduleRefetch,
+    spliceMessage,
+    fetchChildTranscript,
+    toggleTaskExpand,
+  } = useTranscriptState({ sessionId, isActive });
+
+  // ===== SSE bus state (extracted to useSseBus) =====
+  const {
+    running,
+    setRunning,
+    sendError,
+    setSendError,
+    messageQueue,
+    setMessageQueue,
+    permissions,
+    setPermissions,
+    questions,
+    setQuestions,
+    stepTokens,
+    setStepTokens,
+    compactionState,
+    setCompactionState,
+    liveTodos,
+    setLiveTodos,
+    todosDismissed,
+    setTodosDismissed,
+    retryInfo,
+    setRetryInfo,
+    finishByMessageId,
+    setFinishByMessageId,
+    commandByMessageId,
+    setCommandByMessageId,
+    liveChildStatus,
+    setLiveChildStatus,
+    branch,
+    setBranch,
+    drainAbortRef,
+  } = useSseBus({
+    sessionId,
+    cwd,
+    setMessages,
+    scheduleRefetch,
+    spliceMessage,
+    scheduleChildRefetch: (childId: string) => {
+      // Per-child debounced refetch — called when a known child's
+      // message.part.* event arrives while its TaskBody is expanded.
+      const existing = childRefetchTimers.current.get(childId);
+      if (existing) clearTimeout(existing);
+      const t = setTimeout(() => {
+        childRefetchTimers.current.delete(childId);
+        window.api
+          .opencodeMessages(childId)
+          .then((m) => {
+            setChildMessages((prev) => {
+              const next = new Map(prev);
+              next.set(childId, m);
+              return next;
+            });
+          })
+          .catch(() => { /* non-fatal */ });
+      }, 300);
+      childRefetchTimers.current.set(childId, t);
+    },
+    childSessionIds,
+    childMessagesRef,
+    expandedTasksRef,
+    childRefetchTimers,
+    isActiveRef,
+    refetchOwedWhileInactive,
+    pendingDeltas,
+    flushPendingDeltas,
+    scheduleFlush,
+    oldestPendingAt,
+    FLUSH_MAX_AGE_MS,
+    submit: () => {}, // placeholder — ChatPanel's submit is used below
+    submitRef: submitRef as React.RefObject<() => void>,
+    compactSession,
+    forkSession,
+    selectModel,
+    setChatAttention: (v: boolean) => { /* no-op — sidebar attention is cleared in replyPermission/replyQuestion */ },
+    setChatSubagents,
+  });
+
+  // ===== ChatPanel-own state (not extracted to hooks) =====
+  const [error, setError] = useState<string | null>(null);
+  const [showThinking, setShowThinking] = useState(false);
   const [input, setInput] = useState("");
-  const [sendError, setSendError] = useState<string | null>(null);
   // Messages queued while the AI was still running. The moment a queued
   // prompt exists, bui aborts the in-flight turn at the next step boundary
-  // and submits the queued prompt as a fresh turn (see the step.ended drain
-  // trigger + the [running, messageQueue] drain effect). Shown below the
-  // RunningIndicator while waiting; each moves into the transcript once
-  // dispatched.
+  // and submits the queued prompt as a fresh turn.
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
-  // Live mirror of `messageQueue` for the SSE handler closure (registered
-  // once per session, so it can't read the latest state value directly).
+  // Live mirror of `messageQueue` for the SSE handler closure.
   const messageQueueRef = useRef<string[]>([]);
   useEffect(() => {
     messageQueueRef.current = messageQueue;
   }, [messageQueue]);
-  // True between issuing a drain-abort (at a step boundary) and the queued
-  // prompt actually being submitted. Guards against firing a second abort on
-  // the next step.ended, and lets the session.error handler swallow the
-  // resulting MessageAbortedError so the swap is invisible to the user.
-  const drainAbortRef = useRef(false);
   // Available models + server default (pre-fetched on mount, not lazy — so
   // the footer can show a meaningful model name before the first response,
   // and clicking the picker doesn't flash a "Loading…" row). Selection is
@@ -238,7 +336,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Pending attachments (chips above input) + agent @-mentions waiting to be
   // serialized into FilePart / AgentPart on next submit. Cleared on success.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [agentMentions, setAgentMentions] = useState<AgentMention[]>([]);
   // Ephemeral system notice (e.g. /help output) rendered above the input.
   // Cleared on dismiss or on next session change.
   const [systemNotice, setSystemNotice] = useState<string | null>(null);
@@ -254,236 +351,14 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const agentFileToast = useStore((s) => s.agentFileToast);
   const setAgentFileToast = useStore((s) => s.setAgentFileToast);
   const [agentFileSaving, setAgentFileSaving] = useState(false);
-  const setChatSubagents = useStore((s) => s.setChatSubagents);
-  // Typeahead popup state + result caches. Commands and agents are fetched
-  // lazily on first @/ and reused; file searches re-issue per-keystroke.
-  const [typeahead, setTypeahead] = useState<TypeaheadState | null>(null);
-  const [commands, setCommands] = useState<OpencodeCommand[] | null>(null);
-  const [agents, setAgents] = useState<OpencodeAgent[] | null>(null);
-  const [fileResults, setFileResults] = useState<string[]>([]);
-  const fileSearchSeqRef = useRef(0);
-  // Debounce timer for the @-typeahead file lookup. Without this every
-  // keystroke fires a fresh `opencodeFindFiles` HTTP call over the SSH
-  // tunnel; a fast typist can pile up parallel requests that don't
-  // matter (the seq guard discards stale responses) but waste bandwidth
-  // and contribute to perceived input lag. 80ms is small enough that
-  // the suggestion list still feels live as you type.
-  const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Prompt-history navigation (Up/Down cycles past prompts, terminal-style) is
-  // owned by useInputHistory — see the hook call after `updateInput` below.
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  // Wraps the pending QuestionCard(s). A notification deep-link asks us to
-  // scroll here (iOS can't show inline notification actions, so the tap opens
-  // the app and we bring the question into view). Set via wantQuestionScroll.
-  const questionCardRef = useRef<HTMLDivElement>(null);
-  const wantQuestionScroll = useRef(false);
-  // Pinned-to-bottom auto-scroll: true while the viewport is near the bottom.
-  // Flips to false when the user manually scrolls up to read history; flips
-  // back to true when they scroll close to the bottom again. Streams only
-  // auto-follow when this is true — matches the "follow tail" pattern from
-  // terminals and log viewers.
-  const pinnedToBottom = useRef(true);
-  // Debounce-refetch timer: any non-delta event triggers a re-pull within 300ms.
-  // Delta events apply inline so streams feel live; everything else (new parts,
-  // tool state transitions, etc.) just retriggers the canonical fetch.
-  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // ===== Inactive-panel work gating (perf) =====
-  //
-  // App.tsx keeps EVERY visited chat session's ChatPanel mounted (so scroll
-  // position + in-flight streaming survive a sidebar switch), and the main
-  // process broadcasts ONE opencodeEvent to the renderer for every event on
-  // every scoped SSE stream. So with K panels mounted, each event runs this
-  // panel's `onOpencodeEvent` K times. The dominant cost is the full-
-  // transcript refetch (`setMessages` with fresh IPC JSON re-renders + re-
-  // tokenizes the entire conversation, defeating the row memos) and the
-  // delta-buffer flush (re-renders the streaming message). Neither is needed
-  // for a panel the user can't see — the sidebar status (running / attention
-  // / todos / subagent count) flows through SEPARATE setState calls that we
-  // keep running. While inactive we suppress the refetch + delta flush and
-  // remember that a re-pull is owed; the panel does one catch-up refetch when
-  // it becomes active again (see the isActive→true effect below).
-  const isActiveRef = useRef(isActive);
-  isActiveRef.current = isActive;
-  // Set when a refetch was suppressed because the panel was inactive. The
-  // reactivation effect consumes this to pull the canonical transcript once.
-  const refetchOwedWhileInactive = useRef(false);
-  // Component-level handle to the SSE effect's `scheduleRefetch`. The SSE
-  // effect wires this on mount; the reactivation catch-up effect reads it.
-  // (Shared so a catch-up can fire outside the SSE effect's local scope.)
-  const scheduleRefetchRef = useRef<(() => void) | null>(null);
-  // Per-messageID debounce timers for the incremental splice path (live-turn
-  // single-message merge instead of a full transcript re-pull). Keyed by
-  // messageID so concurrent messages each coalesce independently.
-  const spliceTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
-    new Map(),
-  );
-  // ===== Streamed-text delta buffer =====
-  //
-  // opencode emits `message.part.delta` events ~character-by-character for
-  // text/reasoning parts. The earlier policy of "apply every delta to React
-  // state immediately" produced visible jitter on partial markdown: bullets
-  // appeared before their content, code fences flashed as inline-code
-  // before closing, and Prism re-tokenized the in-progress code body on
-  // every keystroke. Instead, accumulate deltas in a ref-keyed buffer and
-  // flush at natural section boundaries (paragraph breaks outside code
-  // blocks, closing ``` fences) — with a 250ms max-age fallback so a
-  // single long paragraph doesn't stall.
-  //
-  // Per part: { messageID, field, text } where `text` is the unflushed
-  // suffix waiting on a boundary. The flush helper slices the
-  // longest-prefix-ending-at-a-boundary into `setMessages` (one render
-  // for ALL pending parts) and keeps the remainder buffered.
-  //
-  // Force-flushed on: session.next.step.ended (each step's narration is
-  // complete), message.part.updated (part snapshot — refetch will follow
-  // anyway), session.idle (turn over), and on session change/unmount.
-  const pendingDeltas = useRef<Map<string, PendingDelta>>(new Map());
-  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The max-age fallback: 250ms of un-flushed buffered content forces a
-  // flush even without a boundary character. Keeps streams feeling live
-  // when paragraphs run long. Tuned to match Claude Code's perceived
-  // rhythm — not so short it produces the jitter we're trying to fix,
-  // not so long the user thinks the stream stalled.
-  const FLUSH_MAX_AGE_MS = 250;
-  const oldestPendingAt = useRef<number | null>(null);
-  // Live step token/cost snapshot from session.next.step.ended. Updates the
-  // footer's ctx bar / running indicator without waiting for the next message
-  // re-fetch. Cleared on session change. Preferred over the transcript-derived
-  // latestTokens when set.
-  const [stepTokens, setStepTokens] = useState<
-    (TokenUsage & { cost: number }) | null
-  >(null);
-  // Current VCS branch for this session's cwd. Initial value is fetched on
-  // mount (the SSE `vcs.branch.updated` event only fires on change); kept
-  // current via that event after that. Rendered as `⎇ <branch>` left of the
-  // model picker in InputArea's footer when non-null.
-  const [branch, setBranch] = useState<string | null>(null);
-  // Live compaction streaming state. session.next.compaction.{started,delta,
-  // ended} fire while opencode summarizes the transcript to free context;
-  // without surfacing them the user sees nothing until session.compacted
-  // refetches the full transcript. `phase` flips to "done" on .ended so we
-  // can show a brief "Compacted" confirmation before clearing.
-  const [compactionState, setCompactionState] = useState<{
-    reason: string;
-    text: string;
-    phase: "running" | "done";
-  } | null>(null);
-  const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Live todo list from todo.updated events. Preferred over the transcript-
-  // scraped activeTodos when non-null so the ActiveTodos card reflects the
-  // running tool's state immediately. Cleared on session change.
-  const [liveTodos, setLiveTodos] = useState<
-    Array<{ content: string; status: string; priority: string }> | null
-  >(null);
-  // User has acknowledged a fully-completed todo list by submitting their
-  // next prompt — hide it from the transcript until opencode emits a new
-  // todowrite (via `todo.updated`). Without this the green-check checklist
-  // stays pinned at the bottom of every subsequent turn, which clutters the
-  // panel and reads as "still active work" when it's actually done. Reset on
-  // session change and on any incoming todo.updated event (see SSE handler).
-  const [todosDismissed, setTodosDismissed] = useState(false);
-  // Server-reported retry status (rate-limited, transient failure, etc).
-  // session.status with type:"retry" carries an attempt counter + an action
-  // describing what the user can do. Surfaces above RunningIndicator while
-  // running stays true; cleared by busy/idle/session-change.
-  const [retryInfo, setRetryInfo] = useState<{
-    attempt: number;
-    message: string;
-    next: number;
-    action?: { title: string; message: string; label: string; link?: string };
-  } | null>(null);
-  // Per-message truncation kind, keyed by assistant messageID. Populated
-  // from `session.next.step.ended` whose `properties.finish` reveals why
-  // the step stopped. Most finishes are benign (end_turn, tool_use) and
-  // classifyFinish() returns null; only real truncations land here.
-  //
-  // Live-event pattern (matches stepTokens, liveTodos, retryInfo): the
-  // canonical message re-fetch at 716–727 doesn't carry per-step finish
-  // metadata back, so keeping a side map here avoids the badge flickering
-  // off whenever the transcript refetches.
-  const [finishByMessageId, setFinishByMessageId] = useState<
-    Map<string, TruncationKind>
-  >(() => new Map());
-
-  // Slash-command provenance. `command.executed` SSE events are keyed by
-  // the ASSISTANT turn id opencode created for the command's response —
-  // not the user message holding the expanded template (which sits one
-  // position earlier in the transcript). The render-site resolver inside
-  // the messages.map call walks idx+1 to translate assistant-id → user-id
-  // and pass the collapsed `/name args` info to that user MessageRow.
-  // Live-event pattern same as finishByMessageId: kept as a side map
-  // because the canonical messages payload has no command-origin field.
-  const [commandByMessageId, setCommandByMessageId] = useState<
-    Map<string, { name: string; arguments: string }>
-  >(() => new Map());
-
-  // ===== Subagent (Task tool / child session) state =====
-  //
-  // When the parent agent invokes the `task` tool, opencode spawns a CHILD
-  // session and runs the subagent inside it. The child's events arrive on
-  // the SAME scoped /event?directory= stream the parent uses (child inherits
-  // parent's cwd), but with the child's sessionID — so the early sessionID
-  // filter would drop them. `childSessionIds` is the runtime allowlist that
-  // filter consults; we populate it from two converging sources:
-  //   1. Walking `messages` for task tool parts → state.metadata.sessionId.
-  //      Covers everything in the persisted transcript (including child
-  //      sessions spawned in previous turns/sessions).
-  //   2. Live `session.created` events whose properties.info.parentID
-  //      matches our sessionId. Covers the brief window before the parent's
-  //      task tool part has been stamped with the child id.
-  //
-  // Stored as a ref because the filter runs INSIDE the SSE handler closure
-  // — needs to read the current set without triggering a re-render or
-  // forcing the handler to re-subscribe on every update.
-  const childSessionIds = useRef<Set<string>>(new Set());
-  // Lazily fetched child transcripts, one per expanded TaskBody. The Map
-  // value is { messages, loading, error } so the card can show a spinner /
-  // error state without a per-card local state hook. Populated on first
-  // expand; kept current by routing child message.part.* events through
-  // the same buffer machinery and applying them here instead of `messages`.
-  const [childMessages, setChildMessages] = useState<
-    Map<string, OpencodeMessage[]>
-  >(() => new Map());
   // Per-child loading/error state for the lazy fetch on expand.
   const [childFetchState, setChildFetchState] = useState<
     Map<string, "loading" | "error">
   >(() => new Map());
-  // Live running/idle status per child session id, driven by the child's
-  // own session.status / session.idle events. Preferred over the parent's
-  // transcript snapshot of `state.status` because the parent's task-part
-  // status only refreshes on the 300ms refetch — leaves a noticeable
-  // window where the badge says "running" but the child has actually
-  // finished. countRunningSubagents() consumes this for the sidebar.
-  const [liveChildStatus, setLiveChildStatus] = useState<
-    Map<string, "running" | "idle">
-  >(() => new Map());
-  // Which task cards are expanded. Keyed by CHILD SESSION ID (not callID)
-  // so the SSE handler — which sees evSessionID, not the callID — can
-  // gate per-card refetches via a ref-mirror without joining maps.
-  // Cleared on session change.
-  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(
-    () => new Set(),
-  );
-  // Mirror of expandedTasks read by the SSE handler closure (which
-  // wouldn't re-subscribe to state changes; refs are how we read mutable
-  // values out of the long-lived effect cleanly). Kept in sync via the
-  // effect below.
-  const expandedTasksRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    expandedTasksRef.current = expandedTasks;
-  }, [expandedTasks]);
   // Ref mirrors of the child-state maps so `toggleTaskExpand` can read
-  // current values synchronously without taking them as deps (which would
-  // invalidate the callback on every keystroke that touches transcript
-  // state and defeat MessageRow memos downstream via TaskContext).
-  const childMessagesRef = useRef<Map<string, OpencodeMessage[]>>(new Map());
+  // current values synchronously without taking them as deps.
   const childFetchStateRef = useRef<Map<string, "loading" | "error">>(new Map());
   const liveChildStatusRef = useRef<Map<string, "running" | "idle">>(new Map());
-  useEffect(() => {
-    childMessagesRef.current = childMessages;
-  }, [childMessages]);
   useEffect(() => {
     childFetchStateRef.current = childFetchState;
   }, [childFetchState]);
@@ -496,269 +371,36 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
   );
-
-  // Internal fetch helper. Sets loading state, hits the API, populates
-  // childMessages on success, marks error on failure. Idempotent against
-  // concurrent calls via the in-flight `loading` guard. Pulled out so we
-  // can call it both on first expand AND on re-expand of a running child.
-  const fetchChildTranscript = useCallback((childSessionId: string) => {
-    if (childFetchStateRef.current.get(childSessionId) === "loading") return;
-    setChildFetchState((prev) => {
-      if (prev.get(childSessionId) === "loading") return prev;
-      const next = new Map(prev);
-      next.set(childSessionId, "loading");
-      return next;
-    });
-    window.api
-      .opencodeMessages(childSessionId)
-      .then((m) => {
-        setChildMessages((prev) => {
-          const next = new Map(prev);
-          next.set(childSessionId, m);
-          return next;
-        });
-        setChildFetchState((prev) => {
-          const next = new Map(prev);
-          next.delete(childSessionId);
-          return next;
-        });
-      })
-      .catch(() => {
-        setChildFetchState((prev) => {
-          const next = new Map(prev);
-          next.set(childSessionId, "error");
-          return next;
-        });
-      });
-  }, []);
-
-  // Expand/collapse handler for a TaskBody card. On FIRST expand fetches
-  // the child's transcript; on RE-expand fetches again when the child is
-  // still running (the cached snapshot would otherwise be stale until the
-  // next live event hits the now-expanded card). Idempotent: re-expanding
-  // a completed child uses the cached transcript with no extra fetch.
-  const toggleTaskExpand = useCallback((childSessionId: string) => {
-    // Reads are synchronous via refs so we can decide the fetch policy
-    // outside the state setter — strict-mode safe (no side effects inside
-    // updaters that would fire twice in dev) and clearer to read.
-    let willExpand = false;
-    setExpandedTasks((prev) => {
-      const next = new Set(prev);
-      if (next.has(childSessionId)) {
-        next.delete(childSessionId);
-        willExpand = false;
-      } else {
-        next.add(childSessionId);
-        willExpand = true;
-      }
-      return next;
-    });
-    if (!willExpand) return;
-    const cached = childMessagesRef.current.has(childSessionId);
-    const isRunning = liveChildStatusRef.current.get(childSessionId) === "running";
-    // Fetch when: no cached snapshot yet, OR the child is still running
-    // (cache is stale by the time the user re-opens the card).
-    if (!cached || isRunning) {
-      fetchChildTranscript(childSessionId);
-    }
-  }, [fetchChildTranscript]);
+  // Compaction clear timer.
+  const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Initial load + reload whenever sessionId changes.
+  // Most state resets are now handled by the extracted hooks (useTranscriptState
+  // resets messages/scroll/delta-buffer, useSseBus resets permissions/questions/
+  // stepTokens/etc. via its SSE effect cleanup). We only need to reset the
+  // ChatPanel-own state here: error, modelOverride, attachments, agentMentions,
+  // systemNotice, dragHover. The SSE stream open/close is also handled by
+  // useSseBus's effect now.
   useEffect(() => {
-    let cancelled = false;
-    // Open the scoped SSE stream for this session while the panel is mounted;
-    // release it on unmount/session-change. The main process refcounts per
-    // directory so the stream lives only as long as a panel needs it — this is
-    // what keeps the bus from holding a connection open for every workspace
-    // opencode knows about (the connection-flood that wedged the backend).
-    void window.api.opencodeOpenStream(sessionId).catch(() => { /* non-fatal */ });
-    setMessages(null);
     setError(null);
-    setPermissions([]);
-    setQuestions([]);
     setModelOverride(readSavedModel(sessionId) ?? configDefaultModel ?? null);
     setAttachments([]);
     setAgentMentions([]);
-    setTypeahead(null);
     setSystemNotice(null);
-    setMessageQueue([]);
-    messageQueueRef.current = [];
-    drainAbortRef.current = false;
-    setStepTokens(null);
-    setRetryInfo(null);
-    setLiveTodos(null);
-    setTodosDismissed(false);
-    setFinishByMessageId(new Map());
-    setCommandByMessageId(new Map());
-    setCompactionState(null);
-    childSessionIds.current = new Set();
-    setChildMessages(new Map());
-    setChildFetchState(new Map());
-    setLiveChildStatus(new Map());
-    setExpandedTasks(new Set());
-    // Drop any buffered text deltas from the previous session — they
-    // refer to part IDs that no longer exist in the new transcript.
-    pendingDeltas.current.clear();
-    oldestPendingAt.current = null;
-    if (flushTimer.current) {
-      clearTimeout(flushTimer.current);
-      flushTimer.current = null;
-    }
-    if (compactionClearTimer.current) {
-      clearTimeout(compactionClearTimer.current);
-      compactionClearTimer.current = null;
-    }
-    if (fileSearchTimer.current) {
-      clearTimeout(fileSearchTimer.current);
-      fileSearchTimer.current = null;
-    }
-    setBranch(null);
-    // Branch indicator. opencode's `vcs.branch.updated` event NEVER fires
-    // on a terminal-side `git checkout` (its internal watcher misses it)
-    // and `GET /vcs` returns stale cached data, so we cannot rely on
-    // event-driven updates. Instead, the main process bypasses opencode
-    // entirely and reads `git -C <cwd> branch --show-current` over the
-    // warm SSH ControlMaster (~30ms). We do an initial fetch on mount and
-    // poll every 5s while this session is mounted, so a checkout in any
-    // terminal reflects in the footer within one tick. Non-fatal on
-    // non-git cwds (returns null).
+    setDragHover(false);
+    // Branch indicator: poll every 5s while this session is mounted.
     const fetchBranch = () => {
       window.api
         .opencodeVcsBranch(cwd)
         .then((b) => {
-          if (!cancelled) setBranch(b);
+          setBranch(b);
         })
         .catch(() => { /* non-fatal — non-git cwd or transport blip */ });
     };
     fetchBranch();
     const branchPoll = setInterval(fetchBranch, 5000);
-
-    // Cached-first render: opencode's GET /session/{id}/message is 20–35s on
-    // large transcripts (3 MB JSON, no server-side cache), so blocking the
-    // panel on it makes session-switches feel broken. Paint the last-known
-    // transcript from disk immediately; the fresh fetch below overwrites it
-    // when it lands. `refreshing` drives the footer hint so the staleness is
-    // visible during the gap.
-    setRefreshing(true);
-    // Watchdog: opencodeMessages can hang indefinitely (wedged main-process
-    // IPC, a stalled SSH ControlMaster, or opencode never responding on a
-    // huge transcript). When it never settles, neither the `.then` nor the
-    // `.catch` below fires, so `refreshing` would stay true forever with the
-    // "↻ refreshing…" hint stuck on and no way to clear it without switching
-    // sessions. Cap the hint at 60s — well past the 20–30s worst case — and
-    // clear it so the footer stops lying about an in-flight fetch.
-    const refreshWatchdog = setTimeout(() => {
-      if (!cancelled) setRefreshing(false);
-    }, 60_000);
-    window.api
-      .opencodeMessagesCached(sessionId)
-      .then((cached) => {
-        // Guard against the fresh fetch winning the race: never overwrite
-        // a fresh transcript with a cached one.
-        if (cancelled || !cached) return;
-        setMessages((prev) => (prev === null ? cached : prev));
-        for (const cid of collectChildSessionIds(cached)) {
-          childSessionIds.current.add(cid);
-        }
-      })
-      .catch(() => { /* cache miss / corrupt — fresh fetch will fill in */ });
-
-    window.api
-      // Reconcile via tail-merge instead of a full re-pull: on desktop this
-      // fetches only the recent tail (~16ms) and merges it into the disk-cached
-      // transcript, so a switch to a session with new events no longer blocks
-      // on a full (up-to-35s) download. Returns the merged FULL transcript
-      // (history is never truncated — falls back to a full pull on a cache gap).
-      // On mobile/web this is just a full pull (no server-side cache).
-      .opencodeMessagesReconcile(sessionId)
-      .then((m) => {
-        clearTimeout(refreshWatchdog);
-        if (cancelled) return;
-        setMessages(m);
-        setRefreshing(false);
-        // Seed the subagent allowlist from the persisted transcript so
-        // events for previously-spawned children (still running OR finished
-        // and being inspected) pass the sessionID filter. Live `session.
-        // created` events keep it current for new spawns.
-        for (const cid of collectChildSessionIds(m)) {
-          childSessionIds.current.add(cid);
-        }
-        // Recover the running state from the transcript at mount. If the
-        // last message is an assistant turn with no completion stamp, that
-        // turn is in flight or wedged (stuck mid-tool-call — opencode never
-        // emitted idle). Either way we must show `running` so the abort
-        // button appears; without this a wedged session looks idle and the
-        // user has no way to clear it. Mount-only — safe to set running
-        // true here because no local send can have raced yet.
-        if (isAssistantTurnInProgress(m)) setRunning(true);
-        // NOTE: we deliberately do NOT reconstruct pending questions from
-        // the transcript here. opencode v1.15 broadcasts the `que_…` reply
-        // token exactly once, on the live question.asked event — it is not
-        // in the transcript, /question, or any replay. A transcript-
-        // recovered question would render but be unanswerable (verified:
-        // reply API hard-requires the que_). Showing an un-submittable card
-        // is worse than not showing it, so existing-session questions
-        // asked before this panel mounted are intentionally not surfaced.
-        // Questions asked while viewing a session work via the live event
-        // (applyQuestionEvent) which carries the que_ as requestId.
-      })
-      .catch((e) => {
-        clearTimeout(refreshWatchdog);
-        if (!cancelled) {
-          setRefreshing(false);
-          // If cached painted earlier, keep showing it and surface the error
-          // out-of-band would be ideal — but for now match prior behavior and
-          // show the error screen (overrides any cached render).
-          setError(String(e?.message ?? e));
-        }
-      });
-    // Eagerly fetch the command list (with templates) so the renderer can
-    // detect historical /command-origin user messages and collapse them on
-    // first render. Without this, only commands invoked DURING this panel's
-    // lifetime get tagged (via live `command.executed` events). The fetch
-    // is cheap and the list is cached in `commands` state.
-    window.api
-      .opencodeCommands()
-      .then((c) => {
-        if (!cancelled) setCommands(c);
-      })
-      .catch(() => { /* non-fatal */ });
-    // Pull current pending permissions (e.g. a tool that was waiting from a
-    // previous bui session before we mounted). `sessionId` is required so
-    // the main process can append `?directory=` — opencode's workspace
-    // routing returns [] for non-default-workspace sessions otherwise, and
-    // we'd render no PermissionCard even though one is live on the server.
-    window.api
-      .opencodePermissions(sessionId)
-      .then((all) => {
-        if (!cancelled) {
-          setPermissions(all.filter((p) => p.sessionID === sessionId));
-        }
-      })
-      .catch(() => { /* non-fatal */ });
-    // Pull current pending questions. Same workspace-scoping rule as
-    // permissions above — without `sessionId` the live `que_…` is invisible
-    // and the QuestionCard never appears (was the root-cause wedge before
-    // the `?directory=` fix on listQuestions).
-    window.api
-      .opencodeQuestions(sessionId)
-      .then((all) => {
-        if (!cancelled) {
-          setQuestions(
-            all
-              .filter((q) => q.sessionID === sessionId)
-              .map(hydrateQuestion) as QuestionRequest[],
-          );
-        }
-      })
-      .catch(() => { /* non-fatal — v2-only endpoint */ });
     return () => {
-      cancelled = true;
       clearInterval(branchPoll);
-      clearTimeout(refreshWatchdog);
-      // Release this session's scoped stream. Main-process refcount drops it
-      // only when the last panel for the dir unmounts.
-      void window.api.opencodeCloseStream(sessionId).catch(() => { /* non-fatal */ });
     };
   }, [sessionId, cwd]);
 
@@ -2456,314 +2098,35 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     })();
   }, [running, messages, autoRenameSessions, tmuxSession, windowIndex, cwd, refresh]);
 
-  // ===== Voice dispatch =====
-  //
-  // Routes a VoiceAction (from rules classifier or LLM fallback) to the
-  // matching panel callback. Panel-scoped actions call local useCallbacks;
-  // App-scoped ones (switch-window / new-session / open-settings) dispatch
-  // a CustomEvent App.tsx listens for — same pattern as the keyboard
-  // shortcuts there. Declared AFTER every callback it depends on to dodge
-  // the TDZ on the dep array.
-  //
-  // For "submit" we both fill the textarea AND fire submit on the next tick
-  // so the dictated turn lands in transcript history exactly like a keypress.
-  const groqApiKey = useStore((s) => s.groqApiKey);
-
-  const dispatchVoiceAction = useCallback(
-    (action: VoiceAction) => {
-      switch (action.kind) {
-        case "append": {
-          // Insert at caret if possible; fall back to appending. Single-space
-          // separator so spoken text doesn't glue into the previous word.
-          const el = inputRef.current;
-          if (el) {
-            const start = el.selectionStart ?? input.length;
-            const end = el.selectionEnd ?? input.length;
-            const prefix = input.slice(0, start);
-            const suffix = input.slice(end);
-            const sep = prefix && !prefix.endsWith(" ") ? " " : "";
-            const tail = suffix && !suffix.startsWith(" ") ? " " : "";
-            const next = `${prefix}${sep}${action.text}${tail}${suffix}`;
-            setInput(next);
-            setTimeout(() => {
-              if (!inputRef.current) return;
-              const pos = (prefix + sep + action.text).length;
-              try {
-                inputRef.current.focus();
-                inputRef.current.setSelectionRange(pos, pos);
-              } catch { /* ignore */ }
-            }, 0);
-          } else {
-            setInput(input ? `${input} ${action.text}` : action.text);
-          }
-          return;
-        }
-        case "submit": {
-          setInput(action.text);
-          setTimeout(() => submitRef.current(), 0);
-          return;
-        }
-        case "clear":
-          // Reuse the /clear builtin path so future changes
-          // (model carry-forward, etc.) stay in one place.
-          setInput("/clear");
-          setTimeout(() => submitRef.current(), 0);
-          return;
-        case "compact": compactSession(); return;
-        case "fork":    forkSession();    return;
-        case "abort":   abort();          return;
-        case "help":    setSystemNotice(buildHelpText()); return;
-        case "toggle-trust":
-          setChatAutoAllow(!chatAutoAllow);
-          return;
-        case "model": {
-          const match = fuzzyMatchModel(action.query, models ?? []);
-          if (match) selectModel({ providerID: match.providerID, modelID: match.id });
-          else setSendError(`No model matched "${action.query}".`);
-          return;
-        }
-        case "allow-once":
-        case "allow-always":
-        case "reject": {
-          // PermissionCard renders above QuestionCard in the visual stack,
-          // so when both are open we route permission replies there. If
-          // no permission is pending and the action is "reject", fall
-          // through to question-rejection — the QuestionCard's Cancel
-          // button is the user's only other "reject" target (W6 fix:
-          // previously we surfaced "no pending permission" even when a
-          // question was the obvious target).
-          //
-          // We pick the LAST (newest) pending request, not the first —
-          // matches the visual order: the topmost card is the most
-          // recent ask. The .find()-from-end pattern is the W5 fix.
-          const lastPerm = findLast(permissions, (p) => p.sessionID === sessionId);
-          if (lastPerm) {
-            const reply =
-              action.kind === "allow-once" ? "once"
-                : action.kind === "allow-always" ? "always"
-                  : "reject";
-            replyPermission(lastPerm.id, reply);
-            return;
-          }
-          // No permission pending. "reject" can still mean "dismiss the
-          // open question". "allow-once" / "allow-always" don't have a
-          // question equivalent — surface the hint.
-          if (action.kind === "reject") {
-            const lastQ = findLast(questions, (q) => q.sessionID === sessionId);
-            if (lastQ) {
-              rejectQuestion(lastQ);
-              return;
-            }
-          }
-          setSendError("No pending permission request to respond to.");
-          return;
-        }
-        case "answer": {
-          // Newest question matches what's visually on top (W5). Same
-          // findLast pattern as the permission branch above.
-          const pending = findLast(
-            questions,
-            (q) => q.sessionID === sessionId && q.questions.length > 0,
-          );
-          if (!pending) {
-            setSendError("No pending question to answer.");
-            return;
-          }
-          // Same choice applied to every sub-question; abort if any
-          // sub-question can't resolve the spoken option.
-          const answers: string[][] = [];
-          for (const sub of pending.questions) {
-            const label = resolveQuestionAnswer(action.choice, sub.options);
-            if (!label) {
-              setSendError(
-                `Couldn't match "${action.choice}" to an option. ` +
-                `Available: ${sub.options.map((o) => o.label).join(", ")}.`,
-              );
-              return;
-            }
-            answers.push([label]);
-          }
-          replyQuestion(pending, answers);
-          return;
-        }
-        case "switch-window":
-        case "new-session":
-        case "open-settings":
-          window.dispatchEvent(
-            new CustomEvent("bui-voice-app-action", { detail: action }),
-          );
-          return;
-        case "unknown": {
-          // Fall back to inserting the raw transcript so the user can edit
-          // and resend — better than swallowing silently.
-          const text = action.transcript.trim();
-          if (text) setInput(input ? `${input} ${text}` : text);
-          return;
-        }
-      }
-    },
-    [
-      input,
-      models,
-      permissions,
-      questions,
-      sessionId,
-      chatAutoAllow,
-      setChatAutoAllow,
-      selectModel,
-      compactSession,
-      forkSession,
-      abort,
-      replyPermission,
-      replyQuestion,
-      rejectQuestion,
-    ],
-  );
-
-  // When the user presses Enter (or Ctrl+M) WHILE the desktop voice
-  // recorder is active, we want the transcribed text to land in the
-  // composer AND immediately submit, in one keystroke. The transcribe call
-  // is async (Groq round-trip ~200-500ms), so we set a one-shot flag that
-  // `onResult` consumes and then auto-submits. Esc just cancels.
-  const submitAfterTranscribeRef = useRef(false);
-
-  const voiceRecorder = useVoiceRecorder({
-    onResult: (r) => {
-      if (r.mode === "dictate") {
-        dispatchVoiceAction({ kind: "append", text: r.text });
-        if (submitAfterTranscribeRef.current) {
-          submitAfterTranscribeRef.current = false;
-          // One-tick delay so the setInput inside the append branch has
-          // committed before submit() reads the textarea value.
-          setTimeout(() => submitRef.current(), 0);
-        }
-      } else {
-        dispatchVoiceAction(r.classify.action);
-      }
-    },
-    onError: (e) => {
-      submitAfterTranscribeRef.current = false;
-      setSendError(e.message);
-    },
-    onEmpty: (reason) => {
-      // Recorded fine but nothing usable came back. Don't use the red error
-      // banner (it's not an error); show a transient system notice so the
-      // user knows the mic worked and why nothing was inserted.
-      submitAfterTranscribeRef.current = false;
-      setSystemNotice(
-        reason === "too-short"
-          ? "Didn't catch that — the recording was too short. Hold a bit longer."
-          : "Didn't catch any speech. Try again, a little louder or closer to the mic.",
-      );
-    },
+  // ===== Voice (extracted to useVoice) =====
+  const {
+    voiceEnabled,
+    voiceRecording,
+    voiceProcessing,
+    voiceRecorder,
+    dispatchVoiceAction,
+  } = useVoice({
+    input,
+    setInput,
+    inputRef,
+    models,
+    permissions,
+    questions,
+    sessionId,
+    chatAutoAllow,
+    setChatAutoAllow,
+    selectModel,
+    compactSession,
+    forkSession,
+    abort,
+    replyPermission,
+    replyQuestion,
+    rejectQuestion,
+    submitRef,
+    setSendError,
+    setSystemNotice,
+    groqApiKey: useStore((s) => s.groqApiKey),
   });
-
-  // Gate the mic affordances on: API key present, browser capable of capture.
-  // Mobile WebView typically needs RECORD_AUDIO granted at the OS layer —
-  // we don't pre-check; the first start() surfaces "permission denied" via
-  // setSendError if the user said no.
-  const voiceEnabled =
-    !!groqApiKey &&
-    typeof navigator !== "undefined" &&
-    !!navigator.mediaDevices?.getUserMedia &&
-    typeof MediaRecorder !== "undefined";
-
-  // Convenience refs so the Ctrl+M handler + the textarea's Enter/Esc
-  // handlers can read the latest phase + invoke start/stop/cancel without
-  // re-subscribing the keydown listener on every recorder re-render.
-  const voicePhaseRef = useRef(voiceRecorder.phase);
-  voicePhaseRef.current = voiceRecorder.phase;
-  const voiceStartRef = useRef(voiceRecorder.start);
-  voiceStartRef.current = voiceRecorder.start;
-  const voiceStopRef = useRef(voiceRecorder.stop);
-  voiceStopRef.current = voiceRecorder.stop;
-  const voiceCancelRef = useRef(voiceRecorder.cancel);
-  voiceCancelRef.current = voiceRecorder.cancel;
-  const voiceRecording =
-    voiceRecorder.phase === "recording" ||
-    voiceRecorder.phase === "requesting";
-  const voiceProcessing = voiceRecorder.phase === "processing";
-
-  // Desktop voice keybinds (Ctrl+M / Enter / Esc) — replace the mobile
-  // mic button on Mac/Linux/Windows. Mobile keeps the touch button (no
-  // physical keyboard in the typical case).
-  //
-  // Ctrl+M  → toggle: start recording, or stop + transcribe + append to
-  //           textarea (does NOT submit; user can edit before sending).
-  // Enter   → only intercepted WHILE recording: stop + transcribe + APPEND
-  //           + auto-submit in one stroke (the natural "I'm done speaking,
-  //           send it" gesture). The submitAfterTranscribeRef flag is what
-  //           threads through the async transcribe call. Outside recording,
-  //           Enter falls through to the textarea's normal submit path.
-  // Esc     → cancel the current recording (discards audio, no transcribe).
-  //           Outside recording, Esc falls through to its normal handlers
-  //           (typeahead-close / abort-running-turn).
-  //
-  // Captured at the window level (with capture:true so Enter/Esc preempt
-  // the textarea's own onKeyDown). The handler gates on voiceEnabled so
-  // users without a Groq key never accidentally trigger a no-op.
-  useEffect(() => {
-    if (!voiceEnabled) return;
-    const handler = (e: KeyboardEvent) => {
-      // Ctrl+M toggle — always available (gated on voiceEnabled).
-      if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "m" || e.key === "M")) {
-        e.preventDefault();
-        const phase = voicePhaseRef.current;
-        if (phase === "recording" || phase === "requesting") {
-          submitAfterTranscribeRef.current = false;
-          voiceStopRef.current();
-        } else if (phase === "idle" || phase === "error") {
-          // Always start in dictate mode from the keyboard. Command mode
-          // stays accessible via the mobile long-press path; on desktop
-          // typing `/clear` etc. is just as fast.
-          void voiceStartRef.current("dictate");
-        }
-        return;
-      }
-      // Enter and Esc only fire while voice is in a non-idle phase —
-      // otherwise they MUST fall through to the textarea/abort handlers.
-      const phase = voicePhaseRef.current;
-      if (phase === "idle" || phase === "error") return;
-      if (
-        e.key === "Enter" &&
-        !e.shiftKey &&
-        !e.metaKey &&
-        !e.ctrlKey &&
-        !e.altKey
-      ) {
-        // Only meaningful while actively recording. During "requesting"
-        // the recorder isn't constructed yet, so stop() would no-op and
-        // the eventual getUserMedia resolution would start recording
-        // anyway with no way to stop — the user would be silently
-        // recording until maxDurationMs (60s). During "processing" we'd
-        // race the in-flight transcribe. Both fall through to the
-        // textarea so Enter still submits whatever's typed.
-        if (phase !== "recording") return;
-        e.preventDefault();
-        e.stopPropagation();
-        submitAfterTranscribeRef.current = true;
-        voiceStopRef.current();
-        return;
-      }
-      if (e.key === "Escape") {
-        // Esc cancels from any non-idle phase: requesting (abandons the
-        // pending permission), recording (discards audio), processing
-        // (lets the transcribe finish but suppresses the auto-submit
-        // flag — the transcript will still land in the textarea). The
-        // cancel() helper handles all three via cancelledRef.
-        e.preventDefault();
-        e.stopPropagation();
-        submitAfterTranscribeRef.current = false;
-        voiceCancelRef.current();
-        return;
-      }
-    };
-    // capture:true so we preempt the textarea's bubble-phase onKeyDown
-    // (otherwise Enter would submit the empty/partial textarea before our
-    // submitAfterTranscribeRef flag was set).
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [voiceEnabled]);
 
   // ===== Drag-drop attachments =====
   //
@@ -3013,244 +2376,31 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     [addDroppedFiles],
   );
 
-  // ===== Typeahead =====
-  //
-  // The textarea's onChange (in InputArea) routes through `updateInput` which
-  // both updates `input` state and detects active typeahead. Three triggers:
-  //   /<word>      at byte 0 → command typeahead
-  //   @<token>     after whitespace (or BOF) → file+agent typeahead
-  // The popup tracks the [anchorStart, anchorEnd) slice and replaces it
-  // verbatim on selection.
-
-  const ensureCommands = useCallback(async () => {
-    if (commands) return;
-    try {
-      const c = await window.api.opencodeCommands();
-      setCommands(c);
-    } catch { /* non-fatal */ }
-  }, [commands]);
-
-  const ensureAgents = useCallback(async () => {
-    if (agents) return;
-    try {
-      const a = await window.api.opencodeAgents();
-      setAgents(a);
-    } catch { /* non-fatal */ }
-  }, [agents]);
-
-  // File search: sequence-tracked so stale responses don't clobber the
-  // latest. Empty query is passed through — opencode's /find/file returns a
-  // browse-style listing of the directory's top-level entries, which is
-  // exactly what we want when the user has just typed `@` with no filter.
-  const searchFiles = useCallback(
-    (query: string) => {
-      if (fileSearchTimer.current) clearTimeout(fileSearchTimer.current);
-      if (!cwd) {
-        setFileResults([]);
-        return;
-      }
-      fileSearchTimer.current = setTimeout(async () => {
-        fileSearchTimer.current = null;
-        const seq = ++fileSearchSeqRef.current;
-        try {
-          const list = await window.api.opencodeFindFiles({ query, directory: cwd });
-          if (seq === fileSearchSeqRef.current) setFileResults(list.slice(0, 20));
-        } catch {
-          if (seq === fileSearchSeqRef.current) setFileResults([]);
-        }
-      }, 80);
-    },
-    [cwd],
-  );
-
-  const detectTypeahead = useCallback(
-    (text: string, caret: number): TypeaheadState | null => {
-      // Command typeahead — fires only when "/" is the very first character
-      // of the input AND the caret is somewhere inside the first word (or
-      // immediately after it before a space). This avoids triggering on
-      // "use /etc/foo" etc.
-      if (text.startsWith("/")) {
-        const m = /^\/([\w-]*)/.exec(text);
-        if (m && caret <= m[0].length) {
-          return {
-            mode: "command",
-            query: m[1],
-            anchorStart: 0,
-            anchorEnd: m[0].length,
-            selectedIdx: 0,
-          };
-        }
-      }
-      // @-mention typeahead — fires when an @ token starts at BOF or after
-      // whitespace and the caret is inside that token. The token ends at the
-      // next whitespace (so "@src/foo " stops being active once you space).
-      const left = text.slice(0, caret);
-      const at = left.lastIndexOf("@");
-      if (at >= 0) {
-        const prev = at > 0 ? text[at - 1] : "";
-        if (at === 0 || /\s/.test(prev)) {
-          const after = text.slice(at + 1, caret);
-          if (!/\s/.test(after)) {
-            // Token extends to the next whitespace forward (or EOL).
-            let end = caret;
-            while (end < text.length && !/\s/.test(text[end])) end++;
-            return {
-              mode: after.startsWith("@") ? "agent" : "file",
-              query: after.replace(/^@/, ""),
-              anchorStart: at,
-              anchorEnd: end,
-              selectedIdx: 0,
-            };
-          }
-        }
-      }
-      return null;
-    },
-    [],
-  );
-
-  const updateInput = useCallback(
-    (next: string) => {
-      setInput(next);
-      const el = inputRef.current;
-      const caret = el?.selectionStart ?? next.length;
-      const t = detectTypeahead(next, caret);
-      setTypeahead(t);
-      if (t) {
-        if (t.mode === "command") void ensureCommands();
-        else if (t.mode === "agent") void ensureAgents();
-        else if (t.mode === "file") void searchFiles(t.query);
-      }
-    },
-    [detectTypeahead, ensureCommands, ensureAgents, searchFiles],
-  );
-
-  // Build the active typeahead's filtered result list. Returns the rows the
-  // popup will render; selection index is clamped by InputArea to its length.
-  const typeaheadRows = useMemo<TypeaheadRow[]>(() => {
-    if (!typeahead) return [];
-    const q = typeahead.query.toLowerCase();
-    if (typeahead.mode === "command") {
-      // bui builtins first — they're always available even when the opencode
-      // /command response hasn't loaded yet, and the user expects /clear /help
-      // to "just work" before learning the rest of the surface.
-      const builtins = filterCommands(BUI_BUILTIN_COMMANDS, q).map((c) => ({
-        kind: "command" as const,
-        key: c.name,
-        primary: `/${c.name}`,
-        secondary: c.description,
-      }));
-      // Drop opencode rows that collide with a builtin name so we don't
-      // show two `/clear` entries if a user has defined one.
-      const ocRows = dedupeAgainstBuiltins(
-        filterCommands(commands ?? [], q),
-        BUI_BUILTIN_NAMES,
-      ).map((c) => ({
-        kind: "command" as const,
-        key: c.name,
-        primary: `/${c.name}`,
-        secondary: c.description,
-      }));
-      return [...builtins, ...ocRows].slice(0, 12);
-    }
-    if (typeahead.mode === "agent") {
-      const all = agents ?? [];
-      const filtered = q
-        ? all.filter((a) => a.name.toLowerCase().includes(q))
-        : all;
-      return filtered.slice(0, 12).map((a) => ({
-        kind: "agent",
-        key: a.name,
-        primary: `@@${a.name}`,
-        secondary: a.description,
-      }));
-    }
-    // File mode — if the active model can't take attachments, show a single
-    // red "not supported" row instead of file results. Selecting it is a
-    // no-op (applyTypeahead falls through harmlessly because key === "").
-    if (!currentModelSupportsAttachments) {
-      return [
-        {
-          kind: "file",
-          key: "",
-          primary: `⚠ ${currentModelName} doesn't support file attachments`,
-          secondary: "Pick a model with attachment support to enable @-mentions",
-        },
-      ];
-    }
-    return fileResults.map((p) => ({
-      kind: "file",
-      key: p,
-      primary: `@${p}`,
-      secondary: undefined,
-    }));
-  }, [
+  // ===== Typeahead (extracted to useTypeahead) =====
+  const {
     typeahead,
-    commands,
-    agents,
-    fileResults,
+    setTypeahead: setTypeaheadFromHook,
+    typeaheadRows,
+    onTypeaheadSelect,
+    onTypeaheadHover,
+    onTypeaheadConfirm,
+    onTypeaheadMove,
+    onTypeaheadCancel,
+    typeaheadOpen,
+    typeaheadExactMatch,
+    updateInput,
+    onHistoryUp,
+    onHistoryDown,
+  } = useTypeahead({
+    input,
+    setInput,
+    inputRef,
+    cwd,
     currentModelSupportsAttachments,
     currentModelName,
-  ]);
-
-  // Apply a typeahead selection: rewrite the [anchorStart, anchorEnd) slice
-  // and re-position the caret. For command/file selections we leave a trailing
-  // space so the user can type arguments immediately.
-  const applyTypeahead = useCallback(
-    (row: TypeaheadRow) => {
-      if (!typeahead) return;
-      const { anchorStart, anchorEnd, mode } = typeahead;
-      const before = input.slice(0, anchorStart);
-      const after = input.slice(anchorEnd);
-      let insertion = row.primary;
-      let trailingSpace = " ";
-      if (mode === "command") {
-        // Commands need a space before arguments.
-        insertion = `/${row.key}`;
-      } else if (mode === "file") {
-        insertion = `@${row.key}`;
-      } else if (mode === "agent") {
-        // For agents we drop the @@ display prefix and store as a single @name.
-        insertion = `@${row.key}`;
-      }
-      const next = before + insertion + trailingSpace + after;
-      setInput(next);
-      setTypeahead(null);
-
-      // File @-mention is path-as-text only — the agent-native pattern.
-      // The `@<path>` we just inserted into the textarea is what the AI
-      // sees; if it needs the content it calls its Read tool. No FilePart,
-      // no chip — matches Claude Code / Cursor / Aider, avoids burning
-      // tokens on full file content the AI may not need.
-      if (mode === "agent") {
-        const id = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-        setAgentMentions((prev) => [...prev, { id, name: row.key }]);
-      }
-
-      // Restore focus + place caret after the inserted token + space.
-      requestAnimationFrame(() => {
-        const el = inputRef.current;
-        if (!el) return;
-        const pos = before.length + insertion.length + trailingSpace.length;
-        el.focus();
-        el.setSelectionRange(pos, pos);
-      });
-    },
-    [typeahead, input, cwd],
-  );
-
-  const moveTypeaheadSelection = useCallback(
-    (dir: 1 | -1) => {
-      setTypeahead((prev) => {
-        if (!prev) return prev;
-        const n = typeaheadRows.length;
-        if (n === 0) return prev;
-        const next = (prev.selectedIdx + dir + n) % n;
-        return { ...prev, selectedIdx: next };
-      });
-    },
-    [typeaheadRows.length],
-  );
+    agentMentions,
+    setAgentMentions,
+  });
 
   // Prompt-history navigation (Up/Down) + the typing path that exits history
   // mode. Self-contained hook; see useInputHistory. The hook also returns
@@ -3259,7 +2409,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     messages,
     inputRef,
     setInput,
-    setTypeahead,
+    setTypeahead: setTypeaheadFromHook,
     updateInput,
   });
 

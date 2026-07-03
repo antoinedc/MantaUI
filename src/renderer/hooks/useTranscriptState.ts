@@ -53,6 +53,11 @@ export type TranscriptState = {
   spliceMessage: (messageId: string) => void;
   fetchChildTranscript: (childId: string) => void;
   toggleTaskExpand: (childId: string) => void;
+  // Exposed for useSseBus — the delta buffer internals.
+  pendingDeltas: React.MutableRefObject<Map<string, PendingDelta>>;
+  flushTimer: React.MutableRefObject<ReturnType<typeof setTimeout> | null>;
+  FLUSH_MAX_AGE_MS: number;
+  oldestPendingAt: React.MutableRefObject<number | null>;
 };
 
 export function useTranscriptState(params: {
@@ -314,5 +319,9 @@ export function useTranscriptState(params: {
     spliceMessage,
     fetchChildTranscript,
     toggleTaskExpand,
+    pendingDeltas,
+    flushTimer,
+    FLUSH_MAX_AGE_MS,
+    oldestPendingAt,
   };
 }
