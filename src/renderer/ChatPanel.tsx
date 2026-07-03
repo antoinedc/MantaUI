@@ -88,6 +88,7 @@ import { RunningIndicator } from "./MessageRow";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
+import { useInputHistory } from "./hooks/useInputHistory";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
 
@@ -268,13 +269,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // and contribute to perceived input lag. 80ms is small enough that
   // the suggestion list still feels live as you type.
   const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Prompt history: when textarea has focus and typeahead is closed, Up/Down
-  // cycle through previously-submitted prompts (terminal-style). The index
-  // is internal to navigateHistory's setter — never read elsewhere, so the
-  // setter is all we keep. draftInput saves whatever the user was typing
-  // before they entered history mode so it can be restored on Down past end.
-  const [, setHistoryIdx] = useState<number | null>(null);
-  const draftInput = useRef<string>("");
+  // Prompt-history navigation (Up/Down cycles past prompts, terminal-style) is
+  // owned by useInputHistory — see the hook call after `updateInput` below.
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Wraps the pending QuestionCard(s). A notification deep-link asks us to
@@ -2294,22 +2290,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const currentModelSupportsAttachments = modelSupportsAttachments(activeModel);
   const currentModelName = activeModel?.name ?? "this model";
 
-  // Prompt history from user messages — chronological, freshest last.
-  const promptHistory = useMemo<string[]>(() => {
-    if (!messages) return [];
-    const out: string[] = [];
-    for (const m of messages) {
-      if (m.info.role !== "user") continue;
-      const text = m.parts
-        .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
-        .map((p) => p.text ?? "")
-        .join("\n")
-        .trim();
-      if (text) out.push(text);
-    }
-    return out;
-  }, [messages]);
-
   // If a saved modelOverride references a model that isn't in the current
   // list of connected models (common after switching providers or fixing
   // listModels' source endpoint), clear it. Otherwise the server rejects the
@@ -3272,60 +3252,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     [typeaheadRows.length],
   );
 
-  // Prompt history navigation — Up cycles back, Down cycles forward. We
-  // bypass updateInput's typeahead detection here (calling setInput directly)
-  // so cycling through past prompts containing `@` or `/` doesn't immediately
-  // open a typeahead popup.
-  const navigateHistory = useCallback(
-    (dir: 1 | -1) => {
-      if (promptHistory.length === 0) return;
-      setHistoryIdx((cur) => {
-        // dir === -1 means UP (older), +1 means DOWN (newer).
-        let next: number | null;
-        if (cur == null) {
-          // Entering history mode — save the current draft so we can restore
-          // it when the user presses Down past the newest entry.
-          if (dir === -1) {
-            draftInput.current = inputRef.current?.value ?? "";
-            next = promptHistory.length - 1;
-          } else {
-            // Already at newest — no-op.
-            return cur;
-          }
-        } else {
-          const candidate = cur + dir;
-          if (candidate < 0) next = 0;
-          else if (candidate >= promptHistory.length) next = null;
-          else next = candidate;
-        }
-        // null means "back to draft" (past the newest entry).
-        const value = next == null ? draftInput.current : promptHistory[next];
-        setInput(value);
-        setTypeahead(null);
-        // Place caret at end after React commits the new value.
-        requestAnimationFrame(() => {
-          const el = inputRef.current;
-          if (!el) return;
-          el.focus();
-          const pos = value.length;
-          el.setSelectionRange(pos, pos);
-        });
-        return next;
-      });
-    },
-    [promptHistory],
-  );
-
-  // Reset history-navigation mode whenever the user edits the input by
-  // typing (not via Up/Down). Keeps history "session" per stretch of edits.
-  const updateInputWithHistoryReset = useCallback(
-    (next: string) => {
-      setHistoryIdx(null);
-      draftInput.current = next;
-      updateInput(next);
-    },
-    [updateInput],
-  );
+  // Prompt-history navigation (Up/Down) + the typing path that exits history
+  // mode. Self-contained hook; see useInputHistory. `promptHistory` is unused
+  // directly by the render but kept for parity / potential callers.
+  const { navigateHistory, updateInputWithHistoryReset } = useInputHistory({
+    messages,
+    inputRef,
+    setInput,
+    setTypeahead,
+    updateInput,
+  });
 
   // Model line: last assistant message's modelID (provider/model).
   const modelLabel = useMemo(() => {

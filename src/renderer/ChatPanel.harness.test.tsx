@@ -294,4 +294,32 @@ describe("ChatPanel composer submit", () => {
     await h.flush();
     expect(api.calls.opencodePrompt?.length ?? 0).toBe(0);
   });
+
+  it("recalls the last user prompt into the empty composer on ArrowUp", async () => {
+    // A transcript with one prior user turn seeds the prompt history.
+    const transcript = [
+      {
+        info: { id: "msg_u1", sessionID: "ses_test", role: "user" as const },
+        parts: [
+          { type: "text", id: "prt_u1", messageID: "msg_u1", text: "previous prompt" },
+        ],
+      },
+    ];
+    ({ api } = installMockApi({
+      opencodeMessagesReconcile: () => Promise.resolve(transcript),
+      opencodeMessages: () => Promise.resolve(transcript),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+      );
+    });
+    await h.flush();
+    // useInputHistory swapped the empty draft for the last user prompt.
+    expect(textarea.value).toBe("previous prompt");
+  });
 });
