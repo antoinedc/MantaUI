@@ -30,6 +30,7 @@ import {
   uploadBuffer,
   cleanupUploads,
   peekRemoteFile,
+  peekRemoteFileHttp,
   listOutbox,
   pullToDownloads,
   writePty,
@@ -139,6 +140,7 @@ import {
   type SpawnOptions,
   type ProviderInput,
 } from "../shared/types.js";
+import { resolveTransportMode } from "../shared/transport.mjs";
 
 // Parse a non-2xx /auth/pair response body into a user-facing error string.
 // The server returns { error: "..." } for 403 (not loopback), 429 (rate limit),
@@ -1213,9 +1215,16 @@ function registerHandlers(): void {
     return buf ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : null;
   });
 
-  ipcMain.handle(IPC.peekRemoteFile, (_e, remotePath: string) =>
-    peekRemoteFile(config, remotePath),
-  );
+  ipcMain.handle(IPC.peekRemoteFile, (_e, remotePath: string) => {
+    // HTTP-mode: fetch from the bui-server's /api/peek route instead of scp.
+    // resolveTransportMode returns "http" when config has a valid boxToken,
+    // so we dispatch to the HTTP handler; otherwise fall through to the
+    // legacy SSH scpDownload path.
+    if (resolveTransportMode(config) === "http") {
+      return peekRemoteFileHttp(config, remotePath);
+    }
+    return peekRemoteFile(config, remotePath);
+  });
 
   // Agent outbox → laptop: pull a remote outbox file to the downloads dir.
   // Returns the saved local absolute path. Used by the require-confirm toast's

@@ -23,6 +23,10 @@ export interface BuiPreload {
   onDesktopNotify(
     cb: (payload: DesktopNotifyPayload) => void,
   ): () => void;
+  // HTTP-mode peek: triggers the main process to fetch from /api/peek and
+  // open the file locally. Only available when the desktop is in "http"
+  // transport mode (paired to a bui-server). No-op on mobile/web.
+  peekRemoteFileHttp(remotePath: string): Promise<void>;
 }
 
 /**
