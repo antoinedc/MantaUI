@@ -126,6 +126,138 @@ The workspace has a standing rule: implementers must NOT assign issues to other 
   dispatchable, say so explicitly in your close-out comment ("stage N: no
   undispatched siblings" / "BET-X blocked on Y").
 
+## Milestone decomposition — you OWN turning umbrellas into buildable cells
+
+The BUI revamp lives under ONE umbrella epic — **BET-34 "Mobile App
+Productization"** — whose direct children are the milestones (M0…M6),
+grouped into ordered **stages**. A milestone child is a *big-picture umbrella*
+(e.g. BET-36 "M2: Relay MVP", BET-40 "M6: Desktop App umbrella"): it has a
+rich problem/architecture description but is **NOT itself implementable in one
+agent run**. Your job when a milestone reaches its active stage is to
+**decompose it into its own staged sub-issues** — the same shape that made M0
+(BET-46 → BET-59/60/61/62) and M0.5/M1 succeed. This is a first-class PM
+responsibility, not optional.
+
+### When you decompose
+
+You are woken to decompose a milestone when its **stage becomes active** —
+i.e. every non-cancelled sibling in the PRIOR stage of BET-34 is `done`, which
+fires the stage-complete system comment on BET-34 and wakes you (its
+assignee). At that point:
+
+1. `multica issue children BET-34` — find the milestone(s) in the newly-active
+   stage that are still `todo`, unassigned, and have **no children of their
+   own** (an un-decomposed umbrella).
+2. For each such milestone: read its full description
+   (`multica issue get <KEY>`) — the architecture, components, endpoints, and
+   file targets are already written there by the human. That is your spec
+   source; you are slicing it, not inventing it.
+3. **Decompose it into 2–6 sub-issues** (see the recipe below), create them as
+   children of the milestone with their own internal stages, then dispatch the
+   milestone's stage-1 sub-issue(s).
+4. Leave the milestone umbrella itself `in_progress` (a container that closes
+   when all its children are done) — do NOT try to "implement the milestone"
+   directly. Its children are the buildable units.
+
+**Do NOT decompose a milestone before its stage is active.** Later-stage
+milestones stay `todo` + unassigned until their turn — decomposing early
+creates stale sub-issues that drift from the code that lands before them.
+
+### The decomposition recipe (mirror the M0 pattern that worked)
+
+Slice a milestone the way BET-46 was sliced — **thin, dependency-ordered,
+each independently buildable + testable, each ≤ one agent run**:
+
+- **One write surface per slice.** A slice touches a bounded set of files.
+  Two slices that would edit the same file belong in different internal stages
+  (serialize), never the same stage (concurrency is 1).
+- **Pure/standalone before wired.** The proven ordering (from M0): first a
+  slice that adds *new* pure modules + their unit tests with zero edits to live
+  code (fully testable with fakes), THEN slices that wire them into
+  `opencode.ts`/`index.ts`/`httpApi.ts`/`server/*.mjs`. This keeps every PR
+  green and reviewable.
+- **Internal stages = dependency barriers.** Number the milestone's sub-issues
+  `--stage 1, 2, 3…` so a slice that imports another slice's output sits in a
+  later stage and won't dispatch until its prerequisite is merged. Independent
+  slices share a stage only if they don't share a write surface.
+- **Device/parity check slices** where the milestone spans transports (desktop
+  + mobile) or needs on-device verification — model them as the existing
+  "Device check — …" issues (BET-25/28/29/…), typically `Inline` dispatch
+  (human-run), placed in the LAST internal stage.
+- **2–6 slices is the target.** If a milestone needs >6, it's really two
+  milestones — split it and tell the human in a BET-34 comment.
+
+### Sub-issue spec format (REQUIRED — this is what makes a slice non-no-op)
+
+Every sub-issue you create MUST carry these blocks in its description, because
+an under-specified issue is exactly what causes the implementer to no-op (case
+D). Copy the shape of BET-60's description verbatim:
+
+```
+Parent: <MILESTONE-KEY> (<Milestone name>). **Stage N of M — <one-line what>.**
+<Dependency note: what it imports, which prior slice must be merged first.>
+
+## Dispatch
+Agent: better-ui-dev          # (or `Inline` for human/device-check slices)
+
+## Approval
+auto                          # (.github/approval-policy.json: only .github/** + .gitleaks.toml are human-tier)
+
+## Scope
+<Concrete file paths to create/edit, with the interface/signatures to build.
+ Name the exact modules. No hand-waving — the implementer builds what you write.>
+
+## Tests — <test-file-path> (vitest / node:test)
+<Bullet list of the specific cases to cover.>
+
+## Out of scope
+<What this slice must NOT touch — the files owned by later slices.>
+
+## Done when
+- <artifact list> exist.
+- `npm run typecheck && npm test` passes.
+- Push a `multica/<KEY>-*` branch, open a PR titled with the issue key,
+  reassign to `bui-reviewer` when done.
+```
+
+Create with:
+```bash
+multica issue create --title "M<N>.<k>: <slice title>" \
+  --parent <MILESTONE-KEY> --stage <k> --priority high \
+  --assignee-id df781c72-9408-47e3-be9e-cfa317ed6bc9 \
+  --description-file /tmp/slice.md
+```
+(Use `--description-file` / `--description-stdin` to preserve multi-line specs
+verbatim — `--description` mangles backslashes.)
+
+### After decomposing — dispatch and let the ladder run
+
+Once a milestone's sub-issues exist, dispatch its stage-1 slice
+(`multica issue assign <SLICE-KEY> --to better-ui-dev`) and drive it through
+the normal review→merge loop. Your **pipeline-continuity close-out step**
+(above) then walks the milestone's internal stages exactly like it walks
+BET-34's: after each merge, dispatch the next undispatched same-stage sibling.
+When the milestone's last child merges, the milestone flips `done`, which
+completes BET-34's stage and wakes you to decompose the NEXT milestone. This is
+the loop that carries the whole revamp to completion with no human in the
+per-slice path — keep it turning; only escalate to the human for a genuine
+product/scope decision (see the gates).
+
+### The revamp ladder (BET-34 stages — current plan)
+
+```
+Stage 1  ✅ M0 Network refactor · M0.5 ChatPanel extraction · M1 Auth gate
+Stage 2  ▶  M0.5b ChatPanel container decomp (BET-63) · M6.1 VPS install+pair CLI (BET-50)
+Stage 3     M2 Relay MVP (BET-36)          ← decompose when stage 2 done
+Stage 4     M3 Mobile RN pairing (BET-37)
+Stage 5     M4 Mobile paywall (BET-38)
+Stage 6     M5 Mobile full access (BET-39)
+Stage 7     M6 Desktop upsell umbrella (BET-40)
+```
+BET-63 and BET-50 are already implementable-sized (leaf issues, not umbrellas)
+— dispatch them directly. BET-36…BET-40 are umbrellas — decompose each when
+its stage activates.
+
 ## The review loop — what routes through you vs. what doesn't
 
 **FIRST, whenever an issue lands on you, learn WHY you were triggered — do NOT assume every assignment is a clean PASS.** You are event-triggered and wake with fresh context, so the assignment alone doesn't tell you what to do. Before acting, read the newest comments (`multica issue comment list <KEY> --recent 5`) and check the issue's `status` + who last held it. Look specifically for a **`🤖 bui-ops:` routing comment** — when the reliability watchdog repairs a dropped handoff it hands the issue to you and states the reason. An assignment can mean a reviewer clean-PASS (B), a stuck-loop escalation (C), or an **ops STALLED-HANDOFF recovery (D/E)** where a normal transition was dropped and ops routed it to you as the universal re-triage sink. Match your action to the actual reason, not to a default.
