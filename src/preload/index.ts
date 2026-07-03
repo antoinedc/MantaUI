@@ -335,6 +335,29 @@ const api = {
   webhookDelete: (id: string): Promise<{ deleted: boolean }> =>
     ipcRenderer.invoke(IPC.webhookDelete, id),
 
+  // Auto-update (desktop-only). Main checks for updates on launch and pushes
+  // updateAvailable / updateDownloaded events to the renderer. The renderer
+  // calls autoUpdateDownload to trigger a manual download, or autoUpdateInstall
+  // to restart and install a downloaded update.
+  autoUpdateDownload: (): Promise<void> =>
+    ipcRenderer.invoke(IPC.autoUpdateDownload),
+  autoUpdateInstall: (): Promise<void> =>
+    ipcRenderer.invoke(IPC.autoUpdateInstall),
+  onAutoUpdateAvailable: (
+    cb: (info: { version: string; releaseName?: string; releaseNotes?: string }) => void,
+  ): (() => void) => {
+    const listener = (_: unknown, info: { version: string; releaseName?: string; releaseNotes?: string }) => cb(info);
+    ipcRenderer.on(IPC.autoUpdateAvailable, listener);
+    return () => ipcRenderer.removeListener(IPC.autoUpdateAvailable, listener);
+  },
+  onAutoUpdateDownloaded: (
+    cb: (info: { version: string; releaseName?: string; releaseNotes?: string }) => void,
+  ): (() => void) => {
+    const listener = (_: unknown, info: { version: string; releaseName?: string; releaseNotes?: string }) => cb(info);
+    ipcRenderer.on(IPC.autoUpdateDownloaded, listener);
+    return () => ipcRenderer.removeListener(IPC.autoUpdateDownloaded, listener);
+  },
+
   // Typeahead sources.
   opencodeCommands: (): Promise<OpencodeCommand[]> =>
     ipcRenderer.invoke(IPC.opencodeCommands),

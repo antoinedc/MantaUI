@@ -662,6 +662,12 @@ export const httpApi: Api = {
   webhookList: (sessionId) => rpc(IPC.webhookList, sessionId),
   webhookDelete: (id) => rpc(IPC.webhookDelete, id),
 
+  // -- auto-update (desktop-only; no-op in http/mobile mode) --
+  autoUpdateDownload: () => Promise.resolve(),
+  autoUpdateInstall: () => Promise.resolve(),
+  onAutoUpdateAvailable: () => () => {},
+  onAutoUpdateDownloaded: () => () => {},
+
   // -- typeahead --
   opencodeCommands: () => rpc(IPC.opencodeCommands),
   opencodeAgents: () => rpc(IPC.opencodeAgents),
