@@ -125,6 +125,7 @@ export function useSseBus(params: {
   FLUSH_MAX_AGE_MS: number;
   submit: () => void;
   submitRef: React.RefObject<() => void>;
+  setInput: (v: string) => void;
   compactSession: () => void;
   forkSession: () => void;
   selectModel: (m: { providerID: string; modelID: string }) => void;
@@ -151,6 +152,7 @@ export function useSseBus(params: {
     FLUSH_MAX_AGE_MS,
     submit,
     submitRef,
+    setInput,
     compactSession,
     forkSession,
     selectModel,
@@ -537,6 +539,7 @@ export function useSseBus(params: {
       drainAbortRef.current = false;
       // One-tick delay so the message is removed from the queue before submit
       setTimeout(() => {
+        setInput(queued);
         submitRef.current?.();
       }, 0);
     }
