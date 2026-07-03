@@ -67,7 +67,9 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
       if (seeded) {
         // Preserve the real preload for Electron-local affordances, then install
         // httpApi as the primary window.api.
-        (window as unknown as { __buiPreload: Api }).__buiPreload = realPreload;
+        window.__buiPreload = realPreload as unknown as NonNullable<
+          typeof window.__buiPreload
+        >;
         (window as unknown as { api: Api }).api = httpApi as unknown as Api;
       }
     }
@@ -81,9 +83,17 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
 async function boot(): Promise<void> {
   if (!isMobile && preload) {
     await chooseDesktopTransport(preload);
+    // Ensure __buiPreload is always set for the typed accessor. In http mode
+    // chooseDesktopTransport already assigned it; in preload mode window.api
+    // IS the preload so alias it. This guarantees getBuiPreload() returns the
+    // real preload on desktop and null on mobile/web.
+    window.__buiPreload = preload as unknown as NonNullable<
+      typeof window.__buiPreload
+    >;
   } else {
     // Mobile/web: install the shim (no preload to preserve).
     (window as unknown as { api: unknown }).api = httpApi;
+    window.__buiPreload = null;
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(

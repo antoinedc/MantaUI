@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
 import { PairingQR, PairingCountdown } from "./PairingQR";
+import { getBuiPreload } from "./preloadAccess";
 import type {
   AuthPairResult,
   BootstrapResult,
@@ -686,7 +687,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     href="https://console.groq.com/keys"
                     onClick={(e) => {
                       e.preventDefault();
-                      window.api.openExternal("https://console.groq.com/keys");
+                      getBuiPreload()?.openExternal("https://console.groq.com/keys");
                     }}
                     className="text-accent hover:underline"
                   >
