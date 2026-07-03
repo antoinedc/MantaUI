@@ -102,6 +102,35 @@ CREATE TABLE IF NOT EXISTS receipts (
 -- "all receipts for box X" (entitlement check in Stage 5) + "expiring soon".
 CREATE INDEX IF NOT EXISTS idx_receipts_box ON receipts(box_id);
 CREATE INDEX IF NOT EXISTS idx_receipts_expires ON receipts(expires_at);
+
+-- Stage 5: native push device tokens, keyed by account_id. A phone registers
+-- its platform token (APNs on iOS, FCM on Android) so the relay's native push
+-- leg (push.mjs) can deliver to it. One account has one current token per
+-- platform; re-registering the same platform overwrites (a rotated APNs token).
+-- account_id is NOT bound to boxes(box_id), so no FK — an account may register
+-- a device token before it has bound any box.
+CREATE TABLE IF NOT EXISTS push_tokens (
+  account_id  TEXT NOT NULL,
+  platform    TEXT NOT NULL,          -- 'apns' | 'fcm'
+  token       TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (account_id, platform)
+);
+-- "all device tokens for account X" (the push fan-out read path).
+CREATE INDEX IF NOT EXISTS idx_push_tokens_account ON push_tokens(account_id);
+
+-- Stage 5: per-box byte metering. One row per box accumulates the total bytes
+-- carried in each direction on the proxy path (ingress = phone→box request
+-- bytes, egress = box→phone response bytes). This is the COGS signal the relay
+-- meters per box_id. A single running-total row per box (not per-request rows)
+-- keeps writes O(1) and the "how much has box X used" read a single lookup.
+CREATE TABLE IF NOT EXISTS metering (
+  box_id       TEXT PRIMARY KEY,
+  ingress      INTEGER NOT NULL DEFAULT 0,
+  egress       INTEGER NOT NULL DEFAULT 0,
+  updated_at   INTEGER NOT NULL,
+  FOREIGN KEY (box_id) REFERENCES boxes(box_id) ON DELETE CASCADE
+);
 `;
 
 // ---------------------------------------------------------------------------
@@ -227,6 +256,34 @@ export function openStore({ path = ":memory:", now = () => Date.now() } = {}) {
     listReceiptsForBox: db.prepare(`
       SELECT * FROM receipts WHERE box_id = ? ORDER BY created_at DESC
     `),
+
+    upsertPushToken: db.prepare(`
+      INSERT INTO push_tokens (account_id, platform, token, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(account_id, platform) DO UPDATE SET
+        token = excluded.token,
+        updated_at = excluded.updated_at
+    `),
+    listPushTokensForAccount: db.prepare(`
+      SELECT * FROM push_tokens WHERE account_id = ?
+    `),
+    deletePushToken: db.prepare(`
+      DELETE FROM push_tokens WHERE account_id = ? AND platform = ?
+    `),
+
+    upsertMetering: db.prepare(`
+      INSERT INTO metering (box_id, ingress, egress, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(box_id) DO UPDATE SET
+        ingress = metering.ingress + excluded.ingress,
+        egress = metering.egress + excluded.egress,
+        updated_at = excluded.updated_at
+    `),
+    getMetering: db.prepare(`SELECT * FROM metering WHERE box_id = ?`),
+    listMetering: db.prepare(`SELECT * FROM metering ORDER BY updated_at DESC`),
+    resetMetering: db.prepare(`
+      UPDATE metering SET ingress = 0, egress = 0, updated_at = ? WHERE box_id = ?
+    `),
   };
 
   // -------------------------------------------------------------------------
@@ -339,6 +396,80 @@ export function openStore({ path = ":memory:", now = () => Date.now() } = {}) {
   }
 
   // -------------------------------------------------------------------------
+  // push_tokens (native device tokens, keyed by account_id)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Register (or replace) a native device token for an account. One current
+   * token per (account, platform); re-registering the same platform overwrites
+   * (e.g. an APNs token rotation). Returns the stored row.
+   *
+   * @param {object} args
+   * @param {string} args.accountId
+   * @param {"apns"|"fcm"} args.platform
+   * @param {string} args.token  the platform device token (opaque, not a 32-hex).
+   */
+  function registerPushToken({ accountId, platform, token }, { at = now() } = {}) {
+    assertAccountId(accountId);
+    assertPlatform(platform);
+    if (typeof token !== "string" || !token) {
+      throw new Error("registerPushToken: token required (non-empty string)");
+    }
+    stmts.upsertPushToken.run(accountId, platform, token, at);
+    return stmts.listPushTokensForAccount
+      .all(accountId)
+      .find((r) => r.platform === platform) ?? null;
+  }
+
+  /** All device-token rows registered for an account (the push fan-out read). */
+  function listPushTokensForAccount(accountId) {
+    assertAccountId(accountId);
+    return stmts.listPushTokensForAccount.all(accountId);
+  }
+
+  /** Remove one platform's device token for an account (token went dead). */
+  function unregisterPushToken(accountId, platform) {
+    assertAccountId(accountId);
+    assertPlatform(platform);
+    const res = stmts.deletePushToken.run(accountId, platform);
+    return res.changes > 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // metering (per-box byte counters)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Add ingress/egress byte counts to a box's running total (creating the row
+   * on first sight). Both default to 0 so a caller can bump one direction only.
+   * The box row must exist first (FK) — the proxy path upserts the box on
+   * dial-in, so by metering time it does. Returns the updated row.
+   */
+  function addUsage(boxId, { ingress = 0, egress = 0 } = {}, { at = now() } = {}) {
+    assertBoxId(boxId);
+    assertByteCount(ingress, "ingress");
+    assertByteCount(egress, "egress");
+    stmts.upsertMetering.run(boxId, ingress, egress, at);
+    return getUsage(boxId);
+  }
+
+  function getUsage(boxId) {
+    assertBoxId(boxId);
+    return stmts.getMetering.get(boxId) ?? null;
+  }
+
+  function listUsage() {
+    return stmts.listMetering.all();
+  }
+
+  /** Zero a box's counters (e.g. at a billing-period boundary). */
+  function resetUsage(boxId, { at = now() } = {}) {
+    assertBoxId(boxId);
+    const res = stmts.resetMetering.run(at, boxId);
+    return res.changes > 0;
+  }
+
+  // -------------------------------------------------------------------------
   // lifecycle / introspection
   // -------------------------------------------------------------------------
 
@@ -376,6 +507,15 @@ export function openStore({ path = ":memory:", now = () => Date.now() } = {}) {
     upsertReceipt,
     getReceipt,
     listReceiptsForBox,
+    // push tokens
+    registerPushToken,
+    listPushTokensForAccount,
+    unregisterPushToken,
+    // metering
+    addUsage,
+    getUsage,
+    listUsage,
+    resetUsage,
     // lifecycle
     close,
     explain,
@@ -406,5 +546,21 @@ function assertAccountId(accountId) {
 function assertStatus(status) {
   if (!KNOWN_BOX_STATUS.has(status)) {
     throw new Error(`store: invalid box status ${JSON.stringify(status)}`);
+  }
+}
+
+const KNOWN_PLATFORMS = new Set(["apns", "fcm"]);
+
+function assertPlatform(platform) {
+  if (!KNOWN_PLATFORMS.has(platform)) {
+    throw new Error(
+      `store: invalid push platform ${JSON.stringify(platform)} (want 'apns' | 'fcm')`,
+    );
+  }
+}
+
+function assertByteCount(n, field) {
+  if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+    throw new Error(`store: invalid ${field} byte count (want non-negative integer)`);
   }
 }
