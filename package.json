@@ -15,8 +15,8 @@
     "mobile": "node src/server/index.mjs",
     "pair": "node scripts/bui-pair.mjs",
     "pack": "node scripts/release/pack.mjs",
-    "test": "vitest run && node --test src/server/*.test.mjs src/relay/*.test.mjs scripts/*.test.mjs",
-    "test:server": "node --test src/server/*.test.mjs src/relay/*.test.mjs",
+    "test": "vitest run && node --test src/server/*.test.mjs src/relay/*.test.mjs src/relay/agent/*.test.mjs scripts/*.test.mjs",
+    "test:server": "node --test src/server/*.test.mjs src/relay/*.test.mjs src/relay/agent/*.test.mjs",
     "test:watch": "vitest",
     "build:mobile": "vite build --config electron.vite.config.mobile.ts"
   },
