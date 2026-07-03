@@ -157,15 +157,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setWebhookError,
     refreshWebhooks,
   } = resources;
-  // Screenshot detection toast — global, lives in the store. App.tsx owns
-  // the single ipcRenderer subscription; this panel reads + clears it.
-  // Only the active panel renders it (gated below by `isActive`).
-  const screenshotToast = useStore((s) => s.screenshotToast);
-  const setScreenshotToast = useStore((s) => s.setScreenshotToast);
-  // Agent → laptop file push toast (single global instance, like screenshots).
-  const agentFileToast = useStore((s) => s.agentFileToast);
-  const setAgentFileToast = useStore((s) => s.setAgentFileToast);
-  const [agentFileSaving, setAgentFileSaving] = useState(false);
   const setChatSubagents = useStore((s) => s.setChatSubagents);
   // Prompt-history navigation (Up/Down cycles past prompts, terminal-style) is
   // owned by useInputHistory — see the hook call after `updateInput` below.
@@ -282,15 +273,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const [error, setError] = useState<string | null>(null);
   const [showThinking, setShowThinking] = useState(false);
   const [input, setInput] = useState("");
-  // Messages queued while the AI was still running. The moment a queued
-  // prompt exists, bui aborts the in-flight turn at the next step boundary
-  // and submits the queued prompt as a fresh turn.
-  const [messageQueue, setMessageQueue] = useState<string[]>([]);
-  // Live mirror of `messageQueue` for the SSE handler closure.
-  const messageQueueRef = useRef<string[]>([]);
-  useEffect(() => {
-    messageQueueRef.current = messageQueue;
-  }, [messageQueue]);
   // Available models + server default (pre-fetched on mount, not lazy — so
   // the footer can show a meaningful model name before the first response,
   // and clicking the picker doesn't flash a "Loading…" row). Selection is
