@@ -20,31 +20,43 @@
 //                 entitlement) is Stage 5. We store the raw receipt + parsed
 //                 fields so Stage 5 has somewhere to put them.
 //
-// DATASTORE CHOICE — better-sqlite3.
-//   We originally reached for the built-in `node:sqlite` (`DatabaseSync`), but
-//   it only exists on Node 22.5+. CI pins Node 20 (`.github/workflows/ci.yml`,
-//   `node-version: 20`), where `node:sqlite` throws ERR_UNKNOWN_BUILTIN_MODULE
-//   and both relay test files fail. The issue scope anticipated exactly this:
-//   "Prefer node:sqlite ... fall back to better-sqlite3 as a dep only if
-//   node:sqlite is unavailable." On the enforced pipeline (Node 20) it IS
-//   unavailable, so we use `better-sqlite3` — a synchronous SQLite binding that
-//   works on both Node 20 and 22. It is a native module, but the relay runs on
-//   Node (not Electron), so no electron-rebuild is needed; npm's default install
-//   builds it (prebuilt binaries cover the common platforms).
+// DATASTORE CHOICE — node-sqlite3-wasm (pure WASM, no native binding).
+//   This slice went through the full elimination on the CI runner:
+//     1. built-in `node:sqlite` (`DatabaseSync`) — only exists on Node 22.5+.
+//        CI pins Node 20 (`.github/workflows/ci.yml`, `node-version: 20`), where
+//        it throws ERR_UNKNOWN_BUILTIN_MODULE. Rejected.
+//     2. `better-sqlite3` — a native addon. It typechecks and `npm ci` succeeds,
+//        but the compiled `better_sqlite3.node` fails to `dlopen` on the
+//        self-hosted runner (ERR_DLOPEN_FAILED / "Module did not self-register":
+//        the prebuilt binary's ABI doesn't match the runner's Node, and there is
+//        no reliable node-gyp toolchain there). Rejected — a native binding on
+//        this runner is not dependable without a guaranteed compile step, which
+//        is out of scope for this slice (`.github/**` is human-tier).
+//     3. `node-sqlite3-wasm` — SQLite compiled to WebAssembly, shipped as a
+//        pre-built .wasm inside the package. NO `.node` addon, NO compile step,
+//        so it loads on whatever Node the runner has (20 or 22) with a plain
+//        `npm ci`. Synchronous API (Database / prepare / run / get / all), same
+//        shape this store already used. THIS is what we ship.
 //
-//   Every query in this file uses the tiny shared subset both bindings
-//   implement — `.exec`, `.prepare(...).run/get/all`, and EXPLAIN QUERY PLAN
-//   rows exposing `.detail` — so the driver choice is confined to the
-//   `openDatabase` helper below (the one seam). If a future runtime standardizes
-//   on `node:sqlite`, swap that single function back to `new DatabaseSync(path)`.
+//   node-sqlite3-wasm ships as CommonJS and — unlike better-sqlite3 / node:sqlite
+//   — its prepared-statement methods bind parameters as a SINGLE ARRAY rather
+//   than variadically. Both of those quirks are hidden inside the `openDatabase`
+//   seam below, which returns a thin adapter exposing the exact better-sqlite3
+//   surface the rest of this file is written against (`.exec`,
+//   `.prepare(...).run/get/all(...variadic)`, `.close`, and EXPLAIN QUERY PLAN
+//   rows exposing `.detail`). Every query above the seam is unchanged. If a
+//   future runtime standardizes on `node:sqlite`, swap that single function back
+//   to `new DatabaseSync(path)`.
 //
 // TESTABILITY: `openStore({ path })` accepts ":memory:" (default) for an
 // in-memory DB that leaves no fs artifacts, or a file path for a persistent
 // store. Migrations are idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so
 // opening an existing DB is a no-op re-apply, never a destructive one.
 
-import Database from "better-sqlite3";
+import sqliteWasm from "node-sqlite3-wasm";
 import { isValidToken } from "../server/webhooks.mjs";
+
+const { Database } = sqliteWasm;
 
 // ---------------------------------------------------------------------------
 // Box status enum (mirrors the box lifecycle the RoutingTable drives)
@@ -97,12 +109,57 @@ CREATE INDEX IF NOT EXISTS idx_receipts_expires ON receipts(expires_at);
 // ---------------------------------------------------------------------------
 
 function openDatabase(path) {
-  // ":memory:" is better-sqlite3's in-memory database sentinel (same as
-  // node:sqlite), leaving no fs artifacts.
-  const db = new Database(path);
+  // ":memory:" is node-sqlite3-wasm's in-memory database sentinel (same as
+  // better-sqlite3 / node:sqlite), leaving no fs artifacts.
+  const raw = new Database(path);
   // Enforce the FKs we declared (SQLite defaults them OFF per-connection).
-  db.exec("PRAGMA foreign_keys = ON;");
-  return db;
+  raw.exec("PRAGMA foreign_keys = ON;");
+
+  // Adapter: reconcile two node-sqlite3-wasm quirks so nothing above the seam
+  // knows which driver is underneath.
+  //   1. BINDING SHAPE: it binds prepared-statement params as a single array;
+  //      the rest of this file calls .run/.get/.all variadically (the
+  //      better-sqlite3 convention). `undefined` params (no args) → no binding.
+  //   2. STATEMENT FINALIZATION: unlike better-sqlite3 (which auto-finalizes on
+  //      db.close), node-sqlite3-wasm holds the file lock until every prepared
+  //      statement is finalized — reopening the same file otherwise throws
+  //      "database is locked". So we track live statements and finalize them all
+  //      in close(). Ad-hoc statements (.explain / the _db escape hatch) are
+  //      finalized eagerly after their single use so they don't accumulate.
+  const toBinding = (params) => (params.length ? params : undefined);
+  const live = new Set();
+  const wrap = (stmt) => ({
+    run: (...params) => stmt.run(toBinding(params)),
+    get: (...params) => stmt.get(toBinding(params)),
+    all: (...params) => stmt.all(toBinding(params)),
+    finalize: () => {
+      live.delete(stmt);
+      try {
+        stmt.finalize();
+      } catch {
+        /* already finalized */
+      }
+    },
+  });
+  return {
+    exec: (sql) => raw.exec(sql),
+    prepare(sql) {
+      const stmt = raw.prepare(sql);
+      live.add(stmt);
+      return wrap(stmt);
+    },
+    close() {
+      for (const stmt of live) {
+        try {
+          stmt.finalize();
+        } catch {
+          /* already finalized */
+        }
+      }
+      live.clear();
+      raw.close();
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -122,8 +179,8 @@ export function openStore({ path = ":memory:", now = () => Date.now() } = {}) {
   // Idempotent migration. Safe to re-run on an existing DB.
   db.exec(SCHEMA);
 
-  // Prepared statements (compiled once, reused). node:sqlite + better-sqlite3
-  // share the prepare().run/get/all shape.
+  // Prepared statements (compiled once, reused). The openDatabase adapter above
+  // gives every driver the same variadic prepare().run/get/all shape.
   const stmts = {
     upsertBox: db.prepare(`
       INSERT INTO boxes (box_id, status, created_at, last_seen)
@@ -295,10 +352,13 @@ export function openStore({ path = ":memory:", now = () => Date.now() } = {}) {
    * "SEARCH ... USING INDEX" rather than a full "SCAN".
    */
   function explain(sql, ...params) {
-    return db
-      .prepare(`EXPLAIN QUERY PLAN ${sql}`)
-      .all(...params)
-      .map((r) => r.detail);
+    // Ad-hoc statement: finalize eagerly so it doesn't linger until close().
+    const stmt = db.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+    try {
+      return stmt.all(...params).map((r) => r.detail);
+    } finally {
+      stmt.finalize();
+    }
   }
 
   return {
