@@ -13,6 +13,10 @@ import {
   replyPermission,
   _resetSessionDirectoryCache,
   _onSessionDirectoryAdded,
+  _setOcTransport,
+  _getOcAgent,
+  _pooledOcRequest,
+  discardBody,
 } from "./opencode.mjs";
 
 test("apiUrl targets local opencode port 4096", () => {
@@ -41,11 +45,14 @@ test("parseSseFrame returns null for comments/keepalive", () => {
 // `GET /session/{id}` on a miss.
 // ---------------------------------------------------------------------------
 
+// The non-streaming opencode calls now route through ocFetch → a pooled
+// node:http transport (NOT globalThis.fetch, which undici won't let us pool).
+// Install the test handler as the ocFetch transport instead. Handler signature
+// is unchanged: (url, init) => Promise<Response>.
 function withMockFetch(handler, fn) {
-  const orig = globalThis.fetch;
-  globalThis.fetch = handler;
+  _setOcTransport(handler);
   return fn().finally(() => {
-    globalThis.fetch = orig;
+    _setOcTransport(null);
   });
 }
 
@@ -492,4 +499,78 @@ test("replyPermission appends ?directory= from cache (auto-allow path)", async (
     replyUrl.includes("directory=%2Fproj%2Fpreply"),
     `replyPermission URL missing scoped directory: ${replyUrl}`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Loopback connection pooling (BET-65)
+//
+// Global fetch (undici) opened a fresh 127.0.0.1:4096 socket per call that
+// lingered in TIME_WAIT; a list/reconcile sweep exhausted the loopback
+// ephemeral-port range (EADDRNOTAVAIL). ocFetch now routes through a shared
+// keep-alive http.Agent so sockets are reused. These guard the pool config and
+// the body-drain helper that keeps pooled sockets from being pinned open.
+// ---------------------------------------------------------------------------
+
+test("ocFetch keep-alive agent is a single module-scope instance", () => {
+  // Referential stability across calls — the pool must not be re-created per
+  // request (that would defeat reuse and re-introduce socket churn).
+  assert.equal(_getOcAgent(), _getOcAgent());
+});
+
+test("ocFetch agent is keep-alive and capped at 16 sockets", () => {
+  const agent = _getOcAgent();
+  assert.equal(agent.keepAlive, true, "agent must keep sockets alive for reuse");
+  assert.equal(agent.maxSockets, 16, "pool must be capped at 16 sockets");
+  assert.equal(agent.maxFreeSockets, 16, "free-socket cap should match maxSockets");
+});
+
+test("discardBody cancels an unread body (frees the pooled socket)", async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const res = new Response(body, { status: 500 });
+  await discardBody(res);
+  assert.equal(cancelled, true, "discardBody must cancel the response body");
+});
+
+test("discardBody is a no-op on a bodyless response (no throw)", async () => {
+  const res = new Response(null, { status: 204 });
+  await discardBody(res); // must not throw
+  assert.ok(true);
+});
+
+test("discardBody swallows errors on an already-consumed body", async () => {
+  const res = new Response("already read", { status: 500 });
+  await res.text(); // consume it
+  await discardBody(res); // cancelling a used body would throw — must be swallowed
+  assert.ok(true);
+});
+
+test("pooled ocFetch reuses one socket across sequential calls", async () => {
+  // A real local server: N sequential ocFetch calls must reuse a bounded
+  // number of sockets (not open N), proving the keep-alive pool works.
+  const { createServer } = await import("node:http");
+  const remotePorts = new Set();
+  const server = createServer((req, res) => {
+    remotePorts.add(req.socket.remotePort);
+    res.end("ok");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    for (let i = 0; i < 25; i++) {
+      const res = await _pooledOcRequest(base + "/x");
+      await res.text();
+    }
+    assert.ok(
+      remotePorts.size <= 2,
+      `expected sequential calls to reuse ~1 socket, saw ${remotePorts.size}`,
+    );
+  } finally {
+    server.close();
+  }
 });

@@ -10,12 +10,140 @@
 
 import { spawn as cpSpawn } from "node:child_process";
 import { homedir } from "node:os";
+import http from "node:http";
 
 const REMOTE_PORT = 4096;
 
 /** Build the full URL for an opencode API path. */
 export function apiUrl(path) {
   return `http://127.0.0.1:${REMOTE_PORT}${path}`;
+}
+
+// ===== Loopback connection pooling =====
+//
+// Node's global `fetch` (undici) opens a FRESH TCP socket to 127.0.0.1:4096
+// for every call and closes it when the response is consumed — each closed
+// socket lingers in TIME_WAIT. Under load (a reconcile/list sweep across many
+// sessions) this burst-creates thousands of one-shot sockets and can exhaust
+// the loopback ephemeral-port range → new connect() fails with EADDRNOTAVAIL.
+// Same class of bug as the desktop forwardFetch path (src/main/opencode.ts);
+// this side just hits opencode directly on the box instead of over an SSH
+// forward. There's no concurrency semaphore here (mobile fan-out is bounded by
+// a single client), so we just pool the sockets.
+//
+// http.Agent gives fetch a keep-alive pool so it reuses a bounded set of
+// sockets instead of burning one per call. maxSockets 16 matches the desktop
+// FORWARD_FETCH_MAX_CONCURRENCY for consistency. The SSE stream path
+// (openEventStream) deliberately does NOT use this agent — a long-lived
+// streaming body would pin a pool socket forever.
+const ocAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 10_000,
+  maxSockets: 16,
+  maxFreeSockets: 16,
+});
+
+/** Test-only accessor: assert the pool config / single-instance invariant. */
+export function _getOcAgent() {
+  return ocAgent;
+}
+
+// The transport ocFetch uses. Production = the pooled http.request impl below
+// (`pooledOcRequest`). Tests can swap in a `(url, init) => Promise<Response>`
+// stub via `_setOcTransport` so they intercept requests without a live server
+// (the old tests mocked globalThis.fetch, which the pooled path bypasses).
+let ocTransport = null; // lazily set to pooledOcRequest after it's defined
+
+/** Test-only: override the transport ocFetch dispatches through. Pass null to
+ *  restore the default pooled transport. */
+export function _setOcTransport(fn) {
+  ocTransport = fn;
+}
+
+/** Test-only: exercise the real pooled transport directly (bypasses any
+ *  installed test stub) so a socket-reuse test can hit a live local server. */
+export function _pooledOcRequest(url, init) {
+  return pooledOcRequest(url, init);
+}
+
+// A `fetch` replacement for opencode's NON-STREAMING endpoints that routes the
+// request through the keep-alive pool via node:http.request (or a test stub).
+//
+// NOTE: undici's global `fetch` does NOT honor the classic `agent` option (nor
+// can we pass a pooled undici `dispatcher` — the Node-bundled undici isn't a
+// resolvable module, so importing it would mean a new npm dependency). Verified
+// on this box: `fetch(url, { agent })` reuses undici's own default pool
+// regardless of the agent passed, so it can't be capped/controlled. So we issue
+// the request via http.request through our own http.Agent and adapt the
+// IncomingMessage into a WHATWG Response — every caller keeps using `.ok` /
+// `.status` / `.json()` / `.text()` unchanged. Same technique as the desktop
+// pooledRequest in src/main/opencode.ts.
+function ocFetch(url, init) {
+  return (ocTransport ?? pooledOcRequest)(url, init);
+}
+
+function pooledOcRequest(url, init) {
+  return new Promise((resolve, reject) => {
+    const method = (init?.method ?? "GET").toString();
+    const headers = {};
+    if (init?.headers) {
+      for (const [k, v] of Object.entries(init.headers)) headers[k] = String(v);
+    }
+    const req = http.request(url, { method, headers, agent: ocAgent }, (msg) => {
+      const body = new ReadableStream({
+        start(controller) {
+          msg.on("data", (chunk) => controller.enqueue(new Uint8Array(chunk)));
+          msg.on("end", () => {
+            try { controller.close(); } catch { /* already closed */ }
+          });
+          msg.on("error", (err) => {
+            try { controller.error(err); } catch { /* already errored */ }
+          });
+        },
+        cancel() {
+          // Return the socket to the pool promptly when the body is discarded.
+          msg.destroy();
+        },
+      });
+      const status = msg.statusCode ?? 0;
+      const resHeaders = new Headers();
+      for (const [k, v] of Object.entries(msg.headers)) {
+        if (Array.isArray(v)) {
+          for (const one of v) resHeaders.append(k, one);
+        } else if (typeof v === "string") {
+          resHeaders.set(k, v);
+        }
+      }
+      const nullBody = status === 204 || status === 205 || status === 304;
+      resolve(
+        new Response(nullBody ? null : body, {
+          status,
+          statusText: msg.statusMessage ?? "",
+          headers: resHeaders,
+        }),
+      );
+    });
+    req.on("error", reject);
+    const bodyInit = init?.body;
+    if (bodyInit != null && method !== "GET" && method !== "HEAD") {
+      req.write(bodyInit);
+    }
+    req.end();
+  });
+}
+
+// Drain-and-discard a response body without reading its content. With a
+// keep-alive pool, an UNCONSUMED body pins its socket open (undici won't
+// return it to the pool until read/cancelled), defeating reuse and
+// re-introducing the churn this fix removes. Every ocFetch caller that gets a
+// Response but returns/throws WITHOUT reading the body must call this on the
+// non-consuming exit. Safe on an already-consumed/bodyless Response.
+export async function discardBody(res) {
+  try {
+    await res?.body?.cancel();
+  } catch {
+    /* already consumed / locked / errored */
+  }
 }
 
 /**
@@ -81,8 +209,11 @@ let ensureStreamForDirectory = null;
 
 async function fetchSessionDirectory(sessionId) {
   try {
-    const res = await fetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
-    if (!res.ok) return null;
+    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
+    if (!res.ok) {
+      await discardBody(res);
+      return null;
+    }
     const body = await res.json();
     return typeof body?.directory === "string" ? body.directory : null;
   } catch {
@@ -152,7 +283,7 @@ function expandTilde(p) {
 export async function createSession({ directory, title = "" }) {
   const absDir = expandTilde(directory);
   const url = `/session?directory=${encodeURIComponent(absDir)}`;
-  const res = await fetch(apiUrl(url), {
+  const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ title }),
@@ -177,7 +308,7 @@ export async function listMessages(sessionId) {
   // mount; without it, only sending a prompt would open the stream.
   void getSessionDirectoryQuery(sessionId).catch(() => {});
   const url = `/session/${encodeURIComponent(sessionId)}/message`;
-  const res = await fetch(apiUrl(url));
+  const res = await ocFetch(apiUrl(url));
   if (!res.ok) {
     throw new Error(`opencode listMessages ${res.status}: ${await res.text()}`);
   }
@@ -192,8 +323,11 @@ export async function listMessages(sessionId) {
 export async function getMessage(sessionId, messageId) {
   try {
     const url = `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`;
-    const res = await fetch(apiUrl(url));
-    if (!res.ok) return null;
+    const res = await ocFetch(apiUrl(url));
+    if (!res.ok) {
+      await discardBody(res);
+      return null;
+    }
     return res.json();
   } catch {
     return null;
@@ -250,7 +384,7 @@ export async function sendPrompt({ sessionId, text, model, attachments, mentions
     if (model.variant) body.variant = model.variant;
   }
 
-  const res = await fetch(apiUrl(url), {
+  const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -273,7 +407,7 @@ export async function sendPrompt({ sessionId, text, model, attachments, mentions
 export async function abortSession(sessionId) {
   const dirQ = await getSessionDirectoryQuery(sessionId);
   const url = `/session/${encodeURIComponent(sessionId)}/abort${dirQ}`;
-  const res = await fetch(apiUrl(url), { method: "POST" });
+  const res = await ocFetch(apiUrl(url), { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode abortSession ${res.status}: ${await res.text()}`);
   }
@@ -284,7 +418,7 @@ export async function abortSession(sessionId) {
  */
 export async function listSessions(directory) {
   const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
-  const res = await fetch(apiUrl(`/session${qs}`));
+  const res = await ocFetch(apiUrl(`/session${qs}`));
   if (!res.ok) {
     throw new Error(`opencode listSessions ${res.status}: ${await res.text()}`);
   }
@@ -298,7 +432,7 @@ export async function listSessions(directory) {
 export async function forkSession({ sessionId, messageID }) {
   const dirQ = await getSessionDirectoryQuery(sessionId);
   const url = `/session/${encodeURIComponent(sessionId)}/fork${dirQ}`;
-  const res = await fetch(apiUrl(url), {
+  const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(messageID ? { messageID } : {}),
@@ -317,7 +451,7 @@ export async function forkSession({ sessionId, messageID }) {
 export async function compactSession(sessionId) {
   const dirQ = await getSessionDirectoryQuery(sessionId);
   const url = `/api/session/${encodeURIComponent(sessionId)}/compact${dirQ}`;
-  const res = await fetch(apiUrl(url), { method: "POST" });
+  const res = await ocFetch(apiUrl(url), { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode compactSession ${res.status}: ${await res.text()}`);
   }
@@ -330,7 +464,7 @@ export async function compactSession(sessionId) {
 export async function deleteSessionRaw(sessionId) {
   sessionDirectoryCache.delete(sessionId);
   const url = `/session/${encodeURIComponent(sessionId)}`;
-  const res = await fetch(apiUrl(url), { method: "DELETE" });
+  const res = await ocFetch(apiUrl(url), { method: "DELETE" });
   if (!res.ok) {
     throw new Error(`opencode deleteSession ${res.status}: ${await res.text()}`);
   }
@@ -353,7 +487,7 @@ export async function generateSessionTitle({ directory, instruction }) {
 
   let sid = null;
   try {
-    const createRes = await fetch(
+    const createRes = await ocFetch(
       apiUrl(`/session?directory=${encodeURIComponent(absDir)}`),
       {
         method: "POST",
@@ -361,14 +495,17 @@ export async function generateSessionTitle({ directory, instruction }) {
         body: JSON.stringify({ title: "bui-auto-title" }),
       },
     );
-    if (!createRes.ok) return "";
+    if (!createRes.ok) {
+      await discardBody(createRes);
+      return "";
+    }
     sid = (await createRes.json()).id;
 
     const promptBody = { parts: [{ type: "text", text: instruction }] };
     if (model) {
       promptBody.model = { providerID: model.providerID, modelID: model.modelID };
     }
-    const promptRes = await fetch(
+    const promptRes = await ocFetch(
       apiUrl(
         `/session/${encodeURIComponent(sid)}/prompt_async?directory=${encodeURIComponent(absDir)}`,
       ),
@@ -378,13 +515,19 @@ export async function generateSessionTitle({ directory, instruction }) {
         body: JSON.stringify(promptBody),
       },
     );
-    if (!promptRes.ok) return "";
+    if (!promptRes.ok) {
+      await discardBody(promptRes);
+      return "";
+    }
 
     const msgUrl = apiUrl(`/session/${encodeURIComponent(sid)}/message`);
     for (let i = 0; i < 30; i++) {
       await new Promise((r) => setTimeout(r, 1000));
-      const r = await fetch(msgUrl);
-      if (!r.ok) continue;
+      const r = await ocFetch(msgUrl);
+      if (!r.ok) {
+        await discardBody(r);
+        continue;
+      }
       const msgs = await r.json();
       const text = extractAssistantText(msgs);
       if (text) return text;
@@ -430,7 +573,7 @@ function extractAssistantText(msgs) {
  */
 export async function listPermissions(sessionId) {
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
-  const res = await fetch(apiUrl(`/permission${dirQ}`));
+  const res = await ocFetch(apiUrl(`/permission${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listPermissions ${res.status}: ${await res.text()}`);
   }
@@ -448,7 +591,7 @@ export async function listPermissions(sessionId) {
 export async function replyPermission({ requestId, reply, sessionId }) {
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
   const url = `/permission/${encodeURIComponent(requestId)}/reply${dirQ}`;
-  const res = await fetch(apiUrl(url), {
+  const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ reply }),
@@ -472,7 +615,7 @@ export async function replyPermission({ requestId, reply, sessionId }) {
  */
 export async function listQuestions(sessionId) {
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
-  const res = await fetch(apiUrl(`/question${dirQ}`));
+  const res = await ocFetch(apiUrl(`/question${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listQuestions ${res.status}: ${await res.text()}`);
   }
@@ -491,7 +634,7 @@ export async function listQuestions(sessionId) {
 export async function replyQuestion({ requestId, answers, sessionId }) {
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
   const url = `/question/${encodeURIComponent(requestId)}/reply${dirQ}`;
-  const res = await fetch(apiUrl(url), {
+  const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ answers }),
@@ -507,7 +650,7 @@ export async function replyQuestion({ requestId, answers, sessionId }) {
 export async function rejectQuestion({ requestId, sessionId }) {
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
   const url = `/question/${encodeURIComponent(requestId)}/reject${dirQ}`;
-  const res = await fetch(apiUrl(url), { method: "POST" });
+  const res = await ocFetch(apiUrl(url), { method: "POST" });
   if (!res.ok) {
     throw new Error(`opencode rejectQuestion ${res.status}: ${await res.text()}`);
   }
@@ -522,8 +665,11 @@ export async function rejectQuestion({ requestId, sessionId }) {
  * @returns {Promise<{ providerID: string, modelID: string }|null>}
  */
 export async function getDefaultModel() {
-  const res = await fetch(apiUrl("/provider"));
-  if (!res.ok) return null;
+  const res = await ocFetch(apiUrl("/provider"));
+  if (!res.ok) {
+    await discardBody(res);
+    return null;
+  }
   const data = await res.json();
   const connected = data.connected ?? [];
   const defaults = data.default ?? {};
@@ -542,7 +688,7 @@ export async function getDefaultModel() {
 export async function listModels() {
   const out = [];
   try {
-    const res = await fetch(apiUrl("/provider"));
+    const res = await ocFetch(apiUrl("/provider"));
     if (res.ok) {
       const data = await res.json();
       const connected = new Set(data.connected ?? []);
@@ -552,6 +698,8 @@ export async function listModels() {
           out.push(_normalizeProviderModel(p.id, modelId, (p.models ?? {})[modelId]));
         }
       }
+    } else {
+      await discardBody(res);
     }
   } catch {
     /* non-fatal */
@@ -625,7 +773,7 @@ export async function getVcsBranch(directory) {
  *  @returns {Promise<Array<{ name: string, description?: string, source?: string, ... }>>}
  */
 export async function listCommands() {
-  const res = await fetch(apiUrl("/command"));
+  const res = await ocFetch(apiUrl("/command"));
   if (!res.ok) {
     throw new Error(`opencode listCommands ${res.status}: ${await res.text()}`);
   }
@@ -645,7 +793,7 @@ export async function listCommands() {
  *  @returns {Promise<Array<{ name: string, description?: string, mode?: string, ... }>>}
  */
 export async function listAgents() {
-  const res = await fetch(apiUrl("/agent"));
+  const res = await ocFetch(apiUrl("/agent"));
   if (!res.ok) {
     throw new Error(`opencode listAgents ${res.status}: ${await res.text()}`);
   }
@@ -666,7 +814,7 @@ export async function listAgents() {
 export async function findFiles({ query, directory }) {
   const qs =
     `?query=${encodeURIComponent(query)}&directory=${encodeURIComponent(directory)}`;
-  const res = await fetch(apiUrl(`/find/file${qs}`));
+  const res = await ocFetch(apiUrl(`/find/file${qs}`));
   if (!res.ok) {
     throw new Error(`opencode findFiles ${res.status}: ${await res.text()}`);
   }
@@ -698,7 +846,7 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
     body.model = `${model.providerID}/${model.modelID}`;
     if (model.variant) body.variant = model.variant;
   }
-  const res = await fetch(apiUrl(url), {
+  const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),

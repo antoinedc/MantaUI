@@ -28,6 +28,7 @@
 // the wire. No OPENCODE_SERVER_PASSWORD configured.
 
 import { spawn as cpSpawn } from "node:child_process";
+import http from "node:http";
 import {
   runSshOnce,
   getBranch as getBranchSsh,
@@ -534,6 +535,170 @@ function releaseForwardSlot(): void {
 // whichever fires first.
 const FORWARD_FETCH_TIMEOUT_MS = 90_000;
 
+// ===== Loopback connection pooling =====
+//
+// Node's global `fetch` (undici) opens a FRESH TCP socket to
+// 127.0.0.1:<forward-port> for every call and closes it when the response is
+// consumed — each closed socket lingers in TIME_WAIT. A reconcile sweep across
+// many sessions burst-creates tens of thousands of these one-shot sockets and
+// exhausts the loopback ephemeral-port range, after which every new loopback
+// `connect()` fails with EADDRNOTAVAIL (and unrelated network calls surface
+// ERR_ADDRESS_INVALID). The semaphore above caps *concurrency* (mux-channel
+// exhaustion, a different problem) but NOT socket *churn*.
+//
+// Fix: route forwardFetch through a shared keep-alive http.Agent so it reuses a
+// bounded pool of sockets instead of burning one per call. We use node:http
+// (NOT undici) deliberately: on this box `require('undici')` and `node:undici`
+// both fail (undici is bundled inside Node, not a resolvable module), so a
+// pooled undici Agent would mean a new npm dependency + electron-vite external
+// wiring. This is loopback-only plain HTTP, so http.request is clean.
+//
+// maxSockets is kept ALIGNED with FORWARD_FETCH_MAX_CONCURRENCY: the semaphore
+// never lets more than that many requests be in flight, so the pool never needs
+// more sockets, and keeping them equal stops the two mechanisms from fighting.
+const forwardAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 10_000,
+  maxSockets: FORWARD_FETCH_MAX_CONCURRENCY,
+  maxFreeSockets: FORWARD_FETCH_MAX_CONCURRENCY,
+});
+
+// Test-only accessor so the pool config can be asserted without reaching into
+// module internals (regression guard: pool must not silently outgrow the
+// semaphore, and must be a single module-scope instance).
+export function _getForwardAgent(): http.Agent {
+  return forwardAgent;
+}
+
+// Drain-and-discard a response body without caring about its content. With a
+// keep-alive pool, an UNCONSUMED body pins its socket open forever (undici
+// won't return it to the pool until the body is read/cancelled), which defeats
+// reuse and re-introduces the churn/leak this fix removes. Every forwardFetch
+// caller that gets a Response but returns/throws WITHOUT reading the body must
+// call this on the non-consuming exit. Safe to call on an already-consumed or
+// bodyless Response (no throw).
+export async function discardBody(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    /* already consumed / locked / errored — nothing to drain */
+  }
+}
+
+// Issue a loopback HTTP request through the shared keep-alive agent and adapt
+// node:http's IncomingMessage into a WHATWG Response so every existing
+// forwardFetch caller (which reads `.ok` / `.status` / `.json()` / `.text()` /
+// `.body`) keeps working unchanged.
+function pooledRequest(
+  url: string,
+  init: Parameters<typeof fetch>[1] | undefined,
+  signal: AbortSignal,
+): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    const method = (init?.method ?? "GET").toString();
+    const headers: Record<string, string> = {};
+    if (init?.headers) {
+      // Only plain object / Headers shapes are used on this path today.
+      const h = init.headers as Record<string, string> | Headers;
+      if (typeof (h as Headers).forEach === "function" && !Array.isArray(h)) {
+        (h as Headers).forEach((v, k) => {
+          headers[k] = v;
+        });
+      } else {
+        for (const [k, v] of Object.entries(h as Record<string, string>)) {
+          headers[k] = String(v);
+        }
+      }
+    }
+
+    if (signal.aborted) {
+      reject(signalReason(signal));
+      return;
+    }
+
+    const req = http.request(
+      url,
+      { method, headers, agent: forwardAgent },
+      (msg: http.IncomingMessage) => {
+        // Adapt the streaming IncomingMessage into a WHATWG ReadableStream so
+        // `.json()` / `.text()` / `.body` all work on the returned Response.
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            msg.on("data", (chunk: Buffer) => {
+              controller.enqueue(new Uint8Array(chunk));
+            });
+            msg.on("end", () => {
+              try {
+                controller.close();
+              } catch {
+                /* already closed */
+              }
+            });
+            msg.on("error", (err) => {
+              try {
+                controller.error(err);
+              } catch {
+                /* already errored */
+              }
+            });
+          },
+          cancel() {
+            // Body cancelled (discardBody / caller stopped reading): destroy the
+            // response so the socket returns to the keep-alive pool promptly.
+            msg.destroy();
+          },
+        });
+
+        const status = msg.statusCode ?? 0;
+        const resHeaders = new Headers();
+        for (const [k, v] of Object.entries(msg.headers)) {
+          if (Array.isArray(v)) {
+            for (const one of v) resHeaders.append(k, one);
+          } else if (typeof v === "string") {
+            resHeaders.set(k, v);
+          }
+        }
+        // 204/205/304 must not carry a body per the Response constructor.
+        const nullBody = status === 204 || status === 205 || status === 304;
+        resolve(
+          new Response(nullBody ? null : body, {
+            status,
+            statusText: msg.statusMessage ?? "",
+            headers: resHeaders,
+          }),
+        );
+      },
+    );
+
+    const onAbort = () => {
+      req.destroy(signalReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    req.on("error", (err) => {
+      signal.removeEventListener("abort", onAbort);
+      reject(err);
+    });
+    req.on("close", () => {
+      signal.removeEventListener("abort", onAbort);
+    });
+
+    const bodyInit = init?.body;
+    if (bodyInit != null && method !== "GET" && method !== "HEAD") {
+      // JSON bodies are strings today; Buffer/Uint8Array also pass through.
+      req.write(bodyInit as string | Buffer | Uint8Array);
+    }
+    req.end();
+  });
+}
+
+function signalReason(signal: AbortSignal): Error {
+  const reason = (signal as { reason?: unknown }).reason;
+  if (reason instanceof Error) return reason;
+  const err = new Error("The operation was aborted");
+  err.name = "AbortError";
+  return err;
+}
+
 async function forwardFetch(
   url: string,
   init?: Parameters<typeof fetch>[1],
@@ -544,7 +709,7 @@ async function forwardFetch(
     ? AbortSignal.any([init.signal, timeoutSignal])
     : timeoutSignal;
   try {
-    return await fetch(url, { ...init, signal });
+    return await pooledRequest(url, init, signal);
   } finally {
     releaseForwardSlot();
   }
@@ -643,7 +808,10 @@ async function fetchSessionDirectory(
   await ensureForward(config);
   try {
     const res = await forwardFetch(apiUrl(config, `/session/${encodeURIComponent(sessionId)}`));
-    if (!res.ok) return null;
+    if (!res.ok) {
+      await discardBody(res);
+      return null;
+    }
     const body = (await res.json()) as { directory?: unknown };
     return typeof body.directory === "string" ? body.directory : null;
   } catch {
@@ -802,7 +970,10 @@ export async function getMessage(
       `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`,
     );
     const res = await forwardFetch(url);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      await discardBody(res);
+      return null;
+    }
     return (await res.json()) as OpencodeMessage;
   } catch {
     return null;
@@ -859,7 +1030,10 @@ export async function reconcileMessages(
       `/session/${encodeURIComponent(sessionId)}/message?limit=${RECONCILE_TAIL_LIMIT}`,
     );
     const res = await forwardFetch(url);
-    if (!res.ok) return listMessages(config, sessionId);
+    if (!res.ok) {
+      await discardBody(res);
+      return listMessages(config, sessionId);
+    }
     tail = (await res.json()) as OpencodeMessage[];
   } catch {
     // Tail fetch failed — fall back to full (which itself may throw; let it,
@@ -1198,13 +1372,18 @@ export async function getDefaultModel(
           modelID: cfg.model.slice(slash + 1),
         };
       }
+    } else {
+      await discardBody(cfgRes);
     }
   } catch {
     /* fall through to provider catalog default */
   }
 
   const res = await forwardFetch(apiUrl(config, "/provider"));
-  if (!res.ok) return null;
+  if (!res.ok) {
+    await discardBody(res);
+    return null;
+  }
   type R = { connected?: string[]; default?: Record<string, string> };
   const data = (await res.json()) as R;
   const connected = data.connected ?? [];
@@ -1262,6 +1441,8 @@ export async function listModels(config: AppConfig): Promise<OpencodeModel[]> {
           out.push(normalizeProviderModel(p.id, modelId, (p.models ?? {})[modelId]));
         }
       }
+    } else {
+      await discardBody(res);
     }
   } catch {
     /* non-fatal */
