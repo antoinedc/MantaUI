@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
+import { PairingQR, PairingCountdown } from "./PairingQR";
 import type {
+  AuthPairResult,
   BootstrapResult,
   OpencodeModel,
   ProbeCheck,
@@ -83,6 +85,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [groqKey, setGroqKey] = useState(groqApiKey);
   const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
   const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
+  // Mobile pairing — one-time code minted on demand. The QR encodes
+  // `bui://pair?id=<boxId>&token=<pairingCode>`; the mobile app scans this to
+  // auto-connect. `pairing` is null until the user clicks "Generate code".
+  // `pairingExpiry` is a Date parsed from the server's expiresAt ISO string,
+  // used to compute the remaining seconds for the countdown UI.
+  const [pairing, setPairing] = useState<AuthPairResult | null>(null);
+  const [pairingExpiry, setPairingExpiry] = useState<Date | null>(null);
+  const [pairingMinting, setPairingMinting] = useState(false);
 
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>("connection");
@@ -161,6 +171,27 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
   const removeRegistryUrl = (url: string) => {
     setRegistryUrls(registryUrls.filter((u) => u !== url));
+  };
+
+  // Mint a one-time pairing code for mobile device pairing. The code is valid
+  // for ~5 minutes (server-enforced); the UI shows a countdown. A new code
+  // supersedes any prior code (the server invalidates the old one).
+  const mintPairingCode = async () => {
+    setPairingMinting(true);
+    try {
+      const result = await window.api.authPair();
+      setPairing(result);
+      if (result.ok) {
+        const expiresAt = new Date(result.expiresAt);
+        setPairingExpiry(expiresAt);
+      }
+    } catch (e) {
+      // Should not happen — authPair returns { ok:false, error } for failures.
+      // But guard against IPC layer crashes.
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPairingMinting(false);
+    }
   };
 
   const runProbe = async () => {
@@ -442,6 +473,66 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     {restoring ? "Restoring…" : "Restore previous"}
                   </button>
                 </div>
+              </div>
+
+              {/* Mobile pairing (BET-80): generate a QR code the mobile app can scan
+                  to auto-connect. The QR encodes `bui://pair?id=<boxId>&token=<code>`.
+                  The code is one-time, valid for ~5 minutes. A new code supersedes
+                  any prior code. */}
+              <div className="border-t border-border pt-6">
+                <h3 className="text-base font-semibold mb-4">Pair phone</h3>
+                <div className="text-sm text-text-faint mb-4">
+                  Scan this QR with the BUI mobile app to connect it to your box. The
+                  code is one-time and valid for ~5 minutes. Generate a new code if the
+                  old one expires.
+                </div>
+                {!pairing ? (
+                  <button
+                    onClick={mintPairingCode}
+                    disabled={pairingMinting || !h}
+                    className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {pairingMinting ? "Generating…" : "Generate pairing code"}
+                  </button>
+                ) : pairing.ok ? (
+                  <div className="space-y-4">
+                    <div className="flex items-start gap-4">
+                      {/* QR code container — rendered as an <img> from the QR data URL. */}
+                      <div className="bg-white p-2 rounded border border-border shrink-0">
+                        <PairingQR
+                          boxId={pairing.boxId}
+                          pairingCode={pairing.pairingCode}
+                        />
+                      </div>
+                      <div className="flex-1 space-y-2">
+                        <div className="text-sm">
+                          <span className="text-text-muted">Code:</span>{" "}
+                          <span className="font-mono text-text">{pairing.pairingCode}</span>
+                        </div>
+                        <div className="text-sm">
+                          <span className="text-text-muted">Box ID:</span>{" "}
+                          <span className="font-mono text-text break-all" title={pairing.boxId}>
+                            {pairing.boxId}
+                          </span>
+                        </div>
+                        {pairingExpiry && (
+                          <PairingCountdown expiry={pairingExpiry} />
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={mintPairingCode}
+                      disabled={pairingMinting}
+                      className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {pairingMinting ? "Generating…" : "Refresh code"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="text-sm text-red-400">
+                    {pairing.error}
+                  </div>
+                )}
               </div>
 
               <div className="border-t border-border pt-6">

@@ -3,6 +3,7 @@ import { join, basename } from "node:path";
 import { watch as fsWatch } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { request as httpRequest } from "node:http";
 import { loadConfig, saveConfig } from "./config.js";
 import {
   killAll,
@@ -73,6 +74,8 @@ import {
   eventTunnelRestart,
   teardownEventTunnel,
   restartOpencode,
+  ensurePresenceForward,
+  PRESENCE_LOCAL_PORT,
   type PromptModel,
   type PromptAttachment,
   type PromptAgentMention,
@@ -129,11 +132,26 @@ import {
   type AppConfig,
   type AgentFileReady,
   type AuthClaimInput,
+  type AuthPairResult,
   type Project,
   type ProjectMeta,
   type SpawnOptions,
   type ProviderInput,
 } from "../shared/types.js";
+
+// Parse a non-2xx /auth/pair response body into a user-facing error string.
+// The server returns { error: "..." } for 403 (not loopback), 429 (rate limit),
+// and 5xx (server error). We extract the `error` field if present, otherwise
+// fall back to a generic message.
+function tryParsePairError(raw: string): string | null {
+  try {
+    const body = JSON.parse(raw);
+    if (body && typeof body.error === "string") return body.error;
+  } catch {
+    /* not JSON — fall through */
+  }
+  return null;
+}
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -1251,6 +1269,74 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.authClaim, (_e, input: AuthClaimInput) =>
     claimPairing(input, (patch) => commit(patch)),
   );
+
+  // Mobile pairing code mint (BET-80): GET /auth/pair over the SSH tunnel.
+  // Returns { pairingCode, boxId, expiresAt } for the desktop to render as a
+  // QR. The /auth/pair endpoint is loopback-only on the server side, so we
+  // route through the existing -L 18787 forward (which terminates on the box
+  // as a local-direct request). No Bearer token needed — /auth/pair is
+  // exempt from the auth gate.
+  ipcMain.handle(IPC.authPair, async () => {
+    const cfg = config;
+    if (!cfg.host) return { ok: false as const, error: "not connected" };
+    try {
+      await ensurePresenceForward(cfg);
+    } catch {
+      return { ok: false as const, error: "SSH tunnel unavailable" };
+    }
+    return new Promise<AuthPairResult>((resolve) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: PRESENCE_LOCAL_PORT,
+          path: "/auth/pair",
+          method: "GET",
+          timeout: 4000,
+        },
+        (res) => {
+          let raw = "";
+          res.setEncoding("utf-8");
+          res.on("data", (c) => (raw += c));
+          res.on("end", () => {
+            if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+              const msg = tryParsePairError(raw);
+              resolve({ ok: false, error: msg || `server ${res.statusCode}` });
+              return;
+            }
+            try {
+              const body = JSON.parse(raw) as {
+                pairing_code?: string;
+                box_id?: string;
+                expiresAt?: string;
+              };
+              if (
+                typeof body.pairing_code === "string" &&
+                typeof body.box_id === "string" &&
+                typeof body.expiresAt === "string"
+              ) {
+                resolve({
+                  ok: true,
+                  pairingCode: body.pairing_code,
+                  boxId: body.box_id,
+                  expiresAt: body.expiresAt,
+                });
+              } else {
+                resolve({ ok: false, error: "unexpected response shape" });
+              }
+            } catch {
+              resolve({ ok: false, error: "bad JSON from server" });
+            }
+          });
+        },
+      );
+      req.on("error", () => resolve({ ok: false, error: "server unreachable" }));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve({ ok: false, error: "server timed out" });
+      });
+      req.end();
+    });
+  });
 
   // Voice / speech-to-text via Groq. Audio bytes are captured by the
   // renderer (MediaRecorder) and shipped here so the API key never lives
