@@ -1,4 +1,4 @@
-// SessionDetailScreen.tsx — the read-only live transcript view (M3.5-1 bar).
+// SessionDetailScreen.tsx — the live transcript + interactive session view.
 //
 // Pushed from a SessionListScreen chat-row tap. On mount it fetches the
 // session's transcript from the box's `opencode:messages` channel and opens the
@@ -7,15 +7,20 @@
 // flips the running indicator. Renders a FlatList of message rows (user /
 // assistant text / tool-call summaries) with pin-to-bottom and pull-to-refresh.
 //
-// READ-ONLY in this slice — no composer / prompt sending (that's stage 2). All
-// transcript/event LOGIC lives in the pure ../pure/transcript + ../pure/events
-// modules; this component owns fetch + socket + render.
+// M3.5-2 adds interactivity: a Composer to send prompts (opencode:prompt) with
+// an optimistic user row + abort, and Permission/Question cards driven by the
+// same /events subscription (permission.asked / question.asked) so a turn that
+// blocks on the box can be answered from the phone. All decision LOGIC lives in
+// the pure ../pure/{transcript,events,composer,interaction} modules; this
+// component owns fetch + socket + render.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
   FlatList,
+  KeyboardAvoidingView,
+  Platform,
   RefreshControl,
   StyleSheet,
   Text,
@@ -23,7 +28,17 @@ import {
 } from "react-native";
 
 import type { RootStackParamList } from "../../App";
-import { AuthRequiredError, fetchTranscript } from "../api/pairingApi";
+import {
+  AuthRequiredError,
+  abortSession,
+  fetchPermissions,
+  fetchQuestions,
+  fetchTranscript,
+  rejectQuestion,
+  replyPermission,
+  replyQuestion,
+  sendPrompt,
+} from "../api/pairingApi";
 import { clearCredentials } from "../api/credentials";
 import { subscribeOpencodeEvents } from "../api/eventsClient";
 import {
@@ -31,6 +46,16 @@ import {
   type MessageRowVM,
   type TranscriptVM,
 } from "../pure/transcript";
+import {
+  applyPermissionEvent,
+  applyQuestionEvent,
+  type PermissionReply,
+  type PermissionVM,
+  type QuestionVM,
+} from "../pure/interaction";
+import { Composer } from "./Composer";
+import { PermissionCard } from "./cards/PermissionCard";
+import { QuestionCard } from "./cards/QuestionCard";
 import { colors } from "../theme";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Session">;
@@ -45,6 +70,13 @@ export function SessionDetailScreen({ navigation, route }: Props) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Pending interaction cards, driven by the /events subscription + a mount
+  // hydrate (an ask fired before we attached is recoverable via the list RPC).
+  const [permissions, setPermissions] = useState<PermissionVM[]>([]);
+  const [questions, setQuestions] = useState<QuestionVM[]>([]);
+  // A card whose reply is in flight — disables its buttons to prevent a
+  // double-submit while the round-trip is outstanding.
+  const [busyCardId, setBusyCardId] = useState<string | null>(null);
 
   const listRef = useRef<FlatList<MessageRowVM>>(null);
   // Pin-to-bottom latch: only auto-scroll when the user is already near the
@@ -73,6 +105,10 @@ export function SessionDetailScreen({ navigation, route }: Props) {
           sessionId,
         );
         setVm(next);
+        // Recover any interaction cards that fired before we attached. These
+        // are best-effort — a failure here must not blank the transcript, so
+        // they're swallowed (the live event stream is the primary path).
+        void hydrateCards();
       } catch (e) {
         if (e instanceof AuthRequiredError) {
           await clearCredentials();
@@ -90,6 +126,23 @@ export function SessionDetailScreen({ navigation, route }: Props) {
     [credentials.serverUrl, credentials.boxToken, sessionId, navigation],
   );
 
+  // Best-effort hydrate of pending permission/question cards on (re)attach.
+  // Never throws — a live ask that arrived before mount is recovered here; the
+  // live event stream keeps them fresh afterward.
+  const hydrateCards = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const [perms, qs] = await Promise.all([
+        fetchPermissions(credentials.serverUrl, credentials.boxToken, sessionId),
+        fetchQuestions(credentials.serverUrl, credentials.boxToken, sessionId),
+      ]);
+      setPermissions(perms);
+      setQuestions(qs);
+    } catch {
+      /* card hydrate is non-fatal — the /events stream is the primary path */
+    }
+  }, [credentials.serverUrl, credentials.boxToken, sessionId]);
+
   // Initial fetch.
   useEffect(() => {
     void load("initial");
@@ -103,11 +156,19 @@ export function SessionDetailScreen({ navigation, route }: Props) {
       credentials.boxToken,
       sessionId,
       (ev) => {
-        // Cheap live edits (delta append, running flag) apply in place. Other
-        // events (new parts, tool state, message.updated) are covered by the
-        // canonical text the next delta/refresh carries; a full re-fetch on
-        // every event would thrash the list, so we keep it lean here.
+        // Cheap transcript edits (delta append, running flag) apply in place.
         setVm((prev) => applyOpencodeEvent(prev, ev));
+        // Interaction cards appear/clear live off the same stream.
+        const props = ev.properties ?? undefined;
+        if (ev.type.startsWith("permission.")) {
+          setPermissions((prev) =>
+            applyPermissionEvent(prev, ev.type, props, sessionId),
+          );
+        } else if (ev.type.startsWith("question.")) {
+          setQuestions((prev) =>
+            applyQuestionEvent(prev, ev.type, props, sessionId),
+          );
+        }
       },
     );
     return () => sub.close();
@@ -126,6 +187,134 @@ export function SessionDetailScreen({ navigation, route }: Props) {
     return undefined;
   }, [vm.rows]);
 
+  // ---- Interaction handlers ----
+
+  // Send a prompt. Optimistically append a user row + flip running so the UI
+  // reacts instantly; the canonical rows arrive over the event stream. On a
+  // send failure we surface an error and clear the optimistic running flag (the
+  // optimistic user row is left — it matches what the user typed).
+  const handleSend = useCallback(
+    async (text: string) => {
+      atBottomRef.current = true;
+      setVm((prev) => ({
+        rows: [
+          ...prev.rows,
+          {
+            key: `optimistic-${Date.now()}`,
+            role: "user",
+            text,
+            tools: [],
+            createdAt: Date.now(),
+          },
+        ],
+        running: true,
+      }));
+      try {
+        await sendPrompt(credentials.serverUrl, credentials.boxToken, sessionId, text);
+      } catch (e) {
+        if (e instanceof AuthRequiredError) {
+          await clearCredentials();
+          navigation.replace("Pairing");
+          return;
+        }
+        setVm((prev) => ({ ...prev, running: false }));
+        setError(e instanceof Error ? e.message : "Couldn't send. Try again.");
+      }
+    },
+    [credentials.serverUrl, credentials.boxToken, sessionId, navigation],
+  );
+
+  const handleAbort = useCallback(async () => {
+    try {
+      await abortSession(credentials.serverUrl, credentials.boxToken, sessionId);
+      setVm((prev) => ({ ...prev, running: false }));
+    } catch (e) {
+      if (e instanceof AuthRequiredError) {
+        await clearCredentials();
+        navigation.replace("Pairing");
+      }
+      /* other abort errors are benign — the idle event will settle running */
+    }
+  }, [credentials.serverUrl, credentials.boxToken, sessionId, navigation]);
+
+  const handlePermissionReply = useCallback(
+    async (perm: PermissionVM, reply: PermissionReply) => {
+      setBusyCardId(perm.id);
+      try {
+        await replyPermission(
+          credentials.serverUrl,
+          credentials.boxToken,
+          perm.requestId,
+          reply,
+          sessionId,
+        );
+        // Optimistically clear; the permission.replied event also clears it.
+        setPermissions((prev) => prev.filter((p) => p.id !== perm.id));
+      } catch (e) {
+        if (e instanceof AuthRequiredError) {
+          await clearCredentials();
+          navigation.replace("Pairing");
+          return;
+        }
+        setError(e instanceof Error ? e.message : "Couldn't send the reply.");
+      } finally {
+        setBusyCardId(null);
+      }
+    },
+    [credentials.serverUrl, credentials.boxToken, sessionId, navigation],
+  );
+
+  const handleQuestionReply = useCallback(
+    async (q: QuestionVM, answers: string[][]) => {
+      setBusyCardId(q.id);
+      try {
+        await replyQuestion(
+          credentials.serverUrl,
+          credentials.boxToken,
+          q.requestId,
+          answers,
+          sessionId,
+        );
+        setQuestions((prev) => prev.filter((x) => x.id !== q.id));
+      } catch (e) {
+        if (e instanceof AuthRequiredError) {
+          await clearCredentials();
+          navigation.replace("Pairing");
+          return;
+        }
+        setError(e instanceof Error ? e.message : "Couldn't send the answer.");
+      } finally {
+        setBusyCardId(null);
+      }
+    },
+    [credentials.serverUrl, credentials.boxToken, sessionId, navigation],
+  );
+
+  const handleQuestionReject = useCallback(
+    async (q: QuestionVM) => {
+      setBusyCardId(q.id);
+      try {
+        await rejectQuestion(
+          credentials.serverUrl,
+          credentials.boxToken,
+          q.requestId,
+          sessionId,
+        );
+        setQuestions((prev) => prev.filter((x) => x.id !== q.id));
+      } catch (e) {
+        if (e instanceof AuthRequiredError) {
+          await clearCredentials();
+          navigation.replace("Pairing");
+          return;
+        }
+        setError(e instanceof Error ? e.message : "Couldn't dismiss the question.");
+      } finally {
+        setBusyCardId(null);
+      }
+    },
+    [credentials.serverUrl, credentials.boxToken, sessionId, navigation],
+  );
+
   if (loading) {
     return (
       <View style={styles.center}>
@@ -135,7 +324,10 @@ export function SessionDetailScreen({ navigation, route }: Props) {
   }
 
   return (
-    <View style={styles.screen}>
+    <KeyboardAvoidingView
+      style={styles.screen}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
       {vm.running && (
         <View style={styles.runningBar}>
           <ActivityIndicator color={colors.accent} size="small" />
@@ -169,7 +361,35 @@ export function SessionDetailScreen({ navigation, route }: Props) {
         renderItem={({ item }) => <MessageRow row={item} />}
       />
       {error && vm.rows.length > 0 && <Text style={styles.errorBar}>{error}</Text>}
-    </View>
+
+      {/* Interaction cards stack above the composer: permissions first (they
+          block the turn hardest), then questions. */}
+      {permissions.map((perm) => (
+        <PermissionCard
+          key={perm.id}
+          perm={perm}
+          busy={busyCardId === perm.id}
+          onReply={(reply) => void handlePermissionReply(perm, reply)}
+        />
+      ))}
+      {questions.map((q) => (
+        <QuestionCard
+          key={q.id}
+          request={q}
+          busy={busyCardId === q.id}
+          onReply={(answers) => void handleQuestionReply(q, answers)}
+          onReject={() => void handleQuestionReject(q)}
+        />
+      ))}
+
+      {sessionId ? (
+        <Composer
+          running={vm.running}
+          onSend={(text) => void handleSend(text)}
+          onAbort={() => void handleAbort()}
+        />
+      ) : null}
+    </KeyboardAvoidingView>
   );
 }
 
