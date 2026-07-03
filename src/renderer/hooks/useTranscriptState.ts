@@ -23,6 +23,8 @@ import {
   findFlushBoundary,
   mergeBufferedDeltas,
   collectChildSessionIds,
+  wasAtBottomBeforeCommit,
+  classifyScrollForPin,
   type PendingDelta,
 } from "../chatUtils";
 
@@ -261,7 +263,7 @@ export function useTranscriptState(params: {
     if (!el) return;
     const onScroll = () => {
       const { scrollHeight, scrollTop, clientHeight } = el;
-      pinnedToBottom.current = scrollHeight - scrollTop - clientHeight <= 8;
+      pinnedToBottom.current = classifyScrollForPin({ scrollHeight, scrollTop, clientHeight });
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => {
@@ -275,12 +277,24 @@ export function useTranscriptState(params: {
     pinnedToBottom.current = true;
   }, [sessionId]);
 
-  // Post-commit stick layout effect
+  // Post-commit stick layout effect. The stick decision MUST compare the user's
+  // pre-commit position against the PREVIOUS render's height (prevScrollHeight),
+  // not the live post-commit el.scrollHeight — by the time this layout effect
+  // runs React has already appended the new rows, so el.scrollHeight is the new
+  // (taller) height while el.scrollTop is still the user's old position.
+  // Measuring against the grown height reports a false large "distance from
+  // bottom" for a user sitting AT the tail, so it declines to stick — the v3
+  // regression PR #50 reintroduced. wasAtBottomBeforeCommit() is the single
+  // source of truth for this (tested in chatUtils.test.ts). Do NOT inline
+  // el.scrollHeight here.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const wasPinned = prevScrollHeight.current === 0 ||
-      (el.scrollHeight - el.scrollTop - el.clientHeight) <= 8;
+    const wasPinned = wasAtBottomBeforeCommit(
+      prevScrollHeight.current,
+      el.scrollTop,
+      el.clientHeight,
+    );
     if (wasPinned) {
       el.scrollTop = el.scrollHeight;
       pinnedToBottom.current = true;
