@@ -82,8 +82,10 @@ export function subscribeOpencodeEvents(
   const createSocket =
     opts.createSocket ??
     ((url: string) => new WebSocket(url) as unknown as WebSocketLike);
-  const setTimeoutFn = opts.setTimeoutFn ?? setTimeout;
-  const clearTimeoutFn = opts.clearTimeoutFn ?? clearTimeout;
+  const setTimeoutFn: (fn: () => void, ms: number) => unknown =
+    opts.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimeoutFn: (handle: unknown) => void =
+    opts.clearTimeoutFn ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
 
   let closedByCaller = false;
   let attempt = 0;

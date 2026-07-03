@@ -75,9 +75,9 @@ describe("subscribeOpencodeEvents", () => {
 
   it("reconnects after an unexpected close, using the injected timer", () => {
     FakeSocket.instances = [];
-    let scheduled: (() => void) | null = null;
+    const scheduledRef: { fn: (() => void) | null } = { fn: null };
     const setTimeoutFn = vi.fn((fn: () => void) => {
-      scheduled = fn;
+      scheduledRef.fn = fn;
       return 1;
     });
     const sub = subscribeOpencodeEvents("http://box", "t", "s1", () => {}, {
@@ -92,7 +92,7 @@ describe("subscribeOpencodeEvents", () => {
     expect(setTimeoutFn).toHaveBeenCalledWith(expect.any(Function), 10);
 
     // Fire the scheduled retry → a second socket is created.
-    scheduled?.();
+    scheduledRef.fn?.();
     expect(FakeSocket.instances).toHaveLength(2);
     sub.close();
   });
