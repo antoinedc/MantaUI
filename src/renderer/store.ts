@@ -109,6 +109,14 @@ type State = {
   // dismiss clear it globally. In auto-pull (trust) mode it's informational
   // (autoPulled:true, localPath set); otherwise it's a Save/dismiss prompt.
   agentFileToast: AgentFileReady | null;
+  // Single global auto-update prompt. Set when main pushes an
+  // updateDownloaded event (electron-updater finished downloading a new
+  // version). The renderer shows a "Restart to update" bar; clicking it
+  // calls autoUpdateInstall which quits + reinstalls. Dismissed by the ×
+  // button (clears the state — the bar won't reappear until the next
+  // updateDownloaded event). Guarded — the mobile httpApi shim's
+  // onAutoUpdate* are no-ops, so this is desktop-only.
+  updatePrompt: { version: string; releaseName?: string } | null;
   // ----- derived selectors -----
   activeSession: () => ActiveSession | null;
   // A minimal AppConfig-shaped snapshot of the onboarding-relevant fields,
@@ -182,6 +190,7 @@ type State = {
   setAutoRenameSessions: (v: boolean) => Promise<void>;
   setScreenshotToast: (t: ScreenshotToast | null) => void;
   setAgentFileToast: (t: AgentFileReady | null) => void;
+  setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -214,6 +223,7 @@ export const useStore = create<State>((set, get) => ({
   status: {},
   screenshotToast: null,
   agentFileToast: null,
+  updatePrompt: null,
 
   configSnapshot: () => {
     const s = get();
@@ -353,6 +363,7 @@ export const useStore = create<State>((set, get) => ({
 
   setScreenshotToast: (t) => set({ screenshotToast: t }),
   setAgentFileToast: (t) => set({ agentFileToast: t }),
+  setUpdatePrompt: (p) => set({ updatePrompt: p }),
 
   applyStatusBatch: (batch) =>
     set((prev) => {
