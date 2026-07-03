@@ -22,9 +22,6 @@ import type {
   OpencodeModel,
   PermissionRequest,
   QuestionRequest,
-  ScheduledJob,
-  SecretMeta,
-  WebhookMeta,
 } from "../shared/types";
 import { useStore } from "./store";
 import {
@@ -72,7 +69,6 @@ import {
 } from "./chatUtils";
 import {
   CLAUDE_ORANGE,
-  TaskContext,
   findLast,
   guessMime,
   mimeToInputMode,
@@ -88,10 +84,13 @@ import {
   type TypeaheadRow,
   type TypeaheadState,
 } from "./chatShared";
-import { ActiveTodos, MessageRow, RunningIndicator } from "./MessageRow";
-import { CompactionCard, PermissionCard, QuestionCard, RetryCard } from "./Cards";
+import { RunningIndicator } from "./MessageRow";
+import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
-import { AttachmentStrip, InputArea, TypeaheadPopup } from "./InputArea";
+import { useSessionResources } from "./hooks/useSessionResources";
+import { useInputHistory } from "./hooks/useInputHistory";
+import { Transcript } from "./Transcript";
+import { Composer } from "./Composer";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
@@ -172,64 +171,34 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Reasoning ("Thinking…") visibility — hidden by default to keep the
   // transcript focused on results. Ctrl+O toggles like Claude Code's TUI.
   const [showThinking, setShowThinking] = useState(false);
-  // Scheduled-prompt management (the ⏰ ScheduledTasksCard). Jobs are
-  // server-owned (bui-server fires them); here we only list + delete via the
-  // schedule:* window.api channels. Refetch-driven (open + open-poll + post-
-  // delete) — NOT a bus event, because desktop's renderer isn't wired to the
-  // server bus. See docs/bui-tools-scheduler.md.
-  const [showSchedules, setShowSchedules] = useState(false);
-  const [schedules, setSchedules] = useState<ScheduledJob[]>([]);
-  const [scheduleError, setScheduleError] = useState<string | null>(null);
-  const refreshSchedules = useCallback(() => {
-    return window.api
-      .scheduleList(sessionId)
-      .then((jobs: ScheduledJob[]) => {
-        setSchedules(Array.isArray(jobs) ? jobs : []);
-        setScheduleError(null);
-      })
-      .catch((e: unknown) => {
-        setScheduleError(e instanceof Error ? e.message : "schedule server unreachable");
-      });
-  }, [sessionId]);
-  // Secrets management (the 🔑 SecretsCard). Secrets are server-owned (the
-  // value never leaves the box; the AI reads them via the secret_* opencode
-  // tools). Here the user adds/edits/deletes via secrets:* window.api channels.
-  // list returns METADATA ONLY (no values). Refetch-driven like schedules.
-  // The card shows shared secrets + this session's scoped ones (sessionId is
-  // passed so the agent-visible view matches what tools will resolve).
-  const [showSecrets, setShowSecrets] = useState(false);
-  const [secrets, setSecrets] = useState<SecretMeta[]>([]);
-  const [secretError, setSecretError] = useState<string | null>(null);
-  const refreshSecrets = useCallback(() => {
-    return window.api
-      .secretsList(sessionId)
-      .then((list: SecretMeta[]) => {
-        setSecrets(Array.isArray(list) ? list : []);
-        setSecretError(null);
-      })
-      .catch((e: unknown) => {
-        setSecretError(e instanceof Error ? e.message : "secrets server unreachable");
-      });
-  }, [sessionId]);
-  // Inbound-webhook management (the 🪝 WebhooksCard). Hooks are server-owned
-  // (external POSTs wake the session); here we only list + revoke via the
-  // webhook:* channels (creation is the AI's job via the `webhook` opencode
-  // tool, which returns the one-time signing secret). Refetch-driven like
-  // schedules/secrets. See docs/bui-tools-webhook.md.
-  const [showWebhooks, setShowWebhooks] = useState(false);
-  const [webhooks, setWebhooks] = useState<WebhookMeta[]>([]);
-  const [webhookError, setWebhookError] = useState<string | null>(null);
-  const refreshWebhooks = useCallback(() => {
-    return window.api
-      .webhookList(sessionId)
-      .then((list: WebhookMeta[]) => {
-        setWebhooks(Array.isArray(list) ? list : []);
-        setWebhookError(null);
-      })
-      .catch((e: unknown) => {
-        setWebhookError(e instanceof Error ? e.message : "webhook server unreachable");
-      });
-  }, [sessionId]);
+  // Server-owned resource cards (⏰ schedules, 🔑 secrets, 🪝 webhooks) —
+  // state, refresh callbacks, poll effects, session resets, and the mobile
+  // `bui-open-*` window-event bridges. Extracted to a self-contained hook
+  // (BET-63) because none of it touches the SSE / pin-to-bottom / message core.
+  const resources = useSessionResources(sessionId);
+  const {
+    showSchedules,
+    setShowSchedules,
+    schedules,
+    setSchedules,
+    scheduleError,
+    setScheduleError,
+    refreshSchedules,
+    showSecrets,
+    setShowSecrets,
+    secrets,
+    setSecrets,
+    secretError,
+    setSecretError,
+    refreshSecrets,
+    showWebhooks,
+    setShowWebhooks,
+    webhooks,
+    setWebhooks,
+    webhookError,
+    setWebhookError,
+    refreshWebhooks,
+  } = resources;
   // Running mirrors opencode session status (busy/idle/retry). We feed it from
   // session.status events for accuracy, but also set it optimistically on send
   // so the UI flips to "Stop" instantly rather than waiting for the next event.
@@ -300,13 +269,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // and contribute to perceived input lag. 80ms is small enough that
   // the suggestion list still feels live as you type.
   const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Prompt history: when textarea has focus and typeahead is closed, Up/Down
-  // cycle through previously-submitted prompts (terminal-style). The index
-  // is internal to navigateHistory's setter — never read elsewhere, so the
-  // setter is all we keep. draftInput saves whatever the user was typing
-  // before they entered history mode so it can be restored on Down past end.
-  const [, setHistoryIdx] = useState<number | null>(null);
-  const draftInput = useRef<string>("");
+  // Prompt-history navigation (Up/Down cycles past prompts, terminal-style) is
+  // owned by useInputHistory — see the hook call after `updateInput` below.
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Wraps the pending QuestionCard(s). A notification deep-link asks us to
@@ -798,52 +762,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     };
   }, [sessionId, cwd]);
 
-  // Close the schedules card + clear its state on session change.
-  useEffect(() => {
-    setShowSchedules(false);
-    setSchedules([]);
-    setScheduleError(null);
-  }, [sessionId]);
-
-  // Keep the toolbar schedule count fresh whether or not the card is open:
-  // fetch once on mount/session-change, then poll. The card being open speeds
-  // the poll up (10s) for snappy create/fire feedback; while closed a slower
-  // 30s background poll keeps the "(N)" count current so a model-created job
-  // shows up without the user having to open the card first. Refetch-driven
-  // (no bus event) so it behaves identically on desktop and mobile.
-  useEffect(() => {
-    void refreshSchedules();
-    const intervalMs = showSchedules ? 10_000 : 30_000;
-    const poll = setInterval(() => void refreshSchedules(), intervalMs);
-    return () => clearInterval(poll);
-  }, [showSchedules, refreshSchedules]);
-
-  // Secrets are only fetched while the card is open (no toolbar count badge to
-  // keep current in the background — unlike schedules). Refetch on open + 10s
-  // poll so a secret added on another device shows up.
-  useEffect(() => {
-    if (!showSecrets) return;
-    void refreshSecrets();
-    const poll = setInterval(() => void refreshSecrets(), 10_000);
-    return () => clearInterval(poll);
-  }, [showSecrets, refreshSecrets]);
-
-  // Close the webhooks card + clear its state on session change.
-  useEffect(() => {
-    setShowWebhooks(false);
-    setWebhooks([]);
-    setWebhookError(null);
-  }, [sessionId]);
-
-  // Webhooks fetched only while the card is open (creation is agent-driven; the
-  // count isn't surfaced on the toolbar, so no background poll). Refetch on open
-  // + 10s poll so a model-created hook / a fresh delivery shows up.
-  useEffect(() => {
-    if (!showWebhooks) return;
-    void refreshWebhooks();
-    const poll = setInterval(() => void refreshWebhooks(), 10_000);
-    return () => clearInterval(poll);
-  }, [showWebhooks, refreshWebhooks]);
+  // (schedule / secrets / webhook poll + reset effects moved to
+  // useSessionResources — see the `resources` hook call above.)
 
   // Refresh permissions list. Called on any permission event.
   // Passes `sessionId` so the main process scopes the request to this
@@ -1862,37 +1782,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  // Mobile entry point for the schedules card: the ⋯ sheet (outside ChatPanel)
-  // dispatches a window CustomEvent rather than reaching into this component's
-  // state. Mirrors the bui-scroll-to-question bridge above.
-  useEffect(() => {
-    const onOpenSchedules = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowSchedules(true);
-    };
-    window.addEventListener("bui-open-schedules", onOpenSchedules);
-    return () => window.removeEventListener("bui-open-schedules", onOpenSchedules);
-  }, [sessionId]);
-
-  // Mobile entry point for the secrets card (mirror of bui-open-schedules).
-  useEffect(() => {
-    const onOpenSecrets = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowSecrets(true);
-    };
-    window.addEventListener("bui-open-secrets", onOpenSecrets);
-    return () => window.removeEventListener("bui-open-secrets", onOpenSecrets);
-  }, [sessionId]);
-
-  // Mobile entry point for the webhooks card (mirror of bui-open-schedules).
-  useEffect(() => {
-    const onOpenWebhooks = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowWebhooks(true);
-    };
-    window.addEventListener("bui-open-webhooks", onOpenWebhooks);
-    return () => window.removeEventListener("bui-open-webhooks", onOpenWebhooks);
-  }, [sessionId]);
+  // (bui-open-schedules / -secrets / -webhooks mobile bridges moved to
+  // useSessionResources.)
 
   // Perform the deferred scroll once the question cards actually exist (cold
   // start: questions arrive via the async fetch after this panel mounts).
@@ -2398,22 +2289,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   }, [models, modelOverride, defaultModel]);
   const currentModelSupportsAttachments = modelSupportsAttachments(activeModel);
   const currentModelName = activeModel?.name ?? "this model";
-
-  // Prompt history from user messages — chronological, freshest last.
-  const promptHistory = useMemo<string[]>(() => {
-    if (!messages) return [];
-    const out: string[] = [];
-    for (const m of messages) {
-      if (m.info.role !== "user") continue;
-      const text = m.parts
-        .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
-        .map((p) => p.text ?? "")
-        .join("\n")
-        .trim();
-      if (text) out.push(text);
-    }
-    return out;
-  }, [messages]);
 
   // If a saved modelOverride references a model that isn't in the current
   // list of connected models (common after switching providers or fixing
@@ -3377,60 +3252,16 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     [typeaheadRows.length],
   );
 
-  // Prompt history navigation — Up cycles back, Down cycles forward. We
-  // bypass updateInput's typeahead detection here (calling setInput directly)
-  // so cycling through past prompts containing `@` or `/` doesn't immediately
-  // open a typeahead popup.
-  const navigateHistory = useCallback(
-    (dir: 1 | -1) => {
-      if (promptHistory.length === 0) return;
-      setHistoryIdx((cur) => {
-        // dir === -1 means UP (older), +1 means DOWN (newer).
-        let next: number | null;
-        if (cur == null) {
-          // Entering history mode — save the current draft so we can restore
-          // it when the user presses Down past the newest entry.
-          if (dir === -1) {
-            draftInput.current = inputRef.current?.value ?? "";
-            next = promptHistory.length - 1;
-          } else {
-            // Already at newest — no-op.
-            return cur;
-          }
-        } else {
-          const candidate = cur + dir;
-          if (candidate < 0) next = 0;
-          else if (candidate >= promptHistory.length) next = null;
-          else next = candidate;
-        }
-        // null means "back to draft" (past the newest entry).
-        const value = next == null ? draftInput.current : promptHistory[next];
-        setInput(value);
-        setTypeahead(null);
-        // Place caret at end after React commits the new value.
-        requestAnimationFrame(() => {
-          const el = inputRef.current;
-          if (!el) return;
-          el.focus();
-          const pos = value.length;
-          el.setSelectionRange(pos, pos);
-        });
-        return next;
-      });
-    },
-    [promptHistory],
-  );
-
-  // Reset history-navigation mode whenever the user edits the input by
-  // typing (not via Up/Down). Keeps history "session" per stretch of edits.
-  const updateInputWithHistoryReset = useCallback(
-    (next: string) => {
-      setHistoryIdx(null);
-      draftInput.current = next;
-      updateInput(next);
-    },
-    [updateInput],
-  );
+  // Prompt-history navigation (Up/Down) + the typing path that exits history
+  // mode. Self-contained hook; see useInputHistory. The hook also returns
+  // `promptHistory`, but ChatPanel doesn't consume it.
+  const { navigateHistory, updateInputWithHistoryReset } = useInputHistory({
+    messages,
+    inputRef,
+    setInput,
+    setTypeahead,
+    updateInput,
+  });
 
   // Model line: last assistant message's modelID (provider/model).
   const modelLabel = useMemo(() => {
@@ -3767,79 +3598,21 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
-      <div
-        ref={scrollRef}
-        className="flex-1 overflow-y-auto px-4 py-3"
-      >
-        <TaskContext.Provider value={taskContextValue}>
-        <div className="flex flex-col justify-end min-h-full">
-        {messages.length === 0 ? (
-          <div className="text-text-faint">
-            <span style={{ color: CLAUDE_ORANGE }}>✻</span>{" "}
-            Welcome. Type a message below to start.
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {messages.map((m, idx) => {
-              const isLastInTranscript =
-                idx === messages.length - 1 && m.info.role === "assistant";
-              // cmdInfo comes from `userCommandInfo` (memoized at panel
-              // scope on [messages, commandByMessageId, commands]).
-              // O(1) Map lookup here means MessageRow can be React.memo'd
-              // without keystrokes invalidating the prop reference.
-              const cmdInfo =
-                m.info.role === "user"
-                  ? userCommandInfo.get(m.info.id) ?? null
-                  : null;
-              return (
-                <MessageRow
-                  key={m.info.id}
-                  msg={m}
-                  showThinking={showThinking}
-                  turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
-                  persistentTodos={
-                    isLastInTranscript && !running ? activeTodos : null
-                  }
-                  truncation={finishByMessageId.get(m.info.id) ?? null}
-                  commandInfo={cmdInfo}
-                />
-              );
-            })}
-            {/* Live todos while a turn is running — rendered INSIDE the */}
-            {/* scroll container at the tail of the transcript so the list */}
-            {/* scrolls with the rest of the chat instead of sitting in a */}
-            {/* shrink-0 row above the input (which made it feel "sticky" */}
-            {/* and ate vertical space on long checklists). The */}
-            {/* `!running` branch above still attaches activeTodos to the */}
-            {/* last assistant message via persistentTodos — same data, */}
-            {/* same rendering, just owned by MessageRow once idle. */}
-            {running && activeTodos && activeTodos.length > 0 && (
-              <ActiveTodos todos={activeTodos} />
-            )}
-            {/* Pending question cards. Rendered INSIDE the scroll */}
-            {/* container at the tail of the transcript so they scroll */}
-            {/* with the rest of the chat instead of sitting in a shrink-0 */}
-            {/* row above the input. They still surface prominently (Claude */}
-            {/* is blocked until answered) but feel like part of the */}
-            {/* conversation — scrolling up through history doesn't keep */}
-            {/* the card glued to the bottom. Same pattern as ActiveTodos. */}
-            {questions.length > 0 && (
-              <div className="space-y-2 pt-1" ref={questionCardRef}>
-                {questions.map((q) => (
-                  <QuestionCard
-                    key={q.id}
-                    request={q}
-                    onReply={(answers) => replyQuestion(q, answers)}
-                    onReject={() => rejectQuestion(q)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-        </div>
-        </TaskContext.Provider>
-      </div>
+      <Transcript
+        messages={messages}
+        scrollRef={scrollRef}
+        questionCardRef={questionCardRef}
+        taskContextValue={taskContextValue}
+        showThinking={showThinking}
+        running={running}
+        activeTodos={activeTodos}
+        questions={questions}
+        turnInfo={turnInfo}
+        finishByMessageId={finishByMessageId}
+        userCommandInfo={userCommandInfo}
+        onReplyQuestion={replyQuestion}
+        onRejectQuestion={rejectQuestion}
+      />
 
       {/* Pending permission cards. Shown above the running indicator/input */}
       {/* so they're hard to miss — tool execution pauses until reply. */}
@@ -4087,36 +3860,15 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
-      {/* Attachment chips strip — only when something pending. */}
-      {attachments.length > 0 && (
-        <AttachmentStrip
-          attachments={attachments}
-          onRemove={removeAttachment}
-        />
-      )}
-
-      {/* Typeahead popup — shown the moment typeahead state is set, even */}
-      {/* if the result list is still loading. Empty rows render a small */}
-      {/* "Searching…" placeholder so the user sees instant feedback. */}
-      {typeahead && (
-        <TypeaheadPopup
-          rows={typeaheadRows}
-          selectedIdx={Math.min(typeahead.selectedIdx, Math.max(0, typeaheadRows.length - 1))}
-          onSelect={applyTypeahead}
-          onHover={(idx) =>
-            setTypeahead((prev) => (prev ? { ...prev, selectedIdx: idx } : prev))
-          }
-          emptyHint={
-            typeahead.mode === "file"
-              ? "Searching…"
-              : typeahead.mode === "agent"
-                ? "No matching agents"
-                : "No matching commands"
-          }
-        />
-      )}
-
-      <InputArea
+      <Composer
+        attachments={attachments}
+        onRemoveAttachment={removeAttachment}
+        typeahead={typeahead}
+        typeaheadRows={typeaheadRows}
+        onTypeaheadSelect={applyTypeahead}
+        onTypeaheadHover={(idx) =>
+          setTypeahead((prev) => (prev ? { ...prev, selectedIdx: idx } : prev))
+        }
         input={input}
         setInput={updateInputWithHistoryReset}
         inputRef={inputRef}
