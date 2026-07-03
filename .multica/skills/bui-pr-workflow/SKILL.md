@@ -132,6 +132,84 @@ The standard implementer workflow for the BUI agents.
     returns the issue, you (or the next run) read `loop_history` before
     starting to fix, so you don't repeat the same mistake.
 
+## Discovered-follow-up gate (MANDATORY — file it, don't just narrate it)
+
+While doing the work you WILL surface follow-ups — gaps you deliberately
+left out of scope, a sibling path you didn't migrate, a drift trap you
+created, a deferred cleanup, a missing edge-case test. **A follow-up
+written only as prose in your PR body or completion comment does not
+exist.** Comments are not the system of record; the next reader closes the
+issue and your "follow-ups flagged: 1,2,3" evaporates into a `done`
+issue's history. This is a real cross-workspace incident (Tenanture
+TEN-350): a "consolidate to a single source of truth" task shipped `done`
+while other consumers still read the retired shape; the gap lived only in a
+completion comment and was one config edit from showing users a wrong
+value. The owner had to catch it by hand.
+
+**The rule: FILE every ACTIONABLE follow-up. Do not use "is it important?"
+to decide whether to file — that judgment call, made under budget pressure
+at the cheapest moment to skip, is exactly what leaks. Importance decides
+ASSIGNMENT, not existence.** Two decisions, kept separate:
+
+**Decision 1 — file or not? (mechanical, no judgment).** Is there a
+concrete change a person could pick up and do? → **FILE it.** The only
+things that stay prose are genuinely non-actionable musings ("we might one
+day want X", "worth thinking about caching someday") — no concrete task.
+When unsure whether it's actionable, file it; a cheap `todo` beats a lost
+gap.
+
+**Decision 2 — assign PM or park? (this is where the severity bar lives).**
+Apply the bar to the filed issue:
+
+FILE **and assign `bui-pm`** (priority ≥ parent's, min `high` for a
+correctness gap) when ANY of:
+- **(a) Dual source of truth / drift trap** — two shapes/paths/configs that
+  can silently diverge, with no sync.
+- **(b) Wrong-value / wrong-behavior risk to a user** — a reader still
+  consumes a value the writer no longer maintains, or the UI shows
+  something the logic won't honor.
+- **(c) The parent's own goal/title implies it** — "remove X everywhere" /
+  "single source of truth" done in *most* places = the unfinished half of
+  THIS task.
+
+FILE **unassigned, `todo`, labeled `follow-up`** (park it — real work, just
+not urgent; the PM's backlog triage handles it) for everything else
+actionable: dead-code deletion, a missing edge-case test, a
+behavior-neutral refactor, a stale doc.
+
+> **NOTE:** you do NOT `assign` to other implementers. "Assign `bui-pm`"
+> means file it, set priority, and `assign` it to **`bui-pm`** so it lands
+> in the PM's triage lane. Parked items stay unassigned. Never self-dispatch
+> an above-bar follow-up to `better-ui-dev`.
+
+How to file:
+
+```bash
+export MULTICA_WORKSPACE_ID=264c89bb-4659-4570-af7b-5f8daaf87985
+# Above-bar → route to the PM to triage/prioritize:
+multica issue create --title "<concrete, scoped title>" --description-file <path> \
+  --status todo --priority <inherit parent's, min high> \
+  --parent <PARENT-ISSUE-UUID> --assignee bui-pm
+# Parked (actionable but minor) → unassigned + labeled:
+multica issue create --title "<concrete, scoped title>" --description-file <path> \
+  --status todo --priority <medium/low> \
+  --parent <PARENT-ISSUE-UUID>
+multica issue label add <NEW-KEY> follow-up
+```
+
+Every filed follow-up's description must carry a `## Dispatch` block and
+name the concrete files + the divergence/risk, not just "migrate the
+consumers." Then, in your PR/completion comment, **link every filed issue
+by key** (`Follow-up filed: <KEY> (PM)`, `Parked: <KEY>`) rather than
+describing any of them in prose.
+
+Self-check addendum (add to the self-check scoring): one criterion is
+**"every actionable follow-up I mention is FILED (not narrated), and every
+above-the-bar one is assigned to `bui-pm`"** — score it, must be 8+ before
+you submit. `bui-pm` re-checks this at its merge gate (GATE 2b) and
+`bui-reviewer`'s `Block (followup-issue)` protocol covers follow-ups *it*
+finds — three lines of defense; yours is the cheapest.
+
 ## Anti-spaghetti contract (mandatory, runs before you write code)
 
 LLMs reason locally and default to the smallest-looking patch — a band-aid

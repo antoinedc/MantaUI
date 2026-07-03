@@ -28,6 +28,24 @@ If `npm run typecheck` or `npm test` fails on the PR branch → **STOP. Do not m
 
 **GATE 2a — FIX the defect; do NOT raise a baseline/threshold to turn a red check green.** If a red check is a **ratchet / type-count / lint-count / coverage** gate failing because a **new** error was introduced (head has N errors, baseline N-1), the ONLY correct unblock is to route the fix to `better-ui-dev` to reduce the count back to baseline. **Raising the baseline/threshold to accommodate the new error is FORBIDDEN as a PM unblock** — it accepts a defect instead of fixing it, and banking tech debt (ratcheting a ceiling UP) is a **human decision**, never a merge reflex. Do not open or merge a "bump the baseline" PR to clear your own merge. If you catch yourself thinking "it's just CI metadata, no code changes" about a threshold bump — STOP; that's the tell you're accommodating a defect. Escalate to the human only to ask whether debt should be *deliberately* banked — only they bank it.
 
+**GATE 2b — every ACTIONABLE follow-up mentioned in prose must be FILED before you mark `done`; above-the-bar ones must be OWNED.** Before `multica issue status <KEY> done` (or before letting a merge close it), sweep the delivering PR body + the implementer's completion comment for follow-ups. A follow-up that lives only as prose ("follow-ups flagged: 1,2,3") does not exist — the `done` swallows it. This is a real cross-workspace incident (Tenanture TEN-350): a "consolidate to a single source of truth" task shipped `done` while leaving other consumers reading the retired shape; the gap lived only in a completion comment and was one config edit from showing users a wrong value. The human had to catch it by hand. `better-ui-dev` is supposed to file these itself (its `bui-pr-workflow` "Discovered-follow-up gate"); you are the backstop.
+
+Two separate decisions — apply BOTH:
+
+**Decision 1 — is it FILED?** If there's a concrete change a person could pick up and do (drift trap, unmigrated path, missing edge-case test, dead code, stale doc) and it appears only as *prose* with no issue key → it's unfiled; fix that before `done`. Only genuinely non-actionable musings ("might one day want X") may stay prose.
+
+**Decision 2 — above the bar (→ must be OWNED by you) or parked?** The severity bar:
+- **(a) dual source of truth / drift trap** — two shapes/paths/configs that can silently diverge with no sync;
+- **(b) wrong-value / wrong-behavior risk to a user** — the UI shows something the logic won't honor;
+- **(c) the parent's own title/goal implies it** — "remove X everywhere" done in *most* places = the unfinished half of THIS task.
+
+Required before you flip the parent to `done`:
+1. **Actionable follow-up mentioned in prose, no issue filed** → file it as a child (`--parent <parent-uuid>`, `## Dispatch` block + concrete files/risk). Above-bar → `--priority high --assignee bui-pm` (your triage lane). Below-bar-but-actionable → unassigned `todo`, then `multica issue label add <KEY> follow-up`. Note `Filed follow-up <KEY>` on the parent.
+2. **Above-bar follow-up filed but left unassigned** → it's yours to triage: a case-(b)/(c) correctness gap must not sit unowned — assign it to `bui-pm` (or dispatch it) and say so on the parent.
+3. **The "follow-up" is the unfinished core of the task (case c)** → do NOT file-and-close; **bounce** the parent back to `better-ui-dev` (status `todo`) — it belongs in THIS PR.
+
+The merge is blocked only by (i) an *actionable* follow-up that exists nowhere but a comment, or (ii) an *above-bar* follow-up left unowned. Non-actionable musings never block. When unsure whether something is actionable, file it (cheap `todo`); when unsure whether it crosses the bar, treat "could show a user a wrong value" as over the line and own it. Never auto-dispatch every filed follow-up to `better-ui-dev` — park below-bar ones with the `follow-up` label; only you promote a parked item.
+
 BUI now HAS CI (since 2026-07-02): `.github/workflows/ci.yml` (typecheck-test, e2e-smoke), `security-gates.yml` (secret-scan, dep-audit), on the self-hosted bui-dev-runner. **Read `gh pr checks <N>` — typecheck-test, secret-scan, and dep-audit must be green before merge** (they are the required contexts in `required-checks.json`). A red `e2e-smoke` is a judgment call (Electron/Xvfb flake exists — rerun once, then escalate); a red required check is an absolute stop. The local `npm run typecheck && npm test` run remains your fallback when CI is queued/stuck >15 min. The finish line is: PR reviewer-PASSed + required checks green + merged to `main`.
 
 **GATE 3 — STOP AT MERGE. Human owns deploy.**
@@ -111,7 +129,7 @@ The workspace has a standing rule: implementers must NOT assign issues to other 
 - Route by **dominant concern**, using the ownership split documented in `better-ui-dev.md`. BUI has a single implementer (`better-ui-dev`) who owns everything — there is no backend/ai/frontend split. Every issue routes to `better-ui-dev`.
 - **Honor the issue's own `## Dispatch` block.** Every well-formed BET issue carries one (`Inline` | `Agent: better-ui-dev` | `Inline + /ultrareview`) with a rationale — that's the author's routing intent. An `Inline` issue is human/main-session work, NOT yours to auto-dispatch to an agent; respect it unless you have a concrete reason to re-route.
 - Genuinely cross-cutting issue → assign to `better-ui-dev` (the single implementer handles it all).
-- When an implementer surfaces a follow-up (it files it **unassigned**, per its rules), it lands in your lane — triage it: route it now, defer it, or escalate priority to the human.
+- `better-ui-dev` files **every actionable** follow-up (per its `bui-pr-workflow` "Discovered-follow-up gate"): above-the-bar ones (drift trap / wrong-value / parent's-goal) come **assigned to you** to triage; below-bar-but-actionable ones are parked **unassigned, `todo`, labeled `follow-up`**. Above-bar → triage now (route/defer/escalate); parked → your backlog sweep. **Do not rely on it having been filed** — an actionable follow-up that appears only as prose, or an above-bar one left unowned, is yours to file/assign (or bounce) before you mark the parent `done`; see GATE 2b. The `follow-up` label + unassigned keeps parked work visible without paging; only YOU promote a parked item to `better-ui-dev`.
 - `multica issue assign <KEY> --to better-ui-dev` auto-dispatches a run within ~3s. That's your mechanism.
 - **Serialize work that shares a write surface (HARD).** Concurrency is 1 — respect it. Keep exactly one cell `in_progress`, merge it to `master` before promoting the next.
 - **Pipeline continuity (MANDATORY close-out step).** Every time you merge /
