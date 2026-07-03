@@ -177,3 +177,51 @@ describe("ChatPanel session resources", () => {
     expect(h.container.querySelector("input[type=password]")).not.toBeNull();
   });
 });
+
+// ===== Transcript rendering (via the mounted ChatPanel) =====
+//
+// Verifies the extracted <Transcript> renders a fetched transcript: a user
+// turn's text and an assistant turn's text both appear in the DOM. Drives the
+// canonical fetch path (opencodeMessagesReconcile) the container uses on mount.
+describe("ChatPanel transcript rendering", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("renders user + assistant message text from the fetched transcript", async () => {
+    const transcript = [
+      {
+        info: { id: "msg_u1", sessionID: "ses_test", role: "user" as const },
+        parts: [
+          { type: "text", id: "prt_u1", messageID: "msg_u1", text: "hello there" },
+        ],
+      },
+      {
+        info: {
+          id: "msg_a1",
+          sessionID: "ses_test",
+          role: "assistant" as const,
+          time: { created: 1, completed: 2 },
+        },
+        parts: [
+          { type: "text", id: "prt_a1", messageID: "msg_a1", text: "general kenobi" },
+        ],
+      },
+    ];
+    installMockApi({
+      opencodeMessagesReconcile: () => Promise.resolve(transcript),
+      opencodeMessages: () => Promise.resolve(transcript),
+    });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    const text = h.text();
+    expect(text).toContain("hello there");
+    expect(text).toContain("general kenobi");
+    // The empty-state welcome is gone once a transcript is present.
+    expect(text).not.toContain("Welcome. Type a message below to start.");
+  });
+});

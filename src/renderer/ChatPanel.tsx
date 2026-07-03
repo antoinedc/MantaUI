@@ -69,7 +69,6 @@ import {
 } from "./chatUtils";
 import {
   CLAUDE_ORANGE,
-  TaskContext,
   findLast,
   guessMime,
   mimeToInputMode,
@@ -85,11 +84,12 @@ import {
   type TypeaheadRow,
   type TypeaheadState,
 } from "./chatShared";
-import { ActiveTodos, MessageRow, RunningIndicator } from "./MessageRow";
-import { CompactionCard, PermissionCard, QuestionCard, RetryCard } from "./Cards";
+import { RunningIndicator } from "./MessageRow";
+import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { AttachmentStrip, InputArea, TypeaheadPopup } from "./InputArea";
 import { useSessionResources } from "./hooks/useSessionResources";
+import { Transcript } from "./Transcript";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
@@ -3662,79 +3662,21 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
-      <div
-        ref={scrollRef}
-        className="flex-1 overflow-y-auto px-4 py-3"
-      >
-        <TaskContext.Provider value={taskContextValue}>
-        <div className="flex flex-col justify-end min-h-full">
-        {messages.length === 0 ? (
-          <div className="text-text-faint">
-            <span style={{ color: CLAUDE_ORANGE }}>✻</span>{" "}
-            Welcome. Type a message below to start.
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {messages.map((m, idx) => {
-              const isLastInTranscript =
-                idx === messages.length - 1 && m.info.role === "assistant";
-              // cmdInfo comes from `userCommandInfo` (memoized at panel
-              // scope on [messages, commandByMessageId, commands]).
-              // O(1) Map lookup here means MessageRow can be React.memo'd
-              // without keystrokes invalidating the prop reference.
-              const cmdInfo =
-                m.info.role === "user"
-                  ? userCommandInfo.get(m.info.id) ?? null
-                  : null;
-              return (
-                <MessageRow
-                  key={m.info.id}
-                  msg={m}
-                  showThinking={showThinking}
-                  turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
-                  persistentTodos={
-                    isLastInTranscript && !running ? activeTodos : null
-                  }
-                  truncation={finishByMessageId.get(m.info.id) ?? null}
-                  commandInfo={cmdInfo}
-                />
-              );
-            })}
-            {/* Live todos while a turn is running — rendered INSIDE the */}
-            {/* scroll container at the tail of the transcript so the list */}
-            {/* scrolls with the rest of the chat instead of sitting in a */}
-            {/* shrink-0 row above the input (which made it feel "sticky" */}
-            {/* and ate vertical space on long checklists). The */}
-            {/* `!running` branch above still attaches activeTodos to the */}
-            {/* last assistant message via persistentTodos — same data, */}
-            {/* same rendering, just owned by MessageRow once idle. */}
-            {running && activeTodos && activeTodos.length > 0 && (
-              <ActiveTodos todos={activeTodos} />
-            )}
-            {/* Pending question cards. Rendered INSIDE the scroll */}
-            {/* container at the tail of the transcript so they scroll */}
-            {/* with the rest of the chat instead of sitting in a shrink-0 */}
-            {/* row above the input. They still surface prominently (Claude */}
-            {/* is blocked until answered) but feel like part of the */}
-            {/* conversation — scrolling up through history doesn't keep */}
-            {/* the card glued to the bottom. Same pattern as ActiveTodos. */}
-            {questions.length > 0 && (
-              <div className="space-y-2 pt-1" ref={questionCardRef}>
-                {questions.map((q) => (
-                  <QuestionCard
-                    key={q.id}
-                    request={q}
-                    onReply={(answers) => replyQuestion(q, answers)}
-                    onReject={() => rejectQuestion(q)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-        </div>
-        </TaskContext.Provider>
-      </div>
+      <Transcript
+        messages={messages}
+        scrollRef={scrollRef}
+        questionCardRef={questionCardRef}
+        taskContextValue={taskContextValue}
+        showThinking={showThinking}
+        running={running}
+        activeTodos={activeTodos}
+        questions={questions}
+        turnInfo={turnInfo}
+        finishByMessageId={finishByMessageId}
+        userCommandInfo={userCommandInfo}
+        onReplyQuestion={replyQuestion}
+        onRejectQuestion={rejectQuestion}
+      />
 
       {/* Pending permission cards. Shown above the running indicator/input */}
       {/* so they're hard to miss — tool execution pauses until reply. */}
