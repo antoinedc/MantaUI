@@ -176,10 +176,25 @@ drop it in `~/.config/systemd/user/`, then
 (shipping a pre-built `mobile/www/`, so the box needs no renderer toolchain).
 Upload it to `<release-host>/releases/bui-<version>.tar.gz`.
 
+## Building the desktop app
+
+To build a packaged `.dmg` (macOS) or `.AppImage` (Linux):
+
+```bash
+npm run pack:desktop
+```
+
+This runs `electron-vite build` to bundle the app, then `electron-builder` to
+produce the platform-specific artifact in `dist/desktop/`. Auto-update is
+configured to use GitHub Releases — after a build, `electron-builder` uploads
+the artifact and generates a `latest.yml` for `electron-updater` to consume.
+
+Signing identities (macOS code signing + notarization) are read from
+environment variables (`CSC_LINK`, `CSC_KEY_PASSWORD`) and are NOT committed
+to the repo. Set them in CI or locally before building.
+
 ## Known beta gaps
 
-- No packaged `.app` / `.dmg` — install with `npm install && npm run dev`.
-- No auto-update; pull from git for new versions.
 - macOS only. Windows/Linux desktop probably needs a few small fixes
   (screenshot detector is already gated; ⌘ keybindings accept Ctrl, but
   the build hasn't been tested).

@@ -1,0 +1,78 @@
+# electron-builder config for Better UI desktop app.
+#
+# Builds:
+#   - macOS: .dmg (signed + notarized when identities are available)
+#   - Linux: .AppImage
+#
+# Auto-update: configured via electron-updater in src/main/autoUpdate.ts.
+# Update server: GitHub Releases (default for OSS projects).
+#
+# Signing identities are read from environment variables:
+#   - CSC_LINK: path to .p12 certificate file (macOS code signing)
+#   - CSC_KEY_PASSWORD: password for the .p12 certificate
+#   - APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD: for notarization (optional)
+#
+# These are NOT committed to the repo — set them in CI or locally.
+
+appId: com.betterui.app
+productName: Better UI
+
+directories:
+  output: dist/desktop
+
+files:
+  - "out/**/*"
+  - "package.json"
+
+extraMetadata:
+  main: out/main/index.js
+
+mac:
+  icon: "assets/icon.icns"
+  category: "public.app-category.developer-tools"
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: "assets/entitlements.mac.plist"
+  entitlementsInherit: "assets/entitlements.mac.plist"
+  darkModeSupport: true
+  artifactName: "${productName}-${version}-${arch}.dmg"
+
+linux:
+  icon: "assets/icons"
+  category: "Development"
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  executableName: better-ui
+  artifactName: "${productName}-${version}-${arch}.AppImage"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+# Auto-update configuration (electron-updater)
+# Uses GitHub Releases as the update server. The `publish` field tells
+# electron-builder to upload artifacts + generate a `latest.yml` after build.
+# For self-hosted S3/CloudFront later, swap `provider: github` for `provider: s3`.
+publish:
+  provider: github
+  owner: antoinedc
+  repo: better-ui
+
+# Build only macOS + Linux (no Windows target for v1)
+only:
+  - mac
+  - linux

@@ -118,6 +118,7 @@ import {
   listWebhooks,
   deleteWebhook,
 } from "./webhook.js";
+import { checkForUpdates } from "./autoUpdate.js";
 // Plain-JS modules shared with the mobile server (src/server/*.mjs). The
 // bundler resolves .mjs imports here; main.process never sees them as TS.
 // Types live in groq.d.mts. Keep them dep-free so they stay portable across
@@ -910,6 +911,9 @@ app.whenReady().then(() => {
     );
     // Pull any newer shared settings made on mobile while desktop was closed.
     void pullSharedConfig().catch(() => {});
+    // Defer update check until after the renderer is ready (avoids blocking startup).
+    // electron-updater skips the check in dev mode (unpacked app).
+    setTimeout(() => checkForUpdates(), 5000);
   });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
