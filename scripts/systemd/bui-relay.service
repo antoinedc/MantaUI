@@ -1,0 +1,37 @@
+# bui-relay.service — systemd --user unit for the combined bui relay (M2.7, BET-72).
+#
+# Mirrors bui-server.service, but runs the COMBINED relay entrypoint
+# (`node src/relay/server.mjs`): one process serving BOTH the box-facing
+# WebSocket dial-out leg and the phone-facing HTTP API (+ IAP/push routes) on a
+# single loopback port. The `bui.dev.antoinedc.com` Caddy vhost reverse-proxies
+# 127.0.0.1:20787 to this process, so a live relay resolves at that host.
+#
+# INSTALL (a human on-box step — same pattern as bui-server.service; substitute
+# the @@…@@ placeholders and drop into ~/.config/systemd/user/):
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now bui-relay
+#   loginctl enable-linger "$USER"    # start at boot without an active login
+#
+# Bind is 127.0.0.1 on purpose: the relay is NOT exposed directly. Caddy fronts
+# it and terminates TLS at bui.dev.antoinedc.com. RELAY_PORT/RELAY_HOST override
+# the bind; RELAY_STORE_PATH overrides the shared SQLite store location.
+
+[Unit]
+Description=bui relay (box WS dial-out + phone HTTP API)
+Documentation=https://github.com/antoinedc/better-ui
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@BUI_HOME@@
+ExecStart=@@NODE_BIN@@ @@BUI_HOME@@/src/relay/server.mjs
+Environment=RELAY_HOST=127.0.0.1
+Environment=RELAY_PORT=20787
+Restart=on-failure
+RestartSec=2
+# Give the relay a moment to flush + close sockets/store on stop before SIGKILL.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
