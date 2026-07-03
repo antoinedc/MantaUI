@@ -111,6 +111,71 @@ The two coexist: each tmux window is one or the other (recognized by a
     long-running `opencode serve` on `127.0.0.1:4096`, tunneled to the Mac
     over SSH `-L 14096:127.0.0.1:4096`. Survives bui restarts.
 
+## Box server (mobile/web) — self-install
+
+The box server (`src/server/`) powers the mobile/web client and the desktop
+pairing flow. On a fresh Linux VPS, one command installs and starts it and
+prints a 6-digit pairing code to enter in the desktop app:
+
+```bash
+curl -fsSL https://bui.useronda.com/install.sh | bash
+```
+
+The installer downloads a pre-built release tarball (no dev toolchain needed on
+the box), runs `npm ci --omit=dev`, installs a `systemd --user` unit
+(`bui-server.service`), waits for the server to come up on `127.0.0.1:8787`, then
+runs `bui pair` and prints the code. Re-running upgrades in place and **preserves
+your box identity** in `~/.bui-mobile/` — the server owns identity (`ensureAuth`
+in `src/server/auth.mjs`); the installer never regenerates it.
+
+Overrides (env):
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `BUI_TARBALL_URL` | (built from host+version) | full tarball URL — local testing / mirror |
+| `BUI_RELEASE_HOST` | `https://bui.useronda.com` | host for the default tarball URL |
+| `BUI_HOME` | `~/bui` | where the code is unpacked |
+| `BUI_MOBILE_PORT` | `8787` | server port |
+
+Manage it: `systemctl --user {status,restart} bui-server`, logs
+`journalctl --user -u bui-server -f`. Mint a fresh pairing code any time with
+`bui pair` (or `npm run pair` from `~/bui`) — each new code supersedes the last.
+
+Exposing the box to your phone/desktop is up to you in v1 (Tailscale/VPN, a
+reverse proxy to `127.0.0.1:8787`, or the documented cloudflared setup). The
+operated relay replaces this later.
+
+### Manual install (fallback — no release tarball)
+
+If you'd rather clone the repo directly (e.g. during development, or before a
+release tarball exists):
+
+```bash
+git clone git@github.com:antoinedc/better-ui.git ~/bui
+cd ~/bui
+npm install
+npm run build:mobile        # build the renderer bundle into mobile/www/
+npm run mobile              # start the server on 0.0.0.0:8787 (BUI_MOBILE_HOST/PORT override)
+```
+
+Then, on the box, mint a pairing code:
+
+```bash
+npm run pair               # GET 127.0.0.1:8787/auth/pair, prints the code
+```
+
+To run it under systemd yourself, copy `scripts/systemd/bui-server.service`,
+substitute the `@@BUI_HOME@@` / `@@NODE_BIN@@` / `@@BUI_PORT@@` placeholders,
+drop it in `~/.config/systemd/user/`, then
+`systemctl --user daemon-reload && systemctl --user enable --now bui-server`
+(and `loginctl enable-linger $USER` so it survives logout).
+
+### Cutting a release tarball
+
+`npm run pack` builds the renderer and produces `dist/bui-<version>.tar.gz`
+(shipping a pre-built `mobile/www/`, so the box needs no renderer toolchain).
+Upload it to `<release-host>/releases/bui-<version>.tar.gz`.
+
 ## Known beta gaps
 
 - No packaged `.app` / `.dmg` — install with `npm install && npm run dev`.
