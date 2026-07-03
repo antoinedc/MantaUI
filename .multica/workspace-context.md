@@ -46,7 +46,7 @@ BUI is an Electron desktop client for working with Claude on a remote Linux box 
 
 **Server-side enforcement**: relay gates endpoints — pre-sub metadata endpoints serve free data; transcript/stream endpoints 402 until IAP receipt is bound to box_id. Blur is a placeholder, not CSS-over-real-content.
 
-## The Relay — What We're Actually Selling
+## The Relay — the operated backend
 
 The relay is the operated backend that makes the mobile app work:
 - **TLS termination** + outbound tunnel coordinator (replaces per-user cloudflared)
@@ -55,7 +55,16 @@ The relay is the operated backend that makes the mobile app work:
 - **IAP receipt validation** (Apple IAP Server Notifications → box_id binding)
 - **Metering/rate-limiting** per box_id (the COGS number)
 
-The relay is **new code, not in this repo**. It's the actual paid product. The software (client + server) stays open source.
+### ✅ Relay decisions (locked 2026-07-03 by @antoinedc) — supersede any "new repo / not in this repo / the paid product" phrasing anywhere
+
+- **The relay is OSS and lives IN THIS MONOREPO at `src/relay/`** (sibling of `src/server/`), Node `.mjs`, own entry `src/relay/index.mjs`. The box-side outbound daemon is the piece that runs ON THE BOX and dials out. **Only the mobile app is closed-source** — client + server + relay are all open source. What's *sold* is the polished App Store app (and optionally a hosted relay instance), NOT the relay source.
+- **Reuse, don't duplicate:** HMAC/token/rate-limit from `src/server/webhooks.mjs` + `src/server/auth.mjs`; box identity from `src/shared/claim.mjs` + `auth.mjs` (`ensureAuth`, box_token from `~/.bui-mobile/auth.json`); push routing from `src/server/push.mjs` (`routeNotification`); reconnect/backoff from `src/shared/net/` (M0).
+- **Datastore: SQLite** (box↔account bindings, tunnel endpoints, IAP receipts). Prefer `node:sqlite`, else `better-sqlite3`. Not Postgres, not JSON.
+- **Tunnel: WebSocket** (reuse the `ws` dep). Box dials OUT (authenticated with box_token), relay maps `box_id → live WS` and multiplexes phone→box requests. NAT/CGNAT-friendly.
+- **Push: APNs + FCM native** operated by the relay (reuse `routeNotification` decision logic, swap delivery leg); VAPID/Web-Push retained for the PWA. Live cert provisioning is a deploy-time step (stub-testable, may defer to M5).
+- **Dev domain: `bui.dev.antoinedc.com`** → Caddy `reverse_proxy 127.0.0.1:20787` on THIS box (single-level under the existing `*.dev.antoinedc.com` cert; mirror the `capo.`/`ronda.` vhosts). **Prod = a dedicated instance + domain later — not built in M2.**
+
+M2 (BET-36) is the milestone that builds this; its issue carries the full slice ladder. bui-pm decomposes it into staged `src/relay/**` sub-issues per the Decomposition Playbook.
 
 ## Token Identity Model (Anonymous by Construction)
 
