@@ -15,8 +15,6 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
-  OpencodeAgent,
-  OpencodeCommand,
   OpencodeEvent,
   OpencodeMessage,
   OpencodeModel,
@@ -25,51 +23,26 @@ import type {
 } from "../shared/types";
 import { useStore } from "./store";
 import {
-  useVoiceRecorder,
-  fuzzyMatchModel,
-  resolveQuestionAnswer,
-} from "./voice";
-import type { VoiceAction } from "../shared/types";
-import {
-  formatBytes,
-  filterCommands,
-  dedupeAgainstBuiltins,
   classifyFinish,
   describeTruncation,
   allTodosTerminal,
   selectActiveTodos,
-  registerChildSessionFromCreated,
-  shouldDropEventForSessionFilter,
-  applyQuestionEvent,
-  hydrateQuestion,
-  detectCommandFromText,
-  isAssistantTurnComplete,
-  isAssistantTurnInProgress,
   selectCacheTtlMs,
   selectLastAssistantCompletion,
   computeStaleCache,
   STALE_CACHE_MIN_TOKENS,
-  findFlushBoundary,
-  mergeBufferedDeltas,
-  collectChildSessionIds,
   countRunningSubagents,
   classifyScrollForPin,
   wasAtBottomBeforeCommit,
-  shouldAbortForQueuedDrain,
-  isToolStepBoundary,
-  isDrainAbortError,
   shouldAutoRename,
   countUserTurns,
   buildTitlePromptInput,
   buildTitleInstruction,
   sanitizeGeneratedTitle,
-  type TruncationKind,
   type StaleCacheResult,
-  type PendingDelta,
 } from "./chatUtils";
 import {
   CLAUDE_ORANGE,
-  findLast,
   guessMime,
   mimeToInputMode,
   modelInputModes,
@@ -77,12 +50,9 @@ import {
   readSavedModel,
   writeSavedModel,
   type Attachment,
-  type AgentMention,
   type ModelSelection,
   type TaskContextValue,
   type TokenUsage,
-  type TypeaheadRow,
-  type TypeaheadState,
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
