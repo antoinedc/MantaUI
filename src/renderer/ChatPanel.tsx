@@ -3253,8 +3253,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   );
 
   // Prompt-history navigation (Up/Down) + the typing path that exits history
-  // mode. Self-contained hook; see useInputHistory. `promptHistory` is unused
-  // directly by the render but kept for parity / potential callers.
+  // mode. Self-contained hook; see useInputHistory. The hook also returns
+  // `promptHistory`, but ChatPanel doesn't consume it.
   const { navigateHistory, updateInputWithHistoryReset } = useInputHistory({
     messages,
     inputRef,
