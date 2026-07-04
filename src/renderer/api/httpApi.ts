@@ -2,6 +2,7 @@ import {
   IPC,
   type AgentFileReady,
   type AuthPairResult,
+  type DesktopNotifyPayload,
   type OpencodeEvent,
   type PtyEvent,
   type WindowStatus,
@@ -213,7 +214,13 @@ async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
 // SSE stream — one shared EventSource, lazily created.
 // ---------------------------------------------------------------------------
 
-type Kind = "opencode" | "pty" | "status" | "screenshot" | "agentFile";
+type Kind =
+  | "opencode"
+  | "pty"
+  | "status"
+  | "screenshot"
+  | "agentFile"
+  | "desktopNotify";
 
 const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   opencode: new Set(),
@@ -221,6 +228,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   status: new Set(),
   screenshot: new Set(),
   agentFile: new Set(),
+  desktopNotify: new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -473,9 +481,11 @@ export const httpApi: Api = {
   // persist locally and the desktop pulls them on its next sync.
   onConfigChanged: () => () => {},
 
-  // Desktop OS-notification directives are a desktop-only IPC (the mobile PWA
-  // is notified via Web Push, not this channel). No-op on mobile.
-  onDesktopNotify: () => () => {},
+  // Desktop OS-notification directives from bui-server's notification router.
+  // In HTTP mode the /events WS delivers `desktopNotify` envelopes; in SSH
+  // mode the main process relays via IPC (preload's onDesktopNotify). Either
+  // way, subscribing here wires the renderer to the live stream.
+  onDesktopNotify: (cb) => on<DesktopNotifyPayload>("desktopNotify", cb),
 
   // -- file uploads --
   uploadFiles: (input) => rpc(IPC.uploadFiles, input),
