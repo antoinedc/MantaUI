@@ -3,9 +3,7 @@ import type {
   AgentFileReady,
   AppConfig,
   Project,
-  TmuxConfigStatus,
   TmuxWindow,
-  TransportInfo,
   WindowStatus,
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
@@ -50,9 +48,6 @@ export type ScreenshotToast = {
 
 type State = {
   loaded: boolean;
-  host: string;
-  user?: string;
-  identityFile?: string;
   // ----- HTTP/relay transport + onboarding (M6, BET-49) -----
   // Mirrored from AppConfig so App.tsx can resolve the transport mode
   // (resolveTransportMode) and the onboarding shell can resume. `boxToken`
@@ -64,10 +59,9 @@ type State = {
   onboardingSkipped: boolean;
   // True when the user explicitly re-launched onboarding from Settings
   // ("Run setup again"). This FORCES the onboarding shell even for a config
-  // that would otherwise resolve to "http"/"ssh" mode (e.g. an already-paired
+  // that would otherwise resolve to "http" mode (e.g. an already-paired
   // box). Cleared when the flow completes or is skipped. Not persisted.
   onboardingForced: boolean;
-  transportPreference: "auto" | "mosh" | "ssh";
   uploadCleanupHours: number;
   chatAutoAllow: boolean;
   // Auto-rename chat-mode windows from the conversation (opt-in). See
@@ -95,8 +89,6 @@ type State = {
   groqApiKey: string;
   voiceTranscriptionModel: string;
   voiceCommandModel: string;
-  transport: TransportInfo | null;
-  tmuxConfig: TmuxConfigStatus | null;
   projects: Project[];
   activeProjectName: string | null;
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
@@ -202,15 +194,11 @@ type State = {
 
 export const useStore = create<State>((set, get) => ({
   loaded: false,
-  host: "",
-  user: undefined,
-  identityFile: undefined,
   serverUrl: "",
   boxId: "",
   boxToken: "",
   onboardingSkipped: false,
   onboardingForced: false,
-  transportPreference: "auto",
   uploadCleanupHours: 1,
   chatAutoAllow: false,
   autoRenameSessions: false,
@@ -222,8 +210,6 @@ export const useStore = create<State>((set, get) => ({
   groqApiKey: "",
   voiceTranscriptionModel: "",
   voiceCommandModel: "",
-  transport: null,
-  tmuxConfig: null,
   projects: [],
   activeProjectName: null,
   activeWindowByProject: {},
@@ -236,7 +222,6 @@ export const useStore = create<State>((set, get) => ({
   configSnapshot: () => {
     const s = get();
     return {
-      host: s.host,
       serverUrl: s.serverUrl,
       boxId: s.boxId,
       boxToken: s.boxToken,
@@ -285,18 +270,9 @@ export const useStore = create<State>((set, get) => ({
   refresh: async () => {
     const cfg = await window.api.configGet();
     get().applyConfig(cfg);
-    if (cfg.host) {
-      // Drop-in approach: never auto-modify the user's tmux config. Status is
-      // surfaced read-only in Settings; a future "Set up tmux for bui" action
-      // can opt them in explicitly if they want our overrides.
-      const [projects, transport, tmuxConfig] = await Promise.all([
-        window.api.tmuxList(),
-        window.api.transportInfo().catch(() => null),
-        window.api.tmuxConfigStatus().catch(() => null),
-      ]);
-      get().applyProjects(projects);
-      set({ transport, tmuxConfig });
-    }
+    // Un-gated: always fetch projects via httpApi (SSH main path gone, BET-82).
+    const projects = await window.api.tmuxList();
+    get().applyProjects(projects);
   },
 
   skipOnboarding: async () => {
@@ -325,14 +301,10 @@ export const useStore = create<State>((set, get) => ({
   applyConfig: (c) =>
     set({
       loaded: true,
-      host: c.host,
-      user: c.user,
-      identityFile: c.identityFile,
       serverUrl: c.serverUrl ?? "",
       boxId: c.boxId ?? "",
       boxToken: c.boxToken ?? "",
       onboardingSkipped: c.onboardingSkipped ?? false,
-      transportPreference: c.transport ?? "auto",
       uploadCleanupHours: c.uploadCleanupHours ?? 1,
       chatAutoAllow: c.chatAutoAllow ?? false,
       autoRenameSessions: c.autoRenameSessions ?? false,

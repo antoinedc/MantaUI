@@ -78,7 +78,8 @@ export function SessionListScreen({
   onOpenSettings,
 }: Props) {
   const projects = useStore((s) => s.projects);
-  const host = useStore((s) => s.host);
+  const serverUrl = useStore((s) => s.serverUrl);
+  const boxId = useStore((s) => s.boxId);
   const activeProjectName = useStore((s) => s.activeProjectName);
 
   const [createState, setCreateState] = useState<CreateState>(null);
@@ -129,7 +130,7 @@ export function SessionListScreen({
       <div className="flex-1 overflow-auto py-2">
         {projects.length === 0 ? (
           <div className="h-full flex items-center justify-center text-text-faint text-sm px-8 text-center">
-            {host
+            {serverUrl || boxId
               ? "No sessions yet. Tap + to create one."
               : "Server not configured."}
           </div>

@@ -36,59 +36,24 @@ describe("isValidBoxToken", () => {
 });
 
 describe("resolveTransportMode", () => {
-  it("http when a valid boxToken is set (regardless of host)", () => {
+  it("http when a valid boxToken is set", () => {
     expect(resolveTransportMode({ boxToken: HEX32 })).toBe("http");
-    // boxToken wins even if a legacy host is also present.
-    expect(resolveTransportMode({ boxToken: HEX32, host: "box.example" })).toBe("http");
-    // and even if onboardingSkipped is set.
-    expect(
-      resolveTransportMode({ boxToken: HEX32, onboardingSkipped: true }),
-    ).toBe("http");
   });
 
-  it("ignores a malformed boxToken and falls through to the next rule", () => {
-    // A junk token must NOT flip us into a broken http mode.
-    expect(resolveTransportMode({ boxToken: "not-a-token", host: "box" })).toBe("ssh");
-    expect(resolveTransportMode({ boxToken: "not-a-token" })).toBe("onboarding");
-    expect(
-      resolveTransportMode({ boxToken: "not-a-token", onboardingSkipped: true }),
-    ).toBe("ssh");
-  });
-
-  it("ssh when host is set and no boxToken (legacy config)", () => {
-    expect(resolveTransportMode({ host: "box.example" })).toBe("ssh");
-    // Full legacy shape (no new keys at all) → ssh. Existing users unchanged.
-    expect(
-      resolveTransportMode({
-        host: "1.2.3.4",
-        user: "dev",
-        identityFile: "~/.ssh/id",
-        projects: [{ tmuxSession: "p", defaultCwd: "~" }],
-        transport: "auto",
-      } as never),
-    ).toBe("ssh");
-  });
-
-  it("treats a blank/whitespace host as unset", () => {
+  it("onboarding when boxToken is missing", () => {
+    expect(resolveTransportMode({})).toBe("onboarding");
+    expect(resolveTransportMode({ host: "box.example" })).toBe("onboarding");
     expect(resolveTransportMode({ host: "" })).toBe("onboarding");
     expect(resolveTransportMode({ host: "   " })).toBe("onboarding");
-    expect(resolveTransportMode({ host: "", onboardingSkipped: true })).toBe("ssh");
-  });
-
-  it("ssh when onboarding was explicitly skipped (no host, no token)", () => {
-    expect(resolveTransportMode({ onboardingSkipped: true })).toBe("ssh");
-    expect(
-      resolveTransportMode({ onboardingSkipped: true, projects: [] }),
-    ).toBe("ssh");
-  });
-
-  it("onboarding for a fresh/empty config", () => {
-    expect(resolveTransportMode({})).toBe("onboarding");
-    expect(resolveTransportMode({ host: "", projects: [] })).toBe("onboarding");
-    // onboardingSkipped explicitly false is the same as absent.
+    // onboardingSkipped no longer influences the result.
+    expect(resolveTransportMode({ onboardingSkipped: true })).toBe("onboarding");
     expect(resolveTransportMode({ onboardingSkipped: false })).toBe("onboarding");
-    // A truthy-but-not-true value does not count as skipped.
-    expect(resolveTransportMode({ onboardingSkipped: 1 as never })).toBe("onboarding");
+  });
+
+  it("onboarding for a malformed boxToken (must NOT flip to http)", () => {
+    expect(resolveTransportMode({ boxToken: "not-a-token" })).toBe("onboarding");
+    expect(resolveTransportMode({ boxToken: "short" })).toBe("onboarding");
+    expect(resolveTransportMode({ boxToken: HEX32.toUpperCase() })).toBe("onboarding");
   });
 
   it("onboarding for null / non-object input", () => {
@@ -153,28 +118,16 @@ describe("parseClaimResponse", () => {
   });
 });
 
-describe("selectDesktopTransport (BET-58)", () => {
+describe("selectDesktopTransport (BET-82: always http)", () => {
   const paired = { boxToken: HEX32, serverUrl: "http://box:8787" };
-  const sshCfg = { host: "1.2.3.4", user: "dev" };
 
-  it("returns 'http' for a paired config when preload is present", () => {
+  it("always returns 'http' on desktop (preload present)", () => {
     expect(selectDesktopTransport(paired, true)).toBe("http");
+    expect(selectDesktopTransport({}, true)).toBe("http");
+    expect(selectDesktopTransport({ host: "1.2.3.4" }, true)).toBe("http");
+    expect(selectDesktopTransport({ onboardingSkipped: true }, true)).toBe("http");
   });
-  it("returns 'preload' for an SSH-mode config (host set, no token)", () => {
-    expect(selectDesktopTransport(sshCfg, true)).toBe("preload");
-  });
-  it("returns 'preload' for an onboarding config (nothing set)", () => {
-    expect(selectDesktopTransport({}, true)).toBe("preload");
-  });
-  it("returns 'preload' for a skipped-onboarding config", () => {
-    expect(selectDesktopTransport({ onboardingSkipped: true }, true)).toBe("preload");
-  });
-  it("SSH users are unaffected even if a stale serverUrl lingers without a token", () => {
-    expect(selectDesktopTransport({ host: "1.2.3.4", serverUrl: "http://box:8787" }, true)).toBe(
-      "preload",
-    );
-  });
-  it("no preload → 'http' (mobile/web path; defensive)", () => {
+  it("returns 'http' when no preload (mobile/web path; defensive)", () => {
     expect(selectDesktopTransport(paired, false)).toBe("http");
     expect(selectDesktopTransport({}, false)).toBe("http");
   });
