@@ -5,10 +5,7 @@ import { PairingQR, PairingCountdown } from "./PairingQR";
 import { getBuiPreload } from "./preloadAccess";
 import type {
   AuthPairResult,
-  BootstrapResult,
   OpencodeModel,
-  ProbeCheck,
-  ProbeResult,
 } from "../shared/types";
 
 const TABS = [
@@ -19,18 +16,6 @@ const TABS = [
   { id: "general", label: "General" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
-
-const CHECK_LABELS: Record<ProbeCheck["name"], string> = {
-  ssh: "SSH",
-  tmux: "tmux",
-  opencode: "opencode binary",
-  opencodeAuthPlugin: "Auth plugin",
-  anthropicAuth: "Anthropic login",
-};
-
-function checkLabel(name: ProbeCheck["name"]): string {
-  return CHECK_LABELS[name];
-}
 
 export function Settings({ onClose }: { onClose: () => void }) {
   const {
@@ -58,10 +43,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [u, setU] = useState(user ?? "");
   const [k, setK] = useState(identityFile ?? "");
   const [tp, setTp] = useState<"auto" | "mosh" | "ssh">(transportPreference);
-  const [probing, setProbing] = useState(false);
-  const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
-  const [bootstrapping, setBootstrapping] = useState(false);
-  const [bootstrapResult, setBootstrapResult] = useState<BootstrapResult | null>(null);
   const [settingUp, setSettingUp] = useState(false);
   const [restoring, setRestoring] = useState(false);
 
@@ -192,46 +173,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
       alert(e instanceof Error ? e.message : String(e));
     } finally {
       setPairingMinting(false);
-    }
-  };
-
-  const runProbe = async () => {
-    setProbing(true);
-    try {
-      const r = await window.api.setupProbe();
-      setProbeResult(r);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    } finally {
-      setProbing(false);
-    }
-  };
-
-  const runProbeFromButton = async () => {
-    setBootstrapResult(null);
-    await runProbe();
-  };
-
-  const runBootstrap = async () => {
-    if (!confirm(
-      "Install opencode on the remote and add the Claude auth plugin?\n\n" +
-      "• Runs the official opencode installer (curl https://opencode.ai/install | bash) " +
-      "if opencode isn't already present.\n" +
-      "• Merges the opencode-claude-auth plugin into ~/.config/opencode/opencode.jsonc, " +
-      "preserving your existing keys. If you already have a plugin (with or without an " +
-      "@version pin), no change is made. If the file is unparseable, it's backed up to " +
-      "opencode.jsonc.pre-bui before being replaced.\n\n" +
-      "Safe to re-run.",
-    )) return;
-    setBootstrapping(true);
-    try {
-      const r = await window.api.setupBootstrap();
-      setBootstrapResult(r);
-      await runProbe();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBootstrapping(false);
     }
   };
 
@@ -399,40 +340,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     You have unsaved connection changes. Save first — the wizard runs
                     against the saved host/user/identity.
                   </div>
-                )}
-                <div className="flex gap-2 mb-4">
-                  <button
-                    onClick={runProbeFromButton}
-                    disabled={!host || probing || bootstrapping || connectionDirty}
-                    className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {probing ? "Testing…" : "Test connection"}
-                  </button>
-                  <button
-                    onClick={runBootstrap}
-                    disabled={!host || probing || bootstrapping || connectionDirty}
-                    className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {bootstrapping ? "Bootstrapping…" : "Bootstrap remote"}
-                  </button>
-                </div>
-                {probeResult && (
-                  <div className="space-y-1 text-sm">
-                    {probeResult.checks.map((c) => (
-                      <div key={c.name} className="flex items-baseline gap-2">
-                        <span className={c.ok ? "text-green-400" : "text-red-400"}>
-                          {c.ok ? "✓" : "✗"}
-                        </span>
-                        <span className="text-text-muted w-32 shrink-0">{checkLabel(c.name)}</span>
-                        <span className="text-text-faint flex-1 break-all">{c.detail}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {bootstrapResult && (
-                  <pre className="text-sm bg-bg-soft border border-border rounded p-3 text-text-muted whitespace-pre-wrap max-h-64 overflow-y-auto">
-                    {bootstrapResult.log.join("\n")}
-                  </pre>
                 )}
               </div>
 

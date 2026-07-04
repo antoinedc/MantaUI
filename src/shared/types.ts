@@ -406,19 +406,6 @@ export const IPC = {
   // Result: { pairingCode, boxId, expiresAt } or { error }.
   authPair: "auth:pair",
 
-  // ---- setup wizard ----
-  // One-shot diagnostic over SSH: returns the status of every remote
-  // prerequisite bui depends on (ssh reachable, tmux installed, opencode
-  // installed, Anthropic auth wired). Used by the "Test connection"
-  // button in Settings.
-  setupProbe: "setup:probe",
-  // Best-effort installer: runs opencode's official installer on the
-  // remote and writes a minimal opencode.jsonc with the
-  // opencode-claude-auth plugin. Idempotent — safe to re-run. Does NOT
-  // perform Anthropic login (that requires browser flow on the remote);
-  // surfaces the exact next-step command instead.
-  setupBootstrap: "setup:bootstrap",
-
   // ---- scheduled prompts (bui-server owned) ----
   // Schedules are a bui-SERVER concept (durable jobs fired by the always-on
   // box process), NOT an opencode concept — so they get their own channels
@@ -581,15 +568,6 @@ export type ProbeResult = {
   // Composite: true iff every check passed. Renderer uses this to flip
   // the wizard from "needs attention" to "ready".
   allOk: boolean;
-};
-
-export type BootstrapResult = {
-  ok: boolean;
-  // Per-step log lines, suitable for showing to the user in a <pre>.
-  // Includes successes ("✓ opencode 0.9.1 installed") and failures
-  // ("✗ Anthropic auth: run `opencode auth login anthropic` on the
-  // remote"). Order is execution order.
-  log: string[];
 };
 
 // ---- opencode message + part types (subset for Phase 1) ----

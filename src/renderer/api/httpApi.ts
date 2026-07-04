@@ -446,13 +446,6 @@ export const httpApi: Api = {
   tmuxSetupConfig: () => rpc(IPC.tmuxSetupConfig),
   tmuxRestoreConfig: () => rpc(IPC.tmuxRestoreConfig),
 
-  // -- setup wizard --
-  // Mobile server doesn't run a setup wizard today (the user has already
-  // installed/started the mobile server) — return a stub indicating that.
-  // Desktop wires the real implementation through Electron IPC.
-  setupProbe: () => rpc(IPC.setupProbe),
-  setupBootstrap: () => rpc(IPC.setupBootstrap),
-
   // -- onboarding pairing --
   // The desktop onboarding shell (BET-49) drives this; the mobile/web client
   // has its own PairingScreen. We still implement it honestly so the Api

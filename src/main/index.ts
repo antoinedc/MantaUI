@@ -4,7 +4,6 @@ import { watch as fsWatch } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig } from "./config.js";
-import { probe as setupProbe, bootstrap as setupBootstrap } from "./setup.js";
 import { claimPairing } from "./auth.js";
 import {
   startDesktopPresence,
@@ -336,14 +335,6 @@ function registerHandlers(): void {
   });
 
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));
-
-  // Setup wizard: one-shot diagnostic + best-effort installer. Both run
-  // against the currently saved config (so the user must Save before
-  // testing — Settings UI enforces this by disabling the buttons while
-  // there are unsaved changes is a TODO; for now we just run with what's
-  // persisted).
-  ipcMain.handle(IPC.setupProbe, () => setupProbe(config));
-  ipcMain.handle(IPC.setupBootstrap, () => setupBootstrap(config));
 
   // Onboarding pairing (BET-49): POST <serverUrl>/auth/claim, and on success
   // persist { serverUrl, boxId, boxToken } to config (via commit — which also
