@@ -1,7 +1,7 @@
 # bui
 
 A macOS desktop client for working with Claude on a remote Linux box over
-SSH+tmux. Sidebar of projects (tmux sessions) with multiple windows each;
+HTTP+tmux. Sidebar of projects (tmux sessions) with multiple windows each;
 xterm.js terminal in one tab type, a native React chat panel powered by
 [opencode](https://opencode.ai) in the other.
 
@@ -20,12 +20,6 @@ in-tree but descoped from this beta — ignore it.
 - Node 20+ and `npm`
 - Xcode Command Line Tools (`xcode-select --install`) — needed by
   `node-pty` to build at install time
-- SSH already set up to your remote box. From a terminal:
-  ```bash
-  ssh user@your-box        # must succeed without typing a password
-  ```
-  Use an ssh-agent identity or an entry in `~/.ssh/config`. bui shells out
-  to your system `ssh`; it does not manage keys.
 
 **Remote (your own Linux box — VPS, dev server, whatever)**
 - `tmux` 3.0+
@@ -38,11 +32,6 @@ in-tree but descoped from this beta — ignore it.
   opencode auth login anthropic
   ```
 
-Mosh is supported but optional — bui auto-detects it on both ends and
-falls back to plain SSH. Install with `brew install mosh` locally and
-`apt install mosh` (or equivalent) on the remote if you want resilient
-mobile connections.
-
 ## Run
 
 ```bash
@@ -51,18 +40,19 @@ npm run dev
 ```
 
 No packaged binary yet — a tester runs from source. First launch opens
-Settings; fill in:
+the onboarding flow:
 
-1. **Remote host** (hostname or IP)
-2. **User** (optional — falls back to `~/.ssh/config`)
-3. **Identity file** (optional — same)
-
-Click **Save**, then **Test connection** to verify ssh / tmux / opencode
-status. If opencode isn't installed yet, **Bootstrap remote** runs the
-official installer and writes a minimal `~/.config/opencode/opencode.jsonc`
-on the remote. After that, run `opencode auth login anthropic` on the
-remote yourself once (the wizard surfaces the exact command) — it opens a
-browser flow that can't be driven over ssh.
+1. **Pair with your box.** Run the self-install script on your Linux box:
+   ```bash
+   curl -fsSL https://bui.useronda.com/install.sh | bash
+   ```
+   It installs bui-server, starts it, and prints a 6-digit pairing code.
+   Enter the code in the bui onboarding screen (along with your box's URL).
+2. **Pick AI providers.** After pairing, select which providers to use
+   (Anthropic comes pre-connected via opencode auth; add OpenAI/DeepSeek/etc.
+   with your own API keys).
+3. **Create your first project.** Enter a directory path, and bui creates
+   a tmux session for it.
 
 Optional: in the "Remote tmux config" section, click **Set up tmux config**
 to append a small fenced block to your remote `~/.tmux.conf` (mouse on,
@@ -98,7 +88,7 @@ The two coexist: each tmux window is one or the other (recognized by a
 
 ## Where state lives
 
-- **Mac**: `<userData>/config.json` — host, user, identity file, project
+- **Mac**: `<userData>/config.json` — `serverUrl`, `boxId`, `boxToken`, project
   metadata (default cwd per project), settings.
 - **Remote**: tmux sessions/windows are the source of truth.
   - `~/.bui-uploads/<session>/<batch>/` — drag-and-drop attachments. Auto
@@ -108,8 +98,8 @@ The two coexist: each tmux window is one or the other (recognized by a
   - `~/.config/opencode/opencode.jsonc` — opencode config. Bootstrap writes
     a minimal one; if you had your own, it's backed up to `.pre-bui`.
   - tmux session `bui-opencode` — bui's chat-mode windows talk to a
-    long-running `opencode serve` on `127.0.0.1:4096`, tunneled to the Mac
-    over SSH `-L 14096:127.0.0.1:4096`. Survives bui restarts.
+    long-running `opencode serve` on `127.0.0.1:4096`, proxied by bui-server
+    (no SSH hop). Survives bui restarts.
 
 ## Box server (mobile/web) — self-install
 
