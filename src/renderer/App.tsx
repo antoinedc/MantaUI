@@ -12,8 +12,8 @@ import { describe as describeConnection } from "../shared/net/state.js";
 export function App() {
   const {
     loaded,
-    host,
-    user,
+    serverUrl,
+    boxId,
     projects,
     activeProjectName,
     activeWindowByProject,
@@ -315,14 +315,6 @@ export function App() {
     };
   }, []);
 
-  // Auto-open Settings for a legacy SSH config that's missing its host — but
-  // NOT while onboarding is showing (the flow owns the screen) and NOT for a
-  // paired HTTP-mode config (boxToken set, host intentionally empty).
-  useEffect(() => {
-    if (loaded && !host && !showOnboarding && resolveTransportMode(configSnapshot()) === "ssh")
-      setSettingsOpen(true);
-  }, [loaded, host, showOnboarding, configSnapshot]);
-
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey;
@@ -441,17 +433,9 @@ export function App() {
   // CWD for the active (project, window). tmux's `paneCurrentPath` is always
   // absolute and follows shell-side `cd`s, so prefer it; fall back to the
   // project's configured `defaultCwd` for chat-mode holder panes that haven't
-  // emitted a path yet. Compact `/home/<user>/...` to `~/...` for display —
-  // matches the convention used everywhere else in the UI.
+  // emitted a path yet.
   const activeCwdRaw = activeWin?.paneCurrentPath || activeProject?.defaultCwd || "";
-  const activeCwd = (() => {
-    if (!activeCwdRaw) return "";
-    if (user && activeCwdRaw.startsWith(`/home/${user}/`)) {
-      return `~/${activeCwdRaw.slice(`/home/${user}/`.length)}`;
-    }
-    if (user && activeCwdRaw === `/home/${user}`) return "~";
-    return activeCwdRaw;
-  })();
+  const activeCwd = activeCwdRaw;
 
   // Full-screen onboarding replaces the entire shell (no sidebar/header/footer).
   // finishOnboarding clears the force flag + re-reads config → normal shell,
@@ -505,7 +489,13 @@ export function App() {
         )}
         <div className="titlebar-drag h-10 border-b border-border flex items-center px-3 gap-2 min-w-0">
           <div className="text-xs text-text-muted flex items-center gap-2 min-w-0">
-            <span className="shrink-0">{host ? host : "Not configured"}</span>
+            <span className="shrink-0">
+              {serverUrl
+                ? (() => { try { return new URL(serverUrl).hostname; } catch { return serverUrl; } })()
+                : boxId
+                  ? boxId.slice(0, 8) + "…"
+                  : "Not configured"}
+            </span>
             {activeProjectName && (
               <span className="text-text-faint shrink-0">
                 · {activeProjectName}
@@ -551,9 +541,9 @@ export function App() {
         <div className="flex-1 relative">
           {projects.length === 0 ? (
             <div className="h-full flex items-center justify-center text-text-faint text-sm">
-              {host
+              {serverUrl || boxId
                 ? "Create a project (⌘N) to start."
-                : "Open Settings to configure your remote host."}
+                : "Open Settings to connect to your box."}
             </div>
           ) : (
             <>
