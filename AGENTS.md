@@ -1,7 +1,11 @@
 # AGENTS.md — context for future sessions
 
-bui is an Electron desktop client for remote `claude` over `ssh`+`tmux`. Pipeline:
-**xterm.js (renderer)** ↔ **node-pty (main)** ↔ **ssh/mosh** ↔ **tmux** ↔ **claude**.
+bui is an Electron desktop client for remote `claude` over HTTP+tmux. Pipeline:
+**xterm.js (renderer)** ↔ **node-pty (main)** ↔ **tmux** ↔ **claude**.
+
+The desktop reaches the Linux box via direct HTTPS to bui-server (`src/server/`),
+authenticated with a `boxToken` obtained during pairing. No SSH, no mosh, no
+tunnels — the server IS the box. See "Desktop transport (HTTP-only)" below.
 
 A secondary mobile/web front-end (`src/server/`) runs on the Linux box itself
 and exposes the same tmux server over HTTP+WS. See the "Mobile / web client"
@@ -13,7 +17,7 @@ session-state snapshot.
 ## Layout
 
 - `src/main/` — Electron main: pty, transport, tmux primitives, config, IPC.
-  - `opencode.ts` — HTTP client + SSH tunnel mgmt for chat-mode windows.
+  - `opencode.ts` — HTTP client + SSE consumer for chat-mode windows.
   - `index.ts` — IPC handlers, opencode SSE bus, screenshot detector.
 - `src/renderer/` — React + xterm.js. `Terminal.tsx` is the only place that
   owns an xterm instance. `ChatPanel.tsx` is the entire chat-mode UI (~3500 LoC).
@@ -93,29 +97,26 @@ checking the keybind handler.
 
 ## File transfer
 
-**Drag in (upload).** Drop a file on the active terminal → main scp's it to
-`$HOME/.bui-uploads/<session>/<ts>/` over the existing ControlMaster socket →
-resolved absolute path is written into the PTY for claude to read.
-`webUtils.getPathForFile(file)` in the preload extracts the local path
-(Electron 31+ removed `File.path`, so the renderer can't read it directly).
-A window-level dragover/drop swallow in `App.tsx` keeps missed drops from
-navigating the renderer to `file://`.
+All file transfer is over HTTP to bui-server — no SSH, no scp, no ControlMaster.
+The server IS the box, so every operation is a direct `POST`/`GET` to
+`<serverUrl>/api/*` with `Authorization: Bearer <boxToken>`.
+
+**Drag in (upload).** Drop a file on the active terminal → `POST
+<serverUrl>/api/upload?session=<name>` streams the bytes straight to
+`~/.bui-uploads/<session>/<batch>/<file>` on the box. `webUtils.getPathForFile(file)`
+in the preload extracts the local path (Electron 31+ removed `File.path`, so the
+renderer can't read it directly). A window-level dragover/drop swallow in
+`App.tsx` keeps missed drops from navigating the renderer to `file://`. The
+absolute remote path is written into the PTY for claude to read.
 
 **Click out (peek).** xterm `LinkProvider` for absolute paths + an explicit
-click handler on `WebLinksAddon`. Path click → main scp-pulls into a per-host
-cache dir under `os.tmpdir()/bui-peek/<hash>/` → `shell.openPath` opens with
-the OS default app. URL click → `shell.openExternal`. **Don't rely on
-WebLinksAddon's default** — its `window.open` path gets denied by
-`setWindowOpenHandler` in `main/index.ts`, so URLs silently no-op.
-
-**OpenSSH 9.x scp gotcha — do NOT shell-quote remote paths.** Since 9.0,
-`scp` defaults to the SFTP transport, which passes the post-colon path
-verbatim (no remote shell). Wrapping the path in `'…'` makes SFTP look for a
-file literally named `'/path/...'` (quotes included) and you get
-`No such file or directory`. SFTP handles spaces and special chars natively,
-so the raw path is correct. The `mkdir` step in `uploadFiles` still uses
-`shellQuote` because that runs through `runSshOnce` (a real remote shell) —
-the quoting rule is "shell command yes, scp path no".
+click handler on `WebLinksAddon`. Path click → `GET
+<serverUrl>/api/peek?path=<abs>&session=<name>` streams the remote file bytes
+back → `__buiPreload.writeTempAndOpen` writes to a Mac tmpfile and
+`shell.openPath` opens with the OS default app. URL click →
+`shell.openExternal`. **Don't rely on WebLinksAddon's default** — its
+`window.open` path gets denied by `setWindowOpenHandler` in `main/index.ts`, so
+URLs silently no-op.
 
 **Hourly cleanup** of `~/.bui-uploads/`: `find -mindepth 2 -maxdepth 2 -type d
 -mmin +N -exec rm -rf {} +` deletes per-batch `<ts>` directories, then prunes
@@ -123,21 +124,21 @@ empty session dirs. Threshold is `uploadCleanupHours` in config (default 1,
 `0` disables). Sweep runs once at app load + every hour after; worst-case
 staleness ≈ `uploadCleanupHours + 1h`.
 
-**Agent → laptop push (outbox).** The reverse of drag-in: the remote AI drops a
-file into `~/.bui-outbox/` (optionally `~/.bui-outbox/<session>/`) and bui pulls
-it to the Mac's Downloads folder. It's the mirror image of upload — same warm
-ControlMaster, `scpDownload` with the destination flipped (`pullToDownloads` in
-`src/main/pty.ts`). Detection is a 3s **outbox poller** in `src/main/index.ts`
-(`pollOutboxOnce` → `listOutbox` over SSH → `find -printf '%s\t%p\n'`); it
-mirrors the screenshot Desktop watcher's philosophy (cheap periodic check, push
-a toast). The outbox is a **one-shot mailbox** — `pullToDownloads` `rm`s the
-remote source after a successful pull, so files aren't re-pulled and don't
-accumulate. The poller keeps a `seenOutboxPaths` set (cleared on host change)
-reconciled against the live listing each tick so a require-confirm toast the
-user hasn't answered isn't re-offered every 3s.
+**Agent → laptop push (outbox / download).** The reverse of drag-in: the remote
+AI drops a file into `~/.bui-outbox/` (optionally `~/.bui-outbox/<session>/`)
+and bui pulls it to the Mac's Downloads folder via `GET
+<serverUrl>/api/download?path=<relative>&session=<name>`. Detection is a 3s
+**outbox poller** in `src/main/index.ts` (`pollOutboxOnce` → `GET
+/api/outbox?session=<name>` → JSON listing); it mirrors the screenshot Desktop
+watcher's philosophy (cheap periodic check, push a toast). The outbox is a
+**one-shot mailbox** — the server `rm`s the remote source after a successful
+download, so files aren't re-pulled and don't accumulate. The poller keeps a
+`seenOutboxPaths` set (cleared on host change) reconciled against the live
+listing each tick so a require-confirm toast the user hasn't answered isn't
+re-offered every 3s.
 
 - **Trust flag `allowAgentPush`** (AppConfig, default OFF, Settings UI). ON =
-  pull immediately + informational toast ("↓ name · saved to Downloads ·
+  download immediately + informational toast ("↓ name · saved to Downloads ·
   Reveal"). OFF = a confirm toast ("AI sent you a file · Save / ×"); the
   renderer's `saveAgentFile` calls `agentPullFile` on Save. Mirrors
   `chatAutoAllow`'s shape but is a SEPARATE flag — writing to Downloads is a
@@ -151,7 +152,7 @@ user hasn't answered isn't re-offered every 3s.
 - **The AI learns the convention** via the `/send-file` command
   (`docs/opencode-commands/send-file.md`). Install on the remote opencode host:
   `ln -sf <repo>/docs/opencode-commands/send-file.md
-  ~/.config/opencode/commands/send-file.md` then restart `bui-opencode`. The
+  ~/.config/opencode/commands/send-file.md` then restart `opencode-serve`. The
   command just tells the AI to `cp <file> ~/.bui-outbox/` — no MCP server, works
   with any model.
 - **Mobile** has no Mac Downloads folder (the server IS the box). A server-side
@@ -275,6 +276,55 @@ the stage-colored `%`; clamp the empty textarea placeholder to one line via
 `resizeInput` still owns height). Verify on-device: `cd mobile && npm run
 apk`, `adb install -r`, screenshot the composer.
 
+## Desktop transport (HTTP-only)
+
+The desktop Electron app no longer uses SSH to reach the box. Everything goes
+over direct HTTPS to bui-server, authenticated with a `boxToken` obtained during
+the pairing flow. No tunnels, no ControlMaster, no mosh.
+
+**Pairing → credentials:**
+1. User installs bui on Mac, opens the app → full-screen onboarding modal.
+2. Enters the 6-digit pairing code (from `bui pair` on the box or the
+   self-install script output).
+3. Desktop POSTs `<serverUrl>/auth/claim { code }` → server validates, returns
+   `{ boxId, boxToken }`. Desktop persists `{ serverUrl, boxId, boxToken }` to
+   `config.json` (`src/main/auth.ts`, `claimPairing`).
+4. All subsequent HTTP calls include `Authorization: Bearer <boxToken>`.
+
+**Transport layer:**
+- `src/main/index.ts` owns all IPC handlers. Each channel (`schedule:*`,
+  `secrets:*`, `webhook:*`, `sharedConfig:*`, `push:*`, `notify:*`, etc.)
+  routes to a `src/main/<module>.ts` client that does a plain `fetch` to
+  `<serverUrl>/api/<path>` with the Bearer token.
+- `src/renderer/api/httpApi.ts` implements the full `Api` contract for the
+  renderer: `/rpc/<channel>` for method calls, `EventSource` to `GET /events`
+  for SSE streaming. Same Bearer token auth.
+- `window.__buiPreload` (from `src/preload/`) provides OS-integration bridges:
+  `writeTempAndOpen` (file peek), `getPathForFile` (drag-drop paths), clipboard
+  access, screenshot detection, native file dialogs. These are Electron-only
+  and have no mobile equivalent.
+
+**What this replaces:** the old SSH `-L` tunnels (`-L 14096:127.0.0.1:4096` for
+opencode, `-L 18787:127.0.0.1:8787` for presence/schedules/secrets). The
+ControlMaster socket (`/tmp/bui-cm-*`), `forwardHeal.ts`, `runSshOnce`,
+`ensurePresenceForward`, and all scp-based file transfer are gone. The server
+IS the box — local execution, no hop.
+
+**Config schema (post-pairing):**
+```json
+{
+  "serverUrl": "https://bui.useronda.com",
+  "boxId": "<32-hex-char>",
+  "boxToken": "<32-hex-char>",
+  "projects": [{ "tmuxSession": "...", "defaultCwd": "..." }]
+}
+```
+Legacy SSH fields (`host`, `user`, `identityFile`, `transport`) are migrated
+out on load (`src/main/config.ts`).
+
+**Mode detection:** if `boxToken` is set → HTTP mode (normal). No fallback to
+SSH — the old `host`-based mode is fully removed.
+
 ## Web Push notifications (`src/server/push.mjs`)
 
 Mobile PWA gets Web Push (VAPID) for events it can't otherwise see when
@@ -299,10 +349,11 @@ lives in `classifyPushEvent` / `firePush`, not the service worker
   our payload, not removable via the Push API.
 
 - **Multi-device suppression (Discord rule: active on desktop ⇒ no mobile
-  push).** The desktop Electron app POSTs `/push/desktop-presence
-  {visible}` over a best-effort SSH `-L 18787:127.0.0.1:8787` forward on the
-  shared ControlMaster (`ensurePresenceForward` in `src/main/opencode.ts`;
-  driver in `src/main/desktopPresence.ts`).
+  push).** The desktop Electron app POSTs `/push/desktop-presence {visible}`
+  direct HTTPS to bui-server (`<serverUrl>/push/desktop-presence` with
+  `Authorization: Bearer <boxToken>`). No SSH forward — the server IS the box.
+  Implementation in `src/main/desktopPresence.ts` (`startDesktopPresence`,
+  `sendHeartbeatHttp`).
   - **ACTIVE = window focused AND recent input — NOT focus alone.**
     `desktopPresence.ts` gates `visible:true` on
     `powerMonitor.getSystemIdleTime() < IDLE_ACTIVE_THRESHOLD_S` (30s) in
@@ -391,11 +442,11 @@ the reusable "bui tools" pattern (for future tools like `ping`) is in
   mobile optimization, but the UI does not depend on it. `describeCron` in
   `chatUtils.ts` (pure, tested) renders human-readable cadence.
 - **Transport: `schedule:*` channels, NOT `opencode:*`** — schedules are a
-  bui-SERVER concept. Desktop reaches the server store over the existing SSH
-  `-L 18787` presence forward (`src/main/schedule.ts`, mirrors
+  bui-SERVER concept. Desktop reaches the server store over direct HTTPS
+  (`<serverUrl>/api/schedule`, `src/main/schedule.ts`, mirrors
   `sharedConfigSync`); mobile is in-process (`src/server/rpc.mjs` →
-  `schedule.mjs`). If the desktop forward is down, list/delete shows an error
-  toast but jobs **still fire** (server-owned). `window.api.scheduleList`/
+  `schedule.mjs`). If the server is down, list/delete shows an error toast
+  but jobs **still fire** (server-owned). `window.api.scheduleList`/
   `scheduleDelete` wired across all 6 sites (types, preload, httpApi, main
   handler, rpc dispatch, impls).
 - Tests: `src/server/schedule.test.mjs` (cron + tick, 20) and `describeCron` in
@@ -526,7 +577,7 @@ routing matrix + scenarios in `docs/bui-tools-notify.md`. Key facts:
 - **Two transports, one router.** Mobile leg = Web Push (unchanged). Desktop leg
   = `setDesktopSink(fn)` (injected by `index.mjs`) publishes a `desktopNotify`
   bus envelope; the Electron app (`src/main/desktopNotify.ts`) consumes
-  bui-server's `GET /events` SSE **over the existing -L 18787 presence forward**,
+  bui-server's `GET /events` SSE **over direct HTTPS to bui-server**,
   relays the payload via `IPC.desktopNotify` → the renderer (`App.tsx`
   `onDesktopNotify`) shows it with the `Notification` API. The desktop ignores
   every other bus `kind` (it already gets opencode events from its own :4096
@@ -601,8 +652,8 @@ peers/notify. Key facts:
   + scope + hint) and a metadata-only list (the value is cleared from component
   state on save and never re-displayed). Refetch-driven (open + 10s poll).
 - **Transport: `secrets:*` channels** (mirror schedule's). Desktop reaches the
-  server store over the existing SSH `-L 18787` presence forward
-  (`src/main/secrets.ts`); mobile is in-process (`src/server/rpc.mjs` →
+  server store over direct HTTPS (`<serverUrl>/api/secrets`,
+  `src/main/secrets.ts`); mobile is in-process (`src/server/rpc.mjs` →
   `secrets.mjs`). `window.api.secretsList/secretsSet/secretsDelete` wired across
   all 6 sites. **list returns metadata only**; the value travels renderer → box
   on set and never comes back.
@@ -651,7 +702,7 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
 ## State
 
 - **Source of truth**: tmux on the remote. `tmux list-sessions` + `list-windows -a`.
-- **Local config** (`<userData>/config.json`): `{host, user, identityFile, transport, projects[{tmuxSession, defaultCwd}], opencodePort, chatAutoAllow, defaultModel, skillRegistryUrls}`.
+- **Local config** (`<userData>/config.json`): `{serverUrl, boxId, boxToken, projects[{tmuxSession, defaultCwd}], chatAutoAllow, defaultModel, skillRegistryUrls, cacheTtl}`.
 - **No local sessions table.** Project = tmux session, app session = tmux window.
 
 ## Patterns worth knowing
@@ -675,10 +726,10 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
     metadata forever. Expansion is therefore mandatory at the **single
     creation chokepoint**, NOT in `resolveProjectCwd`:
     `createSession` expands a leading `~` itself — desktop
-    (`src/main/opencode.ts`) via the now-exported
-    `expandRemotePath` (remote `cd && pwd` over the SSH ControlMaster);
-    mobile (`src/server/opencode.mjs`) via `expandTilde` against the server
-    process's own `$HOME` (it runs on the opencode host). `forkSession` is
+    (`src/main/opencode.ts`) delegates to the server's `expandTilde` via the
+    opencode HTTP proxy (`src/server/opencode.mjs`); mobile
+    (`src/server/opencode.mjs`) uses the same `expandTilde` against the server
+    process's own `$HOME`. `forkSession` is
     unaffected — it inherits the parent's directory from opencode and passes
     no cwd. The new-window path (`pty.ts:maybeCreateChatSession`) expands
     independently before `createSession`; that earlier expansion is now
@@ -752,8 +803,8 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   back to `AppConfig.defaultModel` (from store) when no localStorage entry
   exists, so new sessions pick up the global default automatically.
 - **One PTY per active project**, kept mounted across renders. Switching
-  between sessions inside a project uses `tmux select-window` over a
-  side-channel ssh (no PTY reconnect).
+  between sessions inside a project uses `tmux select-window` over the
+  local tmux socket (no PTY reconnect).
 - **OSC 52 → Mac clipboard** via custom parser handler in `Terminal.tsx`
   (xterm.js's built-in addon-clipboard doesn't work in Electron because
   `navigator.clipboard.writeText` is gated on user gesture).
@@ -830,10 +881,11 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
 
 ## New-project dialog (`Sidebar.tsx`)
 
-Two helpers run against the entered `defaultCwd` over the warm
-ControlMaster socket, both in `src/main/pty.ts`:
+Two helpers run on the server via `local.listWorktrees(cwd)` and
+`local.listPathCompletions(cwd)` (HTTP `POST /rpc/local` → `src/server/local.mjs`),
+both executed locally on the Linux box. No SSH hop — the server IS the box.
 
-- **`listWorktrees(cwd)`** — `cd <cwd> && git worktree list --porcelain`.
+- **`listWorktrees(cwd)`** — `git worktree list --porcelain` in the given cwd.
   If >1 worktree, the dialog pauses to show "Detected N git worktrees.
   Open a session for each?" with Yes / Just main. On Yes, the first
   worktree becomes the tmux session's initial window; the rest are added
@@ -863,12 +915,13 @@ Locked decisions for these flows:
   re-sync if worktrees come and go later (same scope as the "live
   refresh polling" roadmap item).
 
-## Per-window activity poller (`src/main/status.ts`)
+## Per-window activity poller (`src/server/status.mjs`)
 
-Drives the blue/amber dot in the sidebar. Polls every 2s via one SSH call
-that runs `tmux list-windows -a` followed by `tmux capture-pane -p -S -40`
-for every window, then parses the captured text. Reuses the existing
-ControlMaster socket so each tick is cheap (~30–60ms total).
+Runs **on the server** (the Linux box), not on the desktop. Polls every 2s via
+local `tmux list-windows -a` + `tmux capture-pane -p -S -40` for every window,
+then parses the captured text. No SSH hop — the server IS the box. Publishes
+`WindowStatus[]` batches on the in-process bus; the desktop consumes them over
+`GET /events` SSE.
 
 Detection rules — these are **heuristics over Claude's TUI rendering**, not
 a contract. They will break the next time Claude rewords its status line:
@@ -913,43 +966,26 @@ mode.
 
 A second window type alongside the claude-TUI window. A tmux window running
 `sleep infinity` (holder pane) with bui's own React `ChatPanel` overlaid on
-top, talking to an opencode session over HTTP+SSH tunnel.
+top, talking to an opencode session over HTTP (via bui-server).
 
 **Recognition**: presence of `@bui-session-id` tmux user-option on the window
 is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 
 **Architecture**:
 - opencode runs in tmux session `bui-opencode` on the Linux box, port 4096,
-  bound to 127.0.0.1. Mac connects via SSH `-L 14096:127.0.0.1:4096`.
+  bound to 127.0.0.1. The desktop reaches it via bui-server's HTTP proxy
+  (`src/server/opencode.mjs`) — no SSH tunnel, no `-L` forward.
 - Renderer never talks to opencode directly — only via `window.api.*`.
 - Main owns ONE long-lived SSE stream (`/event`) and fans events to the renderer.
   ChatPanel filters by sessionID.
 - Anthropic auth via `opencode-claude-auth@latest` plugin in
   `~/.config/opencode/opencode.jsonc` (Claude Max sub, `~/.claude/.credentials.json`).
 
-**SSH `-L` forward self-heal (`src/main/forwardHeal.ts`)** — the
-`-L 14096:127.0.0.1:4096` forward is attached to the shared SSH
-ControlMaster (`/tmp/bui-cm-%C`, `ControlPersist=10m`). GOTCHA: killing
-the app and relaunching **within the 10-min persist window** leaves the
-old instance's ControlMaster *and its port-14096 forward* alive as an
-orphan. The new instance's `ensureForward` (`src/main/opencode.ts`) starts
-its own master (so `ssh -O check` passes) but `ssh -O forward` is rejected
-with `Port forwarding failed` because the orphan still binds 14096 —
-surfaces as `Error invoking remote method 'opencode:messages': ssh -O
-forward exited 255`. On a port-forwarding failure `ensureForward` now:
-identifies the port holder via `lsof`, and if it's one of *our* own
-`/tmp/bui-cm-*` sockets that is NOT the live master, `ssh -O exit`s that
-specific orphan socket and retries once. A non-ssh holder or a foreign ssh
-tunnel is reported, never killed. Decision logic is pure + unit-tested in
-`forwardHeal.ts` (`isPortForwardingFailure`, `parseLsofListeners`,
-`decideEviction`); the spawn glue stays thin in `opencode.ts`. This
-recurs on every kill-relaunch dev cycle — do not regress the heal path.
-
 **Key files**:
 
 | File | What |
 |---|---|
-| `src/main/opencode.ts` | HTTP client, SSE consumer, ssh tunnel mgmt |
+| `src/main/opencode.ts` | HTTP client, SSE consumer, opencode session mgmt |
 | `src/main/index.ts` | IPC handlers, opencode SSE bus, screenshot detector |
 | `src/main/pty.ts` | `tmuxRestampSessionId`, `tmuxNewChatWindow` |
 | `src/renderer/ChatPanel.tsx` | entire chat UI (~4150 LoC), intentionally monolithic |
@@ -963,7 +999,8 @@ for all new and cleared sessions; settable in Settings; `null`/absent = opencode
 picks its own default. `skillRegistryUrls: string[]` — extra opencode skill
 registry URLs (Settings UI). On save, the `configUpdate` handler reads remote
 `~/.config/opencode/opencode.jsonc`, deep-merges only the `skills.urls` key,
-and writes it back via `runSshOnce`. **Merge is JSONC-comment-stripped** (`//`
+and writes it back via an HTTP call to bui-server (`src/server/local.mjs`).
+**Merge is JSONC-comment-stripped** (`//`
 single-line only) before `JSON.parse`; if it's unparseable we start from `{}`
 rather than corrupting other keys. The default registry
 (`https://antoinedc.github.io/bui-skills`) ships in the opencode binary once
@@ -985,9 +1022,9 @@ configured to send.
   returns stale data forever ("main" even when HEAD is on `feature/x`) and
   the `vcs.branch.updated` SSE below never fires for those switches. The
   `opencode:vcs-branch` IPC (`window.api.opencodeVcsBranch(directory)`)
-  bypasses opencode entirely: main spawns
-  `git -C <cwd> branch --show-current` over the warm SSH ControlMaster
-  (~30ms); the mobile server uses `child_process.spawn("git", ...)` locally.
+  bypasses opencode entirely: the server spawns
+  `git -C <cwd> branch --show-current` locally
+  (~30ms); the mobile server uses the same local spawn.
   ChatPanel polls every 5s and on every submit, so terminal-side checkouts
   reflect within one tick. If you ever need branch info elsewhere, use the
   same IPC — never call `/vcs` directly.
@@ -1163,7 +1200,7 @@ a new prop to MessageRow, either make it primitive or back it with
 a memoized lookup; otherwise the keystroke lag returns.
 
 `@`-typeahead file lookup is debounced 80ms (`fileSearchTimer`) so a
-fast typist doesn't pile up parallel SSH-tunneled `opencodeFindFiles`
+fast typist doesn't pile up parallel HTTP `opencodeFindFiles`
 requests; the seq guard remains so any stale response is discarded.
 
 **Typed `session.error` names.** The `session.error` handler switches on
@@ -1461,7 +1498,8 @@ Three upload paths all land in `~/.bui-uploads/<session>/<ts>/` on the remote:
 1. **Drag-drop** — `image/*`, PDF, audio, video → FilePart chip.
    Everything else → `@<abs-path>` text appended to textarea.
 2. **Paste** (`⌘V` in chat input) — intercepts `image/*` clipboard items,
-   calls `uploadBuffer` IPC (bytes → Mac tmpfile → scp). Same chip as drag-drop.
+    calls `uploadBuffer` IPC (bytes → Mac tmpfile → HTTP `POST /api/upload`).
+    Same chip as drag-drop.
 3. **Screenshot detector** — two parallel paths in `main/index.ts`:
    - *Clipboard poller* (500ms): fingerprints clipboard via `availableFormats()`
      + image size. Fires on `⌘⇧Control+3/4`. Pushes `screenshotDetected` IPC.
@@ -1496,7 +1534,7 @@ in the server modules.
 Global commands (`~/.claude/commands/*.md`) are symlinked into
 `~/.config/opencode/commands/` so opencode's `/command` API picks them up.
 When adding a new command file: `ln -sf ~/.claude/commands/<name>.md ~/.config/opencode/commands/`
-then restart the `bui-opencode` tmux session for opencode to reload.
+then restart `opencode-serve` for opencode to reload.
 
 ## Work tracking (Multica)
 
@@ -1548,7 +1586,7 @@ Full CLI cheat sheet: `/home/dev/projects/shared/multica/setup.md`
 - **Global model preference** — `AppConfig.defaultModel` (Settings UI, persisted to `config.json`). New sessions and `/clear` fall back to this when no per-session localStorage entry exists. `/clear` also carries the current per-session override forward to the new session id before refresh.
 - **Live refresh polling** — sidebar updates only on bui's own actions.
 - **Command palette (⌘K)** — fuzzy switch + actions (~150 lines).
-- **Reconnect-on-drop UI** — SSH has no reconnect banner today.
+- **Reconnect-on-drop UI** — HTTPS has no reconnect banner today.
 - **Mobile create flow** — `+` on the mobile session list currently only
   re-syncs; the new-session/new-project modal (desktop `Sidebar.tsx`) is not
   yet lifted into a mobile sheet.
