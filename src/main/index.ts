@@ -4,28 +4,8 @@ import { watch as fsWatch } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig } from "./config.js";
-import {
-  killAll,
-  killPty,
-  listPathCompletions,
-  listWorktrees,
-  resizePty,
-  spawnPty,
-  uploadFiles,
-  uploadBuffer,
-  cleanupUploads,
-  peekRemoteFile,
-  peekRemoteFileHttp,
-  listOutbox,
-  pullToDownloads,
-  writePty,
-  runSshOnce,
-} from "./pty.js";
-import { info as transportInfo, invalidate as invalidateTransport } from "./transport.js";
 import { probe as setupProbe, bootstrap as setupBootstrap } from "./setup.js";
 import { claimPairing } from "./auth.js";
-import { startStatusPoller, stopStatusPoller } from "./status.js";
-import { buildRemoteConfigWriteCmd } from "./remoteConfigWrite.js";
 import {
   startDesktopPresence,
   stopDesktopPresence,
@@ -65,12 +45,9 @@ import { patchTouchesSharedConfig } from "../shared/sharedConfig.mjs";
 import {
   IPC,
   type AppConfig,
-  type AgentFileReady,
   type AuthClaimInput,
   type ProjectMeta,
-  type SpawnOptions,
 } from "../shared/types.js";
-import { resolveTransportMode } from "../shared/transport.mjs";
 
 // Parse a non-2xx /auth/pair response body into a user-facing error string.
 // The server returns { error: "..." } for 403 (not loopback), 429 (rate limit),
@@ -104,35 +81,6 @@ function upsertProjectMeta(meta: ProjectMeta): void {
 
 function deleteProjectMeta(tmuxSession: string): void {
   commit({ projects: config.projects.filter((p) => p.tmuxSession !== tmuxSession) });
-}
-
-function startPollerIfReady(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (!config.host) {
-    stopStatusPoller();
-    return;
-  }
-  startStatusPoller(mainWindow, () => config);
-}
-
-// Periodic upload cleanup. Runs once on (re)start and every hour afterward;
-// each run deletes batches older than the configured threshold. Worst-case
-// staleness ≈ uploadCleanupHours + 1h.
-let cleanupTimer: ReturnType<typeof setInterval> | null = null;
-
-function scheduleUploadCleanup(): void {
-  if (cleanupTimer) {
-    clearInterval(cleanupTimer);
-    cleanupTimer = null;
-  }
-  if (!config.host) return;
-  const hours = config.uploadCleanupHours ?? 1;
-  if (hours <= 0) return;
-  void cleanupUploads(config, hours);
-  cleanupTimer = setInterval(
-    () => void cleanupUploads(config, config.uploadCleanupHours ?? 1),
-    60 * 60 * 1000,
-  );
 }
 
 // ===== Screenshot detector =====
@@ -227,116 +175,6 @@ function stopScreenshotDetector(): void {
   }
 }
 
-// ===== Agent → laptop outbox poller =====
-//
-// The reverse of drag-and-drop. The remote AI drops a file into
-// `~/.bui-outbox/` and we pull it to the Mac's Downloads folder. This poller
-// is the detection half (the transfer is pty.ts:pullToDownloads); it mirrors
-// the screenshot Desktop watcher's philosophy — cheap periodic check over the
-// warm ControlMaster, push a toast to the renderer.
-//
-// Cadence is 3s: file pushes are a deliberate, low-frequency action (the AI
-// finished generating something), so we don't need sub-second latency, and a
-// single `find` over the warm master is ~30-60ms.
-
-const OUTBOX_POLL_MS = 3000;
-let outboxTimer: ReturnType<typeof setInterval> | null = null;
-// Remote paths we've already acted on this run, so a slow pull (or a
-// require-confirm toast the user hasn't answered yet) isn't re-offered every
-// tick. Cleared on host change so a new box starts fresh.
-const seenOutboxPaths = new Set<string>();
-let outboxPolling = false; // re-entrancy guard for the async tick
-
-// Where agent-pushed files land. Configurable override, else ~/Downloads.
-function resolveDownloadsDir(): string {
-  if (config.downloadsDir && config.downloadsDir.trim()) {
-    return config.downloadsDir.trim();
-  }
-  return app.getPath("downloads");
-}
-
-async function pollOutboxOnce(): Promise<void> {
-  if (outboxPolling) return;
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (!config.host) return;
-  outboxPolling = true;
-  try {
-    const entries = await listOutbox(config);
-    // Reconcile the seen-set with what's actually on the remote: a file the
-    // poller pulled (and rm'd) drops out of the listing, so prune it from the
-    // set. Otherwise the set would grow unbounded across a long session.
-    const present = new Set(entries.map((e) => e.path));
-    for (const p of [...seenOutboxPaths]) {
-      if (!present.has(p)) seenOutboxPaths.delete(p);
-    }
-    for (const entry of entries) {
-      if (seenOutboxPaths.has(entry.path)) continue;
-      seenOutboxPaths.add(entry.path);
-      void handleOutboxEntry(entry);
-    }
-  } catch (e) {
-    console.warn("[outbox] poll failed:", (e as Error).message);
-  } finally {
-    outboxPolling = false;
-  }
-}
-
-async function handleOutboxEntry(entry: {
-  path: string;
-  name: string;
-  size: number;
-  session: string | null;
-}): Promise<void> {
-  const base: AgentFileReady = {
-    remotePath: entry.path,
-    name: entry.name,
-    size: entry.size,
-    sessionName: entry.session,
-    autoPulled: false,
-  };
-  if (config.allowAgentPush) {
-    // Trust mode: pull immediately, toast is informational.
-    try {
-      const localPath = await pullToDownloads(
-        config,
-        entry.path,
-        resolveDownloadsDir(),
-      );
-      // The remote source is gone now (pullToDownloads rm'd it); drop it from
-      // the seen-set so a future same-named push is offered again.
-      seenOutboxPaths.delete(entry.path);
-      pushAgentFileReady({ ...base, autoPulled: true, localPath });
-    } catch (e) {
-      console.warn("[outbox] auto-pull failed:", (e as Error).message);
-      // Fall back to a confirm toast so the file isn't silently lost.
-      pushAgentFileReady(base);
-    }
-  } else {
-    // Require-confirm: just announce. The renderer calls agentPullFile on accept.
-    pushAgentFileReady(base);
-  }
-}
-
-function pushAgentFileReady(payload: AgentFileReady): void {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(IPC.agentFileReady, payload);
-  }
-}
-
-function startOutboxPoller(): void {
-  stopOutboxPoller();
-  if (!config.host) return;
-  void pollOutboxOnce();
-  outboxTimer = setInterval(() => void pollOutboxOnce(), OUTBOX_POLL_MS);
-}
-
-function stopOutboxPoller(): void {
-  if (outboxTimer) {
-    clearInterval(outboxTimer);
-    outboxTimer = null;
-  }
-}
-
 // IPC: renderer calls this to read the current clipboard image as PNG bytes.
 // Separate from the poller so we only read full pixel data on demand.
 function readClipboardImageBuffer(): Buffer | null {
@@ -412,10 +250,7 @@ app.whenReady().then(() => {
   createWindow();
   // Defer poller start until renderer is ready to receive events.
   mainWindow?.webContents.once("did-finish-load", () => {
-    startPollerIfReady();
-    scheduleUploadCleanup();
     startScreenshotDetector();
-    startOutboxPoller();
     // Report desktop focus to the mobile server so it suppresses redundant
     // mobile "done" pushes while the user is active on desktop.
     startDesktopPresence(() => config);
@@ -441,33 +276,20 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
-  stopStatusPoller();
   stopScreenshotDetector();
-  stopOutboxPoller();
-  if (cleanupTimer) clearInterval(cleanupTimer);
-  killAll();
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", () => {
-  stopStatusPoller();
   stopScreenshotDetector();
-  stopOutboxPoller();
   stopDesktopPresence();
   stopDesktopNotifications();
-  if (cleanupTimer) clearInterval(cleanupTimer);
-  killAll();
 });
 
 function registerHandlers(): void {
   ipcMain.handle(IPC.configGet, () => config);
 
   ipcMain.handle(IPC.configUpdate, async (_e, patch: Partial<AppConfig>) => {
-    // Host or identity change → re-detect transport, drop the cached "forward
-    // is up" flag, restart pollers against the new target.
-    if ("host" in patch || "user" in patch || "identityFile" in patch) {
-      invalidateTransport();
-    }
     // If this patch touches a SHAREABLE field, stamp configUpdatedAt so the
     // cross-device sync treats this as the newer snapshot (LWW). Mutating
     // `patch` here means commit() persists the timestamp too. Device-local
@@ -477,67 +299,6 @@ function registerHandlers(): void {
       (patch as AppConfig).configUpdatedAt = Date.now();
     }
     const next = commit(patch);
-    if ("host" in patch || "user" in patch || "identityFile" in patch) {
-      startPollerIfReady();
-      // New target → forget which outbox files we've seen and re-poll fresh.
-      seenOutboxPaths.clear();
-      startOutboxPoller();
-    }
-    if (
-      "host" in patch ||
-      "user" in patch ||
-      "identityFile" in patch ||
-      "uploadCleanupHours" in patch
-    ) {
-      scheduleUploadCleanup();
-    }
-    // Skill registry URLs → write skills.urls into remote opencode.jsonc so
-    // opencode picks them up on next startup. We read the existing file first
-    // to preserve all other settings, then patch only the skills.urls key.
-    if ("skillRegistryUrls" in patch && next.host) {
-      try {
-        const urls = next.skillRegistryUrls ?? [];
-        // Read current remote config (may not exist yet — that's fine)
-        const readResult = await runSshOnce(
-          next,
-          `cat ~/.config/opencode/opencode.jsonc 2>/dev/null || echo '{}'`,
-        );
-        let existing: Record<string, unknown> = {};
-        try {
-          // Strip JSONC comments before parsing (simple single-line // strip)
-          const stripped = readResult.stdout.replace(/\/\/[^\n]*/g, "");
-          existing = JSON.parse(stripped);
-        } catch {
-          // Unparseable — start fresh, preserving the file's plugin entry at least
-        }
-        // Merge: patch only skills.urls; keep everything else untouched
-        const merged = {
-          ...existing,
-          skills: {
-            ...(typeof existing.skills === "object" && existing.skills !== null ? existing.skills as Record<string, unknown> : {}),
-            urls,
-          },
-        };
-        const content = JSON.stringify(merged, null, 2);
-        // Write the JSON bytes UNCHANGED. The previous code did
-        // `printf '%s' ${JSON.stringify(content)}` — double-encoding the
-        // already-stringified JSON, which wrote literal backslash-n /
-        // escaped-quote garbage and produced an invalid opencode.jsonc that
-        // stopped opencode from starting (2026-05-18 incident). The pure,
-        // tested builder emits a single-quoted heredoc so arbitrary JSON
-        // passes through byte-for-byte. See remoteConfigWrite.ts.
-        await runSshOnce(
-          next,
-          buildRemoteConfigWriteCmd(
-            content,
-            "~/.config/opencode/opencode.jsonc",
-          ),
-        );
-      } catch (e) {
-        // Non-fatal — user can still add URLs manually
-        console.error("Failed to write skill registry URLs to remote opencode.jsonc:", e);
-      }
-    }
     // Push the shareable subset to the mobile server so the other device picks
     // it up (e.g. set the Groq STT key on desktop, get it on mobile). Fire-and-
     // forget over HTTPS; the POST response is the
@@ -545,8 +306,6 @@ function registerHandlers(): void {
     if (touchesShared) void pushSharedConfig().catch(() => {});
     return next;
   });
-
-  ipcMain.handle(IPC.transportInfo, () => transportInfo(config));
 
   ipcMain.handle(IPC.projectMetaUpsert, (_e, meta: ProjectMeta) => {
     upsertProjectMeta(meta);
@@ -564,48 +323,11 @@ function registerHandlers(): void {
     clipboard.writeText(text);
   });
 
-  ipcMain.handle(
-    IPC.uploadFiles,
-    (_e, input: { projectName: string; localPaths: string[] }) =>
-      uploadFiles(config, input.projectName, input.localPaths),
-  );
-
-  ipcMain.handle(
-    IPC.uploadBuffer,
-    (_e, input: { projectName: string; filename: string; buffer: ArrayBuffer }) =>
-      uploadBuffer(config, input.projectName, input.filename, Buffer.from(input.buffer)),
-  );
-
   // Read the current clipboard image as PNG bytes (called on demand after a
   // screenshotDetected push — we don't read full pixel data in the poller).
   ipcMain.handle(IPC.clipboardReadImage, () => {
     const buf = readClipboardImageBuffer();
     return buf ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : null;
-  });
-
-  ipcMain.handle(IPC.peekRemoteFile, (_e, remotePath: string) => {
-    // HTTP-mode: fetch from the bui-server's /api/peek route instead of scp.
-    // resolveTransportMode returns "http" when config has a valid boxToken,
-    // so we dispatch to the HTTP handler; otherwise fall through to the
-    // legacy SSH scpDownload path.
-    if (resolveTransportMode(config) === "http") {
-      return peekRemoteFileHttp(config, remotePath);
-    }
-    return peekRemoteFile(config, remotePath);
-  });
-
-  // Agent outbox → laptop: pull a remote outbox file to the downloads dir.
-  // Returns the saved local absolute path. Used by the require-confirm toast's
-  // "Save" button (auto-pull mode does this in the poller). Drops the path from
-  // the seen-set so a future same-named push is offered again.
-  ipcMain.handle(IPC.agentPullFile, async (_e, remotePath: string) => {
-    const localPath = await pullToDownloads(
-      config,
-      remotePath,
-      resolveDownloadsDir(),
-    );
-    seenOutboxPaths.delete(remotePath);
-    return localPath;
   });
 
   // Reveal a local file in Finder / the OS file manager.
@@ -614,14 +336,6 @@ function registerHandlers(): void {
   });
 
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));
-
-  ipcMain.handle(IPC.gitListWorktrees, (_e, cwd: string) =>
-    listWorktrees(config, cwd),
-  );
-
-  ipcMain.handle(IPC.fsListDirs, (_e, partial: string) =>
-    listPathCompletions(config, partial),
-  );
 
   // Setup wizard: one-shot diagnostic + best-effort installer. Both run
   // against the currently saved config (so the user must Save before
@@ -736,21 +450,4 @@ function registerHandlers(): void {
   // list yields metadata only (no signing secret); creation is the AI's job.
   ipcMain.handle(IPC.webhookList, (_e, sessionId?: string) => listWebhooks(sessionId));
   ipcMain.handle(IPC.webhookDelete, (_e, id: string) => deleteWebhook(id));
-
-  ipcMain.handle(IPC.ptySpawn, async (_e, opts: SpawnOptions) => {
-    if (!mainWindow) return;
-    await spawnPty(mainWindow, config, opts);
-  });
-
-  ipcMain.handle(IPC.ptyWrite, (_e, projectName: string, data: string) => {
-    writePty(projectName, data);
-  });
-
-  ipcMain.handle(IPC.ptyResize, (_e, projectName: string, cols: number, rows: number) => {
-    resizePty(projectName, cols, rows);
-  });
-
-  ipcMain.handle(IPC.ptyKill, (_e, projectName: string) => {
-    killPty(projectName);
-  });
 }
