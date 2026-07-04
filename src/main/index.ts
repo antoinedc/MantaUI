@@ -65,7 +65,7 @@ function tryParsePairError(raw: string): string | null {
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
-let config: AppConfig = { host: "", projects: [] };
+let config: AppConfig = { projects: [] };
 
 function commit(next: Partial<AppConfig>): AppConfig {
   config = { ...config, ...next };

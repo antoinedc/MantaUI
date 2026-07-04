@@ -62,7 +62,6 @@ type State = {
   // that would otherwise resolve to "http" mode (e.g. an already-paired
   // box). Cleared when the flow completes or is skipped. Not persisted.
   onboardingForced: boolean;
-  uploadCleanupHours: number;
   chatAutoAllow: boolean;
   // Auto-rename chat-mode windows from the conversation (opt-in). See
   // AppConfig.autoRenameSessions.
@@ -199,7 +198,6 @@ export const useStore = create<State>((set, get) => ({
   boxToken: "",
   onboardingSkipped: false,
   onboardingForced: false,
-  uploadCleanupHours: 1,
   chatAutoAllow: false,
   autoRenameSessions: false,
   allowAgentPush: false,
@@ -305,7 +303,6 @@ export const useStore = create<State>((set, get) => ({
       boxId: c.boxId ?? "",
       boxToken: c.boxToken ?? "",
       onboardingSkipped: c.onboardingSkipped ?? false,
-      uploadCleanupHours: c.uploadCleanupHours ?? 1,
       chatAutoAllow: c.chatAutoAllow ?? false,
       autoRenameSessions: c.autoRenameSessions ?? false,
       allowAgentPush: c.allowAgentPush ?? false,

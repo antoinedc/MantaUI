@@ -42,9 +42,7 @@ describe("resolveTransportMode", () => {
 
   it("onboarding when boxToken is missing", () => {
     expect(resolveTransportMode({})).toBe("onboarding");
-    expect(resolveTransportMode({ host: "box.example" })).toBe("onboarding");
-    expect(resolveTransportMode({ host: "" })).toBe("onboarding");
-    expect(resolveTransportMode({ host: "   " })).toBe("onboarding");
+    expect(resolveTransportMode({ projects: [] })).toBe("onboarding");
     // onboardingSkipped no longer influences the result.
     expect(resolveTransportMode({ onboardingSkipped: true })).toBe("onboarding");
     expect(resolveTransportMode({ onboardingSkipped: false })).toBe("onboarding");
@@ -124,8 +122,7 @@ describe("selectDesktopTransport (BET-82: always http)", () => {
   it("always returns 'http' on desktop (preload present)", () => {
     expect(selectDesktopTransport(paired, true)).toBe("http");
     expect(selectDesktopTransport({}, true)).toBe("http");
-    expect(selectDesktopTransport({ host: "1.2.3.4" }, true)).toBe("http");
-    expect(selectDesktopTransport({ onboardingSkipped: true }, true)).toBe("http");
+    expect(selectDesktopTransport({ projects: [] }, true)).toBe("http");    expect(selectDesktopTransport({ onboardingSkipped: true }, true)).toBe("http");
   });
   it("returns 'http' when no preload (mobile/web path; defensive)", () => {
     expect(selectDesktopTransport(paired, false)).toBe("http");

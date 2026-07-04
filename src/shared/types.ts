@@ -8,9 +8,6 @@ export type ProjectMeta = {
 };
 
 export type AppConfig = {
-  host: string;
-  user?: string;
-  identityFile?: string;
   projects: ProjectMeta[];
   // ----- HTTP/relay transport (M6 onboarding, BET-49) -----
   // Base URL of the bui-server the desktop pairs with, e.g.
@@ -32,11 +29,6 @@ export type AppConfig = {
   // boxToken, no projects). Re-runnable from Settings ("Run setup again").
   // Default false / absent.
   onboardingSkipped?: boolean;
-  // Transport selection. "auto" picks mosh if both ends have it, ssh otherwise.
-  // "mosh" / "ssh" force one regardless of detection.
-  transport?: "auto" | "mosh" | "ssh";
-  // Auto-clean files in ~/.bui-uploads older than this many hours. 0 disables.
-  uploadCleanupHours?: number;
   // ----- Agent → laptop file push (outbox) -----
   // The reverse of drag-and-drop upload: the remote AI drops a file into
   // `~/.bui-outbox/` and bui scp-pulls it to the Mac. An outbox poller in
@@ -117,13 +109,6 @@ export type AppConfig = {
   // (host/user/transport/projects/ports), so a desktop-only host change never
   // claims to be a newer shared-config snapshot. Absent = never synced.
   configUpdatedAt?: number;
-};
-
-export type TransportInfo = {
-  effective: "mosh" | "ssh"; // what we'll actually use
-  preference: "auto" | "mosh" | "ssh"; // user setting
-  moshLocal: boolean; // mosh present on Mac
-  moshRemote: boolean; // mosh-server present on remote
 };
 
 // ----- Live tmux state -----
@@ -264,10 +249,7 @@ export const IPC = {
   // + localPath; otherwise it's a confirm prompt (autoPulled:false).
   agentFileReady: "agent:file-ready",
 
-  // Transport status (mosh vs ssh)
-  transportInfo: "transport:info",
-
-  // Long-lived attached PTY (one per active project)
+  // ---- opencode chat-mode ----
   ptySpawn: "pty:spawn",
   ptyWrite: "pty:write",
   ptyResize: "pty:resize",
@@ -552,25 +534,7 @@ export type AuthPairResult =
   | { ok: true; pairingCode: string; boxId: string; expiresAt: string }
   | { ok: false; error: string };
 
-// ----- Setup probe / bootstrap -----
-
-// One probe check. `ok=true` means the prerequisite is satisfied;
-// `detail` is a short human-readable line (version string when ok,
-// failure reason or next-step hint when not).
-export type ProbeCheck = {
-  name: "ssh" | "tmux" | "opencode" | "opencodeAuthPlugin" | "anthropicAuth";
-  ok: boolean;
-  detail: string;
-};
-
-export type ProbeResult = {
-  checks: ProbeCheck[];
-  // Composite: true iff every check passed. Renderer uses this to flip
-  // the wizard from "needs attention" to "ready".
-  allOk: boolean;
-};
-
-// ---- opencode message + part types (subset for Phase 1) ----
+// ----- opencode message + part types (subset for Phase 1) -----
 //
 // Mirrors the shape of `GET /session/{id}/message` on the opencode server:
 // each entry is { info: Message, parts: Part[] }. We keep the type surface

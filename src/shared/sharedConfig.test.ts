@@ -13,13 +13,12 @@ describe("patchTouchesSharedConfig", () => {
     expect(patchTouchesSharedConfig({ defaultModel: { providerID: "a", modelID: "b" } })).toBe(true);
   });
   it("false for device-local-only patches", () => {
-    expect(patchTouchesSharedConfig({ host: "box" })).toBe(false);
     expect(patchTouchesSharedConfig({ projects: [] })).toBe(false);
     expect(patchTouchesSharedConfig({ opencodePort: 14096 })).toBe(false);
     expect(patchTouchesSharedConfig({ skillRegistryUrls: ["x"] })).toBe(false);
   });
   it("true if a patch mixes shared and local fields", () => {
-    expect(patchTouchesSharedConfig({ host: "box", cacheTtl: "5m" })).toBe(true);
+    expect(patchTouchesSharedConfig({ projects: [], cacheTtl: "5m" })).toBe(true);
   });
   it("false for empty / null / non-object", () => {
     expect(patchTouchesSharedConfig({})).toBe(false);
@@ -37,10 +36,9 @@ describe("patchTouchesSharedConfig", () => {
 describe("extractSharedConfig", () => {
   it("keeps only shareable fields + timestamp, drops device-local", () => {
     const snap = extractSharedConfig({
-      host: "box",
-      user: "dev",
       projects: [{ tmuxSession: "p", defaultCwd: "~" }],
       opencodePort: 14096,
+      downloadsDir: "/tmp",
       groqApiKey: "sk-x",
       voiceCommandModel: "llama",
       chatAutoAllow: true,
@@ -52,11 +50,11 @@ describe("extractSharedConfig", () => {
       chatAutoAllow: true,
       configUpdatedAt: 1000,
     });
-    expect("host" in snap).toBe(false);
     expect("projects" in snap).toBe(false);
+    expect("downloadsDir" in snap).toBe(false);
   });
   it("omits absent fields rather than emitting undefined", () => {
-    const snap = extractSharedConfig({ host: "box" } as never);
+    const snap = extractSharedConfig({ projects: [] } as never);
     expect(snap).toEqual({});
   });
   it("handles null / non-object input", () => {
@@ -66,7 +64,6 @@ describe("extractSharedConfig", () => {
 
 describe("mergeSharedConfig (last-write-wins)", () => {
   const base = {
-    host: "box",
     projects: [],
     groqApiKey: "old",
     configUpdatedAt: 100,
@@ -81,7 +78,7 @@ describe("mergeSharedConfig (last-write-wins)", () => {
     expect(config.groqApiKey).toBe("new");
     expect(config.configUpdatedAt).toBe(200);
     // device-local fields untouched
-    expect(config.host).toBe("box");
+    expect(config.projects).toEqual([]);
   });
 
   it("ignores an older snapshot (local wins)", () => {
@@ -116,11 +113,11 @@ describe("mergeSharedConfig (last-write-wins)", () => {
   it("does not leak device-local incoming fields into local config", () => {
     const { config } = mergeSharedConfig(base, {
       groqApiKey: "new",
-      // a malicious/stray host should be ignored — not a shared key
-      host: "evil",
+      // a stray downloadsDir should be ignored — not a shared key
+      downloadsDir: "/tmp/evil",
       configUpdatedAt: 200,
     } as never);
-    expect(config.host).toBe("box");
+    expect(config.downloadsDir).toBeUndefined();
   });
 
   it("advances the clock even when values already matched (changed=false)", () => {
