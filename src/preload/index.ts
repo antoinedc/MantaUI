@@ -22,7 +22,6 @@ import {
   type WebhookMeta,
   type SpawnOptions,
   type PtyEvent,
-  type TransportInfo,
   type TmuxConfigStatus,
   type VoiceClassifyInput,
   type VoiceClassifyResult,
@@ -52,8 +51,6 @@ const api = {
     ipcRenderer.invoke(IPC.projectMetaUpsert, meta),
   projectMetaDelete: (tmuxSession: string): Promise<AppConfig> =>
     ipcRenderer.invoke(IPC.projectMetaDelete, tmuxSession),
-
-  transportInfo: (): Promise<TransportInfo> => ipcRenderer.invoke(IPC.transportInfo),
 
   // tmux operations on the remote
   tmuxList: (): Promise<Project[]> => ipcRenderer.invoke(IPC.tmuxList),

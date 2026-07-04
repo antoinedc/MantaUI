@@ -22,22 +22,15 @@ import {
 // Config persistence (real implementation — renderer depends on it)
 // ============================================================
 //
-// store.ts reads cfg.host (gating tmuxList/transportInfo/tmuxConfigStatus calls),
-// cfg.chatAutoAllow (toggleable from Settings), cfg.uploadCleanupHours, and
-// cfg.transport. Settings.tsx calls configUpdate({chatAutoAllow}).
-// If all of these return empty stubs the UI would gate on cfg.host="" and never
-// render projects. We therefore implement a real JSON-file-backed store.
+// store.ts reads cfg.chatAutoAllow (toggleable from Settings).
+// If chatAutoAllow returns a falsy value the UI renders fine (it's just off).
 //
 // Shape mirrors src/main/config.ts DEFAULT_CONFIG + AppConfig from shared/types.ts:
-//   { host, user?, identityFile?, projects, transport?, uploadCleanupHours?,
-//     opencodePort?, chatAutoAllow? }
+//   { projects, chatAutoAllow }
 //
-// On the mobile server the "host" is the local box — callers can set it if they
-// want (some renderers may write it), but it defaults to "" which causes store.ts
-// to skip the SSH-only calls (tmuxList is still served via its own channel).
-// However, since mobile server IS local, we pre-populate host to "localhost"
-// in DEFAULT_CONFIG so store.ts proceeds to call tmuxList / transportInfo /
-// tmuxConfigStatus after boot.
+// On the mobile server we ARE the remote Linux box, so git/fs run natively
+// and desktop-only concepts (Mac clipboard, drag-drop local paths, peek-remote-file)
+// are no-ops documented below.
 
 const CONFIG_PATH = join(homedir(), ".bui-mobile", "config.json");
 
@@ -51,9 +44,7 @@ async function atomicWrite(path, data) {
 }
 
 const DEFAULT_CONFIG = {
-  host: "localhost", // triggers store.refresh() to call tmuxList / transportInfo
   projects: [],
-  uploadCleanupHours: 1,
   chatAutoAllow: false,
 };
 
@@ -144,30 +135,6 @@ export async function projectMetaDelete(tmuxSession) {
   const next = { ...cfg, projects: cfg.projects.filter((p) => p.tmuxSession !== tmuxSession) };
   await saveConfig(next);
   return next;
-}
-
-// ============================================================
-// Transport info (real but mobile-appropriate values)
-// ============================================================
-//
-// On mobile the server IS the Linux box — there is no SSH/mosh hop between the
-// HTTP client (WebView on phone) and tmux. We return effective:"ssh" (most
-// conservative), preference from stored config, mosh flags false.
-// The renderer only reads this for display in Settings; it does not gate any
-// core functionality on the effective transport.
-//
-// TransportInfo shape from shared/types.ts:
-//   { effective: "mosh"|"ssh"; preference: "auto"|"mosh"|"ssh";
-//     moshLocal: boolean; moshRemote: boolean }
-
-export async function transportInfo() {
-  const cfg = await getConfig();
-  return {
-    effective: "ssh",
-    preference: cfg.transport ?? "auto",
-    moshLocal: false,
-    moshRemote: false,
-  };
 }
 
 // ============================================================

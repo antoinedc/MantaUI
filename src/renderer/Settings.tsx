@@ -19,7 +19,6 @@ type TabId = (typeof TABS)[number]["id"];
 
 export function Settings({ onClose }: { onClose: () => void }) {
   const {
-    uploadCleanupHours,
     allowAgentPush,
     autoRenameSessions,
     downloadsDir,
@@ -42,7 +41,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
 
   // Files fields (Files tab)
-  const [uch, setUch] = useState<string>(String(uploadCleanupHours));
   const [agentPush, setAgentPush] = useState(allowAgentPush);
   const [dlDir, setDlDir] = useState(downloadsDir);
 
@@ -70,14 +68,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setSelectedModel(defaultModel ?? null);
     setRegistryUrls(skillRegistryUrls ?? []);
     setTtl(cacheTtl);
-    setUch(String(uploadCleanupHours));
     setAgentPush(allowAgentPush);
     setDlDir(downloadsDir);
     setAutoRename(autoRenameSessions);
     setGroqKey(groqApiKey);
     setVoiceTrModel(voiceTranscriptionModel);
     setVoiceCmdModel(voiceCommandModel);
-  }, [defaultModel, skillRegistryUrls, cacheTtl, uploadCleanupHours, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
+  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -94,10 +91,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
     if (saving) return;
     setSaving(true);
     setSaveError(null);
-    const hoursNum = Number(uch);
     try {
       await window.api.configUpdate({
-        uploadCleanupHours: Number.isFinite(hoursNum) && hoursNum >= 0 ? hoursNum : 1,
         allowAgentPush: agentPush,
         autoRenameSessions: autoRename,
         downloadsDir: dlDir.trim(),
@@ -471,26 +466,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {/* Files Tab */}
           {activeTab === "files" && (
             <div className="max-w-2xl space-y-6">
-              <div>
-                <h3 className="text-base font-semibold mb-4">Upload cleanup</h3>
-                <div className="space-y-2">
-                  <input
-                    type="number"
-                    min={0}
-                    step={1}
-                    placeholder="1"
-                    value={uch}
-                    onChange={(e) => setUch(e.target.value)}
-                    className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
-                  />
-                  <div className="text-xs text-text-faint">
-                    Sweeps <code className="text-text-muted">~/.bui-uploads</code> on the remote, removing
-                    drag-and-drop batches older than this. <code className="text-text-muted">0</code>{" "}
-                    disables.
-                  </div>
-                </div>
-              </div>
-
               <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">Agent file delivery</h3>
                 <div className="space-y-3">

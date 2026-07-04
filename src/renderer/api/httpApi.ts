@@ -422,9 +422,6 @@ export const httpApi: Api = {
   projectMetaUpsert: (meta) => rpc(IPC.projectMetaUpsert, meta),
   projectMetaDelete: (tmuxSession) => rpc(IPC.projectMetaDelete, tmuxSession),
 
-  // -- transport --
-  transportInfo: () => rpc(IPC.transportInfo),
-
   // -- tmux operations --
   tmuxList: () => rpc(IPC.tmuxList),
   tmuxNewSession: (input) => rpc(IPC.tmuxNewSession, input),

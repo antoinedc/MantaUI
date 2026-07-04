@@ -8,12 +8,11 @@
 //
 // This module defines the DEVICE-INDEPENDENT subset of AppConfig that should be
 // the same everywhere, plus the pure last-write-wins (LWW) merge used to
-// reconcile the two stores. Device-specific fields (SSH host/user/identity,
-// transport, projects, ports, downloadsDir, allowAgentPush, uploadCleanupHours,
-// skillRegistryUrls) are deliberately NOT shared — they mean different things on
-// each machine (the box IS localhost; the Mac SSHes to it). skillRegistryUrls is
-// excluded because desktop already writes those into the box's opencode.jsonc on
-// its own path; double-handling here would fight that.
+// reconcile the two stores. Device-specific fields (projects, ports, downloadsDir,
+// allowAgentPush, skillRegistryUrls) are deliberately NOT shared — they mean
+// different things on each machine (the box IS localhost; the Mac SSHes to it).
+// skillRegistryUrls is excluded because desktop already writes those into the
+// box's opencode.jsonc on its own path; double-handling here would fight that.
 //
 // Pure + framework-free so both the `.ts` (desktop) and `.mjs` (server) sides
 // import it. Tested in src/shared/sharedConfig.test.ts.
