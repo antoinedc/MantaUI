@@ -45,18 +45,21 @@ export function initSharedConfigSync(deps: {
 async function requestSharedConfig(
   method: "GET" | "POST",
   payload?: SharedConfigSnapshot,
+  boxToken?: string,
 ): Promise<SharedConfigSnapshot | null> {
   const cfg = getConfig?.();
   if (!cfg || !cfg.serverUrl) return null;
   const url = `${cfg.serverUrl.replace(/\/+$/, "")}/api/shared-config`;
   const body = method === "POST" ? JSON.stringify(payload ?? {}) : undefined;
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    ...(body ? { "content-length": String(Buffer.byteLength(body)) } : {}),
+  };
+  if (boxToken) headers["authorization"] = `Bearer ${boxToken}`;
   try {
     const res = await fetch(url, {
       method,
-      headers: {
-        "content-type": "application/json",
-        ...(body ? { "content-length": String(Buffer.byteLength(body)) } : {}),
-      },
+      headers,
       body,
       signal: AbortSignal.timeout(4000),
     });
@@ -86,7 +89,7 @@ export async function pushSharedConfig(): Promise<void> {
     const cfg = getConfig?.();
     if (!cfg) return false;
     const ours = extractSharedConfig(cfg);
-    const serverSnap = await requestSharedConfig("POST", ours);
+    const serverSnap = await requestSharedConfig("POST", ours, cfg.boxToken);
     if (!serverSnap) return false;
     maybeApplyPulled(serverSnap);
     return true;
@@ -100,7 +103,8 @@ export async function pushSharedConfig(): Promise<void> {
 // PULL: fetch the box snapshot and LWW-merge into desktop config. Call on
 // startup (and any time you want to reconcile, e.g. host change).
 export async function pullSharedConfig(): Promise<void> {
-  const serverSnap = await requestSharedConfig("GET");
+  const cfg = getConfig?.();
+  const serverSnap = await requestSharedConfig("GET", undefined, cfg?.boxToken);
   if (serverSnap) maybeApplyPulled(serverSnap);
 }
 
