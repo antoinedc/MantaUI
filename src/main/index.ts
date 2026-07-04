@@ -3,7 +3,6 @@ import { join, basename } from "node:path";
 import { watch as fsWatch } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { request as httpRequest } from "node:http";
 import { loadConfig, saveConfig } from "./config.js";
 import {
   killAll,
@@ -75,8 +74,6 @@ import {
   eventTunnelRestart,
   teardownEventTunnel,
   restartOpencode,
-  ensurePresenceForward,
-  PRESENCE_LOCAL_PORT,
   type PromptModel,
   type PromptAttachment,
   type PromptAgentMention,
@@ -134,7 +131,6 @@ import {
   type AppConfig,
   type AgentFileReady,
   type AuthClaimInput,
-  type AuthPairResult,
   type Project,
   type ProjectMeta,
   type SpawnOptions,
@@ -899,13 +895,13 @@ app.whenReady().then(() => {
     },
   });
   // Scheduled-prompt management client (reaches the box's /api/schedule over
-  // the -L 18787 forward). Jobs are server-owned; this only lists/deletes.
+  // HTTPS). Jobs are server-owned; this only lists/deletes.
   initScheduleClient({ getConfig: () => config });
-  // Secret store client (reaches the box's /api/secrets over the -L 18787
-  // forward). Store is server-owned; this only lists/sets/deletes for the UI.
+  // Secret store client (reaches the box's /api/secrets over HTTPS). Store is
+  // server-owned; this only lists/sets/deletes for the UI.
   initSecretsClient({ getConfig: () => config });
-  // Webhook registry client (reaches the box's /api/webhook over the -L 18787
-  // forward). Hooks are server-owned; this only lists/deletes for the UI.
+  // Webhook registry client (reaches the box's /api/webhook over HTTPS). Hooks
+  // are server-owned; this only lists/deletes for the UI.
   initWebhookClient({ getConfig: () => config });
   registerHandlers();
   createWindow();
@@ -920,7 +916,7 @@ app.whenReady().then(() => {
     // mobile "done" pushes while the user is active on desktop.
     startDesktopPresence(() => config);
     // Receive desktop OS-notification directives from bui-server's router
-    // (over the same -L 18787 forward) and relay them to the renderer.
+    // (over direct HTTPS) and relay them to the renderer.
     startDesktopNotifications(
       () => config,
       (payload) => {
@@ -1063,7 +1059,7 @@ function registerHandlers(): void {
     }
     // Push the shareable subset to the mobile server so the other device picks
     // it up (e.g. set the Groq STT key on desktop, get it on mobile). Fire-and-
-    // forget over the existing -L 18787 forward; the POST response is the
+    // forget over HTTPS; the POST response is the
     // post-merge snapshot, so a racing mobile edit is pulled back in.
     if (touchesShared) void pushSharedConfig().catch(() => {});
     return next;
@@ -1283,72 +1279,50 @@ function registerHandlers(): void {
     claimPairing(input, (patch) => commit(patch)),
   );
 
-  // Mobile pairing code mint (BET-80): GET /auth/pair over the SSH tunnel.
+  // Mobile pairing code mint (BET-80): GET /auth/pair over HTTPS.
   // Returns { pairingCode, boxId, expiresAt } for the desktop to render as a
-  // QR. The /auth/pair endpoint is loopback-only on the server side, so we
-  // route through the existing -L 18787 forward (which terminates on the box
-  // as a local-direct request). No Bearer token needed — /auth/pair is
-  // exempt from the auth gate.
+  // QR. The /auth/pair endpoint is exempt from the auth gate, so no Bearer
+  // token is needed.
   ipcMain.handle(IPC.authPair, async () => {
     const cfg = config;
-    if (!cfg.host) return { ok: false as const, error: "not connected" };
+    if (!cfg.serverUrl) return { ok: false as const, error: "not connected" };
     try {
-      await ensurePresenceForward(cfg);
-    } catch {
-      return { ok: false as const, error: "SSH tunnel unavailable" };
-    }
-    return new Promise<AuthPairResult>((resolve) => {
-      const req = httpRequest(
-        {
-          host: "127.0.0.1",
-          port: PRESENCE_LOCAL_PORT,
-          path: "/auth/pair",
-          method: "GET",
-          timeout: 4000,
-        },
-        (res) => {
-          let raw = "";
-          res.setEncoding("utf-8");
-          res.on("data", (c) => (raw += c));
-          res.on("end", () => {
-            if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-              const msg = tryParsePairError(raw);
-              resolve({ ok: false, error: msg || `server ${res.statusCode}` });
-              return;
-            }
-            try {
-              const body = JSON.parse(raw) as {
-                pairing_code?: string;
-                box_id?: string;
-                expiresAt?: string;
-              };
-              if (
-                typeof body.pairing_code === "string" &&
-                typeof body.box_id === "string" &&
-                typeof body.expiresAt === "string"
-              ) {
-                resolve({
-                  ok: true,
-                  pairingCode: body.pairing_code,
-                  boxId: body.box_id,
-                  expiresAt: body.expiresAt,
-                });
-              } else {
-                resolve({ ok: false, error: "unexpected response shape" });
-              }
-            } catch {
-              resolve({ ok: false, error: "bad JSON from server" });
-            }
-          });
-        },
-      );
-      req.on("error", () => resolve({ ok: false, error: "server unreachable" }));
-      req.on("timeout", () => {
-        req.destroy();
-        resolve({ ok: false, error: "server timed out" });
+      const url = `${cfg.serverUrl.replace(/\/+$/, "")}/auth/pair`;
+      const res = await fetch(url, {
+        method: "GET",
+        signal: AbortSignal.timeout(4000),
       });
-      req.end();
-    });
+      let raw = "";
+      try { raw = await res.text(); } catch { /* bodyless */ }
+      if (!res.ok) {
+        const msg = tryParsePairError(raw);
+        return { ok: false, error: msg || `server ${res.status}` };
+      }
+      try {
+        const body = JSON.parse(raw) as {
+          pairing_code?: string;
+          box_id?: string;
+          expiresAt?: string;
+        };
+        if (
+          typeof body.pairing_code === "string" &&
+          typeof body.box_id === "string" &&
+          typeof body.expiresAt === "string"
+        ) {
+          return {
+            ok: true,
+            pairingCode: body.pairing_code,
+            boxId: body.box_id,
+            expiresAt: body.expiresAt,
+          };
+        }
+        return { ok: false, error: "unexpected response shape" };
+      } catch {
+        return { ok: false, error: "bad JSON from server" };
+      }
+    } catch {
+      return { ok: false, error: "server unreachable" };
+    }
   });
 
   // Voice / speech-to-text via Groq. Audio bytes are captured by the
@@ -1574,13 +1548,13 @@ function registerHandlers(): void {
     },
   );
 
-  // Scheduled prompts (bui-server owned; reached over the -L 18787 forward).
+  // Scheduled prompts (bui-server owned; reached over HTTPS).
   ipcMain.handle(IPC.scheduleList, (_e, sessionId?: string) =>
     listSchedules(sessionId),
   );
   ipcMain.handle(IPC.scheduleDelete, (_e, id: string) => deleteSchedule(id));
 
-  // Secrets (bui-server owned; reached over the -L 18787 forward). list yields
+  // Secrets (bui-server owned; reached over HTTPS). list yields
   // metadata only; set carries the value Mac → box (never through the AI).
   ipcMain.handle(IPC.secretsList, (_e, sessionId?: string, all?: boolean) =>
     listSecretsStore(sessionId, all),
@@ -1588,7 +1562,7 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.secretsSet, (_e, input) => setSecretStore(input));
   ipcMain.handle(IPC.secretsDelete, (_e, id: string) => deleteSecretStore(id));
 
-  // Inbound webhooks (bui-server owned; reached over the -L 18787 forward).
+  // Inbound webhooks (bui-server owned; reached over HTTPS).
   // list yields metadata only (no signing secret); creation is the AI's job.
   ipcMain.handle(IPC.webhookList, (_e, sessionId?: string) => listWebhooks(sessionId));
   ipcMain.handle(IPC.webhookDelete, (_e, id: string) => deleteWebhook(id));

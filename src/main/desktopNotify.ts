@@ -4,9 +4,9 @@
 // decides the DESKTOP should be notified (user at the desk, or away-but-app-open
 // before mobile escalation), it publishes a `{kind:"desktopNotify", payload}`
 // envelope on its in-process bus. This module subscribes to bui-server's
-// `GET /events` SSE stream **over the already-open -L 18787 presence forward**
-// (the same forward desktopPresence.ts POSTs to) and relays each `desktopNotify`
-// payload to the renderer via IPC, where it's shown with the Notification API.
+// `GET /events` SSE stream **over direct HTTPS** (Bearer-authed) and relays each
+// `desktopNotify` payload to the renderer via IPC, where it's shown with the
+// Notification API.
 //
 // Why consume bui-server's bus instead of deciding desktop notifications
 // locally from the opencode stream: the router must see BOTH device presences
@@ -20,7 +20,6 @@
 
 import { request } from "node:http";
 import type { IncomingMessage } from "node:http";
-import { ensurePresenceForward, PRESENCE_LOCAL_PORT } from "./opencode.js";
 import type { AppConfig, DesktopNotifyPayload } from "../shared/types.js";
 
 let getConfig: (() => AppConfig) | null = null;
@@ -64,62 +63,65 @@ function handleFrame(raw: string): void {
 function connect(): void {
   if (stopped) return;
   const cfg = getConfig?.();
-  if (!cfg) {
+  if (!cfg || !cfg.serverUrl) {
     scheduleReconnect();
     return;
   }
-  // Make sure the forward exists before connecting (idempotent; recovers after
-  // sleep/network drop). Then open the long-lived SSE stream.
-  void ensurePresenceForward(cfg)
-    .then(() => {
-      if (stopped) return;
-      const req = request(
-        {
-          host: "127.0.0.1",
-          port: PRESENCE_LOCAL_PORT,
-          path: "/events",
-          method: "GET",
-          headers: { accept: "text/event-stream" },
-        },
-        (res) => {
-          if (res.statusCode !== 200) {
-            res.resume();
-            scheduleReconnect();
-            return;
-          }
-          current = res;
-          res.setEncoding("utf-8");
-          let buf = "";
-          res.on("data", (chunk: string) => {
-            buf += chunk;
-            // SSE events are separated by a blank line.
-            let idx: number;
-            while ((idx = buf.indexOf("\n\n")) !== -1) {
-              const frame = buf.slice(0, idx);
-              buf = buf.slice(idx + 2);
-              handleFrame(frame);
-            }
-          });
-          res.on("end", () => {
-            current = null;
-            scheduleReconnect();
-          });
-          res.on("error", () => {
-            current = null;
-            scheduleReconnect();
-          });
-        },
-      );
-      req.on("error", () => scheduleReconnect());
-      req.end();
-    })
-    .catch(() => scheduleReconnect());
+  // Open the long-lived SSE stream directly to the server.
+  const serverUrl = cfg.serverUrl.replace(/\/+$/, "");
+  const url = new URL("/events", serverUrl);
+  const headers: Record<string, string> = {
+    accept: "text/event-stream",
+  };
+  if (cfg.boxToken) {
+    headers["authorization"] = `Bearer ${cfg.boxToken}`;
+  }
+  const req = request(
+    {
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: url.pathname + url.search,
+      method: "GET",
+      headers,
+    },
+    (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        scheduleReconnect();
+        return;
+      }
+      current = res;
+      res.setEncoding("utf-8");
+      let buf = "";
+      res.on("data", (chunk: string) => {
+        buf += chunk;
+        // SSE events are separated by a blank line.
+        let idx: number;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          handleFrame(frame);
+        }
+      });
+      res.on("end", () => {
+        current = null;
+        scheduleReconnect();
+      });
+      res.on("error", () => {
+        current = null;
+        scheduleReconnect();
+      });
+    },
+  );
+  req.on("error", () => scheduleReconnect());
+  req.end();
 }
 
 /**
  * Start relaying bui-server desktop-notification directives to the renderer.
- * `configGetter` returns the live AppConfig (for the SSH forward); `onPayload`
- * delivers a directive to the renderer (typically a webContents.send). Idempotent.
+ * `configGetter` returns the live AppConfig (serverUrl + boxToken for HTTPS
+ * Bearer auth); `onPayload` delivers a directive to the renderer (typically a
+ * webContents.send). Idempotent.
  */
 export function startDesktopNotifications(
   configGetter: () => AppConfig,

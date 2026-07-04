@@ -2,10 +2,9 @@
 // server so it can suppress redundant mobile "done" pushes (Discord's
 // "active on desktop ⇒ no mobile push" rule).
 //
-// Transport: a best-effort HTTP POST to 127.0.0.1:PRESENCE_LOCAL_PORT, which
-// the shared SSH ControlMaster forwards to the box's mobile server on 8787
-// (see ensurePresenceForward in opencode.ts). If the mobile server isn't
-// running, or the forward isn't up, the POST simply fails and we swallow it —
+// Transport: direct HTTPS POST to `${serverUrl}/push/desktop-presence` with
+// `Authorization: Bearer <boxToken>`. No SSH forward needed — the server IS the
+// box. If the server isn't running, the POST simply fails and we swallow it —
 // presence is a nice-to-have, never load-bearing.
 //
 // ACTIVE = (a bui window is focused) AND (the user actually touched the
@@ -25,9 +24,7 @@
 
 import { app, BrowserWindow, powerMonitor } from "electron";
 import { request } from "node:http";
-import { ensurePresenceForward, PRESENCE_LOCAL_PORT } from "./opencode.js";
 import type { AppConfig } from "../shared/types.js";
-import { resolveTransportMode } from "../shared/transport.mjs";
 
 // How often to re-evaluate active-state and refresh the server's lastSeen.
 // Must be comfortably under the server's DESKTOP_PRESENCE_TTL_MS (60s).
@@ -48,42 +45,7 @@ let lastReported: boolean | null = null;
 function postPresence(visible: boolean): void {
   const cfg = getConfig?.();
   if (!cfg) return;
-  if (resolveTransportMode(cfg) === "http") {
-    // HTTP mode: POST directly to the server over HTTPS with Bearer auth.
-    // No SSH forward needed — the server IS the box.
-    sendHeartbeatHttp(cfg, visible);
-    return;
-  }
-  // SSH mode: make sure the -L forward exists before we POST (cheap idempotent
-  // check; recovers after sleep/network drop). Fire-and-forget.
-  void ensurePresenceForward(cfg)
-    .then(() => sendHeartbeatSsh(visible))
-    .catch(() => {});
-}
-
-function sendHeartbeatSsh(visible: boolean): void {
-  const body = JSON.stringify({ visible });
-  const req = request(
-    {
-      host: "127.0.0.1",
-      port: PRESENCE_LOCAL_PORT,
-      path: "/push/desktop-presence",
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "content-length": Buffer.byteLength(body),
-      },
-      timeout: 4000,
-    },
-    (res) => {
-      // Drain so the socket frees; we don't care about the body.
-      res.resume();
-    },
-  );
-  req.on("error", () => {});
-  req.on("timeout", () => req.destroy());
-  req.write(body);
-  req.end();
+  sendHeartbeatHttp(cfg, visible);
 }
 
 function sendHeartbeatHttp(cfg: AppConfig, visible: boolean): void {
@@ -157,7 +119,7 @@ function reportInactiveNow(): void {
 
 /**
  * Wire desktop-presence reporting. `configGetter` returns the live AppConfig
- * (host/user/identity) used to keep the SSH forward up. Idempotent.
+ * (serverUrl + boxToken used for HTTPS Bearer auth). Idempotent.
  */
 export function startDesktopPresence(configGetter: () => AppConfig): void {
   if (started) return;
