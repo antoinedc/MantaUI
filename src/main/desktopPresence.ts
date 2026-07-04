@@ -27,6 +27,7 @@ import { app, BrowserWindow, powerMonitor } from "electron";
 import { request } from "node:http";
 import { ensurePresenceForward, PRESENCE_LOCAL_PORT } from "./opencode.js";
 import type { AppConfig } from "../shared/types.js";
+import { resolveTransportMode } from "../shared/transport.mjs";
 
 // How often to re-evaluate active-state and refresh the server's lastSeen.
 // Must be comfortably under the server's DESKTOP_PRESENCE_TTL_MS (60s).
@@ -47,14 +48,20 @@ let lastReported: boolean | null = null;
 function postPresence(visible: boolean): void {
   const cfg = getConfig?.();
   if (!cfg) return;
-  // Make sure the -L forward exists before we POST (cheap idempotent check;
-  // recovers after sleep/network drop). Fire-and-forget.
+  if (resolveTransportMode(cfg) === "http") {
+    // HTTP mode: POST directly to the server over HTTPS with Bearer auth.
+    // No SSH forward needed — the server IS the box.
+    sendHeartbeatHttp(cfg, visible);
+    return;
+  }
+  // SSH mode: make sure the -L forward exists before we POST (cheap idempotent
+  // check; recovers after sleep/network drop). Fire-and-forget.
   void ensurePresenceForward(cfg)
-    .then(() => sendHeartbeat(visible))
+    .then(() => sendHeartbeatSsh(visible))
     .catch(() => {});
 }
 
-function sendHeartbeat(visible: boolean): void {
+function sendHeartbeatSsh(visible: boolean): void {
   const body = JSON.stringify({ visible });
   const req = request(
     {
@@ -65,6 +72,35 @@ function sendHeartbeat(visible: boolean): void {
       headers: {
         "content-type": "application/json",
         "content-length": Buffer.byteLength(body),
+      },
+      timeout: 4000,
+    },
+    (res) => {
+      // Drain so the socket frees; we don't care about the body.
+      res.resume();
+    },
+  );
+  req.on("error", () => {});
+  req.on("timeout", () => req.destroy());
+  req.write(body);
+  req.end();
+}
+
+function sendHeartbeatHttp(cfg: AppConfig, visible: boolean): void {
+  const serverUrl = (cfg.serverUrl || "").replace(/\/+$/, "");
+  if (!serverUrl) return;
+  const body = JSON.stringify({ visible });
+  const url = new URL("/push/desktop-presence", serverUrl);
+  const req = request(
+    {
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: url.pathname + url.search,
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        ...(cfg.boxToken ? { authorization: `Bearer ${cfg.boxToken}` } : {}),
       },
       timeout: 4000,
     },
