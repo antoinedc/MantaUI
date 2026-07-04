@@ -5,7 +5,6 @@ import {
   type AppConfig,
   type AuthClaimInput,
   type AuthPairResult,
-  type BootstrapResult,
   type DesktopNotifyPayload,
   type OpencodeAgent,
   type OpencodeCommand,
@@ -14,7 +13,6 @@ import {
   type OpencodeModel,
   type OpencodeSessionListItem,
   type PermissionRequest,
-  type ProbeResult,
   type QuestionRequest,
   type Project,
   type ProjectMeta,
@@ -83,12 +81,6 @@ const api = {
   tmuxConfigStatus: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxConfigStatus),
   tmuxSetupConfig: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxSetupConfig),
   tmuxRestoreConfig: (): Promise<TmuxConfigStatus> => ipcRenderer.invoke(IPC.tmuxRestoreConfig),
-
-  // Setup wizard: probe runs the diagnostic; bootstrap installs opencode
-  // + writes the auth plugin config. Both are best-effort and return
-  // structured results the Settings UI renders.
-  setupProbe: (): Promise<ProbeResult> => ipcRenderer.invoke(IPC.setupProbe),
-  setupBootstrap: (): Promise<BootstrapResult> => ipcRenderer.invoke(IPC.setupBootstrap),
 
   // Onboarding pairing (BET-49): exchange a 6-digit code for the box's tokens
   // via POST <serverUrl>/auth/claim. On success main persists

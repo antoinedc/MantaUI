@@ -3,9 +3,6 @@ import {
   parseProbeOutput,
   mergeOpencodeJsonc,
   stripLineComments,
-  PROBE_SCRIPT,
-  INSTALL_SCRIPT,
-  AUTH_HINT_SCRIPT,
 } from "./setup.js";
 
 describe("parseProbeOutput", () => {
@@ -88,53 +85,6 @@ describe("parseProbeOutput", () => {
     const r = parseProbeOutput(stdout);
     expect(r.checks.find((c) => c.name === "ssh")?.ok).toBe(false);
     expect(r.checks.find((c) => c.name === "ssh")?.detail).toBe("not reported");
-  });
-});
-
-describe("script shape sanity checks", () => {
-  it("PROBE_SCRIPT emits every key the parser expects", () => {
-    // The parser fills in 'not reported' for any missing key, so if the
-    // script forgets to echo one we'd ship a probe that always fails it.
-    for (const key of [
-      "ssh=",
-      "tmux=",
-      "opencode=",
-      "opencodeAuthPlugin=",
-      "anthropicAuth=",
-    ]) {
-      expect(PROBE_SCRIPT).toContain(key);
-    }
-  });
-
-  it("INSTALL_SCRIPT references the official opencode installer", () => {
-    expect(INSTALL_SCRIPT).toContain("opencode.ai/install");
-  });
-
-  it("INSTALL_SCRIPT exits non-zero on installer failure (caller relies on this)", () => {
-    // The bootstrap runner catches the SSH rejection and prepends ✗.
-    // Without `exit 1`, a failed install would print ✗ to stdout but the
-    // SSH session would exit 0, and `bootstrap()` would only flag the
-    // failure if it noticed the ✗ line — fragile.
-    expect(INSTALL_SCRIPT).toContain("exit 1");
-  });
-
-  it("INSTALL_SCRIPT does not actually run the auth login flow (needs browser)", () => {
-    // Install is a separate stage from the auth hint; defensive check.
-    const linesThatExecute = INSTALL_SCRIPT.split("\n").filter((l) =>
-      /^\s*opencode\s+auth\s+login/.test(l),
-    );
-    expect(linesThatExecute).toHaveLength(0);
-  });
-
-  it("AUTH_HINT_SCRIPT surfaces the login command as a next step (printf, not exec)", () => {
-    // Heuristic: any `opencode auth login` reference must be inside a
-    // `printf` string, never invoked at the start of a line. The flow
-    // opens a browser/device-code prompt and would hang the ssh session.
-    const linesThatExecute = AUTH_HINT_SCRIPT.split("\n").filter((l) =>
-      /^\s*opencode\s+auth\s+login/.test(l),
-    );
-    expect(linesThatExecute).toHaveLength(0);
-    expect(AUTH_HINT_SCRIPT).toContain("opencode auth login anthropic");
   });
 });
 

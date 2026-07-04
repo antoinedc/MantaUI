@@ -19,13 +19,10 @@ import {
   listOutbox,
   pullToDownloads,
   writePty,
-  runSshOnce,
 } from "./pty.js";
 import { info as transportInfo, invalidate as invalidateTransport } from "./transport.js";
-import { probe as setupProbe, bootstrap as setupBootstrap } from "./setup.js";
 import { claimPairing } from "./auth.js";
 import { startStatusPoller, stopStatusPoller } from "./status.js";
-import { buildRemoteConfigWriteCmd } from "./remoteConfigWrite.js";
 import {
   startDesktopPresence,
   stopDesktopPresence,
@@ -491,53 +488,6 @@ function registerHandlers(): void {
     ) {
       scheduleUploadCleanup();
     }
-    // Skill registry URLs → write skills.urls into remote opencode.jsonc so
-    // opencode picks them up on next startup. We read the existing file first
-    // to preserve all other settings, then patch only the skills.urls key.
-    if ("skillRegistryUrls" in patch && next.host) {
-      try {
-        const urls = next.skillRegistryUrls ?? [];
-        // Read current remote config (may not exist yet — that's fine)
-        const readResult = await runSshOnce(
-          next,
-          `cat ~/.config/opencode/opencode.jsonc 2>/dev/null || echo '{}'`,
-        );
-        let existing: Record<string, unknown> = {};
-        try {
-          // Strip JSONC comments before parsing (simple single-line // strip)
-          const stripped = readResult.stdout.replace(/\/\/[^\n]*/g, "");
-          existing = JSON.parse(stripped);
-        } catch {
-          // Unparseable — start fresh, preserving the file's plugin entry at least
-        }
-        // Merge: patch only skills.urls; keep everything else untouched
-        const merged = {
-          ...existing,
-          skills: {
-            ...(typeof existing.skills === "object" && existing.skills !== null ? existing.skills as Record<string, unknown> : {}),
-            urls,
-          },
-        };
-        const content = JSON.stringify(merged, null, 2);
-        // Write the JSON bytes UNCHANGED. The previous code did
-        // `printf '%s' ${JSON.stringify(content)}` — double-encoding the
-        // already-stringified JSON, which wrote literal backslash-n /
-        // escaped-quote garbage and produced an invalid opencode.jsonc that
-        // stopped opencode from starting (2026-05-18 incident). The pure,
-        // tested builder emits a single-quoted heredoc so arbitrary JSON
-        // passes through byte-for-byte. See remoteConfigWrite.ts.
-        await runSshOnce(
-          next,
-          buildRemoteConfigWriteCmd(
-            content,
-            "~/.config/opencode/opencode.jsonc",
-          ),
-        );
-      } catch (e) {
-        // Non-fatal — user can still add URLs manually
-        console.error("Failed to write skill registry URLs to remote opencode.jsonc:", e);
-      }
-    }
     // Push the shareable subset to the mobile server so the other device picks
     // it up (e.g. set the Groq STT key on desktop, get it on mobile). Fire-and-
     // forget over HTTPS; the POST response is the
@@ -622,14 +572,6 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.fsListDirs, (_e, partial: string) =>
     listPathCompletions(config, partial),
   );
-
-  // Setup wizard: one-shot diagnostic + best-effort installer. Both run
-  // against the currently saved config (so the user must Save before
-  // testing — Settings UI enforces this by disabling the buttons while
-  // there are unsaved changes is a TODO; for now we just run with what's
-  // persisted).
-  ipcMain.handle(IPC.setupProbe, () => setupProbe(config));
-  ipcMain.handle(IPC.setupBootstrap, () => setupBootstrap(config));
 
   // Onboarding pairing (BET-49): POST <serverUrl>/auth/claim, and on success
   // persist { serverUrl, boxId, boxToken } to config (via commit — which also
