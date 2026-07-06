@@ -210,6 +210,33 @@ async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
   return json.result as T;
 }
 
+/**
+ * Like {@link rpc}, but for channels that may not exist on the server (desktop-
+ * only optimizations the bui-server doesn't implement, or a channel added after
+ * the box was last updated). When the server answers 500 "unknown rpc channel:
+ * <ch>" — the exact string src/server/rpc.mjs throws — we treat it as a benign
+ * "not supported here" and resolve to `fallback` instead of surfacing a red 500
+ * in the console. Any OTHER failure (real 500, network error) still throws, and
+ * a 401 still routes to AuthRequiredError via rpc(). This keeps the HTTP-mode
+ * desktop client resilient to server-surface drift without silently masking
+ * genuine errors.
+ */
+async function rpcOptional<T>(
+  channel: string,
+  fallback: T,
+  ...args: unknown[]
+): Promise<T> {
+  try {
+    return await rpc<T>(channel, ...args);
+  } catch (e) {
+    // Never swallow an auth failure — the UI must still route to re-pair.
+    if (e instanceof AuthRequiredError) throw e;
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("unknown rpc channel")) return fallback;
+    throw e;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SSE stream — one shared EventSource, lazily created.
 // ---------------------------------------------------------------------------
@@ -625,14 +652,28 @@ export const httpApi: Api = {
 
   // -- opencode chat --
   opencodeMessages: (sessionId) => rpc(IPC.opencodeMessages, sessionId),
+  // These three are DESKTOP-ONLY optimizations with no server-side handler:
+  //   • messages-cached — reads main's in-process transcript cache for an
+  //     instant first paint. The bui-server keeps no such cache, so there's
+  //     nothing to serve; returning null is the documented "cache miss" and the
+  //     ChatPanel falls through to its background opencodeMessages() fetch.
+  //   • open-/close-stream — main refcounts a per-directory opencode SSE stream.
+  //     The server's event bus already streams ALL open sessions globally, so
+  //     these are no-ops here.
+  // The server's rpc registry doesn't define these channels, so calling them
+  // returns 500 "unknown rpc channel". rpcOptional() swallows exactly that
+  // (a stale/older box also 500s the same way) and yields the graceful
+  // fallback, instead of a red console 500 on every ChatPanel mount/unmount.
   opencodeMessagesCached: (sessionId) =>
-    rpc(IPC.opencodeMessagesCached, sessionId),
+    rpcOptional(IPC.opencodeMessagesCached, null, sessionId),
   opencodeMessagesReconcile: (sessionId) =>
     rpc(IPC.opencodeMessagesReconcile, sessionId),
   opencodeMessage: (sessionId, messageId) =>
     rpc(IPC.opencodeMessage, sessionId, messageId),
-  opencodeOpenStream: (sessionId) => rpc(IPC.opencodeOpenStream, sessionId),
-  opencodeCloseStream: (sessionId) => rpc(IPC.opencodeCloseStream, sessionId),
+  opencodeOpenStream: (sessionId) =>
+    rpcOptional(IPC.opencodeOpenStream, undefined, sessionId),
+  opencodeCloseStream: (sessionId) =>
+    rpcOptional(IPC.opencodeCloseStream, undefined, sessionId),
   onOpencodeEvent: (cb) => on<OpencodeEvent>("opencode", cb),
 
   /**
