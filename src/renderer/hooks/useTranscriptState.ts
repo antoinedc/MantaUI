@@ -25,6 +25,7 @@ import {
   collectChildSessionIds,
   wasAtBottomBeforeCommit,
   classifyScrollForPin,
+  reconcileOptimisticUser,
   type PendingDelta,
 } from "../chatUtils";
 
@@ -213,11 +214,16 @@ export function useTranscriptState(params: {
                 next[idx] = msg;
                 return next;
               }
+              // Reconcile: if the incoming message is the real user message
+              // for this send, drop any optimistic placeholder that would
+              // otherwise survive as a duplicate. The splice below then
+              // appends the canonical message into its time-sorted position.
+              const cleaned = reconcileOptimisticUser(prev, msg) ?? prev;
               const t = msg.info.time?.created ?? 0;
-              const insertAt = prev.findIndex(
+              const insertAt = cleaned.findIndex(
                 (m) => (m.info.time?.created ?? 0) > t,
               );
-              const next = prev.slice();
+              const next = cleaned.slice();
               if (insertAt < 0) next.push(msg);
               else next.splice(insertAt, 0, msg);
               return next;
