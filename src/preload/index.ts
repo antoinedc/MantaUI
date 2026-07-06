@@ -394,6 +394,14 @@ const api = {
     ipcRenderer.invoke(IPC.opencodeGenerateTitle, input),
 };
 
-contextBridge.exposeInMainWorld("api", api);
+// Expose the real preload bridge under a STABLE, dedicated name — NOT "api".
+// contextBridge.exposeInMainWorld makes the property read-only + non-
+// configurable, so whatever name it's given can never be reassigned. The
+// renderer entry (main.tsx) needs to install `window.api` itself and, in
+// http/paired mode, SWAP it for the httpApi client — a swap that throws
+// "Cannot assign to read only property 'api'" if `api` is the contextBridge
+// property. So we bridge under `__buiPreload` (immutable, always the genuine
+// Electron preload) and let main.tsx define a writable `window.api` from it.
+contextBridge.exposeInMainWorld("__buiPreload", api);
 
 export type Api = typeof api;

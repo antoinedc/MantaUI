@@ -30,8 +30,26 @@ import {
 // We render the desktop <App/> only after the transport is chosen, so no
 // component ever observes a half-installed window.api.
 
-const preload = (window as unknown as { api?: Api }).api;
+// The genuine Electron preload bridge is exposed by src/preload/index.ts under
+// `__buiPreload` (a read-only contextBridge property). We NEVER write to that
+// name; instead we install our own writable `window.api` below, so http mode
+// can swap it for the httpApi client. On the mobile/web build there is no
+// preload at all → `__buiPreload` is undefined → mobile path.
+const preload = (window as unknown as { __buiPreload?: Api }).__buiPreload;
 const isMobile = !preload;
+
+// Install `window.api` as a WRITABLE, configurable property. contextBridge
+// properties are read-only, which is why main.tsx (not the preload) owns
+// `window.api` — this makes the http-mode swap at boot a legal assignment
+// rather than a "Cannot assign to read only property 'api'" TypeError.
+function setWindowApi(next: unknown): void {
+  Object.defineProperty(window, "api", {
+    value: next,
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
+}
 
 async function chooseDesktopTransport(realPreload: Api): Promise<void> {
   // Read the persisted config to learn the transport mode. A failure here
@@ -65,10 +83,10 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
         seeded = false;
       }
       if (seeded) {
-        // Preserve the real preload for Electron-local affordances, then install
-        // httpApi as the primary window.api.
-        (window as unknown as { __buiPreload: Api }).__buiPreload = realPreload;
-        (window as unknown as { api: Api }).api = httpApi as unknown as Api;
+        // The real preload already lives at window.__buiPreload (contextBridge)
+        // for Electron-local affordances (clipboard, reveal, OS notifications).
+        // Install httpApi as the primary window.api.
+        setWindowApi(httpApi);
       }
     }
     // If seed is null the config claimed http mode but lacks a usable
@@ -80,10 +98,15 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
 
 async function boot(): Promise<void> {
   if (!isMobile && preload) {
+    // Desktop: default window.api to the real preload bridge, then let the
+    // transport chooser swap it to httpApi if the config is paired (http mode).
+    // Because `window.api` is now main-owned (not the contextBridge property),
+    // this default install + the http-mode swap are both legal assignments.
+    setWindowApi(preload);
     await chooseDesktopTransport(preload);
   } else {
     // Mobile/web: install the shim (no preload to preserve).
-    (window as unknown as { api: unknown }).api = httpApi;
+    setWindowApi(httpApi);
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
