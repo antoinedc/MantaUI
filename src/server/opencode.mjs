@@ -577,7 +577,14 @@ export async function listPermissions(sessionId) {
   if (!res.ok) {
     throw new Error(`opencode listPermissions ${res.status}: ${await res.text()}`);
   }
-  return res.json();
+  const all = await res.json();
+  // opencode's /permission endpoint is `?directory=`-scoped, not session-scoped:
+  // a directory can hold pending permissions from multiple sessions. Filter
+  // down to the requested sessionID so callers never see cross-session leaks.
+  if (sessionId && Array.isArray(all)) {
+    return all.filter((p) => p.sessionID === sessionId);
+  }
+  return all;
 }
 
 /** Approve or deny a permission request.
@@ -619,7 +626,15 @@ export async function listQuestions(sessionId) {
   if (!res.ok) {
     throw new Error(`opencode listQuestions ${res.status}: ${await res.text()}`);
   }
-  return res.json();
+  const all = await res.json();
+  // opencode's /question endpoint is `?directory=`-scoped, not session-scoped:
+  // a directory can hold pending questions from multiple sessions (including
+  // orphan/subagent sessions). Filter down to the requested sessionID so
+  // callers never see cross-session leaks or stale/orphan asks.
+  if (sessionId && Array.isArray(all)) {
+    return all.filter((q) => q.sessionID === sessionId);
+  }
+  return all;
 }
 
 /**

@@ -791,11 +791,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const replyQuestion = useCallback(
     async (q: QuestionRequest, answers: string[][]) => {
       const que = q.requestId;
+      // No reply token → unanswerable ask (stale/orphan/cross-session leak).
+      // Auto-dismiss instead of surfacing an error the user can't clear.
       if (!que) {
-        setSendError(
-          "This question can't be answered — its reply token was not " +
-            "captured (asked before this session was open).",
-        );
+        setQuestions((prev) => prev.filter((x) => x.id !== q.id));
+        useStore.getState().setChatAttention(q.sessionID, null);
         return;
       }
       setQuestions((prev) => prev.filter((x) => x.id !== q.id));

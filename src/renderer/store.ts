@@ -540,14 +540,18 @@ export const useStore = create<State>((set, get) => ({
             window.api.opencodeQuestions?.(sid).catch(() => []) ?? [],
             window.api.opencodePermissions?.(sid).catch(() => []) ?? [],
           ]);
-          // A pending question outranks a pending permission (matches the
-          // StatusIndicator priority — a blocked question is the most
-          // urgent ask). Only latch if something is genuinely pending; do
-          // NOT clear here — absence of a pending request at startup is the
-          // normal case and must not stomp live SSE-driven attention.
-          if (questions.length > 0) {
+          // Belt-and-braces: server-side listQuestions/listPermissions now
+          // filters by sessionId, but defensively scope here too so the
+          // attention latch can't leak if a caller ever bypasses the server
+          // filter (e.g. a future unscoped path). Only latch if something is
+          // genuinely pending for THIS session; do NOT clear — absence of a
+          // pending request at startup is the normal case and must not stomp
+          // live SSE-driven attention.
+          const myQuestions = questions.filter((q) => q.sessionID === sid);
+          const myPermissions = permissions.filter((p) => p.sessionID === sid);
+          if (myQuestions.length > 0) {
             get().setChatAttention(sid, "question");
-          } else if (permissions.length > 0) {
+          } else if (myPermissions.length > 0) {
             get().setChatAttention(sid, "permission");
           }
         } catch {
