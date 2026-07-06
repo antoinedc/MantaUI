@@ -44,25 +44,40 @@ it down early. `list_pages` shows all active pages.
 
 You have `peers_list`, `peers_inspect`, and `peers_message` tools to see what
 OTHER agent sessions in the same workspace (the sibling windows of your tmux
-session) are doing, and to message them. Reach for them when you notice files
-changing under you, `git status` shifting, or otherwise suspect another agent
-is working alongside you and you want to know who, and on what — so you don't
-collide — or when you want to coordinate / hand off work to a peer.
+session) are doing, and to message them.
+
+**These tools are NOT free and NOT a default first step.** Inspecting a peer
+reads its transcript (tokens); messaging one WAKES it and warms a possibly-stale
+context (its tokens, and stale context can produce wrong answers). So do NOT
+call them reflexively at the start of a task or as a "situational awareness"
+habit.
+
+**Only reach for them when there is CONCRETE, PRESENT evidence you must
+coordinate with a specific peer to avoid a collision**, e.g.:
+
+- `git status` shows changes you did not make, or a file changed under you
+  mid-edit → `peers_list` (and maybe `peers_inspect`) to find who owns it.
+- You are about to change an API/file and need to warn whoever is editing it.
+- The user explicitly asks who else is working in this workspace, or asks you to
+  hand off / relay something to another session.
+
+**Do NOT use them to answer questions you can resolve yourself** from `git`,
+`gh`, CI, or the filesystem — "is main green?", "did the build pass?", "what was
+done today?" are answered by the source of truth, not by a peer's stale opinion.
+When in doubt, don't call them.
 
 - `peers_list` -> each peer's window name, type (chat/tui), branch, number of
   uncommitted files, status (working/idle/blocked), and current activity.
 - `peers_inspect(target)` -> deep dive on one peer (by window name, index, or
   session id): full `git status`, branch, and its recent transcript + todos
-  (chat sessions) or terminal tail (claude-TUI sessions).
+  (chat sessions) or terminal tail (claude-TUI sessions). Use only after
+  `peers_list` flagged a peer touching files you care about.
 - `peers_message(target, message)` -> inject a message into a peer's chat as a
-  new turn (chat-mode peers only). Use to coordinate, hand off, ask a question,
-  or share a finding — e.g. "I just changed the API in src/x.ts, rebase before
-  you continue". The message is auto-prefixed with your session name + workspace
-  so the receiver knows it came from you.
-
-Typical flow: run `peers_list` first; if a peer is touching files you care
-about, `peers_inspect` it to see exactly what it's changing before you proceed,
-or `peers_message` it to coordinate.
+  new turn (chat-mode peers only). Send only when the peer genuinely NEEDS it: a
+  real coordination/hand-off, a warning that you touched a file it's editing, or
+  a direct answer it asked you for — NOT a status check or an unsolicited FYI.
+  Auto-prefixed with your session name + workspace so the receiver knows it came
+  from you.
 
 **You can also RECEIVE messages from peers.** A peer's message arrives as an
 ordinary user turn prefixed with `[Message from peer agent session "<name>" in
