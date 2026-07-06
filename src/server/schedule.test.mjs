@@ -4,6 +4,7 @@ import {
   validateCron,
   cronMatches,
   minuteKey,
+  isJobFireable,
   createScheduler,
 } from "./schedule.mjs";
 
@@ -165,7 +166,7 @@ const baseJob = {
   recurring: true,
   label: "",
   sessionID: "ses_abc",
-  directory: "/home/dev/x",
+  directory: "",
   createdAt: 0,
   lastFiredMinute: null,
 };
@@ -236,4 +237,138 @@ test("tick leaves non-due jobs untouched and persists nothing", async () => {
   await tick();
   assert.equal(h.published.length, 0);
   assert.equal(h.jobs[0].lastFiredMinute, null);
+});
+
+// ----------------------------------------------------------------------------
+// isJobFireable — pure helper
+// ----------------------------------------------------------------------------
+
+test("isJobFireable returns ok for a job with an existing directory", () => {
+  const job = { ...baseJob, directory: "/tmp/exists" };
+  const fakeFs = (p) => p === "/tmp/exists";
+  const result = isJobFireable(job, { directoryExists: fakeFs });
+  assert.equal(result.ok, true);
+});
+
+test("isJobFireable returns skip when directory is gone", () => {
+  const job = { ...baseJob, directory: "/tmp/gone" };
+  const fakeFs = () => false;
+  const result = isJobFireable(job, { directoryExists: fakeFs });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "directory gone");
+});
+
+test("isJobFireable returns skip for a disabled job regardless of directory", () => {
+  const job = { ...baseJob, directory: "/tmp/gone", disabled: true };
+  const fakeFs = () => false;
+  const result = isJobFireable(job, { directoryExists: fakeFs });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "disabled");
+});
+
+test("isJobFireable allows jobs with empty directory (no cwd set)", () => {
+  const job = { ...baseJob, directory: "" };
+  const fakeFs = () => false;
+  const result = isJobFireable(job, { directoryExists: fakeFs });
+  assert.equal(result.ok, true);
+});
+
+// ----------------------------------------------------------------------------
+// createScheduler.tick — dead-cwd handling
+// ----------------------------------------------------------------------------
+
+test("tick does NOT fire a job whose directory no longer exists", async () => {
+  const now = localDate(2026, 6, 20, 15, 5);
+  const deadJob = { ...baseJob, id: "dead1", directory: "/tmp/never-existed-xyz" };
+  const h = harness([deadJob], now);
+  // Inject a fake filesystem where nothing exists.
+  const { tick } = createScheduler({ ...h.deps, directoryExists: () => false });
+  await tick();
+  assert.equal(h.sent.length, 0, "prompt was NOT sent to dead session");
+});
+
+test("tick fires a job whose directory exists (regression)", async () => {
+  const now = localDate(2026, 6, 20, 15, 5);
+  const h = harness([baseJob], now);
+  const { tick } = createScheduler({ ...h.deps, directoryExists: () => true });
+  await tick();
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(h.sent[0], { sessionId: "ses_abc", text: "check the deploy" });
+});
+
+test("tick auto-disables a job whose directory is gone and does not re-fire it", async () => {
+  const now = localDate(2026, 6, 20, 15, 5);
+  const deadJob = { ...baseJob, id: "dead2", directory: "/tmp/gone-xyz" };
+  const h = harness([deadJob], now);
+  const { tick } = createScheduler({ ...h.deps, directoryExists: () => false });
+
+  // First tick: job is due, directory is gone → auto-disable, no fire.
+  await tick();
+  assert.equal(h.sent.length, 0, "no prompt sent on first detection");
+  assert.equal(h.jobs.length, 1, "job still in store");
+  assert.equal(h.jobs[0].disabled, true);
+  assert.equal(h.jobs[0].disabledReason, "directory gone");
+
+  // Second tick (next minute): disabled job must NOT fire.
+  const next = localDate(2026, 6, 20, 15, 6);
+  // Reload jobs to reflect the auto-disable from the first tick.
+  h.deps.load = async () => h.jobs.map((j) => ({ ...j }));
+  const { tick: tick2 } = createScheduler({ ...h.deps, directoryExists: () => false, now: () => next });
+  await tick2();
+  assert.equal(h.sent.length, 0, "no prompt sent on second tick either");
+});
+
+test("tick auto-disables dead-cwd job and persists the flag", async () => {
+  const now = localDate(2026, 6, 20, 15, 5);
+  const deadJob = { ...baseJob, id: "dead3", directory: "/tmp/gone-xyz" };
+  let saved;
+  const h = harness([deadJob], now);
+  h.deps.save = async (next) => {
+    saved = next;
+    h.jobs = next;
+  };
+  const { tick } = createScheduler({ ...h.deps, directoryExists: () => false });
+  await tick();
+  assert.ok(saved, "save was called");
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].disabled, true);
+  assert.equal(saved[0].disabledReason, "directory gone");
+});
+
+test("tick processes a mix of live and dead-cwd jobs correctly", async () => {
+  const now = localDate(2026, 6, 20, 15, 5);
+  const liveJob = { ...baseJob, id: "live1" };
+  const deadJob = { ...baseJob, id: "dead4", directory: "/tmp/gone-xyz" };
+  const h = harness([liveJob, deadJob], now);
+  const { tick } = createScheduler({ ...h.deps, directoryExists: (p) => p === "/home/dev/x" });
+  await tick();
+  // Live job fires, dead job does not.
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(h.sent[0], { sessionId: "ses_abc", text: "check the deploy" });
+  // Both jobs survive: live with stamped minute, dead auto-disabled.
+  assert.equal(h.jobs.length, 2);
+  const live = h.jobs.find((j) => j.id === "live1");
+  const dead = h.jobs.find((j) => j.id === "dead4");
+  assert.equal(live.lastFiredMinute, "2026-06-20T15:05");
+  assert.equal(dead.disabled, true);
+  assert.equal(dead.disabledReason, "directory gone");
+});
+
+test("tick does not re-evaluate already-disabled jobs", async () => {
+  const now = localDate(2026, 6, 20, 15, 5);
+  const disabledJob = { ...baseJob, id: "disabled1", disabled: true, directory: "/tmp/gone-xyz" };
+  const h = harness([disabledJob], now);
+  // directoryExists is called only for non-disabled jobs — if it were called
+  // for the disabled job we'd see extra calls. Use a counter to verify.
+  let existsCalls = 0;
+  const fakeFs = () => {
+    existsCalls++;
+    return false;
+  };
+  const { tick } = createScheduler({ ...h.deps, directoryExists: fakeFs });
+  await tick();
+  assert.equal(existsCalls, 0, "directoryExists was NOT called for disabled job");
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.jobs.length, 1);
+  assert.equal(h.jobs[0].disabled, true);
 });
