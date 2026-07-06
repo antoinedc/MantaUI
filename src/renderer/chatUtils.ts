@@ -1822,6 +1822,51 @@ export function describeNextRun(
   return `${MON_NAMES[nd.getMonth()]} ${nd.getDate()} ${hhmm}`;
 }
 
+// ===== Optimistic user-message reconciliation =====
+//
+// When the user sends a prompt, ChatPanel immediately appends a synthetic
+// "optimistic" user message (id `optimistic-user-<timestamp>`) so the UI
+// shows the bubble instantly. The real user message arrives a few hundred
+// ms later via SSE (`message.updated` → `spliceMessage`). If `spliceMessage`
+// does a blind insert (because the real id doesn't match the optimistic id),
+// BOTH messages render briefly — the visible "double bubble" flicker.
+//
+// `reconcileOptimisticUser` is the single source of truth for stripping the
+// optimistic placeholder the moment the canonical server message arrives.
+// It is called from `spliceMessage`'s insert path: if the incoming message
+// is role "user" AND the previous messages contain an `optimistic-user-*`
+// entry, that entry is dropped before the real message is appended.
+//
+// Pure + exported so the contract is unit-tested and can't silently regress.
+
+/**
+ * Strip any optimistic user placeholder from `prev` that belongs to the same
+ * send as `incoming`. Returns a new array (or `prev` unchanged) so React
+ * skips the re-render when nothing changed.
+ *
+ * Rules:
+ *   - Only fires for `incoming.info.role === "user"`. Assistant / system
+ *     messages never trigger reconciliation (they have no optimistic twin).
+ *   - Drops every message whose id starts with `optimistic-user-`. In
+ *     practice there is at most one per send, but we scan all of them
+ *     defensively — a prior run that failed to reconcile could have left
+ *     a stale one behind.
+ *   - Returns `prev` unchanged when there is no optimistic entry to drop,
+ *     so the caller's splice can proceed with the canonical array.
+ */
+export function reconcileOptimisticUser<M extends { info: { id: string; role: string } }>(
+  prev: M[] | null | undefined,
+  incoming: M,
+): M[] | null | undefined {
+  if (incoming.info.role !== "user") return prev;
+  if (!prev || prev.length === 0) return prev;
+  // Scan for any optimistic placeholder. If none found, return the original
+  // reference so the caller's splice operates on the canonical array.
+  const next = prev.filter((m) => !m.info.id.startsWith("optimistic-user-"));
+  if (next.length === prev.length) return prev; // no optimistic entry to drop
+  return next;
+}
+
 // ===== Live tool output =====
 //
 // A tool part's *final* output lands in `state.output`, but that field only

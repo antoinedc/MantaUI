@@ -56,6 +56,7 @@ import {
   nextCronRun,
   describeNextRun,
   resolveToolOutput,
+  reconcileOptimisticUser,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2548,5 +2549,80 @@ describe("resolveToolOutput", () => {
   it("never throws on null/undefined state", () => {
     expect(resolveToolOutput(null)).toBe("");
     expect(resolveToolOutput(undefined)).toBe("");
+  });
+});
+
+// ===== reconcileOptimisticUser =====
+
+describe("reconcileOptimisticUser", () => {
+  type Msg = { info: { id: string; role: string; time?: { created?: number } } };
+
+  const userMsg = (id: string, text?: string): Msg => ({
+    info: { id, role: "user", time: text ? { created: 1000 } : undefined },
+  });
+  const assistantMsg = (id: string): Msg => ({
+    info: { id, role: "assistant", time: { created: 500 } },
+  });
+
+  it("returns prev unchanged when incoming is not a user message", () => {
+    const prev: Msg[] = [
+      userMsg("optimistic-user-1"),
+      assistantMsg("msg_1"),
+    ];
+    const incoming: Msg = {
+      info: { id: "msg_assistant_real", role: "assistant", time: { created: 2000 } },
+    };
+    expect(reconcileOptimisticUser(prev, incoming)).toBe(prev);
+  });
+
+  it("returns prev unchanged when there is no optimistic entry", () => {
+    const prev: Msg[] = [assistantMsg("msg_1"), userMsg("msg_user_real")];
+    const incoming: Msg = userMsg("msg_user_real_2");
+    expect(reconcileOptimisticUser(prev, incoming)).toBe(prev);
+  });
+
+  it("drops optimistic-user-* entry when real user message arrives", () => {
+    const optimistic = userMsg("optimistic-user-1234");
+    const prev: Msg[] = [assistantMsg("msg_0"), optimistic];
+    const incoming: Msg = userMsg("msg_real_user");
+    const result = reconcileOptimisticUser(prev, incoming);
+    expect(result).not.toBe(prev); // new reference
+    expect(result).toHaveLength(1);
+    expect(result![0].info.id).toBe("msg_0");
+  });
+
+  it("drops optimistic entry even when it is not the last message", () => {
+    const optimistic = userMsg("optimistic-user-999");
+    const prev: Msg[] = [optimistic, assistantMsg("msg_1")];
+    const incoming: Msg = userMsg("msg_real_user");
+    const result = reconcileOptimisticUser(prev, incoming);
+    expect(result).toHaveLength(1);
+    expect(result![0].info.id).toBe("msg_1");
+  });
+
+  it("handles null/undefined prev gracefully", () => {
+    const incoming: Msg = userMsg("msg_real");
+    expect(reconcileOptimisticUser(null, incoming)).toBeNull();
+    expect(reconcileOptimisticUser(undefined, incoming)).toBeUndefined();
+  });
+
+  it("handles empty prev array", () => {
+    const incoming: Msg = userMsg("msg_real");
+    expect(reconcileOptimisticUser([], incoming)).toEqual([]);
+  });
+
+  it("returns prev unchanged when no optimistic entry exists (same reference)", () => {
+    const prev: Msg[] = [assistantMsg("msg_0"), userMsg("msg_user_1")];
+    const incoming: Msg = userMsg("msg_user_2");
+    // No optimistic entries → should return the same reference.
+    expect(reconcileOptimisticUser(prev, incoming)).toBe(prev);
+  });
+
+  it("is a no-op for assistant messages even with optimistic entries present", () => {
+    const optimistic = userMsg("optimistic-user-1");
+    const prev: Msg[] = [optimistic, assistantMsg("msg_0")];
+    const incoming: Msg = assistantMsg("msg_real");
+    // Assistant incoming → never reconciles, even if optimistic is present.
+    expect(reconcileOptimisticUser(prev, incoming)).toBe(prev);
   });
 });
