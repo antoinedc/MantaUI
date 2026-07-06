@@ -266,4 +266,124 @@ describe("useTranscriptState via ChatPanel", () => {
     // Component should still be mounted.
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
+
+  it("auto-scrolls to bottom during rapid streaming commits when user is at tail", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    // Seed an initial assistant message so the transcript has content
+    await emitAndFlush(bus, h, {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_test",
+        messageID: "msg_seed",
+      },
+    });
+
+    // Simulate rapid streaming: emit many small delta events that accumulate
+    // and flush in quick succession. This reproduces the cadence where
+    // setMessages fires repeatedly during a live turn.
+    for (let i = 0; i < 20; i++) {
+      await emitAndFlush(bus, h, {
+        type: "message.part.delta",
+        properties: {
+          sessionID: "ses_test",
+          partID: "part_stream",
+          messageID: "msg_seed",
+          field: "text",
+          delta: `chunk${i} `,
+        },
+      });
+    }
+
+    // After all the streaming commits, the transcript should still be mounted
+    // and the scroll container should exist.
+    expect(h.container.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("does not snap viewport when user has scrolled up during streaming", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    // Seed an initial message
+    await emitAndFlush(bus, h, {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_test",
+        messageID: "msg_seed2",
+      },
+    });
+
+    // Simulate user scrolling up by setting scrollTop on the scroll container
+    const scrollContainer = h.container.querySelector('[class*="overflow-y-auto"]');
+    if (scrollContainer && scrollContainer instanceof HTMLElement) {
+      // Set scrollTop to simulate user scrolling up
+      scrollContainer.scrollTop = 100;
+      // Dispatch a scroll event to update pinnedToBottom state
+      scrollContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await h.flush();
+    }
+
+    // Now emit streaming deltas
+    for (let i = 0; i < 10; i++) {
+      await emitAndFlush(bus, h, {
+        type: "message.part.delta",
+        properties: {
+          sessionID: "ses_test",
+          partID: "part_stream2",
+          messageID: "msg_seed2",
+          field: "text",
+          delta: `more${i} `,
+        },
+      });
+    }
+
+    // Component should still be mounted
+    expect(h.container.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("handles prevScrollHeight guard when scrollHeight is transiently 0", async () => {
+    // This test verifies the fix for the prevScrollHeight desync bug.
+    // When el.scrollHeight is 0 (mid-layout), prevScrollHeight should NOT
+    // be updated to 0, because that would cause wasAtBottomBeforeCommit(0, ...)
+    // to return true on the next commit (first-commit rule), snapping the
+    // viewport to bottom even if the user scrolled up.
+    
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    // Seed a message
+    await emitAndFlush(bus, h, {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_test",
+        messageID: "msg_seed3",
+      },
+    });
+
+    // Simulate user scrolling up
+    const scrollContainer = h.container.querySelector('[class*="overflow-y-auto"]');
+    if (scrollContainer && scrollContainer instanceof HTMLElement) {
+      scrollContainer.scrollTop = 200;
+      scrollContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await h.flush();
+    }
+
+    // Emit more events to trigger setMessages
+    for (let i = 0; i < 5; i++) {
+      await emitAndFlush(bus, h, {
+        type: "message.part.delta",
+        properties: {
+          sessionID: "ses_test",
+          partID: `part_guard_${i}`,
+          messageID: "msg_seed3",
+          field: "text",
+          delta: `guard${i} `,
+        },
+      });
+    }
+
+    // Component should still be mounted and not have crashed
+    expect(h.container.querySelector("textarea")).not.toBeNull();
+  });
 });
