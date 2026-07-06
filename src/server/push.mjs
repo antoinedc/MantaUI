@@ -436,20 +436,30 @@ export function classifyPushEvent(evt, ctx) {
 }
 
 /**
- * Pure: should a "done" push be dropped because its session can't be resolved
- * to a tmux chat window (null label)? Such a session is a SUBAGENT child (it
+ * Pure: should a push be dropped because its session can't be resolved to a
+ * tmux chat window (null label)? Such a session is a SUBAGENT child (it
  * inherited the parent's directory, runs on the same scoped /event stream, but
  * has no `@bui-session-id` of its own) or a stale orphan — there is no chat for
- * the user to land on, and the push would be the nameless "Claude is done" that
- * deep-links nowhere. Only "done" is gated; permission/question/error must
- * still escalate even for an unresolved session.
+ * the user to land on, and the push would be a nameless notification that
+ * deep-links nowhere.
+ *
+ * Covers `done`, `error`, `permission`, and `question`: an orphan session has
+ * no chat window for the user to act in or land on, so a push to any of these
+ * kinds is useless. A `done` would be a nameless "Claude is done"; an `error`
+ * would be a nameless "The turn failed"; a `permission`/`question` would
+ * require user action the user can't take from a push that deep-links to a
+ * sessionId the app can't find.
  *
  * @param {{kind?: string}|null} payload  classifyPushEvent result
  * @param {string|null} label             resolved "workspace / session-name", or null
  * @returns {boolean}
  */
-export function shouldSuppressUnresolvedDone(payload, label) {
-  return payload?.kind === "done" && !label;
+export function shouldSuppressUnresolvedNotification(payload, label) {
+  if (!label) {
+    const k = payload?.kind;
+    return k === "done" || k === "error" || k === "permission" || k === "question";
+  }
+  return false;
 }
 
 /**
@@ -712,20 +722,21 @@ export async function firePush(evt) {
 
     if (!payload) return;
 
-    // Suppress an unresolvable "done": no tmux window stamps this sessionID
-    // (label is null), so it's a SUBAGENT child session (it inherited the
-    // parent's directory and runs on the same scoped /event stream) or a stale
-    // orphan — NOT a chat the user opened. Such a push has no workspace/name
-    // (generic "Claude is done") and deep-links to a sessionId the app can't
+    // Suppress an unresolvable notification: no tmux window stamps this
+    // sessionID (label is null), so it's a SUBAGENT child session (it inherited
+    // the parent's directory and runs on the same scoped /event stream) or a
+    // stale orphan — NOT a chat the user opened. Such a push has no workspace/
+    // name (generic "Claude is done" / "The turn failed" / "Permission needed"
+    // / "Claude has a question") and deep-links to a sessionId the app can't
     // find, dumping the user on the session list. The desktop renderer hides
     // subagent idles via its childSessionIds allowlist; the server pump has no
     // parent/child awareness, so the null-label test is our proxy: if we can't
-    // name the chat, the user has nothing actionable to land on. Permission /
-    // question / error stay un-gated below — those are blocking and must
-    // escalate even for an unresolved session.
-    if (shouldSuppressUnresolvedDone(payload, label)) {
+    // name the chat, the user has nothing actionable to land on. This applies
+    // to done/error/permission/question — all are useless without a resolvable
+    // session label.
+    if (shouldSuppressUnresolvedNotification(payload, label)) {
       console.log(
-        `[push] done sid=${sid} suppressed=unresolvable-session ` +
+        `[push] ${payload.kind} sid=${sid} suppressed=unresolvable-session ` +
           `(no tmux @bui-session-id → subagent/orphan)`,
       );
       return;

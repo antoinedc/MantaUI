@@ -4,7 +4,7 @@ import {
   classifyPushEvent,
   buildSessionLabel,
   shouldSuppressForDesktop,
-  shouldSuppressUnresolvedDone,
+  shouldSuppressUnresolvedNotification,
   routeNotification,
   notifTier,
   fireNotify,
@@ -246,7 +246,7 @@ test("REGRESSION: a nameless 'done' (subagent/orphan, null label) is suppressed"
     { focusSessionId: null, focusVisible: false, wasBusy: true, label: null },
   );
   assert.equal(done?.kind, "done");
-  assert.equal(shouldSuppressUnresolvedDone(done, null), true);
+  assert.equal(shouldSuppressUnresolvedNotification(done, null), true);
 });
 
 test("a named 'done' (resolvable session) is NOT suppressed", () => {
@@ -254,16 +254,76 @@ test("a named 'done' (resolvable session) is NOT suppressed", () => {
     { type: "session.idle", properties: { sessionID: "ses_real" } },
     { focusSessionId: null, focusVisible: false, wasBusy: true, label: "default / my-chat" },
   );
-  assert.equal(shouldSuppressUnresolvedDone(done, "default / my-chat"), false);
+  assert.equal(shouldSuppressUnresolvedNotification(done, "default / my-chat"), false);
 });
 
-test("permission/question/error are NEVER suppressed by the unresolved gate", () => {
-  // These are blocking and must escalate even when the session can't be named.
-  for (const type of ["permission", "question", "error"]) {
-    assert.equal(shouldSuppressUnresolvedDone({ kind: type }, null), false);
-  }
-  // Null payload is a no-op too.
-  assert.equal(shouldSuppressUnresolvedDone(null, null), false);
+test("unresolved 'error' (null label) is suppressed — fixes BET-107 orphan spam", () => {
+  // An orphan session errors: no tmux window stamps it, so the push would be
+  // a nameless "The turn failed." that deep-links nowhere. Suppress it.
+  const err = classifyPushEvent(
+    { type: "session.error", properties: { sessionID: "ses_orphan" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: false, label: null },
+  );
+  assert.equal(err?.kind, "error");
+  assert.equal(shouldSuppressUnresolvedNotification(err, null), true);
+});
+
+test("resolvable 'error' (with label) is NOT suppressed", () => {
+  const err = classifyPushEvent(
+    { type: "session.error", properties: { sessionID: "ses_real", message: "boom" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: false, label: "default / my-chat" },
+  );
+  assert.equal(err?.kind, "error");
+  assert.equal(shouldSuppressUnresolvedNotification(err, "default / my-chat"), false);
+});
+
+test("unresolved 'permission' (null label) is suppressed", () => {
+  // An orphan session asks permission: no chat window for the user to act in,
+  // so the push is useless even though it's "blocking".
+  const perm = classifyPushEvent(
+    { type: "permission.asked", properties: { sessionID: "ses_orphan_perm", id: "per_x" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: false, label: null },
+  );
+  assert.equal(perm?.kind, "permission");
+  assert.equal(shouldSuppressUnresolvedNotification(perm, null), true);
+});
+
+test("resolvable 'permission' (with label) is NOT suppressed", () => {
+  const perm = classifyPushEvent(
+    { type: "permission.asked", properties: { sessionID: "ses_real_perm", id: "per_y" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: false, label: "default / my-chat" },
+  );
+  assert.equal(perm?.kind, "permission");
+  assert.equal(shouldSuppressUnresolvedNotification(perm, "default / my-chat"), false);
+});
+
+test("unresolved 'question' (null label) is suppressed", () => {
+  // An orphan session asks a question: no chat window for the user to answer
+  // from, so the push is useless.
+  const q = classifyPushEvent(
+    { type: "question.asked", properties: { sessionID: "ses_orphan_q" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: false, label: null },
+  );
+  assert.equal(q?.kind, "question");
+  assert.equal(shouldSuppressUnresolvedNotification(q, null), true);
+});
+
+test("resolvable 'question' (with label) is NOT suppressed", () => {
+  const q = classifyPushEvent(
+    { type: "question.asked", properties: { sessionID: "ses_real_q" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: false, label: "default / my-chat" },
+  );
+  assert.equal(q?.kind, "question");
+  assert.equal(shouldSuppressUnresolvedNotification(q, "default / my-chat"), false);
+});
+
+test("null payload → no suppression (no-op)", () => {
+  assert.equal(shouldSuppressUnresolvedNotification(null, null), false);
+});
+
+test("non-notifying kind with null label → no suppression", () => {
+  // Other kinds (e.g. "notify") should not be suppressed even with null label.
+  assert.equal(shouldSuppressUnresolvedNotification({ kind: "notify" }, null), false);
 });
 
 const LBL = { ...NOFOCUS, label: "default / my-chat" };
