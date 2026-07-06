@@ -7,6 +7,30 @@ import type {
   WindowStatus,
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
+import { clientToken } from "./api/httpApi";
+
+// Overlay the desktop-local pairing secrets (serverUrl/boxToken) onto a config
+// snapshot. In http mode window.api.configGet() returns the bui-server's config,
+// which never carries these — they live only on this desktop, mirrored into
+// localStorage by main.tsx (bui_server/bui_token) at boot. Reading them here
+// keeps resolveTransportMode() from seeing an empty boxToken and forcing
+// onboarding on an already-paired install. A missing/blank local value leaves
+// the incoming config field untouched, so this is a no-op on mobile/web and on
+// a genuinely-unpaired fresh install.
+function mergeLocalPairing(cfg: AppConfig): AppConfig {
+  let serverUrl = "";
+  try {
+    serverUrl = localStorage.getItem("bui_server") ?? "";
+  } catch {
+    /* localStorage unavailable (private mode / SSR) — treat as no override */
+  }
+  const boxToken = clientToken() ?? "";
+  return {
+    ...cfg,
+    serverUrl: serverUrl || cfg.serverUrl,
+    boxToken: boxToken || cfg.boxToken,
+  };
+}
 
 // "Active session" in our UI = (projectName, windowIndex) tuple
 export type ActiveSession = {
@@ -267,7 +291,13 @@ export const useStore = create<State>((set, get) => ({
 
   refresh: async () => {
     const cfg = await window.api.configGet();
-    get().applyConfig(cfg);
+    // In http mode window.api.configGet() returns the bui-SERVER's config,
+    // which structurally lacks the desktop-local pairing secrets
+    // (serverUrl/boxId/boxToken). Those live only on this desktop — mirrored
+    // into localStorage["bui_server"]/["bui_token"] by main.tsx at boot (and by
+    // the pairing step via applyPairing). Overlay them so applyConfig doesn't
+    // blank the pairing and flip the app back into onboarding on every refresh.
+    get().applyConfig(mergeLocalPairing(cfg));
     // Un-gated: always fetch projects via httpApi (SSH main path gone, BET-82).
     const projects = await window.api.tmuxList();
     get().applyProjects(projects);
