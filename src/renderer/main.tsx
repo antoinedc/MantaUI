@@ -25,27 +25,61 @@ import {
 // We render the desktop <App/> only after the transport is chosen, so no
 // component ever observes a half-installed window.api.
 
-const preload = (window as unknown as { api?: Api }).api;
+// The genuine Electron preload bridge is exposed by src/preload/index.ts under
+// `__buiPreload` (a read-only contextBridge property). We NEVER write to that
+// name; instead we install our own writable `window.api` below, so http mode
+// can swap it for the httpApi client. On the mobile/web build there is no
+// preload at all → `__buiPreload` is undefined → mobile path.
+const preload = (window as unknown as { __buiPreload?: Api }).__buiPreload;
 const isMobile = !preload;
+
+// Install `window.api` as a WRITABLE, configurable property. contextBridge
+// properties are read-only, which is why main.tsx (not the preload) owns
+// `window.api` — this makes the http-mode swap at boot a legal assignment
+// rather than a "Cannot assign to read only property 'api'" TypeError.
+function setWindowApi(next: unknown): void {
+  Object.defineProperty(window, "api", {
+    value: next,
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
+}
 
 async function chooseDesktopTransport(realPreload: Api): Promise<void> {
   // Desktop always uses httpApi (BET-82: SSH main path gone).
-  // Preserve the real preload for Electron-local affordances, then install
-  // httpApi as the primary window.api.
-  window.__buiPreload = realPreload as unknown as NonNullable<
-    typeof window.__buiPreload
-  >;
-  (window as unknown as { api: Api }).api = httpApi as unknown as Api;
+  // The real preload already lives at window.__buiPreload (exposed read-only by
+  // the preload's contextBridge) — we NEVER write to that name. Here we only
+  // decide whether to swap the primary window.api over to httpApi.
 
   // Try to seed localStorage with paired credentials so httpApi has a base
-  // URL + token. Non-fatal if configGet fails or seed is null — httpApi is
-  // already installed and will show "Not configured" until pairing completes.
+  // URL + token. Non-fatal if configGet fails or seed is null — window.api
+  // stays on the preload bridge and will show "Not configured" until pairing
+  // completes.
   try {
     const config = await realPreload.configGet();
     const seed = desktopHttpClientSeed(config);
     if (seed) {
-      localStorage.setItem("bui_server", seed.bui_server);
-      localStorage.setItem("bui_token", seed.bui_token);
+      // Seed the two localStorage keys httpApi reads for its base URL + token.
+      let seeded = true;
+      try {
+        localStorage.setItem("bui_server", seed.bui_server);
+        localStorage.setItem("bui_token", seed.bui_token);
+      } catch (e) {
+        // localStorage unavailable is fatal for http mode (httpApi can't read
+        // its base) — fall back to preload rather than a 401-looping client.
+        // Do NOT return here: chooseDesktopTransport must fall through so boot()
+        // still renders. We simply leave window.api as the preload bridge by
+        // skipping the httpApi swap below.
+        console.warn("[bui] localStorage seed failed; using preload transport:", e);
+        seeded = false;
+      }
+      if (seeded) {
+        // The real preload already lives at window.__buiPreload (contextBridge)
+        // for Electron-local affordances (clipboard, reveal, OS notifications).
+        // Install httpApi as the primary window.api.
+        setWindowApi(httpApi);
+      }
     }
   } catch (e) {
     console.warn("[bui] configGet failed at entry:", e);
@@ -54,12 +88,16 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
 
 async function boot(): Promise<void> {
   if (!isMobile && preload) {
+    // Desktop: default window.api to the real preload bridge, then let the
+    // transport chooser swap it to httpApi if the config is paired (http mode).
+    // Because `window.api` is now main-owned (not the contextBridge property),
+    // this default install + the http-mode swap are both legal assignments.
+    setWindowApi(preload);
     await chooseDesktopTransport(preload);
     // chooseDesktopTransport already assigned window.__buiPreload.
   } else {
     // Mobile/web: install the shim (no preload to preserve).
-    (window as unknown as { api: unknown }).api = httpApi;
-    window.__buiPreload = null;
+    setWindowApi(httpApi);
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
