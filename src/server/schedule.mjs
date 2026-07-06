@@ -136,6 +136,30 @@ export function minuteKey(date) {
 }
 
 // ---------------------------------------------------------------------------
+// Job fireability — pure decision helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Decide whether a job can be fired right now. Pure (no I/O): the caller
+ * injects the directory-existence check so this can be unit-tested without
+ * touching the filesystem.
+ *
+ * Returns { ok: true } when the job should be fired, or { ok: false, reason }
+ * with a stable string reason so the caller can log consistently.
+ *
+ * Reasons:
+ *   "disabled"      — the job was previously marked disabled (by us or the user)
+ *   "directory gone" — the job's cwd no longer exists on disk
+ */
+export function isJobFireable(job, { directoryExists } = {}) {
+  if (job.disabled) return { ok: false, reason: "disabled" };
+  if (job.directory && !directoryExists(job.directory)) {
+    return { ok: false, reason: "directory gone" };
+  }
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
 // Store (atomic, same pattern as local.mjs)
 // ---------------------------------------------------------------------------
 
@@ -220,15 +244,28 @@ export async function listJobs(sessionID, { load = loadJobs } = {}) {
  * hasn't already fired this minute), stamps lastFiredMinute, deletes fired
  * one-shots, and persists. Re-entrancy guarded.
  *
+ * Jobs whose `directory` no longer exists on disk are auto-disabled on first
+ * detection (a single log line, then they stop retrying forever). Disabled
+ * jobs are never re-evaluated for firing. This breaks the dead-cwd retry loop
+ * where a deleted worktree caused opencode errors on every tick indefinitely.
+ *
  * @param {object} deps
  * @param {() => Promise<object[]>} deps.load
  * @param {(jobs: object[]) => Promise<void>} deps.save
  * @param {(args: {sessionId: string, text: string}) => Promise<any>} deps.sendPrompt
  * @param {() => Date} [deps.now]
  * @param {(evt: object) => void} [deps.publish]
+ * @param {(path: string) => boolean} [deps.directoryExists] — defaults to node:fs/existsSync
  * @returns {{ tick: () => Promise<void> }}
  */
-export function createScheduler({ load, save, sendPrompt, now = () => new Date(), publish } = {}) {
+export function createScheduler({
+  load,
+  save,
+  sendPrompt,
+  now = () => new Date(),
+  publish,
+  directoryExists = existsSync,
+} = {}) {
   let inFlight = false;
 
   async function tick() {
@@ -243,6 +280,33 @@ export function createScheduler({ load, save, sendPrompt, now = () => new Date()
       const firedSessions = new Set();
 
       for (const job of jobs) {
+        // Disabled jobs never fire — they were auto-disabled (dead cwd) or
+        // manually disabled by the user. Just persist them as-is.
+        if (job.disabled) {
+          survivors.push(job);
+          continue;
+        }
+
+        const fireable = isJobFireable(job, { directoryExists });
+        if (!fireable.ok) {
+          console.warn(
+            `[schedule] skip ${job.id}: ${fireable.reason}${job.directory ? " " + job.directory : ""}`,
+          );
+          if (fireable.reason === "directory gone") {
+            // Auto-disable: persist with disabled flag + reason so the user
+            // can see it in the UI and re-enable if they restore the dir.
+            survivors.push({
+              ...job,
+              disabled: true,
+              disabledReason: "directory gone",
+            });
+            mutated = true;
+          } else {
+            survivors.push(job);
+          }
+          continue;
+        }
+
         const due = job.lastFiredMinute !== key && cronMatches(job.cron, when);
         if (!due) {
           survivors.push(job);
