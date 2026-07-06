@@ -301,7 +301,16 @@ export function useTranscriptState(params: {
     } else {
       pinnedToBottom.current = false;
     }
-    prevScrollHeight.current = el.scrollHeight;
+    // Guard: only persist scrollHeight when it's a valid positive value.
+    // Under the new HTTP-streaming cadence, commits can land mid-layout
+    // (justify-end reflow, container not yet painted) where el.scrollHeight
+    // transiently reads 0. Writing 0 into prevScrollHeight would make the
+    // next commit's wasAtBottomBeforeCommit(0, ...) return true (first-
+    // commit rule) and snap the viewport to the bottom even if the user
+    // scrolled up — the exact auto-scroll regression we're fixing.
+    if (el.scrollHeight > 0) {
+      prevScrollHeight.current = el.scrollHeight;
+    }
   }, [messages]);
 
   return {
