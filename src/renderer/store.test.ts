@@ -415,7 +415,7 @@ describe("replayChatAttention", () => {
   });
 
   it("latches 'question' for a session with a pending question", async () => {
-    questionsBySid["ses_q"] = [{ id: "q1" }];
+    questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q" }];
     await useStore.getState().replayChatAttention();
     const win = useStore.getState().status.bui[0];
     expect(win.attention).toBe(true);
@@ -423,7 +423,7 @@ describe("replayChatAttention", () => {
   });
 
   it("latches 'permission' for a session with only a pending permission", async () => {
-    permissionsBySid["ses_p"] = [{ id: "p1" }];
+    permissionsBySid["ses_p"] = [{ id: "p1", sessionID: "ses_p" }];
     await useStore.getState().replayChatAttention();
     const win = useStore.getState().status.bui[1];
     expect(win.attention).toBe(true);
@@ -431,8 +431,8 @@ describe("replayChatAttention", () => {
   });
 
   it("question outranks permission when both are pending", async () => {
-    questionsBySid["ses_q"] = [{ id: "q1" }];
-    permissionsBySid["ses_q"] = [{ id: "p1" }];
+    questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q" }];
+    permissionsBySid["ses_q"] = [{ id: "p1", sessionID: "ses_q" }];
     await useStore.getState().replayChatAttention();
     expect(useStore.getState().status.bui[0].attentionKind).toBe("question");
   });
@@ -454,7 +454,7 @@ describe("replayChatAttention", () => {
       if (sid === "ses_q") throw new Error("scoped fetch failed");
       return [];
     };
-    permissionsBySid["ses_p"] = [{ id: "p1" }];
+    permissionsBySid["ses_p"] = [{ id: "p1", sessionID: "ses_p" }];
     await useStore.getState().replayChatAttention();
     // ses_p still latched despite ses_q's question fetch throwing.
     expect(useStore.getState().status.bui[1].attentionKind).toBe("permission");

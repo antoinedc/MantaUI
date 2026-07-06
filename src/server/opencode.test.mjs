@@ -10,6 +10,7 @@ import {
   compactSession,
   abortSession,
   listPermissions,
+  listQuestions,
   replyPermission,
   _resetSessionDirectoryCache,
   _onSessionDirectoryAdded,
@@ -498,6 +499,133 @@ test("replyPermission appends ?directory= from cache (auto-allow path)", async (
   assert.ok(
     replyUrl.includes("directory=%2Fproj%2Fpreply"),
     `replyPermission URL missing scoped directory: ${replyUrl}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Session-scoped filtering for listQuestions / listPermissions (BET-110)
+//
+// opencode's /question and /permission endpoints are `?directory=`-scoped, not
+// session-scoped. A directory can hold pending items from multiple sessions
+// (including orphan/subagent sessions). listQuestions/listPermissions must
+// filter the directory-wide response down to the requested sessionId so callers
+// never see cross-session leaks or stale/orphan asks.
+// ---------------------------------------------------------------------------
+
+test("listPermissions filters directory-wide response to the requested sessionId", async () => {
+  _resetSessionDirectoryCache();
+  const calls = [];
+  await withMockFetch(
+    async (url, opts) => {
+      calls.push(String(url));
+      // getSessionDirectoryQuery lazy-fetches the session's directory.
+      if (String(url) === "http://127.0.0.1:4096/session/ses_B") {
+        return new Response(
+          JSON.stringify({ id: "ses_B", directory: "/shared/dir" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(url).startsWith("http://127.0.0.1:4096/permission?directory=")) {
+        // Directory-wide response: permissions from THREE different sessions.
+        return new Response(
+          JSON.stringify([
+            { id: "per_a", sessionID: "ses_A", permission: "Bash", reply: null },
+            { id: "per_b", sessionID: "ses_B", permission: "Write", reply: null },
+            { id: "per_c", sessionID: "ses_C", permission: "Bash", reply: null },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const result = await listPermissions("ses_B");
+      assert.deepEqual(
+        result,
+        [{ id: "per_b", sessionID: "ses_B", permission: "Write", reply: null }],
+        "must return only the requested session's permissions",
+      );
+    },
+  );
+});
+
+test("listQuestions filters directory-wide response to the requested sessionId", async () => {
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url, opts) => {
+      // getSessionDirectoryQuery lazy-fetches the session's directory.
+      if (String(url) === "http://127.0.0.1:4096/session/ses_B") {
+        return new Response(
+          JSON.stringify({ id: "ses_B", directory: "/shared/dir" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(url).startsWith("http://127.0.0.1:4096/question?directory=")) {
+        // Directory-wide response: questions from THREE different sessions,
+        // plus an orphan session (ses_orphan) that should be dropped.
+        return new Response(
+          JSON.stringify([
+            { id: "que_1", sessionID: "ses_A", questions: [{ question: "OK?", answers: [] }] },
+            { id: "que_2", sessionID: "ses_B", questions: [{ question: "Your move?", answers: [] }] },
+            { id: "que_3", sessionID: "ses_orphan", questions: [{ question: "stale", answers: [] }] },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const result = await listQuestions("ses_B");
+      assert.deepEqual(
+        result,
+        [{ id: "que_2", sessionID: "ses_B", questions: [{ question: "Your move?", answers: [] }] }],
+        "must return only the requested session's questions",
+      );
+    },
+  );
+});
+
+test("listPermissions without sessionId returns unfiltered directory-wide list", async () => {
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      if (String(url).startsWith("http://127.0.0.1:4096/permission")) {
+        return new Response(
+          JSON.stringify([
+            { id: "per_x", sessionID: "ses_X", permission: "Bash", reply: null },
+            { id: "per_y", sessionID: "ses_Y", permission: "Write", reply: null },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const result = await listPermissions(null);
+      assert.equal(result.length, 2, "unscoped call returns full list");
+    },
+  );
+});
+
+test("listQuestions without sessionId returns unfiltered directory-wide list", async () => {
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      if (String(url).startsWith("http://127.0.0.1:4096/question")) {
+        return new Response(
+          JSON.stringify([
+            { id: "que_x", sessionID: "ses_X", questions: [{ question: "q?", answers: [] }] },
+            { id: "que_y", sessionID: "ses_Y", questions: [{ question: "q2?", answers: [] }] },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const result = await listQuestions(null);
+      assert.equal(result.length, 2, "unscoped call returns full list");
+    },
   );
 });
 
