@@ -149,3 +149,36 @@ test("tmux:new-session forwards chatMode + oc client and resolves cwd", async ()
   assert.equal(last.cwd, "/home/dev/projects/newproj", "explicit cwd preserved");
   assert.ok(last.oc && typeof last.oc.createSession === "function", "oc client forwarded");
 });
+
+// REGRESSION (Refresh in Settings → "unreachable: could not reach the
+// endpoint"): httpApi + preload both send discover-models as POSITIONAL args
+// — rpc(channel, baseURL, apiKey) — and dispatch() spreads args into the
+// handler. The old handler destructured a single object (`input?.baseURL`),
+// so it read `.baseURL` off the baseURL STRING → undefined → discovery ran
+// against "" for EVERY refresh. This drives the real positional path through
+// dispatch() with fetch mocked, and asserts the request hits
+// <baseURL>/models with the provided key.
+test("opencode:discover-models accepts positional (baseURL, apiKey) args", async () => {
+  const { deps } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  const seen = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push({ url: String(url), auth: opts?.headers?.Authorization ?? "" });
+    return new Response(JSON.stringify({ data: [{ id: "m1" }] }), {
+      status: 200, headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const result = await dispatch(handlers, "opencode:discover-models", [
+      "https://api.example.com/v1", "explicit-key",
+    ]);
+    assert.equal(seen.length, 1, "exactly one discovery request");
+    assert.equal(seen[0].url, "https://api.example.com/v1/models");
+    assert.equal(seen[0].auth, "Bearer explicit-key");
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.models, [{ id: "m1" }]);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});

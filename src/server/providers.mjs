@@ -301,6 +301,29 @@ export async function discoverModels(baseURL, apiKey) {
 }
 
 /**
+ * Discovery entrypoint for the ProvidersCard Refresh flow. The renderer sends
+ * an EMPTY apiKey by design ("Refresh never re-sends the secret"), and the
+ * stored key for the endpoint is recovered here from opencode.jsonc via
+ * findStoredApiKey — the secret stays on the box. An explicit apiKey (the
+ * add-endpoint validation path) is used as-is.
+ *
+ * `readConfig` is injectable for tests; defaults to readRemoteConfig. A config
+ * read failure degrades to keyless discovery (the endpoint may be public).
+ */
+export async function discoverModelsForEndpoint(baseURL, apiKey, readConfig = readRemoteConfig) {
+  let key = apiKey ?? "";
+  if (!key) {
+    try {
+      key = findStoredApiKey(await readConfig(), baseURL);
+    } catch (e) {
+      console.warn("[providers] could not read stored api key:", e);
+      key = "";
+    }
+  }
+  return discoverModels(baseURL, key);
+}
+
+/**
  * Apply a set of provider mutations and write opencode.jsonc back.
  * Does NOT restart opencode; the caller decides (prompt-before-restart).
  */
