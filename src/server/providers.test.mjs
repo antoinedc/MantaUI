@@ -300,7 +300,7 @@ describe("readProviderEndpoints", () => {
   it("uses id as name when name is missing", () => {
     const cfg = {
       provider: {
-        bare: { npm: "x", options: {}, models: {} },
+        bare: { npm: "x", options: { baseURL: "https://bare.example/v1" }, models: {} },
       },
     };
     const endpoints = readProviderEndpoints(cfg);
@@ -309,6 +309,31 @@ describe("readProviderEndpoints", () => {
 
   it("returns empty array for config with no providers", () => {
     assert.deepEqual(readProviderEndpoints({}), []);
+  });
+
+  // REGRESSION: plugin-authed provider blocks (e.g. anthropic via
+  // opencode-claude-auth) have no options.baseURL. They must NOT be projected
+  // into the ProvidersCard: the card's Refresh would fetch `"" + "/models"`
+  // ("unreachable: could not reach the endpoint"), and a model toggle / remove
+  // on the row would rewrite the block as an @ai-sdk/openai-compatible
+  // endpoint with an empty baseURL, corrupting the plugin auth.
+  it("excludes plugin-authed blocks without a baseURL (anthropic)", () => {
+    const cfg = {
+      provider: {
+        anthropic: {
+          // Real shape from a claude-auth setup: models but no options.baseURL.
+          models: { "claude-opus-4-8": { id: "claude-opus-4-8" } },
+        },
+        voska: {
+          npm: "@ai-sdk/openai-compatible",
+          name: "VoskaAI",
+          options: { baseURL: "https://api.voska.org/v1", apiKey: "k" },
+          models: { "qwen3.6-27b": {} },
+        },
+      },
+    };
+    const endpoints = readProviderEndpoints(cfg);
+    assert.deepEqual(endpoints.map((e) => e.id), ["voska"]);
   });
 });
 
@@ -409,6 +434,24 @@ describe("discoverModels", () => {
     assert.equal(result.ok, false);
     if (!result.ok) {
       assert.equal(result.error, "unreachable");
+    }
+    globalThis.fetch = origFetch;
+  });
+
+  // REGRESSION: an empty baseURL used to reach fetch("/models") and surface as
+  // a misleading "unreachable: could not reach the endpoint". It must return a
+  // clear bad_response without touching the network.
+  it("returns bad_response (not unreachable) for an empty baseURL", async () => {
+    globalThis.fetch = async () => {
+      throw new Error("fetch must not be called for an empty baseURL");
+    };
+    for (const bad of ["", "   ", undefined, null]) {
+      const result = await discoverModels(bad, "");
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.error, "bad_response");
+        assert.match(result.detail ?? "", /no baseURL/);
+      }
     }
     globalThis.fetch = origFetch;
   });
