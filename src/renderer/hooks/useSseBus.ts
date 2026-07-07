@@ -61,6 +61,8 @@ import {
   isDrainAbortError,
   shouldAbortForQueuedDrain,
   collectChildSessionIds,
+  applyQuestionEvent,
+  hydrateQuestion,
   type PendingDelta,
 } from "../chatUtils";
 import type { TokenUsage } from "../chatShared";
@@ -201,7 +203,15 @@ export function useSseBus(params: {
     try {
       const qs = await window.api.opencodeQuestions?.(sessionId);
       if (Array.isArray(qs)) {
-        setQuestions(qs);
+        // Mirror ChatPanel's original hydrate + sessionID-filter: hydrateQuestion
+        // copies the server's `que_…` id into `requestId` (required for reply),
+        // and the filter keeps only the viewed session's questions so a
+        // cumulative workspace-wide GET doesn't stack unrelated backlog.
+        setQuestions(
+          qs
+            .filter((q) => q.sessionID === sessionId)
+            .map(hydrateQuestion) as QuestionRequest[],
+        );
       }
     } catch { /* non-fatal */ }
   }, [sessionId]);
@@ -223,9 +233,12 @@ export function useSseBus(params: {
 
   const rejectQuestion = useCallback(
     (q: QuestionRequest) => {
-      void window.api.opencodeQuestionReject?.(sessionId, q.id);
+      // Signature is opencodeQuestionReject(requestId, sessionId?) and the
+      // reply/reject API accepts ONLY the `que_…` requestId, not the callID.
+      if (!q.requestId) return;
+      void window.api.opencodeQuestionReject?.(q.requestId, q.sessionID);
     },
-    [sessionId],
+    [],
   );
 
   // SSE effect
@@ -503,7 +516,18 @@ export function useSseBus(params: {
       }
 
       if (ev.type === "question.asked" || ev.type === "question.replied" || ev.type === "question.rejected") {
-        void refreshQuestions();
+        // Payload-driven live update (restored from BET-64 refactor regression).
+        // Applying the event payload directly (a) hydrates `requestId` from the
+        // asked payload so submit can send the reply, (b) upserts by callID so
+        // re-asks don't stack, and (c) filters to the viewed session — instead
+        // of re-polling GET /question which returns ALL cumulatively-pending
+        // questions for the workspace and dropped the requestId + filter.
+        setQuestions((prev) =>
+          applyQuestionEvent(prev, ev.type, props, sessionId) as QuestionRequest[],
+        );
+        if (ev.type === "question.replied" || ev.type === "question.rejected") {
+          scheduleRefetch();
+        }
       }
     });
 
