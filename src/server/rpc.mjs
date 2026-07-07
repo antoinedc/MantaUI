@@ -209,9 +209,13 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     "opencode:models": () => oc.listModels(),
 
     // Provider management — now served from the server (BET-82.3).
-    // get-providers: fetch opencode's /provider endpoint (all providers,
-    // connected set, defaults). Returns the raw shape { all, connected, default }.
-    "opencode:get-providers": () => providers.getProviders(),
+    // get-providers: read opencode.jsonc and project the configured provider
+    // blocks into ProviderEndpoint[] (id/name/baseURL/hasApiKey/enabledModels),
+    // which is exactly what the Settings ProvidersCard form consumes. This must
+    // NOT return the raw /provider HTTP shape { all, connected, default } — that
+    // object has no rows for the card to map over, so custom providers (e.g.
+    // "Voska AI") would never be prefilled (BET-114).
+    "opencode:get-providers": () => providers.getProviderEndpoints(),
 
     // discover-models: query an OpenAI-compatible endpoint's /models.
     // Args: { baseURL, apiKey? } — apiKey may be "" (use stored key).
