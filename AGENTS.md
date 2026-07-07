@@ -557,6 +557,17 @@ schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
 - **No UI card, no durable store, no bus event** — purely a live AI-facing
   read + message tool (v1). No `peers:*` window.api channels; the desktop
   renderer doesn't consume it.
+- **Tool descriptions + the AGENTS.md blurb are deliberately cost-aware and
+  anti-reflex** (rewritten after a session called `peers_list` at task start and
+  needlessly woke an unrelated peer). Each `execute` is a read/wake with a token
+  cost — `peers_inspect` reads a transcript, `peers_message` WAKES a peer and
+  warms its (possibly stale) context. The guidance therefore forbids reflexive /
+  "situational awareness" use and requires CONCRETE present evidence of a
+  file-level collision (or an explicit user ask) before calling; questions
+  answerable from `git`/`gh`/CI/fs ("is main green?", "what shipped today?") must
+  NOT trigger a peer call. If you regenerate these descriptions, KEEP the cost
+  warning + the anti-pattern list — the naive "run peers_list first" framing is
+  what caused the waste.
 - Tests: `src/server/peers.test.mjs` (resolveWorkspace, selectPeers,
   parseGitStatus, summarizeTranscript, classifyChatStatus, describeChatActivity,
   recentTurns, formatPeerMessage, sendPeerMessage — 20). Pure logic only.

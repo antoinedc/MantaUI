@@ -82,13 +82,20 @@ function q(context: any): string {
 
 export const list = tool({
   description: [
-    "List the OTHER agent sessions working in the same workspace (the sibling",
-    "windows of the same tmux session) and a one-line summary of what each is",
-    "doing. Use when you notice files changing, git status shifting, or",
-    "otherwise suspect another agent is working alongside you and you want to",
-    "know who and on what. Shows each peer's branch, number of uncommitted",
-    "files, status (working/idle/blocked), and current activity. Call",
-    "peers_inspect for a detailed look at one peer.",
+    "List the OTHER agent sessions in the same workspace and a one-line summary",
+    "of each. COSTS TOKENS AND HAS SIDE EFFECTS: inspecting a peer reads its",
+    "transcript and a message WAKES it, warming a possibly-stale context — so",
+    "this is NOT a free 'situational awareness' check and must not be called",
+    "reflexively at the start of a task.",
+    "ONLY call it when there is CONCRETE EVIDENCE another agent is editing the",
+    "SAME files right now AND you must coordinate to avoid a collision:",
+    "e.g. `git status` shows changes you did not make, a file changed under you",
+    "mid-edit, or the user explicitly asks who else is working here.",
+    "DO NOT use it to answer questions you can resolve yourself from git / gh /",
+    "CI / the filesystem (e.g. 'is main green?', 'did the build pass?', 'what",
+    "was done today?') — a peer's opinion is stale and worse than the source of",
+    "truth. If in doubt, don't call it. Shows each peer's branch, uncommitted-",
+    "file count, status, and current activity; call peers_inspect for detail.",
   ].join(" "),
   args: {},
   async execute(_args, context) {
@@ -108,12 +115,14 @@ export const list = tool({
 
 export const inspect = tool({
   description: [
-    "Inspect ONE peer session in your workspace in detail: its full git status",
-    "(which files it's changing), branch, and — for chat sessions — its recent",
-    "transcript turns and active todo list, or — for terminal sessions — the",
-    "tail of its terminal pane. Use after peers_list to dig into what a specific",
-    "agent is doing. Identify the peer by its window name, window index, or",
-    "opencode session id (all shown by peers_list).",
+    "Inspect ONE peer session in detail: its full git status (which files it's",
+    "changing), branch, and — for chat sessions — recent transcript turns +",
+    "todos, or — for terminal sessions — the terminal-pane tail. Use ONLY after",
+    "peers_list has already shown a peer is actively touching files you care",
+    "about and you need to see exactly what, to avoid a collision. Reading a",
+    "peer's transcript costs tokens; do not inspect out of curiosity or to",
+    "gather facts you can get from git / gh / CI yourself. Identify the peer by",
+    "its window name, window index, or opencode session id (from peers_list).",
   ].join(" "),
   args: {
     target: z
@@ -166,14 +175,17 @@ export const inspect = tool({
 export const message = tool({
   description: [
     "Send a message to ANOTHER agent session in your workspace (a sibling tmux",
-    "window). The message is injected into that peer's chat as a new turn,",
-    "prefixed with context about who sent it (your session name + workspace) so",
-    "the receiving agent knows it came from a peer, not its user. Use to",
-    "coordinate, hand off work, ask a question, or share a finding with another",
-    "agent — e.g. 'I just changed the API in src/x.ts, rebase before you",
-    "continue'. Identify the peer by its window name, window index, or opencode",
-    "session id (all shown by peers_list). Only chat-mode peers can receive a",
-    "message; terminal (claude-TUI) peers cannot.",
+    "window). WAKES the target: it runs a fresh turn, warming its context and",
+    "spending its tokens — so only send when you have something the peer",
+    "genuinely NEEDS and cannot get otherwise: a real coordination/hand-off, a",
+    "warning that you changed a file it's editing, or a direct answer it asked",
+    "you for. Do NOT ping a peer for status you can read yourself, to 'check in',",
+    "or to share an FYI it didn't request. The message is injected as a new turn",
+    "prefixed with your session name + workspace so the receiver knows it came",
+    "from a peer, not its user — e.g. 'I just changed the API in src/x.ts, rebase",
+    "before you continue'. Identify the peer by window name, index, or session id",
+    "(from peers_list). Only chat-mode peers can receive a message; terminal",
+    "(claude-TUI) peers cannot.",
   ].join(" "),
   args: {
     target: z
