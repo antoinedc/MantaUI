@@ -164,15 +164,28 @@ export function removeProviderBlock(cfg, id) {
 // Project the config's provider map down to renderer-safe metadata. Never
 // includes the apiKey value — only whether one is present — and scrubs any
 // credential embedded in the baseURL.
+//
+// ONLY blocks with an options.baseURL are projected: the ProvidersCard is the
+// manager for OpenAI-compatible ENDPOINTS, and a baseURL is definitional for
+// those. Plugin-authed providers (e.g. the `anthropic` block used by
+// opencode-claude-auth) have no baseURL and MUST be excluded — rendering them
+// in the card gives them a Refresh button that fetches `"" + "/models"`
+// ("unreachable: could not reach the endpoint"), and worse, a model toggle or
+// ✕ on that row would route the block through upsertProviderBlock /
+// removeProviderBlock, overwriting it with npm:"@ai-sdk/openai-compatible" +
+// empty baseURL and corrupting the plugin auth. They still appear in the model
+// dropdown, which reads the live /provider endpoint instead.
 export function readProviderEndpoints(cfg) {
   const providers = getProviderMap(cfg);
-  return Object.entries(providers).map(([id, block]) => ({
-    id,
-    name: typeof block.name === "string" ? block.name : id,
-    baseURL: block.options?.baseURL ? stripUrlUserinfo(block.options.baseURL) : "",
-    hasApiKey: Boolean(block.options?.apiKey),
-    enabledModels: Object.keys(block.models ?? {}),
-  }));
+  return Object.entries(providers)
+    .filter(([, block]) => Boolean(block.options?.baseURL))
+    .map(([id, block]) => ({
+      id,
+      name: typeof block.name === "string" ? block.name : id,
+      baseURL: stripUrlUserinfo(block.options.baseURL),
+      hasApiKey: Boolean(block.options?.apiKey),
+      enabledModels: Object.keys(block.models ?? {}),
+    }));
 }
 
 // Find the apiKey stored in opencode.jsonc for the provider whose baseURL
@@ -256,6 +269,13 @@ export async function getProviders() {
  * the box's network view.
  */
 export async function discoverModels(baseURL, apiKey) {
+  // Defense-in-depth: an endpoint row without a baseURL can't be discovered
+  // (fetch("/models") throws "Failed to parse URL"). readProviderEndpoints
+  // filters these out of the card, but guard here too so a stale client or
+  // direct rpc call gets a clear error instead of "unreachable".
+  if (!baseURL || !String(baseURL).trim()) {
+    return { ok: false, error: "bad_response", detail: "provider has no baseURL configured" };
+  }
   const url = `${normBaseURL(baseURL)}/models`;
   try {
     const headers = {};
