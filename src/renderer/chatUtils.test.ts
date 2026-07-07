@@ -1311,6 +1311,58 @@ describe("applyQuestionEvent — callID unification & defensive removal", () => 
   });
 });
 
+// ===== BET-112 regression: live path replaces stale GET /question re-poll =====
+//
+// The hook's useSseBus now drives question state via applyQuestionEvent on
+// every question.* event instead of re-polling GET /question (which returns
+// ALL cumulatively-pending workspace questions and dropped both the sessionID
+// filter and the que_ requestId). These cases lock the properties the live
+// path depends on: distinct in-session asks accumulate WITHOUT stacking a
+// cross-session backlog, and every stored card carries a usable requestId so
+// submit can actually POST the reply (the "stuck on loading" root cause).
+describe("applyQuestionEvent — BET-112 live-path stacking/requestId", () => {
+  const SID = "ses_view";
+  const mkAsked = (id: string, callID: string) => ({
+    id,
+    sessionID: SID,
+    questions: [{ question: "q", header: "h", options: [] }],
+    tool: { messageID: `msg_${callID}`, callID },
+  });
+
+  it("two distinct in-session asks yield two cards, each with its own requestId", () => {
+    let state = applyQuestionEvent([], "question.asked", mkAsked("que_1", "toolu_1"), SID);
+    state = applyQuestionEvent(state, "question.asked", mkAsked("que_2", "toolu_2"), SID);
+    expect(state).toHaveLength(2);
+    expect(state.map((q) => q.id)).toEqual(["toolu_1", "toolu_2"]);
+    // Both cards carry the que_ reply token — without this, submit short-circuits
+    // ("reply token was not captured") and the spinner hangs forever.
+    expect(state.map((q) => q.requestId)).toEqual(["que_1", "que_2"]);
+  });
+
+  it("interleaved cross-session asks never stack into the viewed panel", () => {
+    let state = applyQuestionEvent([], "question.asked", mkAsked("que_1", "toolu_1"), SID);
+    // A question fired in ANOTHER session (workspace-wide GET would have
+    // returned it) must not appear in the viewed panel.
+    state = applyQuestionEvent(
+      state,
+      "question.asked",
+      { ...mkAsked("que_9", "toolu_9"), sessionID: "ses_other" },
+      SID,
+    );
+    expect(state).toHaveLength(1);
+    expect(state[0].id).toBe("toolu_1");
+  });
+
+  it("replying one ask leaves the other pending (no backlog re-render)", () => {
+    let state = applyQuestionEvent([], "question.asked", mkAsked("que_1", "toolu_1"), SID);
+    state = applyQuestionEvent(state, "question.asked", mkAsked("que_2", "toolu_2"), SID);
+    state = applyQuestionEvent(state, "question.replied", { requestID: "que_1", sessionID: SID }, SID);
+    expect(state).toHaveLength(1);
+    expect(state[0].id).toBe("toolu_2");
+    expect(state[0].requestId).toBe("que_2");
+  });
+});
+
 // ===== hydrateQuestion =====
 
 describe("hydrateQuestion", () => {
