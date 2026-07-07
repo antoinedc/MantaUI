@@ -16,13 +16,14 @@ test("dispatch throws a descriptive error for unknown channel", async () => {
 // Minimal stubs for buildHandlers — only the namespaces touched by the cwd
 // resolution tests need real behavior; everything else can be a no-op.
 function makeDeps(projects) {
-  const calls = { newWindow: [], newWindowGetIndex: [], createSession: [], forkSession: [] };
+  const calls = { newWindow: [], newSession: [], newWindowGetIndex: [], createSession: [], forkSession: [] };
   return {
     calls,
     deps: {
       tmux: {
         listProjects: async () => [],
         newWindow: async (i) => { calls.newWindow.push(i); return []; },
+        newSession: async (i) => { calls.newSession.push(i); return []; },
         newWindowGetIndex: async (sessionName, windowName, cwd) => {
           calls.newWindowGetIndex.push({ sessionName, windowName, cwd });
           return 1;
@@ -103,4 +104,48 @@ test("opencode:fork-session creates the new tmux window in the resolved defaultC
     cwd: "",
   });
   assert.equal(calls.newWindowGetIndex.at(-1).cwd, "/home/dev/projects/better-ui");
+});
+
+// ---- BET-113: chatMode must reach the tmux layer with the oc client -------
+// The regression was the tmux:new-window / tmux:new-session handlers dropping
+// chatMode and never giving the tmux layer an opencode client to create a
+// session with. These assert the handler forwards both.
+
+test("tmux:new-window forwards chatMode + oc client to tmux.newWindow", async () => {
+  const { deps, calls } = makeDeps([{ tmuxSession: "better-ui", defaultCwd: "/home/dev/projects/better-ui" }]);
+  const handlers = buildHandlers(deps);
+  await handlers["tmux:new-window"]({
+    sessionName: "better-ui",
+    windowName: "chat",
+    cwd: "",
+    chatMode: true,
+  });
+  const last = calls.newWindow.at(-1);
+  assert.equal(last.chatMode, true, "chatMode forwarded");
+  assert.equal(last.cwd, "/home/dev/projects/better-ui", "cwd resolved from defaultCwd");
+  assert.ok(last.oc && typeof last.oc.createSession === "function", "oc client forwarded");
+});
+
+test("tmux:new-window forwards oc even for a non-chat window (chatMode falsy)", async () => {
+  const { deps, calls } = makeDeps([{ tmuxSession: "better-ui", defaultCwd: "/home/dev/projects/better-ui" }]);
+  const handlers = buildHandlers(deps);
+  await handlers["tmux:new-window"]({ sessionName: "better-ui", windowName: "term", cwd: "" });
+  const last = calls.newWindow.at(-1);
+  assert.ok(!last.chatMode, "chatMode not set for a plain window");
+  assert.ok(last.oc && typeof last.oc.createSession === "function", "oc client still forwarded");
+});
+
+test("tmux:new-session forwards chatMode + oc client and resolves cwd", async () => {
+  const { deps, calls } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  await handlers["tmux:new-session"]({
+    name: "newproj",
+    windowName: "chat",
+    cwd: "/home/dev/projects/newproj",
+    chatMode: true,
+  });
+  const last = calls.newSession.at(-1);
+  assert.equal(last.chatMode, true, "chatMode forwarded");
+  assert.equal(last.cwd, "/home/dev/projects/newproj", "explicit cwd preserved");
+  assert.ok(last.oc && typeof last.oc.createSession === "function", "oc client forwarded");
 });

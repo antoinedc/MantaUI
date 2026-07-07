@@ -44,16 +44,12 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
 
   const [name, setName] = useState("");
   const [cwd, setCwd] = useState("~");
-  // chat-mode toggle: HIDDEN on mobile for now because the mobile server's
-  // `tmux:new-session` / `tmux:new-window` channels (src/server/tmux.mjs)
-  // ignore the chatMode flag — the @bui-session-id stamp and chat-holder
-  // pane that desktop pty.ts:tmuxNewWindow does are missing. Toggling here
-  // would create a plain terminal window labeled "chat mode" → broken UX.
-  // Re-expose once the server gains a `chatMode:true` path (parallel to
-  // desktop maybeCreateChatSession + REMOTE_CHAT_HOLDER_CMD). The variable
-  // stays so the few create-paths that pass it remain typed; it's always
-  // false in this build.
-  const chatMode = false;
+  // chat-mode toggle (re-exposed, BET-113): the mobile server's
+  // `tmux:new-session` / `tmux:new-window` channels now honour chatMode —
+  // src/server/tmux.mjs creates an opencode session, launches the holder pane
+  // (`sleep infinity`), and stamps @bui-session-id — the same path desktop
+  // uses. Default OFF to match the desktop new-session/new-project dialog.
+  const [chatMode, setChatMode] = useState(false);
 
   // cwd autocomplete: debounced fsListDirs query; results in a tappable list.
   const [cwdMatches, setCwdMatches] = useState<string[]>([]);
@@ -373,8 +369,16 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
               </div>
             )}
 
-            {/* chat-mode toggle intentionally hidden — see comment above
-                the `chatMode` declaration. */}
+            {/* chat-mode toggle (BET-113): the server now honours chatMode. */}
+            <label className="flex items-center gap-2 text-sm text-text-muted select-none">
+              <input
+                type="checkbox"
+                checked={chatMode}
+                onChange={(e) => setChatMode(e.target.checked)}
+                className="accent-accent"
+              />
+              chat mode (opencode)
+            </label>
 
             {error && <div className="text-xs text-red-400">{error}</div>}
 

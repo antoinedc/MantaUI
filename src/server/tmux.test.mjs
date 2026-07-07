@@ -1,6 +1,44 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseSessions, isMissingSessionError } from "./tmux.mjs";
+import {
+  parseSessions,
+  isMissingSessionError,
+  newWindow,
+  newSession,
+  _setRun,
+  CHAT_HOLDER_CMD,
+} from "./tmux.mjs";
+
+// Install a fake tmux transport that records every command and returns a
+// window index of 0 for creation commands (matching `-P -F '#{window_index}'`).
+// Returns the recorder so a test can assert on the commands issued.
+function installFakeTmux() {
+  const cmds = [];
+  _setRun(async (cmd, args) => {
+    cmds.push({ cmd, args });
+    // new-session / new-window with -P -F print the window index on stdout.
+    if (args.includes("new-window") || args.includes("new-session")) {
+      return { stdout: "0\n", stderr: "" };
+    }
+    return { stdout: "", stderr: "" };
+  });
+  return cmds;
+}
+
+// A fake opencode client that records createSession calls.
+function fakeOc(sessionId = "ses_chat123") {
+  const created = [];
+  return {
+    created,
+    createSession: async (i) => { created.push(i); return { id: sessionId }; },
+  };
+}
+
+function findSetSid(cmds) {
+  return cmds.find(
+    (c) => c.args.includes("set-window-option") && c.args.includes("@bui-session-id"),
+  );
+}
 
 test("parseSessions builds project list from tmux -F output", () => {
   const sess = "alpha\t1\nbeta\t0";
@@ -81,4 +119,114 @@ test("isMissingSessionError returns false for non-Error inputs", () => {
   assert.equal(isMissingSessionError(null, "x"), false);
   assert.equal(isMissingSessionError(undefined, "x"), false);
   assert.equal(isMissingSessionError("can't find session: x", "x"), false);
+});
+
+// ---- chat-mode (BET-113 regression) --------------------------------------
+//
+// The "chat mode (opencode)" toggle in the new-session / new-window dialog
+// must (1) create an opencode session, (2) launch the holder pane instead of
+// a shell, and (3) stamp @bui-session-id on the new window. Without the stamp
+// the renderer sees opencodeSessionId === null and renders Terminal, not
+// ChatPanel — the exact regression from commit 81f5779.
+
+test("newWindow chatMode:true creates an opencode session AND stamps @bui-session-id", async () => {
+  const cmds = installFakeTmux();
+  const oc = fakeOc("ses_abc");
+  try {
+    await newWindow({
+      sessionName: "better-ui",
+      windowName: "chat",
+      cwd: "/home/dev/projects/better-ui",
+      chatMode: true,
+      oc,
+    });
+  } finally {
+    _setRun(null);
+  }
+  // (1) opencode session created in the window's cwd.
+  assert.equal(oc.created.length, 1, "one opencode session created");
+  assert.equal(oc.created[0].directory, "/home/dev/projects/better-ui");
+  // (2) holder pane launched (sleep infinity) rather than the default shell.
+  const newWin = cmds.find((c) => c.args.includes("new-window"));
+  assert.ok(newWin, "new-window issued");
+  assert.ok(newWin.args.includes(CHAT_HOLDER_CMD), "holder cmd passed to new-window");
+  // (3) @bui-session-id stamped with the created session id.
+  const stamp = findSetSid(cmds);
+  assert.ok(stamp, "set-window-option @bui-session-id issued");
+  assert.ok(stamp.args.includes("ses_abc"), "stamp carries the opencode session id");
+});
+
+test("newWindow chatMode:false stays a plain window — no session, no stamp, no holder", async () => {
+  const cmds = installFakeTmux();
+  const oc = fakeOc();
+  try {
+    await newWindow({
+      sessionName: "better-ui",
+      windowName: "term",
+      cwd: "/home/dev/projects/better-ui",
+      chatMode: false,
+      oc,
+    });
+  } finally {
+    _setRun(null);
+  }
+  assert.equal(oc.created.length, 0, "no opencode session created for a plain window");
+  assert.equal(findSetSid(cmds), undefined, "no @bui-session-id stamp for a plain window");
+  const newWin = cmds.find((c) => c.args.includes("new-window"));
+  assert.ok(newWin, "new-window issued");
+  assert.ok(!newWin.args.includes(CHAT_HOLDER_CMD), "no holder cmd for a plain window");
+});
+
+test("newSession chatMode:true creates an opencode session AND stamps @bui-session-id", async () => {
+  const cmds = installFakeTmux();
+  const oc = fakeOc("ses_sess1");
+  try {
+    await newSession({
+      name: "newproj",
+      cwd: "/home/dev/projects/newproj",
+      windowName: "chat",
+      chatMode: true,
+      oc,
+    });
+  } finally {
+    _setRun(null);
+  }
+  assert.equal(oc.created.length, 1, "one opencode session created");
+  assert.equal(oc.created[0].directory, "/home/dev/projects/newproj");
+  const newSess = cmds.find((c) => c.args.includes("new-session"));
+  assert.ok(newSess, "new-session issued");
+  assert.ok(newSess.args.includes(CHAT_HOLDER_CMD), "holder cmd passed to new-session");
+  const stamp = findSetSid(cmds);
+  assert.ok(stamp, "set-window-option @bui-session-id issued");
+  assert.ok(stamp.args.includes("ses_sess1"), "stamp carries the opencode session id");
+});
+
+test("newSession chatMode:false stays a plain session — no session create, no stamp", async () => {
+  const cmds = installFakeTmux();
+  const oc = fakeOc();
+  try {
+    await newSession({
+      name: "newproj",
+      cwd: "/home/dev/projects/newproj",
+      windowName: "main",
+      chatMode: false,
+      oc,
+    });
+  } finally {
+    _setRun(null);
+  }
+  assert.equal(oc.created.length, 0, "no opencode session for a plain session");
+  assert.equal(findSetSid(cmds), undefined, "no @bui-session-id stamp for a plain session");
+});
+
+test("newWindow chatMode:true throws when no opencode client is injected", async () => {
+  installFakeTmux();
+  try {
+    await assert.rejects(
+      () => newWindow({ sessionName: "s", windowName: "chat", cwd: "/tmp", chatMode: true }),
+      /chat mode requires an opencode client/,
+    );
+  } finally {
+    _setRun(null);
+  }
 });

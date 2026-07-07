@@ -17,7 +17,7 @@ export function expandTildePath(p) {
   return p; // ~user form — leave for the shell, not ours to guess
 }
 
-export function run(cmd, args) {
+function spawnRun(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
@@ -28,6 +28,22 @@ export function run(cmd, args) {
       code === 0 ? resolve({ stdout, stderr })
                  : reject(new Error(`${cmd} exited ${code}: ${stderr.trim() || stdout.trim()}`)));
   });
+}
+
+// The transport every tmux command dispatches through. Production = spawnRun
+// (real child_process). Tests swap in a fake `(cmd, args) => Promise<{stdout,
+// stderr}>` via `_setRun` so the chat-mode branch (which calls tmux new-window
+// + set-window-option) is unit-testable without a live tmux server. Mirrors
+// the `_setOcTransport` pattern in src/server/opencode.mjs.
+let runImpl = spawnRun;
+
+export function run(cmd, args) {
+  return runImpl(cmd, args);
+}
+
+/** Test-only: override the tmux command transport. Pass null to restore. */
+export function _setRun(fn) {
+  runImpl = fn ?? spawnRun;
 }
 
 export function parseSessions(sessStdout, winStdout) {
@@ -62,6 +78,13 @@ export async function listProjects() {
   return parseSessions(sess.stdout, wins.stdout);
 }
 
+// Chat-mode windows don't run a TUI — bui renders its own React ChatPanel
+// into the slot. The tmux pane just holds the window alive so the existing
+// project/window model still works. `sleep infinity` exits cleanly when the
+// window is killed (no zombies) and consumes no CPU. Mirrors
+// REMOTE_CHAT_HOLDER_CMD in the (now-deleted) desktop src/main/pty.ts.
+export const CHAT_HOLDER_CMD = "sleep infinity";
+
 // See src/main/pty.ts:sessionSurvivabilityCmd for the rationale.
 // `exit-empty off` keeps the tmux server alive across empty-session moments,
 // and `destroy-unattached off` keeps the per-project session pinned after
@@ -83,7 +106,63 @@ export function isMissingSessionError(err, sessionName) {
   return false;
 }
 
-export async function newSession({ name, cwd, windowName, createDir }) {
+// For chat-mode: create an opencode session in `cwd` and return its id;
+// non-chat is a no-op returning null. Centralised so the new-session and
+// new-window paths stay aligned. Mirrors maybeCreateChatSession in the
+// (now-deleted) desktop src/main/pty.ts. `oc` is the src/server/opencode.mjs
+// namespace, injected by the rpc handler (kept as a param so tmux.mjs stays
+// dependency-injected + unit-testable). opencode is LOCAL to this box — no SSH
+// hop. `oc.createSession` expands a leading `~` itself (see expandTilde in
+// opencode.mjs), so the tilde-corruption chokepoint is already covered there.
+async function maybeCreateChatSession(oc, chatMode, cwd, title) {
+  if (!chatMode) return null;
+  if (!oc || typeof oc.createSession !== "function") {
+    throw new Error("chat mode requires an opencode client (oc.createSession)");
+  }
+  const sess = await oc.createSession({ directory: cwd, title });
+  return sess.id;
+}
+
+// Create the tmux window with an explicit index-returning form. For chat-mode
+// we launch the holder pane (`sleep infinity`) instead of the default shell so
+// the pane is inert under bui's overlaid ChatPanel; for non-chat we launch the
+// default shell (no trailing command).
+async function newWindowGetIndexInternal(sessionName, windowName, cwd, chatMode) {
+  const { stdout } = await run("tmux", [
+    "new-window",
+    "-t", sessionName,
+    "-n", windowName,
+    "-P", "-F", "#{window_index}",
+    ...(cwd ? ["-c", cwd] : []),
+    ...(chatMode ? ["sh", "-c", CHAT_HOLDER_CMD] : []),
+  ]);
+  const idx = Number(stdout.trim());
+  if (!Number.isFinite(idx)) {
+    throw new Error(`tmux new-window returned unexpected index: ${JSON.stringify(stdout.trim())}`);
+  }
+  return idx;
+}
+
+// Create a session and return the index of its initial window.
+async function newSessionGetIndex(name, cwd, windowName, chatMode) {
+  const { stdout } = await run("tmux", [
+    "new-session", "-d", "-s", name, "-c", cwd ?? ".",
+    "-P", "-F", "#{window_index}",
+    ...(windowName ? ["-n", windowName] : []),
+    ...(chatMode ? ["sh", "-c", CHAT_HOLDER_CMD] : []),
+  ]);
+  const idx = Number(stdout.trim());
+  return Number.isFinite(idx) ? idx : 0;
+}
+
+// @param {object} input
+// @param {string} input.name           tmux session (project) name
+// @param {string} [input.cwd]          working directory (absolute/tilde)
+// @param {string} [input.windowName]   initial window name
+// @param {boolean} [input.createDir]   mkdir -p the cwd first (onboarding)
+// @param {boolean} [input.chatMode]    create an opencode chat-mode window
+// @param {object} [input.oc]           opencode client (required when chatMode)
+export async function newSession({ name, cwd, windowName, createDir, chatMode, oc }) {
   // Onboarding's first-project step opts into auto-creation via createDir: a
   // missing ~/projects/<name> should be created, not silently swallowed. tmux
   // new-session -c falls back to $HOME for a non-existent dir, so the mkdir -p
@@ -92,25 +171,36 @@ export async function newSession({ name, cwd, windowName, createDir }) {
   if (createDir && cwd) {
     await mkdir(expandTildePath(cwd), { recursive: true });
   }
-  await run("tmux", ["new-session", "-d", "-s", name, "-c", cwd ?? ".",
-    ...(windowName ? ["-n", windowName] : [])]);
+  // Chat-mode: create the opencode session BEFORE the tmux window so we can
+  // stamp @bui-session-id on it. Without the stamp the renderer sees
+  // opencodeSessionId === null and renders Terminal instead of ChatPanel —
+  // this was the BET-113 regression.
+  const sid = await maybeCreateChatSession(
+    oc, chatMode, cwd ?? ".", `${name} / ${windowName ?? "default"}`,
+  );
+  const idx = await newSessionGetIndex(name, cwd, windowName, !!chatMode);
   await applySessionSurvivability(name);
+  if (sid) await restampSessionId(name, idx, sid);
   return listProjects();
 }
-export async function newWindow({ sessionName, windowName, cwd }) {
+export async function newWindow({ sessionName, windowName, cwd, chatMode, oc }) {
+  const sid = await maybeCreateChatSession(
+    oc, chatMode, cwd ?? ".", `${sessionName} / ${windowName}`,
+  );
+  let idx;
   try {
-    await run("tmux", ["new-window", "-t", sessionName, "-n", windowName,
-      ...(cwd ? ["-c", cwd] : [])]);
+    idx = await newWindowGetIndexInternal(sessionName, windowName, cwd, !!chatMode);
   } catch (err) {
     // Auto-heal: the project's tmux session vanished between calls
     // (server restart, manual kill, etc.). Recreate it with this window
     // as the first window — see src/main/pty.ts:tmuxNewWindow for the
-    // matching desktop-transport branch.
+    // matching desktop-transport branch. We do NOT recreate the opencode
+    // session — `sid` is already resolved and reusable as the stamp.
     if (!isMissingSessionError(err, sessionName)) throw err;
-    await run("tmux", ["new-session", "-d", "-s", sessionName, "-n", windowName,
-      ...(cwd ? ["-c", cwd] : [])]);
+    idx = await newSessionGetIndex(sessionName, cwd, windowName, !!chatMode);
     await applySessionSurvivability(sessionName);
   }
+  if (sid) await restampSessionId(sessionName, idx, sid);
   return listProjects();
 }
 
