@@ -14,6 +14,7 @@ import {
   discoverModels,
   setProviders,
   getProviders,
+  getProviderEndpoints,
 } from "./providers.mjs";
 
 // ---------------------------------------------------------------------------
@@ -421,6 +422,64 @@ describe("discoverModels", () => {
       assert.equal(result.error, "bad_response");
     }
     globalThis.fetch = origFetch;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getProviderEndpoints — the config-reading path backing "opencode:get-providers"
+// (BET-114). Must return a ProviderEndpoint[] (ARRAY) projected from
+// opencode.jsonc, NOT the raw /provider HTTP object { all, connected, default }.
+// readConfig is injected so we don't touch the real ~/.config/opencode file.
+// ---------------------------------------------------------------------------
+
+describe("getProviderEndpoints", () => {
+  it("returns a ProviderEndpoint[] array (not the raw {all,connected,default} object)", async () => {
+    const cfg = {
+      provider: {
+        voska: {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Voska AI",
+          options: { baseURL: "https://api.voska.org/v1", apiKey: "vk-secret" },
+          models: { "voska-large": { id: "voska-large", name: "voska-large" } },
+        },
+      },
+    };
+    const result = await getProviderEndpoints(async () => cfg);
+    // BET-114 regression: the handler must hand the form an ARRAY of endpoints.
+    assert.ok(Array.isArray(result), "expected an array, not the raw provider object");
+    assert.ok(!("all" in result), "must not be the raw /provider { all, connected, default } shape");
+  });
+
+  it("prefills a configured custom provider (Voska AI) with renderer-safe metadata", async () => {
+    const cfg = {
+      provider: {
+        voska: {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Voska AI",
+          options: { baseURL: "https://api.voska.org/v1", apiKey: "vk-secret" },
+          models: { "voska-large": { id: "voska-large", name: "voska-large" } },
+        },
+      },
+    };
+    const result = await getProviderEndpoints(async () => cfg);
+    const voska = result.find((e) => e.id === "voska");
+    assert.ok(voska, "Voska AI provider should be surfaced to the form");
+    assert.equal(voska.name, "Voska AI");
+    assert.equal(voska.baseURL, "https://api.voska.org/v1");
+    assert.equal(voska.hasApiKey, true); // presence only — the secret never leaves the box
+    assert.deepEqual(voska.enabledModels, ["voska-large"]);
+  });
+
+  it("returns [] when the config reader throws (unparseable/absent config)", async () => {
+    const result = await getProviderEndpoints(async () => {
+      throw new Error("unparseable");
+    });
+    assert.deepEqual(result, []);
+  });
+
+  it("returns [] for a config with no providers", async () => {
+    const result = await getProviderEndpoints(async () => ({}));
+    assert.deepEqual(result, []);
   });
 });
 

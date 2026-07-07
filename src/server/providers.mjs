@@ -209,6 +209,28 @@ async function readRemoteConfig() {
 }
 
 /**
+ * Read opencode.jsonc from the box and project it into the ProviderEndpoint[]
+ * shape the Settings ProvidersCard form expects. This is the config-reading
+ * path (NOT the /provider HTTP endpoint): the card needs the configured
+ * provider blocks (id/name/baseURL/hasApiKey/enabledModels), so a custom
+ * provider like "Voska AI" is prefilled in the form.
+ *
+ * `readConfig` is injectable so the projection can be unit-tested without the
+ * real ~/.config/opencode/opencode.jsonc file; it defaults to readRemoteConfig.
+ * Returns [] if the config is absent or unparseable (the form degrades to an
+ * empty list rather than throwing).
+ */
+export async function getProviderEndpoints(readConfig = readRemoteConfig) {
+  try {
+    const cfg = await readConfig();
+    return readProviderEndpoints(cfg);
+  } catch (e) {
+    console.warn("[providers] could not read provider endpoints:", e);
+    return [];
+  }
+}
+
+/**
  * Fetch the provider list from opencode's /provider endpoint.
  * Returns the raw shape: { all: [...], connected: [...], default: {...} }.
  *
