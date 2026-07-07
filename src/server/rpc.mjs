@@ -218,9 +218,14 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     "opencode:get-providers": () => providers.getProviderEndpoints(),
 
     // discover-models: query an OpenAI-compatible endpoint's /models.
-    // Args: { baseURL, apiKey? } — apiKey may be "" (use stored key).
-    "opencode:discover-models": (input) =>
-      providers.discoverModels(input?.baseURL ?? "", input?.apiKey ?? ""),
+    // POSITIONAL args (baseURL, apiKey) — httpApi/preload both send
+    // `rpc(channel, baseURL, apiKey)` and dispatch() spreads args, so an
+    // object-destructuring handler here reads `.baseURL` off a STRING and
+    // discovery silently ran against "" ("unreachable: could not reach the
+    // endpoint" on every Refresh). apiKey "" = recover the stored key from
+    // opencode.jsonc server-side (Refresh never re-sends the secret).
+    "opencode:discover-models": (baseURL, apiKey) =>
+      providers.discoverModelsForEndpoint(baseURL ?? "", apiKey ?? ""),
 
     // set-providers: apply upsert/remove mutations to opencode.jsonc.
     // Args: { upsert?: ProviderInput[], remove?: string[] }

@@ -12,6 +12,7 @@ import {
   readProviderEndpoints,
   findStoredApiKey,
   discoverModels,
+  discoverModelsForEndpoint,
   setProviders,
   getProviders,
   getProviderEndpoints,
@@ -562,5 +563,89 @@ describe("setProviders", () => {
     // In test env, the write may succeed or fail depending on filesystem
     // permissions. The important thing is it returns { ok, error? }.
     assert.ok("ok" in result);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// discoverModelsForEndpoint — the ProvidersCard Refresh entrypoint
+// ---------------------------------------------------------------------------
+
+describe("discoverModelsForEndpoint", () => {
+  const origFetch = globalThis.fetch;
+  const okResponse = () =>
+    new Response(JSON.stringify({ data: [{ id: "m1" }] }), {
+      status: 200, headers: { "content-type": "application/json" },
+    });
+  const cfgWithKey = {
+    provider: {
+      voska: {
+        npm: "@ai-sdk/openai-compatible",
+        options: { baseURL: "https://api.voska.org/v1", apiKey: "stored-secret" },
+        models: {},
+      },
+    },
+  };
+
+  it("recovers the stored api key when the renderer sends an empty key (Refresh contract)", async () => {
+    const seen = [];
+    globalThis.fetch = async (url, opts) => {
+      seen.push({ url: String(url), auth: opts?.headers?.Authorization ?? "" });
+      return okResponse();
+    };
+    try {
+      const result = await discoverModelsForEndpoint(
+        "https://api.voska.org/v1", "", async () => cfgWithKey,
+      );
+      assert.equal(result.ok, true);
+      assert.equal(seen[0].auth, "Bearer stored-secret");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("uses an explicit api key as-is without reading the config", async () => {
+    const seen = [];
+    globalThis.fetch = async (url, opts) => {
+      seen.push({ auth: opts?.headers?.Authorization ?? "" });
+      return okResponse();
+    };
+    try {
+      const result = await discoverModelsForEndpoint(
+        "https://api.voska.org/v1", "explicit",
+        async () => { throw new Error("readConfig must not be called"); },
+      );
+      assert.equal(result.ok, true);
+      assert.equal(seen[0].auth, "Bearer explicit");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("degrades to keyless discovery when the config is unreadable", async () => {
+    const seen = [];
+    globalThis.fetch = async (url, opts) => {
+      seen.push({ auth: opts?.headers?.Authorization ?? "" });
+      return okResponse();
+    };
+    try {
+      const result = await discoverModelsForEndpoint(
+        "https://public.example/v1", "", async () => { throw new Error("boom"); },
+      );
+      assert.equal(result.ok, true);
+      assert.equal(seen[0].auth, "", "no Authorization header sent");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("still rejects an empty baseURL with a clear error (no network)", async () => {
+    globalThis.fetch = async () => { throw new Error("must not fetch"); };
+    try {
+      const result = await discoverModelsForEndpoint("", "", async () => cfgWithKey);
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.equal(result.error, "bad_response");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });
