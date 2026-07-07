@@ -137,15 +137,24 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // to the server. Mobile attachments use uploadBuffer (/api/upload) instead.
     "upload:files": (input) => local.uploadFiles(input),
 
-    // ---- tmux (8 channels, unchanged) ----
+    // ---- tmux (8 channels) ----
     "tmux:list": () => tmux.listProjects(),
-    "tmux:new-session": (i) => tmux.newSession(i),
+    // chatMode (BET-113): when the new-session dialog's "chat mode (opencode)"
+    // toggle is on, tmux.newSession must create an opencode session, launch a
+    // holder pane, and stamp @bui-session-id — so it needs the `oc` client.
+    // Resolve cwd first (createSession requires an absolute-ish dir; the tilde
+    // is expanded inside oc.createSession). For new-session the project meta
+    // doesn't exist yet, so resolveProjectCwd falls back to the passed cwd.
+    "tmux:new-session": async (i) =>
+      tmux.newSession({ ...i, cwd: await resolveProjectCwd(i.name, i.cwd), oc }),
     // Resolve cwd: prefer explicit cwd in input, then fall back to the
     // project's stored defaultCwd (set when the workspace was created).
     // Without this, new chat windows opened in a workspace silently inherit
     // tmux's default cwd (usually $HOME) instead of the workspace path.
+    // Pass `oc` so a chatMode window creates + stamps an opencode session
+    // (BET-113 regression: this used to silently drop chatMode).
     "tmux:new-window": async (i) =>
-      tmux.newWindow({ ...i, cwd: await resolveProjectCwd(i.sessionName, i.cwd) }),
+      tmux.newWindow({ ...i, cwd: await resolveProjectCwd(i.sessionName, i.cwd), oc }),
     "tmux:rename-session": (i) => tmux.renameSession(i),
     "tmux:rename-window": (i) => tmux.renameWindow(i),
     "tmux:kill-session": (n) => tmux.killSession(n),
