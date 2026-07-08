@@ -159,7 +159,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
     if (mode.kind !== "new-project" || creating) return;
     const projectName = name.trim();
     if (!projectName) return;
-    const path = cwd.trim() || "~";
+    const path = cwd.trim() || "";
 
     setError(null);
 

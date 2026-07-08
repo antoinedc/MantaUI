@@ -44,7 +44,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
         sessionId: sid,
         sessionName: owner?.tmuxSession ?? projectName,
         windowName,
-        cwd: owner?.cwd || "~",
+        cwd: owner?.cwd ?? "",
       })
       .catch(() => {});
     setSheetOpen(false);

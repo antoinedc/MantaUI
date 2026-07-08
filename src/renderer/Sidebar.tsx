@@ -183,7 +183,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     if (creating) return;
     const name = newProjectName.trim();
     if (!name) return;
-    const cwd = newProjectCwd.trim() || "~";
+    const cwd = newProjectCwd.trim() || "";
 
     if (mode === "auto") {
       setCreating(true);
