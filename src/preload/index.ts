@@ -32,6 +32,8 @@ import {
   type ProviderEndpoint,
   type DiscoverResult,
   type ProviderInput,
+  type SubagentDef,
+  type SubagentInput,
 } from "../shared/types.js";
 import type { ClaimOutcome } from "../shared/claim.mjs";
 
@@ -276,6 +278,12 @@ const api = {
     ipcRenderer.invoke(IPC.opencodeSetProviders, ops),
   opencodeDiscoverModels: (baseURL: string, apiKey: string): Promise<DiscoverResult> =>
     ipcRenderer.invoke(IPC.opencodeDiscoverModels, baseURL, apiKey),
+  opencodeGetSubagents: (): Promise<SubagentDef[]> =>
+    ipcRenderer.invoke(IPC.opencodeGetSubagents),
+  opencodeSetSubagents: (
+    ops: { upsert?: SubagentInput[]; remove?: string[] },
+  ): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.opencodeSetSubagents, ops),
   opencodeRestart: (): Promise<void> => ipcRenderer.invoke(IPC.opencodeRestart),
   opencodeVcsBranch: (directory?: string): Promise<string | null> =>
     ipcRenderer.invoke(IPC.opencodeVcsBranch, directory),

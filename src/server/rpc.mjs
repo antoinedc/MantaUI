@@ -231,6 +231,16 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // Args: { upsert?: ProviderInput[], remove?: string[] }
     "opencode:set-providers": (input) =>
       providers.setProviders(input ?? {}),
+
+    // get-subagents: read configured subagent blocks from opencode.jsonc.
+    // Returns SubagentDef[] — the config-reading path backing the SubagentsCard.
+    "opencode:get-subagents": () => providers.getSubagents(),
+
+    // set-subagents: apply upsert/remove mutations to opencode.jsonc agent blocks.
+    // Args: { upsert?: SubagentInput[], remove?: string[] }
+    "opencode:set-subagents": (input) =>
+      providers.setSubagents(input ?? {}),
+
     "opencode:restart": () => undefined,
 
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args

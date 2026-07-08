@@ -330,6 +330,9 @@ export const IPC = {
   opencodeGetProviders: "opencode:get-providers",
   opencodeSetProviders: "opencode:set-providers",
   opencodeDiscoverModels: "opencode:discover-models",
+  // Subagent management: list/set named subagent blocks in opencode.jsonc.
+  opencodeGetSubagents: "opencode:get-subagents",
+  opencodeSetSubagents: "opencode:set-subagents",
   opencodeRestart: "opencode:restart",
   // What opencode would use if prompt_async were called without a model.
   opencodeDefaultModel: "opencode:default-model",
@@ -633,6 +636,20 @@ export type ProviderInput = {
   baseURL: string;
   apiKey?: string;
   enabledModels: string[];
+};
+
+// A configured subagent block from opencode.jsonc. Projected by readAgentBlocks.
+export type SubagentDef = {
+  name: string;          // agent name, e.g. "fast"
+  model: string;         // "providerID/modelID", e.g. "anthropic/claude-haiku-4"
+  description: string;   // human description, e.g. "Fast worker for mechanical tasks"
+};
+
+// Input the renderer sends to set/replace a single subagent.
+export type SubagentInput = {
+  name: string;
+  model: string;
+  description: string;
 };
 
 // Trimmed view of an opencode model from GET /api/model. The wire format
