@@ -135,6 +135,11 @@ function getProviderMap(cfg) {
   return p && typeof p === "object" ? { ...(p) } : {};
 }
 
+function getAgentMap(cfg) {
+  const a = cfg.agent;
+  return a && typeof a === "object" ? { ...(a) } : {};
+}
+
 // Insert or replace a single provider block. Only the `provider` key is touched;
 // every other key in `cfg` is preserved by spread. If `input.apiKey` is
 // undefined, the existing key (if any) is kept — so the renderer never has to
@@ -200,6 +205,43 @@ export function findStoredApiKey(cfg, baseURL) {
     (b) => b.options?.baseURL && normBaseURL(b.options.baseURL) === target,
   );
   return match?.options?.apiKey ?? "";
+}
+
+// ---------------------------------------------------------------------------
+// Subagent block manipulation (pure)
+// ---------------------------------------------------------------------------
+
+// Insert or replace a single named subagent. Only the `agent` key is touched;
+// every other key in `cfg` is preserved by spread. `mode` is always forced to
+// "subagent" (the only config-writable agent type bui manages).
+export function upsertAgentBlock(cfg, input) {
+  const agents = getAgentMap(cfg);
+  agents[input.name] = {
+    model: input.model,
+    description: input.description,
+    mode: "subagent",
+  };
+  return { ...cfg, agent: agents };
+}
+
+export function removeAgentBlock(cfg, name) {
+  const agents = getAgentMap(cfg);
+  delete agents[name];
+  return { ...cfg, agent: agents };
+}
+
+// Project the config's agent map down to SubagentDef[]. ONLY blocks with a
+// `model` string are projected — this filters out opencode's built-in agents
+// (which have no model in config) so the UI never renders/clobbers them.
+export function readAgentBlocks(cfg) {
+  const agents = getAgentMap(cfg);
+  return Object.entries(agents)
+    .filter(([, block]) => typeof block.model === "string" && block.model)
+    .map(([name, block]) => ({
+      name,
+      model: block.model,
+      description: typeof block.description === "string" ? block.description : "",
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +379,51 @@ export async function setProviders(ops) {
   }
   for (const id of ops.remove ?? []) cfg = removeProviderBlock(cfg, id);
   for (const input of ops.upsert ?? []) cfg = upsertProviderBlock(cfg, input);
+  const content = JSON.stringify(cfg, null, 2);
+  try {
+    await mkdir(dirname(OPENCODE_JSONC), { recursive: true });
+    await atomicWrite(OPENCODE_JSONC, content);
+    return { ok: true };
+  } catch (e) {
+    console.warn("[providers] write failed:", e);
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Read opencode.jsonc from the box and project it into the SubagentDef[]
+ * shape the Settings SubagentsCard form expects. This is the config-reading
+ * path: the card needs the configured subagent blocks (name/model/description).
+ *
+ * `readConfig` is injectable so the projection can be unit-tested without the
+ * real ~/.config/opencode/opencode.jsonc file; it defaults to readRemoteConfig.
+ * Returns [] if the config is absent or unparseable (the form degrades to an
+ * empty list rather than throwing).
+ */
+export async function getSubagents(readConfig = readRemoteConfig) {
+  try {
+    const cfg = await readConfig();
+    return readAgentBlocks(cfg);
+  } catch (e) {
+    console.warn("[providers] could not read subagent blocks:", e);
+    return [];
+  }
+}
+
+/**
+ * Apply a set of subagent mutations and write opencode.jsonc back.
+ * Does NOT restart opencode; the caller must do that manually.
+ */
+export async function setSubagents(ops) {
+  let cfg;
+  try {
+    cfg = await readRemoteConfig();
+  } catch (e) {
+    console.warn("[providers] refusing to write — config unparseable/unreadable:", e);
+    return { ok: false, error: `${UNPARSEABLE_CONFIG_MSG} (refusing to overwrite)` };
+  }
+  for (const name of ops.remove ?? []) cfg = removeAgentBlock(cfg, name);
+  for (const input of ops.upsert ?? []) cfg = upsertAgentBlock(cfg, input);
   const content = JSON.stringify(cfg, null, 2);
   try {
     await mkdir(dirname(OPENCODE_JSONC), { recursive: true });
