@@ -15,6 +15,7 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { reconcileSubagents } from "../shared/subagentSync.mjs";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (ported from src/main/providers.ts)
@@ -433,4 +434,53 @@ export async function setSubagents(ops) {
     console.warn("[providers] write failed:", e);
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/**
+ * Reconcile the full model list against opencode.jsonc's configured agent
+ * blocks + the caller-supplied deactivated set (BET-123 "auto-register every
+ * model" feature), then apply the diff via the EXISTING setSubagents writer
+ * (never a second writer — hard constraint). Returns the resulting
+ * SubagentDef[] projection, computed directly from the applied diff (no
+ * re-read needed) so the result is exact even when `applySubagents` is
+ * mocked in tests.
+ *
+ * A no-op diff (upsert.length === 0 && remove.length === 0) skips the write
+ * entirely — this is what makes running it on every card open/toggle cheap
+ * and idempotent.
+ *
+ * `readConfig`/`applySubagents` are injectable for tests; default to the
+ * real readRemoteConfig/setSubagents. On a read failure, degrades to []
+ * (logged) rather than throwing — same "form degrades gracefully" contract
+ * as getSubagents/getProviderEndpoints. On a write failure, degrades to the
+ * pre-sync existingAgents list (logged) so the card still renders something.
+ */
+export async function syncSubagents(
+  { models = [], deactivated = [] } = {},
+  readConfig = readRemoteConfig,
+  applySubagents = setSubagents,
+) {
+  let cfg;
+  try {
+    cfg = await readConfig();
+  } catch (e) {
+    console.warn("[providers] could not read config for subagent sync:", e);
+    return [];
+  }
+  const existingAgents = readAgentBlocks(cfg);
+  const { upsert, remove } = reconcileSubagents({ models, existingAgents, deactivated });
+  if (upsert.length === 0 && remove.length === 0) return existingAgents;
+
+  const result = await applySubagents({ upsert, remove });
+  if (!result.ok) {
+    console.warn("[providers] subagent sync write failed:", result.error);
+    return existingAgents;
+  }
+
+  // Project the applied diff directly rather than re-reading the file —
+  // exact and testable without a real filesystem round-trip.
+  const byName = new Map(existingAgents.map((a) => [a.name, a]));
+  for (const name of remove) byName.delete(name);
+  for (const a of upsert) byName.set(a.name, a);
+  return [...byName.values()];
 }

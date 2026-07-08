@@ -1646,6 +1646,82 @@ the server writes `~/.manta-uploads/<session>/<batch>/<filename>` and returns th
 absolute remote path. (Historical: the deleted desktop-SSH `pty.ts` version
 staged a Mac tmpfile + scp + remote `mv`; HTTP-only sends bytes directly.)
 
+## Subagent management — auto-register + activation toggle (BET-123)
+
+Settings → AI tab → `SubagentsCard` (mounts after `ProvidersCard`; **desktop
+only**, same as BET-121 — not in `MobileSettings.tsx`). opencode's `task` tool
+has no `model` argument; the only way to run a subagent on a chosen model is a
+NAMED agent in `opencode.jsonc`'s `agent` key, dispatched via
+`task(subagent_type: "<name>")`. opencode re-scans `agent` **only at
+startup**, so a config write does nothing until opencode restarts (see the
+restart button below).
+
+**Maximally permissive, not opt-in.** Every model in
+`window.api.opencodeModels()` gets an `agent` block automatically; the user
+DEACTIVATES the ones they don't want, rather than hand-picking which to add.
+One row per model, sourced from the model list — NOT from the configured
+agent blocks — so a not-yet-registered model still shows up.
+
+- **Naming**: `deriveSubagentName(providerID, modelID, taken)` in
+  `src/shared/subagentSync.mjs` (pure, tested). Prefers the `modelGuide.mjs`
+  catalog family key (`haiku`, `sonnet`, `gpt-4o`, ...) via the exported
+  `familyKey()`; falls back to a slugified modelID, then providerID, then
+  `"model"`. Collisions get a numeric suffix (`-2`, `-3`, ...), case-
+  insensitive against the taken set.
+- **Deactivation = the agent block is ABSENT from opencode.jsonc**, not a
+  flag inside it (an `agent` block can't safely carry arbitrary bui metadata
+  without risking opencode rejecting unknown keys). The set of deactivated
+  models is bui-side state: `AppConfig.deactivatedSubagents: string[]`
+  (`"providerID/modelID"` strings), persisted through the EXISTING
+  `configGet`/`configUpdate` channels — no dedicated IPC channel was added
+  for this; it's exactly a plain config field, same as `skillRegistryUrls`.
+  NOT in `sharedConfig.mjs`'s `SHARED_CONFIG_KEYS` (device-local for now,
+  matching that module's device-local-by-default stance for anything not
+  explicitly listed there).
+- **Reconciliation**: `reconcileSubagents({models, existingAgents,
+  deactivated})` in `src/shared/subagentSync.mjs` (pure, tested) diffs the
+  model list against the configured blocks + the deactivated set →
+  `{upsert, remove}`. A model already registered is left untouched (preserves
+  a user-renamed name/description); a block whose `model` doesn't match any
+  known model is NEVER touched (a user's hand-made agent survives). The I/O
+  wrapper `syncSubagents({models, deactivated})` in `src/server/providers.mjs`
+  reads `opencode.jsonc`, reconciles, and applies via the EXISTING
+  `setSubagents` writer (no second config writer). No-op diffs skip the write
+  entirely, so it's safe to call on every card open AND every activation
+  toggle (`opencode:sync-subagents` RPC channel — mirrors `get`/`set-subagents`
+  1:1). Idempotent: running it twice against its own output is a no-op.
+- **Restart**: `opencode:restart` (`src/server/opencodeAdmin.mjs`,
+  `restartOpencode()`) was a no-op stub through BET-121; now runs
+  `systemctl --user restart opencode-serve` via `execFile` with a fixed argv
+  array (never a shell string — no injection surface, and none is possible
+  since the function takes no external input). This is opencode's OWN systemd
+  service, **separate from bui-server** — restarting it does not restart
+  bui-server, but it DOES drop every in-flight opencode turn across every
+  chat-mode window. The card's restart button is gated behind an explicit
+  confirm ("STOPS all running opencode sessions...") — restart is never
+  triggered automatically as a side effect of a subagent edit.
+  **Pre-existing callers**: `ProvidersCard.tsx` / `ProvidersStep.tsx` already
+  called `window.api.opencodeRestart()` after adding a provider (so `/provider`
+  re-auths) — that call was always a no-op before this ticket; it is now a
+  REAL restart with the same drop-all-sessions side effect. That's intentional
+  (the provider flow was designed around a working restart from the start),
+  not new scope creep — but be aware if you're debugging "why did opencode
+  restart" reports.
+- Desktop reaches all of this the same way as every other opencode/data
+  channel post-pairing: `window.api` is swapped to `httpApi` in `main.tsx`
+  (`/rpc` to bui-server), so there is no separate Electron `ipcMain.handle`
+  wiring for subagent channels — the `preload/index.ts` methods exist only as
+  the `Api` type source + a residual pre-HTTP-mode implementation.
+- Context-size badge (`Nk`) is `formatModelContextSize()` in `chatUtils.ts`
+  (tested) — the single source for the `Math.round(context/1000)k`
+  expression; `ModelPicker.tsx` and `SubagentsCard.tsx` both import it rather
+  than re-deriving.
+- Tests: `src/shared/subagentSync.test.ts` (naming + reconcile, 18),
+  `src/server/providers.test.mjs` `syncSubagents` describe block (7),
+  `src/server/opencodeAdmin.test.mjs` (restart, 3), `formatModelContextSize`
+  in `chatUtils.test.ts` (2). All pure/injected-I/O — no real opencode.jsonc
+  or systemctl call in the suite.
+
 ## Testing
 
 Two separate test suites — both run via `npm test`:

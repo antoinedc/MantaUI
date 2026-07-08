@@ -28,6 +28,20 @@ export function resolveContextLimit(
   return ASSUMED_CONTEXT_TOKENS;
 }
 
+// Compact "Nk" display for a model's context window (e.g. 200_000 → "200k").
+// Returns null for a missing/non-positive limit so callers can omit the
+// badge entirely rather than rendering "0k". The canonical
+// `Math.round(context / 1000)k` expression — ModelPicker.tsx and
+// SubagentsCard.tsx both import this instead of re-deriving it inline.
+export function formatModelContextSize(
+  context: number | null | undefined,
+): string | null {
+  if (typeof context !== "number" || !Number.isFinite(context) || context <= 0) {
+    return null;
+  }
+  return `${Math.round(context / 1000)}k`;
+}
+
 // Classify a per-step finish reason emitted by opencode into the smallest
 // set the UI actually needs to act on. Opencode normalizes provider-native
 // values (Anthropic stop_reason, OpenAI finish_reason, Gemini finishReason)

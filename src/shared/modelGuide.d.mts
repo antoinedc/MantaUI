@@ -10,3 +10,5 @@ export function describeModel(
   providerID: string,
   modelID: string
 ): ModelInfo | null;
+
+export function familyKey(modelID: string): string | null;

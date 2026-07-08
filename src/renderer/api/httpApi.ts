@@ -786,6 +786,7 @@ export const httpApi: Api = {
   opencodeDiscoverModels: (baseURL, apiKey) => rpc(IPC.opencodeDiscoverModels, baseURL, apiKey),
   opencodeGetSubagents: () => rpc(IPC.opencodeGetSubagents),
   opencodeSetSubagents: (ops) => rpc(IPC.opencodeSetSubagents, ops),
+  opencodeSyncSubagents: (input) => rpc(IPC.opencodeSyncSubagents, input),
   opencodeRestart: () => rpc(IPC.opencodeRestart),
   opencodeDefaultModel: () => rpc(IPC.opencodeDefaultModel),
   opencodeVcsBranch: (directory) => rpc(IPC.opencodeVcsBranch, directory),

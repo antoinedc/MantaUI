@@ -113,6 +113,12 @@ const CATALOG = [
   },
 ];
 
+function matchFamily(modelID) {
+  if (!modelID || typeof modelID !== "string") return null;
+  const normalized = modelID.toLowerCase();
+  return CATALOG.find((e) => normalized.includes(e.key)) ?? null;
+}
+
 /**
  * Look up metadata for a model by family match.
  *
@@ -121,13 +127,24 @@ const CATALOG = [
  * @returns {{ blurb: string, goodFor: string[], tier: "fast" | "balanced" | "deep" } | null}
  */
 export function describeModel(providerID, modelID) {
-  if (!modelID || typeof modelID !== "string") return null;
-  const normalized = modelID.toLowerCase();
-  const entry = CATALOG.find((e) => normalized.includes(e.key));
+  const entry = matchFamily(modelID);
   if (!entry) return null;
   return {
     blurb: entry.blurb,
     goodFor: entry.goodFor,
     tier: entry.tier,
   };
+}
+
+/**
+ * The catalog family key a modelID matches (e.g. "haiku", "gpt-4o"), or null
+ * when no family matches. Used by subagentSync.mjs to derive stable,
+ * human-readable subagent names without duplicating the CATALOG here.
+ *
+ * @param {string} modelID
+ * @returns {string | null}
+ */
+export function familyKey(modelID) {
+  const entry = matchFamily(modelID);
+  return entry ? entry.key : null;
 }

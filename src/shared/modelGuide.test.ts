@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { describeModel } from "./modelGuide.mjs";
+import { describeModel, familyKey } from "./modelGuide.mjs";
 
 describe("describeModel", () => {
   it("matches haiku family", () => {
@@ -98,5 +98,21 @@ describe("describeModel", () => {
     const r = describeModel("openai", "gpt-4o-mini-turbo");
     expect(r).toBeTruthy();
     expect(r?.tier).toBe("fast"); // gpt-4o-mini wins, not a hypothetical later "mini"
+  });
+});
+
+describe("familyKey", () => {
+  it("returns the matched catalog key", () => {
+    expect(familyKey("claude-haiku-4")).toBe("haiku");
+    expect(familyKey("gpt-4o-mini")).toBe("gpt-4o-mini");
+  });
+
+  it("returns null for no match", () => {
+    expect(familyKey("random-model")).toBeNull();
+  });
+
+  it("returns null for invalid input", () => {
+    expect(familyKey("")).toBeNull();
+    expect(familyKey(null as unknown as string)).toBeNull();
   });
 });

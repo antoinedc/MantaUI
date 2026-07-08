@@ -21,6 +21,7 @@ import {
   readAgentBlocks,
   getSubagents,
   setSubagents,
+  syncSubagents,
 } from "./providers.mjs";
 
 // ---------------------------------------------------------------------------
@@ -852,5 +853,119 @@ describe("setSubagents", () => {
     // we'll just verify the contract: if it can't read, it returns an error.
     // In practice this would need the real file to be corrupt.
     assert.ok(result.ok === true || (result.ok === false && result.error));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// syncSubagents — the BET-123 auto-register reconciliation entrypoint.
+// readConfig + applySubagents are both injectable, so these tests never
+// touch the real opencode.jsonc.
+// ---------------------------------------------------------------------------
+
+describe("syncSubagents", () => {
+  const haiku = { providerID: "anthropic", id: "claude-haiku-4" };
+  const opus = { providerID: "anthropic", id: "claude-opus-4" };
+
+  it("upserts new models and returns the resulting SubagentDef[]", async () => {
+    const calls = [];
+    const applySubagents = async (ops) => { calls.push(ops); return { ok: true }; };
+    const result = await syncSubagents(
+      { models: [haiku], deactivated: [] },
+      async () => ({}),
+      applySubagents,
+    );
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].upsert.length, 1);
+    assert.equal(calls[0].upsert[0].model, "anthropic/claude-haiku-4");
+    assert.deepEqual(calls[0].remove, []);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].name, "haiku");
+  });
+
+  it("is a no-op (does not call applySubagents) when nothing changed", async () => {
+    let called = false;
+    const applySubagents = async () => { called = true; return { ok: true }; };
+    const existingCfg = {
+      agent: { haiku: { model: "anthropic/claude-haiku-4", description: "Fast", mode: "subagent" } },
+    };
+    const result = await syncSubagents(
+      { models: [haiku], deactivated: [] },
+      async () => existingCfg,
+      applySubagents,
+    );
+    assert.equal(called, false);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].name, "haiku");
+  });
+
+  it("removes a deactivated model's agent block", async () => {
+    const calls = [];
+    const applySubagents = async (ops) => { calls.push(ops); return { ok: true }; };
+    const existingCfg = {
+      agent: { haiku: { model: "anthropic/claude-haiku-4", description: "Fast", mode: "subagent" } },
+    };
+    const result = await syncSubagents(
+      { models: [haiku], deactivated: ["anthropic/claude-haiku-4"] },
+      async () => existingCfg,
+      applySubagents,
+    );
+    assert.deepEqual(calls[0].remove, ["haiku"]);
+    assert.deepEqual(result, []);
+  });
+
+  it("handles a mixed batch of upsert + remove in one call", async () => {
+    const calls = [];
+    const applySubagents = async (ops) => { calls.push(ops); return { ok: true }; };
+    const existingCfg = {
+      agent: { opus: { model: "anthropic/claude-opus-4", description: "Deep", mode: "subagent" } },
+    };
+    const result = await syncSubagents(
+      { models: [haiku, opus], deactivated: ["anthropic/claude-opus-4"] },
+      async () => existingCfg,
+      applySubagents,
+    );
+    assert.equal(calls[0].upsert.length, 1);
+    assert.equal(calls[0].upsert[0].model, "anthropic/claude-haiku-4");
+    assert.deepEqual(calls[0].remove, ["opus"]);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].name, "haiku");
+  });
+
+  it("degrades to [] when the config can't be read", async () => {
+    const result = await syncSubagents(
+      { models: [haiku] },
+      async () => { throw new Error("boom"); },
+    );
+    assert.deepEqual(result, []);
+  });
+
+  it("degrades to the pre-sync list when the write fails, without throwing", async () => {
+    const existingCfg = {};
+    const applySubagents = async () => ({ ok: false, error: "disk full" });
+    const result = await syncSubagents(
+      { models: [haiku] },
+      async () => existingCfg,
+      applySubagents,
+    );
+    assert.deepEqual(result, []); // pre-sync existingAgents was also []
+  });
+
+  it("is idempotent: a second call against the post-sync config is a no-op", async () => {
+    let cfg = {};
+    const applySubagents = async (ops) => {
+      for (const name of ops.remove ?? []) delete cfg.agent?.[name];
+      for (const input of ops.upsert ?? []) {
+        cfg = { ...cfg, agent: { ...(cfg.agent ?? {}), [input.name]: { model: input.model, description: input.description, mode: "subagent" } } };
+      }
+      return { ok: true };
+    };
+    const first = await syncSubagents({ models: [haiku, opus] }, async () => cfg, applySubagents);
+    assert.equal(first.length, 2);
+
+    let secondCalled = false;
+    const applySubagents2 = async (ops) => { secondCalled = true; return applySubagents(ops); };
+    const second = await syncSubagents({ models: [haiku, opus] }, async () => cfg, applySubagents2);
+    assert.equal(secondCalled, false);
+    assert.equal(second.length, 2);
   });
 });

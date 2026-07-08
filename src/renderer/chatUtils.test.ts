@@ -14,6 +14,7 @@ import {
   dedupeAgainstBuiltins,
   ASSUMED_CONTEXT_TOKENS,
   resolveContextLimit,
+  formatModelContextSize,
   classifyFinish,
   describeTruncation,
   isTerminalTodo,
@@ -234,6 +235,25 @@ describe("resolveContextLimit", () => {
     expect(resolveContextLimit({ limit: { context: NaN } })).toBe(
       ASSUMED_CONTEXT_TOKENS,
     );
+  });
+});
+
+// ===== formatModelContextSize =====
+
+describe("formatModelContextSize", () => {
+  it("formats a context limit as a rounded 'Nk' string", () => {
+    expect(formatModelContextSize(1_000_000)).toBe("1000k");
+    expect(formatModelContextSize(200_000)).toBe("200k");
+    expect(formatModelContextSize(1_500)).toBe("2k");
+  });
+
+  it("returns null for missing/non-positive/non-finite values", () => {
+    expect(formatModelContextSize(null)).toBeNull();
+    expect(formatModelContextSize(undefined)).toBeNull();
+    expect(formatModelContextSize(0)).toBeNull();
+    expect(formatModelContextSize(-1)).toBeNull();
+    expect(formatModelContextSize(Infinity)).toBeNull();
+    expect(formatModelContextSize(NaN)).toBeNull();
   });
 });
 
