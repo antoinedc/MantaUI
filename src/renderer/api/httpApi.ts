@@ -16,6 +16,7 @@ import {
 import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
 import { getBuiPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
+import { shouldForceReconnect } from "../chatUtils";
 
 // ---------------------------------------------------------------------------
 // Server base URL resolution (3 deployment contexts):
@@ -275,25 +276,28 @@ let _controller: WsReconnectController | null = null;
 let _resyncing = false;
 
 /**
- * Fire two synthetic, side-effect-free OpencodeEvents so that every active
- * ChatPanel refetches messages, permissions, AND questions after the SSE
- * stream reconnects.
+ * Fire a single synthetic, side-effect-free "server.connected" OpencodeEvent
+ * so that every active ChatPanel does a full resync after the events
+ * WebSocket reconnects (missed a `session.idle`, a permission reply, a new
+ * question, etc. while the socket was down/half-open).
  *
- * Synthetic event 1 — "permission.replied"
- *   ChatPanel handler (lines ~736-741): calls refreshPermissions() (→
- *   opencodePermissions re-fetch) AND scheduleRefetch() (→ opencodeMessages
- *   re-fetch, debounced 300 ms).  No state mutations; purely triggers fetches.
- *
- * Synthetic event 2 — "question.asked"
- *   ChatPanel handler (lines ~745-753): calls refreshQuestions() (→
- *   opencodeQuestions re-fetch).  No state mutations; purely triggers a fetch.
- *
- * Both events have no sessionID in properties so they pass the early
+ * `useSseBus.ts`'s `ev.type === "server.connected"` branch already does
+ * exactly this: `scheduleRefetch()` (→ opencodeMessages re-fetch, debounced)
+ * + `refreshPermissions()` + `refreshQuestions()`, and re-derives `running`
+ * from the refetched transcript. It carries no `sessionID`, so it passes the
  * `if (props.sessionID && props.sessionID !== sessionId) return` guard in
- * every mounted ChatPanel, causing each panel to refetch for its own session.
+ * every mounted ChatPanel — each panel resyncs its own session. An inactive
+ * (unmounted-transcript) panel defers its refetch via the owed-flag path in
+ * useTranscriptState and catches up on reactivation.
  *
- * Neither event type mutates transcript state (no delta/part/id fields are
- * processed for these types) — they only schedule fetch calls.
+ * PRIOR BUG (regression, fixed here): this used to dispatch two DIFFERENT
+ * synthetic events — "permission.replied" and "question.asked" — whose
+ * handlers had since changed underneath it (permission.replied dropped its
+ * scheduleRefetch call; question.asked with empty properties has no `id` and
+ * is a no-op in applyQuestionEvent). Net effect: resync silently did nothing,
+ * so a dropped `session.idle` left `running` stuck true forever and the UI
+ * looked frozen until Cmd+R. Reuse the existing server.connected branch
+ * instead of growing new handler code in useSseBus.
  */
 function fireResync() {
   if (_resyncing) return;
@@ -303,12 +307,8 @@ function fireResync() {
     _resyncing = false;
     const set = listeners.opencode;
     if (set.size === 0) return; // no listeners yet — nothing to do
-    // Synthetic event 1: triggers refreshPermissions() + scheduleRefetch()
-    const ev1: OpencodeEvent = { type: "permission.replied", properties: {} };
-    for (const fn of set) { try { fn(ev1); } catch { /* listener error — ignore, see onmessage */ } }
-    // Synthetic event 2: triggers refreshQuestions()
-    const ev2: OpencodeEvent = { type: "question.asked", properties: {} };
-    for (const fn of set) { try { fn(ev2); } catch { /* listener error — ignore */ } }
+    const ev: OpencodeEvent = { type: "server.connected", properties: {} };
+    for (const fn of set) { try { fn(ev); } catch { /* listener error — ignore, see onmessage */ } }
   }, 0);
 }
 
@@ -325,16 +325,37 @@ function wsUrl(): string {
   return withTokenParam(base, clientToken());
 }
 
+// Liveness watchdog (BET-115 fix A). A half-open WebSocket keeps reporting
+// `readyState === OPEN` even when the underlying path died silently (tunnel
+// restart, sleep/wake, NAT timeout) — the browser never fires
+// onclose/onerror because nothing told it to, so the reconnect controller
+// never retries and the app looks frozen until the user hits Cmd+R.
+//
+// The server sends an app-level `{kind:"heartbeat"}` frame every 15s
+// (src/server/events.mjs, alongside its invisible-to-JS protocol ping).
+// `lastFrameAt` is stamped on EVERY frame we receive — heartbeat or real —
+// so it tracks actual liveness of the path, not just the socket object.
+let lastFrameAt = Date.now();
+
+// 45s = 3 missed 15s heartbeats. Long enough to absorb one dropped frame /
+// GC pause without false-positiving; short enough that a genuinely dead path
+// recovers well within the time a user notices "nothing's happening".
+const HEARTBEAT_STALE_MS = 45_000;
+const WATCHDOG_INTERVAL_MS = 15_000;
+
 // Dispatch one parsed {kind,payload} frame to its listeners. The frame is
 // byte-identical to the old SSE envelope, so this is unchanged from before the
-// controller refactor. Non-JSON / control frames are ignored.
+// controller refactor. Non-JSON / control frames are ignored (but still count
+// as liveness — see lastFrameAt above).
 function dispatchFrame(data: unknown) {
+  lastFrameAt = Date.now();
   try {
     const { kind, payload } = JSON.parse(data as string) as {
-      kind: Kind;
+      kind: Kind | "heartbeat";
       payload: unknown;
     };
-    const set = listeners[kind];
+    if (kind === "heartbeat") return; // liveness ping only — no listener, no demux
+    const set = listeners[kind as Kind];
     if (set) for (const fn of set) fn(payload);
   } catch {
     // non-JSON / control frame — ignore
@@ -361,7 +382,14 @@ function getController(): WsReconnectController {
     create: (url) => new WebSocket(url) as unknown as WsLike,
     onMessage: dispatchFrame,
     onReconnect: fireResync,
-    onState: (s) => useStore.getState().setConnectionState(s),
+    onState: (s) => {
+      useStore.getState().setConnectionState(s);
+      // Fresh connect (initial or reconnect, including a forced one): reset
+      // the liveness clock so the watchdog doesn't immediately re-fire while
+      // the new socket is still warming up (its first heartbeat is up to 15s
+      // away).
+      if (s.state === "connected") lastFrameAt = Date.now();
+    },
     onConfigError: (e) =>
       console.warn(
         "[bui] events WebSocket not opened:",
@@ -369,6 +397,23 @@ function getController(): WsReconnectController {
       ),
   });
   return _controller;
+}
+
+// Watchdog loop: every 15s, ask the pure decision helper (chatUtils.ts) if
+// the controller-reported "connected" state is stale relative to the last
+// frame actually seen. If so, the socket is half-open — force it closed and
+// reopen immediately (forceReconnect resets lastFrameAt on the new connect
+// via the onState hook above, so this can't immediately re-fire).
+let _watchdogInstalled = false;
+function installLivenessWatchdog() {
+  if (_watchdogInstalled) return;
+  _watchdogInstalled = true;
+  setInterval(() => {
+    const state = getController().getState().state;
+    if (shouldForceReconnect(state, lastFrameAt, Date.now(), HEARTBEAT_STALE_MS)) {
+      getController().forceReconnect();
+    }
+  }, WATCHDOG_INTERVAL_MS);
 }
 
 // iOS suspends an installed standalone PWA when backgrounded / screen-locked.
@@ -392,6 +437,7 @@ function installResumeWatchdog() {
 function ensureStream() {
   getController().ensure();
   installResumeWatchdog();
+  installLivenessWatchdog();
 }
 
 // The preload's `onX` methods return `() => Electron.IpcRenderer` because

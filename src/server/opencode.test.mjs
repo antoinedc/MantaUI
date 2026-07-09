@@ -12,9 +12,13 @@ import {
   listPermissions,
   listQuestions,
   replyPermission,
+  subscribeEvents,
   _resetSessionDirectoryCache,
   _onSessionDirectoryAdded,
   _setOcTransport,
+  _setEventStreamTransport,
+  _setReadinessTimeoutMs,
+  _resetStreamReadyState,
   _getOcAgent,
   _pooledOcRequest,
   discardBody,
@@ -675,6 +679,111 @@ test("discardBody swallows errors on an already-consumed body", async () => {
   await res.text(); // consume it
   await discardBody(res); // cancelling a used body would throw — must be swallowed
   assert.ok(true);
+});
+
+// ---------------------------------------------------------------------------
+// Scoped-stream readiness gate (BET-115 fix C)
+//
+// sendPrompt (via getSessionDirectoryQuery) must not POST to opencode before
+// the scoped `/event?directory=` subscription it depends on has actually
+// connected upstream — otherwise events emitted in response to the prompt
+// land on a subscription that isn't listening yet and are lost forever.
+// ---------------------------------------------------------------------------
+
+/** A ReadableStream that never emits or closes — models an SSE body that's
+ *  "connected" but has delivered no frames yet. */
+function openStreamBody() {
+  return new ReadableStream({ start() {} });
+}
+
+test("readiness gate: sendPrompt does not POST before the scoped stream connects", async () => {
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+  let releaseConnect;
+  const connectGate = new Promise((r) => { releaseConnect = r; });
+  _setEventStreamTransport(async (url) => {
+    if (String(url).includes("directory=")) {
+      await connectGate; // hold the scoped stream "connecting" until released
+    }
+    return new Response(openStreamBody(), { status: 200 });
+  });
+
+  const calls = [];
+  const stop = subscribeEvents(() => {});
+  try {
+    await withMockFetch(
+      async (url, opts) => {
+        calls.push({ url: String(url), method: opts?.method ?? "GET" });
+        if (String(url).endsWith("/session/ses_gate")) {
+          return new Response(JSON.stringify({ directory: "/work/gate" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(null, { status: 204 });
+      },
+      async () => {
+        const promptDone = sendPrompt({ sessionId: "ses_gate", text: "hi" }).then(
+          () => { calls.push({ marker: "prompt-resolved" }); },
+        );
+        // Let microtasks/timers run without advancing past the gate — the
+        // scoped stream hasn't connected, so the POST must not have fired.
+        await new Promise((r) => setTimeout(r, 30));
+        assert.ok(
+          !calls.some((c) => c.url?.includes("prompt_async")),
+          "sendPrompt POSTed before the scoped stream connected",
+        );
+        releaseConnect();
+        await promptDone;
+        assert.ok(
+          calls.some((c) => c.url?.includes("prompt_async")),
+          "sendPrompt never POSTed after the scoped stream connected",
+        );
+      },
+    );
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+    _resetStreamReadyState();
+  }
+});
+
+test("readiness gate: degrades to sending after the bound elapses (wedged stream)", async () => {
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+  _setReadinessTimeoutMs(30); // don't make the test sleep 5s for real
+  // The scoped stream never connects (transport hangs forever) — the gate
+  // must still let the prompt through once the bound elapses.
+  _setEventStreamTransport(() => new Promise(() => {}));
+
+  const calls = [];
+  const stop = subscribeEvents(() => {});
+  try {
+    await withMockFetch(
+      async (url, opts) => {
+        calls.push({ url: String(url), method: opts?.method ?? "GET" });
+        if (String(url).endsWith("/session/ses_wedge")) {
+          return new Response(JSON.stringify({ directory: "/work/wedge" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(null, { status: 204 });
+      },
+      async () => {
+        await sendPrompt({ sessionId: "ses_wedge", text: "hi" });
+      },
+    );
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+    _setReadinessTimeoutMs(null);
+    _resetStreamReadyState();
+  }
+  assert.ok(
+    calls.some((c) => c.url?.includes("prompt_async")),
+    "sendPrompt never degraded to sending once the readiness bound elapsed",
+  );
 });
 
 test("pooled ocFetch reuses one socket across sequential calls", async () => {

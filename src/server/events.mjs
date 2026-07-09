@@ -48,9 +48,16 @@ export function attachEventsWs(bus, ws) {
     }
   });
   // Heartbeat: keeps intermediaries (Cloudflare tunnel) from idling the
-  // socket and lets the client notice a half-open connection.
+  // socket and lets the client notice a half-open connection. The WS
+  // protocol ping() alone isn't enough — it's answered by the network stack
+  // transparently to JS, so the browser never learns whether frames are
+  // actually still arriving. Also send an app-level frame the client CAN
+  // see; the renderer's liveness watchdog (httpApi.ts) stamps a
+  // last-frame-received timestamp on every frame, including this one, and
+  // force-reconnects if too many heartbeats are missed.
   const ka = setInterval(() => {
     try { ws.ping?.(); } catch { /* closing */ }
+    try { ws.send(JSON.stringify({ kind: "heartbeat", ts: Date.now() })); } catch { /* closing */ }
   }, 15000);
   ka.unref();
   const cleanup = () => { clearInterval(ka); off(); };

@@ -156,6 +156,27 @@ export class WsReconnectController {
     this.ensure();
   }
 
+  /**
+   * Unconditionally tear down the current socket and open a fresh one RIGHT
+   * NOW, even if `readyState === OPEN`. Used by the liveness watchdog
+   * (httpApi.ts): a half-open socket keeps reporting OPEN even when the
+   * underlying path died silently (tunnel restart, sleep/wake, NAT timeout),
+   * so `ensure()` (which no-ops on an already-open socket) can never recover
+   * it — only an unconditional close does.
+   *
+   * This is a deliberate restart, not a failure retry: the backoff is reset
+   * first so the reconnect is immediate (no exponential delay), and the drop
+   * is marked so the next successful open still fires `onReconnect` (the
+   * resync path), exactly like any other reconnect. `open()` itself closes
+   * whatever socket currently exists (open/connecting/dead) before creating
+   * the new one, so there's no separate close step needed here.
+   */
+  forceReconnect(): void {
+    this.hadDrop = true;
+    this.backoff.reset();
+    this.open();
+  }
+
   /** Tear down permanently (app teardown). Cancels timers, closes the socket. */
   close(reason = "close"): void {
     this.epoch += 1;

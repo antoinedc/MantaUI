@@ -57,6 +57,7 @@ import {
   describeNextRun,
   resolveToolOutput,
   reconcileOptimisticUser,
+  shouldForceReconnect,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2676,5 +2677,42 @@ describe("reconcileOptimisticUser", () => {
     const incoming: Msg = assistantMsg("msg_real");
     // Assistant incoming → never reconciles, even if optimistic is present.
     expect(reconcileOptimisticUser(prev, incoming)).toBe(prev);
+  });
+});
+
+// ===== shouldForceReconnect =====
+
+describe("shouldForceReconnect", () => {
+  const THRESHOLD = 45_000;
+
+  it("returns true when connected and stale beyond the threshold", () => {
+    const lastFrameAt = 0;
+    const now = THRESHOLD + 1;
+    expect(shouldForceReconnect("connected", lastFrameAt, now, THRESHOLD)).toBe(true);
+  });
+
+  it("returns false when connected and fresh (within the threshold)", () => {
+    const lastFrameAt = 1000;
+    const now = 1000 + THRESHOLD - 1;
+    expect(shouldForceReconnect("connected", lastFrameAt, now, THRESHOLD)).toBe(false);
+  });
+
+  it("returns false exactly at the threshold boundary (strictly greater-than)", () => {
+    const lastFrameAt = 0;
+    expect(shouldForceReconnect("connected", lastFrameAt, THRESHOLD, THRESHOLD)).toBe(false);
+  });
+
+  it("returns false when not connected, no matter how stale", () => {
+    const now = 1_000_000;
+    expect(shouldForceReconnect("connecting", 0, now, THRESHOLD)).toBe(false);
+    expect(shouldForceReconnect("reconnecting", 0, now, THRESHOLD)).toBe(false);
+    expect(shouldForceReconnect("stalled", 0, now, THRESHOLD)).toBe(false);
+    expect(shouldForceReconnect("closed", 0, now, THRESHOLD)).toBe(false);
+    expect(shouldForceReconnect("idle", 0, now, THRESHOLD)).toBe(false);
+  });
+
+  it("respects a custom threshold", () => {
+    expect(shouldForceReconnect("connected", 0, 100, 50)).toBe(true);
+    expect(shouldForceReconnect("connected", 0, 40, 50)).toBe(false);
   });
 });
