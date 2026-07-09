@@ -116,6 +116,11 @@ export function App() {
   useEffect(() => {
     if (!chatSessionKey) return;
     void useStore.getState().replayChatAttention();
+    // Cold-start backfill of the sidebar elapsed-since-last-message label
+    // (BET-119) — same rationale/gating as replayChatAttention above: SSE
+    // is forward-only, so a chat window's lastMessageAt is unset until its
+    // next busy/idle transition without this.
+    void useStore.getState().backfillLastMessageTimes();
   }, [chatSessionKey]);
 
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel

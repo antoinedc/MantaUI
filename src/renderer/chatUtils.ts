@@ -344,6 +344,38 @@ export function selectCacheTtlMs(ttl: "5m" | "1h"): number {
   return ttl === "1h" ? 60 * 60_000 : 5 * 60_000;
 }
 
+// Sidebar/mobile "time since last message" label (BET-119). Floors to the
+// coarsest unit that still fits so the label stays short ("3m", "1h", "2d").
+// Sub-minute elapsed collapses to "now" to avoid per-second re-renders — the
+// label is driven by whatever re-renders the status map already (2s poller
+// batches / SSE-driven store updates), not a dedicated ticking interval.
+export function formatAge(elapsedMs: number): string {
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 60_000) return "now";
+  const minutes = Math.floor(elapsedMs / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(elapsedMs / 3_600_000);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(elapsedMs / 86_400_000);
+  return `${days}d`;
+}
+
+// Classifies elapsed-since-last-message against the prompt-cache TTL so the
+// sidebar age label can be colored: fresh (cache is warm) → aging (cache is
+// getting close to expiring) → stale (cache has likely expired, a follow-up
+// re-warms the full prefix). Thresholds are 50%/90% of ttlMs, matching the
+// feature spec — NOT the same thresholds as `computeStaleCache`'s 100%
+// (fully-expired) gate, which drives a different UI (the "/clear" pill).
+export function classifyCacheAge(
+  lastMessageAt: number,
+  now: number,
+  ttlMs: number,
+): "fresh" | "aging" | "stale" {
+  const elapsed = Math.max(0, now - lastMessageAt);
+  if (elapsed < 0.5 * ttlMs) return "fresh";
+  if (elapsed < 0.9 * ttlMs) return "aging";
+  return "stale";
+}
+
 export function selectLastAssistantCompletion(
   messages:
     | Array<{

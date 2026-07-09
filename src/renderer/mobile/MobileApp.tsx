@@ -85,6 +85,9 @@ export function MobileApp() {
   useEffect(() => {
     if (!chatSessionKey) return;
     void useStore.getState().replayChatAttention();
+    // Cold-start backfill of the elapsed-since-last-message label (BET-119,
+    // mirror of App.tsx — see store.backfillLastMessageTimes).
+    void useStore.getState().backfillLastMessageTimes();
   }, [chatSessionKey]);
 
   // Sidebar status for chat-mode windows (mirror of the desktop App.tsx

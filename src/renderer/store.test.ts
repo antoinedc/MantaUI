@@ -117,12 +117,34 @@ describe("setChatRunning / setChatAttention", () => {
 
     it("sets running:true for the matching window", () => {
       useStore.getState().setChatRunning("ses_chat", true);
-      expect(useStore.getState().status.bui[0]).toEqual({
+      const win = useStore.getState().status.bui[0];
+      expect(win).toMatchObject({
         running: true,
         subagents: 0,
         attention: false,
         attentionKind: undefined,
       });
+      // BET-119: an idle → running transition stamps lastMessageAt.
+      expect(win.lastMessageAt).toEqual(expect.any(Number));
+    });
+
+    it("stamps lastMessageAt on every running-value transition (BET-119)", () => {
+      const before = Date.now();
+      useStore.getState().setChatRunning("ses_chat", true);
+      const afterStart = useStore.getState().status.bui[0].lastMessageAt;
+      expect(afterStart).toBeGreaterThanOrEqual(before);
+
+      useStore.getState().setChatRunning("ses_chat", false);
+      const afterIdle = useStore.getState().status.bui[0].lastMessageAt;
+      expect(afterIdle).toBeGreaterThanOrEqual(afterStart!);
+    });
+
+    it("does NOT re-stamp lastMessageAt on a no-op running→running call (BET-119)", () => {
+      useStore.getState().setChatRunning("ses_chat", true);
+      const first = useStore.getState().status.bui[0].lastMessageAt;
+      useStore.getState().setChatRunning("ses_chat", true);
+      const second = useStore.getState().status.bui[0].lastMessageAt;
+      expect(second).toBe(first);
     });
 
     it("latches attention='idle' on running → idle when user isn't on the window", () => {

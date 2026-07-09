@@ -37,6 +37,8 @@ import {
   selectLastAssistantCompletion,
   computeStaleCache,
   STALE_CACHE_MIN_TOKENS,
+  formatAge,
+  classifyCacheAge,
   findFlushBoundary,
   mergeBufferedDeltas,
   extractSubagentInfo,
@@ -748,6 +750,59 @@ describe("computeStaleCache", () => {
       cachedTokens: 49_999.7,
     });
     expect(r.staleTokens).toBe(50_000);
+  });
+});
+
+// ===== formatAge =====
+
+describe("formatAge", () => {
+  it("collapses sub-minute elapsed to 'now'", () => {
+    expect(formatAge(0)).toBe("now");
+    expect(formatAge(59_000)).toBe("now");
+  });
+
+  it("floors to minutes below an hour", () => {
+    expect(formatAge(60_000)).toBe("1m");
+    expect(formatAge(59 * 60_000)).toBe("59m");
+  });
+
+  it("floors to hours below a day", () => {
+    expect(formatAge(60 * 60_000)).toBe("1h");
+    expect(formatAge(23 * 3_600_000)).toBe("23h");
+  });
+
+  it("floors to days at/above 24h", () => {
+    expect(formatAge(24 * 3_600_000)).toBe("1d");
+  });
+
+  it("treats negative/NaN input as 'now'", () => {
+    expect(formatAge(-1000)).toBe("now");
+    expect(formatAge(NaN)).toBe("now");
+  });
+});
+
+// ===== classifyCacheAge =====
+
+describe("classifyCacheAge", () => {
+  const TTL_1H = 3_600_000;
+  const TTL_5M = 300_000;
+
+  it("is fresh below 50% of ttl", () => {
+    expect(classifyCacheAge(0, 0, TTL_1H)).toBe("fresh");
+    expect(classifyCacheAge(0, 1_799_999, TTL_1H)).toBe("fresh");
+  });
+
+  it("is aging between 50% and 90% of ttl", () => {
+    expect(classifyCacheAge(0, 1_800_000, TTL_1H)).toBe("aging");
+    expect(classifyCacheAge(0, 3_239_999, TTL_1H)).toBe("aging");
+  });
+
+  it("is stale at/above 90% of ttl", () => {
+    expect(classifyCacheAge(0, 3_240_000, TTL_1H)).toBe("stale");
+  });
+
+  it("works with the 5m ttl", () => {
+    expect(classifyCacheAge(0, 150_000, TTL_5M)).toBe("aging");
   });
 });
 
