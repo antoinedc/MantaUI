@@ -207,6 +207,72 @@ function cacheSessionDirectoryQuiet(sessionId, directory) {
 // in-use session's events arrive even though the bootstrap didn't pre-open it.
 let ensureStreamForDirectory = null;
 
+// ---------------------------------------------------------------------------
+// Scoped-stream readiness gate (BET-115 fix C)
+//
+// opencode's `/event?directory=` is a fresh subscription every time it opens
+// (fresh session/reconnect), and events emitted BEFORE the subscription
+// registers upstream are lost forever — no replay. `sendPrompt` (and the
+// other session-mutating calls) POST through `getSessionDirectoryQuery`,
+// which fire-and-forgets `ensureStreamForDirectory(dir)`. On a brand-new
+// session that races: the POST can land before the scoped stream is actually
+// listening, so the first turn's events vanish and the UI looks frozen.
+//
+// `streamReadyState` tracks, per directory key ("" = global), a promise that
+// resolves the first time `openEventStream`'s upstream fetch comes back OK
+// (see `onConnect` below). `getSessionDirectoryQuery` awaits it with a 5s
+// bound before returning — long enough for a normal connect, short enough
+// that a wedged opencode degrades to "send anyway" rather than hanging the
+// prompt forever.
+// ---------------------------------------------------------------------------
+const streamReadyState = new Map(); // key -> { promise, resolve }
+
+// Test-only: shrink the 5s readiness bound so tests don't have to sleep for
+// real. Reset to null (→ default 5000) between tests.
+let readinessTimeoutMsOverride = null;
+export function _setReadinessTimeoutMs(ms) {
+  readinessTimeoutMsOverride = ms;
+}
+
+function makePendingReadyEntry() {
+  let resolve;
+  const promise = new Promise((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+function getOrCreateStreamReady(key) {
+  let entry = streamReadyState.get(key);
+  if (!entry) {
+    entry = makePendingReadyEntry();
+    streamReadyState.set(key, entry);
+  }
+  return entry;
+}
+
+/** Called by openEventStream's onConnect: the scoped subscription is live. */
+function markStreamConnected(key) {
+  getOrCreateStreamReady(key).resolve();
+}
+
+/**
+ * Called by openEventStream's onDisconnect: the scoped subscription dropped.
+ * Re-arm with a FRESH pending promise so a prompt sent during the reconnect
+ * window waits for the NEW subscription rather than resolving instantly off
+ * the stale (already-resolved) promise. Callers that already captured the old
+ * promise reference are still bounded by the 5s race in
+ * getSessionDirectoryQuery, so this can't hang a caller indefinitely.
+ */
+function markStreamDisconnected(key) {
+  streamReadyState.set(key, makePendingReadyEntry());
+}
+
+/** Test-only: clear readiness state between scenarios. */
+export function _resetStreamReadyState() {
+  streamReadyState.clear();
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function fetchSessionDirectory(sessionId) {
   try {
     const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
@@ -236,8 +302,15 @@ async function getSessionDirectoryQuery(sessionId) {
   // doesn't open a stream). opencode emits this prompt's events only on the
   // scoped channel; without the stream they're lost and the session looks
   // frozen. Idempotent (openFor no-ops if already open).
+  //
+  // Readiness gate: wait (bounded) for the scoped stream's FIRST successful
+  // connect before returning, so a session-mutating call (sendPrompt et al.)
+  // can't race ahead of its own event subscription and lose the reply. Bound
+  // is deliberately short — a wedged opencode must never hang the prompt.
   if (dir && ensureStreamForDirectory) {
     try { ensureStreamForDirectory(dir); } catch { /* non-fatal */ }
+    const ready = getOrCreateStreamReady(dir).promise;
+    await Promise.race([ready, sleep(readinessTimeoutMsOverride ?? 5000)]);
   }
   return dir ? `?directory=${encodeURIComponent(dir)}` : "";
 }
@@ -875,11 +948,33 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
 // SSE event subscription
 // ---------------------------------------------------------------------------
 
+// Transport used by the long-lived SSE stream in openEventStream. Production
+// = the real global `fetch` (undici) — deliberately NOT the pooled ocFetch
+// transport (a keep-alive pool socket would be pinned forever by a streaming
+// body; see the ocAgent comment above). Tests can override this to simulate
+// a controllable SSE response (including WHEN it "connects") without a live
+// opencode server.
+let eventStreamTransport = null;
+/** Test-only: override the transport openEventStream dispatches through.
+ *  Pass null to restore the default (global fetch). */
+export function _setEventStreamTransport(fn) {
+  eventStreamTransport = fn;
+}
+function eventFetch(url, init) {
+  return (eventStreamTransport ?? fetch)(url, init);
+}
+
 // One long-lived SSE connection to opencode's /event endpoint, optionally
 // scoped to a project `?directory=`. Auto-reconnects on drop with 1.5 s
 // delay; returns stop() that flips stopped=true AND aborts the in-flight
 // fetch so reader.read() unblocks immediately.
-function openEventStream(onEvent, directory) {
+//
+// `hooks.onConnect` fires each time the upstream fetch comes back OK, before
+// the parse loop starts — this is what resolves the readiness gate above.
+// `hooks.onDisconnect` fires whenever a (non-teardown) connection ends, so
+// the readiness gate can re-arm for the next connect.
+function openEventStream(onEvent, directory, hooks = {}) {
+  const { onConnect, onDisconnect } = hooks;
   let stopped = false;
   let currentController = null;
   const path = directory
@@ -891,13 +986,14 @@ function openEventStream(onEvent, directory) {
       const controller = new AbortController();
       currentController = controller;
       try {
-        const res = await fetch(apiUrl(path), {
+        const res = await eventFetch(apiUrl(path), {
           signal: controller.signal,
           headers: { accept: "text/event-stream" },
         });
         if (!res.ok || !res.body) {
           throw new Error(`opencode SSE ${res.status}: ${res.statusText}`);
         }
+        onConnect?.();
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = "";
@@ -933,7 +1029,15 @@ function openEventStream(onEvent, directory) {
       } catch {
         /* reconnect on error or AbortError from stop() */
       }
-      if (!stopped) await new Promise((r) => setTimeout(r, 1500));
+      // The connection just ended (cleanly or via error) and we're about to
+      // retry — a real drop, not an intentional stop(). Re-arm the readiness
+      // gate so a prompt sent during this reconnect window waits for the NEXT
+      // successful connect instead of resolving off a stale "was connected"
+      // promise.
+      if (!stopped) {
+        onDisconnect?.();
+        await sleep(1500);
+      }
     }
   })();
 
@@ -962,7 +1066,13 @@ export function subscribeEvents(onEvent) {
 
   const openFor = (key, dir) => {
     if (streams.has(key)) return;
-    streams.set(key, openEventStream(onEvent, dir));
+    streams.set(
+      key,
+      openEventStream(onEvent, dir, {
+        onConnect: () => markStreamConnected(key),
+        onDisconnect: () => markStreamDisconnected(key),
+      }),
+    );
   };
 
   // Global stream catches non-scoped events (server.heartbeat, vcs.branch.updated,

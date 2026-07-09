@@ -1,5 +1,10 @@
 // Pure utility functions extracted from ChatPanel for testability.
 
+// Type-only import — erased at compile time, keeps this module dependency-
+// free at runtime (the whole point of chatUtils.ts: pure functions testable
+// without DOM/Electron/network).
+import type { ConnectionStateName } from "../shared/net/state.js";
+
 // Fallback context size used when the active model has no `limit.context`
 // (or no active model is known yet). 200k is the lowest common denominator
 // across Claude Sonnet 4.5 and older — generous enough that the bar
@@ -1894,4 +1899,36 @@ export function resolveToolOutput(state: {
   const meta = state.metadata;
   const live = meta && typeof meta.output === "string" ? meta.output : "";
   return live;
+}
+
+// ---------------------------------------------------------------------------
+// Client liveness watchdog (BET-115 fix A)
+//
+// A half-open WebSocket is undetectable from `readyState` alone — it stays
+// "OPEN" even when the underlying path is dead (tunnel restart, sleep/wake,
+// NAT timeout), so the browser never fires onclose/onerror and the shared
+// reconnect controller never retries. The server sends an app-level
+// `{kind:"heartbeat"}` frame every 15s (src/server/events.mjs); the renderer
+// stamps `lastFrameAt` on every frame it receives (heartbeat or real) and a
+// watchdog interval calls this pure decision function to decide whether the
+// connection is stale enough to force a reconnect even though the socket
+// still LOOKS open.
+// ---------------------------------------------------------------------------
+
+/**
+ * Decide whether the events WebSocket should be force-reconnected.
+ *
+ * Only fires when the controller believes it's `connected` — a socket that's
+ * already `connecting`/`reconnecting`/`closed` is already on the recovery
+ * path and doesn't need the watchdog to intervene. `thresholdMs` is the
+ * caller's staleness bound (BET-115 spec: 45s = 3 missed 15s heartbeats).
+ */
+export function shouldForceReconnect(
+  state: ConnectionStateName,
+  lastFrameAt: number,
+  now: number,
+  thresholdMs: number,
+): boolean {
+  if (state !== "connected") return false;
+  return now - lastFrameAt > thresholdMs;
 }
