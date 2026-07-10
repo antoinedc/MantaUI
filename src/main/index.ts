@@ -1,6 +1,7 @@
 import { app, BrowserWindow, clipboard, ipcMain, shell } from "electron";
 import { join, basename } from "node:path";
 import { watch as fsWatch } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig } from "./config.js";
@@ -302,6 +303,15 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.clipboardReadImage, () => {
     const buf = readClipboardImageBuffer();
     return buf ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : null;
+  });
+
+  // Read an arbitrary local (Mac) file's bytes. Used for Desktop screenshot
+  // detection (screenshotDetected source:"file") — only main can touch the
+  // OS filesystem; the renderer funnels the bytes into uploadBuffer from there.
+  // `path` comes from our own fs.watch on the Desktop dir, not user input.
+  ipcMain.handle(IPC.readLocalFile, async (_e, path: string) => {
+    const buf = await readFile(path);
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
   });
 
   // Reveal a local file in Finder / the OS file manager.

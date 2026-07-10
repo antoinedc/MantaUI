@@ -427,3 +427,125 @@ describe("ChatPanel abort rejects orphaned questions", () => {
     expect(api.calls.opencodeQuestionReject ?? []).toEqual([]);
   });
 });
+
+// ===== Screenshot "Add to chat" → uploadBuffer (BET-130) =====
+//
+// Regression coverage for the HTTP-mode bug where acceptScreenshot dead-ended
+// on window.api.clipboardReadImage / window.api.uploadFiles (both server-side
+// stubs once window.api is httpApi). The fix routes bytes through
+// window.__buiPreload (the real Electron preload, never swapped) and then
+// uploads them via window.api.uploadBuffer — the one primitive that actually
+// works in HTTP mode. These tests assert the chip reaches "ready" with a
+// remotePath, and that the preload OS bridge (not window.api) supplied bytes.
+describe("ChatPanel screenshot accept", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    (window as unknown as { __buiPreload: unknown }).__buiPreload = null;
+  });
+
+  it("clipboard source: reads bytes via preload.clipboardReadImage, uploads via window.api.uploadBuffer", async () => {
+    const fakeBuf = new ArrayBuffer(4);
+    const clipboardReadImage = () => Promise.resolve(fakeBuf);
+    const readLocalFile = () => Promise.reject(new Error("should not be called"));
+    (window as unknown as {
+      __buiPreload: { clipboardReadImage: typeof clipboardReadImage; readLocalFile: typeof readLocalFile };
+    }).__buiPreload = { clipboardReadImage, readLocalFile };
+
+    let uploadedBuffer: ArrayBuffer | null = null;
+    const { api } = installMockApi({
+      uploadBuffer: (input: { buffer: ArrayBuffer }) => {
+        uploadedBuffer = input.buffer;
+        return Promise.resolve("/remote/screenshot-123.png");
+      },
+    });
+    resetStore({
+      screenshotToast: { source: "clipboard" },
+    });
+
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const addBtn = Array.from(h.container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Add to chat",
+    ) as HTMLButtonElement;
+    expect(addBtn).toBeTruthy();
+    await act(async () => {
+      addBtn.click();
+    });
+    await h.flush();
+
+    expect(uploadedBuffer).toBe(fakeBuf);
+    expect(api.calls.uploadBuffer?.[0]?.[0]).toMatchObject({
+      projectName: "proj",
+      buffer: fakeBuf,
+    });
+    // Chip landed in the "ready" state — title attr carries the remotePath.
+    const chip = h.container.querySelector('[title="/remote/screenshot-123.png"]');
+    expect(chip).toBeTruthy();
+  });
+
+  it("file source: reads bytes via preload.readLocalFile, uploads via window.api.uploadBuffer", async () => {
+    const fakeBuf = new ArrayBuffer(8);
+    let requestedPath: string | null = null;
+    const readLocalFile = (path: string) => {
+      requestedPath = path;
+      return Promise.resolve(fakeBuf);
+    };
+    (window as unknown as {
+      __buiPreload: { readLocalFile: typeof readLocalFile };
+    }).__buiPreload = { readLocalFile };
+
+    let uploadedBuffer: ArrayBuffer | null = null;
+    installMockApi({
+      uploadBuffer: (input: { buffer: ArrayBuffer }) => {
+        uploadedBuffer = input.buffer;
+        return Promise.resolve("/remote/shot.png");
+      },
+    });
+    resetStore({
+      screenshotToast: { source: "file", path: "/Users/x/Desktop/shot.png" },
+    });
+
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const addBtn = Array.from(h.container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Add to chat",
+    ) as HTMLButtonElement;
+    await act(async () => {
+      addBtn.click();
+    });
+    await h.flush();
+
+    expect(requestedPath).toBe("/Users/x/Desktop/shot.png");
+    expect(uploadedBuffer).toBe(fakeBuf);
+    const chip = h.container.querySelector('[title="/remote/shot.png"]');
+    expect(chip).toBeTruthy();
+  });
+
+  it("no preload (mobile/web): chip goes to error state instead of silently dropping", async () => {
+    (window as unknown as { __buiPreload: unknown }).__buiPreload = null;
+    installMockApi();
+    resetStore({
+      screenshotToast: { source: "clipboard" },
+    });
+
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const addBtn = Array.from(h.container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Add to chat",
+    ) as HTMLButtonElement;
+    await act(async () => {
+      addBtn.click();
+    });
+    await h.flush();
+
+    // Errored chip renders with title = errorMsg (see AttachmentStrip).
+    const chip = h.container.querySelector('[title="Screenshot capture requires the desktop app"]');
+    expect(chip).toBeTruthy();
+  });
+});

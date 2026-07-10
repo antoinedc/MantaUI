@@ -225,6 +225,11 @@ export const IPC = {
   // Read the current clipboard image as PNG ArrayBuffer (null if no image).
   // Called on demand after a screenshotDetected event — not polled.
   clipboardReadImage: "clipboard:read-image",
+  // Read an arbitrary local (Mac) file's raw bytes. Only main can touch the
+  // OS filesystem — this is how the renderer gets bytes for a Desktop
+  // screenshot detection (screenshotDetected source:"file") so it can then
+  // upload them via uploadBuffer. NOT for remote/box files (see peekRemoteFile).
+  readLocalFile: "fs:read-local-file",
 
   // Drag-and-drop file upload to a per-session remote tmp dir
   uploadFiles: "upload:files",

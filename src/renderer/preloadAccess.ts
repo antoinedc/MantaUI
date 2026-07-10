@@ -17,6 +17,13 @@ export interface BuiPreload {
     cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
   ): () => void;
   clipboardWriteText(text: string): Promise<void>;
+  // Read the current clipboard image as PNG bytes (null if no image). Only
+  // main can touch the OS clipboard — this must go through the preload, NOT
+  // window.api (which is httpApi in HTTP mode and has no OS access).
+  clipboardReadImage(): Promise<ArrayBuffer | null>;
+  // Read an arbitrary local (Mac) file's bytes — e.g. a Desktop screenshot
+  // detected by main's fs.watch. Only main can touch the OS filesystem.
+  readLocalFile(path: string): Promise<ArrayBuffer>;
   openExternal(url: string): Promise<void>;
   revealInFolder(localPath: string): Promise<void>;
   getPathForFile(file: File): string;
