@@ -591,10 +591,30 @@ export const httpApi: Api = {
   // can fetch from /api/peek and open the file with shell.openPath (the
   // renderer has no direct shell access). Falls back to the RPC channel for
   // mobile/web where the server IS the box and reads the file natively.
+  //
+  // BET-127 review note: there is no ipcMain.handle(IPC.peekRemoteFile, ...)
+  // registered in src/main/index.ts today, so the preload call below always
+  // rejects ("no handler registered"). Pre-BET-127, the __buiPreload probe
+  // checked a name (peekRemoteFileHttp) the preload never exposed, so it
+  // never matched and fell through to the RPC no-op — a silent, pre-existing
+  // no-op UX for a known-broken feature. BET-127 fixed the probe's NAME to
+  // match what the preload actually exposes (peekRemoteFile), which is
+  // correct and required, but that alone would have flipped the observed
+  // behavior from "click does nothing" to "click pops an alert()" purely as
+  // a side effect of a naming fix in a cleanup PR — not an intended UX
+  // change. We catch the rejection here and fall through to the same RPC
+  // no-op as before, preserving the pre-existing silent-degrade behavior
+  // until a real ipcMain handler lands (tracked as a follow-up; see BET-127
+  // PR discussion).
   peekRemoteFile: async (remotePath) => {
     const preload = (window as { __buiPreload?: { peekRemoteFile?: (p: string) => Promise<void> } }).__buiPreload;
     if (preload?.peekRemoteFile) {
-      return preload.peekRemoteFile(remotePath);
+      try {
+        return await preload.peekRemoteFile(remotePath);
+      } catch {
+        // No ipcMain handler yet — degrade silently (see note above) rather
+        // than surface an IPC error to the user.
+      }
     }
     return rpc(IPC.peekRemoteFile, remotePath);
   },
