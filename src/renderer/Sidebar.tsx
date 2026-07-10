@@ -40,6 +40,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     status,
     setActive,
     refresh,
+    backgroundSyncing,
   } = useStore();
 
   const showError = (e: unknown) => {
@@ -371,9 +372,23 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     <aside className="w-64 shrink-0 border-r border-border bg-bg-elev flex flex-col">
       <div className="titlebar-drag h-10 shrink-0" />
       <div className="px-3 pb-2 flex items-center justify-between">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-text-muted">
-          Workspace
-        </h2>
+        <div className="flex items-center gap-2 min-w-0">
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+            Workspace
+          </h2>
+          {backgroundSyncing && (
+            <span
+              className="flex items-center gap-1.5 text-[11px] text-text-faint"
+              title="Syncing session state…"
+            >
+              <span
+                className="h-3 w-3 rounded-full border-2 border-text-faint border-t-transparent animate-spin"
+                aria-hidden
+              />
+              Syncing…
+            </span>
+          )}
+        </div>
         <button
           onClick={() => setNewProjectOpen(true)}
           className="text-text-muted hover:text-text text-lg leading-none"

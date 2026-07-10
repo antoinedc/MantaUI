@@ -60,6 +60,7 @@ import {
   resolveToolOutput,
   reconcileOptimisticUser,
   shouldForceReconnect,
+  runWithConcurrency,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2784,5 +2785,62 @@ describe("shouldForceReconnect", () => {
   it("respects a custom threshold", () => {
     expect(shouldForceReconnect("connected", 0, 100, 50)).toBe(true);
     expect(shouldForceReconnect("connected", 0, 40, 50)).toBe(false);
+  });
+});
+
+// ===== runWithConcurrency =====
+
+describe("runWithConcurrency", () => {
+  it("runs every item exactly once and resolves after all complete", async () => {
+    const items = [1, 2, 3, 4, 5, 6, 7, 8];
+    const seen: number[] = [];
+    await runWithConcurrency(items, 3, async (item) => {
+      await Promise.resolve();
+      seen.push(item);
+    });
+    expect(seen.length).toBe(items.length);
+    expect([...seen].sort((a, b) => a - b)).toEqual(items);
+  });
+
+  it("never exceeds the concurrency limit", async () => {
+    const items = Array.from({ length: 20 }, (_, i) => i);
+    let inFlight = 0;
+    let maxObserved = 0;
+    const limit = 4;
+    await runWithConcurrency(items, limit, async () => {
+      inFlight++;
+      maxObserved = Math.max(maxObserved, inFlight);
+      // Yield a couple of microtask turns so overlapping workers have a
+      // chance to race, rather than resolving synchronously.
+      await new Promise((r) => setTimeout(r, 0));
+      inFlight--;
+    });
+    expect(maxObserved).toBeLessThanOrEqual(limit);
+    expect(maxObserved).toBeGreaterThan(0);
+  });
+
+  it("isolates a per-item rejection — one failure doesn't abort the batch", async () => {
+    const items = [1, 2, 3, 4, 5];
+    const completed: number[] = [];
+    await expect(
+      runWithConcurrency(items, 2, async (item) => {
+        if (item === 3) throw new Error("boom");
+        completed.push(item);
+      }),
+    ).resolves.toBeUndefined();
+    expect(completed.sort((a, b) => a - b)).toEqual([1, 2, 4, 5]);
+  });
+
+  it("handles an empty items array", async () => {
+    await expect(runWithConcurrency([], 4, async () => {})).resolves.toBeUndefined();
+  });
+
+  it("handles limit larger than items length", async () => {
+    const items = [1, 2];
+    const seen: number[] = [];
+    await runWithConcurrency(items, 10, async (item) => {
+      seen.push(item);
+    });
+    expect(seen.sort((a, b) => a - b)).toEqual(items);
   });
 });

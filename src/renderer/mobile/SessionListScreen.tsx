@@ -106,6 +106,7 @@ export function SessionListScreen({
   const serverUrl = useStore((s) => s.serverUrl);
   const boxId = useStore((s) => s.boxId);
   const activeProjectName = useStore((s) => s.activeProjectName);
+  const backgroundSyncing = useStore((s) => s.backgroundSyncing);
 
   const [createState, setCreateState] = useState<CreateState>(null);
 
@@ -127,7 +128,21 @@ export function SessionListScreen({
   return (
     <div className="mobile-screen">
       <div className="mobile-header">
-        <div className="flex-1 text-text font-bold text-base px-1">Sessions</div>
+        <div className="flex-1 flex items-center gap-2 min-w-0 px-1">
+          <span className="text-text font-bold text-base">Sessions</span>
+          {backgroundSyncing && (
+            <span
+              className="flex items-center gap-1.5 text-[11px] text-text-faint"
+              title="Syncing session state…"
+            >
+              <span
+                className="h-3 w-3 rounded-full border-2 border-text-faint border-t-transparent animate-spin"
+                aria-hidden
+              />
+              Syncing…
+            </span>
+          )}
+        </div>
         <button
           className="mobile-tap text-text-muted text-xl leading-none"
           onClick={onRefresh}

@@ -8,7 +8,11 @@ import type {
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
 import { clientToken } from "./api/httpApi";
-import { isAssistantTurnInProgress } from "./chatUtils";
+import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
+
+// Cap on simultaneous in-flight requests for the startup opencode fan-outs
+// (`replayChatAttention`, `backfillLastMessageTimes`) — see BET-135.
+const OPENCODE_FANOUT_CONCURRENCY = 4;
 
 // Overlay the desktop-local pairing secrets (serverUrl/boxToken) onto a config
 // snapshot. In http mode window.api.configGet() returns the bui-server's config,
@@ -148,6 +152,11 @@ type State = {
   // show "reconnecting…" when the link is down. Updated by the httpApi
   // reconnect controller via setConnectionState; read by App.tsx.
   connectionState: ConnectionState;
+  // True while the startup opencode fan-out (`runBackgroundSync`) is running
+  // — surfaced as a subtle "Syncing…" indicator in the sidebar so a momentary
+  // slowdown from bounded-concurrency fetches reads as "syncing", not
+  // "frozen" (BET-135). False the rest of the time.
+  backgroundSyncing: boolean;
   // ----- derived selectors -----
   activeSession: () => ActiveSession | null;
   // A minimal AppConfig-shaped snapshot of the onboarding-relevant fields,
@@ -227,6 +236,12 @@ type State = {
   // same App.tsx/MobileApp.tsx effect as `replayChatAttention` (keyed on the
   // chat-session set). Safe to call repeatedly.
   backfillLastMessageTimes: () => Promise<void>;
+  // Runs `replayChatAttention` + `backfillLastMessageTimes` together (as
+  // App.tsx/MobileApp.tsx already did — both fire-and-forget in parallel)
+  // while toggling `backgroundSyncing` around the pair, so the sidebar can
+  // show a "Syncing…" indicator for the duration. Behavior of the two
+  // fan-outs themselves is unchanged; this is scheduling + a flag only.
+  runBackgroundSync: () => Promise<void>;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   setAutoRenameSessions: (v: boolean) => Promise<void>;
   setScreenshotToast: (t: ScreenshotToast | null) => void;
@@ -260,6 +275,7 @@ export const useStore = create<State>((set, get) => ({
   agentFileToast: null,
   updatePrompt: null,
   connectionState: { state: "idle" },
+  backgroundSyncing: false,
 
   configSnapshot: () => {
     const s = get();
@@ -594,8 +610,10 @@ export const useStore = create<State>((set, get) => ({
     }
     if (sessionIds.size === 0) return;
     if (!window.api.opencodeQuestions && !window.api.opencodePermissions) return;
-    await Promise.all(
-      [...sessionIds].map(async (sid) => {
+    await runWithConcurrency(
+      [...sessionIds],
+      OPENCODE_FANOUT_CONCURRENCY,
+      async (sid) => {
         try {
           const [questions, permissions] = await Promise.all([
             window.api.opencodeQuestions?.(sid).catch(() => []) ?? [],
@@ -654,7 +672,7 @@ export const useStore = create<State>((set, get) => ({
         } catch {
           // Per-session failure is non-fatal — best-effort replay.
         }
-      }),
+      },
     );
   },
 
@@ -673,8 +691,10 @@ export const useStore = create<State>((set, get) => ({
     if (dirs.size === 0) return;
     if (!window.api.opencodeListSessions) return;
     const updatedBySessionId = new Map<string, number>();
-    await Promise.all(
-      [...dirs].map(async (dir) => {
+    await runWithConcurrency(
+      [...dirs],
+      OPENCODE_FANOUT_CONCURRENCY,
+      async (dir) => {
         try {
           const sessions = await window.api.opencodeListSessions!(dir);
           for (const s of sessions) {
@@ -686,7 +706,7 @@ export const useStore = create<State>((set, get) => ({
         } catch {
           // Per-directory failure is non-fatal — best-effort backfill.
         }
-      }),
+      },
     );
     if (updatedBySessionId.size === 0) return;
     set((prev) => {
@@ -718,6 +738,18 @@ export const useStore = create<State>((set, get) => ({
       }
       return changed ? { status: next } : prev;
     });
+  },
+
+  runBackgroundSync: async () => {
+    set({ backgroundSyncing: true });
+    try {
+      await Promise.all([
+        get().replayChatAttention(),
+        get().backfillLastMessageTimes(),
+      ]);
+    } finally {
+      set({ backgroundSyncing: false });
+    }
   },
 
   applyProjects: (projects) =>

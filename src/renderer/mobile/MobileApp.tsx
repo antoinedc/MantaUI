@@ -84,10 +84,10 @@ export function MobileApp() {
     .join(",");
   useEffect(() => {
     if (!chatSessionKey) return;
-    void useStore.getState().replayChatAttention();
-    // Cold-start backfill of the elapsed-since-last-message label (BET-119,
-    // mirror of App.tsx — see store.backfillLastMessageTimes).
-    void useStore.getState().backfillLastMessageTimes();
+    // runBackgroundSync (mirror of App.tsx) fires both fan-outs in parallel
+    // with bounded per-fan-out concurrency + a `backgroundSyncing` flag
+    // (BET-135).
+    void useStore.getState().runBackgroundSync();
   }, [chatSessionKey]);
 
   // Sidebar status for chat-mode windows (mirror of the desktop App.tsx
