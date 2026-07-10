@@ -60,6 +60,7 @@ import {
   registerChildSessionFromCreated,
   isDrainAbortError,
   shouldAbortForQueuedDrain,
+  isToolStepBoundary,
   collectChildSessionIds,
   applyQuestionEvent,
   hydrateQuestion,
@@ -532,6 +533,15 @@ export function useSseBus(params: {
         const messageID = String(props.messageID ?? "");
         spliceMessage(messageID);
         flushPendingDeltas(false);
+      }
+
+      // Primary drain trigger — the real step boundary the deployed opencode
+      // build actually emits (see module doc + BET-131). Only fires for the
+      // main session: `isChildEvent` above already returned early for
+      // subagent child events, so a completed tool part reaching here always
+      // belongs to the session this hook owns.
+      if (ev.type === "message.part.updated" && isToolStepBoundary(props.part)) {
+        maybeDrainQueuedPrompt();
       }
 
       if (ev.type === "session.compacted") {
