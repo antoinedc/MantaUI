@@ -33,7 +33,16 @@ export interface BuiPreload {
   // HTTP-mode peek: triggers the main process to fetch from /api/peek and
   // open the file locally. Only available when the desktop is in "http"
   // transport mode (paired to a bui-server). No-op on mobile/web.
-  peekRemoteFileHttp(remotePath: string): Promise<void>;
+  //
+  // NOTE (BET-127): this is the SAME name the preload runtime exposes
+  // (`peekRemoteFile` in src/preload/index.ts) — there is no ipcMain.handle
+  // registered for IPC.peekRemoteFile in src/main/index.ts today, so calling
+  // this currently rejects rather than opening a file. That gap predates this
+  // extraction and is out of scope here (flagged for a follow-up); this
+  // change only reconciles the name so httpApi's `window.__buiPreload` probe
+  // (httpApi.ts peekRemoteFile) actually finds the method instead of always
+  // silently falling through to the (also-stubbed) server RPC no-op.
+  peekRemoteFile(remotePath: string): Promise<void>;
 }
 
 /**

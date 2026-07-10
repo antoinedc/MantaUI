@@ -1,4 +1,4 @@
-import type { Api } from "../preload/index";
+import type { Api } from "../shared/api";
 import type { BuiPreload } from "./preloadAccess";
 
 declare global {
