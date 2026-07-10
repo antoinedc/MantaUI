@@ -543,12 +543,6 @@ export const httpApi: Api = {
   onScreenshotDetected: (cb) =>
     on<{ source: "clipboard" | "file"; path?: string }>("screenshot", cb),
 
-  // Cross-device shared-config sync is desktop-driven (the desktop pushes to /
-  // pulls from this server). On mobile there's no inbound config-pull push, so
-  // this is a no-op subscription that returns an unsubscriber. Mobile edits
-  // persist locally and the desktop pulls them on its next sync.
-  onConfigChanged: () => () => {},
-
   // Desktop OS-notification directives from bui-server's notification router.
   // In HTTP mode the /events WS delivers `desktopNotify` envelopes; in SSH
   // mode the main process relays via IPC (preload's onDesktopNotify). Either

@@ -122,10 +122,6 @@ export interface Api {
     cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
   ): () => void;
 
-  // Cross-device shared-config sync pulled a newer snapshot from mobile into
-  // desktop config; the store re-applies it so Settings reflects the change.
-  onConfigChanged(cb: (cfg: AppConfig) => void): () => void;
-
   // bui-server's notification router decided the desktop should show an OS
   // notification (relayed over the -L 18787 forward). The renderer shows it
   // via the Notification API after a local "am I viewing this?" check.

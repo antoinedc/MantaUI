@@ -12,11 +12,6 @@ import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import {
-  patchTouchesSharedConfig,
-  extractSharedConfig,
-  mergeSharedConfig,
-} from "../shared/sharedConfig.mjs";
 
 // ============================================================
 // Config persistence (real implementation — renderer depends on it)
@@ -85,35 +80,11 @@ export async function configGet() {
 
 // configUpdate(patch) — merge patch, persist, return full config.
 // preload: ipcRenderer.invoke(IPC.configUpdate, patch) → args[0] = patch
-//
-// If the patch touches a SHAREABLE field (see sharedConfig.mjs), stamp
-// configUpdatedAt so the desktop's next sync sees this as the newer snapshot
-// (LWW). Device-local edits do NOT bump the clock.
 export async function configUpdate(patch) {
   const current = await getConfig();
   const next = { ...current, ...patch };
-  if (patchTouchesSharedConfig(patch)) {
-    next.configUpdatedAt = Date.now();
-  }
   await saveConfig(next);
   return next;
-}
-
-// sharedConfigGet() — the device-independent subset + its LWW timestamp.
-// Served over GET /api/shared-config so the desktop can pull mobile-side edits.
-export async function sharedConfigGet() {
-  return extractSharedConfig(await getConfig());
-}
-
-// sharedConfigApply(snapshot) — LWW-merge an incoming shared-config snapshot
-// (from the desktop) into our config. Persists only if a shareable field
-// actually changed. Returns the resulting shared snapshot so the caller sees
-// the post-merge state (which may still be ours if ours was newer).
-export async function sharedConfigApply(snapshot) {
-  const current = await getConfig();
-  const { config: merged, changed } = mergeSharedConfig(current, snapshot);
-  if (changed) await saveConfig(merged);
-  return extractSharedConfig(merged);
 }
 
 // projectMetaUpsert(meta: ProjectMeta) → AppConfig
