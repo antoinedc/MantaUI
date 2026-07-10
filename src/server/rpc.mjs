@@ -36,9 +36,26 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
   async function resolveProjectCwd(sessionName, inputCwd) {
     const trimmed = typeof inputCwd === "string" ? inputCwd.trim() : "";
     if (trimmed && trimmed !== "~") return trimmed;
+    // 1. Prefer the stored project meta (set by the desktop on project create).
     const cfg = await local.configGet();
     const meta = cfg.projects?.find((p) => p.tmuxSession === sessionName);
-    return (meta?.defaultCwd ?? "").trim() || trimmed || "~";
+    const storedCwd = (meta?.defaultCwd ?? "").trim();
+    if (storedCwd && storedCwd !== "~") return storedCwd;
+    // 2. Fall back to the LIVE tmux session's directory. The config file is
+    //    frequently empty or stale (sessions created outside the desktop
+    //    project-create flow have no stored meta), which silently dropped every
+    //    new window into $HOME. listProjects() derives defaultCwd from the
+    //    session's first window's actual pane path — the canonical "where this
+    //    project lives" — so consult it before defaulting to ~.
+    try {
+      const projects = await tmux.listProjects();
+      const live = projects.find((p) => p.tmuxSession === sessionName);
+      const liveCwd = (live?.defaultCwd ?? "").trim();
+      if (liveCwd && liveCwd !== "~") return liveCwd;
+    } catch {
+      // tmux unavailable → fall through to the last-resort default below.
+    }
+    return storedCwd || trimmed || "~";
   }
 
   // Resolve a caller's bui project (tmux session) name from its opencode

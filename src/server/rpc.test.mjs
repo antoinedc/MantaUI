@@ -15,13 +15,13 @@ test("dispatch throws a descriptive error for unknown channel", async () => {
 
 // Minimal stubs for buildHandlers — only the namespaces touched by the cwd
 // resolution tests need real behavior; everything else can be a no-op.
-function makeDeps(projects) {
+function makeDeps(projects, liveProjects = []) {
   const calls = { newWindow: [], newSession: [], newWindowGetIndex: [], createSession: [], forkSession: [] };
   return {
     calls,
     deps: {
       tmux: {
-        listProjects: async () => [],
+        listProjects: async () => liveProjects,
         newWindow: async (i) => { calls.newWindow.push(i); return []; },
         newSession: async (i) => { calls.newSession.push(i); return []; },
         newWindowGetIndex: async (sessionName, windowName, cwd) => {
@@ -62,11 +62,43 @@ test("tmux:new-window preserves an explicit non-tilde cwd from the renderer", as
   assert.equal(calls.newWindow.at(-1).cwd, "/home/dev/projects/better-ui/worktrees/feat");
 });
 
-test("tmux:new-window falls through to '~' when project meta is missing", async () => {
+test("tmux:new-window falls through to '~' when no stored meta and no live tmux session", async () => {
   const { deps, calls } = makeDeps([]);
   const handlers = buildHandlers(deps);
   await handlers["tmux:new-window"]({ sessionName: "unknown", windowName: "session", cwd: "" });
   assert.equal(calls.newWindow.at(-1).cwd, "~");
+});
+
+test("tmux:new-window falls back to the LIVE tmux session cwd when stored meta is missing", async () => {
+  // Config has no meta for this session (the common case: the session was not
+  // created via the desktop project-create flow), but tmux knows where it lives.
+  const { deps, calls } = makeDeps(
+    [],
+    [{ tmuxSession: "Leasebot", defaultCwd: "/home/dev/projects/leasebot" }],
+  );
+  const handlers = buildHandlers(deps);
+  await handlers["tmux:new-window"]({ sessionName: "Leasebot", windowName: "session", cwd: "" });
+  assert.equal(calls.newWindow.at(-1).cwd, "/home/dev/projects/leasebot");
+});
+
+test("tmux:new-window ignores a live tmux defaultCwd of '~' (no useful info)", async () => {
+  const { deps, calls } = makeDeps(
+    [],
+    [{ tmuxSession: "Leasebot", defaultCwd: "~" }],
+  );
+  const handlers = buildHandlers(deps);
+  await handlers["tmux:new-window"]({ sessionName: "Leasebot", windowName: "session", cwd: "" });
+  assert.equal(calls.newWindow.at(-1).cwd, "~");
+});
+
+test("stored project meta takes precedence over the live tmux cwd", async () => {
+  const { deps, calls } = makeDeps(
+    [{ tmuxSession: "Leasebot", defaultCwd: "/home/dev/projects/leasebot" }],
+    [{ tmuxSession: "Leasebot", defaultCwd: "/home/dev" }],
+  );
+  const handlers = buildHandlers(deps);
+  await handlers["tmux:new-window"]({ sessionName: "Leasebot", windowName: "session", cwd: "" });
+  assert.equal(calls.newWindow.at(-1).cwd, "/home/dev/projects/leasebot");
 });
 
 test("opencode:clear-session passes resolved defaultCwd to oc.createSession", async () => {
