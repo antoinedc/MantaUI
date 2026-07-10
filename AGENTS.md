@@ -1,36 +1,79 @@
 # AGENTS.md — context for future sessions
 
-bui is an Electron desktop client for remote `claude` over HTTP+tmux. Pipeline:
-**xterm.js (renderer)** ↔ **node-pty (main)** ↔ **tmux** ↔ **claude**.
+bui is an Electron desktop client for `claude`/opencode sessions running on a
+remote Linux box, reached **over HTTPS** (no SSH). Pipeline:
+**xterm.js (renderer)** ↔ **HTTP/WS** ↔ **bui-server (`src/server/`, on the box)**
+↔ **tmux + opencode** ↔ **claude**.
 
-The desktop reaches the Linux box via direct HTTPS to bui-server (`src/server/`),
-authenticated with a `boxToken` obtained during pairing. No SSH, no mosh, no
-tunnels — the server IS the box. See "Desktop transport (HTTP-only)" below.
+**HTTP-only is the sole transport.** The desktop reaches the box via direct
+HTTPS to bui-server, authenticated with a `boxToken` obtained during pairing.
+No SSH, no mosh, no tunnels, no `-L` forwards, no ControlMaster — **the server
+IS the box**. The old SSH/PTY main-process transport (`src/main/pty.ts`,
+`src/main/opencode.ts`, the event tunnel, forward-heal) was deleted; only two
+transport modes remain (`src/shared/transport.mjs`): `http` (paired) and
+`onboarding` (pre-pairing). See "Desktop transport (HTTP-only)" below.
 
-A secondary mobile/web front-end (`src/server/`) runs on the Linux box itself
-and exposes the same tmux server over HTTP+WS. See the "Mobile / web client"
-section below.
+The SAME bui-server serves the mobile/web front-end. Desktop and mobile are both
+thin clients over the identical `/rpc` + `/events` HTTP surface; the desktop adds
+only OS-integration bridges (clipboard, screenshot, file peek, notifications) via
+its Electron preload. See "Mobile / web client" below.
+
+**Runtime note (the code hasn't fully caught up to this yet):** once paired,
+`src/renderer/main.tsx` swaps `window.api` to `httpApi` (`/rpc` + `/events`), so
+EVERY renderer data call goes over HTTP. The Electron IPC path (`src/preload/` +
+`src/main/index.ts` handlers) is now vestigial for data — it carries only the
+pre-pairing `authClaim`/`authPair` channels plus the OS bridges. A large
+dead-surface removal is tracked in **BET-124** (docs/preload cleanup) and a
+follow-up epic (delete the redundant `src/main/{schedule,secrets,webhook,
+sharedConfigSync}.ts` HTTPS clients, extract the `Api` type out of the preload
+runtime, retire the two-config LWW sync). Until those land, treat any
+`src/main/*` data client or IPC handler other than pairing + OS bridges as dead.
 
 See `README.md` for user-facing intro and `HANDOFF.md` for the most recent
 session-state snapshot.
 
 ## Layout
 
-- `src/main/` — Electron main: pty, transport, tmux primitives, config, IPC.
-  - `opencode.ts` — HTTP client + SSE consumer for chat-mode windows.
-  - `index.ts` — IPC handlers, opencode SSE bus, screenshot detector.
-- `src/renderer/` — React + xterm.js. `Terminal.tsx` is the only place that
-  owns an xterm instance. `ChatPanel.tsx` is the entire chat-mode UI (~3500 LoC).
-  - `chatUtils.ts` — pure utility functions extracted for testability (`formatTokens`,
-    `formatDuration`, `ctxStageColor`, `filterCommands`, `dedupeAgainstBuiltins`,
-    `resolveContextLimit`, `classifyFinish`, `describeTruncation`,
-    `isTerminalTodo`, `allTodosTerminal`).
+- `src/server/` — **the core.** Node HTTP+WS server that runs **on the Linux
+  box** and owns everything: tmux, opencode, config, schedules, secrets,
+  webhooks, push, peers, serve-page. It's what both the desktop and the
+  mobile/web client talk to over HTTPS. Serves the React renderer built by
+  `build:mobile`. Module tree: `index.mjs` (entry + `/rpc` + `/events` + REST
+  `/api/*`), `rpc.mjs` (channel dispatch — the `window.api` contract server
+  side), `tmux.mjs`, `opencode.mjs` (HTTP proxy to opencode on `127.0.0.1:4096`
+  + SSE), `pty.mjs`, `events.mjs` (bus + SSE), `local.mjs` (config/git/fs),
+  `status.mjs`, `push.mjs`, `schedule.mjs`, `secrets.mjs`, `webhook.mjs`,
+  `servePage.mjs`, `peers.mjs`, `outbox.mjs`, `auth.mjs`.
+- `src/renderer/` — React + xterm.js UI (desktop `App.tsx` + mobile
+  `MobileApp.tsx`). `Terminal.tsx` is the only place that owns an xterm
+  instance. `ChatPanel.tsx` is the entire chat-mode UI (~4150 LoC).
+  - `api/httpApi.ts` — implements the full `Api` contract over `/rpc` +
+    `/events`. **This is the live data path on BOTH desktop and mobile.**
+    `main.tsx` installs it as `window.api` when paired.
+  - `preloadAccess.ts` — the narrow `BuiPreload` interface: the ~9 OS bridges
+    the renderer reaches via `window.__buiPreload` (clipboard, openExternal,
+    reveal, screenshot, file peek, desktop-notify, getPathForFile).
+  - `chatUtils.ts` — pure utility functions extracted for testability
+    (`formatTokens`, `formatDuration`, `ctxStageColor`, `filterCommands`,
+    `dedupeAgainstBuiltins`, `resolveContextLimit`, `classifyFinish`,
+    `describeTruncation`, `isTerminalTodo`, `allTodosTerminal`).
     Import from here; don't redeclare them inline in ChatPanel.
-- `src/preload/` — typed `window.api` bridge.
-- `src/server/` — Node HTTP+WS server for mobile/web access. Runs **on the
-  Linux box**, not the Mac. Serves the React renderer built by `build:mobile`.
-  Module tree: `index.mjs` (entry), `tmux.mjs`, `pty.mjs`, `opencode.mjs`,
-  `rpc.mjs`, `events.mjs`, `local.mjs`, `status.mjs`.
+- `src/preload/` — Electron `contextBridge`. Exposes OS-integration bridges as
+  `window.__buiPreload` and is the `export type Api = typeof api` source that
+  typechecks `httpApi`. NOTE: it still *declares* ~60 methods but ~90% are dead
+  in HTTP mode (their `ipcMain` handlers were removed) — the runtime only needs
+  the OS bridges + `authClaim`/`authPair`. See BET-124 / the preload-shrink
+  epic.
+- `src/main/` — Electron main process, now **OS-integration + pairing only**:
+  screenshot detector, clipboard, drag-drop, `desktopPresence.ts`,
+  `desktopNotify.ts`, `autoUpdate.ts`, `auth.ts` (pairing claim), `config.ts`
+  (local `{serverUrl, boxId, boxToken, projects}` store). It does NOT own tmux,
+  pty, or opencode anymore — those live in `src/server/`. Any `src/main/*.ts`
+  HTTPS data client (`schedule.ts`, `secrets.ts`, `webhook.ts`,
+  `sharedConfigSync.ts`) is redundant with `httpApi` and slated for deletion.
+- `src/shared/` — transport mode resolution (`transport.mjs`), plus pure logic
+  shared by renderer + server (`groq.mjs`, `subagentSync.mjs`,
+  `voiceClassifier.mjs`, `modelGuide.mjs`).
 
 ## Build / run
 
@@ -719,15 +762,21 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
 ## Patterns worth knowing
 
 - **New window / new chat-session cwd inheritance** — every code path that
-  creates a tmux window or an opencode session resolves cwd to the project's
-  stored `defaultCwd` when the renderer's input is empty OR the literal `"~"`.
-  Helper `resolveProjectCwd(sessionName, inputCwd)` lives in
-  `src/main/index.ts` (desktop) and is duplicated inside `buildHandlers` in
-  `src/server/rpc.mjs` (mobile). Applied by: `tmux:new-window`,
-  `opencode:clear-session`, `opencode:fork-session`. **Renderer must pass
-  `cwd ?? ""`**, NOT `cwd || "~"` — the literal tilde would defeat the
-  resolver. Server tests in `src/server/rpc.test.mjs` cover empty / tilde /
-  explicit-path inputs.
+  creates a tmux window or an opencode session resolves the cwd through ONE
+  helper, `resolveProjectCwd(sessionName, inputCwd)` in `buildHandlers`
+  (`src/server/rpc.mjs`). It is the SOLE resolver — HTTP-only means there is no
+  longer a desktop-main copy (the old `src/main/index.ts` duplicate was deleted
+  with the SSH path). Applied by all four consumers: `tmux:new-session`,
+  `tmux:new-window`, `opencode:fork-session`, `opencode:clear-session`.
+  Precedence (BET-120): **explicit non-tilde cwd → stored project `defaultCwd`
+  in config → LIVE tmux session dir (`listProjects()` first-window pane path) →
+  `"~"`** as last resort. The live-tmux fallback matters because the stored
+  config (`~/.bui-mobile/config.json` `projects[]`) is only populated by the
+  desktop project-create flow and is empty/stale for sessions created any other
+  way — without it, every new window silently dropped into `$HOME`. **Renderer
+  must pass `cwd ?? ""`** (or omit it), NOT `cwd || "~"` — the literal tilde
+  would defeat the resolver. Tests: `src/server/rpc.test.mjs` covers empty /
+  tilde / explicit / stored-meta-precedence / live-tmux-fallback.
   - **GOTCHA — opencode does NOT reject a tilde dir; it silently corrupts
     it.** `resolveProjectCwd` deliberately returns a possibly-tilde path
     (`~/projects/x`) — it picks *which* cwd, not an absolute one. opencode's
@@ -735,16 +784,14 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
     tilde-relative one against its OWN server process cwd (the remote
     `$HOME`), persisting the corrupt `/home/<user>/~/projects/x` into session
     metadata forever. Expansion is therefore mandatory at the **single
-    creation chokepoint**, NOT in `resolveProjectCwd`:
-    `createSession` expands a leading `~` itself — desktop
-    (`src/main/opencode.ts`) delegates to the server's `expandTilde` via the
-    opencode HTTP proxy (`src/server/opencode.mjs`); mobile
-    (`src/server/opencode.mjs`) uses the same `expandTilde` against the server
-    process's own `$HOME`. `forkSession` is
-    unaffected — it inherits the parent's directory from opencode and passes
-    no cwd. The new-window path (`pty.ts:maybeCreateChatSession`) expands
-    independently before `createSession`; that earlier expansion is now
-    redundant but harmless. Regression tests:
+    creation chokepoint**, NOT in `resolveProjectCwd`: `createSession`
+    (`src/server/opencode.mjs`) expands a leading `~` itself via `expandTilde`
+    against the server process's own `$HOME` — the renderer (desktop + mobile)
+    reaches it the same way over `/rpc`. `forkSession` is unaffected — it
+    inherits the parent's directory from opencode and passes no cwd. The
+    new-window chat-holder path (`tmux.mjs:maybeCreateChatSession`) also
+    expands before `createSession`; that earlier expansion is now redundant but
+    harmless. Regression tests:
     `createSession expands a leading ~ …` in `src/server/opencode.test.mjs`
     (red/green verified). Do NOT "simplify" by moving expansion back into a
     caller — the chokepoint is what makes the corruption unreachable.
@@ -982,13 +1029,18 @@ top, talking to an opencode session over HTTP (via bui-server).
 **Recognition**: presence of `@bui-session-id` tmux user-option on the window
 is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 
-**Architecture**:
-- opencode runs in tmux session `bui-opencode` on the Linux box, port 4096,
-  bound to 127.0.0.1. The desktop reaches it via bui-server's HTTP proxy
+**Architecture** (HTTP-only — opencode session mgmt + SSE live server-side):
+- opencode runs as a `systemd --user` service (`opencode-serve`) on the Linux
+  box, port 4096, bound to 127.0.0.1. bui-server proxies it over HTTP
   (`src/server/opencode.mjs`) — no SSH tunnel, no `-L` forward.
-- Renderer never talks to opencode directly — only via `window.api.*`.
-- Main owns ONE long-lived SSE stream (`/event`) and fans events to the renderer.
-  ChatPanel filters by sessionID.
+- Renderer never talks to opencode directly — only via `window.api.*`, which is
+  `httpApi` (`/rpc` + `/events`) on both desktop and mobile.
+- **bui-server** owns the opencode SSE streams (`src/server/opencode.mjs`
+  `subscribeEvents` — global + one scoped `/event?directory=` stream per known
+  session directory) and republishes on its in-process bus; the renderer
+  consumes them via `GET /events`. ChatPanel filters by sessionID. (Historical:
+  the desktop main process used to own this SSE bus via `src/main/opencode.ts` +
+  `src/main/index.ts` over an SSH forward — that path is deleted.)
 - Anthropic auth via `opencode-claude-auth@latest` plugin in
   `~/.config/opencode/opencode.jsonc` (Claude Max sub, `~/.claude/.credentials.json`).
 
@@ -996,11 +1048,13 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 
 | File | What |
 |---|---|
-| `src/main/opencode.ts` | HTTP client, SSE consumer, opencode session mgmt |
-| `src/main/index.ts` | IPC handlers, opencode SSE bus, screenshot detector |
-| `src/main/pty.ts` | `tmuxRestampSessionId`, `tmuxNewChatWindow` |
+| `src/server/opencode.mjs` | opencode HTTP proxy, session mgmt, per-directory SSE streams (server-side, the sole owner) |
+| `src/server/tmux.mjs` | tmux CRUD, `restampSessionId` (`@bui-session-id`), chat-holder pane, `maybeCreateChatSession` |
+| `src/server/rpc.mjs` | `/rpc` channel dispatch — the `window.api` contract, server side; `resolveProjectCwd` |
+| `src/server/index.mjs` | bui-server entry: `/rpc`, `/events` SSE, REST `/api/*`, WS `/pty`, auth gate |
+| `src/renderer/api/httpApi.ts` | the live `window.api` on desktop + mobile (`/rpc` + `/events`) |
 | `src/renderer/ChatPanel.tsx` | entire chat UI (~4150 LoC), intentionally monolithic |
-| `src/renderer/App.tsx` | mounts ChatPanels keyed by session id |
+| `src/renderer/App.tsx` | mounts ChatPanels keyed by session id; owns the `onOpencodeEvent` fan-out |
 
 **AppConfig additions**: `opencodePort` (default 14096), `chatAutoAllow`
 (auto-reply "always" to all permission requests — like `--dangerously-skip-permissions`).
@@ -1227,10 +1281,18 @@ to the raw message.
 `?directory=<session.directory>` so opencode runs tools inside the project
 worktree. opencode's `/event` stream is ALSO scoped by `?directory=`: events
 from a scoped POST land only on the matching scoped subscription, NOT on
-the global stream. The bus in `src/main/index.ts` therefore opens **one
-`/event` stream per directory** in addition to the global stream:
+the global stream. The event bus therefore opens **one `/event` stream per
+directory** in addition to the global stream.
 
-- `sessionDirectoryCache` in `src/main/opencode.ts` maps `sessionId →
+**Location (HTTP-only):** this machinery now lives entirely in bui-server —
+`src/server/opencode.mjs` (`subscribeEvents`, `sessionDirectoryCache`,
+`rememberSessionDirectory`) + `src/server/index.mjs` (the bus that spawns
+per-directory streams and republishes on `/events`). References below to
+`src/main/{index,opencode}.ts` are the deleted desktop-main equivalents, kept
+only to explain the shared contract and the historical "identical bug in both
+transports"; the surviving copy is the `src/server/*.mjs` one.
+
+- `sessionDirectoryCache` (`src/server/opencode.mjs`) maps `sessionId →
   directory`; populated by `createSession`, `forkSession`, and `listSessions`
   (via a side-effect loop), and lazy-filled by `GET /session/{id}` on miss.
 - `onSessionDirectoryAdded` lets the bus auto-spawn a stream whenever a new
@@ -1522,8 +1584,11 @@ Three upload paths all land in `~/.bui-uploads/<session>/<ts>/` on the remote:
    **Do NOT add `document.hidden` check** — bui loses focus during the screenshot
    gesture so the event would always be dropped.
 
-`uploadBuffer` in `pty.ts`: writes `ArrayBuffer` to Mac tmpfile, calls
-`uploadFiles`, `mv` on remote to restore original filename, deletes tmpfile.
+`uploadBuffer` (`src/renderer/api/httpApi.ts`): POSTs the `ArrayBuffer` bytes
+straight to bui-server `POST /api/upload?session=<name>` with the Bearer token;
+the server writes `~/.bui-uploads/<session>/<batch>/<filename>` and returns the
+absolute remote path. (Historical: the deleted desktop-SSH `pty.ts` version
+staged a Mac tmpfile + scp + remote `mv`; HTTP-only sends bytes directly.)
 
 ## Testing
 
@@ -1588,12 +1653,14 @@ Full CLI cheat sheet: `/home/dev/projects/shared/multica/setup.md`
   Phase 2 is the "Open as session" affordance: a button on the TaskBody
   header that creates a fresh chat-mode tmux window stamped with the
   child's existing opencode sessionId — no new opencode session. The
-  plumbing is already there (`pty.ts:tmuxNewWindow`'s `existingSessionId`
-  param + `maybeCreateChatSession` short-circuit; the fork handler is
-  the template to copy minus the fork POST). Needs a new
-  `IPC.opencodeAdoptSession` channel mirrored on desktop + mobile, with
-  `rememberSessionDirectory` exported from both transports so the
-  per-directory SSE stream opens before the renderer mounts the panel.
+  plumbing is server-side: `src/server/tmux.mjs` `newWindow` +
+  `maybeCreateChatSession` (add an `existingSessionId` short-circuit so it
+  stamps the child's id instead of creating a session); the
+  `opencode:fork-session` handler in `src/server/rpc.mjs` is the template to
+  copy minus the fork POST. Needs a new `opencode:adopt-session` `/rpc`
+  channel + httpApi method, ensuring `rememberSessionDirectory`
+  (`src/server/opencode.mjs`) runs so the per-directory SSE stream opens
+  before the renderer mounts the panel.
 - **Global model preference** — `AppConfig.defaultModel` (Settings UI, persisted to `config.json`). New sessions and `/clear` fall back to this when no per-session localStorage entry exists. `/clear` also carries the current per-session override forward to the new session id before refresh.
 - **Live refresh polling** — sidebar updates only on bui's own actions.
 - **Command palette (⌘K)** — fuzzy switch + actions (~150 lines).
