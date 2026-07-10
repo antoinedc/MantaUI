@@ -62,12 +62,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
   const [newSessionFor, setNewSessionFor] = useState<string | null>(null);
   const [newSessionName, setNewSessionName] = useState("");
-  const [newSessionChatMode, setNewSessionChatMode] = useState(false);
-
-  // Project-create chat-mode toggle. When true, every window we spawn for the
-  // new project (single-window OR worktree fan-out) opens as a chat-mode
-  // window pinned to its own opencode session.
-  const [newProjectChatMode, setNewProjectChatMode] = useState(false);
 
   const [confirmDeleteFor, setConfirmDeleteFor] = useState<
     | { kind: "session"; project: string; index: number; name: string }
@@ -115,7 +109,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const resetNewProjectForm = () => {
     setNewProjectName("");
     setNewProjectCwd("~");
-    setNewProjectChatMode(false);
     setNewProjectOpen(false);
     setDetectedWorktrees(null);
     setCreating(false);
@@ -204,7 +197,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           name,
           cwd,
           windowName: "default",
-          chatMode: newProjectChatMode,
+          chatMode: true,
         });
         resetNewProjectForm();
         await refresh();
@@ -227,7 +220,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           name,
           cwd: first.path,
           windowName: worktreeName(first),
-          chatMode: newProjectChatMode,
+          chatMode: true,
         });
         for (const w of rest) {
           try {
@@ -235,7 +228,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               sessionName: name,
               windowName: worktreeName(w),
               cwd: w.path,
-              chatMode: newProjectChatMode,
+              chatMode: true,
             });
           } catch (e) {
             // Surface but keep going — partial fan-out is better than aborting
@@ -248,7 +241,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           name,
           cwd,
           windowName: "default",
-          chatMode: newProjectChatMode,
+          chatMode: true,
         });
       }
       resetNewProjectForm();
@@ -263,7 +256,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const startNewSession = (projectName: string) => {
     setNewSessionFor(projectName);
     setNewSessionName("");
-    setNewSessionChatMode(false);
     setCollapsed((prev) => {
       const next = new Set(prev);
       next.delete(projectName);
@@ -282,7 +274,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       const projects = await window.api.tmuxNewWindow({
         sessionName: newSessionFor,
         windowName,
-        chatMode: newSessionChatMode,
+        chatMode: true,
       });
       setNewSessionFor(null);
       await refresh();
@@ -496,15 +488,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             </div>
           ) : (
             <div className="space-y-2">
-              <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={newProjectChatMode}
-                  onChange={(e) => setNewProjectChatMode(e.target.checked)}
-                  className="accent-accent"
-                />
-                <span>chat mode (opencode)</span>
-              </label>
               <div className="flex gap-2">
                 <button
                   onClick={() => createProject("auto")}
@@ -706,15 +689,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                         }}
                         className="w-full bg-bg-soft border border-border px-2 py-0.5 text-xs rounded focus:outline-none focus:border-accent"
                       />
-                      <label className="flex items-center gap-2 text-[11px] text-text-muted cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={newSessionChatMode}
-                          onChange={(e) => setNewSessionChatMode(e.target.checked)}
-                          className="accent-accent"
-                        />
-                        <span>chat mode (opencode)</span>
-                      </label>
                       <div className="flex gap-2">
                         <button
                           onClick={createSession}
