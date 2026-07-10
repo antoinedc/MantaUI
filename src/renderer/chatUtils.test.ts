@@ -2469,12 +2469,30 @@ describe("buildTitlePromptInput", () => {
 });
 
 describe("sanitizeGeneratedTitle", () => {
-  it("lowercases and keeps at most two words", () => {
-    expect(sanitizeGeneratedTitle("JWT Expiry Fix Now")).toBe("jwt expiry");
+  it("preserves sentence case (no lowercasing)", () => {
+    expect(sanitizeGeneratedTitle("Fix SSE reconnect after sleep")).toBe(
+      "Fix SSE reconnect after sleep",
+    );
+  });
+
+  it("clamps to six words", () => {
+    expect(
+      sanitizeGeneratedTitle("one two three four five six seven"),
+    ).toBe("one two three four five six");
+  });
+
+  it("clamps overly long output at a word boundary", () => {
+    const out = sanitizeGeneratedTitle(
+      "Refactor the enormous authentication middleware pipeline completely",
+    );
+    expect(out.length).toBeLessThanOrEqual(48);
+    expect(out.endsWith(" ")).toBe(false);
+    // Should not cut mid-word.
+    expect(out).not.toMatch(/[a-zA-Z]-$/);
   });
 
   it("strips quotes, markdown, and trailing punctuation", () => {
-    expect(sanitizeGeneratedTitle('"**Login Bug.**"')).toBe("login bug");
+    expect(sanitizeGeneratedTitle('"**Login Bug.**"')).toBe("Login Bug");
     expect(sanitizeGeneratedTitle("`auth`")).toBe("auth");
     expect(sanitizeGeneratedTitle("“dark mode”")).toBe("dark mode");
   });
@@ -2487,12 +2505,9 @@ describe("sanitizeGeneratedTitle", () => {
   });
 
   it("uses only the first line of a chatty model", () => {
-    expect(sanitizeGeneratedTitle("api docs\nHere's why...")).toBe("api docs");
-  });
-
-  it("clamps overly long output", () => {
-    const out = sanitizeGeneratedTitle("supercalifragilisticexpialidocious");
-    expect(out.length).toBeLessThanOrEqual(24);
+    expect(sanitizeGeneratedTitle("Api docs\nHere's why...")).toBe(
+      "Api docs",
+    );
   });
 
   it("returns empty for null/blank (caller must skip the rename)", () => {

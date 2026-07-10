@@ -1501,8 +1501,8 @@ export function isDrainAbortError(
 
 // ── Auto-rename session ───────────────────────────────────────────────────
 // When `autoRenameSessions` is enabled, ChatPanel periodically asks opencode
-// to summarize the recent conversation into a 1-2 word tmux window name (see
-// the "Auto-rename" section in AGENTS.md). These pure helpers make the
+// to summarize the recent conversation into a short 3-6 word tmux window
+// name (see the "Auto-rename" section in AGENTS.md). These pure helpers make the
 // trigger cadence, the prompt input, and the title sanitization testable
 // without spinning up a session.
 
@@ -1518,9 +1518,9 @@ export const AUTO_RENAME_EVERY_N_TURNS = 5;
 const TITLE_INPUT_MAX_CHARS = 2000;
 
 // Max length of the final window name. tmux truncates long names in the status
-// line and our sidebar; a 1-2 word title should never approach this, but we
+// line and our sidebar; a 3-6 word title should never approach this, but we
 // clamp defensively so a misbehaving model can't write an essay into the name.
-const TITLE_MAX_CHARS = 24;
+const TITLE_MAX_CHARS = 48;
 
 /**
  * Should an auto-rename fire at this user-turn count? True on every Nth
@@ -1598,11 +1598,12 @@ export function buildTitlePromptInput(
 }
 
 /**
- * Sanitize a model-generated title into a safe 1-2 word tmux window name.
+ * Sanitize a model-generated title into a safe 3-6 word tmux window name.
  * Strips surrounding quotes/markdown/punctuation, collapses whitespace,
- * takes at most the first two words, lowercases, and clamps length. Returns
- * "" when nothing usable remains (caller MUST skip the rename rather than
- * blank the window name — the rename IPC rejects empty names anyway). Pure +
+ * takes at most the first six words, preserves the model's sentence case,
+ * and clamps length (cutting at a word boundary when possible). Returns ""
+ * when nothing usable remains (caller MUST skip the rename rather than blank
+ * the window name — the rename IPC rejects empty names anyway). Pure +
  * tested.
  */
 export function sanitizeGeneratedTitle(raw: string | null | undefined): string {
@@ -1617,10 +1618,14 @@ export function sanitizeGeneratedTitle(raw: string | null | undefined): string {
   s = s.split(/\r?\n/)[0] ?? "";
   // Drop trailing sentence punctuation.
   s = s.replace(/[.!?,;:]+$/g, "");
-  // Collapse internal whitespace, take at most two words.
-  const words = s.trim().split(/\s+/).filter(Boolean).slice(0, 2);
-  let out = words.join(" ").toLowerCase().trim();
-  if (out.length > TITLE_MAX_CHARS) out = out.slice(0, TITLE_MAX_CHARS).trim();
+  // Collapse internal whitespace, take at most six words. Preserve case.
+  const words = s.trim().split(/\s+/).filter(Boolean).slice(0, 6);
+  let out = words.join(" ").trim();
+  if (out.length > TITLE_MAX_CHARS) {
+    const window = out.slice(0, TITLE_MAX_CHARS);
+    const lastSpace = window.lastIndexOf(" ");
+    out = (lastSpace > 0 ? window.slice(0, lastSpace) : window).trim();
+  }
   return out;
 }
 
@@ -1628,9 +1633,13 @@ export function sanitizeGeneratedTitle(raw: string | null | undefined): string {
 // the main process) so the renderer and tests share one source of truth.
 export function buildTitleInstruction(conversation: string): string {
   return (
-    "You are titling a work session. Reply with ONLY a 1-2 word lowercase " +
-    "title (no punctuation, no quotes, no explanation) that summarizes the " +
-    "current focus of this conversation:\n\n" +
+    "You are titling a work session. Reply with ONLY a short descriptive " +
+    "title of 3 to 6 words that names the concrete task, feature, or bug " +
+    "being worked on in this conversation. Sentence case. No trailing " +
+    "punctuation, no quotes, no explanation. Be specific — prefer 'Fix SSE " +
+    "reconnect after sleep' or 'Sidebar session age indicator' over vague " +
+    "titles like 'Code fixes' or 'Debugging session'. Title the CURRENT " +
+    "focus, weighting the most recent messages:\n\n" +
     conversation
   );
 }

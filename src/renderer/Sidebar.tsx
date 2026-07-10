@@ -597,7 +597,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                     return (
                       <div key={w.index}>
                         <div
-                          className={`group flex items-center gap-1 pl-2 pr-1 py-0.5 rounded text-sm cursor-pointer transition ${
+                          className={`group flex items-center gap-1 pl-2 pr-1 py-0.5 rounded text-xs cursor-pointer transition ${
                             isActive
                               ? "bg-bg-soft text-text"
                               : "text-text-muted hover:bg-bg-soft hover:text-text"
@@ -616,7 +616,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                                 else if (e.key === "Escape") setRenameTarget(null);
                               }}
                               onBlur={commitRename}
-                              className="flex-1 bg-bg border border-accent px-1 py-0 text-sm rounded focus:outline-none"
+                              className="flex-1 bg-bg border border-accent px-1 py-0 text-xs rounded focus:outline-none"
                             />
                           ) : (
                             <span
