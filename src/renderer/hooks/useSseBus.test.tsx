@@ -7,12 +7,16 @@
 // mount ChatPanel and emit events through the mock bus.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { act } from "react";
 import { ChatPanel } from "../ChatPanel";
 import {
   installMockApi,
   resetStore,
   mount,
   emitAndFlush,
+  type MockApi,
+  type MockEventBus,
+  type Harness,
 } from "../testHarness";
 
 const PROPS = {
@@ -366,5 +370,146 @@ describe("useSseBus via ChatPanel", () => {
 
     // Component should still be mounted (event was dropped).
     expect(h.container.querySelector("textarea")).not.toBeNull();
+  });
+});
+
+// ===== Queued-message drain at the next tool boundary (BET-131 regression) =====
+//
+// The deployed opencode build never emits `session.next.step.*`, so the
+// drain trigger on that event is dead in production. The real, primary
+// trigger is a `message.part.updated` event whose part is a tool that just
+// completed/errored (`isToolStepBoundary`). This regression was introduced
+// when the SSE handler moved from ChatPanel.tsx into useSseBus.ts (BET-64)
+// and the tool-boundary call site was dropped. Verify it fires the abort
+// immediately at the next tool completion instead of waiting for full idle.
+describe("useSseBus queued-message drain on tool step boundary", () => {
+  let api: MockApi;
+  let bus: MockEventBus;
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  // Same controlled-input helper as ChatPanel.harness.test.tsx.
+  function typeInto(el: HTMLTextAreaElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  async function queueASecondMessage(container: HTMLElement) {
+    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      typeInto(textarea, "second message");
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+  }
+
+  it("aborts and drains at the next completed tool part, not at full idle", async () => {
+    ({ api, bus } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    // Turn is already running.
+    await emitAndFlush(bus, h, {
+      type: "session.status",
+      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    });
+
+    // User submits a second message mid-turn — it queues instead of sending.
+    await queueASecondMessage(h.container);
+    await h.flush();
+    expect(api.calls.opencodeAbort ?? []).toEqual([]);
+
+    // A tool call completes — this is the ONLY step-boundary event the
+    // deployed opencode build actually emits. It must trigger the drain
+    // immediately, not wait for session.idle.
+    await emitAndFlush(bus, h, {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_test",
+        messageID: "msg_1",
+        part: { type: "tool", state: { status: "completed" } },
+      },
+    });
+
+    expect(api.calls.opencodeAbort).toEqual([["ses_test"]]);
+  });
+
+  it("does not abort on a running (non-boundary) tool part", async () => {
+    ({ api, bus } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await emitAndFlush(bus, h, {
+      type: "session.status",
+      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    });
+    await queueASecondMessage(h.container);
+    await h.flush();
+
+    await emitAndFlush(bus, h, {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_test",
+        messageID: "msg_1",
+        part: { type: "tool", state: { status: "running" } },
+      },
+    });
+
+    expect(api.calls.opencodeAbort ?? []).toEqual([]);
+  });
+
+  it("does not drain the parent queue on a subagent child's tool completion", async () => {
+    ({ api, bus } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    // Register a subagent child session under the main session.
+    await emitAndFlush(bus, h, {
+      type: "session.created",
+      properties: {
+        sessionID: "ses_test",
+        info: { id: "child_boundary", parentID: "ses_test" },
+      },
+    });
+
+    await emitAndFlush(bus, h, {
+      type: "session.status",
+      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    });
+    await queueASecondMessage(h.container);
+    await h.flush();
+
+    // A tool completes inside the CHILD session — must not drain the
+    // parent's queue.
+    await emitAndFlush(bus, h, {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "child_boundary",
+        messageID: "msg_child_1",
+        part: { type: "tool", state: { status: "completed" } },
+      },
+    });
+
+    expect(api.calls.opencodeAbort ?? []).toEqual([]);
   });
 });
