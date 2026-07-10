@@ -530,18 +530,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   {isCollapsed ? "▸" : "▾"}
                 </span>
                 {renameTarget?.kind === "project" && renameTarget.old === p.tmuxSession ? (
-                  <input
-                    autoFocus
+                  <RenameInput
                     value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
-                    onClick={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => {
-                      e.stopPropagation();
-                      if (e.key === "Enter") commitRename();
-                      else if (e.key === "Escape") setRenameTarget(null);
-                    }}
-                    onBlur={commitRename}
-                    className="flex-1 bg-bg border border-accent px-1 py-0 text-xs rounded font-semibold normal-case tracking-normal focus:outline-none"
+                    onChange={setRenameValue}
+                    onCommit={commitRename}
+                    onCancel={() => setRenameTarget(null)}
+                    size="project"
                   />
                 ) : (
                   <span
@@ -605,18 +599,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                           onClick={() => onClickWindow(p, w.index)}
                         >
                           {isRenaming ? (
-                            <input
-                              autoFocus
+                            <RenameInput
                               value={renameValue}
-                              onChange={(e) => setRenameValue(e.target.value)}
-                              onClick={(e) => e.stopPropagation()}
-                              onKeyDown={(e) => {
-                                e.stopPropagation();
-                                if (e.key === "Enter") commitRename();
-                                else if (e.key === "Escape") setRenameTarget(null);
-                              }}
-                              onBlur={commitRename}
-                              className="flex-1 bg-bg border border-accent px-1 py-0 text-xs rounded focus:outline-none"
+                              onChange={setRenameValue}
+                              onCommit={commitRename}
+                              onCancel={() => setRenameTarget(null)}
+                              size="window"
                             />
                           ) : (
                             <span
@@ -855,6 +843,38 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
     return <span className="flex items-center leading-none">{ageLabel}</span>;
   }
   return null;
+}
+
+function RenameInput({
+  value,
+  onChange,
+  onCommit,
+  onCancel,
+  size,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onCommit: () => void;
+  onCancel: () => void;
+  size: "project" | "window";
+}) {
+  return (
+    <input
+      autoFocus
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") onCommit();
+        else if (e.key === "Escape") onCancel();
+      }}
+      onBlur={onCommit}
+      className={`flex-1 bg-bg border border-accent px-1 py-0 text-xs rounded focus:outline-none ${
+        size === "project" ? "font-semibold normal-case tracking-normal" : ""
+      }`}
+    />
+  );
 }
 
 function ConfirmDelete({
