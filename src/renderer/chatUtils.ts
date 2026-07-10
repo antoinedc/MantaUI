@@ -1973,3 +1973,42 @@ export function shouldForceReconnect(
   if (state !== "connected") return false;
   return now - lastFrameAt > thresholdMs;
 }
+
+// ---------------------------------------------------------------------------
+// Bounded-concurrency fan-out (BET-135)
+//
+// The store's startup fan-outs (`replayChatAttention`,
+// `backfillLastMessageTimes`) used `Promise.all` over every chat session /
+// directory, firing every opencode request in one unbounded burst. With many
+// sessions this hammers opencode and makes the whole app feel sluggish right
+// after the session list loads. `runWithConcurrency` caps how many `fn`
+// calls are in flight at once while still resolving once every item has
+// settled (success or failure) — callers keep the exact same "run for every
+// item, don't stop on one failure" semantics, just scheduled more gently.
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `fn` over every item in `items`, at most `limit` concurrently.
+ * Resolves once every item has settled. A rejecting `fn` is swallowed
+ * per-item (matching the callers' existing best-effort try/catch bodies)
+ * so one failure can't abort the rest of the batch.
+ */
+export async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const idx = i++;
+      if (idx >= items.length) return;
+      try {
+        await fn(items[idx]);
+      } catch {
+        /* per-item failure is non-fatal — isolate and continue the batch */
+      }
+    }
+  });
+  await Promise.all(workers);
+}

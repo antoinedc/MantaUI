@@ -115,12 +115,11 @@ export function App() {
     .join(",");
   useEffect(() => {
     if (!chatSessionKey) return;
-    void useStore.getState().replayChatAttention();
-    // Cold-start backfill of the sidebar elapsed-since-last-message label
-    // (BET-119) — same rationale/gating as replayChatAttention above: SSE
-    // is forward-only, so a chat window's lastMessageAt is unset until its
-    // next busy/idle transition without this.
-    void useStore.getState().backfillLastMessageTimes();
+    // runBackgroundSync fires replayChatAttention + backfillLastMessageTimes
+    // together (unchanged behavior — both still run in parallel), bounding
+    // each fan-out's concurrency and toggling `backgroundSyncing` for the
+    // sidebar's "Syncing…" indicator (BET-135).
+    void useStore.getState().runBackgroundSync();
   }, [chatSessionKey]);
 
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
