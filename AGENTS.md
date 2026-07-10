@@ -85,34 +85,46 @@ npm run test:server   # node:test only (src/server/)
 npm run test:watch    # vitest watch mode (renderer only)
 npm run dev           # main-process AND preload changes need a full Ctrl+C + restart
 npm run mobile        # mobile/web server on $MANTA_MOBILE_HOST:$MANTA_MOBILE_PORT (default 0.0.0.0:8787)
-npm run build:mobile  # Vite build of renderer → mobile/www/ for Capacitor
+npm run build:mobile  # Vite build of renderer → mobile/www/ (gitignored artifact; CI builds it on main)
 ```
 
 The preload bundle is built once at dev-server start; renderer HMR alone won't
 pick up new `window.api` methods. If you add an IPC channel and don't see it
 on `window.api`, you didn't restart.
 
-**MOBILE CHANGES NEED A REBUILD + COMMIT — source edits alone do NOTHING on a
-phone/browser.** The mobile/web client is served as a **pre-built static
-bundle** from `mobile/www/` (`src/server/index.mjs` `PUBLIC_DIR`), NOT live
-source. `mobile/www/` is **tracked in git** (not ignored). So any change that
-should reach mobile — `ChatPanel.tsx`, `mobile.css`, `src/renderer/**`, the
-service worker — requires:
+**MOBILE CHANGES REACH DEVICES ONLY AFTER THE BUNDLE IS REBUILT ON MAIN — but
+you no longer rebuild/commit it by hand.** The mobile/web client is served as a
+**pre-built static bundle** from `mobile/www/` (`src/server/index.mjs`
+`PUBLIC_DIR`), NOT live source. As of 2026-07-10 `mobile/www/` is **gitignored**
+(NOT tracked on branches) — the whole dir is a Vite build artifact whose source
+is `src/renderer/` + `src/renderer/public/`.
 
-```
-npm run build:mobile        # rebuilds mobile/www/ (Vite, content-hashed assets)
-git add mobile/www && git commit && git push
-```
+- **On a feature branch: just edit the source** (`ChatPanel.tsx`, `mobile.css`,
+  `src/renderer/**`, the service worker under `src/renderer/public/`). Do NOT
+  run `build:mobile` and commit `mobile/www/` — it's ignored, and committing it
+  is what used to make every two in-flight PRs conflict on the content-hashed
+  filenames + `index.html`'s `<script src>` (BET-118). If you want to preview on
+  a device before merge, `npm run build:mobile` locally and test — the output is
+  ignored, so nothing to un-stage.
+- **On merge to main: CI rebuilds and commits the bundle for you.**
+  `.github/workflows/build-mobile-bundle.yml` runs `build:mobile` on every push
+  to `main` and commits the fresh `mobile/www/` back (message
+  `chore(mobile): rebuild … [skip ci]`). So the box's `git pull` on main still
+  yields a ready-to-serve bundle — **deploy stays `git pull` + restart, no build
+  step on the box.** The workflow force-adds the ignored dir, no-ops when source
+  produces an identical bundle (the steady state + its own loop-guard follow-up
+  run), and serializes via a concurrency group so two quick merges don't race.
 
-Symptom if you skip this: you commit renderer/CSS changes, the desktop Electron
-app shows them (it runs Vite live), but the phone PWA looks unchanged — because
-the served bundle is stale. **No server restart is needed** — bui-server reads
-the static files per-request and sends `no-store` on `index.html` (so the next
-PWA launch / hard-refresh pulls the new content-hashed JS/CSS automatically).
-The service worker does NO asset caching (`mobile/www/sw.js`), so it isn't the
-culprit. To see changes on-device: force-quit + reopen the iOS PWA (or
-hard-refresh the browser). Desktop is unaffected by this — only the
-mobile/web client serves from `mobile/www/`.
+Symptom if the bundle is stale on a device: the desktop Electron app shows your
+changes (it runs Vite live), but the phone PWA looks unchanged. On main this
+means the bundle-build workflow hasn't finished (or failed) — check its run.
+**No server restart is needed** — bui-server reads the static files per-request
+and sends `no-store` on `index.html` (so the next PWA launch / hard-refresh
+pulls the new content-hashed JS/CSS automatically). The service worker does NO
+asset caching (`mobile/www/sw.js`), so it isn't the culprit. To see changes
+on-device: force-quit + reopen the iOS PWA (or hard-refresh the browser).
+Desktop is unaffected by this — only the mobile/web client serves from
+`mobile/www/`.
 
 Git-synced (since 2026-05-16). Single source of truth:
 `git@github.com:antoinedc/MantaUI.git` (private). Both the remote dev box

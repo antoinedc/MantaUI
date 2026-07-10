@@ -1,0 +1,100 @@
+# Build + commit the mobile/web bundle on push to main.
+#
+# WHY THIS EXISTS
+# ---------------
+# The mobile/web client (`src/server/` PUBLIC_DIR) is served as a PRE-BUILT
+# static bundle from `mobile/www/` — bui-server reads the files off disk per
+# request, there is no build step on the box at deploy time. Historically the
+# bundle was committed into EVERY feature branch (rebuilt by hand via
+# `npm run build:mobile`). Vite content-hashes the asset filenames
+# (`index-<hash>.js`) and rewrites the `<script src>` in `index.html`, so any
+# two in-flight PRs that both rebuilt produced DIFFERENT hashed filenames plus
+# conflicting edits to the same lines of index.html — git could not auto-merge
+# either, forcing extra rebase cycles (flagged on BET-118).
+#
+# THE FIX (option 2)
+# ------------------
+# `mobile/www/` is now gitignored on branches (see .gitignore). Nothing
+# generated lives in feature-branch diffs, so the structural conflict is gone.
+# This workflow is the SINGLE place the bundle is produced and committed: on
+# every push to `main` it rebuilds `mobile/www/` from source
+# (src/renderer/ + src/renderer/public/) and commits it back to main, so the
+# box's `git pull` on main still yields a ready-to-serve bundle — deploy stays
+# "git pull + restart", no build step on the box.
+#
+# LOOP GUARD
+# ----------
+# This workflow's own commit pushes to main, which re-triggers `push: main`.
+# Because `mobile/www/` is gitignored, that follow-up run rebuilds, finds the
+# committed bundle already matches source, sees NO diff, and exits without
+# committing — so it terminates after one extra no-op run. The `[skip ci]` tag
+# in the commit message additionally short-circuits the other push-triggered
+# workflows (CI, etc.) for the bundle commit.
+
+name: Build mobile bundle
+
+on:
+  push:
+    branches: [main]
+
+# Serialize: two merges to main in quick succession must not race two pushes of
+# the bundle. cancel-in-progress:false so an in-flight build+commit finishes
+# before the next runs (avoids a lost update / non-fast-forward push).
+concurrency:
+  group: build-mobile-bundle
+  cancel-in-progress: false
+
+jobs:
+  build-and-commit:
+    runs-on: self-hosted
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need a real ref (not detached HEAD) to commit + push back to main,
+          # and the token must be able to push.
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # node-pty's electron-rebuild postinstall is best-effort (`|| true` in
+      # package.json); the mobile build is pure Vite and doesn't need the native
+      # module, so npm ci succeeds on the runner regardless.
+      - run: npm ci
+
+      - name: Build mobile bundle
+        run: npm run build:mobile
+
+      - name: Commit bundle if changed
+        env:
+          # This is set on the runner's git identity; the commit is authored by
+          # the workflow so it's distinguishable from human/agent commits.
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          # Force-add: mobile/www/ is gitignored, so a plain `git add` is a
+          # no-op. -f stages the freshly built (ignored) bundle.
+          git add -f mobile/www
+
+          # Nothing staged → source produced an identical bundle (this is the
+          # steady state, including the loop-guard follow-up run). Exit clean.
+          if git diff --cached --quiet; then
+            echo "mobile/www/ already up to date with source — nothing to commit."
+            exit 0
+          fi
+
+          # [skip ci] keeps the push-triggered CI/other workflows from running
+          # on a pure bundle commit. This workflow still re-runs (see loop-guard
+          # note in the header) but no-ops on the next pass.
+          git commit -m "chore(mobile): rebuild mobile/www bundle [skip ci]"
+          git push origin HEAD:main
+          echo "Committed + pushed rebuilt mobile/www bundle."
