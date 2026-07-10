@@ -656,37 +656,6 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ---------- Cross-device shared-settings sync ----------
-  // GET  /api/shared-config → the device-independent subset of config + its
-  //                           LWW timestamp (so desktop can pull mobile edits).
-  // POST /api/shared-config   body = a shared-config snapshot from the desktop;
-  //                           LWW-merged in (newer timestamp wins). Returns the
-  //                           post-merge snapshot. Reached by the desktop over
-  //                           its existing SSH -L 18787 → box:8787 forward.
-  if (path === "/api/shared-config") {
-    try {
-      if (req.method === "GET") {
-        const snap = await local.sharedConfigGet();
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(snap));
-        return;
-      }
-      if (req.method === "POST") {
-        const body = await readJsonBody(req);
-        const snap = await local.sharedConfigApply(body);
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(snap));
-        return;
-      }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
-    } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
-    }
-    return;
-  }
-
   // ---------- Scheduled prompts ----------
   // POST   /api/schedule        body {cron, prompt, recurring, label, sessionID,
   //                             directory} → {id, cron, recurring} (400 bad cron)

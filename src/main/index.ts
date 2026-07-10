@@ -14,7 +14,6 @@ import {
   startDesktopNotifications,
   stopDesktopNotifications,
 } from "./desktopNotify.js";
-import { initSharedConfigSync, pullSharedConfig } from "./sharedConfigSync.js";
 import { checkForUpdates } from "./autoUpdate.js";
 import { IPC, type AppConfig, type AuthClaimInput } from "../shared/types.js";
 
@@ -188,15 +187,6 @@ app.setAppUserModelId("com.betterui.app");
 
 app.whenReady().then(() => {
   config = loadConfig();
-  // Cross-device shared-settings sync: read the live config, and when a newer
-  // snapshot is pulled from the mobile server, commit it + tell the renderer.
-  initSharedConfigSync({
-    getConfig: () => config,
-    applyPulled: (snap) => {
-      const next = commit(snap as Partial<AppConfig>);
-      mainWindow?.webContents.send(IPC.configChanged, next);
-    },
-  });
   registerHandlers();
   createWindow();
   // Defer poller start until renderer is ready to receive events.
@@ -215,8 +205,6 @@ app.whenReady().then(() => {
         }
       },
     );
-    // Pull any newer shared settings made on mobile while desktop was closed.
-    void pullSharedConfig().catch(() => {});
     // Defer update check until after the renderer is ready (avoids blocking startup).
     // electron-updater skips the check in dev mode (unpacked app).
     setTimeout(() => checkForUpdates(), 5000);

@@ -100,15 +100,6 @@ export type AppConfig = {
   // classifier in chatUtils.ts can't match a command-mode utterance. Default
   // "llama-3.1-8b-instant" — JSON-mode capable, ~$0.0001/call, ~300ms.
   voiceCommandModel?: string;
-  // ----- Cross-device shared-settings sync (LWW) -----
-  // Epoch-ms timestamp of the last change to a SHAREABLE field (the
-  // device-independent subset in src/shared/sharedConfig.mjs — voice/Groq,
-  // defaultModel, chatAutoAllow, autoRenameSessions, cacheTtl). Desktop and
-  // the mobile server each stamp this on a shareable change and compare it to
-  // resolve "latest wins" when syncing. NOT bumped by device-local edits
-  // (host/user/transport/projects/ports), so a desktop-only host change never
-  // claims to be a newer shared-config snapshot. Absent = never synced.
-  configUpdatedAt?: number;
 };
 
 // ----- Live tmux state -----
@@ -269,12 +260,6 @@ export const IPC = {
   // "Add to chat?" toast. Payload: { source: "clipboard"|"file", path?: string }
   // path is only set for file-based detections (Desktop watcher).
   screenshotDetected: "screenshot:detected",
-
-  // Cross-device shared-config sync pulled a newer snapshot from the mobile
-  // server into desktop config. Renderer re-applies it to the store so the
-  // Settings UI reflects the change without a manual refresh. Payload: the
-  // full AppConfig.
-  configChanged: "config:changed",
 
   // main → renderer push: the bui-server notification router decided the
   // desktop should show an OS notification. Relayed from the server's

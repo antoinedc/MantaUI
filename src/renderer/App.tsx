@@ -149,18 +149,6 @@ export function App() {
     return off;
   }, []);
 
-  // Cross-device shared settings: when the desktop pulls a newer config
-  // snapshot from the mobile server (e.g. you set the Groq STT key on your
-  // phone), main pushes the merged AppConfig down here so the store + Settings
-  // reflect it live. Guarded — the mobile shim's onConfigChanged is a no-op.
-  useEffect(() => {
-    if (!window.api.onConfigChanged) return;
-    const off = window.api.onConfigChanged((cfg) => {
-      useStore.getState().applyConfig(cfg);
-    });
-    return off;
-  }, []);
-
   // Auto-update: main checks for updates on launch and pushes
   // updateAvailable / updateDownloaded events to the renderer. We only care
   // about updateDownloaded (an update is ready to install) — updateAvailable
