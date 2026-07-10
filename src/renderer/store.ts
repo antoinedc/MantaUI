@@ -54,11 +54,20 @@ export type ActiveSession = {
 // only when `attention === true`. Defaults to "idle" when unset for
 // backward compat with the existing poller-driven flow.
 export type AttentionKind = "idle" | "question" | "permission";
+// `lastMessageAt` (unix ms, BET-119) is stamped whenever a chat-mode
+// session's `running` value CHANGES (either direction — idle→running marks
+// a new user message, running→idle marks the assistant completion) by
+// `setChatRunning`, and backfilled on cold start by
+// `backfillLastMessageTimes()`. Drives the sidebar/mobile elapsed-time label
+// colored by prompt-cache TTL freshness (`classifyCacheAge`). Undefined for
+// TUI (non-chat) windows — the TTL concept only applies to opencode chat
+// sessions, and the sidebar gates the label on this field being set.
 export type WindowStatusUI = {
   running: boolean;
   subagents: number;
   attention: boolean;
   attentionKind?: AttentionKind;
+  lastMessageAt?: number;
 };
 
 // Global screenshot detection toast. Single instance app-wide — the active
@@ -207,6 +216,16 @@ type State = {
   // latches the attention indicator for any still-pending request. Safe to
   // call repeatedly; it only ever sets attention for genuinely-pending asks.
   replayChatAttention: () => Promise<void>;
+  // Cold-start backfill for `lastMessageAt` (BET-119). Live updates come
+  // from `setChatRunning` via opencode SSE, but a freshly (re)connected app
+  // has seen no SSE transitions yet, so every chat window would show no age
+  // label until its next busy/idle flip. Queries each chat-mode window's
+  // owning directory via opencodeListSessions and stamps `lastMessageAt`
+  // from `time.updated` — ONLY for windows that don't already have a live
+  // stamp, so this can never stomp a real SSE-driven value. Called from the
+  // same App.tsx/MobileApp.tsx effect as `replayChatAttention` (keyed on the
+  // chat-session set). Safe to call repeatedly.
+  backfillLastMessageTimes: () => Promise<void>;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   setAutoRenameSessions: (v: boolean) => Promise<void>;
   setScreenshotToast: (t: ScreenshotToast | null) => void;
@@ -464,11 +483,20 @@ export const useStore = create<State>((set, get) => ({
           : attention
             ? "idle"
             : undefined;
+      // Stamp lastMessageAt (BET-119) only on an actual running-value
+      // transition — idle→running marks a new user message, running→idle
+      // marks the assistant's completion. A redundant call with the same
+      // value (the SSE handler fires more than the value actually changes)
+      // must NOT touch the stamp, or the sidebar age label would reset on
+      // every no-op event.
+      const lastMessageAt =
+        wasRunning !== running ? Date.now() : old?.lastMessageAt;
       const nextWin: WindowStatusUI = {
         running,
         subagents: old?.subagents ?? 0,
         attention,
         attentionKind,
+        lastMessageAt,
       };
       return {
         status: {
@@ -510,6 +538,7 @@ export const useStore = create<State>((set, get) => ({
         subagents: old?.subagents ?? 0,
         attention: wantAttention,
         attentionKind: wantAttention ? kind ?? "idle" : undefined,
+        lastMessageAt: old?.lastMessageAt,
       };
       return {
         status: {
@@ -536,6 +565,7 @@ export const useStore = create<State>((set, get) => ({
         subagents: count,
         attention: old?.attention ?? false,
         attentionKind: old?.attentionKind,
+        lastMessageAt: old?.lastMessageAt,
       };
       return {
         status: {
@@ -589,6 +619,68 @@ export const useStore = create<State>((set, get) => ({
         }
       }),
     );
+  },
+
+  backfillLastMessageTimes: async () => {
+    const projects = get().projects;
+    // opencodeListSessions is `?directory=`-scoped (same constraint as the
+    // question/permission lists above), so collect the distinct owning
+    // directories of chat-mode windows and query per-directory rather than
+    // per-session — one call covers every chat window sharing a cwd.
+    const dirs = new Set<string>();
+    for (const p of projects) {
+      for (const w of p.windows) {
+        if (w.opencodeSessionId) dirs.add(w.paneCurrentPath || p.defaultCwd);
+      }
+    }
+    if (dirs.size === 0) return;
+    if (!window.api.opencodeListSessions) return;
+    const updatedBySessionId = new Map<string, number>();
+    await Promise.all(
+      [...dirs].map(async (dir) => {
+        try {
+          const sessions = await window.api.opencodeListSessions!(dir);
+          for (const s of sessions) {
+            const updated = s.time?.updated;
+            if (typeof updated === "number" && updated > 0) {
+              updatedBySessionId.set(s.id, updated);
+            }
+          }
+        } catch {
+          // Per-directory failure is non-fatal — best-effort backfill.
+        }
+      }),
+    );
+    if (updatedBySessionId.size === 0) return;
+    set((prev) => {
+      let changed = false;
+      const next: Record<string, Record<number, WindowStatusUI>> = {
+        ...prev.status,
+      };
+      for (const p of prev.projects) {
+        for (const w of p.windows) {
+          if (!w.opencodeSessionId) continue;
+          const updated = updatedBySessionId.get(w.opencodeSessionId);
+          if (updated == null) continue;
+          const cur = next[p.tmuxSession]?.[w.index];
+          // Never stomp a live SSE-driven stamp — only fill windows that
+          // haven't had a setChatRunning transition yet.
+          if (cur?.lastMessageAt != null) continue;
+          next[p.tmuxSession] = {
+            ...next[p.tmuxSession],
+            [w.index]: {
+              running: cur?.running ?? false,
+              subagents: cur?.subagents ?? 0,
+              attention: cur?.attention ?? false,
+              attentionKind: cur?.attentionKind,
+              lastMessageAt: updated,
+            },
+          };
+          changed = true;
+        }
+      }
+      return changed ? { status: next } : prev;
+    });
   },
 
   applyProjects: (projects) =>

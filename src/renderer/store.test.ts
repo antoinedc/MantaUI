@@ -117,12 +117,34 @@ describe("setChatRunning / setChatAttention", () => {
 
     it("sets running:true for the matching window", () => {
       useStore.getState().setChatRunning("ses_chat", true);
-      expect(useStore.getState().status.bui[0]).toEqual({
+      const win = useStore.getState().status.bui[0];
+      expect(win).toMatchObject({
         running: true,
         subagents: 0,
         attention: false,
         attentionKind: undefined,
       });
+      // BET-119: an idle → running transition stamps lastMessageAt.
+      expect(win.lastMessageAt).toEqual(expect.any(Number));
+    });
+
+    it("stamps lastMessageAt on every running-value transition (BET-119)", () => {
+      const before = Date.now();
+      useStore.getState().setChatRunning("ses_chat", true);
+      const afterStart = useStore.getState().status.bui[0].lastMessageAt;
+      expect(afterStart).toBeGreaterThanOrEqual(before);
+
+      useStore.getState().setChatRunning("ses_chat", false);
+      const afterIdle = useStore.getState().status.bui[0].lastMessageAt;
+      expect(afterIdle).toBeGreaterThanOrEqual(afterStart!);
+    });
+
+    it("does NOT re-stamp lastMessageAt on a no-op running→running call (BET-119)", () => {
+      useStore.getState().setChatRunning("ses_chat", true);
+      const first = useStore.getState().status.bui[0].lastMessageAt;
+      useStore.getState().setChatRunning("ses_chat", true);
+      const second = useStore.getState().status.bui[0].lastMessageAt;
+      expect(second).toBe(first);
     });
 
     it("latches attention='idle' on running → idle when user isn't on the window", () => {
@@ -300,6 +322,13 @@ describe("setChatRunning / setChatAttention", () => {
       expect(win.attentionKind).toBe("question");
       expect(win.attention).toBe(true);
     });
+
+    it("preserves chat-window lastMessageAt across poller ticks (BET-119)", () => {
+      useStore.getState().setChatRunning("ses_chat", true);
+      const stamped = useStore.getState().status.bui[0].lastMessageAt;
+      useStore.getState().applyStatusBatch([]);
+      expect(useStore.getState().status.bui[0].lastMessageAt).toBe(stamped);
+    });
   });
 
   describe("setChatSubagents", () => {
@@ -458,6 +487,112 @@ describe("replayChatAttention", () => {
     await useStore.getState().replayChatAttention();
     // ses_p still latched despite ses_q's question fetch throwing.
     expect(useStore.getState().status.bui[1].attentionKind).toBe("permission");
+  });
+});
+
+// ===== Cold-start lastMessageAt backfill (BET-119) =====
+//
+// opencode SSE is forward-only (same rationale as replayChatAttention
+// above), so a chat window's lastMessageAt is unset until its first
+// busy/idle transition post-launch. backfillLastMessageTimes queries each
+// chat window's owning directory for its opencode session list and stamps
+// lastMessageAt from time.updated — but only for windows with no live stamp
+// yet, so it can never clobber a real setChatRunning-driven value.
+
+describe("backfillLastMessageTimes", () => {
+  let sessionsByDir: Record<string, Array<{ id: string; time?: { updated?: number } }>>;
+  let listCalls: string[];
+
+  beforeEach(() => {
+    sessionsByDir = {};
+    listCalls = [];
+    (globalThis as unknown as { window: unknown }).window = {
+      api: {
+        opencodeListSessions: async (dir: string) => {
+          listCalls.push(dir);
+          return sessionsByDir[dir] ?? [];
+        },
+      },
+    };
+    useStore.setState({
+      projects: [
+        proj({
+          tmuxSession: "bui",
+          windows: [
+            {
+              index: 0,
+              name: "chat",
+              active: false,
+              paneCurrentPath: "/x",
+              opencodeSessionId: "ses_chat",
+            },
+            {
+              index: 1,
+              name: "term",
+              active: false,
+              paneCurrentPath: "/z",
+              opencodeSessionId: null,
+            },
+          ],
+        }),
+      ],
+      status: {},
+      activeProjectName: null,
+      activeWindowByProject: {},
+    });
+  });
+
+  it("stamps lastMessageAt from time.updated for a chat window with no prior stamp", async () => {
+    sessionsByDir["/x"] = [{ id: "ses_chat", time: { updated: 12345 } }];
+    await useStore.getState().backfillLastMessageTimes();
+    expect(useStore.getState().status.bui[0].lastMessageAt).toBe(12345);
+  });
+
+  it("never stomps a live SSE-driven stamp", async () => {
+    useStore.getState().setChatRunning("ses_chat", true);
+    const live = useStore.getState().status.bui[0].lastMessageAt;
+    sessionsByDir["/x"] = [{ id: "ses_chat", time: { updated: 1 } }];
+    await useStore.getState().backfillLastMessageTimes();
+    expect(useStore.getState().status.bui[0].lastMessageAt).toBe(live);
+  });
+
+  it("only queries chat-mode windows' directories (skips terminal windows)", async () => {
+    await useStore.getState().backfillLastMessageTimes();
+    expect(listCalls).toEqual(["/x"]);
+  });
+
+  it("is a no-op when there are no chat-mode windows", async () => {
+    useStore.setState({
+      projects: [
+        proj({
+          tmuxSession: "bui",
+          windows: [
+            {
+              index: 0,
+              name: "term",
+              active: false,
+              paneCurrentPath: "/z",
+              opencodeSessionId: null,
+            },
+          ],
+        }),
+      ],
+      status: {},
+    });
+    await useStore.getState().backfillLastMessageTimes();
+    expect(listCalls).toEqual([]);
+    expect(useStore.getState().status).toEqual({});
+  });
+
+  it("is resilient to a per-directory fetch rejection", async () => {
+    (globalThis as unknown as { window: { api: Record<string, unknown> } })
+      .window.api.opencodeListSessions = async () => {
+      throw new Error("fetch failed");
+    };
+    await expect(
+      useStore.getState().backfillLastMessageTimes(),
+    ).resolves.toBeUndefined();
+    expect(useStore.getState().status.bui?.[0]?.lastMessageAt).toBeUndefined();
   });
 });
 

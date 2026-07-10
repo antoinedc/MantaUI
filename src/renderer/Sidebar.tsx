@@ -7,6 +7,7 @@ import {
 } from "react";
 import { useStore, type WindowStatusUI } from "./store";
 import type { Project, WorktreeInfo } from "../shared/types";
+import { classifyCacheAge, formatAge, selectCacheTtlMs } from "./chatUtils";
 
 const COLLAPSE_KEY = "bui:collapsed-projects";
 
@@ -783,15 +784,52 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 //                              urgent.
 //   none                     → nothing rendered.
 function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
+  // Read here (not lifted to the call site) to keep the Sidebar.tsx call
+  // site untouched — see BET-119 spec.
+  const cacheTtl = useStore((s) => s.cacheTtl);
   if (!status) return null;
+  const kind = status.attentionKind ?? "idle";
+  const isBlockingAttention =
+    status.attention && (kind === "question" || kind === "permission");
+  // BET-119: elapsed-since-last-message label, colored by prompt-cache
+  // freshness. Shown only for chat-mode windows (lastMessageAt is only ever
+  // stamped by setChatRunning/backfillLastMessageTimes, both chat-only) that
+  // are idle and not blocked on a question/permission — the red ?/! glyph
+  // outranks it, matching the precedence below. While running, the pulsing
+  // dot IS the indicator; no age label alongside it.
+  //
+  // Re-render cadence is free: `applyStatusBatch` replaces the whole
+  // `status` object on every 2s poller tick, and setChatRunning/
+  // setChatAttention do the same on every opencode SSE event, so
+  // `Date.now()` below recomputes on every one of those renders without a
+  // dedicated interval. If the status map is ever memoized to skip
+  // unchanged-looking updates, a ticking interval needs to be added here.
+  const ageLabel =
+    status.lastMessageAt != null && !status.running && !isBlockingAttention
+      ? (() => {
+          const ttlMs = selectCacheTtlMs(cacheTtl);
+          const now = Date.now();
+          const cls = classifyCacheAge(status.lastMessageAt!, now, ttlMs);
+          const color =
+            cls === "fresh"
+              ? "text-emerald-400/70"
+              : cls === "aging"
+                ? "text-amber-400/80"
+                : "text-red-400/80";
+          return (
+            <span className={`text-[10px] tabular-nums ${color}`}>
+              {formatAge(now - status.lastMessageAt!)}
+            </span>
+          );
+        })()
+      : null;
   // Blocking attention (question/permission) OUTRANKS running. opencode keeps
   // the session "busy" while it's blocked on a Question/permission tool, so a
   // running-first check would mask the red ?/! behind a blue running dot for
   // the entire time the user is being asked to act — exactly when the
   // indicator matters most. The red dot wins; the user MUST act to unblock.
   if (status.attention) {
-    const kind = status.attentionKind ?? "idle";
-    if (kind === "question" || kind === "permission") {
+    if (isBlockingAttention) {
       const glyph = kind === "question" ? "?" : "!";
       const tooltip =
         kind === "question"
@@ -812,10 +850,13 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
     // show the steady amber dot.
     if (!status.running) {
       return (
-        <span
-          className="w-1.5 h-1.5 rounded-full bg-amber-400"
-          title="Finished — click to view"
-        />
+        <span className="flex items-center gap-1 leading-none">
+          {ageLabel}
+          <span
+            className="w-1.5 h-1.5 rounded-full bg-amber-400"
+            title="Finished — click to view"
+          />
+        </span>
       );
     }
   }
@@ -835,6 +876,9 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
         )}
       </span>
     );
+  }
+  if (ageLabel) {
+    return <span className="flex items-center leading-none">{ageLabel}</span>;
   }
   return null;
 }

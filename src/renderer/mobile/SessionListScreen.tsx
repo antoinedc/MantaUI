@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStore } from "../store";
 import type { Project, TmuxWindow } from "../../shared/types";
 import { MobileCreateSheet } from "./MobileCreateSheet";
+import { classifyCacheAge, formatAge, selectCacheTtlMs } from "../chatUtils";
 
 type Props = {
   onOpenSession: (projectName: string, windowIndex: number) => void;
@@ -25,6 +26,14 @@ function typeLabel(w: TmuxWindow, running: boolean, attention: boolean): string 
   return kind;
 }
 
+// BET-119: same color mapping as the desktop Sidebar's StatusIndicator —
+// keep the class strings in sync if either changes.
+function ageColorClass(cls: "fresh" | "aging" | "stale"): string {
+  if (cls === "fresh") return "text-emerald-400/70";
+  if (cls === "aging") return "text-amber-400/80";
+  return "text-red-400/80";
+}
+
 function SessionRow({
   project,
   window: w,
@@ -35,8 +44,16 @@ function SessionRow({
   onOpen: () => void;
 }) {
   const status = useStore((s) => s.status[project.tmuxSession]?.[w.index]);
+  const cacheTtl = useStore((s) => s.cacheTtl);
   const running = status?.running ?? false;
   const attention = status?.attention ?? false;
+  const isBlockingAttention =
+    attention && (status?.attentionKind === "question" || status?.attentionKind === "permission");
+  // Same gating as the desktop label: chat-mode window, idle (not running),
+  // not blocked on a question/permission (that state already surfaces as
+  // "needs you" in the type label above).
+  const showAge =
+    status?.lastMessageAt != null && !running && !isBlockingAttention;
   return (
     <button
       className="mobile-row w-full text-left"
@@ -53,6 +70,14 @@ function SessionRow({
         </span>
         <span className="block text-text-muted text-xs truncate">
           {typeLabel(w, running, attention)}
+          {showAge && (
+            <span
+              className={`tabular-nums ${ageColorClass(classifyCacheAge(status!.lastMessageAt!, Date.now(), selectCacheTtlMs(cacheTtl)))}`}
+            >
+              {" "}
+              · {formatAge(Date.now() - status!.lastMessageAt!)}
+            </span>
+          )}
         </span>
       </span>
       <span className="text-text-faint text-lg leading-none">›</span>
