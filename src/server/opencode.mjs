@@ -374,12 +374,17 @@ export async function createSession({ directory, title = "" }) {
  *  @param {string} sessionId
  */
 export async function listMessages(sessionId) {
-  // A web client fetching a session's transcript means that session is being
-  // viewed — ensure its scoped stream so live updates arrive. Resolving the
-  // dir (and opening the stream) is fire-and-forget so it doesn't delay the
-  // transcript fetch. Mirrors the desktop ChatPanel opening its stream on
-  // mount; without it, only sending a prompt would open the stream.
-  void getSessionDirectoryQuery(sessionId).catch(() => {});
+  // Open AND await the session's scoped event stream BEFORE reading the
+  // transcript snapshot, so live events emitted around the snapshot land on
+  // the now-open stream instead of vanishing (opencode has no replay). The
+  // wait is internally bounded (~5s) so a wedged opencode degrades to
+  // "fetch anyway", never a hang. This mirrors the write paths (sendPrompt),
+  // which already await the same gate.
+  try {
+    await getSessionDirectoryQuery(sessionId);
+  } catch {
+    /* non-fatal: fetch the snapshot regardless */
+  }
   const url = `/session/${encodeURIComponent(sessionId)}/message`;
   const res = await ocFetch(apiUrl(url));
   if (!res.ok) {
