@@ -63,6 +63,7 @@ import { useVoice } from "./hooks/useVoice";
 import { useTypeahead } from "./hooks/useTypeahead";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
+import { getBuiPreload } from "./preloadAccess";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
@@ -1244,24 +1245,30 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     ]);
 
     try {
-      let remotePath: string;
+      // Only Electron main can read the Mac clipboard or a Mac file — both
+      // must come from the preload OS bridge, never window.api (which is
+      // httpApi in HTTP mode and has no OS access; the server IS the box).
+      const preload = getBuiPreload();
+      if (!preload) throw new Error("Screenshot capture requires the desktop app");
+
+      let buf: ArrayBuffer;
       if (toast.source === "file" && toast.path) {
-        // Desktop watcher: we have a local Mac path — use uploadFiles directly.
-        const results = await window.api.uploadFiles({
-          projectName: tmuxSession,
-          localPaths: [toast.path],
-        });
-        remotePath = results[0] ?? "";
+        // Desktop watcher: read the local Mac file's bytes via main.
+        buf = await preload.readLocalFile(toast.path);
       } else {
-        // Clipboard: read bytes from main then uploadBuffer.
-        const buf = await window.api.clipboardReadImage();
-        if (!buf) throw new Error("Clipboard image vanished");
-        remotePath = await window.api.uploadBuffer({
-          projectName: tmuxSession,
-          filename,
-          buffer: buf,
-        });
+        // Clipboard: read bytes from main.
+        const clip = await preload.clipboardReadImage();
+        if (!clip) throw new Error("Clipboard image vanished");
+        buf = clip;
       }
+      // Upload the bytes through the same proven path as paste/drag-drop —
+      // window.api.uploadBuffer POSTs to the server's /api/upload.
+      const remotePath = await window.api.uploadBuffer({
+        projectName: tmuxSession,
+        filename,
+        buffer: buf,
+      });
+      if (!remotePath) throw new Error("Upload failed");
       setAttachments((prev) =>
         prev.map((a) => (a.id === id ? { ...a, status: "ready", remotePath } : a)),
       );

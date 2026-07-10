@@ -17,6 +17,8 @@ function makeFakePreload(): BuiPreload {
       return vi.fn();
     }),
     clipboardWriteText: vi.fn(async () => {}),
+    clipboardReadImage: vi.fn(async () => null),
+    readLocalFile: vi.fn(async () => new ArrayBuffer(0)),
     openExternal: vi.fn(async () => {}),
     revealInFolder: vi.fn(async () => {}),
     getPathForFile: vi.fn((f: File) => f.name),

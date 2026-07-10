@@ -108,6 +108,8 @@ const api = {
     ipcRenderer.invoke(IPC.clipboardWriteText, text),
   clipboardReadImage: (): Promise<ArrayBuffer | null> =>
     ipcRenderer.invoke(IPC.clipboardReadImage),
+  readLocalFile: (path: string): Promise<ArrayBuffer> =>
+    ipcRenderer.invoke(IPC.readLocalFile, path),
 
   onScreenshotDetected: (
     cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
