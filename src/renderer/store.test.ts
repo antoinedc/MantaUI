@@ -520,8 +520,7 @@ describe("replayChatAttention", () => {
     questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q", requestId: "que_1" }];
     messagesBySid["ses_q"] = completedTranscript;
     await useStore.getState().replayChatAttention();
-    const win = useStore.getState().status.bui[0];
-    expect(win?.attention).not.toBe(true);
+    expect(useStore.getState().status.bui?.[0]?.attention).not.toBe(true);
     expect(rejectCalls).toEqual([{ requestId: "que_1", sessionId: "ses_q" }]);
   });
 
@@ -529,8 +528,7 @@ describe("replayChatAttention", () => {
     questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q" }];
     messagesBySid["ses_q"] = completedTranscript;
     await useStore.getState().replayChatAttention();
-    const win = useStore.getState().status.bui[0];
-    expect(win?.attention).not.toBe(true);
+    expect(useStore.getState().status.bui?.[0]?.attention).not.toBe(true);
     expect(rejectCalls).toEqual([]);
   });
 
@@ -538,8 +536,7 @@ describe("replayChatAttention", () => {
     permissionsBySid["ses_p"] = [{ id: "p1", sessionID: "ses_p" }];
     messagesBySid["ses_p"] = completedTranscript;
     await useStore.getState().replayChatAttention();
-    const win = useStore.getState().status.bui[1];
-    expect(win?.attention).not.toBe(true);
+    expect(useStore.getState().status.bui?.[1]?.attention).not.toBe(true);
     expect(rejectCalls).toEqual([]);
   });
 
@@ -550,8 +547,7 @@ describe("replayChatAttention", () => {
       throw new Error("transcript fetch failed");
     };
     await useStore.getState().replayChatAttention();
-    const win = useStore.getState().status.bui[0];
-    expect(win?.attention).not.toBe(true);
+    expect(useStore.getState().status.bui?.[0]?.attention).not.toBe(true);
     expect(rejectCalls).toEqual([]);
   });
 });

@@ -323,3 +323,107 @@ describe("ChatPanel composer submit", () => {
     expect(textarea.value).toBe("previous prompt");
   });
 });
+
+// ===== Abort self-heals orphaned questions (BET-116) =====
+//
+// opencode's /question pending list is cumulative and never expires. A
+// question whose turn is aborted must be rejected server-side too, or it
+// re-latches the sidebar's stale "?" glyph on a later replay. Verifies the
+// user-facing abort path (Escape while running) rejects every pending
+// question for the session and clears the local card.
+describe("ChatPanel abort rejects orphaned questions", () => {
+  let api: MockApi;
+  let bus: MockEventBus;
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("rejects all pending questions and clears the card on Escape-abort", async () => {
+    // Question cards render at the tail of the transcript (see Transcript.tsx)
+    // which only mounts its message-list branch for a non-empty transcript —
+    // seed one completed turn so the card is actually visible in the DOM.
+    const transcript = [
+      {
+        info: {
+          id: "msg_a1",
+          sessionID: "ses_test",
+          role: "assistant" as const,
+          time: { created: 1, completed: 2 },
+        },
+        parts: [
+          { type: "text", id: "prt_a1", messageID: "msg_a1", text: "ok, one sec" },
+        ],
+      },
+    ];
+    ({ api, bus } = installMockApi({
+      opencodeMessagesReconcile: () => Promise.resolve(transcript),
+      opencodeMessages: () => Promise.resolve(transcript),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await emitAndFlush(bus, h, {
+      type: "question.asked",
+      properties: {
+        sessionID: "ses_test",
+        id: "que_1",
+        questions: [
+          {
+            header: "Approach",
+            question: "Which approach?",
+            options: [{ label: "a" }, { label: "b" }],
+          },
+        ],
+      },
+    });
+    // The question card is up.
+    expect(h.text()).toContain("Which approach?");
+
+    // Turn is running.
+    await emitAndFlush(bus, h, {
+      type: "session.status",
+      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    });
+
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await h.flush();
+
+    expect(api.calls.opencodeAbort).toEqual([["ses_test"]]);
+    // Best-effort reject fired for the orphaned question.
+    expect(api.calls.opencodeQuestionReject).toEqual([["que_1", "ses_test"]]);
+    // Card is gone locally — no re-latch possible from stale local state.
+    expect(h.text()).not.toContain("Which approach?");
+  });
+
+  it("does not call opencodeQuestionReject on Escape-abort when nothing is pending", async () => {
+    ({ api, bus } = installMockApi());
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await emitAndFlush(bus, h, {
+      type: "session.status",
+      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    });
+
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await h.flush();
+
+    expect(api.calls.opencodeAbort).toEqual([["ses_test"]]);
+    expect(api.calls.opencodeQuestionReject ?? []).toEqual([]);
+  });
+});
