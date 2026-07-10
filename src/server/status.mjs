@@ -13,6 +13,7 @@ import { run } from "./tmux.mjs";
 
 const POLL_MS = 2000;
 const CAPTURE_LINES = 40;
+const CAPTURE_CONCURRENCY = 8;
 
 // Sentinel that won't appear in captured terminal content (ANSI-stripped text).
 export const MARK = "__BUI_PANE__";
@@ -84,15 +85,16 @@ export function parseStatus(stdout) {
 // Desktop does this in one shell pipeline over SSH; here we can't do that
 // in a single run() call (no shell). Instead:
 //   1. list-windows -a  → "session\twindowIndex" lines
-//   2. For each window, capture-pane -p -S -N
-// The extra round-trips per window are fine at 2s poll; correctness matters
-// more than micro-optimisation here.
+//   2. capture-pane -p -S -N for each window, bounded-concurrency parallel
+//      (CAPTURE_CONCURRENCY workers), results reassembled in `targets` order
+//      so parseStatus's MARK-delimited demux stays stable regardless of
+//      which capture resolves first.
 
-async function collectPanes() {
+export async function collectPanes(runFn = run) {
   // Step 1: list all windows.
   let winStdout;
   try {
-    const r = await run("tmux", [
+    const r = await runFn("tmux", [
       "list-windows", "-a",
       "-F", "#{session_name}:#{window_index}",
     ]);
@@ -109,22 +111,36 @@ async function collectPanes() {
 
   if (targets.length === 0) return "";
 
-  // Step 2: capture each pane in sequence, accumulate MARK-delimited output.
-  const chunks = [];
-  for (const target of targets) {
-    chunks.push(`\n${MARK}${target}${MARK}\n`);
-    try {
-      const r = await run("tmux", [
-        "capture-pane",
-        "-t", target,
-        "-p",
-        "-S", String(-CAPTURE_LINES),
-      ]);
-      chunks.push(r.stdout);
-    } catch {
-      // Window may have been killed between list and capture — skip it.
-      chunks.push("");
+  // Step 2: capture each pane, bounded-concurrency parallel. Results are
+  // written into an index-aligned array, not pushed as promises resolve, so
+  // the final join is always in `targets` order.
+  const captured = new Array(targets.length).fill("");
+  let next = 0;
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= targets.length) return;
+      try {
+        const r = await runFn("tmux", [
+          "capture-pane",
+          "-t", targets[i],
+          "-p",
+          "-S", String(-CAPTURE_LINES),
+        ]);
+        captured[i] = r.stdout;
+      } catch {
+        // Window may have been killed between list and capture — skip it.
+        captured[i] = "";
+      }
     }
+  }
+  const poolSize = Math.min(CAPTURE_CONCURRENCY, targets.length);
+  await Promise.all(Array.from({ length: poolSize }, () => worker()));
+
+  const chunks = [];
+  for (let i = 0; i < targets.length; i++) {
+    chunks.push(`\n${MARK}${targets[i]}${MARK}\n`);
+    chunks.push(captured[i]);
   }
   return chunks.join("");
 }

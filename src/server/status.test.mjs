@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseStatus, countSubagents, MARK } from "./status.mjs";
+import { parseStatus, countSubagents, collectPanes, MARK } from "./status.mjs";
 
 // ----------------------------------------------------------------------------
 // countSubagents — pure helper
@@ -123,4 +123,88 @@ test("parseStatus includes subagents count", () => {
   const out = parseStatus(stdout);
   assert.equal(out[0].running, true);
   assert.equal(out[0].subagents, 1);
+});
+
+// ----------------------------------------------------------------------------
+// collectPanes — bounded-concurrency parallel pane capture (order-preserving)
+// ----------------------------------------------------------------------------
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("collectPanes preserves target order regardless of capture-pane resolve order", async () => {
+  const targets = ["a:0", "b:1", "c:2"];
+  // Delays chosen so "a:0" (index 0) resolves LAST despite being first in
+  // target order — proving the output is ordered by target index, not by
+  // which capture-pane call settles first.
+  const delays = { "a:0": 30, "b:1": 10, "c:2": 5 };
+
+  const fakeRun = async (cmd, args) => {
+    if (args[0] === "list-windows") {
+      return { stdout: targets.join("\n") + "\n" };
+    }
+    // args: ["capture-pane", "-t", target, "-p", "-S", ...]
+    const target = args[2];
+    await sleep(delays[target]);
+    return { stdout: `body-${target}\n` };
+  };
+
+  const stdout = await collectPanes(fakeRun);
+  const parsed = parseStatus(stdout);
+
+  assert.equal(parsed.length, 3);
+  assert.deepEqual(
+    parsed.map((w) => `${w.session}:${w.windowIndex}`),
+    targets,
+  );
+
+  // Also verify the raw MARK ordering directly (belt-and-suspenders — parseStatus
+  // could theoretically reorder, though it doesn't).
+  const markPositions = targets.map((t) => stdout.indexOf(`${MARK}${t}${MARK}`));
+  assert.deepEqual(
+    [...markPositions].sort((x, y) => x - y),
+    markPositions,
+  );
+});
+
+test("collectPanes isolates a per-window capture-pane failure without rejecting the whole call", async () => {
+  const targets = ["a:0", "b:1", "c:2"];
+
+  const fakeRun = async (cmd, args) => {
+    if (args[0] === "list-windows") {
+      return { stdout: targets.join("\n") + "\n" };
+    }
+    const target = args[2];
+    if (target === "b:1") {
+      throw new Error("window killed between list and capture");
+    }
+    return { stdout: `body-${target}\n` };
+  };
+
+  const stdout = await collectPanes(fakeRun);
+  const parsed = parseStatus(stdout);
+
+  assert.equal(parsed.length, 3);
+  assert.deepEqual(
+    parsed.map((w) => `${w.session}:${w.windowIndex}`),
+    targets,
+  );
+  // The failed window's body is empty (no captured text), but it still
+  // produced a slot — the whole tick did not reject.
+  assert.equal(parsed[1].running, false);
+  assert.equal(parsed[1].subagents, 0);
+});
+
+test("collectPanes returns empty string when no windows exist", async () => {
+  const fakeRun = async (cmd, args) => {
+    if (args[0] === "list-windows") return { stdout: "" };
+    throw new Error("should not be called");
+  };
+  assert.equal(await collectPanes(fakeRun), "");
+});
+
+test("collectPanes returns empty string when list-windows itself fails", async () => {
+  const fakeRun = async () => {
+    throw new Error("no tmux server running");
+  };
+  assert.equal(await collectPanes(fakeRun), "");
 });
