@@ -1656,8 +1656,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   if (!messages) {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-bg text-text-faint text-sm font-mono">
-        Loading session…
+      <div className="h-full w-full flex flex-col items-center justify-center gap-3 bg-bg text-text-faint text-sm font-mono">
+        <div
+          className="h-5 w-5 rounded-full border-2 border-text-faint border-t-transparent animate-spin"
+          aria-hidden
+        />
+        <span>Connecting to session…</span>
       </div>
     );
   }

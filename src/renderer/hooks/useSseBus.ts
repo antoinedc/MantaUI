@@ -581,6 +581,10 @@ export function useSseBus(params: {
       for (const cid of collectChildSessionIds(m)) {
         childSessionIds.current.add(cid);
       }
+      // Self-heal: one debounced refetch after the stream is (now) live, in
+      // case an event slipped through during stream warm-up. Idempotent,
+      // gated on active panel by scheduleRefetch itself.
+      scheduleRefetch();
     }).catch(() => { /* non-fatal */ });
 
     return () => {

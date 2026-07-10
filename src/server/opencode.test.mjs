@@ -5,6 +5,7 @@ import {
   parseSseFrame,
   createSession,
   sendPrompt,
+  listMessages,
   runCommand,
   forkSession,
   compactSession,
@@ -783,6 +784,117 @@ test("readiness gate: degrades to sending after the bound elapses (wedged stream
   assert.ok(
     calls.some((c) => c.url?.includes("prompt_async")),
     "sendPrompt never degraded to sending once the readiness bound elapsed",
+  );
+});
+
+test("listMessages awaits the scoped stream ready gate BEFORE fetching the transcript", async () => {
+  // Regression: listMessages used to fire-and-forget getSessionDirectoryQuery,
+  // so the /message snapshot could be fetched (and events lost) before the
+  // scoped stream was actually connected. This asserts the ready gate is
+  // awaited — the /message GET must never fire until the scoped stream
+  // connects — mirroring the write-path readiness gate test above.
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+  let releaseConnect;
+  const connectGate = new Promise((r) => { releaseConnect = r; });
+  _setEventStreamTransport(async (url) => {
+    if (String(url).includes("directory=")) {
+      await connectGate; // hold the scoped stream "connecting" until released
+    }
+    return new Response(openStreamBody(), { status: 200 });
+  });
+
+  const calls = [];
+  const stop = subscribeEvents(() => {});
+  try {
+    await withMockFetch(
+      async (url, opts) => {
+        calls.push({ url: String(url), method: opts?.method ?? "GET" });
+        if (String(url).endsWith("/session/ses_msg_gate")) {
+          return new Response(JSON.stringify({ directory: "/work/msg-gate" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (String(url).includes("/message")) {
+          return new Response(JSON.stringify([{ id: "m1" }]), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(null, { status: 204 });
+      },
+      async () => {
+        const listDone = listMessages("ses_msg_gate").then((msgs) => {
+          calls.push({ marker: "list-resolved" });
+          return msgs;
+        });
+        // Let microtasks/timers run without advancing past the gate — the
+        // scoped stream hasn't connected, so the /message GET must not have
+        // fired yet.
+        await new Promise((r) => setTimeout(r, 30));
+        assert.ok(
+          !calls.some((c) => c.url?.includes("/message")),
+          "listMessages fetched the transcript before the scoped stream connected",
+        );
+        releaseConnect();
+        const msgs = await listDone;
+        assert.ok(
+          calls.some((c) => c.url?.includes("/message")),
+          "listMessages never fetched the transcript after the scoped stream connected",
+        );
+        assert.deepEqual(msgs, [{ id: "m1" }]);
+      },
+    );
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+    _resetStreamReadyState();
+  }
+});
+
+test("listMessages still returns the transcript when the readiness gate times out", async () => {
+  // Degradation case: a wedged opencode (scoped stream never connects) must
+  // never turn the transcript fetch into a hang — the bounded gate elapses
+  // and listMessages still resolves with the fetched messages.
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+  _setReadinessTimeoutMs(30); // don't make the test sleep 5s for real
+  _setEventStreamTransport(() => new Promise(() => {})); // never connects
+
+  const stop = subscribeEvents(() => {});
+  let msgs;
+  try {
+    await withMockFetch(
+      async (url) => {
+        if (String(url).endsWith("/session/ses_msg_wedge")) {
+          return new Response(JSON.stringify({ directory: "/work/msg-wedge" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (String(url).includes("/message")) {
+          return new Response(JSON.stringify([{ id: "m2" }]), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(null, { status: 204 });
+      },
+      async () => {
+        msgs = await listMessages("ses_msg_wedge");
+      },
+    );
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+    _setReadinessTimeoutMs(null);
+    _resetStreamReadyState();
+  }
+  assert.deepEqual(
+    msgs,
+    [{ id: "m2" }],
+    "listMessages never degraded to fetching the transcript once the readiness bound elapsed",
   );
 });
 
