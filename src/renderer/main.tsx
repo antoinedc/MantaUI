@@ -5,7 +5,7 @@ import { MobileApp } from "./mobile/MobileApp";
 import "./index.css";
 import "./mobile/mobile.css";
 import { httpApi } from "./api/httpApi";
-import type { Api } from "../preload/index";
+import type { Api } from "../shared/api";
 import {
   desktopHttpClientSeed,
 } from "../shared/transport.mjs";

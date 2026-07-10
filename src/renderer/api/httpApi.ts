@@ -7,7 +7,7 @@ import {
   type PtyEvent,
   type WindowStatus,
 } from "../../shared/types.js";
-import type { Api } from "../../preload/index.js";
+import type { Api } from "../../shared/api.js";
 import {
   classifyClaimResult,
   networkFailure,
@@ -592,9 +592,9 @@ export const httpApi: Api = {
   // renderer has no direct shell access). Falls back to the RPC channel for
   // mobile/web where the server IS the box and reads the file natively.
   peekRemoteFile: async (remotePath) => {
-    const preload = (window as { __buiPreload?: { peekRemoteFileHttp?: (p: string) => Promise<void> } }).__buiPreload;
-    if (preload?.peekRemoteFileHttp) {
-      return preload.peekRemoteFileHttp(remotePath);
+    const preload = (window as { __buiPreload?: { peekRemoteFile?: (p: string) => Promise<void> } }).__buiPreload;
+    if (preload?.peekRemoteFile) {
+      return preload.peekRemoteFile(remotePath);
     }
     return rpc(IPC.peekRemoteFile, remotePath);
   },

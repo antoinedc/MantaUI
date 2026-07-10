@@ -24,7 +24,7 @@ function makeFakePreload(): BuiPreload {
       cb({ kind: "test" });
       return vi.fn();
     }),
-    peekRemoteFileHttp: vi.fn(async () => {}),
+    peekRemoteFile: vi.fn(async () => {}),
   };
 }
 
