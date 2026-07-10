@@ -66,6 +66,7 @@ import {
   type PendingDelta,
 } from "../chatUtils";
 import type { TokenUsage } from "../chatShared";
+import { useStore } from "../store";
 
 export type SseBus = {
   running: boolean;
@@ -103,6 +104,11 @@ export type SseBus = {
   replyPermission: (id: string, reply: "once" | "always" | "reject") => void;
   replyQuestion: (q: QuestionRequest, answers: string[][]) => void;
   rejectQuestion: (q: QuestionRequest) => void;
+  // Best-effort cleanup for any question(s) blocking an aborted turn — see
+  // BET-116. Owned here (not ChatPanel) because this hook owns `questions`
+  // state; exposed so ChatPanel's own user-facing abort path can call the
+  // SAME loop instead of duplicating it.
+  rejectAllPendingQuestions: () => void;
   refreshPermissions: () => Promise<void>;
   refreshQuestions: () => Promise<void>;
 };
@@ -158,6 +164,10 @@ export function useSseBus(params: {
   const drainAbortRef = useRef(false);
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
   const [questions, setQuestions] = useState<QuestionRequest[]>([]);
+  const questionsRef = useRef<QuestionRequest[]>([]);
+  useEffect(() => {
+    questionsRef.current = questions;
+  }, [questions]);
   const [stepTokens, setStepTokens] = useState<(TokenUsage & { cost: number }) | null>(null);
   const [compactionState, setCompactionState] = useState<{
     reason: string;
@@ -186,9 +196,31 @@ export function useSseBus(params: {
   >(() => new Map());
   const [branch, setBranch] = useState<string | null>(null);
 
-  const abort = useCallback(() => {
-    void window.api.opencodeAbort(sessionId).catch(() => { /* non-fatal */ });
+  // Any question that was blocking an aborted turn is dead — opencode's
+  // pending list never expires on its own (see BET-116), so it would
+  // re-latch the sidebar's red "?" glyph on a later replay unless we reject
+  // it here. Best-effort, fire-and-forget: cleanup must never surface an
+  // error. Called from BOTH abort paths below (user-facing abort and the
+  // queued-drain abort) via a single shared helper — do not duplicate the
+  // loop.
+  const rejectAllPendingQuestions = useCallback(() => {
+    const pending = questionsRef.current;
+    if (pending.length === 0) return;
+    for (const q of pending) {
+      if (!q.requestId) continue;
+      void window.api.opencodeQuestionReject
+        ?.(q.requestId, q.sessionID)
+        .catch(() => { /* best-effort cleanup */ });
+    }
+    setQuestions([]);
+    useStore.getState().setChatAttention(sessionId, null);
   }, [sessionId]);
+
+  const abort = useCallback(() => {
+    void window.api.opencodeAbort(sessionId)
+      .catch(() => { /* non-fatal */ })
+      .then(() => rejectAllPendingQuestions());
+  }, [sessionId, rejectAllPendingQuestions]);
 
   const refreshPermissions = useCallback(async () => {
     try {
@@ -249,9 +281,11 @@ export function useSseBus(params: {
         return;
       }
       drainAbortRef.current = true;
-      void window.api.opencodeAbort(sessionId).catch(() => {
-        drainAbortRef.current = false;
-      });
+      void window.api.opencodeAbort(sessionId)
+        .catch(() => {
+          drainAbortRef.current = false;
+        })
+        .then(() => rejectAllPendingQuestions());
     };
 
     const off = window.api.onOpencodeEvent((ev: OpencodeEvent) => {
@@ -595,6 +629,7 @@ export function useSseBus(params: {
     replyPermission,
     replyQuestion,
     rejectQuestion,
+    rejectAllPendingQuestions,
     refreshPermissions,
     refreshQuestions,
   };

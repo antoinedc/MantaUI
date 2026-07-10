@@ -8,6 +8,7 @@ import type {
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
 import { clientToken } from "./api/httpApi";
+import { isAssistantTurnInProgress } from "./chatUtils";
 
 // Overlay the desktop-local pairing secrets (serverUrl/boxToken) onto a config
 // snapshot. In http mode window.api.configGet() returns the bui-server's config,
@@ -609,9 +610,45 @@ export const useStore = create<State>((set, get) => ({
           // live SSE-driven attention.
           const myQuestions = questions.filter((q) => q.sessionID === sid);
           const myPermissions = permissions.filter((p) => p.sessionID === sid);
+          if (myQuestions.length === 0 && myPermissions.length === 0) return;
+
+          // opencode's pending question/permission lists are cumulative and
+          // never expire — a question whose turn was aborted (explicit abort,
+          // queued-message drain-abort, opencode restart, app closed mid-ask)
+          // stays "pending" forever unless something explicitly rejects it.
+          // Trusting the list alone re-latches the red "?" glyph on every
+          // launch for these orphans (BET-116). Validate against the
+          // transcript BEFORE latching: fetch the tail only for sessions that
+          // have something pending (rare, so the cost is acceptable) and
+          // check whether the turn is actually still in flight.
+          let inFlight = false;
+          try {
+            const messages = await window.api.opencodeMessages(sid);
+            inFlight = isAssistantTurnInProgress(messages);
+          } catch {
+            // Transcript fetch failed — skip this session this launch rather
+            // than guess; retried on the next replay.
+            return;
+          }
+
           if (myQuestions.length > 0) {
-            get().setChatAttention(sid, "question");
-          } else if (myPermissions.length > 0) {
+            if (inFlight) {
+              get().setChatAttention(sid, "question");
+            } else {
+              // Orphan: reject server-side so opencode's pending map is
+              // permanently cleaned and the glyph cannot recur on the next
+              // launch. Fire-and-forget; skip entries with no requestId
+              // (transcript-only recovered questions are unanswerable).
+              for (const q of myQuestions) {
+                if (!q.requestId) continue;
+                void window.api.opencodeQuestionReject?.(q.requestId, sid).catch(() => {
+                  /* best-effort cleanup */
+                });
+              }
+            }
+          } else if (myPermissions.length > 0 && inFlight) {
+            // Stale permission entries are opencode-managed — only skip the
+            // latch, do not auto-reject (unlike orphaned questions above).
             get().setChatAttention(sid, "permission");
           }
         } catch {

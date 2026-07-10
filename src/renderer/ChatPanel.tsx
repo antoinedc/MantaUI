@@ -225,6 +225,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     retryInfo,
     compactionState,
     drainAbortRef,
+    rejectAllPendingQuestions,
   } = useSseBus({
     sessionId,
     cwd,
@@ -769,7 +770,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     } catch (e) {
       setSendError(String((e as Error)?.message ?? e));
     }
-  }, [sessionId]);
+    // Any question that was blocking this turn is dead now — reject it
+    // server-side so it can't re-latch the sidebar's stale "?" glyph on a
+    // later replay (BET-116). Best-effort; the helper never throws.
+    rejectAllPendingQuestions();
+  }, [sessionId, rejectAllPendingQuestions]);
 
   const replyPermission = useCallback(
     async (requestId: string, reply: "once" | "always" | "reject") => {

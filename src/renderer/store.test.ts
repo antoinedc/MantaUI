@@ -388,14 +388,29 @@ describe("setChatRunning / setChatAttention", () => {
 describe("replayChatAttention", () => {
   let questionsBySid: Record<string, unknown[]>;
   let permissionsBySid: Record<string, unknown[]>;
+  // Default every session to an in-flight transcript (last assistant message
+  // has no completion stamp) so existing "latch" expectations below keep
+  // their original meaning; tests that exercise the orphan/self-heal path
+  // override this per-session to a COMPLETED transcript.
+  let messagesBySid: Record<string, unknown[]>;
   let questionCalls: string[];
   let permissionCalls: string[];
+  let messagesCalls: string[];
+  let rejectCalls: Array<{ requestId: string; sessionId: string }>;
+
+  const inFlightTranscript = [{ info: { role: "assistant" } }];
+  const completedTranscript = [
+    { info: { role: "assistant", time: { completed: 1234 } } },
+  ];
 
   beforeEach(() => {
     questionsBySid = {};
     permissionsBySid = {};
+    messagesBySid = {};
     questionCalls = [];
     permissionCalls = [];
+    messagesCalls = [];
+    rejectCalls = [];
     (globalThis as unknown as { window: unknown }).window = {
       api: {
         opencodeQuestions: async (sid: string) => {
@@ -405,6 +420,13 @@ describe("replayChatAttention", () => {
         opencodePermissions: async (sid: string) => {
           permissionCalls.push(sid);
           return permissionsBySid[sid] ?? [];
+        },
+        opencodeMessages: async (sid: string) => {
+          messagesCalls.push(sid);
+          return messagesBySid[sid] ?? inFlightTranscript;
+        },
+        opencodeQuestionReject: async (requestId: string, sessionId: string) => {
+          rejectCalls.push({ requestId, sessionId });
         },
       },
     };
@@ -487,6 +509,46 @@ describe("replayChatAttention", () => {
     await useStore.getState().replayChatAttention();
     // ses_p still latched despite ses_q's question fetch throwing.
     expect(useStore.getState().status.bui[1].attentionKind).toBe("permission");
+  });
+
+  it("skips the transcript check entirely when nothing is pending (no opencodeMessages call)", async () => {
+    await useStore.getState().replayChatAttention();
+    expect(messagesCalls).toEqual([]);
+  });
+
+  it("does NOT latch and rejects an orphaned question whose turn already completed", async () => {
+    questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q", requestId: "que_1" }];
+    messagesBySid["ses_q"] = completedTranscript;
+    await useStore.getState().replayChatAttention();
+    expect(useStore.getState().status.bui?.[0]?.attention).not.toBe(true);
+    expect(rejectCalls).toEqual([{ requestId: "que_1", sessionId: "ses_q" }]);
+  });
+
+  it("skips (but does not reject) an orphaned question with no requestId", async () => {
+    questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q" }];
+    messagesBySid["ses_q"] = completedTranscript;
+    await useStore.getState().replayChatAttention();
+    expect(useStore.getState().status.bui?.[0]?.attention).not.toBe(true);
+    expect(rejectCalls).toEqual([]);
+  });
+
+  it("does NOT latch a stale permission whose turn already completed, and does not reject it", async () => {
+    permissionsBySid["ses_p"] = [{ id: "p1", sessionID: "ses_p" }];
+    messagesBySid["ses_p"] = completedTranscript;
+    await useStore.getState().replayChatAttention();
+    expect(useStore.getState().status.bui?.[1]?.attention).not.toBe(true);
+    expect(rejectCalls).toEqual([]);
+  });
+
+  it("skips latching (fails safe) when the transcript fetch itself throws", async () => {
+    questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q", requestId: "que_1" }];
+    (globalThis as unknown as { window: { api: Record<string, unknown> } })
+      .window.api.opencodeMessages = async () => {
+      throw new Error("transcript fetch failed");
+    };
+    await useStore.getState().replayChatAttention();
+    expect(useStore.getState().status.bui?.[0]?.attention).not.toBe(true);
+    expect(rejectCalls).toEqual([]);
   });
 });
 
