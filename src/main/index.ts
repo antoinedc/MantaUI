@@ -14,24 +14,9 @@ import {
   startDesktopNotifications,
   stopDesktopNotifications,
 } from "./desktopNotify.js";
-import {
-  initSharedConfigSync,
-  pushSharedConfig,
-  pullSharedConfig,
-} from "./sharedConfigSync.js";
+import { initSharedConfigSync, pullSharedConfig } from "./sharedConfigSync.js";
 import { checkForUpdates } from "./autoUpdate.js";
-// Plain-JS modules shared with the mobile server (src/server/*.mjs). The
-// bundler resolves .mjs imports here; main.process never sees them as TS.
-// Types live in groq.d.mts. Keep them dep-free so they stay portable across
-// both transports.
-import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
-import { patchTouchesSharedConfig } from "../shared/sharedConfig.mjs";
-import {
-  IPC,
-  type AppConfig,
-  type AuthClaimInput,
-  type ProjectMeta,
-} from "../shared/types.js";
+import { IPC, type AppConfig, type AuthClaimInput } from "../shared/types.js";
 
 // Parse a non-2xx /auth/pair response body into a user-facing error string.
 // The server returns { error: "..." } for 403 (not loopback), 429 (rate limit),
@@ -56,15 +41,6 @@ function commit(next: Partial<AppConfig>): AppConfig {
   config = { ...config, ...next };
   saveConfig(config);
   return config;
-}
-
-function upsertProjectMeta(meta: ProjectMeta): void {
-  const others = config.projects.filter((p) => p.tmuxSession !== meta.tmuxSession);
-  commit({ projects: [...others, meta] });
-}
-
-function deleteProjectMeta(tmuxSession: string): void {
-  commit({ projects: config.projects.filter((p) => p.tmuxSession !== tmuxSession) });
 }
 
 // ===== Screenshot detector =====
@@ -262,35 +238,13 @@ app.on("before-quit", () => {
 });
 
 function registerHandlers(): void {
+  // Read ONLY by main.tsx's boot sequence (`chooseDesktopTransport`), before
+  // httpApi is installed as `window.api` — used to seed httpApi's
+  // localStorage credentials from the desktop's local config.json (pairing
+  // triple). Called directly on `window.__buiPreload`, never through
+  // `window.api` (which is httpApi post-boot and reaches config over
+  // /rpc/config:get instead). See src/preload/index.ts and src/renderer/main.tsx.
   ipcMain.handle(IPC.configGet, () => config);
-
-  ipcMain.handle(IPC.configUpdate, async (_e, patch: Partial<AppConfig>) => {
-    // If this patch touches a SHAREABLE field, stamp configUpdatedAt so the
-    // cross-device sync treats this as the newer snapshot (LWW). Mutating
-    // `patch` here means commit() persists the timestamp too. Device-local
-    // edits (host/projects/ports/…) do NOT bump the clock.
-    const touchesShared = patchTouchesSharedConfig(patch);
-    if (touchesShared) {
-      (patch as AppConfig).configUpdatedAt = Date.now();
-    }
-    const next = commit(patch);
-    // Push the shareable subset to the mobile server so the other device picks
-    // it up (e.g. set the Groq STT key on desktop, get it on mobile). Fire-and-
-    // forget over HTTPS; the POST response is the
-    // post-merge snapshot, so a racing mobile edit is pulled back in.
-    if (touchesShared) void pushSharedConfig().catch(() => {});
-    return next;
-  });
-
-  ipcMain.handle(IPC.projectMetaUpsert, (_e, meta: ProjectMeta) => {
-    upsertProjectMeta(meta);
-    return config;
-  });
-
-  ipcMain.handle(IPC.projectMetaDelete, (_e, tmuxSession: string) => {
-    deleteProjectMeta(tmuxSession);
-    return config;
-  });
 
   // Clipboard write via Electron main — bypasses renderer permission restrictions
   // that silently block navigator.clipboard.writeText for non-user-gesture writes.
@@ -375,37 +329,5 @@ function registerHandlers(): void {
       return { ok: false, error: "server unreachable" };
     }
   });
-
-  // Voice / speech-to-text via Groq. Audio bytes are captured by the
-  // renderer (MediaRecorder) and shipped here so the API key never lives
-  // in the renderer process. See src/shared/groq.mjs for the HTTP layer
-  // and src/shared/voiceClassifier.mjs for the rules classifier.
-  ipcMain.handle(
-    IPC.voiceTranscribe,
-    async (_e, input: { buffer: ArrayBuffer; mime: string }) => {
-      const apiKey = config.groqApiKey;
-      const model = config.voiceTranscriptionModel;
-      return transcribeAudio({
-        buffer: input.buffer,
-        mime: input.mime,
-        apiKey: apiKey ?? "",
-        model,
-      });
-    },
-  );
-
-  ipcMain.handle(
-    IPC.voiceClassifyCommand,
-    async (_e, input: { transcript: string; useLlmFallback?: boolean }) => {
-      const apiKey = config.groqApiKey;
-      const model = config.voiceCommandModel;
-      return classifyVoiceCommand({
-        transcript: input.transcript,
-        apiKey: apiKey ?? "",
-        model,
-        useLlmFallback: input.useLlmFallback,
-      });
-    },
-  );
 
 }
