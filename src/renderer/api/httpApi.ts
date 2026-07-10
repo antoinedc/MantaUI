@@ -482,9 +482,10 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 //   • onScreenshotDetected / onDesktopNotify → subscription no-ops (these are
 //     Mac-desktop signals; the http client simply never receives them).
 //   • readLocalFile (arbitrary Mac file bytes, for screenshot "Add to chat")
-//     → rejects. The server IS the box and has no access to the Mac
-//     filesystem; callers (ChatPanel's acceptScreenshot) MUST go through
-//     window.__buiPreload.readLocalFile instead, exactly like clipboardReadImage.
+//     is NOT part of the Api type — the server IS the box and has no access
+//     to the Mac filesystem; callers (ChatPanel's acceptScreenshot) MUST go
+//     through window.__buiPreload.readLocalFile instead, exactly like
+//     clipboardReadImage.
 //
 // None of these throw. If a future feature MUST use the real preload in http
 // mode (e.g. OS clipboard), reach it explicitly via window.__buiPreload rather
@@ -537,12 +538,6 @@ export const httpApi: Api = {
   // -- clipboard --
   clipboardWriteText: (text) => rpc(IPC.clipboardWriteText, text),
   clipboardReadImage: () => rpc(IPC.clipboardReadImage),
-  // Never actually called — the server IS the box, it has no Mac filesystem
-  // access. Callers must use window.__buiPreload.readLocalFile (Electron
-  // main → fs.readFile) instead. Present only to satisfy the full Api type.
-  readLocalFile: async (_path: string): Promise<ArrayBuffer> => {
-    throw new Error("readLocalFile is not available over HTTP — use the preload bridge");
-  },
 
   // -- screenshot detection (SSE push) --
   onScreenshotDetected: (cb) =>
