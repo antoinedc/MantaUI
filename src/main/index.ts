@@ -18,22 +18,6 @@ import {
   pushSharedConfig,
   pullSharedConfig,
 } from "./sharedConfigSync.js";
-import {
-  initScheduleClient,
-  listSchedules,
-  deleteSchedule,
-} from "./schedule.js";
-import {
-  initSecretsClient,
-  listSecrets as listSecretsStore,
-  setSecret as setSecretStore,
-  deleteSecret as deleteSecretStore,
-} from "./secrets.js";
-import {
-  initWebhookClient,
-  listWebhooks,
-  deleteWebhook,
-} from "./webhook.js";
 import { checkForUpdates } from "./autoUpdate.js";
 // Plain-JS modules shared with the mobile server (src/server/*.mjs). The
 // bundler resolves .mjs imports here; main.process never sees them as TS.
@@ -236,15 +220,6 @@ app.whenReady().then(() => {
       mainWindow?.webContents.send(IPC.configChanged, next);
     },
   });
-  // Scheduled-prompt management client (reaches the box's /api/schedule over
-  // HTTPS). Jobs are server-owned; this only lists/deletes.
-  initScheduleClient({ getConfig: () => config });
-  // Secret store client (reaches the box's /api/secrets over HTTPS). Store is
-  // server-owned; this only lists/sets/deletes for the UI.
-  initSecretsClient({ getConfig: () => config });
-  // Webhook registry client (reaches the box's /api/webhook over HTTPS). Hooks
-  // are server-owned; this only lists/deletes for the UI.
-  initWebhookClient({ getConfig: () => config });
   registerHandlers();
   createWindow();
   // Defer poller start until renderer is ready to receive events.
@@ -423,22 +398,4 @@ function registerHandlers(): void {
     },
   );
 
-  // Scheduled prompts (bui-server owned; reached over HTTPS).
-  ipcMain.handle(IPC.scheduleList, (_e, sessionId?: string) =>
-    listSchedules(sessionId),
-  );
-  ipcMain.handle(IPC.scheduleDelete, (_e, id: string) => deleteSchedule(id));
-
-  // Secrets (bui-server owned; reached over HTTPS). list yields
-  // metadata only; set carries the value Mac → box (never through the AI).
-  ipcMain.handle(IPC.secretsList, (_e, sessionId?: string, all?: boolean) =>
-    listSecretsStore(sessionId, all),
-  );
-  ipcMain.handle(IPC.secretsSet, (_e, input) => setSecretStore(input));
-  ipcMain.handle(IPC.secretsDelete, (_e, id: string) => deleteSecretStore(id));
-
-  // Inbound webhooks (bui-server owned; reached over HTTPS).
-  // list yields metadata only (no signing secret); creation is the AI's job.
-  ipcMain.handle(IPC.webhookList, (_e, sessionId?: string) => listWebhooks(sessionId));
-  ipcMain.handle(IPC.webhookDelete, (_e, id: string) => deleteWebhook(id));
 }
