@@ -248,7 +248,7 @@ export function App() {
 
   // Desktop OS notifications. bui-server's router (push.mjs) decides WHICH
   // device(s) get a notification (no duplicates) and relays a desktop directive
-  // over the -L 18787 forward → main → IPC here. We add the final local
+  // → main → IPC here. We add the final local
   // suppression — if this window is focused AND already showing that exact
   // session, the user is looking at it, so don't pop an OS notification — then
   // show it via the Notification API and deep-link to the session on click.
