@@ -9,8 +9,15 @@
 // task comments on each function).
 
 import { spawn as cpSpawn } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import http from "node:http";
+import {
+  CREDENTIALS_PATH,
+  parseCredentials,
+  isRefreshTokenExpired,
+  classifyRefreshOutcome,
+} from "./claudeAuth.mjs";
 
 const REMOTE_PORT = 4096;
 
@@ -856,6 +863,88 @@ export async function getVcsBranch(directory) {
       resolve(name ? name : null);
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Claude credential auto-refresh (BET-139)
+// ---------------------------------------------------------------------------
+
+// Single-flight guard: concurrent ProviderAuthError events share one
+// in-flight refresh promise instead of racing multiple `claude` spawns.
+let _refreshInFlight = null;
+
+/** Best-effort read + parse of ~/.claude/.credentials.json. Null on any
+ *  read or parse failure (file missing, permissions, malformed JSON). */
+function readCredsSnapshot() {
+  try {
+    return parseCredentials(readFileSync(CREDENTIALS_PATH, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-mint expired Claude OAuth credentials by shelling out to the `claude`
+ * CLI — the exact fix the user performs by hand today. Mirrors getVcsBranch's
+ * cpSpawn-wrapped-in-a-Promise shape.
+ *
+ * Triggered from exactly ONE place: the renderer's ProviderAuthError handler
+ * (via the opencode:refresh-credentials RPC channel). Single-flight guarded
+ * so concurrent auth errors share one refresh instead of duplicate spawns.
+ *
+ * @returns {Promise<{ ok: boolean, reason?: "no-credentials" | "refresh-token-expired" | "failed", expiresAt?: number }>}
+ */
+export async function refreshClaudeCredentials() {
+  if (_refreshInFlight) return _refreshInFlight;
+  _refreshInFlight = doRefresh().finally(() => {
+    _refreshInFlight = null;
+  });
+  return _refreshInFlight;
+}
+
+async function doRefresh() {
+  const credsBefore = readCredsSnapshot();
+
+  // Pre-checks — no point spawning `claude` if we already know it can't work.
+  if (!credsBefore) {
+    return logAndReturn({ ok: false, reason: "no-credentials" });
+  }
+  if (isRefreshTokenExpired(credsBefore, Date.now())) {
+    return logAndReturn({ ok: false, reason: "refresh-token-expired" });
+  }
+
+  // Run the CLI refresh (this is the "run claude" the user does by hand).
+  // Non-zero exit / spawn error (e.g. ENOENT) doesn't short-circuit — we
+  // re-check the actual credentials file afterward, which is the source of
+  // truth regardless of the process's exit code.
+  await new Promise((resolve) => {
+    const proc = cpSpawn("claude", ["-p", ".", "--model", "haiku"], {
+      cwd: tmpdir(),
+      env: { ...process.env, TERM: "dumb" },
+      stdio: "ignore",
+      timeout: 60_000,
+    });
+    proc.on("error", () => resolve());
+    proc.on("exit", () => resolve());
+  });
+
+  const credsAfter = readCredsSnapshot();
+  const now = Date.now();
+  const outcome = classifyRefreshOutcome({ credsBefore, credsAfter, now });
+  if (outcome === "ok") {
+    return logAndReturn({ ok: true, expiresAt: credsAfter.expiresAt });
+  }
+  return logAndReturn({ ok: false, reason: outcome });
+}
+
+function logAndReturn(result) {
+  console.log(
+    "[claude-auth] refresh ok=%s reason=%s expiresAt=%s",
+    result.ok,
+    result.reason ?? "-",
+    result.expiresAt ?? "-",
+  );
+  return result;
 }
 
 // ---------------------------------------------------------------------------

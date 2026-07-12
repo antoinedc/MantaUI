@@ -784,6 +784,7 @@ export const httpApi: Api = {
   opencodeRestart: () => rpc(IPC.opencodeRestart),
   opencodeDefaultModel: () => rpc(IPC.opencodeDefaultModel),
   opencodeVcsBranch: (directory) => rpc(IPC.opencodeVcsBranch, directory),
+  opencodeRefreshCredentials: () => rpc(IPC.opencodeRefreshCredentials),
 
   // -- session management --
   opencodeListSessions: (directory) => rpc(IPC.opencodeListSessions, directory),

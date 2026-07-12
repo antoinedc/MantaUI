@@ -2012,3 +2012,45 @@ export async function runWithConcurrency<T>(
   });
   await Promise.all(workers);
 }
+
+// ---------------------------------------------------------------------------
+// Claude credential auto-refresh (BET-139)
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a failed `opencodeRefreshCredentials()` outcome to the actionable
+ * banner text shown via `setSendError`. Pure so the copy is testable without
+ * exercising the async refresh flow. Keep in sync with the reasons returned
+ * by `refreshClaudeCredentials` in src/server/opencode.mjs.
+ */
+export function credentialRefreshBannerText(
+  reason?: "no-credentials" | "refresh-token-expired" | "failed",
+): string {
+  switch (reason) {
+    case "refresh-token-expired":
+      return "Claude login expired — run `opencode auth login anthropic` on the box, then retry.";
+    case "no-credentials":
+      return "No Claude credentials found — run `opencode auth login anthropic` on the box.";
+    default:
+      return "Couldn't refresh Claude credentials automatically. Run `claude` on the box, then retry.";
+  }
+}
+
+/**
+ * The text of the most recent user-role message with non-empty text —
+ * i.e. the turn that just errored with ProviderAuthError and needs to be
+ * auto-resent once credentials are refreshed. Returns null when there's no
+ * such message (empty/synthetic transcript).
+ */
+export function lastUserMessageText(
+  messages: { info: { role: string }; parts: OpencodePartLike[] }[] | null,
+): string | null {
+  if (!messages) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.info.role !== "user") continue;
+    const text = extractTextFromParts(m.parts).trim();
+    if (text) return text;
+  }
+  return null;
+}

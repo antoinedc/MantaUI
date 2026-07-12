@@ -36,6 +36,8 @@ import {
   classifyScrollForPin,
   detectCommandFromText,
   formatBytes,
+  credentialRefreshBannerText,
+  lastUserMessageText,
   type StaleCacheResult,
 } from "./chatUtils";
 import {
@@ -53,7 +55,7 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
-import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
+import { CompactionCard, CredRefreshCard, PermissionCard, RetryCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
@@ -172,6 +174,19 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // Input state must be declared before useSseBus (which needs setInput).
   const [input, setInput] = useState("");
 
+  // ===== Claude credential auto-refresh (BET-139) =====
+  //
+  // Driven by a ProviderAuthError session.error, routed here from useSseBus
+  // via the onProviderAuthError callback. `credRefresh` is a per-session
+  // live-event state, same convention as retryInfo/compactionState.
+  const [credRefresh, setCredRefresh] = useState<null | "refreshing" | "ok" | "error">(null);
+  // Indirection mirrors submitRef: the SSE effect inside useSseBus only
+  // depends on [sessionId], so a plain closure passed as a prop would be
+  // captured once (at mount / session change) and go stale against the
+  // freshest `messages`. Routing the call through a ref that's reassigned
+  // every render keeps it fresh without re-arming the SSE subscription.
+  const onProviderAuthErrorRef = useRef<() => void>(() => {});
+
   // ===== Transcript state (extracted to useTranscriptState) =====
   const {
     messages,
@@ -265,7 +280,39 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     submit: () => {}, // placeholder — ChatPanel's submit is used below
     submitRef,
     setInput,
+    // Indirection to dodge the circular dep: this callback needs setSendError
+    // (returned BY useSseBus) and the freshest `messages` (from
+    // useTranscriptState). onProviderAuthErrorRef.current is assigned below,
+    // after both are in scope — see the comment there.
+    onProviderAuthError: () => onProviderAuthErrorRef.current(),
   });
+
+  // Actual ProviderAuthError handler: refresh credentials server-side, then
+  // either auto-resend the failed turn (success) or surface an actionable
+  // banner (failure). Kept as a plain function (not useCallback) reassigned
+  // to the ref every render — see onProviderAuthErrorRef's declaration for
+  // why the indirection is needed.
+  onProviderAuthErrorRef.current = () => {
+    void (async () => {
+      setCredRefresh("refreshing");
+      const res = await window.api.opencodeRefreshCredentials();
+      if (res.ok) {
+        setCredRefresh("ok");
+        const lastText = lastUserMessageText(messages);
+        if (lastText) {
+          setInput(lastText);
+          setTimeout(() => {
+            submitRef.current?.();
+          }, 0);
+        }
+        setTimeout(() => setCredRefresh(null), 2500);
+      } else {
+        setCredRefresh("error");
+        setSendError(credentialRefreshBannerText(res.reason));
+        setCredRefresh(null);
+      }
+    })();
+  };
 
   // ===== ChatPanel-own state (not extracted to hooks) =====
   const [error, setError] = useState<string | null>(null);
@@ -323,8 +370,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // resets messages/scroll/delta-buffer, useSseBus resets permissions/questions/
   // stepTokens/etc. via its SSE effect cleanup). We only need to reset the
   // ChatPanel-own state here: error, modelOverride, attachments, agentMentions,
-  // systemNotice, dragHover. The SSE stream open/close is also handled by
-  // useSseBus's effect now.
+  // systemNotice, dragHover, credRefresh. The SSE stream open/close is also
+  // handled by useSseBus's effect now.
   useEffect(() => {
     setError(null);
     setModelOverride(readSavedModel(sessionId) ?? configDefaultModel ?? null);
@@ -332,6 +379,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setAgentMentions([]);
     setSystemNotice(null);
     setDragHover(false);
+    setCredRefresh(null);
     // Branch indicator: poll every 5s while this session is mounted.
     const fetchBranch = () => {
       window.api
@@ -1727,6 +1775,15 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {compactionState && (
         <div className="shrink-0 px-4 pt-2">
           <CompactionCard state={compactionState} />
+        </div>
+      )}
+
+      {/* Claude credential auto-refresh (BET-139). Only "refreshing"/"ok" */}
+      {/* render here — "error" surfaces via the sendError banner instead */}
+      {/* (see onProviderAuthErrorRef above), so it's intentionally excluded. */}
+      {(credRefresh === "refreshing" || credRefresh === "ok") && (
+        <div className="shrink-0 px-4 pt-2">
+          <CredRefreshCard state={credRefresh} />
         </div>
       )}
 
