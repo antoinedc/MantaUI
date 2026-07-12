@@ -75,8 +75,8 @@ async function resolveProjectName({ sessionID, directory }) {
 
 // Desktop notification leg: the notification router (push.mjs) publishes a
 // `desktopNotify` bus envelope when it decides the desktop should be notified.
-// The Electron app subscribes to GET /events over its -L 18787 forward and
-// renders it as an OS Notification. push.mjs stays bus-decoupled via this sink.
+// The Electron app subscribes to GET /events and renders it as an OS
+// Notification. push.mjs stays bus-decoupled via this sink.
 push.setDesktopSink((payload) =>
   bus.publish({ kind: "desktopNotify", payload }),
 );
@@ -1128,8 +1128,7 @@ const server = createServer(async (req, res) => {
         });
       } else if (path === "/push/desktop-presence") {
         // Desktop (Electron) heartbeat: suppress mobile "done" pushes while
-        // the user is active on desktop. Posted on focus/blur/system-idle over
-        // the desktop's SSH -L 18787 forward.
+        // the user is active on desktop. Posted on focus/blur/system-idle.
         result = push.setDesktopPresence({ visible: body?.visible });
         console.log(`[push] desktop-presence visible=${!!body?.visible}`);
       } else if (path === "/push/answer") {

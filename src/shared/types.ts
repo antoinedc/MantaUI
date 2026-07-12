@@ -263,7 +263,7 @@ export const IPC = {
 
   // main → renderer push: the bui-server notification router decided the
   // desktop should show an OS notification. Relayed from the server's
-  // `desktopNotify` bus event over the -L 18787 forward. Payload:
+  // `desktopNotify` bus event. Payload:
   // DesktopNotifyPayload. The renderer suppresses it if it's already viewing
   // that session, else shows it via the Notification API + deep-links on click.
   desktopNotify: "desktop:notify",

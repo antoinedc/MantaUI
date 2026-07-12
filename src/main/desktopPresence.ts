@@ -23,7 +23,8 @@
 // lastSeen fresh (TTL) while active, and lets it lapse once you go idle.
 
 import { app, BrowserWindow, powerMonitor } from "electron";
-import { request } from "node:http";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import type { AppConfig } from "../shared/types.js";
 
 // How often to re-evaluate active-state and refresh the server's lastSeen.
@@ -53,7 +54,8 @@ function sendHeartbeatHttp(cfg: AppConfig, visible: boolean): void {
   if (!serverUrl) return;
   const body = JSON.stringify({ visible });
   const url = new URL("/push/desktop-presence", serverUrl);
-  const req = request(
+  const doRequest = url.protocol === "https:" ? httpsRequest : httpRequest;
+  const req = doRequest(
     {
       hostname: url.hostname,
       port: url.port || (url.protocol === "https:" ? 443 : 80),

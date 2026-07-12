@@ -144,8 +144,7 @@ export function getFocus() {
 // Desktop presence — the Electron app reports "I'm focused" so a mobile "done"
 // push is suppressed when the user is heads-down on the desktop (Discord's
 // "active on desktop ⇒ no mobile push" rule). The desktop reaches this server
-// over an SSH -L 18787:127.0.0.1:8787 forward on the shared ControlMaster and
-// POSTs /push/desktop-presence on focus/blur/system-idle.
+// directly over HTTPS and POSTs /push/desktop-presence on focus/blur/system-idle.
 //
 // Two timers gate suppression so a crashed/asleep desktop can't permanently
 // mute mobile:
@@ -513,8 +512,8 @@ const _pending = new Set();
 // Desktop sink + escalation state
 //
 // `_desktopSink` is injected by index.mjs and publishes a `desktopNotify` bus
-// envelope, which the Electron app consumes over the -L 18787 forward and
-// renders as an OS Notification. push.mjs stays decoupled from the bus (mirrors
+// envelope, which the Electron app consumes and renders as an OS Notification.
+// push.mjs stays decoupled from the bus (mirrors
 // how schedule.mjs takes an injected sendPrompt).
 // ---------------------------------------------------------------------------
 
