@@ -186,7 +186,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     expandedTasks,
     expandedTasksRef,
     childMessagesRef,
-    scheduleRefetchRef,
     isActiveRef,
     refetchOwedWhileInactive,
     prevScrollHeight,
@@ -518,17 +517,19 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   // Catch-up refetch on reactivation. While inactive, scheduleRefetch and the
   // delta buffer are suppressed (see the gating refs near refetchTimer) so we
-  // don't re-render a transcript the user can't see. When the panel becomes
-  // active again, pull the canonical transcript once if any refetch/delta was
-  // dropped while hidden — this repaints with everything that streamed in the
-  // background. scheduleRefetchRef is set by the SSE effect (same lifecycle);
-  // guard for the first render where it may not be wired yet.
+  // don't re-render a transcript the user can't see. On reactivation, pull the
+  // canonical transcript (if any refetch/delta was dropped while hidden) plus
+  // the pending questions/permissions — their .asked events can be missed while
+  // the panel is hidden and there is no delta/owed mechanism to replay them.
   useEffect(() => {
     if (!isActive) return;
-    if (!refetchOwedWhileInactive.current) return;
-    refetchOwedWhileInactive.current = false;
-    scheduleRefetchRef.current?.();
-  }, [isActive]);
+    if (refetchOwedWhileInactive.current) {
+      refetchOwedWhileInactive.current = false;
+      scheduleRefetch();
+    }
+    refreshQuestions();
+    refreshPermissions();
+  }, [isActive, scheduleRefetch, refreshQuestions, refreshPermissions]);
 
   const submit = useCallback(async () => {
     // Block submit while any attachment is still uploading.

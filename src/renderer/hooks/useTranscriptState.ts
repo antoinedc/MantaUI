@@ -44,7 +44,6 @@ export type TranscriptState = {
   setExpandedTasks: React.Dispatch<React.SetStateAction<Set<string>>>;
   expandedTasksRef: React.MutableRefObject<Set<string>>;
   childMessagesRef: React.MutableRefObject<Map<string, OpencodeMessage[]>>;
-  scheduleRefetchRef: React.MutableRefObject<(() => void) | null>;
   isActiveRef: React.MutableRefObject<boolean>;
   refetchOwedWhileInactive: React.MutableRefObject<boolean>;
   prevScrollHeight: React.MutableRefObject<number>;
@@ -77,7 +76,6 @@ export function useTranscriptState(params: {
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
   const refetchOwedWhileInactive = useRef(false);
-  const scheduleRefetchRef = useRef<(() => void) | null>(null);
   const spliceTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   // Per-message max-wait guard: records when the CURRENT (un-fired) splice
   // debounce for a message first started. A running tool emits
@@ -153,26 +151,6 @@ export function useTranscriptState(params: {
     return unmatchedCount;
   }, []);
 
-  const scheduleFlush = useCallback(() => {
-    if (flushTimer.current) return;
-    const now = Date.now();
-    const age =
-      oldestPendingAt.current != null ? now - oldestPendingAt.current : 0;
-    const delay = Math.max(0, Math.min(16, FLUSH_MAX_AGE_MS - age));
-    flushTimer.current = setTimeout(() => {
-      flushTimer.current = null;
-      const now2 = Date.now();
-      const aged =
-        oldestPendingAt.current != null &&
-        now2 - oldestPendingAt.current >= FLUSH_MAX_AGE_MS;
-      const unmatched = flushPendingDeltas(aged);
-      if (unmatched > 0) scheduleRefetchRef.current?.();
-      if (pendingDeltas.current.size > 0) {
-        scheduleFlush();
-      }
-    }, delay);
-  }, [flushPendingDeltas]);
-
   const scheduleRefetch = useCallback(() => {
     if (!isActiveRef.current) {
       refetchOwedWhileInactive.current = true;
@@ -192,6 +170,26 @@ export function useTranscriptState(params: {
         .catch(() => { /* keep last-known state */ });
     }, 300);
   }, [sessionId]);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushTimer.current) return;
+    const now = Date.now();
+    const age =
+      oldestPendingAt.current != null ? now - oldestPendingAt.current : 0;
+    const delay = Math.max(0, Math.min(16, FLUSH_MAX_AGE_MS - age));
+    flushTimer.current = setTimeout(() => {
+      flushTimer.current = null;
+      const now2 = Date.now();
+      const aged =
+        oldestPendingAt.current != null &&
+        now2 - oldestPendingAt.current >= FLUSH_MAX_AGE_MS;
+      const unmatched = flushPendingDeltas(aged);
+      if (unmatched > 0) scheduleRefetch();
+      if (pendingDeltas.current.size > 0) {
+        scheduleFlush();
+      }
+    }, delay);
+  }, [flushPendingDeltas, scheduleRefetch]);
 
   const spliceMessage = useCallback((messageId: string) => {
     if (!messageId) {
@@ -364,7 +362,6 @@ export function useTranscriptState(params: {
     setExpandedTasks,
     expandedTasksRef,
     childMessagesRef,
-    scheduleRefetchRef,
     isActiveRef,
     refetchOwedWhileInactive,
     prevScrollHeight,
