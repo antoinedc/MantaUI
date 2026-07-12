@@ -793,8 +793,13 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
               : cls === "aging"
                 ? "text-amber-400/80"
                 : "text-red-400/80";
+          // Stale ages are low-signal for old idle sessions: hide by default,
+          // reveal on row hover. Reuses the same group-hover pattern as the
+          // row's close button (the row <div> carries the `group` class).
+          const hoverOnly =
+            cls === "stale" ? " opacity-0 group-hover:opacity-100" : "";
           return (
-            <span className={`text-[10px] tabular-nums ${color}`}>
+            <span className={`text-[10px] tabular-nums ${color}${hoverOnly}`}>
               {formatAge(now - status.lastMessageAt!)}
             </span>
           );
