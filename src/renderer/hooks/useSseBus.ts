@@ -530,7 +530,24 @@ export function useSseBus(params: {
       }
 
       if (ev.type === "message.part.updated" || ev.type === "message.updated") {
-        const messageID = String(props.messageID ?? "");
+        // messageID lives at DIFFERENT paths per event type on the deployed
+        // opencode build (verified live against /events):
+        //   - message.part.updated → properties.part.messageID (top-level
+        //     properties.messageID is UNDEFINED)
+        //   - message.updated       → properties.messageID (properties.info.id
+        //     as a fallback)
+        // Reading only props.messageID meant message.part.updated resolved to
+        // "" and fell through to a FULL scheduleRefetch — whose single 300ms
+        // timer is reset on every event. A running bash emits part.updated
+        // every ~20-40ms, so that timer never fired until the turn went idle:
+        // live tool output (metadata.output) never streamed, it dumped all at
+        // once on completion. Resolving the real id routes to the targeted
+        // per-message splice (which has its own max-wait guard).
+        const part = props.part as { messageID?: unknown } | undefined;
+        const info = props.info as { id?: unknown } | undefined;
+        const messageID = String(
+          props.messageID ?? part?.messageID ?? info?.id ?? "",
+        );
         spliceMessage(messageID);
         flushPendingDeltas(false);
       }
@@ -593,15 +610,25 @@ export function useSseBus(params: {
     };
   }, [sessionId]);
 
-  // Drain effect: when running flips false and there's a queued prompt, submit it
+  // Drain effect: when running flips false and there's a queued prompt, submit
+  // it. This is the SOLE drain effect (a duplicate in ChatPanel was removed —
+  // both fired on the same running→false edge and double-submitted).
+  //
+  // Ordering matters: setInput(queued) runs NOW (synchronously in this effect),
+  // and the actual submit is deferred to a setTimeout(0). The gap lets React
+  // re-render so submitRef.current is reassigned to a fresh submit() closure
+  // that captures the new `input` — submit() reads `input` from its render
+  // closure (not a ref), so calling it before the input-set re-render would
+  // read the stale empty value and no-op. Do NOT collapse setInput into the
+  // timeout alongside submitRef.current() — that reintroduces the stale-closure
+  // bug where the queued prompt is silently dropped.
   useEffect(() => {
     if (!running && messageQueue.length > 0) {
       const queued = messageQueue[0];
       setMessageQueue((prev) => prev.slice(1));
       drainAbortRef.current = false;
-      // One-tick delay so the message is removed from the queue before submit
+      setInput(queued);
       setTimeout(() => {
-        setInput(queued);
         submitRef.current?.();
       }, 0);
     }

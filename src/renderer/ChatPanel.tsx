@@ -225,7 +225,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     finishByMessageId,
     retryInfo,
     compactionState,
-    drainAbortRef,
     rejectAllPendingQuestions,
   } = useSseBus({
     sessionId,
@@ -747,23 +746,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   // When the AI goes idle (running flips false) and there are queued
   // messages, dispatch the next one. We restore it into `input` and call
-  // submit() via the ref so slash commands, attachments, and model
-  // resolution all go through the same code path as a manual submit.
-  //
-  // Idle is reached one of two ways now: a turn finishing naturally, OR the
-  // step-boundary drain-abort (see the session.next.step.ended handler) that
-  // interrupts a still-running turn the moment a prompt is queued. Either
-  // way the submit path is identical — this effect just waits for !running.
-  // Re-arm drainAbortRef here so the NEXT queued item (if any) can again
-  // abort the freshly-submitted turn at its next step boundary.
-  useEffect(() => {
-    if (running || messageQueue.length === 0) return;
-    drainAbortRef.current = false;
-    const [next, ...rest] = messageQueue;
-    setMessageQueue(rest);
-    setInput(next);
-    setTimeout(() => submitRef.current(), 0);
-  }, [running, messageQueue]);
+  // NOTE: the queued-message drain effect (submit next queued prompt when
+  // running flips false) lives in useSseBus (useSseBus.ts). It used to be
+  // ALSO duplicated here — both effects fired on the same running→false
+  // transition against the shared messageQueue/submitRef and submitted the
+  // same queued item TWICE. The duplicate was removed; the hook's effect is
+  // the single owner. Do NOT reintroduce a drain effect here.
 
   const abort = useCallback(async () => {
     try {

@@ -845,6 +845,25 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   did); only the abort *error/indication* is hidden. The predicates are pure +
   tested in `chatUtils.test.ts`. ChatPanel is shared with mobile, so this
   behavior applies on both transports (both implement `opencodeAbort`).
+
+  **The drain effect is the SOLE owner and lives in `useSseBus.ts` — do NOT
+  duplicate it.** The BET-64 hook extraction left an IDENTICAL
+  `[running, messageQueue]` drain effect in BOTH `useSseBus.ts` AND
+  `ChatPanel.tsx`. Both fired on the same `running→false` edge against the
+  shared `messageQueue` + `submitRef`, submitting the same queued prompt
+  **TWICE** ("queued message sent twice"). The ChatPanel copy was removed;
+  a `no double send` regression test in `useSseBus.test.tsx` guards it.
+
+  **Ordering inside the drain effect is load-bearing:** `setInput(queued)`
+  runs synchronously in the effect body, and ONLY the `submitRef.current()`
+  call is deferred to `setTimeout(0)`. `submit()` reads `input` from its
+  render closure (not a ref), so the deferred submit must run AFTER the
+  input-set re-render has reassigned `submitRef.current` to a fresh closure.
+  The hook version originally did `setInput(queued); submitRef.current()`
+  BOTH inside the timeout back-to-back — no re-render gap — so submit read
+  the stale empty input and **silently dropped the queued prompt**
+  (a contributor to "queued messages seem to wait / never send"). Do NOT
+  collapse `setInput` back into the timeout next to the submit call.
 - **TodoWrite checklist auto-dismissal** — when every item in the pinned
   `ActiveTodos` is terminal (`completed` or `cancelled`) at the moment the
   user submits their next prompt, `todosDismissed` flips true and the card
@@ -1275,6 +1294,43 @@ full — try /compact: …", `MessageOutputLengthError` → "Response truncated
 (hit output limit)", `StructuredOutputError`, `ApiError`. Add new branches
 when opencode introduces new error class names; unknown names fall through
 to the raw message.
+
+**Live tool output (bash tailing) — the messageID + debounce-starvation
+trap.** A running tool streams its stdout into `state.metadata.output` (NOT
+`state.output`, which only exists at `completed`); `resolveToolOutput`
+(`chatUtils.ts`) prefers `state.output` and falls back to the live
+`metadata.output` so `BashBody` tails a long command's latest lines. opencode
+emits a `message.part.updated` for the tool part every ~20-40ms as output
+grows (verified live against `/events`). Two bugs conspired to make this show
+nothing until the turn ended ("bash · running" with an empty body, then the
+whole output dumped at once on completion):
+
+- **messageID is at a DIFFERENT path per event type.** On
+  `message.part.updated` the id lives at `properties.part.messageID`; the
+  top-level `properties.messageID` is UNDEFINED (it's only set on
+  `message.updated`). The handler read only `props.messageID`, so
+  `message.part.updated` resolved to `""` and `spliceMessage("")` fell through
+  to a FULL `scheduleRefetch()` instead of the targeted per-message splice.
+  Fix: resolve `props.messageID ?? props.part.messageID ?? props.info.id`
+  (`useSseBus.ts`).
+- **The refetch debounce was starved.** Both `scheduleRefetch` and the
+  per-message `spliceMessage` are 300ms-debounced with a timer that RESETS on
+  every call. Because tool updates arrive every ~30ms — far faster than
+  300ms — the timer never fired until the stream paused (turn idle). Fix: a
+  per-message **max-wait guard** (`SPLICE_MAX_WAIT_MS = 250` in
+  `useTranscriptState.ts`) — if a message's splice has been pending longer
+  than the cap, the in-flight timer is allowed to fire instead of being reset,
+  so live output updates at a steady ~4Hz cap. `spliceTimers` +
+  `spliceFirstScheduledAt` are cleared on session change so a late timer can't
+  write a stale message into the new session.
+
+The renderer's render path (`resolveToolOutput` → `BashBody` →
+`ConnectorOutput` pin-to-bottom, memoized on the `part` reference) was already
+correct; the bug was purely event-routing + debounce, not rendering. The full
+pipeline (opencode → bui-server `/events` → RPC `opencode:message`) delivers
+`metadata.output` intact both mid-run and at completion — verified by
+streaming the box's opencode `/event` and bui-server `/events` during a slow
+`for i…; do echo; sleep 1; done`.
 
 **Per-project SSE scope** — every session-mutating POST
 (`prompt_async`, `command`, `fork`, `compact`) carries

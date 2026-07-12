@@ -79,6 +79,15 @@ export function useTranscriptState(params: {
   const refetchOwedWhileInactive = useRef(false);
   const scheduleRefetchRef = useRef<(() => void) | null>(null);
   const spliceTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // Per-message max-wait guard: records when the CURRENT (un-fired) splice
+  // debounce for a message first started. A running tool emits
+  // message.part.updated every ~20-40ms — far faster than the 300ms debounce —
+  // so resetting the timer on every event would starve it and nothing would
+  // render until the turn idles. If the debounce has been pending longer than
+  // SPLICE_MAX_WAIT_MS we let the in-flight timer fire instead of resetting it,
+  // so live output updates at a steady ~4Hz cap.
+  const spliceFirstScheduledAt = useRef<Map<string, number>>(new Map());
+  const SPLICE_MAX_WAIT_MS = 250;
   const pendingDeltas = useRef<Map<string, PendingDelta>>(new Map());
   const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const FLUSH_MAX_AGE_MS = 250;
@@ -194,11 +203,26 @@ export function useTranscriptState(params: {
       return;
     }
     const existing = spliceTimers.current.get(messageId);
-    if (existing) clearTimeout(existing);
+    if (existing) {
+      // Max-wait guard: if this message's splice has already been pending
+      // longer than SPLICE_MAX_WAIT_MS, DON'T reset the in-flight timer —
+      // let it fire so a continuously-updating message (a running tool
+      // streaming output every ~30ms) still renders at a steady cap instead
+      // of being starved until the turn idles.
+      const firstAt = spliceFirstScheduledAt.current.get(messageId);
+      if (firstAt != null && Date.now() - firstAt >= SPLICE_MAX_WAIT_MS) {
+        return;
+      }
+      clearTimeout(existing);
+    }
+    if (!spliceFirstScheduledAt.current.has(messageId)) {
+      spliceFirstScheduledAt.current.set(messageId, Date.now());
+    }
     spliceTimers.current.set(
       messageId,
       setTimeout(() => {
         spliceTimers.current.delete(messageId);
+        spliceFirstScheduledAt.current.delete(messageId);
         window.api
           .opencodeMessage(sessionId, messageId)
           .then((msg) => {
@@ -281,6 +305,12 @@ export function useTranscriptState(params: {
   useEffect(() => {
     prevScrollHeight.current = 0;
     pinnedToBottom.current = true;
+    // Cancel any in-flight per-message splice from the PREVIOUS session so a
+    // late timer can't refetch + write a stale message into the new session's
+    // list. Also clear the max-wait bookkeeping.
+    for (const t of spliceTimers.current.values()) clearTimeout(t);
+    spliceTimers.current.clear();
+    spliceFirstScheduledAt.current.clear();
   }, [sessionId]);
 
   // Post-commit stick layout effect. The stick decision MUST compare the user's

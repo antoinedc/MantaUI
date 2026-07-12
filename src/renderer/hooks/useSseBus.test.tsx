@@ -512,4 +512,50 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
 
     expect(api.calls.opencodeAbort ?? []).toEqual([]);
   });
+
+  // REGRESSION: a queued message must be submitted EXACTLY ONCE on drain.
+  // There used to be TWO identical `[running, messageQueue]` drain effects —
+  // one in useSseBus, one in ChatPanel — both firing on the same running→false
+  // transition against the shared queue + submitRef, submitting the same
+  // queued prompt twice. The ChatPanel duplicate was removed; the hook's
+  // effect is the sole owner. If a duplicate is ever reintroduced this test
+  // sees two opencodePrompt calls for "second message".
+  it("submits a queued message exactly once when it drains (no double send)", async () => {
+    ({ api, bus } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    // Turn running; queue a second message mid-turn.
+    await emitAndFlush(bus, h, {
+      type: "session.status",
+      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    });
+    await queueASecondMessage(h.container);
+    await h.flush();
+
+    // A tool completes → drain-abort fires opencodeAbort.
+    await emitAndFlush(bus, h, {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_test",
+        messageID: "msg_1",
+        part: { type: "tool", state: { status: "completed" } },
+      },
+    });
+    // The abort flips the session idle → the drain effect submits the queued
+    // prompt. Emit the idle the abort would produce.
+    await emitAndFlush(bus, h, {
+      type: "session.idle",
+      properties: { sessionID: "ses_test" },
+    });
+    await h.flush();
+
+    const promptCalls = (api.calls.opencodePrompt ?? []).filter((args) =>
+      JSON.stringify(args).includes("second message"),
+    );
+    expect(promptCalls.length).toBe(1);
+  });
 });
