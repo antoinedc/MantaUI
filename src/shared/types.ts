@@ -330,6 +330,10 @@ export const IPC = {
   // only fires on change, so the chat footer fetches the initial value on
   // mount via this channel.
   opencodeVcsBranch: "opencode:vcs-branch",
+  // Re-mint expired Claude OAuth credentials (spawns `claude` server-side)
+  // and report the outcome. Triggered by the renderer's ProviderAuthError
+  // handler — see the session.error switch in useSseBus.ts.
+  opencodeRefreshCredentials: "opencode:refresh-credentials",
   // Session management: list/fork/compact/delete.
   opencodeListSessions: "opencode:list-sessions",
   opencodeForkSession: "opencode:fork-session",     // returns new sessionId

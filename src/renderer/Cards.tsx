@@ -58,6 +58,35 @@ export function RetryCard({
   );
 }
 
+// ===== Credential refresh card =====
+//
+// Rendered while the renderer auto-recovers from a ProviderAuthError (BET-139):
+// a background `claude` refresh runs server-side, and on success the failed
+// turn is auto-resent. Failure is surfaced via the sendError banner instead
+// (see credentialRefreshBannerText in chatUtils.ts) — this card renders
+// nothing for the "error" phase to avoid double-surfacing the message.
+
+export function CredRefreshCard({ state }: { state: "refreshing" | "ok" }) {
+  const isRefreshing = state === "refreshing";
+  return (
+    <div
+      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+    >
+      <div className="flex items-center gap-2">
+        <span style={{ color: CLAUDE_ORANGE }}>
+          <span className={isRefreshing ? "inline-block animate-pulse" : "inline-block"}>
+            ↻
+          </span>
+        </span>
+        <span className="text-text">
+          {isRefreshing ? "Refreshing Claude credentials…" : "Credentials refreshed — resending."}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 // ===== Compaction card =====
 //
 // Rendered while session.next.compaction.* events stream in. "running" shows

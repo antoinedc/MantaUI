@@ -67,6 +67,7 @@ function defaultApiImpl(): Record<string, unknown> {
     opencodeModels: () => Promise.resolve([]),
     opencodeDefaultModel: () => Promise.resolve(null),
     opencodeVcsBranch: () => Promise.resolve(null),
+    opencodeRefreshCredentials: () => Promise.resolve({ ok: false, reason: "failed" }),
     opencodeCommands: () => Promise.resolve([]),
     opencodeAgents: () => Promise.resolve([]),
     opencodeFindFiles: () => Promise.resolve([]),

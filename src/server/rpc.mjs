@@ -267,6 +267,9 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // → args[0] = directory (string | undefined)
     "opencode:vcs-branch": (directory) => oc.getVcsBranch(directory),
 
+    // preload: ipcRenderer.invoke(IPC.opencodeRefreshCredentials)  → no args
+    "opencode:refresh-credentials": () => oc.refreshClaudeCredentials(),
+
     // preload: ipcRenderer.invoke(IPC.opencodeListSessions, directory?)
     // → args[0] = directory (string | undefined)
     "opencode:list-sessions": (directory) => oc.listSessions(directory),

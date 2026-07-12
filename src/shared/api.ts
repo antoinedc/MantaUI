@@ -216,6 +216,11 @@ export interface Api {
   }): Promise<{ ok: boolean; error?: string }>;
   opencodeRestart(): Promise<void>;
   opencodeVcsBranch(directory?: string): Promise<string | null>;
+  opencodeRefreshCredentials(): Promise<{
+    ok: boolean;
+    reason?: "no-credentials" | "refresh-token-expired" | "failed";
+    expiresAt?: number;
+  }>;
 
   // Session management.
   opencodeListSessions(directory?: string): Promise<OpencodeSessionListItem[]>;
