@@ -1,0 +1,259 @@
+/* manta UI — Design System · global entry point
+ * Consumers link THIS file only. Keep it @import lines only.
+ */
+/* manta UI — Webfonts
+ * Inter (UI/sans) + JetBrains Mono (code/mono), served from Google Fonts.
+ * The logo wordmark uses a rounded geometric display face (Quicksand family)
+ * and lives ONLY as an image asset — it is never used in product UI.
+ */
+
+/* manta UI — Color tokens
+ * Dark-first developer tool. Base anchors from the brand kit:
+ *   bg #0B1020 · primary #2E6BFF · accent #49D7F5 · text #F8FAFC
+ * Neutral + semantic ramps are derived to stay harmonious (cool, oceanic).
+ */
+:root {
+  /* ---- Brand ramps ---------------------------------------------------- */
+  /* Navy — the canvas & surface elevations (darkest → lightest) */
+  --navy-950: #0B1020; /* app background (brand base) */
+  --navy-900: #0E1326;
+  --navy-850: #12182F;
+  --navy-800: #171F3A; /* raised panels / cards */
+  --navy-750: #1D2647;
+  --navy-700: #253055; /* hairline borders on surfaces */
+  --navy-600: #33406B;
+  --navy-500: #45537F;
+
+  /* Blue — primary action */
+  --blue-300: #8AABFF;
+  --blue-400: #5A88FF;
+  --blue-500: #2E6BFF; /* primary (brand) */
+  --blue-600: #1E52DB;
+  --blue-700: #1740AE;
+
+  /* Cyan — accent / highlight / agent glow */
+  --cyan-300: #9BEBFB;
+  --cyan-400: #49D7F5; /* accent (brand) */
+  --cyan-500: #22BEE0;
+  --cyan-600: #1298B8;
+
+  /* Neutral (cool slate) — text & muted UI on dark */
+  --slate-50:  #F8FAFC; /* text (brand) */
+  --slate-200: #CBD3E1;
+  --slate-300: #A7B1C4;
+  --slate-400: #7E889D;
+  --slate-500: #5C6578;
+  --slate-600: #434B5E;
+
+  /* Semantic hues (cool-leaning to match the oceanic brand) */
+  --green-400: #4BE3B1;
+  --green-500: #22C79A;
+  --amber-400: #F7C15A;
+  --amber-500: #F0A934;
+  --red-400:   #FF7A88;
+  --red-500:   #F0505F;
+
+  /* ---- Semantic aliases (use THESE in product UI) --------------------- */
+  /* Surfaces */
+  --surface-app:        var(--navy-950);
+  --surface-sunken:     var(--navy-900);
+  --surface-panel:      var(--navy-850);
+  --surface-card:       var(--navy-800);
+  --surface-raised:     var(--navy-750);
+  --surface-overlay:    #10162BF2; /* modals / popovers (near-opaque) */
+  --surface-inset:      #070B17;   /* code wells, terminals */
+
+  /* Borders */
+  --border-subtle:      #FFFFFF14; /* 8% white hairline */
+  --border-default:     var(--navy-700);
+  --border-strong:      var(--navy-600);
+  --border-focus:       var(--blue-500);
+
+  /* Text */
+  --text-primary:       var(--slate-50);
+  --text-secondary:     var(--slate-200);
+  --text-tertiary:      var(--slate-400);
+  --text-disabled:      var(--slate-500);
+  --text-inverse:       var(--navy-950);
+  --text-link:          var(--cyan-400);
+  --text-code:          var(--cyan-300);
+
+  /* Primary action */
+  --action-primary:        var(--blue-500);
+  --action-primary-hover:  var(--blue-400);
+  --action-primary-active: var(--blue-600);
+  --action-on-primary:     #FFFFFF;
+
+  /* Accent action (secondary emphasis) */
+  --action-accent:         var(--cyan-400);
+  --action-accent-hover:   var(--cyan-300);
+  --action-on-accent:      var(--navy-950);
+
+  /* Subtle / ghost surfaces */
+  --fill-subtle:        #FFFFFF0D; /* 5% white */
+  --fill-subtle-hover:  #FFFFFF1A; /* 10% white */
+  --fill-active:        #FFFFFF14;
+
+  /* Status (foreground + soft background tint) */
+  --status-success:     var(--green-500);
+  --status-success-bg:  #22C79A1F;
+  --status-warning:     var(--amber-500);
+  --status-warning-bg:  #F0A9341F;
+  --status-danger:      var(--red-500);
+  --status-danger-bg:   #F0505F1F;
+  --status-info:        var(--cyan-400);
+  --status-info-bg:     #49D7F51F;
+  --status-neutral:     var(--slate-400);
+  --status-neutral-bg:  #FFFFFF0F;
+
+  /* Focus ring */
+  --ring: 0 0 0 2px var(--surface-app), 0 0 0 4px var(--blue-500);
+
+  /* Signature brand gradient (mark + emphasis) */
+  --gradient-brand: linear-gradient(135deg, var(--cyan-400) 0%, var(--blue-500) 100%); /* @kind color */
+  --gradient-brand-soft: linear-gradient(135deg, #49D7F52E 0%, #2E6BFF2E 100%); /* @kind color */
+}
+
+/* manta UI — Typography tokens
+ * Inter for UI text; JetBrains Mono for code, paths, IDs, metrics.
+ * Type scale is compact and technical — a dev tool, not a marketing site.
+ */
+:root {
+  /* Families */
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
+
+  /* Weights */
+  --fw-regular: 400;   /* @kind font */
+  --fw-medium: 500;    /* @kind font */
+  --fw-semibold: 600;  /* @kind font */
+  --fw-bold: 700;      /* @kind font */
+  --fw-extrabold: 800; /* @kind font */
+
+  /* Font sizes (rem @ 16px root) */
+  --fs-2xs: 0.6875rem; /* 11px — micro labels, kbd */
+  --fs-xs:  0.75rem;   /* 12px — captions, meta, mono */
+  --fs-sm:  0.8125rem; /* 13px — dense UI, secondary */
+  --fs-base:0.875rem;  /* 14px — body / default UI */
+  --fs-md:  1rem;      /* 16px — emphasized body */
+  --fs-lg:  1.125rem;  /* 18px — section titles */
+  --fs-xl:  1.375rem;  /* 22px — view titles */
+  --fs-2xl: 1.75rem;   /* 28px — page headings */
+  --fs-3xl: 2.25rem;   /* 36px — display */
+  --fs-4xl: 3rem;      /* 48px — hero display */
+
+  /* Line heights */
+  --lh-tight: 1.15;    /* @kind font */
+  --lh-snug: 1.3;      /* @kind font */
+  --lh-normal: 1.5;    /* @kind font */
+  --lh-relaxed: 1.65;  /* @kind font */
+  --lh-code: 1.55;     /* @kind font */
+
+  /* Letter spacing */
+  --ls-tight: -0.02em; /* @kind font */
+  --ls-snug: -0.01em;  /* @kind font */
+  --ls-normal: 0em;    /* @kind font */
+  --ls-wide: 0.02em;   /* @kind font */
+  --ls-caps: 0.08em;   /* @kind font */
+
+  /* ---- Semantic text roles (font shorthand) ---- */
+  --text-display:  var(--fw-extrabold) var(--fs-4xl)/var(--lh-tight) var(--font-sans); /* @kind font */
+  --text-h1:       var(--fw-bold) var(--fs-2xl)/var(--lh-tight) var(--font-sans);       /* @kind font */
+  --text-h2:       var(--fw-semibold) var(--fs-xl)/var(--lh-snug) var(--font-sans);     /* @kind font */
+  --text-title:    var(--fw-semibold) var(--fs-lg)/var(--lh-snug) var(--font-sans);     /* @kind font */
+  --text-body:     var(--fw-regular) var(--fs-base)/var(--lh-normal) var(--font-sans);  /* @kind font */
+  --text-body-sm:  var(--fw-regular) var(--fs-sm)/var(--lh-normal) var(--font-sans);    /* @kind font */
+  --text-label:    var(--fw-medium) var(--fs-sm)/var(--lh-snug) var(--font-sans);       /* @kind font */
+  --text-caption:  var(--fw-regular) var(--fs-xs)/var(--lh-snug) var(--font-sans);      /* @kind font */
+  --text-mono:     var(--fw-regular) var(--fs-sm)/var(--lh-code) var(--font-mono);      /* @kind font */
+  --text-mono-sm:  var(--fw-regular) var(--fs-xs)/var(--lh-code) var(--font-mono);      /* @kind font */
+}
+
+/* manta UI — Spacing & layout tokens
+ * 4px base grid. Compact density for information-dense dev surfaces.
+ */
+:root {
+  --space-0: 0;
+  --space-px: 1px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  /* Component-scale sizing */
+  --control-h-sm: 28px;
+  --control-h-md: 34px;
+  --control-h-lg: 40px;
+
+  /* Layout rails (dev-app chrome) */
+  --rail-icon: 56px;    /* far-left icon rail */
+  --sidebar-w: 264px;   /* workspace/session sidebar */
+  --topbar-h: 48px;     /* app title bar */
+  --content-max: 1200px;
+
+  /* Z-index scale */
+  --z-base: 0;        /* @kind other */
+  --z-sticky: 100;    /* @kind other */
+  --z-dropdown: 400;  /* @kind other */
+  --z-overlay: 800;   /* @kind other */
+  --z-modal: 900;     /* @kind other */
+  --z-toast: 1000;    /* @kind other */
+  --z-tooltip: 1100;  /* @kind other */
+}
+
+/* manta UI — Effects: radius, borders, shadows, motion
+ * Shadows are deep and cool on the dark canvas; glows carry the brand accent.
+ */
+:root {
+  /* Corner radii — soft but not pill-heavy; matches the rounded logo mark */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;   /* default control radius */
+  --radius-lg: 12px;  /* cards, panels */
+  --radius-xl: 16px;  /* large surfaces, sheets */
+  --radius-2xl: 22px;
+  --radius-full: 999px;
+
+  /* Border widths */
+  --border-w: 1px;    /* @kind other */
+  --border-w-2: 1.5px; /* @kind other */
+
+  /* Elevation — layered dark shadows (cool, low-spread) */
+  --shadow-xs: 0 1px 2px rgba(3, 6, 15, 0.4);
+  --shadow-sm: 0 2px 6px rgba(3, 6, 15, 0.45);
+  --shadow-md: 0 8px 24px rgba(3, 6, 15, 0.55);
+  --shadow-lg: 0 18px 48px rgba(3, 6, 15, 0.6);
+  --shadow-xl: 0 32px 80px rgba(2, 4, 12, 0.7);
+
+  /* Inset — code wells, pressed states */
+  --shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.04),
+                  inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+
+  /* Brand glows — for active/agent-running states */
+  --glow-blue: 0 0 0 1px rgba(46, 107, 255, 0.5), 0 0 24px rgba(46, 107, 255, 0.35);
+  --glow-cyan: 0 0 0 1px rgba(73, 215, 245, 0.5), 0 0 24px rgba(73, 215, 245, 0.35);
+
+  /* Motion — quick, precise easing; no bounce */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);   /* @kind other */
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1); /* @kind other */
+  --dur-fast: 120ms;  /* @kind other */
+  --dur-base: 180ms;  /* @kind other */
+  --dur-slow: 280ms;  /* @kind other */
+  --transition-base: all var(--dur-base) var(--ease-out); /* @kind other */
+}
+
+  html, body { margin: 0; height: 100%; background: var(--surface-app); overflow: hidden; }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--navy-700); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--navy-600); background-clip: padding-box; }
+  a { color: var(--text-link); text-decoration: none; }
+  a:hover { color: var(--cyan-300); }
