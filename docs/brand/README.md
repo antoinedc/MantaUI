@@ -1,6 +1,6 @@
-# manta UI — Brand & Design System
+# Manta UI — Brand & Design System
 
-Source of truth for the **manta** rebrand (formerly `bui` / `better-ui`).
+Source of truth for the **Manta** rebrand (formerly `bui` / `better-ui`).
 Imported from the Claude design project
 `d88214b7-700d-4179-b4c1-4bbc3c7de0e8` (2026-07-13).
 
@@ -10,8 +10,8 @@ scope** for this cycle.
 
 ## Name
 
-- Product name: **manta UI** (wordmark styled lowercase "manta UI").
-- Short name: **manta**.
+- Product name: **Manta UI** (capitalized "Manta").
+- Short name: **Manta**.
 - The wordmark uses a rounded geometric display face (Quicksand family) and
   lives ONLY as an image asset — it is never used in product UI. Product UI
   uses Inter.
@@ -24,7 +24,7 @@ scope** for this cycle.
   (`--gradient-brand`).
 - Icon sets (PWA / iOS / Android / desktop `.icns`) must be regenerated from
   this mark. The current onboarding "logo" is a generic inline SVG and must be
-  replaced with the manta mark + wordmark.
+  replaced with the Manta mark + wordmark.
 
 ## Typography
 
@@ -50,12 +50,12 @@ gradients) are in **`tokens.css`** — the authoritative token list. Product
 code should map to the semantic aliases (`--surface-app`, `--action-primary`,
 `--status-warning`, …), not raw hex.
 
-### Migration mapping (current → manta)
+### Migration mapping (current → Manta)
 
 The current app is Tailwind-theme-based (`tailwind.config.js`) plus a handful
 of inline hex constants. Rough target mapping for the colors subissue:
 
-| Current                                   | manta target            |
+| Current                                   | Manta target            |
 | ----------------------------------------- | ----------------------- |
 | `bg` `#0e0f12` / `#15171c` / `#1b1e25`    | navy `950/850/800`      |
 | `border` `#262932` / `#383c47`            | navy `700/600`          |
@@ -72,7 +72,7 @@ duplication problem away).
 
 ## Voice & content
 
-manta writes like **a senior engineer pairing with you**: direct, concise,
+Manta writes like **a senior engineer pairing with you**: direct, concise,
 technically literate, never chirpy.
 
 - **Person.** Second person for the user ("your VPS", "you approved"). The
@@ -100,7 +100,7 @@ technically literate, never chirpy.
 ## Visual foundations
 
 - **Vibe.** Deep-ocean dark. Near-black navy canvas (`#0B1020`), cool slate
-  text, lit by electric blue (primary) + bright cyan (accent) — the manta
+  text, lit by electric blue (primary) + bright cyan (accent) — the Manta
   mark's gradient. Restrained, technical, high-contrast. "Instrument panel,"
   not "landing page."
 - **Color.** Dark-first and **dark-only** (no light theme). Navy elevation
