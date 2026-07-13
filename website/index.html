@@ -75,6 +75,67 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 .meta{font-size:13px;color:var(--slate-500)}
 .meta .mono{color:var(--slate-400)}
 
+/* install command */
+.install{max-width:560px;margin:0 auto 18px}
+.install-label{font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--slate-500);margin-bottom:10px}
+.install-cmd{display:flex;align-items:center;gap:12px;background:var(--surface-inset);border:1px solid var(--border-default);
+  border-radius:var(--radius-md);padding:12px 12px 12px 16px;box-shadow:var(--shadow-md);transition:border-color .15s var(--ease-out),box-shadow .15s var(--ease-out)}
+.install-cmd:hover{border-color:var(--blue-500);box-shadow:0 0 0 1px rgba(46,107,255,.35),0 0 22px rgba(46,107,255,.18)}
+.install-cmd code{flex:1;text-align:left;font-family:var(--font-mono);font-size:14px;color:var(--slate-200);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.install-cmd .prompt{color:var(--cyan-400);margin-right:8px;user-select:none}
+.install-cmd .url{color:var(--cyan-300)}
+.copy-btn{flex-shrink:0;height:30px;padding:0 14px;border-radius:6px;border:1px solid var(--border-strong);background:var(--fill-subtle);
+  color:var(--text-secondary);font-family:var(--font-sans);font-size:12.5px;font-weight:600;cursor:pointer;transition:all .12s var(--ease-out)}
+.copy-btn:hover{background:var(--fill-subtle-hover);color:var(--text-primary);border-color:var(--blue-500)}
+.copy-btn:active{transform:translateY(.5px)}
+@media(max-width:560px){.install-cmd code{font-size:12.5px}}
+
+/* app screenshot mockup */
+.shot{position:relative;z-index:1;max-width:920px;margin:56px auto 0;border-radius:var(--radius-xl);overflow:hidden;
+  border:1px solid var(--border-default);box-shadow:var(--shadow-xl);background:var(--surface-card)}
+.shot-bar{display:flex;align-items:center;gap:8px;height:40px;padding:0 14px;background:var(--surface-panel);border-bottom:1px solid var(--border-subtle)}
+.shot-title{margin-left:8px;font-family:var(--font-mono);font-size:12px;color:var(--slate-400)}
+.app{display:grid;grid-template-columns:52px 210px 1fr;height:440px;text-align:left}
+.rail{background:var(--surface-sunken);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;align-items:center;padding-top:14px;gap:14px}
+.rail .logo{width:26px;height:26px;object-fit:contain}
+.rail .ri{width:30px;height:30px;border-radius:8px;background:var(--fill-subtle);display:grid;place-items:center}
+.rail .ri.on{background:#12233f;box-shadow:inset 0 0 0 1px #2E6BFF66}
+.rail .ri svg{width:15px;height:15px;stroke:var(--slate-400)}
+.rail .ri.on svg{stroke:var(--cyan-400)}
+.side{background:var(--surface-panel);border-right:1px solid var(--border-subtle);padding:14px 10px;overflow:hidden}
+.side .grp{font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--slate-500);padding:8px 8px 6px}
+.side .s{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;font-size:13px;color:var(--slate-300);font-family:var(--font-sans)}
+.side .s.sel{background:var(--fill-subtle);color:var(--slate-50)}
+.side .s .sd{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.side .s .sd.run{background:var(--cyan-400);box-shadow:0 0 0 3px rgba(73,215,245,.16)}
+.side .s .sd.idle{background:var(--slate-600)}
+.side .s .sd.wait{background:var(--amber-500)}
+.side .s .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side .s .nm b{color:var(--cyan-300);font-weight:500}
+.panel{background:var(--surface-app);display:flex;flex-direction:column;overflow:hidden}
+.panel .ph{height:46px;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;gap:10px;padding:0 18px;font-family:var(--font-mono);font-size:12px;color:var(--slate-400)}
+.panel .ph .pill{margin-left:auto}
+.panel .body{flex:1;overflow:hidden;padding:18px;display:flex;flex-direction:column;gap:14px}
+.msg{max-width:78%}
+.msg .who{font-size:11px;font-weight:600;color:var(--slate-500);margin-bottom:5px;letter-spacing:.02em}
+.msg.user{align-self:flex-end;text-align:left}
+.msg.user .bub{background:var(--fill-subtle);border:1px solid var(--border-subtle);color:var(--slate-100,#eef2f8);border-radius:12px 12px 4px 12px}
+.msg .bub{padding:10px 14px;border-radius:12px;font-size:13.5px;line-height:1.5;color:var(--slate-200)}
+.msg.agent .bub{color:var(--slate-200)}
+.tool{font-family:var(--font-mono);font-size:12px;color:var(--slate-400);display:flex;align-items:center;gap:8px}
+.tool .tk{color:var(--slate-500)}
+.tool .pth{color:var(--cyan-400)}
+.tool .ok{color:var(--green-500)}
+.wellrow{font-family:var(--font-mono);font-size:12px;background:var(--surface-inset);border:1px solid var(--border-subtle);border-radius:8px;padding:10px 12px;color:var(--slate-300)}
+.wellrow .ok{color:var(--green-500)}
+.wellrow .dim{color:var(--slate-500)}
+.composer{border-top:1px solid var(--border-subtle);padding:12px 16px;display:flex;align-items:center;gap:10px}
+.composer .field{flex:1;height:36px;border-radius:8px;background:var(--surface-inset);border:1px solid var(--border-default);
+  display:flex;align-items:center;padding:0 12px;font-size:13px;color:var(--slate-500);font-family:var(--font-sans)}
+.composer .send{width:36px;height:36px;border-radius:8px;background:var(--blue-500);display:grid;place-items:center;flex-shrink:0}
+.composer .send svg{width:16px;height:16px;stroke:#fff}
+@media(max-width:760px){.app{grid-template-columns:52px 1fr;height:400px}.side{display:none}}
+
 /* terminal mock */
 .demo{position:relative;z-index:1;max-width:860px;margin:56px auto 0;border-radius:var(--radius-xl);overflow:hidden;
   border:1px solid var(--border-default);box-shadow:var(--shadow-xl);background:var(--surface-card)}
@@ -174,33 +235,57 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
   <div class="aura"></div>
   <div class="wrap">
     <img src="manta-logo.png" alt="manta UI" class="hero-mark">
-    <div class="eyebrow">Desktop &amp; mobile agent client</div>
-    <h1 style="margin-top:16px">Drive your coding agents <span class="grad">from anywhere</span></h1>
+    <h1>Drive your coding agents <span class="grad">from anywhere</span></h1>
     <p class="sub">manta UI is a desktop and mobile client for remote Claude and opencode sessions. Your agents run on your box — you steer, approve, and ship from your laptop or your phone.</p>
-    <div class="cta">
-      <a href="#download" class="btn btn-primary">Download for macOS</a>
-      <a href="https://github.com/antoinedc/better-ui" class="btn btn-ghost">View source</a>
+    <div class="install">
+      <div class="install-label">Drop this on your box to install</div>
+      <div class="install-cmd">
+        <code><span class="prompt">$</span> curl -fsSL <span class="url">https://manta.sh/install</span> | bash</code>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://manta.sh/install | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
+      </div>
     </div>
     <div class="meta">Runs over plain HTTPS · no SSH · pair once with a <span class="mono">6-digit code</span></div>
 
-    <div class="demo">
-      <div class="demo-bar">
+    <div class="shot">
+      <div class="shot-bar">
         <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-        <span class="demo-title">ethernal / <span class="live">feat-auth</span></span>
-        <span style="margin-left:auto"><span class="pill pill-run"><span class="ping"></span>Running</span></span>
+        <span class="shot-title">manta UI</span>
       </div>
-      <div class="demo-body">
-<span class="dim">›</span> <span class="u">add a device-code pairing flow to the auth module</span>
-
-<span class="a">I'll add the device flow. Let me look at the current auth module first.</span>
-
-<span class="dim">›</span> read <span class="path">src/server/auth.mjs</span> <span class="dim">· 1 file</span>
-<span class="dim">›</span> edit <span class="path">src/server/auth.mjs</span> <span class="ok">+38 −4</span>
-<span class="dim">›</span> $ <span class="u">npm test</span>
-  <span class="ok">✓</span> 41 passed <span class="dim">· 2.1s</span>
-
-<span class="a">Done. Device pairing added — mint on loopback, 6-digit code, 60s TTL.</span>
-<span class="dim">3 files changed · 42s · sess_8fa2</span>
+      <div class="app">
+        <!-- icon rail -->
+        <div class="rail">
+          <img src="manta-logo.png" alt="" class="logo">
+          <div class="ri on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg></div>
+          <div class="ri"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></div>
+          <div class="ri"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3m9-9h-3M6 12H3"/></svg></div>
+        </div>
+        <!-- session sidebar -->
+        <div class="side">
+          <div class="grp">Ethernal</div>
+          <div class="s sel"><span class="sd run"></span><span class="nm">feat/<b>auth</b></span></div>
+          <div class="s"><span class="sd idle"></span><span class="nm">main</span></div>
+          <div class="grp">Marketing</div>
+          <div class="s"><span class="sd wait"></span><span class="nm">hero-<b>copy</b></span></div>
+          <div class="s"><span class="sd idle"></span><span class="nm">landing</span></div>
+          <div class="grp">Infra</div>
+          <div class="s"><span class="sd idle"></span><span class="nm">deploy</span></div>
+        </div>
+        <!-- chat panel -->
+        <div class="panel">
+          <div class="ph">ethernal / <span style="color:var(--cyan-300)">feat/auth</span> · <span class="mono">vps-fra-1</span>
+            <span class="pill pill-run"><span class="ping"></span>Running</span></div>
+          <div class="body">
+            <div class="msg user"><div class="who">You</div><div class="bub">add a device-code pairing flow to the auth module</div></div>
+            <div class="msg agent"><div class="who">manta</div><div class="bub">I'll add the device flow. Let me look at the current auth module first.</div></div>
+            <div class="tool"><span class="tk">›</span> read <span class="pth">src/server/auth.mjs</span></div>
+            <div class="tool"><span class="tk">›</span> edit <span class="pth">src/server/auth.mjs</span> <span class="ok">+38 −4</span></div>
+            <div class="wellrow"><span class="dim">$</span> npm test &nbsp; <span class="ok">✓ 41 passed</span> <span class="dim">· 2.1s</span></div>
+          </div>
+          <div class="composer">
+            <div class="field">Reply to manta…</div>
+            <div class="send"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -307,9 +392,11 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
   <div class="wrap">
     <h2>Your agents. Your box. Your call.</h2>
     <p>Open source. Runs on hardware you already own.</p>
-    <div class="cta" style="justify-content:center">
-      <a href="#" class="btn btn-primary">Download for macOS</a>
-      <a href="https://github.com/antoinedc/better-ui" class="btn btn-ghost">Read the docs</a>
+    <div class="install" style="margin-bottom:0">
+      <div class="install-cmd">
+        <code><span class="prompt">$</span> curl -fsSL <span class="url">https://manta.sh/install</span> | bash</code>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://manta.sh/install | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
+      </div>
     </div>
   </div>
 </section>
