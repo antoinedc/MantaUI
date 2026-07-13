@@ -526,7 +526,7 @@ const server = createServer(async (req, res) => {
   {
     // The HTTP /events route can also be consumed as an EventSource (SSE) by a
     // non-WS client, which likewise can't set an Authorization header — so honor
-    // the ?token= fallback here too, scoped to /events + /pty ONLY. Every other
+    // the ?token= fallback here too, scoped to /events ONLY. Every other
     // route ignores ?token= and still requires a real Bearer header.
     const gate = authEngine.authorize({
       method: req.method,
@@ -1156,7 +1156,7 @@ const server = createServer(async (req, res) => {
   }
 
   // Static fallback for the React + PWA bundle in mobile/www/. All backend
-  // routes (/events, /rpc/*, /api/*, /pty WS) were matched above, so this
+  // routes (/events, /rpc/*, /api/*) were matched above, so this
   // only ever sees client asset / SPA-route requests. An existing file
   // (hashed /assets/*, /manifest.webmanifest, /icons/*) is served with its
   // MIME; anything else falls back to index.html so client-side routing /
@@ -1179,12 +1179,16 @@ const server = createServer(async (req, res) => {
   res.end("not found");
 });
 
-// ---------- WebSocket: one PTY per connection ----------
+// ---------- WebSocket: /events live stream ----------
 //
-// URL: /pty?session=NAME&window=INDEX&cols=80&rows=24
-// Client→Server text frames are JSON: {type:"data",data:"..."} or
-//   {type:"resize",cols,rows}.
-// Server→Client text frames are raw PTY output (utf-8).
+// URL: /events (optionally ?token=<box_token> for header-less WS clients).
+// SSE alternative for iOS standalone PWAs, which can't reliably receive
+// EventSource. Same bus + envelope as the HTTP /events SSE route.
+//
+// (BET-138: the /pty WS route this section used to also handle — one raw
+// PTY per connection, attached via tmux attach-session — was removed. The
+// pty:* RPC channels Terminal.tsx uses never rode this WS; they go over the
+// normal Bearer-gated /rpc/* HTTP path, same as every other RPC channel.)
 
 const wss = new WebSocketServer({ noServer: true });
 
