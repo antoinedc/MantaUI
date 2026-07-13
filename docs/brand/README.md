@@ -70,6 +70,89 @@ Decide during implementation whether to keep Tailwind + a hex map, or move to
 CSS custom properties matching `tokens.css` (the latter mirrors mobile.css's
 duplication problem away).
 
+## Voice & content
+
+manta writes like **a senior engineer pairing with you**: direct, concise,
+technically literate, never chirpy.
+
+- **Person.** Second person for the user ("your VPS", "you approved"). The
+  agent speaks first person, present-progressive, narrating: "I'll add the
+  device flow. Let me look at the current auth module first."
+- **Tone.** Calm, factual, confident. State outcomes, not adjectives.
+  `3 files changed · 42s`, not "Success! 🎉 All done!".
+- **Casing.** Sentence case everywhere — buttons, titles, menus (New session,
+  not New Session). ALL-CAPS only for tiny eyebrow/section labels with wide
+  tracking (TODAY, WORKSPACE).
+- **Verbs.** Action labels imperative and short: Run, Stop, Approve, Deny,
+  Connect VPS, New session, Create & run.
+- **Numbers & code.** Counts, durations, paths, branches, IDs, commands are
+  always monospace (JetBrains Mono): `feat/auth`, `vps-fra-1`, `sess_8fa2`,
+  `$ npm test`, `+3`.
+- **Status vocabulary** (small, controlled): Running · Awaiting approval ·
+  Idle · Failed · Offline · Done.
+- **Punctuation.** Middot `·` separates metadata (Frankfurt · 4 vCPU · 8 GB).
+  Arrows / check-cross (`✓`, `›`) appear in terminal output only.
+- **Emoji.** None in product UI. The only icon-in-text is the monospace
+  `✓`/`›` inside terminal wells.
+- **Errors.** Plain and specific — say what failed and the next action:
+  "VPS unreachable. Reconnect?" — never "Oops!".
+
+## Visual foundations
+
+- **Vibe.** Deep-ocean dark. Near-black navy canvas (`#0B1020`), cool slate
+  text, lit by electric blue (primary) + bright cyan (accent) — the manta
+  mark's gradient. Restrained, technical, high-contrast. "Instrument panel,"
+  not "landing page."
+- **Color.** Dark-first and **dark-only** (no light theme). Navy elevation
+  ramp (`--surface-app → sunken → panel → card → raised`) + a darker-than-
+  canvas inset (`#070B17`) for terminals/code wells. Blue = primary actions;
+  cyan = accent/highlight and the "agent is alive" color. Semantics lean
+  cool: success `#22C79A`, warning `#F0A934`, danger `#F0505F`, info = cyan.
+  Color used sparingly — most UI is navy + slate; brand color reserved for
+  actions, active states, status.
+- **Type.** Inter for all UI; JetBrains Mono for anything machine-generated /
+  copy-pasteable. Compact scale — body 14px, dense rows 13px. Tight negative
+  tracking on headings. No serifs.
+- **Density.** 4px grid, information-dense. Fixed chrome: 56px icon rail,
+  264px sidebar, 48px topbar. Controls 28–34px.
+- **Backgrounds.** Flat navy fills — no photos, no illustration, no noise.
+  Only gradient is brand cyan→blue (`--gradient-brand`): logo mark, small
+  agent avatars, active tab underlines, occasional emphasis — never full-bleed.
+- **Borders.** Hairlines do the work: 1px translucent white (`--border-subtle`,
+  8%) or solid navy (`--border-default`), brightening one step on hover.
+- **Shadows.** Deep, cool, low-spread, dark-tuned (`--shadow-xs → xl`) + inset
+  for code wells. Elevation for overlays more than resting cards.
+- **Glows.** Signature affordance: a colored ring (`--glow-blue`,
+  `--glow-cyan`) marks live states. **Cyan glow = "working."**
+- **Radii.** Soft, not pill-round: 6–8px controls, 12px cards/panels, 16px+
+  sheets/dialogs. `--radius-full` only for pills, dots, switch track.
+- **Cards.** `--surface-card` fill, 1px `--border-default`, 12px radius,
+  subtle shadow. Interactive: lift 2px + brighten border on hover. "Running"
+  cards drop the border for a cyan glow.
+- **Transparency/blur.** Overlays only: dialogs/toasts use near-opaque
+  `--surface-overlay` + 12px backdrop blur over a dark scrim
+  (`rgba(4,7,16,0.66)` + 4px blur). Resting surfaces opaque.
+- **Motion.** Quick, precise — 120–280ms, `cubic-bezier(0.22,1,0.36,1)`, no
+  bounce. Fades + short translate-ups; live status dot has a gentle ping halo.
+  Reduced-motion collapses to instant.
+- **Hover/press.** Hover = brighten (fill/border/glow). Press = 0.5px nudge
+  down + darker action color. Ghost elements: transparent → ~10% white.
+- **Focus.** 2px brand-blue ring offset from surface (`--ring`) + soft blue
+  halo on inputs. Always visible — keyboard-first app.
+
+## Provenance & ground truth
+
+Built from a minimal brand kit (`mantaUI_brand_kit.zip`): the **four anchor
+colors** (`#0B1020` / `#2E6BFF` / `#49D7F5` / `#F8FAFC`), the **two fonts**
+(Inter, JetBrains Mono), and the **logo** are **ground truth**. Everything
+else (token ramps, semantic aliases, components) is an original, considered
+proposal — open to iteration.
+
+**Font note:** Inter + JetBrains Mono load from Google Fonts (no self-hosted
+binaries provided). The logo wordmark uses a rounded-geometric display face
+(Quicksand-family look) that lives ONLY in the logo image — never in product
+UI. Self-hosted fonts / the exact logo typeface would need the source files.
+
 ## Assets in this directory
 
 - `manta-logo.png` — brand mark (raster).
