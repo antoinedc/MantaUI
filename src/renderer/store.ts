@@ -119,6 +119,11 @@ type State = {
   // cache_control.ttl on requests — opencode does); must match opencode's
   // setting. Defaults to "1h".
   cacheTtl: "5m" | "1h";
+  // Per-launcher CLI flag overrides for AI CLI TUI launch modes (BET-138
+  // refinement). Keyed by launcher id, then flag key; missing keys fall back
+  // to the launcher's registry default (see resolveLauncherFlags). Empty
+  // object = no user overrides for any launcher.
+  launcherFlags: Record<string, Record<string, boolean>>;
   // Voice / Groq STT. `groqApiKey` is the gating signal — empty string
   // means voice features are unavailable and the mic button stays hidden.
   // Other two fields default to "" so the main/server picks the built-in
@@ -264,6 +269,7 @@ export const useStore = create<State>((set, get) => ({
   defaultModel: null,
   skillRegistryUrls: [],
   cacheTtl: "1h",
+  launcherFlags: {},
   groqApiKey: "",
   voiceTranscriptionModel: "",
   voiceCommandModel: "",
@@ -376,6 +382,7 @@ export const useStore = create<State>((set, get) => ({
       defaultModel: c.defaultModel ?? null,
       skillRegistryUrls: c.skillRegistryUrls ?? [],
       cacheTtl: c.cacheTtl === "5m" ? "5m" : "1h",
+      launcherFlags: c.launcherFlags ?? {},
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       voiceCommandModel: c.voiceCommandModel ?? "",

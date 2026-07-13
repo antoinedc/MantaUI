@@ -180,21 +180,24 @@ export function isPublicAssetPath(path) {
 }
 
 // ---------------------------------------------------------------------------
-// Query-param token fallback for header-less clients (/events + /pty ONLY)
+// Query-param token fallback for header-less clients (/events ONLY)
 // ---------------------------------------------------------------------------
 //
 // Browsers cannot set an Authorization header on a WebSocket handshake (or on
-// an EventSource), so the two streaming routes accept the box_token as a
+// an EventSource), so the streaming route accepts the box_token as a
 // ?token=<box_token> query param instead. This is DELIBERATELY limited to
-// /events and /pty: every other route must present a real Bearer header, so a
-// token can never leak into a proxy/referrer log for a normal data request.
+// /events: every other route must present a real Bearer header, so a token
+// can never leak into a proxy/referrer log for a normal data request.
+// (BET-138: the /pty WebSocket route this fallback used to also cover was
+// removed — the pty:* RPC channels used by Terminal.tsx never needed it,
+// they ride the normal Bearer-gated /rpc/* path.)
 //
 // Pure + testable: given a path, the Authorization header value, and the raw
 // ?token= query value, return the effective Authorization value to feed into
 // authorize(). The header always wins when present (non-browser clients keep
-// using it); the query token is honored only as a fallback and only on the two
-// allowlisted stream paths.
-export const QUERY_TOKEN_PATHS = new Set(["/events", "/pty"]);
+// using it); the query token is honored only as a fallback and only on the
+// allowlisted stream path.
+export const QUERY_TOKEN_PATHS = new Set(["/events"]);
 
 export function queryTokenAllowedForPath(path) {
   return QUERY_TOKEN_PATHS.has(path);
@@ -205,7 +208,7 @@ export function authorizationForRequest(path, headerValue, queryToken) {
   if (typeof headerValue === "string" && headerValue.trim() !== "") {
     return headerValue;
   }
-  // No header: fall back to ?token= ONLY on the allowlisted stream paths.
+  // No header: fall back to ?token= ONLY on the allowlisted stream path.
   if (
     queryTokenAllowedForPath(path) &&
     typeof queryToken === "string" &&

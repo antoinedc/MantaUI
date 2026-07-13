@@ -5,8 +5,10 @@ import { SubagentsCard } from "./SubagentsCard";
 import { PairingQR, PairingCountdown } from "./PairingQR";
 import { getBuiPreload } from "./preloadAccess";
 import { describeModel } from "../shared/modelGuide.mjs";
+import { resolveLauncherFlags } from "./chatShared";
 import type {
   AuthPairResult,
+  AvailableLauncher,
   OpencodeModel,
 } from "../shared/types";
 
@@ -30,6 +32,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     groqApiKey,
     voiceTranscriptionModel,
     voiceCommandModel,
+    launcherFlags,
     refresh,
   } = useStore();
 
@@ -42,6 +45,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [newRegistryUrl, setNewRegistryUrl] = useState("");
   const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
+  // AI CLI TUI launch options (BET-138 refinement) — flags for launchers
+  // detected on this box (e.g. Claude Code's --dangerously-skip-permissions).
+  const [availableLaunchers, setAvailableLaunchers] = useState<AvailableLauncher[]>([]);
+  const [launcherFlagValues, setLauncherFlagValues] =
+    useState<Record<string, Record<string, boolean>>>(launcherFlags ?? {});
 
   // Files fields (Files tab)
   const [agentPush, setAgentPush] = useState(allowAgentPush);
@@ -77,7 +85,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setGroqKey(groqApiKey);
     setVoiceTrModel(voiceTranscriptionModel);
     setVoiceCmdModel(voiceCommandModel);
-  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
+    setLauncherFlagValues(launcherFlags ?? {});
+  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -86,6 +95,24 @@ export function Settings({ onClose }: { onClose: () => void }) {
       .then((list) => setModels(list))
       .catch(() => {});
   }, []);
+
+  // Fetch which AI CLI TUIs are set up on this box (non-fatal — an empty list
+  // just hides the launch-options section).
+  useEffect(() => {
+    window.api
+      .launchersList()
+      .then((list) => setAvailableLaunchers(list))
+      .catch(() => {});
+  }, []);
+
+  const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
+    const l = availableLaunchers.find((x) => x.id === launcherId);
+    if (!l) return;
+    setLauncherFlagValues((prev) => ({
+      ...prev,
+      [launcherId]: { ...resolveLauncherFlags(l.flags, prev[launcherId]), [flagKey]: checked },
+    }));
+  };
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -105,6 +132,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         groqApiKey: groqKey.trim(),
         voiceTranscriptionModel: voiceTrModel.trim(),
         voiceCommandModel: voiceCmdModel.trim(),
+        launcherFlags: launcherFlagValues,
       });
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
@@ -423,6 +451,45 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <div className="border-t border-border pt-6">
                 <SubagentsCard />
               </div>
+
+              {/* AI CLI launch options (BET-138 refinement) — flags used when
+                  launching an AI CLI (e.g. Claude Code) directly in a
+                  session's terminal via the session-mode dropdown. Only CLIs
+                  detected on this box (binary on PATH + provider connected)
+                  are shown; an empty list renders nothing beyond the muted
+                  hint. */}
+              {availableLaunchers.some((l) => l.flags.length > 0) && (
+                <div className="border-t border-border pt-6">
+                  <h3 className="text-base font-semibold mb-1">AI CLI launch options</h3>
+                  <div className="text-sm text-text-faint mb-4">
+                    Flags used when launching an AI CLI (e.g. Claude Code) directly in a
+                    session's terminal. Only CLIs detected on this box are shown.
+                  </div>
+                  <div className="space-y-4">
+                    {availableLaunchers
+                      .filter((l) => l.flags.length > 0)
+                      .map((l) => (
+                        <div key={l.id} className="space-y-2">
+                          <div className="text-sm font-medium text-text">{l.label}</div>
+                          {l.flags.map((f) => (
+                            <label
+                              key={f.key}
+                              className="flex items-start gap-3 text-sm cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]}
+                                onChange={(e) => setLauncherFlag(l.id, f.key, e.target.checked)}
+                                className="mt-0.5"
+                              />
+                              <span>{f.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
 
               <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">Skill registries</h3>

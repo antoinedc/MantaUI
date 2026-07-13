@@ -2,6 +2,13 @@ import { useEffect, useState } from "react";
 import { useStore, resolveSessionOwner } from "../store";
 import { ChatPanel } from "../ChatPanel";
 import { Terminal } from "../Terminal";
+import {
+  type SessionMode,
+  readSavedMode,
+  writeSavedMode,
+  resolveLauncherFlags,
+} from "../chatShared";
+import type { AvailableLauncher } from "../../shared/types";
 
 type Props = {
   projectName: string;
@@ -12,6 +19,7 @@ type Props = {
 export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   const projects = useStore((s) => s.projects);
   const refresh = useStore((s) => s.refresh);
+  const launcherFlags = useStore((s) => s.launcherFlags);
   const [sheetOpen, setSheetOpen] = useState(false);
   // Inline rename state — when set, the sheet replaces its action buttons with
   // a name input + Save / Cancel. Mobile keyboards make a separate modal
@@ -29,10 +37,51 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
     if (projects.length > 0 && !win) onBack();
   }, [projects.length, win, onBack]);
 
-  if (!project || !win) return null;
-
-  const sid = win.opencodeSessionId;
+  // `win` may still be undefined here (early-returned below) — every hook
+  // in this component must run unconditionally on every render, so `sid` is
+  // read via optional chaining rather than after the early return.
+  const sid = win?.opencodeSessionId ?? null;
   const owner = sid ? resolveSessionOwner(projects, sid) : null;
+
+  // Session-mode toggle (BET-138): Chat / Terminal / an AI CLI TUI launcher.
+  // `sid` is set for every bui-created session, so mode only matters when
+  // it's present; the `!sid` branches below are the legacy foreign-window
+  // fallback (bui never creates those anymore).
+  const [mode, setModeState] = useState<SessionMode>(() =>
+    sid ? readSavedMode(sid) : "chat",
+  );
+  const [availableLaunchers, setAvailableLaunchers] = useState<AvailableLauncher[]>([]);
+
+  useEffect(() => {
+    window.api
+      .launchersList()
+      .then(setAvailableLaunchers)
+      .catch(() => setAvailableLaunchers([]));
+  }, [sid]);
+
+  useEffect(() => {
+    setModeState(sid ? readSavedMode(sid, availableLaunchers) : "chat");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sid]);
+
+  const setMode = (m: SessionMode) => {
+    if (sid) writeSavedMode(sid, m);
+    setModeState(m);
+  };
+
+  // "chat" only makes sense when sid is set (guarded in the render switch
+  // below); for a legacy foreign window (no sid — bui never creates these
+  // anymore) mode is always effectively "terminal", so modeId falls back to
+  // "terminal" rather than mis-parsing "chat" as a launcher id.
+  const modeId = mode.startsWith("tui:") ? mode.slice("tui:".length) : "terminal";
+  const launcherDef = mode.startsWith("tui:")
+    ? availableLaunchers.find((l) => l.id === modeId)
+    : undefined;
+  const launcher = launcherDef
+    ? { id: launcherDef.id, flags: resolveLauncherFlags(launcherDef.flags, launcherFlags[launcherDef.id]) }
+    : undefined;
+
+  if (!project || !win) return null;
 
   const forkSession = () => {
     if (!sid) return;
@@ -109,12 +158,14 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   // flag): a stuck agent is exactly the case where the running indicator may
   // be stale, so the stop must work regardless. Aborting an already-idle
   // session is a harmless no-op.
-  //   - chat (opencode) windows  → opencodeAbort(sid), same as the desktop
-  //     "Esc to stop" keybind in ChatPanel.
-  //   - terminal (claude TUI) windows → write \x1b to the project PTY.
-  //     Select the window first: mobile navigation doesn't select-window on
-  //     open and the project's single PTY follows the active tmux window, so
-  //     without this ESC could land on a different window than the one shown.
+  //   - chat mode → opencodeAbort(sid), same as the desktop "Esc to stop"
+  //     keybind in ChatPanel.
+  //   - terminal / AI CLI TUI mode (or a legacy foreign window with no sid,
+  //     which bui never creates anymore) → write \x1b to that mode's shell
+  //     PTY. Select the tmux window first: mobile navigation doesn't
+  //     select-window on open, and the legacy fallback path's PTY follows
+  //     the active tmux window, so without this ESC could land on a
+  //     different window than the one shown.
   const sendEsc = () => {
     if (sid) {
       window.api.opencodeAbort(sid).catch(() => {});
@@ -124,7 +175,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
       .tmuxSelectWindow({ sessionName: projectName, windowIndex: win.index })
       .catch(() => {})
       .finally(() => {
-        window.api.ptyWrite(projectName, "\x1b").catch(() => {});
+        window.api.ptyWrite(`${projectName}:${modeId}`, "\x1b").catch(() => {});
       });
   };
 
@@ -158,10 +209,25 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
         </button>
         <div className="flex-1 min-w-0">
           <div className="text-text font-bold text-sm truncate">{win.name}</div>
-          <div className="text-text-faint text-xs truncate">
-            {projectName}
-            {sid ? " · chat" : " · terminal"}
-          </div>
+          {sid ? (
+            <select
+              className="mobile-tap text-text-faint text-xs bg-transparent"
+              value={mode}
+              onChange={(e) => setMode(e.target.value as SessionMode)}
+            >
+              <option value="chat">{projectName} · chat</option>
+              <option value="terminal">{projectName} · terminal</option>
+              {availableLaunchers.map((l) => (
+                <option key={l.id} value={`tui:${l.id}`}>
+                  {projectName} · {l.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="text-text-faint text-xs truncate">
+              {projectName} · terminal
+            </div>
+          )}
         </div>
         {/* Esc / stop — interrupts the running agent the way pressing Esc
             would on desktop. Shown for both chat and terminal windows; see
@@ -188,7 +254,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
       </div>
 
       <div className="mobile-body">
-        {sid ? (
+        {sid && mode === "chat" ? (
           <ChatPanel
             sessionId={sid}
             tmuxSession={owner?.tmuxSession ?? null}
@@ -197,7 +263,12 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
             isActive={true}
           />
         ) : (
-          <Terminal projectName={projectName} active={true} />
+          <Terminal
+            sessionKey={`${sid ?? projectName}:${modeId}`}
+            cwd={owner?.cwd ?? ""}
+            launcher={launcher}
+            active={true}
+          />
         )}
       </div>
 

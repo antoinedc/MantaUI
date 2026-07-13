@@ -1,13 +1,27 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
 import { Settings } from "./Settings";
 import { Onboarding } from "./Onboarding";
-import { useStore, flatSessions } from "./store";
+import { useStore, flatSessions, resolveSessionOwner } from "./store";
 import { resolveTransportMode } from "../shared/transport.mjs";
 import { getBuiPreload } from "./preloadAccess";
 import { describe as describeConnection } from "../shared/net/state.js";
+import {
+  type SessionMode,
+  readSavedMode,
+  writeSavedMode,
+  resolveLauncherFlags,
+} from "./chatShared";
+import type { AvailableLauncher } from "../shared/types";
+
+// mode -> the composite-key "modeId" segment used for the PTY sessionKey and
+// the visitedModes tracking set. "chat" has no PTY, so it's never called with
+// mode==="chat" (callers guard first).
+function modeIdFor(m: SessionMode): string {
+  return m === "terminal" ? "terminal" : m.slice("tui:".length);
+}
 
 export function App() {
   const {
@@ -26,6 +40,7 @@ export function App() {
     updatePrompt,
     setUpdatePrompt,
     connectionState,
+    launcherFlags,
   } = useStore();
 
   // Entry gating: a fresh config (no host, no boxToken, not skipped) resolves
@@ -49,11 +64,6 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const sidebarRef = useRef<SidebarHandle>(null);
 
-  // Track which projects we've ever activated — so we mount Terminal lazily
-  // and keep them mounted (each holds an SSH PTY).
-  const visited = useRef<Set<string>>(new Set());
-  if (activeProjectName) visited.current.add(activeProjectName);
-
   // Same pattern for chat-mode windows: mount a ChatPanel for each opencode
   // session we've ever opened, keep it mounted so scroll position + in-flight
   // streaming state are preserved when switching back.
@@ -66,6 +76,57 @@ export function App() {
     : null;
   const activeChatSessionId = activeWin?.opencodeSessionId ?? null;
   if (activeChatSessionId) visitedChats.current.add(activeChatSessionId);
+
+  // Session-mode toggle (BET-138): each chat session shows Chat, a bare
+  // shell-in-cwd Terminal, or an AI CLI TUI launcher (e.g. Claude Code).
+  // `mode` tracks the ACTIVE chat session's current mode; other sessions'
+  // last-used modes stay in localStorage (read lazily when they're
+  // activated). `visitedModes` tracks every `${sessionId}:${modeId}`
+  // composite key ever opened, so its Terminal is mounted lazily on first
+  // use and then kept warm (mirrors visitedChats above).
+  const visitedModes = useRef<Set<string>>(new Set());
+  const [mode, setModeState] = useState<SessionMode>("chat");
+  const [availableLaunchers, setAvailableLaunchers] = useState<AvailableLauncher[]>([]);
+
+  // Which AI CLI TUIs (if any) this box has set up. Cheap; refetched whenever
+  // the active session changes (and once on mount, since it starts null).
+  // Guarded like the other httpApi-only calls in this file (onStatusEvent,
+  // onAgentFileReady, ...): on a fresh/unpaired desktop boot, window.api is
+  // still the raw preload OS-bridge subset (no launchersList) until the
+  // http-mode transport swap in main.tsx completes — this effect runs on
+  // every App render regardless of onboarding state, so it must not assume
+  // the swap already happened.
+  useEffect(() => {
+    if (!window.api.launchersList) {
+      setAvailableLaunchers([]);
+      return;
+    }
+    window.api
+      .launchersList()
+      .then(setAvailableLaunchers)
+      .catch(() => setAvailableLaunchers([]));
+  }, [activeChatSessionId]);
+
+  // Reset to the persisted mode whenever the active chat session changes. A
+  // saved `tui:<id>` whose launcher isn't in `availableLaunchers` downgrades
+  // to "chat" (readSavedMode's fallback).
+  useEffect(() => {
+    const m = activeChatSessionId ? readSavedMode(activeChatSessionId, availableLaunchers) : "chat";
+    setModeState(m);
+    if (activeChatSessionId && m !== "chat") {
+      visitedModes.current.add(`${activeChatSessionId}:${modeIdFor(m)}`);
+    }
+  }, [activeChatSessionId, availableLaunchers]);
+
+  const setMode = (m: SessionMode) => {
+    if (activeChatSessionId) {
+      writeSavedMode(activeChatSessionId, m);
+      if (m !== "chat") {
+        visitedModes.current.add(`${activeChatSessionId}:${modeIdFor(m)}`);
+      }
+    }
+    setModeState(m);
+  };
 
   // Latest projects + active session for the desktop-notification handler,
   // so its subscription doesn't churn on every render.
@@ -529,6 +590,27 @@ export function App() {
             )}
           </div>
 
+          {/* Session-mode dropdown (BET-138): Chat / Terminal / one entry per
+              available AI CLI launcher. Only shown for an active chat session
+              — every bui-created window carries one. WebkitAppRegion opts out
+              of the titlebar's Electron drag region so the select is clickable. */}
+          {activeChatSessionId && (
+            <div className="ml-auto" style={{ WebkitAppRegion: "no-drag" } as CSSProperties}>
+              <select
+                className="text-xs bg-surface border border-border rounded px-1 py-0.5 text-text"
+                value={mode}
+                onChange={(e) => setMode(e.target.value as SessionMode)}
+              >
+                <option value="chat">Chat</option>
+                <option value="terminal">Terminal</option>
+                {availableLaunchers.map((l) => (
+                  <option key={l.id} value={`tui:${l.id}`}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
         <div className="flex-1 relative">
           {projects.length === 0 ? (
@@ -539,54 +621,60 @@ export function App() {
             </div>
           ) : (
             <>
-              {/* Terminals (claude-TUI windows): one per visited project, kept */}
-              {/* mounted. Hidden when the active window is chat-mode. */}
-              {[...visited.current].map((projName) => {
-                const projectActive = projName === activeProjectName;
-                const visible = projectActive && !activeChatSessionId;
+              {/* Terminal / AI-TUI layer (BET-138): one per `${sessionId}:${modeId}` */}
+              {/* composite key ever opened, kept mounted so the shell/CLI */}
+              {/* stays warm across mode toggles. Visible only when it's the */}
+              {/* active session's CURRENT mode. modeId is "terminal" (bare */}
+              {/* shell) or an available launcher's id (AI CLI TUI). */}
+              {[...visitedModes.current].map((key) => {
+                const sepIdx = key.lastIndexOf(":");
+                const sid = key.slice(0, sepIdx);
+                const modeId = key.slice(sepIdx + 1);
+                const owner = resolveSessionOwner(projects, sid);
+                const wantMode: SessionMode =
+                  modeId === "terminal" ? "terminal" : `tui:${modeId}`;
+                const isActiveThisMode = sid === activeChatSessionId && mode === wantMode;
+                const launcherDef =
+                  modeId === "terminal" ? undefined : availableLaunchers.find((l) => l.id === modeId);
+                const launcher = launcherDef
+                  ? { id: launcherDef.id, flags: resolveLauncherFlags(launcherDef.flags, launcherFlags[launcherDef.id]) }
+                  : undefined;
                 return (
                   <div
-                    key={`pty:${projName}`}
+                    key={`term:${key}`}
                     className="absolute inset-0"
-                    style={{ display: visible ? "block" : "none" }}
+                    style={{ display: isActiveThisMode ? "block" : "none" }}
                   >
-                    <Terminal projectName={projName} active={projectActive} />
+                    <Terminal
+                      sessionKey={key}
+                      cwd={owner?.cwd ?? ""}
+                      launcher={launcher}
+                      active={isActiveThisMode}
+                    />
                   </div>
                 );
               })}
               {/* Chat panels (opencode chat-mode windows): one per visited */}
-              {/* session id, only the active one is visible. */}
+              {/* session id, visible only when it's the active session AND */}
+              {/* the active session's current mode is "chat". */}
               {[...visitedChats.current].map((sid) => {
-                // Find the tmux window that owns this session id. May be null
-                // if the window was killed remotely but bui still has the
-                // panel mounted — fork/delete buttons gracefully no-op then.
-                // Prefer paneCurrentPath (always absolute, from tmux) over
-                // p.defaultCwd (might be a literal "~/..." that opencode's
-                // /find/file etc don't expand).
-                let owner: { tmuxSession: string; windowIndex: number; cwd: string } | null = null;
-                for (const p of projects) {
-                  const w = p.windows.find((x) => x.opencodeSessionId === sid);
-                  if (w) {
-                    owner = {
-                      tmuxSession: p.tmuxSession,
-                      windowIndex: w.index,
-                      cwd: w.paneCurrentPath || p.defaultCwd,
-                    };
-                    break;
-                  }
-                }
+                // owner is null if the window was killed remotely but bui
+                // still has the panel mounted — fork/delete buttons
+                // gracefully no-op then.
+                const owner = resolveSessionOwner(projects, sid);
+                const isActiveChat = sid === activeChatSessionId && mode === "chat";
                 return (
                   <div
                     key={`chat:${sid}`}
                     className="absolute inset-0"
-                    style={{ display: sid === activeChatSessionId ? "block" : "none" }}
+                    style={{ display: isActiveChat ? "block" : "none" }}
                   >
                     <ChatPanel
                       sessionId={sid}
                       tmuxSession={owner?.tmuxSession ?? null}
                       windowIndex={owner?.windowIndex ?? null}
                       cwd={owner?.cwd ?? ""}
-                      isActive={sid === activeChatSessionId}
+                      isActive={isActiveChat}
                     />
                   </div>
                 );

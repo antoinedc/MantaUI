@@ -706,11 +706,14 @@ export const httpApi: Api = {
 
   // -- PTY --
   ptySpawn: (opts) => rpc(IPC.ptySpawn, opts),
-  ptyWrite: (projectName, data) => rpc(IPC.ptyWrite, projectName, data),
-  ptyResize: (projectName, cols, rows) =>
-    rpc(IPC.ptyResize, projectName, cols, rows),
-  ptyKill: (projectName) => rpc(IPC.ptyKill, projectName),
+  ptyWrite: (sessionKey, data) => rpc(IPC.ptyWrite, sessionKey, data),
+  ptyResize: (sessionKey, cols, rows) =>
+    rpc(IPC.ptyResize, sessionKey, cols, rows),
+  ptyKill: (sessionKey) => rpc(IPC.ptyKill, sessionKey),
   onPtyEvent: (cb) => on<PtyEvent>("pty", cb),
+
+  // -- AI CLI TUI launchers --
+  launchersList: () => rpc(IPC.launchersList),
 
   // -- window status --
   onStatusEvent: (cb) => on<WindowStatus[]>("status", cb),

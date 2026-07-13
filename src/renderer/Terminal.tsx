@@ -36,8 +36,12 @@ export function handleOsc52(
 }
 
 type Props = {
-  projectName: string;
+  sessionKey: string; // stable per-session-mode id (`${opencodeSessionId}:${modeId}`)
+  cwd: string;        // working dir for the shell/CLI
   active: boolean;
+  // Present only when this Terminal is an AI CLI TUI launch mode (BET-138
+  // refinement). Absent = plain login shell (base "terminal" mode).
+  launcher?: { id: string; flags: Record<string, boolean> };
 };
 
 const THEME = {
@@ -64,7 +68,7 @@ const THEME = {
   brightWhite: "#ffffff",
 };
 
-export function Terminal({ projectName, active }: Props) {
+export function Terminal({ sessionKey, cwd, active, launcher }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -182,7 +186,7 @@ export function Terminal({ projectName, active }: Props) {
     searchRef.current = search;
     // Diagnostic: expose this Terminal's xterm as a window global so we can
     // inspect modes / buffer state from DevTools while reproducing UI bugs.
-    (window as unknown as Record<string, unknown>)[`_term_${projectName}`] = term;
+    (window as unknown as Record<string, unknown>)[`_term_${sessionKey}`] = term;
     (window as unknown as Record<string, unknown>)._term = term;
 
     let disposeEvents: (() => void) | null = null;
@@ -193,21 +197,21 @@ export function Terminal({ projectName, active }: Props) {
       try { fit.fit(); } catch { /* not ready, ResizeObserver will retry */ }
       const cols = term.cols || 80;
       const rows = term.rows || 24;
-      window.api.ptySpawn({ projectName, cols, rows }).then(() => {
+      window.api.ptySpawn({ sessionKey, cwd, cols, rows, launcher }).then(() => {
         if (cancelled) return;
         disposeEvents = window.api.onPtyEvent((e) => {
-          if (e.projectName !== projectName) return;
+          if (e.sessionKey !== sessionKey) return;
           if (e.kind === "data") term.write(e.data);
           else if (e.kind === "exit")
             term.write(
-              `\r\n\x1b[2m[disconnected from ${projectName}: ${e.code ?? "?"}]\x1b[0m\r\n`,
+              `\r\n\x1b[2m[shell exited: ${e.code ?? "?"}]\x1b[0m\r\n`,
             );
         });
       });
     });
 
     const onData = term.onData((data) => {
-      window.api.ptyWrite(projectName, data);
+      window.api.ptyWrite(sessionKey, data);
     });
 
     // Skip fit while the container is hidden (display:none → contentRect is
@@ -220,7 +224,7 @@ export function Terminal({ projectName, active }: Props) {
       if (!rect || rect.width < 50 || rect.height < 50) return;
       try {
         fit.fit();
-        window.api.ptyResize(projectName, term.cols, term.rows);
+        window.api.ptyResize(sessionKey, term.cols, term.rows);
       } catch {
         /* not ready */
       }
@@ -244,7 +248,7 @@ export function Terminal({ projectName, active }: Props) {
       if (ev.key === "Enter" && ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
         ev.preventDefault();
         ev.stopPropagation();
-        window.api.ptyWrite(projectName, "\x1b\r");
+        window.api.ptyWrite(sessionKey, "\x1b\r");
         return false;
       }
 
@@ -261,7 +265,7 @@ export function Terminal({ projectName, active }: Props) {
       }
       if (ev.key === "v") {
         navigator.clipboard.readText().then((t) => {
-          if (t) window.api.ptyWrite(projectName, t);
+          if (t) window.api.ptyWrite(sessionKey, t);
         });
         return false;
       }
@@ -284,14 +288,14 @@ export function Terminal({ projectName, active }: Props) {
       ro.disconnect();
       disposeEvents?.();
       term.dispose();
-      // Don't kill the PTY here — keep the project's tmux attach alive across
-      // remounts so switching back doesn't reconnect. ptySpawn replaces an
+      // Don't kill the PTY here — keep the shell/CLI alive across remounts so
+      // switching back to Terminal mode doesn't reconnect. ptySpawn reuses an
       // existing entry, so this is safe.
       termRef.current = null;
       fitRef.current = null;
       searchRef.current = null;
     };
-  }, [projectName]);
+  }, [sessionKey]);
 
   useEffect(() => {
     if (!active) return;
@@ -315,12 +319,12 @@ export function Terminal({ projectName, active }: Props) {
         const { cols, rows } = term;
         const wide = Math.max(cols * 2, cols + 200);
         term.resize(wide, rows);
-        window.api.ptyResize(projectName, wide, rows);
+        window.api.ptyResize(sessionKey, wide, rows);
         requestAnimationFrame(() => {
           const t2 = termRef.current;
           if (!t2) return;
           t2.resize(cols, rows);
-          window.api.ptyResize(projectName, cols, rows);
+          window.api.ptyResize(sessionKey, cols, rows);
           t2.focus();
         });
       } catch {
@@ -331,7 +335,7 @@ export function Terminal({ projectName, active }: Props) {
       cancelAnimationFrame(raf);
       clearTimeout(t);
     };
-  }, [active, projectName]);
+  }, [active, sessionKey]);
 
   const isFileDrag = (e: React.DragEvent) =>
     Array.from(e.dataTransfer.types).includes("Files");
@@ -376,19 +380,19 @@ export function Terminal({ projectName, active }: Props) {
       const remotePaths: string[] = [];
       if (withPaths.length > 0) {
         remotePaths.push(
-          ...(await window.api.uploadFiles({ projectName, localPaths: withPaths })),
+          ...(await window.api.uploadFiles({ projectName: sessionKey, localPaths: withPaths })),
         );
       }
       for (const f of byteFiles) {
         const buffer = await f.arrayBuffer();
         remotePaths.push(
-          await window.api.uploadBuffer({ projectName, filename: f.name, buffer }),
+          await window.api.uploadBuffer({ projectName: sessionKey, filename: f.name, buffer }),
         );
       }
       const uploaded = remotePaths.filter((p) => p);
       if (uploaded.length === 0) return;
       const text = uploaded.map(quoteForPrompt).join(" ") + " ";
-      window.api.ptyWrite(projectName, text);
+      window.api.ptyWrite(sessionKey, text);
       termRef.current?.focus();
     } catch (err) {
       alert(err instanceof Error ? err.message : String(err));

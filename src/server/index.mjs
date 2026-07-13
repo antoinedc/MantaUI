@@ -526,7 +526,7 @@ const server = createServer(async (req, res) => {
   {
     // The HTTP /events route can also be consumed as an EventSource (SSE) by a
     // non-WS client, which likewise can't set an Authorization header — so honor
-    // the ?token= fallback here too, scoped to /events + /pty ONLY. Every other
+    // the ?token= fallback here too, scoped to /events ONLY. Every other
     // route ignores ?token= and still requires a real Bearer header.
     const gate = authEngine.authorize({
       method: req.method,
@@ -1156,7 +1156,7 @@ const server = createServer(async (req, res) => {
   }
 
   // Static fallback for the React + PWA bundle in mobile/www/. All backend
-  // routes (/events, /rpc/*, /api/*, /pty WS) were matched above, so this
+  // routes (/events, /rpc/*, /api/*) were matched above, so this
   // only ever sees client asset / SPA-route requests. An existing file
   // (hashed /assets/*, /manifest.webmanifest, /icons/*) is served with its
   // MIME; anything else falls back to index.html so client-side routing /
@@ -1179,12 +1179,16 @@ const server = createServer(async (req, res) => {
   res.end("not found");
 });
 
-// ---------- WebSocket: one PTY per connection ----------
+// ---------- WebSocket: /events live stream ----------
 //
-// URL: /pty?session=NAME&window=INDEX&cols=80&rows=24
-// Client→Server text frames are JSON: {type:"data",data:"..."} or
-//   {type:"resize",cols,rows}.
-// Server→Client text frames are raw PTY output (utf-8).
+// URL: /events (optionally ?token=<box_token> for header-less WS clients).
+// SSE alternative for iOS standalone PWAs, which can't reliably receive
+// EventSource. Same bus + envelope as the HTTP /events SSE route.
+//
+// (BET-138: the /pty WS route this section used to also handle — one raw
+// PTY per connection, attached via tmux attach-session — was removed. The
+// pty:* RPC channels Terminal.tsx uses never rode this WS; they go over the
+// normal Bearer-gated /rpc/* HTTP path, same as every other RPC channel.)
 
 const wss = new WebSocketServer({ noServer: true });
 
@@ -1193,10 +1197,10 @@ server.on("upgrade", (req, socket, head) => {
 
   // Auth gate for WS upgrades. Browsers can't set an Authorization header on a
   // WebSocket, so the token also travels as a ?token= query param; non-browser
-  // clients may still use the header. Both /events and /pty are gated. The
-  // ?token= fallback is scoped to /events + /pty ONLY by authorizationForRequest
-  // (a header always wins; the query token is honored only on those two stream
-  // paths). Reject with an HTTP 401 handshake response before the upgrade.
+  // clients may still use the header. /events is gated. The ?token= fallback
+  // is scoped to /events ONLY by authorizationForRequest (a header always
+  // wins; the query token is honored only on that stream path). Reject with
+  // an HTTP 401 handshake response before the upgrade.
   const wsAuth = authEngine.authorize({
     method: "GET",
     path: url.pathname,
@@ -1218,63 +1222,8 @@ server.on("upgrade", (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, (ws) => attachEventsWs(bus, ws));
     return;
   }
-  if (url.pathname === "/pty") {
-    wss.handleUpgrade(req, socket, head, (ws) => attachPty(ws, url));
-    return;
-  }
   socket.destroy();
 });
-
-function attachPty(ws, url) {
-  const session = url.searchParams.get("session");
-  const windowIdx = url.searchParams.get("window");
-  const cols = Number(url.searchParams.get("cols")) || 80;
-  const rows = Number(url.searchParams.get("rows")) || 24;
-
-  if (!session || !/^[A-Za-z0-9._-]+$/.test(session)) {
-    ws.close(1008, "bad session");
-    return;
-  }
-
-  // Delegate to the shared spawn helper in pty.mjs.
-  // spawnRawPty handles window pre-select, clamping, env — behaviour unchanged.
-  const wsPty = pty.spawnRawPty({ session, windowIdx, cols, rows });
-
-  wsPty.onData((data) => {
-    if (ws.readyState === ws.OPEN) ws.send(data);
-  });
-  wsPty.onExit(({ exitCode }) => {
-    try {
-      ws.close(1000, `pty exited ${exitCode}`);
-    } catch {
-      /* already closed */
-    }
-  });
-
-  ws.on("message", (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
-    if (msg.type === "data" && typeof msg.data === "string") {
-      wsPty.write(msg.data);
-    } else if (msg.type === "resize") {
-      const c = Number(msg.cols);
-      const r = Number(msg.rows);
-      if (c > 0 && r > 0) wsPty.resize(c, r);
-    }
-  });
-
-  ws.on("close", () => {
-    try {
-      wsPty.kill();
-    } catch {
-      /* already gone */
-    }
-  });
-}
 
 server.listen(PORT, HOST, () => {
   console.log(`bui-mobile listening on http://${HOST}:${PORT}`);

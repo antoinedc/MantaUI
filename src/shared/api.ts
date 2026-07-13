@@ -20,6 +20,7 @@ import type {
   WebhookMeta,
   SpawnOptions,
   PtyEvent,
+  AvailableLauncher,
   TmuxConfigStatus,
   VoiceClassifyInput,
   VoiceClassifyResult,
@@ -149,13 +150,18 @@ export interface Api {
   agentPullFile(remotePath: string): Promise<string>;
   revealInFolder(localPath: string): Promise<void>;
 
-  // Long-lived attached PTYs (1 per active project)
+  // Ephemeral shell-in-cwd (or AI CLI TUI) PTYs, one per session-mode
+  // composite key (`${sessionId}:${modeId}`). See src/server/pty.mjs.
   ptySpawn(opts: SpawnOptions): Promise<void>;
-  ptyWrite(projectName: string, data: string): Promise<void>;
-  ptyResize(projectName: string, cols: number, rows: number): Promise<void>;
-  ptyKill(projectName: string): Promise<void>;
+  ptyWrite(sessionKey: string, data: string): Promise<void>;
+  ptyResize(sessionKey: string, cols: number, rows: number): Promise<void>;
+  ptyKill(sessionKey: string): Promise<void>;
 
   onPtyEvent(cb: (e: PtyEvent) => void): () => void;
+
+  // Which AI CLI TUI launchers are available on this box right now (BET-138
+  // refinement). Cheap; call on active-session change, no polling needed.
+  launchersList(): Promise<AvailableLauncher[]>;
 
   onStatusEvent(cb: (batch: WindowStatus[]) => void): () => void;
 

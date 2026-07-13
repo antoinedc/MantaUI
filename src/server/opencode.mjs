@@ -352,7 +352,7 @@ export function _onSessionDirectoryAdded(fn) {
 // paths. The mobile server runs ON the opencode host, so a literal `~` /
 // `~/...` expands against this process's own $HOME. Mirrors the desktop fix
 // in src/main/opencode.ts:createSession.
-function expandTilde(p) {
+export function expandTilde(p) {
   if (typeof p !== "string" || !p.startsWith("~")) return p;
   const home = homedir();
   if (p === "~") return home;

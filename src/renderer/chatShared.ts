@@ -267,3 +267,57 @@ export function writeSavedModel(sessionId: string, m: ModelSelection | null): vo
     else localStorage.removeItem(modelKey(sessionId));
   } catch { /* quota / disabled storage */ }
 }
+
+// Per-session mode toggle (BET-138): a chat session shows either the
+// ChatPanel ("chat"), a bare shell-in-cwd ("terminal"), or an AI CLI TUI
+// launcher ("tui:<launcherId>", e.g. "tui:claude"). Persisted per-session in
+// localStorage, mirroring the model-selection helpers above. Default is
+// always "chat" (locked decision — new sessions never default elsewhere).
+export type SessionMode = "chat" | "terminal" | `tui:${string}`;
+
+export function modeKey(sessionId: string): string {
+  return `bui:session:${sessionId}:mode`;
+}
+
+// `availableLaunchers` is the CURRENT set of launchers the box reports (see
+// window.api.launchersList()). A saved `tui:<id>` whose launcher is not in
+// that set downgrades to "chat" — e.g. a machine that lost its `claude`
+// install shouldn't render a broken TUI slot. Defaults to an empty list so
+// callers that haven't fetched launchers yet still get sane "chat"/"terminal"
+// behavior (only `tui:*` modes are affected by the availability check).
+export function readSavedMode(
+  sessionId: string,
+  availableLaunchers: { id: string }[] = [],
+): SessionMode {
+  try {
+    const raw = localStorage.getItem(modeKey(sessionId));
+    if (raw === "terminal") return "terminal";
+    if (raw && raw.startsWith("tui:")) {
+      const launcherId = raw.slice("tui:".length);
+      return availableLaunchers.some((l) => l.id === launcherId)
+        ? (raw as SessionMode)
+        : "chat";
+    }
+    return "chat"; // default, and the fallback for any unrecognized value
+  } catch {
+    return "chat";
+  }
+}
+
+export function writeSavedMode(sessionId: string, m: SessionMode): void {
+  try {
+    localStorage.setItem(modeKey(sessionId), m);
+  } catch { /* quota / disabled storage */ }
+}
+
+// Merge a launcher's flag schema with the user's saved overrides (from
+// AppConfig.launcherFlags), falling back to each flag's registry default for
+// keys the user never touched.
+export function resolveLauncherFlags(
+  schema: { key: string; default: boolean }[],
+  saved: Record<string, boolean> | undefined,
+): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const f of schema) out[f.key] = saved?.[f.key] ?? f.default;
+  return out;
+}

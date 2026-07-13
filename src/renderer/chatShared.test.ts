@@ -1,4 +1,9 @@
-import { describe, it, expect } from "vitest";
+// @vitest-environment jsdom
+// jsdom is required for readSavedMode/writeSavedMode (BET-138) below, which
+// use localStorage — the default "node" vitest environment doesn't provide
+// it. The pure helpers in this file don't care about environment, so
+// switching the whole file to jsdom is safe.
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   CLAUDE_ORANGE,
   SPINNER_VERBS,
@@ -9,6 +14,9 @@ import {
   modelInputModes,
   modelSupportsAttachments,
   findLast,
+  readSavedMode,
+  writeSavedMode,
+  resolveLauncherFlags,
 } from "./chatShared";
 import type { OpencodeModel } from "../shared/types";
 
@@ -145,5 +153,79 @@ describe("findLast", () => {
   it("returns undefined when nothing matches or the array is empty", () => {
     expect(findLast([1, 2, 3], (v) => v > 10)).toBeUndefined();
     expect(findLast([], () => true)).toBeUndefined();
+  });
+});
+
+describe("readSavedMode / writeSavedMode (BET-138)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("defaults to 'chat' when nothing is saved", () => {
+    expect(readSavedMode("sess-1")).toBe("chat");
+  });
+
+  it("round-trips 'terminal' unchanged", () => {
+    writeSavedMode("sess-1", "terminal");
+    expect(readSavedMode("sess-1")).toBe("terminal");
+  });
+
+  it("preserves a saved 'tui:<id>' when the launcher is available", () => {
+    writeSavedMode("sess-1", "tui:claude");
+    expect(readSavedMode("sess-1", [{ id: "claude" }])).toBe("tui:claude");
+  });
+
+  it("downgrades an unavailable 'tui:<id>' to 'chat'", () => {
+    writeSavedMode("sess-1", "tui:codex");
+    expect(readSavedMode("sess-1", [{ id: "claude" }])).toBe("chat");
+  });
+
+  it("downgrades any 'tui:<id>' to 'chat' when no availableLaunchers list is given", () => {
+    writeSavedMode("sess-1", "tui:claude");
+    expect(readSavedMode("sess-1")).toBe("chat");
+  });
+
+  it("is scoped per session id", () => {
+    writeSavedMode("sess-1", "terminal");
+    expect(readSavedMode("sess-2")).toBe("chat");
+  });
+
+  it("falls back to 'chat' on any storage error (e.g. disabled storage)", () => {
+    const orig = Storage.prototype.getItem;
+    Storage.prototype.getItem = () => {
+      throw new Error("storage disabled");
+    };
+    try {
+      expect(readSavedMode("sess-1")).toBe("chat");
+    } finally {
+      Storage.prototype.getItem = orig;
+    }
+  });
+});
+
+describe("resolveLauncherFlags", () => {
+  const schema = [
+    { key: "skipPermissions", default: true },
+    { key: "verbose", default: false },
+  ];
+
+  it("uses each flag's registry default when nothing is saved", () => {
+    expect(resolveLauncherFlags(schema, undefined)).toEqual({
+      skipPermissions: true,
+      verbose: false,
+    });
+  });
+
+  it("overrides defaults with saved values, per-key", () => {
+    expect(resolveLauncherFlags(schema, { skipPermissions: false })).toEqual({
+      skipPermissions: false,
+      verbose: false, // untouched key still falls back to its default
+    });
+  });
+
+  it("ignores saved keys that aren't in the schema", () => {
+    expect(
+      resolveLauncherFlags(schema, { skipPermissions: false, ghostFlag: true } as never),
+    ).toEqual({ skipPermissions: false, verbose: false });
   });
 });
