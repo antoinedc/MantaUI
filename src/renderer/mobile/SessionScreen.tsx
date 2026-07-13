@@ -158,12 +158,14 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   // flag): a stuck agent is exactly the case where the running indicator may
   // be stale, so the stop must work regardless. Aborting an already-idle
   // session is a harmless no-op.
-  //   - chat (opencode) windows  → opencodeAbort(sid), same as the desktop
-  //     "Esc to stop" keybind in ChatPanel.
-  //   - terminal (claude TUI) windows → write \x1b to the project PTY.
-  //     Select the window first: mobile navigation doesn't select-window on
-  //     open and the project's single PTY follows the active tmux window, so
-  //     without this ESC could land on a different window than the one shown.
+  //   - chat mode → opencodeAbort(sid), same as the desktop "Esc to stop"
+  //     keybind in ChatPanel.
+  //   - terminal / AI CLI TUI mode (or a legacy foreign window with no sid,
+  //     which bui never creates anymore) → write \x1b to that mode's shell
+  //     PTY. Select the tmux window first: mobile navigation doesn't
+  //     select-window on open, and the legacy fallback path's PTY follows
+  //     the active tmux window, so without this ESC could land on a
+  //     different window than the one shown.
   const sendEsc = () => {
     if (sid) {
       window.api.opencodeAbort(sid).catch(() => {});

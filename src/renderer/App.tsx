@@ -90,7 +90,17 @@ export function App() {
 
   // Which AI CLI TUIs (if any) this box has set up. Cheap; refetched whenever
   // the active session changes (and once on mount, since it starts null).
+  // Guarded like the other httpApi-only calls in this file (onStatusEvent,
+  // onAgentFileReady, ...): on a fresh/unpaired desktop boot, window.api is
+  // still the raw preload OS-bridge subset (no launchersList) until the
+  // http-mode transport swap in main.tsx completes — this effect runs on
+  // every App render regardless of onboarding state, so it must not assume
+  // the swap already happened.
   useEffect(() => {
+    if (!window.api.launchersList) {
+      setAvailableLaunchers([]);
+      return;
+    }
     window.api
       .launchersList()
       .then(setAvailableLaunchers)
