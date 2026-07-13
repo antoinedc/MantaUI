@@ -1,110 +1,127 @@
-// Long-lived attached PTYs keyed by projectName, exposed over the RPC layer.
+// Ephemeral, cwd-keyed PTYs (shell-in-cwd Terminal mode, or an AI CLI TUI
+// launch mode), exposed over the RPC layer's pty:* channels.
 //
-// This module owns the shared node-pty spawn logic so BOTH the existing
-// /pty WebSocket handler (attachPty in index.mjs) and the new pty:* RPC
-// channels talk to the same underlying spawn implementation.
+// BET-138: this module used to attach to a tmux session (`tmux attach-session`,
+// keyed by projectName) for BOTH the /pty WebSocket handler and the pty:* RPC
+// channels. The tmux-attach path and the /pty WS handler are gone (bui never
+// creates a "claude-TUI" tmux window anymore, so there is nothing to attach
+// to). This module now spawns a real shell (or, for a launcher mode, an AI
+// CLI like `claude`) directly in the session's working directory. No tmux
+// involvement, no scrollback recovery — the PTY dies with the shell/CLI.
 //
-// PtyEvent shape mirrors src/main/pty.ts (kind field, not type):
-//   { kind: "data", projectName: string, data: string }
-//   { kind: "exit", projectName: string, code: number | null }
+// PtyEvent shape (kind field, not type):
+//   { kind: "data", sessionKey: string, data: string }
+//   { kind: "exit", sessionKey: string, code: number | null }
 //
-// This matches what src/shared/types.ts declares and what Terminal.tsx expects
-// (via onPtyEvent / IPC.ptyEvent).
+// This matches what src/shared/types.ts declares and what Terminal.tsx
+// expects (via onPtyEvent / IPC.ptyEvent).
 
 import { spawn as ptySpawnNative } from "node-pty";
+import { expandTilde } from "./opencode.mjs";
+import { findLauncher } from "./launcherRegistry.mjs";
 
 // ---------- shared low-level spawn helper ----------
 //
-// Creates a node-pty that runs `tmux attach-session -t <session>`.
-// Optionally selects a specific window index first (WS path uses this).
-// Returns the raw IPty object. Does NOT register in the registry.
+// Spawns either a login shell (no launcher) OR an AI CLI TUI (launcher given)
+// in `cwd`. Ephemeral, no tmux. Returns the raw IPty object. Does NOT
+// register it in the registry below.
 //
-// opts: { session, windowIdx?, cols, rows }
-// windowSelectFn: optional (session, windowIdx) => void side-effect before spawn
-// (used by the WS path so select-window happens at connect time).
-
-import { spawn as cpSpawn } from "node:child_process";
-
-export function spawnRawPty({ session, windowIdx, cols, rows }) {
-  if (windowIdx != null && /^\d+$/.test(String(windowIdx))) {
-    cpSpawn("tmux", ["select-window", "-t", `${session}:${windowIdx}`], {
-      stdio: "ignore",
-    });
-  }
-
-  return ptySpawnNative("tmux", ["attach-session", "-t", session], {
+// opts: { cwd, cols, rows, launcher? }
+// launcher, if given: { id: string, flags?: Record<string, boolean> }.
+// Unknown launcher ids fall through to a plain shell (defensive — e.g. a
+// stale localStorage mode referencing a launcher that no longer exists).
+export function spawnShellPty({ cwd, cols, rows, launcher }) {
+  const dir = expandTilde(cwd && cwd.trim() ? cwd : "~");
+  const size = {
     name: "xterm-256color",
+    cwd: dir,
     cols: Math.max(20, Math.min(500, Number(cols) || 80)),
     rows: Math.max(5, Math.min(200, Number(rows) || 24)),
     env: { ...process.env, TERM: "xterm-256color" },
-  });
+  };
+
+  if (launcher && launcher.id) {
+    const def = findLauncher(launcher.id);
+    if (def) {
+      const args = def.buildArgs(launcher.flags || {});
+      // Run the CLI directly. When it exits, the PTY exits (ephemeral
+      // lifecycle) — same as `exit`ing the plain shell.
+      return ptySpawnNative(def.bin, args, size);
+    }
+    // Unknown launcher id -> fall through to a plain shell.
+  }
+
+  const shell = process.env.SHELL || "bash";
+  return ptySpawnNative(shell, ["-l"], size);
 }
 
 // ---------- RPC registry ----------
 //
-// One IPty per projectName. spawn() acts like the desktop spawnPty():
-//   - If a pty already exists for projectName, do not tear it down (same
-//     behaviour as src/main/pty.ts lines 687-688: "do NOT tear it down").
+// One IPty per sessionKey. The caller composes sessionKey as
+// `${opencodeSessionId}:${modeId}` (modeId = "terminal" or a launcher id) so
+// Terminal mode and each TUI launcher mode of the same chat session get
+// independent, kept-warm PTYs. spawn() acts like the desktop spawnPty():
+//   - If a pty already exists for sessionKey, do not tear it down (same
+//     behaviour as src/main/pty.ts: "do NOT tear it down").
 //   - onEvent(ptyEvent) is called for every data/exit event. The RPC caller
 //     passes a closure that forwards to bus.publish.
 
-const ptys = new Map(); // projectName → IPty
+const ptys = new Map(); // sessionKey → IPty
 
 /**
- * Spawn (or silently reuse) a pty for opts.projectName.
- * @param {SpawnOptions} opts  { projectName, cols, rows }
- * @param {(e: PtyEvent) => void} onEvent
+ * Spawn (or silently reuse) a shell/launcher pty for opts.sessionKey.
+ * @param {{ sessionKey: string, cwd: string, cols: number, rows: number, launcher?: { id: string, flags?: Record<string, boolean> } }} opts
+ * @param {(e) => void} onEvent
  */
 export function spawn(opts, onEvent) {
-  const { projectName, cols, rows } = opts;
-  if (!projectName) throw new Error("pty:spawn — projectName required");
+  const { sessionKey, cwd, cols, rows, launcher } = opts;
+  if (!sessionKey) throw new Error("pty:spawn — sessionKey required");
 
-  // Mirror desktop: if already exists, do not respawn (avoids disconnect noise).
-  // The incoming onEvent is intentionally dropped on this reuse path.
-  // Safe ONLY because every caller passes the same sink (bus.publish, a
-  // module singleton). If a future caller passes a per-client onEvent,
-  // this must be changed to re-point or multiplex the listener instead.
-  if (ptys.has(projectName)) return;
+  // Mirror desktop: if already exists, do not respawn (avoids disconnect
+  // noise on remount). The incoming onEvent is intentionally dropped on this
+  // reuse path — safe ONLY because every caller passes the same sink
+  // (bus.publish, a module singleton).
+  if (ptys.has(sessionKey)) return;
 
-  const pty = spawnRawPty({ session: projectName, cols, rows });
-  ptys.set(projectName, pty);
+  const pty = spawnShellPty({ cwd, cols, rows, launcher });
+  ptys.set(sessionKey, pty);
 
   pty.onData((data) => {
-    onEvent({ kind: "data", projectName, data });
+    onEvent({ kind: "data", sessionKey, data });
   });
 
   pty.onExit(({ exitCode }) => {
-    onEvent({ kind: "exit", projectName, code: exitCode ?? null });
-    ptys.delete(projectName);
+    onEvent({ kind: "exit", sessionKey, code: exitCode ?? null });
+    ptys.delete(sessionKey);
   });
 }
 
 /**
- * Write data to the pty for projectName. No-op if not found (mirror desktop).
- * @param {string} projectName
+ * Write data to the pty for sessionKey. No-op if not found (mirror desktop).
+ * @param {string} sessionKey
  * @param {string} data
  */
-export function write(projectName, data) {
-  ptys.get(projectName)?.write(data);
+export function write(sessionKey, data) {
+  ptys.get(sessionKey)?.write(data);
 }
 
 /**
- * Resize the pty for projectName. No-op if not found.
- * @param {string} projectName
+ * Resize the pty for sessionKey. No-op if not found.
+ * @param {string} sessionKey
  * @param {number} cols
  * @param {number} rows
  */
-export function resize(projectName, cols, rows) {
-  ptys.get(projectName)?.resize(cols, rows);
+export function resize(sessionKey, cols, rows) {
+  ptys.get(sessionKey)?.resize(cols, rows);
 }
 
 /**
- * Kill and remove the pty for projectName. Mirror desktop killPty().
- * @param {string} projectName
+ * Kill and remove the pty for sessionKey. Mirror desktop killPty().
+ * @param {string} sessionKey
  */
-export function kill(projectName) {
-  const p = ptys.get(projectName);
+export function kill(sessionKey) {
+  const p = ptys.get(sessionKey);
   if (!p) return;
   try { p.kill(); } catch { /* already gone */ }
-  ptys.delete(projectName);
+  ptys.delete(sessionKey);
 }

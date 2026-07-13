@@ -44,6 +44,13 @@ export type AppConfig = {
   // Absent → app.getPath("downloads") (~/Downloads). A leading "~" is NOT
   // expanded here; pass an absolute path or leave empty for the default.
   downloadsDir?: string;
+  /**
+   * Per-launcher CLI flag values for TUI launch modes (BET-138 refinement).
+   * Keyed by launcher id (see src/server/launcherRegistry.mjs), then flag key.
+   * Missing keys fall back to each flag's registry `default`. Example:
+   *   { claude: { skipPermissions: true } }
+   */
+  launcherFlags?: Record<string, Record<string, boolean>>;
   // Local port forwarded to the remote `opencode serve` instance for chat-mode
   // windows. Defaults to 14096 to avoid colliding with a user's local opencode
   // running on 4096.
@@ -149,15 +156,41 @@ export type WorktreeInfo = {
 
 // ----- IPC inputs -----
 
+// BET-138: the pty is a shell-in-cwd (or, for a launcher mode, an AI CLI TUI
+// like `claude`) spawned directly in a chat session's working directory — NOT
+// a tmux attach. `sessionKey` is the caller-composed
+// `${opencodeSessionId}:${modeId}` (modeId = "terminal" or a launcher id from
+// src/server/launcherRegistry.mjs) so Terminal mode and each TUI launcher
+// mode of the same chat session get independent, kept-warm PTYs.
 export type SpawnOptions = {
-  projectName: string; // tmux session to attach to
+  sessionKey: string; // stable per-session-mode id: see comment above
+  cwd: string;        // working dir for the shell/CLI (may be tilde-prefixed)
   cols: number;
   rows: number;
+  // Present only for a TUI launch mode (absent = plain login shell).
+  launcher?: { id: string; flags: Record<string, boolean> };
 };
 
 export type PtyEvent =
-  | { kind: "data"; projectName: string; data: string }
-  | { kind: "exit"; projectName: string; code: number | null };
+  | { kind: "data"; sessionKey: string; data: string }
+  | { kind: "exit"; sessionKey: string; code: number | null };
+
+// One AI CLI TUI launcher available on this box (see src/server/launcherRegistry.mjs
+// for the full registry; this is the availability-filtered subset the server
+// reports via IPC.launchersList). `flags` is the schema only — the CLI-flag
+// mapping (`arg`) stays server-side and never crosses to the renderer.
+export type LauncherFlagSchema = {
+  key: string;
+  label: string;
+  type: "boolean";
+  default: boolean;
+};
+
+export type AvailableLauncher = {
+  id: string;
+  label: string;
+  flags: LauncherFlagSchema[];
+};
 
 // Per-window activity status, derived from periodically capturing pane buffers
 // on the remote and looking for claude's busy markers. One entry per existing
@@ -251,6 +284,11 @@ export const IPC = {
   ptyResize: "pty:resize",
   ptyKill: "pty:kill",
   ptyEvent: "pty:event",
+
+  // Which AI CLI TUI launchers (Claude Code, ...) are available on this box
+  // right now — binary on PATH AND its opencode provider connected. Drives
+  // the session-mode dropdown's launcher options (BET-138 refinement).
+  launchersList: "launchers:list",
 
   // Per-window activity status, pushed every ~2s from a remote pane-capture poll
   statusEvent: "status:event",

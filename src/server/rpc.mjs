@@ -11,6 +11,7 @@ import {
 } from "./secrets.mjs";
 import { resolveWorkspace } from "./peers.mjs";
 import * as providers from "./providers.mjs";
+import * as launchers from "./launchers.mjs";
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -392,25 +393,38 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
 
     // ---- pty channels (4 channels) ----
     //
+    // BET-138: the pty is a shell-in-cwd (or AI CLI TUI launch), not a tmux
+    // attach — keyed by sessionKey (`${opencodeSessionId}:${modeId}`), not
+    // projectName. See src/server/pty.mjs.
+    //
     // IPC.ptySpawn   = "pty:spawn"   preload: ipcRenderer.invoke(IPC.ptySpawn, opts)
-    //   → args[0] = SpawnOptions { projectName, cols, rows }
+    //   → args[0] = SpawnOptions { sessionKey, cwd, cols, rows, launcher? }
     //   Side-effect: data/exit events flow to bus as { kind:"pty", payload: PtyEvent }
-    //   where PtyEvent = { kind:"data"|"exit", projectName, data? / code? }
+    //   where PtyEvent = { kind:"data"|"exit", sessionKey, data? / code? }
     //   (matches src/shared/types.ts PtyEvent and src/main/pty.ts emit shape)
     "pty:spawn": (opts) =>
       pty.spawn(opts, (e) => bus.publish({ kind: "pty", payload: e })),
 
-    // IPC.ptyWrite   = "pty:write"   preload: ipcRenderer.invoke(IPC.ptyWrite, projectName, data)
-    //   → args[0] = projectName, args[1] = data
-    "pty:write": (projectName, data) => pty.write(projectName, data),
+    // IPC.ptyWrite   = "pty:write"   preload: ipcRenderer.invoke(IPC.ptyWrite, sessionKey, data)
+    //   → args[0] = sessionKey, args[1] = data
+    "pty:write": (sessionKey, data) => pty.write(sessionKey, data),
 
-    // IPC.ptyResize  = "pty:resize"  preload: ipcRenderer.invoke(IPC.ptyResize, projectName, cols, rows)
-    //   → args[0] = projectName, args[1] = cols, args[2] = rows
-    "pty:resize": (projectName, cols, rows) => pty.resize(projectName, cols, rows),
+    // IPC.ptyResize  = "pty:resize"  preload: ipcRenderer.invoke(IPC.ptyResize, sessionKey, cols, rows)
+    //   → args[0] = sessionKey, args[1] = cols, args[2] = rows
+    "pty:resize": (sessionKey, cols, rows) => pty.resize(sessionKey, cols, rows),
 
-    // IPC.ptyKill    = "pty:kill"    preload: ipcRenderer.invoke(IPC.ptyKill, projectName)
-    //   → args[0] = projectName
-    "pty:kill": (projectName) => pty.kill(projectName),
+    // IPC.ptyKill    = "pty:kill"    preload: ipcRenderer.invoke(IPC.ptyKill, sessionKey)
+    //   → args[0] = sessionKey
+    "pty:kill": (sessionKey) => pty.kill(sessionKey),
+
+    // ---- launcher availability (BET-138 refinement) ----
+    // IPC.launchersList = "launchers:list" — which AI CLI TUIs (see
+    // src/server/launcherRegistry.mjs) are available on this box right now:
+    // binary on PATH AND (if the launcher declares one) opencode reports its
+    // provider connected. Cheap; the renderer fetches on active-session
+    // change, no polling.
+    "launchers:list": () =>
+      launchers.listAvailableLaunchers({ getProviders: providers.getProviders }),
   };
 }
 

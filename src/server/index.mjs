@@ -1193,10 +1193,10 @@ server.on("upgrade", (req, socket, head) => {
 
   // Auth gate for WS upgrades. Browsers can't set an Authorization header on a
   // WebSocket, so the token also travels as a ?token= query param; non-browser
-  // clients may still use the header. Both /events and /pty are gated. The
-  // ?token= fallback is scoped to /events + /pty ONLY by authorizationForRequest
-  // (a header always wins; the query token is honored only on those two stream
-  // paths). Reject with an HTTP 401 handshake response before the upgrade.
+  // clients may still use the header. /events is gated. The ?token= fallback
+  // is scoped to /events ONLY by authorizationForRequest (a header always
+  // wins; the query token is honored only on that stream path). Reject with
+  // an HTTP 401 handshake response before the upgrade.
   const wsAuth = authEngine.authorize({
     method: "GET",
     path: url.pathname,
@@ -1218,63 +1218,8 @@ server.on("upgrade", (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, (ws) => attachEventsWs(bus, ws));
     return;
   }
-  if (url.pathname === "/pty") {
-    wss.handleUpgrade(req, socket, head, (ws) => attachPty(ws, url));
-    return;
-  }
   socket.destroy();
 });
-
-function attachPty(ws, url) {
-  const session = url.searchParams.get("session");
-  const windowIdx = url.searchParams.get("window");
-  const cols = Number(url.searchParams.get("cols")) || 80;
-  const rows = Number(url.searchParams.get("rows")) || 24;
-
-  if (!session || !/^[A-Za-z0-9._-]+$/.test(session)) {
-    ws.close(1008, "bad session");
-    return;
-  }
-
-  // Delegate to the shared spawn helper in pty.mjs.
-  // spawnRawPty handles window pre-select, clamping, env — behaviour unchanged.
-  const wsPty = pty.spawnRawPty({ session, windowIdx, cols, rows });
-
-  wsPty.onData((data) => {
-    if (ws.readyState === ws.OPEN) ws.send(data);
-  });
-  wsPty.onExit(({ exitCode }) => {
-    try {
-      ws.close(1000, `pty exited ${exitCode}`);
-    } catch {
-      /* already closed */
-    }
-  });
-
-  ws.on("message", (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
-    if (msg.type === "data" && typeof msg.data === "string") {
-      wsPty.write(msg.data);
-    } else if (msg.type === "resize") {
-      const c = Number(msg.cols);
-      const r = Number(msg.rows);
-      if (c > 0 && r > 0) wsPty.resize(c, r);
-    }
-  });
-
-  ws.on("close", () => {
-    try {
-      wsPty.kill();
-    } catch {
-      /* already gone */
-    }
-  });
-}
 
 server.listen(PORT, HOST, () => {
   console.log(`bui-mobile listening on http://${HOST}:${PORT}`);

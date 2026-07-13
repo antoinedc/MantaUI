@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { ProvidersCard } from "../ProvidersCard";
-import type { OpencodeModel } from "../../shared/types";
+import { resolveLauncherFlags } from "../chatShared";
+import type { AvailableLauncher, OpencodeModel } from "../../shared/types";
 import {
   isPushSupported,
   pushPermission,
@@ -45,6 +46,7 @@ export function MobileSettings({ onClose }: Props) {
     groqApiKey,
     voiceTranscriptionModel,
     voiceCommandModel,
+    launcherFlags,
     refresh,
   } = useStore();
 
@@ -74,6 +76,10 @@ export function MobileSettings({ onClose }: Props) {
   const [groqKey, setGroqKey] = useState(groqApiKey);
   const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
   const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
+  // AI CLI TUI launch options (BET-138 refinement) — mirrors desktop Settings.
+  const [availableLaunchers, setAvailableLaunchers] = useState<AvailableLauncher[]>([]);
+  const [launcherFlagValues, setLauncherFlagValues] =
+    useState<Record<string, Record<string, boolean>>>(launcherFlags ?? {});
 
   // Push notifications — not server config (it's a per-device subscription),
   // so it lives outside the Save flow. `pushOn` reflects an actual live
@@ -147,7 +153,8 @@ export function MobileSettings({ onClose }: Props) {
     setGroqKey(groqApiKey);
     setVoiceTrModel(voiceTranscriptionModel);
     setVoiceCmdModel(voiceCommandModel);
-  }, [chatAutoAllow, autoRenameSessions, defaultModel, cacheTtl, skillRegistryUrls, groqApiKey, voiceTranscriptionModel, voiceCommandModel]);
+    setLauncherFlagValues(launcherFlags ?? {});
+  }, [chatAutoAllow, autoRenameSessions, defaultModel, cacheTtl, skillRegistryUrls, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags]);
 
   // Model list is best-effort — opencode unreachable just means the
   // picker shows only "opencode default". Same as desktop Settings.
@@ -157,6 +164,24 @@ export function MobileSettings({ onClose }: Props) {
       .then((list) => setModels(list))
       .catch(() => {});
   }, []);
+
+  // Which AI CLI TUIs are set up on this box — non-fatal, an empty list just
+  // hides the launch-options section below.
+  useEffect(() => {
+    window.api
+      .launchersList()
+      .then((list) => setAvailableLaunchers(list))
+      .catch(() => {});
+  }, []);
+
+  const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
+    const l = availableLaunchers.find((x) => x.id === launcherId);
+    if (!l) return;
+    setLauncherFlagValues((prev) => ({
+      ...prev,
+      [launcherId]: { ...resolveLauncherFlags(l.flags, prev[launcherId]), [flagKey]: checked },
+    }));
+  };
 
   const save = async () => {
     setSaving(true);
@@ -179,6 +204,7 @@ export function MobileSettings({ onClose }: Props) {
         groqApiKey: groqKey.trim(),
         voiceTranscriptionModel: voiceTrModel.trim(),
         voiceCommandModel: voiceCmdModel.trim(),
+        launcherFlags: launcherFlagValues,
       });
       await refresh();
       setSavedToast(true);
@@ -325,6 +351,42 @@ export function MobileSettings({ onClose }: Props) {
         </section>
 
         <ProvidersCard />
+
+        {/* AI CLI launch options (BET-138 refinement) — mirrors desktop
+            Settings' AI tab section. Only CLIs detected on this box are
+            shown; an empty list renders nothing. */}
+        {availableLaunchers.some((l) => l.flags.length > 0) && (
+          <section className="space-y-3 pt-1 border-t border-border">
+            <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+              AI CLI launch options
+            </label>
+            <div className="text-xs text-text-faint">
+              Flags used when launching an AI CLI (e.g. Claude Code) directly in a
+              session's terminal. Only CLIs detected on this box are shown.
+            </div>
+            {availableLaunchers
+              .filter((l) => l.flags.length > 0)
+              .map((l) => (
+                <div key={l.id} className="space-y-2">
+                  <div className="text-sm font-medium text-text">{l.label}</div>
+                  {l.flags.map((f) => (
+                    <label
+                      key={f.key}
+                      className="flex items-center justify-between gap-3"
+                    >
+                      <span className="text-sm text-text">{f.label}</span>
+                      <input
+                        type="checkbox"
+                        checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]}
+                        onChange={(e) => setLauncherFlag(l.id, f.key, e.target.checked)}
+                        className="w-5 h-5 accent-accent"
+                      />
+                    </label>
+                  ))}
+                </div>
+              ))}
+          </section>
+        )}
 
         {/* Cache TTL — two buttons, not a select, to match desktop affordance. */}
         <section className="space-y-2 pt-1 border-t border-border">

@@ -97,7 +97,6 @@ test("isExemptPath exempts only /auth pairing + /hook delivery", () => {
   assert.equal(isExemptPath("/api/projects"), false);
   assert.equal(isExemptPath("/rpc/tmux"), false);
   assert.equal(isExemptPath("/events"), false);
-  assert.equal(isExemptPath("/pty"), false);
   assert.equal(isExemptPath("/"), false);
   assert.equal(isExemptPath(null), false);
 });
@@ -122,20 +121,20 @@ test("isPublicAssetPath allows the SPA shell + PWA assets", () => {
 });
 
 // ----------------------------------------------------------------------------
-// query-param token fallback — /events + /pty ONLY (BET-51)
+// query-param token fallback — /events ONLY (BET-51; /pty removed in BET-138)
 // ----------------------------------------------------------------------------
 
-test("queryTokenAllowedForPath allows ONLY /events and /pty", () => {
+test("queryTokenAllowedForPath allows ONLY /events", () => {
   assert.equal(queryTokenAllowedForPath("/events"), true);
-  assert.equal(queryTokenAllowedForPath("/pty"), true);
   // every other route must present a real Bearer header
+  assert.equal(queryTokenAllowedForPath("/pty"), false);
   assert.equal(queryTokenAllowedForPath("/api/projects"), false);
   assert.equal(queryTokenAllowedForPath("/rpc/tmux"), false);
   assert.equal(queryTokenAllowedForPath("/auth/status"), false);
   assert.equal(queryTokenAllowedForPath("/"), false);
   assert.equal(queryTokenAllowedForPath("/events/../api/projects"), false);
-  // exactly the two paths, nothing more
-  assert.deepEqual([...QUERY_TOKEN_PATHS].sort(), ["/events", "/pty"]);
+  // exactly the one path, nothing more
+  assert.deepEqual([...QUERY_TOKEN_PATHS].sort(), ["/events"]);
 });
 
 test("authorizationForRequest: header always wins on any route", () => {
@@ -152,11 +151,11 @@ test("authorizationForRequest: header always wins on any route", () => {
   assert.equal(authorizationForRequest("/events", "   ", HEX32), `Bearer ${HEX32}`);
 });
 
-test("authorizationForRequest: ?token= honored ONLY on /events + /pty", () => {
-  // stream paths: query token becomes a Bearer value
+test("authorizationForRequest: ?token= honored ONLY on /events", () => {
+  // stream path: query token becomes a Bearer value
   assert.equal(authorizationForRequest("/events", "", HEX32), `Bearer ${HEX32}`);
-  assert.equal(authorizationForRequest("/pty", undefined, HEX32), `Bearer ${HEX32}`);
   // any other route ignores ?token= entirely → empty (gate then 401s)
+  assert.equal(authorizationForRequest("/pty", undefined, HEX32), "");
   assert.equal(authorizationForRequest("/api/projects", "", HEX32), "");
   assert.equal(authorizationForRequest("/rpc/tmux", null, HEX32), "");
   assert.equal(authorizationForRequest("/auth/status", "", HEX32), "");
