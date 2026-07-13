@@ -20,6 +20,14 @@ import { spawn as ptySpawnNative } from "node-pty";
 import { expandTilde } from "./opencode.mjs";
 import { findLauncher } from "./launcherRegistry.mjs";
 
+// Single-quote a token so it survives a `$SHELL -lc "<cmd>"` re-parse intact.
+// Bin names + registry flags are trusted (no user input), but quoting keeps
+// this correct if a future launcher arg ever contains a space or metachar.
+export function shellQuote(token) {
+  if (/^[A-Za-z0-9._/@:=+-]+$/.test(token)) return token;
+  return `'${String(token).replace(/'/g, `'\\''`)}'`;
+}
+
 // ---------- shared low-level spawn helper ----------
 //
 // Spawns either a login shell (no launcher) OR an AI CLI TUI (launcher given)
@@ -40,18 +48,28 @@ export function spawnShellPty({ cwd, cols, rows, launcher }) {
     env: { ...process.env, TERM: "xterm-256color" },
   };
 
+  const shell = process.env.SHELL || "bash";
+
   if (launcher && launcher.id) {
     const def = findLauncher(launcher.id);
     if (def) {
       const args = def.buildArgs(launcher.flags || {});
-      // Run the CLI directly. When it exits, the PTY exits (ephemeral
-      // lifecycle) — same as `exit`ing the plain shell.
-      return ptySpawnNative(def.bin, args, size);
+      // Run the CLI through a LOGIN shell (`$SHELL -lc "<cmd>"`), NOT a bare
+      // execFile of the binary. The availability probe in launchers.mjs uses
+      // `command -v` inside a login shell, so a launcher only ever appears in
+      // the dropdown when it resolves in the interactive PATH (claude lives at
+      // ~/.local/bin/claude, which is NOT on the systemd --user service PATH).
+      // Spawning the bin directly would inherit the server's bare PATH and
+      // exit immediately (127 → surfaced to the user as "[shell exited: 1]").
+      // The login shell reproduces the same PATH the probe saw, so the CLI is
+      // found. When it exits, the login shell exits, so the PTY still dies with
+      // the CLI (ephemeral lifecycle preserved).
+      const cmd = [def.bin, ...args].map(shellQuote).join(" ");
+      return ptySpawnNative(shell, ["-l", "-c", cmd], size);
     }
     // Unknown launcher id -> fall through to a plain shell.
   }
 
-  const shell = process.env.SHELL || "bash";
   return ptySpawnNative(shell, ["-l"], size);
 }
 

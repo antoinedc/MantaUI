@@ -212,6 +212,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
           {sid ? (
             <select
               className="mobile-tap text-text-faint text-xs bg-transparent"
+              style={{ colorScheme: "dark" }}
               value={mode}
               onChange={(e) => setMode(e.target.value as SessionMode)}
             >
