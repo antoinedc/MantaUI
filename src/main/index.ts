@@ -182,7 +182,7 @@ app.setPath("userData", join(app.getPath("appData"), "better-ui"));
 // builds — the source name on OS notifications (otherwise the renderer's
 // Web Notification API attributes them to the bundle, i.e. "Electron" in dev).
 // `appUserModelId` does the equivalent for Windows toast attribution.
-app.setName("Better UI");
+app.setName("Manta UI");
 app.setAppUserModelId("com.betterui.app");
 
 app.whenReady().then(() => {

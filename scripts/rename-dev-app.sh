@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-APP_NAME="Better UI"
+APP_NAME="Manta UI"
 
 if [[ "$(uname)" != "Darwin" ]]; then
   echo "rename-dev-app: not macOS — nothing to do."

@@ -1,4 +1,4 @@
-// autoUpdate.ts — auto-update checks for the Better UI desktop app.
+// autoUpdate.ts — auto-update checks for the Manta UI desktop app.
 //
 // Uses electron-updater's autoUpdater to:
 //   1. Check for updates on app launch (after a short delay to avoid blocking startup)
