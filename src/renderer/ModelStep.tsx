@@ -30,8 +30,8 @@ import { StepFooter } from "./onboardingUi";
 //   onBack     — go back to Step 2 (Providers).
 //   onContinue — advance to Step 4 (Project). Enabled once a model is selected.
 
-const ACCENT = "#7c9cff";
-const DANGER = "#f87171";
+const ACCENT = "#5A88FF";
+const DANGER = "#FF7A88";
 
 export function ModelStep({
   onBack,
@@ -122,14 +122,14 @@ export function ModelStep({
                 onClick={() => void pick(m)}
                 className="flex items-center gap-3.5 rounded-md border px-4 py-3 text-left transition-colors"
                 style={{
-                  borderColor: sel ? ACCENT : "#262932",
-                  background: sel ? "#1b1e25" : "transparent",
+                  borderColor: sel ? ACCENT : "#253055",
+                  background: sel ? "#171F3A" : "transparent",
                   boxShadow: sel ? `0 0 0 3px rgba(124,156,255,0.15)` : undefined,
                 }}
               >
                 <span
                   className="w-[18px] h-[18px] rounded-full border flex items-center justify-center shrink-0"
-                  style={{ borderColor: sel ? ACCENT : "#3a3f4b" }}
+                  style={{ borderColor: sel ? ACCENT : "#33406B" }}
                 >
                   {sel && <span className="w-2 h-2 rounded-full" style={{ background: ACCENT }} />}
                 </span>

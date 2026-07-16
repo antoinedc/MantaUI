@@ -41,7 +41,7 @@ import { StepFooter } from "./onboardingUi";
 //   onBack    — go back to Step 3 (Model).
 //   onCreated — project created; the shell advances to the success screen.
 
-const DANGER = "#f87171"; // inline error text (matches PairStep/ModelStep)
+const DANGER = "#FF7A88"; // inline error text (matches PairStep/ModelStep)
 
 export function FirstProjectStep({
   onBack,

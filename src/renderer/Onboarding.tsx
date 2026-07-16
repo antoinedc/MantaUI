@@ -46,7 +46,7 @@ import mantaMark from "./assets/manta-mark-128.png";
 //            skipped. The parent (App.tsx) re-reads config and drops back to the
 //            normal shell WITHOUT an app restart.
 
-const ACCENT = "#7c9cff"; // matches the app's Tailwind `accent` token (see tailwind.config)
+const ACCENT = "#5A88FF"; // matches the app's Tailwind `accent` token (see tailwind.config)
 
 // One progress dot + (optionally) the connector leading into it.
 function ProgressRail({ current }: { current: OnboardingPosition }) {
@@ -63,22 +63,22 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
               {i > 0 && (
                 <div
                   className="h-0.5 w-12 sm:w-16 transition-colors"
-                  style={{ background: step <= activeIdx ? ACCENT : "#262932" }}
+                  style={{ background: step <= activeIdx ? ACCENT : "#253055" }}
                 />
               )}
               <div
                 className="w-8 h-8 rounded-full flex items-center justify-center text-[13px] font-semibold transition-all shrink-0"
                 style={
                   state === "inactive"
-                    ? { background: "#1b1e25", color: "#6b7280", border: "1.5px solid #262932" }
+                    ? { background: "#171F3A", color: "#5C6578", border: "1.5px solid #253055" }
                     : state === "active"
                       ? {
                           background: ACCENT,
-                          color: "#0e0f12",
+                          color: "#0B1020",
                           border: `1.5px solid ${ACCENT}`,
                           boxShadow: `0 0 0 4px rgba(124,156,255,0.15)`,
                         }
-                      : { background: ACCENT, color: "#0e0f12", border: `1.5px solid ${ACCENT}` }
+                      : { background: ACCENT, color: "#0B1020", border: `1.5px solid ${ACCENT}` }
                 }
               >
                 {state === "completed" ? <CheckIcon className="w-3.5 h-3.5" /> : step}
@@ -94,7 +94,7 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
             <div
               key={step}
               className="text-xs text-center min-w-[60px]"
-              style={{ color: isActive ? "#9aa0aa" : "#6b7280", fontWeight: isActive ? 500 : 400 }}
+              style={{ color: isActive ? "#A7B1C4" : "#5C6578", fontWeight: isActive ? 500 : 400 }}
             >
               {STEP_LABELS[step]}
             </div>

@@ -210,7 +210,7 @@ export function InputArea({
       <div className="px-4 py-3 flex items-start gap-2">
         <span
           className="select-none pt-px shrink-0"
-          style={{ color: voiceActive ? "#f87171" : CLAUDE_ORANGE }}
+          style={{ color: voiceActive ? "#FF7A88" : CLAUDE_ORANGE }}
           title={
             voiceActive
               ? voiceProcessing

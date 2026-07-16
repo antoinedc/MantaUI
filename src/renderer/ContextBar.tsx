@@ -15,8 +15,8 @@ import { ctxStageColor, type ContextBreakdown, type StaleCacheResult } from "./c
 
 // Cache-segment colors — tuned to read as distinct buckets without
 // competing with the stage color of the fresh segment.
-const CACHE_WRITE_COLOR = "#f59e0b"; // amber-500: warm-up, expensive
-const CACHE_READ_COLOR = "#0ea5a4"; // teal-600: cached, cheap
+const CACHE_WRITE_COLOR = "#F0A934"; // amber-500: warm-up, expensive
+const CACHE_READ_COLOR = "#22BEE0"; // teal-600: cached, cheap
 
 // Format a token count compactly for the inline stale-cache pill
 // ("12k", "120k", "1.2M"). Differs from `formatTokens` (which appends
@@ -91,7 +91,7 @@ export function ContextBar({
         // CSS rule.
         className="inline-block w-24 h-3 rounded-[2px] overflow-hidden align-middle"
         style={{
-          backgroundColor: "#1b1e25",
+          backgroundColor: "#171F3A",
           backgroundImage: `radial-gradient(circle, ${dot} 1.2px, transparent 1.4px)`,
           backgroundSize: "4px 4px",
         }}
