@@ -311,6 +311,20 @@ export function useTranscriptState(params: {
     spliceFirstScheduledAt.current.clear();
   }, [sessionId]);
 
+  // Unmount cleanup — clear EVERY pending debounce timer. A timer surviving
+  // unmount fires against a torn-down environment (CI flake: "window is not
+  // defined" after jsdom teardown in vitest) and would also setState on an
+  // unmounted component. The session-change effect above only covers splice
+  // timers on sessionId CHANGE, not the final unmount.
+  useEffect(() => {
+    return () => {
+      if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
+      if (flushTimer.current) clearTimeout(flushTimer.current);
+      for (const t of spliceTimers.current.values()) clearTimeout(t);
+      spliceTimers.current.clear();
+    };
+  }, []);
+
   // Post-commit stick layout effect. The stick decision MUST compare the user's
   // pre-commit position against the PREVIOUS render's height (prevScrollHeight),
   // not the live post-commit el.scrollHeight — by the time this layout effect
