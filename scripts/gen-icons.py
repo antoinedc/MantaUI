@@ -76,3 +76,42 @@ for f in glob.glob("mobile/ios/App/App/Assets.xcassets/Splash.imageset/*.png"):
 for f in glob.glob("mobile/android/app/src/main/res/drawable*/splash.png"):
     sz=Image.open(f).size; splash(*sz).save(f)
 print("splashes regenerated")
+
+# ---- Desktop assets (assets/icon.icns, assets/icons/, renderer header mark) ----
+from PIL import ImageDraw
+def mac_tile(size):
+    """Big-Sur style: rounded navy tile inset 5% on transparent, mark ~62%."""
+    c = Image.new("RGBA", (size, size), (0,0,0,0))
+    inset = round(size*0.05); tile = size - 2*inset
+    mask = Image.new("L", (tile, tile), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0,0,tile-1,tile-1], radius=round(tile*0.2237), fill=255)
+    c.paste(Image.new("RGBA",(tile,tile),NAVY), (inset,inset), mask)
+    inner = round(tile*0.62); w,h = im.size; s = min(inner/w, inner/h)
+    nw,nh = round(w*s), round(h*s)
+    c.alpha_composite(im.resize((nw,nh), Image.LANCZOS), ((size-nw)//2,(size-nh)//2))
+    return c
+
+os.makedirs("assets/icons", exist_ok=True)
+for s in (16,32,48,64,128,256,512):
+    square(im, s).save(f"assets/icons/{s}x{s}.png")
+
+# renderer header mark (bundled via Vite import in Onboarding.tsx)
+h = 128; w = round(im.size[0]*h/im.size[1])
+im.resize((w,h), Image.LANCZOS).save("src/renderer/assets/manta-mark-128.png")
+
+try:
+    from icnsutil import IcnsFile
+    import tempfile
+    tiles = {}
+    with tempfile.TemporaryDirectory() as td:
+        icns = IcnsFile()
+        for key, px in [("icp4",16),("icp5",32),("ic07",128),("ic08",256),("ic09",512),
+                        ("ic11",32),("ic12",64),("ic13",256),("ic14",512),("ic10",1024)]:
+            p = tiles.get(px)
+            if not p:
+                p = f"{td}/{px}.png"; mac_tile(px).save(p); tiles[px] = p
+            icns.add_media(key, file=p)
+        icns.write("assets/icon.icns")
+    print("assets/icon.icns written")
+except ImportError:
+    print("icnsutil not installed — skipped assets/icon.icns (pip install icnsutil)")

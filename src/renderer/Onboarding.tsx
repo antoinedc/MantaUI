@@ -14,6 +14,7 @@ import { ProvidersStep } from "./ProvidersStep";
 import { ModelStep } from "./ModelStep";
 import { FirstProjectStep } from "./FirstProjectStep";
 import { ArrowRight, CheckIcon } from "./onboardingUi";
+import mantaMark from "./assets/manta-mark-128.png";
 
 // Onboarding.tsx — full-screen M6.2 onboarding shell (BET-49-T3).
 //
@@ -130,24 +131,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         {/* Header: logo + progress rail (hidden on the success screen). */}
         <div className="text-center mb-10">
           <div className="inline-flex items-center gap-2.5 mb-8">
-            <div
-              className="w-9 h-9 rounded flex items-center justify-center"
-              style={{ background: `linear-gradient(135deg, ${ACCENT}, #a78bfa)` }}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#0e0f12"
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="w-5 h-5"
-              >
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
-            </div>
+            <img src={mantaMark} alt="" className="w-9 h-9 object-contain" />
             <span className="text-xl font-semibold tracking-tight">bui</span>
           </div>
           {!isSuccess && <ProgressRail current={pos} />}
