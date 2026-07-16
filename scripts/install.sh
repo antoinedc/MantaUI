@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — one-command VPS self-install for the bui box server.
+# install.sh — one-command VPS self-install for the manta box server.
 #
 #   curl -fsSL https://mantaui.com/install.sh | bash
 #
@@ -12,7 +12,7 @@
 # Overrides (env):
 #   MANTA_TARBALL_URL   full URL of the release tarball (skips host+version build)
 #   MANTA_RELEASE_HOST  host for the default tarball URL (default mantaui.com)
-#   MANTA_HOME          where code is unpacked (default ~/bui)
+#   MANTA_HOME          where code is unpacked (default ~/manta)
 #   MANTA_MOBILE_PORT   server port (default 8787)
 #   MANTA_VERSION       version to fetch when MANTA_TARBALL_URL is unset (default: latest)
 #
@@ -58,7 +58,7 @@ ok "Prerequisites present ($(node -v), npm $(npm -v))."
 # 2. Resolve config. Bootstrap install-lib.mjs so we can reuse its pure helpers
 #    even before the tarball is unpacked — download just that one file first.
 # ---------------------------------------------------------------------------
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/bui-install.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/manta-install.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 # Determine version (for the default tarball URL). If MANTA_TARBALL_URL is set the
@@ -74,7 +74,7 @@ if [ -n "${MANTA_TARBALL_URL:-}" ]; then
 else
   host="${MANTA_RELEASE_HOST:-https://mantaui.com}"
   host="${host%/}"
-  TARBALL_URL="${host}/releases/bui-${MANTA_VERSION}.tar.gz"
+  TARBALL_URL="${host}/releases/manta-${MANTA_VERSION}.tar.gz"
 fi
 log "Release tarball: $TARBALL_URL"
 
@@ -82,11 +82,11 @@ log "Release tarball: $TARBALL_URL"
 # 3. Download + extract the pre-built tarball (ships mobile/www/ prebuilt, so no
 #    renderer toolchain needed on the VPS).
 # ---------------------------------------------------------------------------
-MANTA_HOME="${MANTA_HOME:-$HOME/bui}"
+MANTA_HOME="${MANTA_HOME:-$HOME/manta}"
 AUTH_DIR="$HOME/.manta"
 
 log "Downloading release…"
-curl -fsSL "$TARBALL_URL" -o "$WORK/bui.tar.gz" \
+curl -fsSL "$TARBALL_URL" -o "$WORK/manta.tar.gz" \
   || die "download failed: $TARBALL_URL
       (set MANTA_TARBALL_URL to a reachable tarball, e.g. a local file:// or mirror)"
 
@@ -94,9 +94,9 @@ log "Extracting to $MANTA_HOME…"
 mkdir -p "$MANTA_HOME"
 # Preserve ~/.manta no matter what — it lives outside MANTA_HOME, but be
 # explicit that we never touch it. Extract stripping the top-level dir.
-tar -xzf "$WORK/bui.tar.gz" -C "$MANTA_HOME" --strip-components=1 \
+tar -xzf "$WORK/manta.tar.gz" -C "$MANTA_HOME" --strip-components=1 \
   || die "extract failed"
-ok "Unpacked bui into $MANTA_HOME."
+ok "Unpacked manta into $MANTA_HOME."
 
 cd "$MANTA_HOME"
 
@@ -178,7 +178,7 @@ node -e '
 ok "Server is healthy."
 
 log "Minting pairing code…"
-# Delegate to the same `bui pair` CLI the user runs later (loopback GET /auth/pair).
+# Delegate to the same `manta pair` CLI the user runs later (loopback GET /auth/pair).
 node "$MANTA_HOME/scripts/manta-pair.mjs" || die "failed to mint pairing code (is the server local-reachable?)"
 
 cat <<EOF
@@ -189,5 +189,5 @@ Installed. Manage the server with:
   journalctl --user -u manta-server -f
 
 Re-run this installer any time to upgrade in place (your box identity is preserved).
-Run 'bui pair' (or 'npm run pair' in $MANTA_HOME) to mint a fresh pairing code.
+Run 'manta pair' (or 'npm run pair' in $MANTA_HOME) to mint a fresh pairing code.
 EOF

@@ -129,7 +129,7 @@ Overrides (env):
 |-----|---------|---------|
 | `MANTA_TARBALL_URL` | (built from host+version) | full tarball URL — local testing / mirror |
 | `MANTA_RELEASE_HOST` | `https://mantaui.com` | host for the default tarball URL |
-| `MANTA_HOME` | `~/bui` | where the code is unpacked |
+| `MANTA_HOME` |  `~/manta` | where the code is unpacked |
 | `MANTA_MOBILE_PORT` | `8787` | server port |
 
 Manage it: `systemctl --user {status,restart} bui-server`, logs
@@ -169,7 +169,7 @@ drop it in `~/.config/systemd/user/`, then
 
 `npm run pack` builds the renderer and produces `dist/bui-<version>.tar.gz`
 (shipping a pre-built `mobile/www/`, so the box needs no renderer toolchain).
-Upload it to `<release-host>/releases/bui-<version>.tar.gz`.
+Upload it to `<release-host>/releases/manta-<version>.tar.gz`.
 
 ## Building the desktop app
 

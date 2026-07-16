@@ -25,7 +25,7 @@ import { STATE_DIRNAME } from "../src/shared/paths.mjs";
 // ---------------------------------------------------------------------------
 
 // Loopback health/pairing target. The server binds 127.0.0.1:8787 under the
-// systemd unit we install; the installer + `bui pair` only ever talk to it over
+// systemd unit we install; the installer + `manta pair` only ever talk to it over
 // loopback (minting a pairing code is loopback-gated — see auth.mjs).
 export const DEFAULT_PORT = 8787;
 export const HEALTH_PATH = "/auth/status";
@@ -38,7 +38,7 @@ export const DEFAULT_RELEASE_HOST = "https://mantaui.com";
 // Where the box lives once installed. `~/.manta/` (auth.json + config.json)
 // is deliberately OUTSIDE this dir so an upgrade that replaces MANTA_HOME never
 // touches box identity. `MANTA_HOME` overrides the code location only.
-export const DEFAULT_HOME_DIRNAME = "bui";
+export const DEFAULT_HOME_DIRNAME = "manta";
 
 // Persisted box identity — the file ensureAuth() writes on first server run.
 // Its presence is the idempotency signal: "identity already exists, preserve it."
@@ -62,7 +62,7 @@ function envVal(env, key) {
  * Injectable `home` for tests (defaults to os.homedir()).
  *
  * Returns:
- *   buiHome      — where the code is unpacked (MANTA_HOME || ~/bui)
+ *   buiHome      — where the code is unpacked (MANTA_HOME || ~/manta)
  *   authDir      — ~/.manta (never inside buiHome)
  *   authFile     — ~/.manta/auth.json (idempotency probe target)
  *   tarballUrl   — explicit MANTA_TARBALL_URL, else null (resolved per-version)
@@ -106,7 +106,7 @@ export function parsePort(value) {
  * Resolve the tarball download URL.
  *   - If MANTA_TARBALL_URL is set (via resolveConfig → cfg.tarballUrl), use it
  *     verbatim. This is the local-test / mirror override.
- *   - Otherwise build `<releaseHost>/releases/bui-<version>.tar.gz`.
+ *   - Otherwise build `<releaseHost>/releases/manta-<version>.tar.gz`.
  *
  * `version` must be a plain semver-ish string (no slashes / traversal); we
  * validate it so a bogus package.json version can't smuggle a path.
@@ -119,7 +119,7 @@ export function resolveTarballUrl({ tarballUrl, releaseHost, version } = {}) {
     );
   }
   const host = stripTrailingSlash(releaseHost || DEFAULT_RELEASE_HOST);
-  return `${host}/releases/bui-${version}.tar.gz`;
+  return `${host}/releases/manta-${version}.tar.gz`;
 }
 
 // A release version is digits/letters/dots/hyphens only — enough for semver +
@@ -168,7 +168,7 @@ export function checkIdentity(cfg, { exists = existsSync } = {}) {
  *
  * A *connection refused* (fetch throws) means the server hasn't bound yet →
  * retry. ANY HTTP status (200, 401, 403, ...) means the process is listening,
- * which is all we need before running `bui pair`; /auth/status is gated so it
+ * which is all we need before running `manta pair`; /auth/status is gated so it
  * legitimately answers 401 without a token, and that still proves liveness.
  *
  * Deterministic + testable: inject `fetchFn`, `sleep`, and `now`. No real
@@ -225,7 +225,7 @@ function defaultSleep(ms) {
 
 /**
  * Format the human-facing pairing block printed at the end of install (and by
- * `bui pair`). Given the server's { pairing_code, box_id, expiresAt } response,
+ * `manta pair`). Given the server's { pairing_code, box_id, expiresAt } response,
  * produce a stable, greppable multi-line string.
  *
  * `serverUrl` is the address the DESKTOP should point at (the box's public
@@ -238,7 +238,7 @@ export function formatPairingOutput({ pairing_code, box_id, expiresAt, serverUrl
   }
   const lines = [];
   lines.push("");
-  lines.push("  ✓ bui server is running.");
+  lines.push("  ✓ manta server is running.");
   lines.push("");
   lines.push(`  Pairing code:  ${pairing_code}`);
   if (expiresAt != null) {
@@ -258,7 +258,7 @@ export function formatPairingOutput({ pairing_code, box_id, expiresAt, serverUrl
     lines.push("    • cloudflared      → see docs (the operated relay replaces this later)");
     lines.push("");
   }
-  lines.push("  → Enter the pairing code in the bui desktop app to connect.");
+  lines.push("  → Enter the pairing code in the Manta desktop app to connect.");
   lines.push("");
   return lines.join("\n");
 }

@@ -23,7 +23,7 @@ const HOME = "/home/tester";
 
 test("resolveConfig applies defaults when env is empty", () => {
   const cfg = resolveConfig({ env: {}, home: HOME });
-  assert.equal(cfg.buiHome, join(HOME, "bui"));
+  assert.equal(cfg.buiHome, join(HOME, "manta"));
   assert.equal(cfg.authDir, join(HOME, ".manta"));
   assert.equal(cfg.authFile, join(HOME, ".manta", "auth.json"));
   assert.equal(cfg.tarballUrl, null);
@@ -52,7 +52,7 @@ test("resolveConfig treats empty-string env vars as unset (shell footgun)", () =
     env: { MANTA_HOME: "", MANTA_TARBALL_URL: "", MANTA_MOBILE_PORT: "" },
     home: HOME,
   });
-  assert.equal(cfg.buiHome, join(HOME, "bui"));
+  assert.equal(cfg.buiHome, join(HOME, "manta"));
   assert.equal(cfg.tarballUrl, null);
   assert.equal(cfg.port, DEFAULT_PORT);
 });
@@ -98,7 +98,7 @@ test("resolveTarballUrl builds default URL from host + version", () => {
     releaseHost: "https://mantaui.com",
     version: "0.0.1",
   });
-  assert.equal(url, "https://mantaui.com/releases/bui-0.0.1.tar.gz");
+  assert.equal(url, "https://mantaui.com/releases/manta-0.0.1.tar.gz");
 });
 
 test("resolveTarballUrl uses explicit override verbatim", () => {
@@ -116,7 +116,7 @@ test("resolveTarballUrl strips trailing slash on host", () => {
     releaseHost: "https://mirror.example.com/",
     version: "1.2.3-rc.1",
   });
-  assert.equal(url, "https://mirror.example.com/releases/bui-1.2.3-rc.1.tar.gz");
+  assert.equal(url, "https://mirror.example.com/releases/manta-1.2.3-rc.1.tar.gz");
 });
 
 test("resolveTarballUrl rejects a path-traversal version", () => {
@@ -260,7 +260,7 @@ test("formatPairingOutput produces a stable human block", () => {
   assert.match(out, /Pairing code:  847291/);
   assert.match(out, /Box ID:        0123456789abcdef0123456789abcdef/);
   assert.match(out, /Expires:       2026-07-03 12:34:56 UTC/);
-  assert.match(out, /Enter the pairing code in the bui desktop app/);
+  assert.match(out, /Enter the pairing code in the Manta desktop app/);
 });
 
 test("formatPairingOutput prints ingress hint when no serverUrl given", () => {
@@ -298,9 +298,9 @@ test("formatExpiry handles epoch-ms, ISO string, and junk", () => {
 test("renderShellConfig emits eval-able KEY=VALUE lines", () => {
   const cfg = resolveConfig({ env: {}, home: HOME });
   const out = renderShellConfig(cfg, { version: "0.0.1" });
-  assert.match(out, new RegExp(`MANTA_HOME='${join(HOME, "bui")}'`));
+  assert.match(out, new RegExp(`MANTA_HOME='${join(HOME, "manta")}'`));
   assert.match(out, /MANTA_AUTH_FILE='.*\.manta\/auth\.json'/);
-  assert.match(out, /MANTA_TARBALL_URL='.*\/releases\/bui-0\.0\.1\.tar\.gz'/);
+  assert.match(out, /MANTA_TARBALL_URL='.*\/releases\/manta-0\.0\.1\.tar\.gz'/);
   assert.match(out, /MANTA_PORT='8787'/);
   assert.match(out, /MANTA_HEALTH_URL='http:\/\/127\.0\.0\.1:8787\/auth\/status'/);
 });

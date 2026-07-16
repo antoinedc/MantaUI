@@ -3,9 +3,9 @@
 //
 //   node scripts/release/pack.mjs [--out dist] [--skip-build]
 //
-// Produces `dist/bui-<version>.tar.gz` whose contents unpack into a single
-// top-level `bui-<version>/` directory. The installer downloads this, extracts
-// with --strip-components=1 into ~/bui, runs `npm ci --omit=dev`, and starts the
+// Produces `dist/manta-<version>.tar.gz` whose contents unpack into a single
+// top-level `manta-<version>/` directory. The installer downloads this, extracts
+// with --strip-components=1 into ~/manta, runs `npm ci --omit=dev`, and starts the
 // server — NO renderer toolchain needed on the box, because we ship a PRE-BUILT
 // `mobile/www/` here.
 //
@@ -67,8 +67,8 @@ async function main() {
   }
 
   const stageRoot = join(REPO_ROOT, args.outDir, ".stage");
-  const stageDir = join(stageRoot, `bui-${version}`);
-  const outFile = join(REPO_ROOT, args.outDir, `bui-${version}.tar.gz`);
+  const stageDir = join(stageRoot, `manta-${version}`);
+  const outFile = join(REPO_ROOT, args.outDir, `manta-${version}.tar.gz`);
 
   // 1. Build the renderer bundle unless told to skip (CI may pre-build).
   if (!args.skipBuild) {
@@ -107,7 +107,7 @@ async function main() {
   await writeFile(
     join(stageDir, "RELEASE.json"),
     JSON.stringify(
-      { name: "bui", version, built_at: new Date().toISOString(), includes: INCLUDE },
+      { name: "manta", version, built_at: new Date().toISOString(), includes: INCLUDE },
       null,
       2,
     ) + "\n",
@@ -118,7 +118,7 @@ async function main() {
   await mkdir(dirname(outFile), { recursive: true });
   const r = spawnSync(
     "tar",
-    ["-czf", outFile, "-C", stageRoot, `bui-${version}`],
+    ["-czf", outFile, "-C", stageRoot, `manta-${version}`],
     { stdio: "inherit" },
   );
   if (r.status !== 0) die("tar failed");
@@ -127,7 +127,7 @@ async function main() {
   await rm(stageRoot, { recursive: true, force: true });
 
   log(`Done: ${outFile}`);
-  log(`Upload it to <release-host>/releases/bui-${version}.tar.gz`);
+  log(`Upload it to <release-host>/releases/manta-${version}.tar.gz`);
 }
 
 main().catch((e) => die(String(e?.stack ?? e)));
