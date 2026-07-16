@@ -33,7 +33,7 @@ export const HEALTH_PATH = "/auth/status";
 // Default release host. The repo is private; CI publishes a versioned tarball
 // the installer downloads (no git clone on the VPS). `MANTA_TARBALL_URL` overrides
 // the whole URL for local testing; otherwise we build it from host + version.
-export const DEFAULT_RELEASE_HOST = "https://bui.useronda.com";
+export const DEFAULT_RELEASE_HOST = "https://app.mantaui.com";
 
 // Where the box lives once installed. `~/.manta/` (auth.json + config.json)
 // is deliberately OUTSIDE this dir so an upgrade that replaces MANTA_HOME never

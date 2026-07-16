@@ -8,7 +8,7 @@
 // This tool is a THIN registrar. It validates the request and POSTs it to
 // manta-server (127.0.0.1:8787, same box — no SSH hop), which copies the page
 // into a stable directory and serves it via an in-process HTTP server. Caddy
-// reverse-proxies *.bui.antoinedc.com to this server. The tool does NOT sleep
+// reverse-proxies *.pages.mantaui.com to this server. The tool does NOT sleep
 // or run the page itself — execute() must return promptly.
 //
 // See docs/bui-tools-scheduler.md for the general "bui tools" pattern.
@@ -69,11 +69,11 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
 
 export const serve_page = tool({
   description: [
-    "Host a standalone HTML webpage publicly under *.bui.antoinedc.com.",
+    "Host a standalone HTML webpage publicly under *.pages.mantaui.com.",
     "Use when you generate a web page (design preview, demo, mockup, interactive",
     "prototype) and want it accessible from anywhere — especially from the",
     "machine where the bui UI is running. The page is served at",
-    "https://<subdomain>.bui.antoinedc.com and auto-expires after 24h by",
+    "https://<subdomain>.pages.mantaui.com and auto-expires after 24h by",
     "default (configurable via ttlHours). To update a page, call this tool",
     "again with the same subdomain and a new file path.",
   ].join(" "),
@@ -84,7 +84,7 @@ export const serve_page = tool({
         "Subdomain for the page (e.g. 'preview', 'my-design'). " +
           "Must be 1-63 lowercase alphanumeric characters or hyphens, no " +
           "leading/trailing hyphens. The page will be served at " +
-          "https://<subdomain>.bui.antoinedc.com",
+          "https://<subdomain>.pages.mantaui.com",
       ),
     filePath: z
       .string()
@@ -133,7 +133,7 @@ export const stop_page = tool({
       `/api/serve-page?subdomain=${encodeURIComponent(args.subdomain)}`,
     );
     return result.deleted
-      ? `Page ${args.subdomain}.bui.antoinedc.com has been taken down.`
+      ? `Page ${args.subdomain}.pages.mantaui.com has been taken down.`
       : `No page found for subdomain "${args.subdomain}".`;
   },
 });

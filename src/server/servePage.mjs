@@ -4,8 +4,8 @@
 // (docs/opencode-tools/serve-page.ts), which POSTs to bui-server's
 // /api/serve-page. The source file is copied into a stable directory
 // under ~/.manta/pages/<subdomain>/, and an in-process HTTP server
-// on 127.0.0.1:20080 serves it. Caddy reverse-proxies *.bui.antoinedc.com
-// to this port, so the page is accessible at https://<sub>.bui.antoinedc.com.
+// on 127.0.0.1:20080 serves it. Caddy reverse-proxies *.pages.mantaui.com
+// to this port, so the page is accessible at https://<sub>.pages.mantaui.com.
 //
 // Server-owned so pages survive Mac-app-close / session navigation / reboot.
 // Pages expire after a configurable TTL (default 24h). A cleanup sweep
@@ -24,7 +24,7 @@ const PAGES_DIR = join(homedir(), STATE_DIRNAME, "pages");
 const FILE_SERVER_PORT = 20080;
 const FILE_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TTL_HOURS = 24;
-const DOMAIN_SUFFIX = ".bui.antoinedc.com";
+const DOMAIN_SUFFIX = ".pages.mantaui.com";
 
 // Cleanup sweep interval — 5 min. Pages expire at TTL, sweep removes
 // stale entries. 5 min is coarse enough to be cheap, fine enough that
@@ -100,7 +100,7 @@ function resolvePageDir(subdomain) {
 
 // Validate subdomain: 1-63 chars, alphanumeric + hyphen, no leading/trailing
 // hyphen. This prevents injection into the Host header and ensures the
-// subdomain matches the *.bui.antoinedc.com wildcard cert.
+// subdomain matches the *.pages.mantaui.com wildcard cert.
 export function isValidSubdomain(s) {
   return typeof s === "string" && /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(s);
 }
@@ -176,7 +176,7 @@ export async function registerPage(
 
   return {
     ok: true,
-    url: `https://${subdomain}.bui.antoinedc.com`,
+    url: `https://${subdomain}.pages.mantaui.com`,
     subdomain,
     expiresAt,
   };
@@ -206,7 +206,7 @@ export async function unregisterPage(
 export function listPages() {
   return loadPages().map((p) => ({
     subdomain: p.subdomain,
-    url: `https://${p.subdomain}.bui.antoinedc.com`,
+    url: `https://${p.subdomain}.pages.mantaui.com`,
     expiresAt: p.expiresAt,
     createdAt: p.createdAt,
     sessionID: p.sessionID,
@@ -269,7 +269,7 @@ export function startCleanupPoller({ intervalMs = CLEANUP_MS } = {}) {
 export function createFileServer({ host = FILE_SERVER_HOST, port = FILE_SERVER_PORT } = {}) {
   const server = createServer(async (req, res) => {
     // Extract subdomain from Host header.
-    // e.g. "preview.bui.antoinedc.com" → "preview"
+    // e.g. "preview.pages.mantaui.com" → "preview"
     const subdomain = extractSubdomain(req.headers.host ?? "");
     if (!subdomain) {
       res.writeHead(404, { "content-type": "application/json" });

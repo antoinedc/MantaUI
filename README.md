@@ -44,7 +44,7 @@ the onboarding flow:
 
 1. **Pair with your box.** Run the self-install script on your Linux box:
    ```bash
-   curl -fsSL https://bui.useronda.com/install.sh | bash
+   curl -fsSL https://app.mantaui.com/install.sh | bash
    ```
    It installs bui-server, starts it, and prints a 6-digit pairing code.
    Enter the code in the bui onboarding screen (along with your box's URL).
@@ -109,7 +109,7 @@ pairing flow. On a fresh Linux VPS, one command installs and starts it and
 prints a 6-digit pairing code to enter in the desktop app:
 
 ```bash
-curl -fsSL https://bui.useronda.com/install.sh | bash
+curl -fsSL https://app.mantaui.com/install.sh | bash
 ```
 
 The installer downloads a pre-built release tarball (no dev toolchain needed on
@@ -124,7 +124,7 @@ Overrides (env):
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `MANTA_TARBALL_URL` | (built from host+version) | full tarball URL — local testing / mirror |
-| `MANTA_RELEASE_HOST` | `https://bui.useronda.com` | host for the default tarball URL |
+| `MANTA_RELEASE_HOST` | `https://app.mantaui.com` | host for the default tarball URL |
 | `MANTA_HOME` | `~/bui` | where the code is unpacked |
 | `MANTA_MOBILE_PORT` | `8787` | server port |
 

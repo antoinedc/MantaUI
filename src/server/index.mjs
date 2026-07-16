@@ -145,7 +145,7 @@ if (!authEnforced) {
 
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
 // serves HTML pages from ~/.manta/pages/<subdomain>/index.html. Caddy
-// reverse-proxies *.bui.antoinedc.com to this port. Pages are registered by
+// reverse-proxies *.pages.mantaui.com to this port. Pages are registered by
 // the remote AI's global opencode `serve_page` tool → POST /api/serve-page.
 // See src/server/servePage.mjs + docs/.
 // eslint-disable-next-line no-unused-vars
@@ -830,7 +830,7 @@ const server = createServer(async (req, res) => {
   // Created by the remote AI's global opencode `serve_page` tool. Source files
   // are copied into ~/.manta/pages/<subdomain>/index.html and served by the
   // in-process file server on 127.0.0.1:20080. Caddy reverse-proxies
-  // *.bui.antoinedc.com to that port. Pages expire after TTL (default 24h).
+  // *.pages.mantaui.com to that port. Pages expire after TTL (default 24h).
   if (path === "/api/serve-page") {
     try {
       if (req.method === "POST") {

@@ -3,7 +3,7 @@
 # Mirrors manta-server.service, but runs the COMBINED relay entrypoint
 # (`node src/relay/server.mjs`): one process serving BOTH the box-facing
 # WebSocket dial-out leg and the phone-facing HTTP API (+ IAP/push routes) on a
-# single loopback port. The `bui.dev.antoinedc.com` Caddy vhost reverse-proxies
+# single loopback port. The `relay.mantaui.com` Caddy vhost reverse-proxies
 # 127.0.0.1:20787 to this process, so a live relay resolves at that host.
 #
 # INSTALL (a human on-box step — same pattern as manta-server.service; substitute
@@ -13,7 +13,7 @@
 #   loginctl enable-linger "$USER"    # start at boot without an active login
 #
 # Bind is 127.0.0.1 on purpose: the relay is NOT exposed directly. Caddy fronts
-# it and terminates TLS at bui.dev.antoinedc.com. RELAY_PORT/RELAY_HOST override
+# it and terminates TLS at relay.mantaui.com. RELAY_PORT/RELAY_HOST override
 # the bind; RELAY_STORE_PATH overrides the shared SQLite store location.
 
 [Unit]

@@ -31,13 +31,13 @@ the bui UI (the ⏰ schedules card), so keep labels short and descriptive.
 You have `serve_page`, `stop_page`, and `list_pages` tools to host standalone
 HTML pages publicly. When you generate a web page (design preview, demo,
 mockup), call `serve_page(subdomain, filePath)` to get a public URL under
-*.bui.antoinedc.com. The page auto-expires after 24h (configurable via
+*.pages.mantaui.com. The page auto-expires after 24h (configurable via
 `ttlHours`, or `0` for no expiry). To update a page, call `serve_page` again
 with the same subdomain and a new file. Call `stop_page(subdomain)` to take
 it down early. `list_pages` shows all active pages.
 
-- `serve_page(subdomain, filePath, ttlHours?)` -> "Page served at https://<sub>.bui.antoinedc.com"
-- `stop_page(subdomain)` -> "Page <sub>.bui.antoinedc.com has been taken down."
+- `serve_page(subdomain, filePath, ttlHours?)` -> "Page served at https://<sub>.pages.mantaui.com"
+- `stop_page(subdomain)` -> "Page <sub>.pages.mantaui.com has been taken down."
 - `list_pages` -> bullet list of active pages with URLs and expiry times
 
 ## bui peer-session awareness
@@ -141,7 +141,7 @@ session when the task finishes instead of checking every 5 minutes", "wake me
 here when CI goes green", "let GitHub notify this chat on a new issue".
 
 - `webhook_create(label, instructions?, unsigned?)` -> returns a public delivery
-  URL (`https://bui.useronda.com/hook/<token>`) and an HMAC signing secret
+  URL (`https://app.mantaui.com/hook/<token>`) and an HMAC signing secret
   (shown ONCE). Give both to the user or configure the external system to POST
   its event JSON to that URL with header
   `X-Bui-Signature: sha256=HMAC_SHA256(secret, rawBody)`. `instructions` is a
