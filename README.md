@@ -161,6 +161,17 @@ Systemd: copy `scripts/systemd/manta-server.service`, substitute the
 
 ## Desktop development
 
+Pre-built installers (from the latest release):
+
+- macOS (arm64 + x64, unsigned): <https://mantaui.com/downloads/Manta-latest.dmg>
+- Linux (x64 AppImage): <https://mantaui.com/downloads/Manta-latest.AppImage>
+
+The macOS build is unsigned — first launch will be blocked by Gatekeeper.
+Right-click the `.dmg` in Finder → **Open** to bypass (or
+`xattr -d com.apple.quarantine /Applications/Manta\ UI.app` after install).
+
+Run from source:
+
 ```bash
 npm install
 npm run typecheck
@@ -202,10 +213,21 @@ session by POST). Install/update = copy to `~/.config/opencode/tools/`
 2. `npm run pack` → `dist/manta-<version>.tar.gz`; upload to the release
    host: `/var/www/mantaui/releases/manta-<version>.tar.gz` (+ copy to
    `manta-latest.tar.gz`).
-3. Desktop: `npm run pack:desktop` → `.dmg` / `.AppImage` in `dist/desktop/`
-   (signing via `CSC_LINK`/`CSC_KEY_PASSWORD` env; unsigned in beta).
+3. Desktop: `bash scripts/release/desktop.sh` → `.dmg` / `.AppImage` in
+   `dist/desktop/` (signing via `CSC_LINK`/`CSC_KEY_PASSWORD` env; unsigned
+   in beta). The script prints the exact `scp` commands to publish to the
+   prod box — `/var/www/mantaui/updates/` (electron-updater "generic"
+   feed) and `/var/www/mantaui/downloads/` (human-facing binaries,
+   including the `Manta-latest.{dmg,AppImage}` copies the website links
+   to). Auto-update is wired via `electron-builder.yml` → `publish:
+   { provider: generic, url: https://mantaui.com/updates }`;
+   electron-updater reads the URL from `app-update.yml` baked at build
+   time, no code override needed.
 4. Sync `scripts/install.sh` to the site root if it changed.
-5. Verify: `curl -sI https://mantaui.com/install.sh` and the tarball URL.
+5. Verify: `curl -sI https://mantaui.com/install.sh` and the tarball URL,
+   plus `curl -sI https://mantaui.com/downloads/Manta-latest.dmg` and
+   `curl -s https://mantaui.com/updates/latest-mac.yml` (version must
+   match `package.json`).
 
 ## Production infra (ours)
 

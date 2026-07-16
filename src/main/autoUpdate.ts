@@ -6,7 +6,10 @@
 //   3. Notify the renderer when an update is ready to install (via IPC)
 //   4. Restart the app after the user confirms installation
 //
-// Update server: GitHub Releases (configured in electron-builder.yml).
+// Update server: `https://mantaui.com/updates/` (electron-updater "generic"
+// provider, configured in electron-builder.yml → `publish.url`). electron-
+// updater reads the feed URL from `app-update.yml` baked at build time —
+// no override here on purpose.
 // In production, this is seamless. In dev (unpacked app), checks are skipped
 // because there's no signed artifact to verify against.
 

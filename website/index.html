@@ -243,7 +243,11 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
         <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mantaui.com/install.sh | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
       </div>
     </div>
-    <div class="meta">Free &amp; <a href="https://github.com/antoinedc/MantaUI">open source</a> · runs on hardware you already own</div>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://mantaui.com/downloads/Manta-latest.dmg">Download for macOS</a>
+      <a class="btn btn-ghost" href="https://mantaui.com/downloads/Manta-latest.AppImage">Download for Linux</a>
+    </div>
+    <div class="meta">macOS build is unsigned — first launch: right-click the .dmg → Open. Free &amp; <a href="https://github.com/antoinedc/MantaUI">open source</a>.</div>
 
     <div class="shot">
       <div class="shot-bar">
@@ -396,6 +400,10 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
         <code><span class="prompt">$</span> curl -fsSL <span class="url">https://mantaui.com/install.sh</span> | bash</code>
         <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mantaui.com/install.sh | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
       </div>
+    </div>
+    <div class="cta" style="margin-top:20px">
+      <a class="btn btn-primary" href="https://mantaui.com/downloads/Manta-latest.dmg">Download for macOS</a>
+      <a class="btn btn-ghost" href="https://mantaui.com/downloads/Manta-latest.AppImage">Download for Linux</a>
     </div>
   </div>
 </section>
