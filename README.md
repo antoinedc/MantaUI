@@ -128,7 +128,7 @@ Overrides (env):
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `MANTA_TARBALL_URL` | (built from host+version) | full tarball URL — local testing / mirror |
-| `MANTA_RELEASE_HOST` | `https://app.mantaui.com` | host for the default tarball URL |
+| `MANTA_RELEASE_HOST` | `https://mantaui.com` | host for the default tarball URL |
 | `MANTA_HOME` | `~/bui` | where the code is unpacked |
 | `MANTA_MOBILE_PORT` | `8787` | server port |
 

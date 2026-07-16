@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install.sh — one-command VPS self-install for the bui box server.
 #
-#   curl -fsSL https://app.mantaui.com/install.sh | bash
+#   curl -fsSL https://mantaui.com/install.sh | bash
 #
 # Gets manta-server running under systemd --user on a fresh Linux box and prints a
 # 6-digit pairing code to enter in the desktop app. Idempotent: re-running
@@ -11,7 +11,7 @@
 #
 # Overrides (env):
 #   MANTA_TARBALL_URL   full URL of the release tarball (skips host+version build)
-#   MANTA_RELEASE_HOST  host for the default tarball URL (default app.mantaui.com)
+#   MANTA_RELEASE_HOST  host for the default tarball URL (default mantaui.com)
 #   MANTA_HOME          where code is unpacked (default ~/bui)
 #   MANTA_MOBILE_PORT   server port (default 8787)
 #   MANTA_VERSION       version to fetch when MANTA_TARBALL_URL is unset (default: latest)
@@ -72,7 +72,7 @@ MANTA_VERSION="${MANTA_VERSION:-latest}"
 if [ -n "${MANTA_TARBALL_URL:-}" ]; then
   TARBALL_URL="$MANTA_TARBALL_URL"
 else
-  host="${MANTA_RELEASE_HOST:-https://app.mantaui.com}"
+  host="${MANTA_RELEASE_HOST:-https://mantaui.com}"
   host="${host%/}"
   TARBALL_URL="${host}/releases/bui-${MANTA_VERSION}.tar.gz"
 fi
