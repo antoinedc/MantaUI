@@ -46,7 +46,7 @@ Therefore, before any PASS:
 
 1. **Read the issue body and the comment chain** to extract:
    - The original requirement / acceptance criteria.
-   - The PR number (parse from the most recent `agent:better-ui-dev` comment; look for `https://github.com/antoinedc/better-ui/pull/<N>`).
+   - The PR number (parse from the most recent `agent:better-ui-dev` comment; look for `https://github.com/antoinedc/MantaUI/pull/<N>`).
    - The implementer agent name (`better-ui-dev`).
 
 2. **Iteration cap.** Count your own prior comments on this issue. If the count is `>= 3`, **escalate immediately** — do not run another review. Post a Multica comment: *"ESCALATED after 3 review cycles — structural disagreement the loop can't resolve. Latest PR: <url>. Prior review notes are in this thread."* Reassign the issue to `bui-pm` (status `in_review`) — the PM decides whether to force a resolution, re-scope, or escalate to the human with a diagnosis. Then stop.
@@ -54,7 +54,7 @@ Therefore, before any PASS:
 3. **Check out the repo** for the mechanical pre-flight step:
 
    ```bash
-   multica repo checkout git@github.com:antoinedc/better-ui.git
+   multica repo checkout git@github.com:antoinedc/MantaUI.git
    gh pr checkout <N>
    ```
 

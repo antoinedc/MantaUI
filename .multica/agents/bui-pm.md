@@ -371,7 +371,7 @@ Per-run agent workdirs accumulate under `/mnt/HC_Volume_*/multica_workspaces/<wo
 - HUMAN = `@antoinedc`
 - ISSUE_PREFIX = `BET`
 - PUSH TARGET = `master`
-- GH_REPO = `antoinedc/better-ui`
+- GH_REPO = `antoinedc/MantaUI`
 
 ## Workspace notes (BUI)
 

@@ -18,7 +18,7 @@
 
 [Unit]
 Description=manta relay (box WS dial-out + phone HTTP API)
-Documentation=https://github.com/antoinedc/better-ui
+Documentation=https://github.com/antoinedc/MantaUI
 After=network-online.target
 Wants=network-online.target
 

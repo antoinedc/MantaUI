@@ -9,7 +9,7 @@ The standard implementer workflow for the BUI agents.
 
 ## Steps
 
-1. `multica repo checkout git@github.com:antoinedc/better-ui.git` inside
+1. `multica repo checkout git@github.com:antoinedc/MantaUI.git` inside
    your workdir. Never edit files outside the workdir. (A human-owned
    checkout at `/home/dev/projects/better-ui` bypasses isolation.)
 

@@ -16,7 +16,7 @@
 
 [Unit]
 Description=manta box server (mobile/web + relay proxy)
-Documentation=https://github.com/antoinedc/better-ui
+Documentation=https://github.com/antoinedc/MantaUI
 After=network-online.target
 Wants=network-online.target
 

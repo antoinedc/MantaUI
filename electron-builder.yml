@@ -70,7 +70,7 @@ nsis:
 publish:
   provider: github
   owner: antoinedc
-  repo: better-ui
+  repo: MantaUI
 
 # Build only macOS + Linux (no Windows target for v1)
 only:

@@ -115,7 +115,7 @@ hard-refresh the browser). Desktop is unaffected by this — only the
 mobile/web client serves from `mobile/www/`.
 
 Git-synced (since 2026-05-16). Single source of truth:
-`git@github.com:antoinedc/better-ui.git` (private). Both the remote dev box
+`git@github.com:antoinedc/MantaUI.git` (private). Both the remote dev box
 (`dev@157.90.224.92:/home/dev/projects/better-ui`) and the Mac are clones
 tracking `origin/main`. **No more rsync** — push from whichever side you
 worked on, `git pull` on the other before starting. Commit as you go;
