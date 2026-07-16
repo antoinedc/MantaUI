@@ -38,13 +38,23 @@ in-tree but descoped from this beta — ignore it.
 
 ## Run
 
+Pre-built installers (from the latest release):
+
+- macOS (arm64 + x64, unsigned): <https://mantaui.com/downloads/Manta-latest.dmg>
+- Linux (x64 AppImage): <https://mantaui.com/downloads/Manta-latest.AppImage>
+
+The macOS build is unsigned — first launch will be blocked by Gatekeeper.
+Right-click the `.dmg` in Finder → **Open** to bypass (or `xattr -d com.apple.quarantine
+/Applications/Manta\ UI.app` after install).
+
+Run from source:
+
 ```bash
 npm install
 npm run dev
 ```
 
-No packaged binary yet — a tester runs from source. First launch opens
-the onboarding flow:
+First launch opens the onboarding flow:
 
 1. **Pair with your box.** Run the self-install script on your Linux box:
    ```bash
@@ -176,13 +186,20 @@ Upload it to `<release-host>/releases/manta-<version>.tar.gz`.
 To build a packaged `.dmg` (macOS) or `.AppImage` (Linux):
 
 ```bash
-npm run pack:desktop
+bash scripts/release/desktop.sh
 ```
 
-This runs `electron-vite build` to bundle the app, then `electron-builder` to
-produce the platform-specific artifact in `dist/desktop/`. Auto-update is
-configured to use GitHub Releases — after a build, `electron-builder` uploads
-the artifact and generates a `latest.yml` for `electron-updater` to consume.
+This runs `electron-vite build` to bundle the app, then `electron-builder
+--mac --linux --publish never` to produce the platform-specific artifacts in
+`dist/desktop/`. The script prints the exact `scp` commands the owner runs to
+publish to the prod box — see the script header for the path layout
+(`/var/www/mantaui/updates/` is the electron-updater feed,
+`/var/www/mantaui/downloads/` is the human-facing binaries).
+
+Auto-update is configured to use the **prod box apex** as the update server
+(`electron-builder.yml` → `publish: { provider: generic, url:
+https://mantaui.com/updates }`). `electron-updater` reads the feed URL from
+`app-update.yml` baked at build time — no code override needed.
 
 Signing identities (macOS code signing + notarization) are read from
 environment variables (`CSC_LINK`, `CSC_KEY_PASSWORD`) and are NOT committed

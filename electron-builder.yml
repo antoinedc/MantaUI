@@ -5,7 +5,10 @@
 #   - Linux: .AppImage
 #
 # Auto-update: configured via electron-updater in src/main/autoUpdate.ts.
-# Update server: GitHub Releases (default for OSS projects).
+# Update server: the prod box apex — `https://mantaui.com/updates/` (electron-
+# updater "generic" provider). Upload the whole `dist/desktop/` output
+# (binaries + latest-{mac,linux}.yml) to that path and electron-updater does
+# the rest.
 #
 # Signing identities are read from environment variables:
 #   - CSC_LINK: path to .p12 certificate file (macOS code signing)
@@ -64,15 +67,18 @@ nsis:
   allowToChangeInstallationDirectory: true
 
 # Auto-update configuration (electron-updater)
-# Uses GitHub Releases as the update server. The `publish` field tells
-# electron-builder to upload artifacts + generate a `latest.yml` after build.
-# For self-hosted S3/CloudFront later, swap `provider: github` for `provider: s3`.
+# Uses the prod box apex as the update server. The `publish` field tells
+# electron-builder to (a) generate `latest-mac.yml` / `latest-linux.yml`
+# next to the artifacts and (b) upload when `--publish always` is set.
+# scripts/release/desktop.sh builds with `--publish never` (so the yml is
+# emitted but NOT uploaded); the owner scp's the whole `dist/desktop/`
+# directory to `<prod>:/var/www/mantaui/updates/` (see the script's printed
+# checklist).
 publish:
-  provider: github
-  owner: antoinedc
-  repo: MantaUI
+  provider: generic
+  url: https://mantaui.com/updates
 
-# Build only macOS + Linux (no Windows target for v1)
-only:
-  - mac
-  - linux
+# (Target selection is on the CLI — `scripts/release/desktop.sh` passes
+# `--mac --linux` so we never build the `win:` target above. There used to
+# be an `only:` block here, but `only` is a CLI-only flag in electron-builder
+# 25.x and the config schema rejects it.)
