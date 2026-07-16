@@ -24,15 +24,16 @@
 // See docs/bui-tools-webhook.md for the full design + scope cuts.
 //
 // Server-owned + durable (survives Mac-app-close / reboot), same pattern as
-// schedule.mjs / secrets.mjs. Store: ~/.bui-mobile/webhooks.json (0600).
+// schedule.mjs / secrets.mjs. Store: ~/.manta/webhooks.json (0600).
 
 import { readFile, writeFile, rename, mkdir, chmod } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { STATE_DIRNAME } from "../shared/paths.mjs";
 
-const STORE_PATH = join(homedir(), ".bui-mobile", "webhooks.json");
+const STORE_PATH = join(homedir(), STATE_DIRNAME, "webhooks.json");
 
 // Rate limit: 30 deliveries/min per token (token bucket, capacity 30, refill
 // 0.5/sec). A chatty/hostile source can burst 30 then is throttled to 1 per 2s.
@@ -142,7 +143,7 @@ export function toMeta(hook) {
 
 // Build the public delivery URL for a token. The base is configurable so a
 // future custom domain doesn't require a code change.
-export function deliveryUrl(token, base = process.env.BUI_PUBLIC_URL || "https://bui.useronda.com") {
+export function deliveryUrl(token, base = process.env.MANTA_PUBLIC_URL || "https://bui.useronda.com") {
   return `${base.replace(/\/+$/, "")}/hook/${token}`;
 }
 

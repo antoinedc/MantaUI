@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { listOutbox, createOutboxScanner } from "./outbox.mjs";
 
 async function makeOutbox() {
-  return mkdtemp(join(tmpdir(), "bui-outbox-test-"));
+  return mkdtemp(join(tmpdir(), "manta-outbox-test-"));
 }
 
 // ----------------------------------------------------------------------------

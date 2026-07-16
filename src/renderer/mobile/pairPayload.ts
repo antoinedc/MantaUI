@@ -9,9 +9,9 @@
 // round-trip oracle in tests (and later by the desktop QR panel in M6).
 //
 //   1. Custom scheme (primary — what the desktop panel renders):
-//        bui://pair?server=<url>&code=<6-digit>
+//        manta://pair?server=<url>&code=<6-digit>
 //      M6-spec alias, also accepted:
-//        bui://pair?id=<serverUrl-or-boxId>&token=<code>
+//        manta://pair?id=<serverUrl-or-boxId>&token=<code>
 //   2. Deferred-deeplink https form (Branch/Firebase style):
 //        https://<host>/m/<payload>?server=<url>&code=<6-digit>
 //
@@ -48,7 +48,7 @@ function coerceServerUrl(raw: string): string | null {
  * not exactly 6 digits, or an unparseable URL. Whitespace is trimmed.
  *
  * Accepts either query spelling — `server`/`code` (primary) or the M6 alias
- * `id`/`token` — and both URL shapes (custom `bui://pair` scheme and the
+ * `id`/`token` — and both URL shapes (custom `manta://pair` scheme and the
  * `https://host/m/...` deferred-deeplink form).
  */
 export function parsePairPayload(raw: string): PairPayload | null {
@@ -63,14 +63,14 @@ export function parsePairPayload(raw: string): PairPayload | null {
   }
 
   // Only two families are pairing payloads:
-  //   • bui://pair?...          (custom scheme; host is "pair")
+  //   • manta://pair?...          (custom scheme; host is "pair")
   //   • https://<host>/m/...    (deferred deeplink; path starts with /m/ or /m)
-  const isBuiScheme = url.protocol === "bui:";
+  const isMantaScheme = url.protocol === "manta:";
   const isHttps = url.protocol === "https:" || url.protocol === "http:";
   const isDeferredPath = /^\/m(\/|$)/.test(url.pathname);
 
-  if (isBuiScheme) {
-    // bui://pair — the host segment must be "pair" (URL puts it in .hostname).
+  if (isMantaScheme) {
+    // manta://pair — the host segment must be "pair" (URL puts it in .hostname).
     if (url.hostname !== "pair") return null;
   } else if (isHttps) {
     if (!isDeferredPath) return null;
@@ -98,12 +98,12 @@ export function parsePairPayload(raw: string): PairPayload | null {
 
 /**
  * Inverse of parsePairPayload: produce the canonical custom-scheme string
- *   bui://pair?server=<url-encoded>&code=<code>
+ *   manta://pair?server=<url-encoded>&code=<code>
  * Used as a round-trip oracle in tests and later by the desktop QR panel (M6).
  * The server URL is URL-encoded so reserved characters survive the query.
  */
 export function buildPairPayload(p: PairPayload): string {
   const serverUrl = normalizeServerUrl(p.serverUrl);
   const code = normalizeCode(p.code);
-  return `bui://pair?server=${encodeURIComponent(serverUrl)}&code=${code}`;
+  return `manta://pair?server=${encodeURIComponent(serverUrl)}&code=${code}`;
 }

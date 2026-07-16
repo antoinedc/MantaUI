@@ -101,7 +101,7 @@ describe("ChatPanel render harness", () => {
 // ===== useSessionResources integration (via the mounted ChatPanel) =====
 //
 // Verifies the extracted schedules/secrets/webhooks hook is wired correctly:
-// it fetches on mount and the mobile `bui-open-*` window bridges open the
+// it fetches on mount and the mobile `manta-open-*` window bridges open the
 // matching card. These are the integration tests deferred from BET-47 — they
 // exercise a full component interaction (event → hook state → card render),
 // not a pure function.
@@ -127,7 +127,7 @@ describe("ChatPanel session resources", () => {
     expect(api.calls.scheduleList[0]).toEqual(["ses_test"]);
   });
 
-  it("opens the schedules card via the bui-open-schedules bridge", async () => {
+  it("opens the schedules card via the manta-open-schedules bridge", async () => {
     ({ api } = installMockApi({
       scheduleList: () => Promise.resolve([]),
     }));
@@ -138,7 +138,7 @@ describe("ChatPanel session resources", () => {
 
     await act(async () => {
       window.dispatchEvent(
-        new CustomEvent("bui-open-schedules", { detail: { sessionId: "ses_test" } }),
+        new CustomEvent("manta-open-schedules", { detail: { sessionId: "ses_test" } }),
       );
     });
     await h.flush();
@@ -146,14 +146,14 @@ describe("ChatPanel session resources", () => {
     expect(h.text()).toContain("No scheduled tasks in this session.");
   });
 
-  it("ignores a bui-open-schedules bridge for another session id", async () => {
+  it("ignores a manta-open-schedules bridge for another session id", async () => {
     ({ api } = installMockApi({ scheduleList: () => Promise.resolve([]) }));
     resetStore();
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
     await act(async () => {
       window.dispatchEvent(
-        new CustomEvent("bui-open-schedules", { detail: { sessionId: "ses_OTHER" } }),
+        new CustomEvent("manta-open-schedules", { detail: { sessionId: "ses_OTHER" } }),
       );
     });
     await h.flush();
@@ -161,14 +161,14 @@ describe("ChatPanel session resources", () => {
     expect(h.text()).not.toContain("No scheduled tasks in this session.");
   });
 
-  it("opens the secrets card via the bui-open-secrets bridge", async () => {
+  it("opens the secrets card via the manta-open-secrets bridge", async () => {
     ({ api } = installMockApi({ secretsList: () => Promise.resolve([]) }));
     resetStore();
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
     await act(async () => {
       window.dispatchEvent(
-        new CustomEvent("bui-open-secrets", { detail: { sessionId: "ses_test" } }),
+        new CustomEvent("manta-open-secrets", { detail: { sessionId: "ses_test" } }),
       );
     });
     await h.flush();

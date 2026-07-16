@@ -84,7 +84,7 @@ npm test              # vitest (renderer) + node:test (src/server/*.test.mjs)
 npm run test:server   # node:test only (src/server/)
 npm run test:watch    # vitest watch mode (renderer only)
 npm run dev           # main-process AND preload changes need a full Ctrl+C + restart
-npm run mobile        # mobile/web server on $BUI_MOBILE_HOST:$BUI_MOBILE_PORT (default 0.0.0.0:8787)
+npm run mobile        # mobile/web server on $MANTA_MOBILE_HOST:$MANTA_MOBILE_PORT (default 0.0.0.0:8787)
 npm run build:mobile  # Vite build of renderer → mobile/www/ for Capacitor
 ```
 
@@ -146,7 +146,7 @@ The server IS the box, so every operation is a direct `POST`/`GET` to
 
 **Drag in (upload).** Drop a file on the active terminal → `POST
 <serverUrl>/api/upload?session=<name>` streams the bytes straight to
-`~/.bui-uploads/<session>/<batch>/<file>` on the box. `webUtils.getPathForFile(file)`
+`~/.manta-uploads/<session>/<batch>/<file>` on the box. `webUtils.getPathForFile(file)`
 in the preload extracts the local path (Electron 31+ removed `File.path`, so the
 renderer can't read it directly). A window-level dragover/drop swallow in
 `App.tsx` keeps missed drops from navigating the renderer to `file://`. The
@@ -161,14 +161,14 @@ back → `__buiPreload.writeTempAndOpen` writes to a Mac tmpfile and
 `window.open` path gets denied by `setWindowOpenHandler` in `main/index.ts`, so
 URLs silently no-op.
 
-**Hourly cleanup** of `~/.bui-uploads/`: `find -mindepth 2 -maxdepth 2 -type d
+**Hourly cleanup** of `~/.manta-uploads/`: `find -mindepth 2 -maxdepth 2 -type d
 -mmin +N -exec rm -rf {} +` deletes per-batch `<ts>` directories, then prunes
 empty session dirs. Threshold is `uploadCleanupHours` in config (default 1,
 `0` disables). Sweep runs once at app load + every hour after; worst-case
 staleness ≈ `uploadCleanupHours + 1h`.
 
 **Agent → laptop push (outbox / download).** The reverse of drag-in: the remote
-AI drops a file into `~/.bui-outbox/` (optionally `~/.bui-outbox/<session>/`)
+AI drops a file into `~/.manta-outbox/` (optionally `~/.manta-outbox/<session>/`)
 and bui pulls it to the Mac's Downloads folder via `GET
 <serverUrl>/api/download?path=<relative>&session=<name>`. Detection is a 3s
 **outbox poller** in `src/main/index.ts` (`pollOutboxOnce` → `GET
@@ -196,16 +196,16 @@ re-offered every 3s.
   (`docs/opencode-commands/send-file.md`). Install on the remote opencode host:
   `ln -sf <repo>/docs/opencode-commands/send-file.md
   ~/.config/opencode/commands/send-file.md` then restart `opencode-serve`. The
-  command just tells the AI to `cp <file> ~/.bui-outbox/` — no MCP server, works
+  command just tells the AI to `cp <file> ~/.manta-outbox/` — no MCP server, works
   with any model.
 - **Mobile** has no Mac Downloads folder (the server IS the box). A server-side
   outbox poller (`src/server/outbox.mjs`, `startOutboxPoller` wired in
-  `index.mjs`) `readdir`s `~/.bui-outbox/` locally every 3s and publishes
+  `index.mjs`) `readdir`s `~/.manta-outbox/` locally every 3s and publishes
   `{kind:"agentFile"}` bus events; the httpApi shim's `onAgentFileReady`
   subscribes to that kind. Every detection is a CONFIRM toast (`autoPulled:false`)
   — there's no silent disk write to a phone/browser. Tapping Save calls
   `agentPullFile`, which triggers a browser download via `GET /api/download`
-  (`src/server/index.mjs`, path-traversal-guarded to `~/.bui-outbox/`, deletes
+  (`src/server/index.mjs`, path-traversal-guarded to `~/.manta-outbox/`, deletes
   the source on success — the one-shot mailbox). The mobile `agentPullFile`
   returns `""` (no OS path to reveal) so the toast dismisses instead of showing
   a dead "Reveal" button; `revealInFolder` is a no-op. `MobileApp.tsx` wires the
@@ -230,7 +230,7 @@ from a phone or browser with nothing installed on the device.
 - `rpc.mjs` — `POST /rpc/<channel>` dispatch; `buildHandlers({tmux,oc,pty,bus,local})`
   maps all `window.api` channels
 - `local.mjs` — git worktrees, fs listing, JSON-file-backed config
-  (`~/.bui-mobile/config.json`). Desktop-only concepts (Mac clipboard, mosh,
+  (`~/.manta/config.json`). Desktop-only concepts (Mac clipboard, mosh,
   scp peek) are documented no-ops
 - `status.mjs` — ports `src/main/status.ts` activity poller; same BUSY_RE /
   subagent regexes, runs locally, publishes `WindowStatus[]` batches on bus
@@ -238,24 +238,24 @@ from a phone or browser with nothing installed on the device.
 **`window.api` shim** (`src/renderer/api/httpApi.ts`): implements the full
 `Api` contract over `/rpc` + `/events`. Installed in `main.tsx` only when
 `window.api` is absent (Electron preload not loaded). Server base read from
-`localStorage["bui_server"]`.
+`localStorage["manta_server"]`.
 
 **Trust mode (chatAutoAllow)**: the opencode pump in `index.mjs` reads
 `configGet()` per `permission.asked` event and auto-replies "always" when
 enabled — mirrors `src/main/index.ts` opencodeBusLoop. Config file is
-`~/.bui-mobile/config.json`; atomic writes (temp-rename pattern).
+`~/.manta/config.json`; atomic writes (temp-rename pattern).
 
 **Auth (M1, live since 2026-07-02).** bui-server enforces
 `Authorization: Bearer <box_token>` on EVERY data route (`/rpc`, `/events`,
 `/pty`, `/api/*`, `/push/*`) — `src/server/auth.mjs`, gate wired in
 `index.mjs`. Only `/auth/pair` (loopback-only mint), `/auth/claim`, and
-`/hook/<token>` are exempt. Token store: `~/.bui-mobile/auth.json` (0600).
+`/hook/<token>` are exempt. Token store: `~/.manta/auth.json` (0600).
 Devices pair via a 6-digit one-time code (`curl -s
 http://127.0.0.1:8787/auth/pair` ON the box, then enter the code in the
 device's pairing screen); rollout runbook in `docs/auth-enforcement-rollout.md`.
-Escape hatch: `BUI_AUTH_DISABLED=1` (temporary only). **GOTCHA — the
+Escape hatch: `MANTA_AUTH_DISABLED=1` (temporary only). **GOTCHA — the
 bui-native opencode tools (`docs/opencode-tools/*.ts`) must send this Bearer
-header too**: each tool's `boxToken()` reads `~/.bui-mobile/auth.json` directly
+header too**: each tool's `boxToken()` reads `~/.manta/auth.json` directly
 (same box, same user) per call. When the gate first shipped the tools had no
 auth plumbing and EVERY tool call failed "unauthorized" — if you add a new bui
 tool, copy the `boxToken()`/`authHeaders()` helpers, or it will 401.
@@ -264,8 +264,8 @@ also accept `?token=`. Default bind `127.0.0.1:8787`. Internet access is a
 **named Cloudflare tunnel on QUIC**, run by **systemd --user** on the box
 (`dev@157.90.224.92`), surviving reboots via `loginctl enable-linger dev`:
 
-- `~/.config/systemd/user/bui-server.service` → `node src/server/index.mjs`
-  (`BUI_MOBILE_HOST=127.0.0.1`, port 8787).
+- `~/.config/systemd/user/manta-server.service` → `node src/server/index.mjs`
+  (`MANTA_MOBILE_HOST=127.0.0.1`, port 8787).
 - `~/.config/systemd/user/bui-tunnel.service` (`Requires=bui-server`) →
   `cloudflared tunnel --config ~/.cloudflared/config.yml run bui`.
 - Permanent URL: **https://bui.useronda.com** (named tunnel
@@ -286,7 +286,7 @@ Client→server: `{type:"data",data}` or `{type:"resize",cols,rows}`.
 Server→client: raw PTY bytes.
 
 **Upload endpoint** (`POST /api/upload?session=NAME`): unchanged layout
-(`~/.bui-uploads/<session>/<batch>/<file>`).
+(`~/.manta-uploads/<session>/<batch>/<file>`).
 
 **Capacitor wrapper** (`mobile/`): Android APK + iOS scaffold. `npm run apk`
 in `mobile/` builds the debug APK. `mobile/sync-web.sh` runs `build:mobile`
@@ -460,7 +460,7 @@ the reusable "bui tools" pattern (for future tools like `ping`) is in
 - **The tool is a thin registrar** — it `fetch`es bui-server
   (`127.0.0.1:8787/api/schedule`, same box, no SSH hop) and returns immediately.
   `execute` must NOT sleep; the durable store + firing loop live server-side.
-- **Server-owned + durable.** Jobs in `~/.bui-mobile/schedule.json` (atomic
+- **Server-owned + durable.** Jobs in `~/.manta/schedule.json` (atomic
   writes). `startSchedulePoller` ticks every 30s (`createScheduler`, outbox-
   poller shape: inFlight guard + `timer.unref()`), fires due jobs via
   `oc.sendPrompt({sessionId, text})` — the scheduled turn streams into the
@@ -477,8 +477,8 @@ the reusable "bui tools" pattern (for future tools like `ping`) is in
   renders on desktop AND mobile with no mobile-CSS edits). Opened by the
   `⏰ schedules` button in `SessionToolbar` (desktop) or the `Scheduled tasks`
   item in the mobile `⋯` sheet (`SessionScreen.tsx`), which dispatches a
-  `bui-open-schedules` window CustomEvent (the sheet is outside ChatPanel —
-  mirrors the `bui-scroll-to-question` bridge). **Freshness is refetch-driven**
+  `manta-open-schedules` window CustomEvent (the sheet is outside ChatPanel —
+  mirrors the `manta-scroll-to-question` bridge). **Freshness is refetch-driven**
   (open + 10s open-poll), NOT a bus event: desktop's renderer isn't wired to the
   server's in-process bus, so a `schedule.updated` event would only reach
   mobile. bui-server still publishes `schedule.updated` (cheap) for a future
@@ -512,9 +512,9 @@ generates on the box. Follows the same "bui tools" pattern as the scheduler
 - **Thin registrar** — `fetch`es bui-server `127.0.0.1:8787/api/serve-page`
   (same box, no SSH hop), returns the public URL immediately. No long-running
   work in `execute`.
-- **Server-owned + durable.** Registry in `~/.bui-mobile/serve-page.json`
+- **Server-owned + durable.** Registry in `~/.manta/serve-page.json`
   (atomic writes). Source file is **COPIED** at register time into
-  `~/.bui-mobile/pages/<subdomain>/index.html` (stable snapshot — survives
+  `~/.manta/pages/<subdomain>/index.html` (stable snapshot — survives
   `/tmp` cleanup; updating = re-call `serve_page` with the same subdomain).
 - **In-process file server on `127.0.0.1:20080`** (`createFileServer`/
   `startFileServer`, started in `index.mjs` alongside the schedule poller).
@@ -551,7 +551,7 @@ coordinate / hand off work to a peer. Same "bui tools" pattern as
 schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
 
 - **Workspace = tmux session (bui project); peers = sibling windows.** The crux
-  is the `@bui-session-id` tmux user-option, surfaced by `tmux.listProjects()`
+  is the `@manta-session-id` tmux user-option, surfaced by `tmux.listProjects()`
   as `window.opencodeSessionId`. `resolveWorkspace(projects, sessionID,
   directory)` (pure) finds the caller's window — by sessionID first, falling
   back to a `paneCurrentPath === directory` match (covers subagent children
@@ -693,15 +693,15 @@ peers/notify. Key facts:
 - **Thin registrar** — `fetch`es bui-server (no SSH hop). `secret_list` GETs
   `/api/secrets?sessionID=`; `secret_provide` POSTs `/api/secrets/provide
   {key, sessionID}` → `{path, key, hint}`.
-- **Server-owned + durable.** Store `~/.bui-mobile/secrets.json` (atomic write,
-  chmod 0600). Materialized value files under `~/.bui-secrets/` (dir 0700, files
+- **Server-owned + durable.** Store `~/.manta/secrets.json` (atomic write,
+  chmod 0600). Materialized value files under `~/.manta-secrets/` (dir 0700, files
   0600): shared → `<key>`, session → `sessions/<sessionID>/<key>`. `deleteSecret`
   also removes the materialized file so a deleted secret can't be re-read off
   disk.
 - **UI card**: `SecretsCard` in `ChatPanel.tsx` (pinned card above the composer,
   modeled on `ScheduledTasksCard` → renders desktop AND mobile, no mobile-CSS
   edits). Opened by the `🔑 secrets` button in `SessionToolbar` (desktop) or the
-  `Secrets` item in the mobile `⋯` sheet (`SessionScreen.tsx` → `bui-open-secrets`
+  `Secrets` item in the mobile `⋯` sheet (`SessionScreen.tsx` → `manta-open-secrets`
   window CustomEvent). The card has an add/edit form (key + value [type=password]
   + scope + hint) and a metadata-only list (the value is cleared from component
   state on save and never re-displayed). Refetch-driven (open + 10s poll).
@@ -771,7 +771,7 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   Precedence (BET-120): **explicit non-tilde cwd → stored project `defaultCwd`
   in config → LIVE tmux session dir (`listProjects()` first-window pane path) →
   `"~"`** as last resort. The live-tmux fallback matters because the stored
-  config (`~/.bui-mobile/config.json` `projects[]`) is only populated by the
+  config (`~/.manta/config.json` `projects[]`) is only populated by the
   desktop project-create flow and is empty/stale for sessions created any other
   way — without it, every new window silently dropped into `$HOME`. **Renderer
   must pass `cwd ?? ""`** (or omit it), NOT `cwd || "~"` — the literal tilde
@@ -874,7 +874,7 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
   any incoming `todo.updated`. Do NOT clear on idle/`session.idle` —
   the user keeps the visual confirmation right up to their next turn.
 - **Model persistence across sessions** — model selection is per-session in
-  `localStorage` (`bui:chat:<sessionId>:model`). On `/clear`, the handler
+  `localStorage` (`manta:chat:<sessionId>:model`). On `/clear`, the handler
   captures the returned `newSessionId` and copies the current override into
   the new key before calling `refresh()`. `modelOverride` initial state falls
   back to `AppConfig.defaultModel` (from store) when no localStorage entry
@@ -1045,7 +1045,7 @@ A second window type alongside the claude-TUI window. A tmux window running
 `sleep infinity` (holder pane) with bui's own React `ChatPanel` overlaid on
 top, talking to an opencode session over HTTP (via bui-server).
 
-**Recognition**: presence of `@bui-session-id` tmux user-option on the window
+**Recognition**: presence of `@manta-session-id` tmux user-option on the window
 is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 
 **Architecture** (HTTP-only — opencode session mgmt + SSE live server-side):
@@ -1068,7 +1068,7 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 | File | What |
 |---|---|
 | `src/server/opencode.mjs` | opencode HTTP proxy, session mgmt, per-directory SSE streams (server-side, the sole owner) |
-| `src/server/tmux.mjs` | tmux CRUD, `restampSessionId` (`@bui-session-id`), chat-holder pane, `maybeCreateChatSession` |
+| `src/server/tmux.mjs` | tmux CRUD, `restampSessionId` (`@manta-session-id`), chat-holder pane, `maybeCreateChatSession` |
 | `src/server/rpc.mjs` | `/rpc` channel dispatch — the `window.api` contract, server side; `resolveProjectCwd` |
 | `src/server/index.mjs` | bui-server entry: `/rpc`, `/events` SSE, REST `/api/*`, WS `/pty`, auth gate |
 | `src/renderer/api/httpApi.ts` | the live `window.api` on desktop + mobile (`/rpc` + `/events`) |
@@ -1533,7 +1533,7 @@ long-press ≥500ms (touch) = **command** mode — transcript routed through
 the rules classifier and (on no match) a Groq llama call returning a
 structured `VoiceAction` that's dispatched panel-side (clear/compact/fork/
 abort/model/answer/permission/etc) or App-side (switch-window/new-session/
-open-settings, via a `bui-voice-app-action` `CustomEvent`).
+open-settings, via a `manta-voice-app-action` `CustomEvent`).
 
 **Audio pipeline (identical on both transports):**
 1. `useVoiceRecorder` (`src/renderer/voice.ts`) drives a `MediaRecorder`
@@ -1622,7 +1622,7 @@ before the OS prompt fires.
 
 ## File upload paths (chat-mode)
 
-Three upload paths all land in `~/.bui-uploads/<session>/<ts>/` on the remote:
+Three upload paths all land in `~/.manta-uploads/<session>/<ts>/` on the remote:
 
 1. **Drag-drop** — `image/*`, PDF, audio, video → FilePart chip.
    Everything else → `@<abs-path>` text appended to textarea.
@@ -1642,7 +1642,7 @@ Three upload paths all land in `~/.bui-uploads/<session>/<ts>/` on the remote:
 
 `uploadBuffer` (`src/renderer/api/httpApi.ts`): POSTs the `ArrayBuffer` bytes
 straight to bui-server `POST /api/upload?session=<name>` with the Bearer token;
-the server writes `~/.bui-uploads/<session>/<batch>/<filename>` and returns the
+the server writes `~/.manta-uploads/<session>/<batch>/<filename>` and returns the
 absolute remote path. (Historical: the deleted desktop-SSH `pty.ts` version
 staged a Mac tmpfile + scp + remote `mv`; HTTP-only sends bytes directly.)
 

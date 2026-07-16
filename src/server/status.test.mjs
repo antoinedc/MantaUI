@@ -44,7 +44,7 @@ test("countSubagents ignores plain ⎿ Running lines without a preceding Task", 
 
 function mkStdout(entries) {
   // Simulates the shell loop output:
-  //   \n__BUI_PANE__<session>:<index>__BUI_PANE__\n<body>
+  //   \n__MANTA_PANE__<session>:<index>__MANTA_PANE__\n<body>
   return entries
     .map(({ target, body }) => `\n${MARK}${target}${MARK}\n${body}`)
     .join("");

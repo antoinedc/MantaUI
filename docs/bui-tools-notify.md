@@ -143,7 +143,7 @@ desktop at all" (the heartbeat is what proves the Mac is even reachable).
   second notification for the same session+kind *replaces* the first
   (`renotify` on the SW; `tag`-collapse on Electron) instead of stacking.
 - **Subagent / unresolved session** — a "done" whose sessionID has no tmux
-  `@bui-session-id` is a subagent child or orphan; already suppressed by
+  `@manta-session-id` is a subagent child or orphan; already suppressed by
   `shouldSuppressUnresolvedDone`. The `notify` tool always carries a real
   session, so it's unaffected.
 - **Quiet hours / DND** — Slack's signature feature. **Deferred to v2** (locked).

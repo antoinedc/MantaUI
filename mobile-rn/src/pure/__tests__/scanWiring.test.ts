@@ -8,7 +8,7 @@ import { buildPairPayload } from "../pairPayload";
 import { classifyCameraAvailability, decideScan } from "../scanWiring";
 
 describe("decideScan", () => {
-  it("valid bui://pair QR → pair with {serverUrl, code}", () => {
+  it("valid manta://pair QR → pair with {serverUrl, code}", () => {
     const raw = buildPairPayload({ serverUrl: "http://192.168.1.10:8787", code: "482913" });
     const d = decideScan(raw);
     expect(d.kind).toBe("pair");
@@ -27,7 +27,7 @@ describe("decideScan", () => {
   });
 
   it("accepts the id/token alias spelling", () => {
-    const d = decideScan("bui://pair?id=http://box:8787&token=654321");
+    const d = decideScan("manta://pair?id=http://box:8787&token=654321");
     expect(d.kind).toBe("pair");
     if (d.kind === "pair") expect(d.payload.code).toBe("654321");
   });
@@ -38,13 +38,13 @@ describe("decideScan", () => {
     if (d.kind === "invalid") expect(d.message.length).toBeGreaterThan(0);
   });
 
-  it("a bui pair URL missing the code → invalid", () => {
-    const d = decideScan("bui://pair?server=http://box:8787");
+  it("a manta pair URL missing the code → invalid", () => {
+    const d = decideScan("manta://pair?server=http://box:8787");
     expect(d.kind).toBe("invalid");
   });
 
   it("a 5-digit (too short) code → invalid", () => {
-    const d = decideScan("bui://pair?server=http://box:8787&code=12345");
+    const d = decideScan("manta://pair?server=http://box:8787&code=12345");
     expect(d.kind).toBe("invalid");
   });
 

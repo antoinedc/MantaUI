@@ -1,16 +1,17 @@
 // bui-native `schedule` tool — global opencode custom tool.
 //
-// Install on the opencode host (the Linux box that runs bui-server + opencode):
+// Install on the opencode host (the Linux box that runs manta-server + opencode):
 //   mkdir -p ~/.config/opencode/tools
 //   ln -sf <repo>/docs/opencode-tools/schedule.ts ~/.config/opencode/tools/schedule.ts
-// then restart the `bui-opencode` tmux session so opencode re-scans tools/.
+// then `systemctl --user restart opencode-serve` so opencode re-scans tools/
+// (NOT a `bui-opencode` tmux session — that reference elsewhere is stale).
 //
 // This tool is a THIN registrar. It validates the request and POSTs it to
-// bui-server (127.0.0.1:8787, same box — no SSH hop), which owns the durable
+// manta-server (127.0.0.1:8787, same box — no SSH hop), which owns the durable
 // store and the firing loop (src/server/schedule.mjs). The tool does NOT sleep
 // or run the prompt itself — execute() must return promptly.
 //
-// When a job is due, bui-server re-submits `prompt` into THIS session via
+// When a job is due, manta-server re-submits `prompt` into THIS session via
 // opencode, so the scheduled work streams back into the user's open bui chat as
 // a new turn. See docs/bui-tools-scheduler.md for the full design.
 
@@ -19,19 +20,19 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const BUI_SERVER = process.env.BUI_SERVER_URL || "http://127.0.0.1:8787";
+const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 
-// bui-server enforces `Authorization: Bearer <box_token>` on every /api route
+// manta-server enforces `Authorization: Bearer <box_token>` on every /api route
 // (M1 auth gate — src/server/auth.mjs). These tools run on the SAME box as the
-// same user as bui-server, so they read the token straight from the server's
-// own auth store (~/.bui-mobile/auth.json, 0600). Re-read on every call (one
+// same user as manta-server, so they read the token straight from the server's
+// own auth store (~/.manta/auth.json, 0600). Re-read on every call (one
 // tiny local file) so a token rotation never requires an opencode-serve
-// restart. BUI_BOX_TOKEN env overrides for tests/dev.
+// restart. MANTA_BOX_TOKEN env overrides for tests/dev.
 function boxToken(): string | null {
-  const fromEnv = process.env.BUI_BOX_TOKEN;
+  const fromEnv = process.env.MANTA_BOX_TOKEN;
   if (fromEnv) return fromEnv;
   try {
-    const raw = readFileSync(join(homedir(), ".bui-mobile", "auth.json"), "utf-8");
+    const raw = readFileSync(join(homedir(), ".manta", "auth.json"), "utf-8");
     const tok = JSON.parse(raw)?.box_token;
     return typeof tok === "string" && /^[0-9a-f]{32}$/.test(tok) ? tok : null;
   } catch {
@@ -50,7 +51,7 @@ function authHeaders(body?: unknown): Record<string, string> {
 const z = tool.schema;
 
 async function call(method: string, path: string, body?: unknown): Promise<any> {
-  const res = await fetch(`${BUI_SERVER}${path}`, {
+  const res = await fetch(`${MANTA_SERVER}${path}`, {
     method,
     headers: authHeaders(body),
     body: body ? JSON.stringify(body) : undefined,
@@ -63,7 +64,7 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
     json = { error: text };
   }
   if (!res.ok) {
-    throw new Error(json?.error || `bui-server ${res.status}`);
+    throw new Error(json?.error || `manta-server ${res.status}`);
   }
   return json;
 }

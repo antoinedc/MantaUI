@@ -118,7 +118,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     //
     // Same channel names + payload shapes as the desktop IPC, so the
     // renderer code is identical. API key + model overrides come from the
-    // mobile-server config (~/.bui-mobile/config.json). Stored plaintext —
+    // mobile-server config (~/.manta/config.json). Stored plaintext —
     // same trust model as the rest of bui's credentials.
     //
     // preload: ipcRenderer.invoke(IPC.voiceTranscribe, { buffer, mime })
@@ -159,7 +159,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     "tmux:list": () => tmux.listProjects(),
     // chatMode (BET-113): when the new-session dialog's "chat mode (opencode)"
     // toggle is on, tmux.newSession must create an opencode session, launch a
-    // holder pane, and stamp @bui-session-id — so it needs the `oc` client.
+    // holder pane, and stamp @manta-session-id — so it needs the `oc` client.
     // Resolve cwd first (createSession requires an absolute-ish dir; the tilde
     // is expanded inside oc.createSession). For new-session the project meta
     // doesn't exist yet, so resolveProjectCwd falls back to the passed cwd.
@@ -300,7 +300,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // desktop behavior (src/main/index.ts):
     //   1. opencodeForkSession(config, sessionId, messageID) → { id: newSessionId, ... }
     //   2. tmuxNewWindow(config, sessionName, windowName, cwd, true, newSessionId)
-    //      (chatMode=true stamps @bui-session-id on the new window)
+    //      (chatMode=true stamps @manta-session-id on the new window)
     //   3. return { newSessionId: forked.id, projects: await listProjects() }
     // mobile equivalent: oc.forkSession takes { sessionId, messageID }; then
     // we create a tmux window getting its index back, stamp it, then listProjects.

@@ -1,13 +1,13 @@
-# bui-server.service — systemd --user unit for the bui box server.
+# manta-server.service — systemd --user unit for the manta box server.
 #
 # Mirrors the hand-rolled unit documented in AGENTS.md ("Mobile / web client"):
 # runs `node src/server/index.mjs` bound to loopback, restarted on failure,
 # started at boot via `loginctl enable-linger $USER`.
 #
 # The installer (scripts/install.sh) substitutes the @@…@@ placeholders and
-# writes the result to ~/.config/systemd/user/bui-server.service, then:
+# writes the result to ~/.config/systemd/user/manta-server.service, then:
 #   systemctl --user daemon-reload
-#   systemctl --user enable --now bui-server
+#   systemctl --user enable --now manta-server
 #
 # Bind is 127.0.0.1 on purpose: the server is NOT exposed directly. The user
 # fronts it with their own ingress (tailscale / reverse proxy / cloudflared) —
@@ -15,17 +15,17 @@
 # so `bui pair` must run on the box.
 
 [Unit]
-Description=bui box server (mobile/web + relay proxy)
+Description=manta box server (mobile/web + relay proxy)
 Documentation=https://github.com/antoinedc/better-ui
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=@@BUI_HOME@@
-ExecStart=@@NODE_BIN@@ @@BUI_HOME@@/src/server/index.mjs
-Environment=BUI_MOBILE_HOST=127.0.0.1
-Environment=BUI_MOBILE_PORT=@@BUI_PORT@@
+WorkingDirectory=@@MANTA_HOME@@
+ExecStart=@@NODE_BIN@@ @@MANTA_HOME@@/src/server/index.mjs
+Environment=MANTA_MOBILE_HOST=127.0.0.1
+Environment=MANTA_MOBILE_PORT=@@MANTA_PORT@@
 Restart=on-failure
 RestartSec=2
 # Give the server a moment to flush on stop before SIGKILL.

@@ -36,9 +36,9 @@ export function selectDesktopTransport(
   hasPreload: boolean,
 ): "http" | "preload";
 
-// The localStorage keys httpApi reads (bui_server / bui_token), seeded from a
+// The localStorage keys httpApi reads (manta_server / manta_token), seeded from a
 // paired desktop config's serverUrl + boxToken. Returns null when the config
 // isn't a usable paired-http config (missing serverUrl or invalid boxToken).
 export function desktopHttpClientSeed(
   config: Partial<AppConfig> | null | undefined,
-): { bui_server: string; bui_token: string } | null;
+): { manta_server: string; manta_token: string } | null;

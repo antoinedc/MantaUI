@@ -17,7 +17,7 @@
 // in the service worker. Focus-suppression for the "done" case relies on the
 // client POSTing /push/focus on visibility / session changes.
 //
-// State persists under ~/.bui-mobile/ alongside config.json:
+// State persists under ~/.manta/ alongside config.json:
 //   vapid.json      — generated VAPID keypair (stable across restarts so
 //                     existing subscriptions keep working)
 //   push-subs.json  — array of PushSubscription JSON objects
@@ -31,9 +31,10 @@ import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { STATE_DIRNAME } from "../shared/paths.mjs";
 import * as tmux from "./tmux.mjs";
 
-const DIR = join(homedir(), ".bui-mobile");
+const DIR = join(homedir(), STATE_DIRNAME);
 const VAPID_PATH = join(DIR, "vapid.json");
 const SUBS_PATH = join(DIR, "push-subs.json");
 
@@ -438,7 +439,7 @@ export function classifyPushEvent(evt, ctx) {
  * Pure: should a push be dropped because its session can't be resolved to a
  * tmux chat window (null label)? Such a session is a SUBAGENT child (it
  * inherited the parent's directory, runs on the same scoped /event stream, but
- * has no `@bui-session-id` of its own) or a stale orphan — there is no chat for
+ * has no `@manta-session-id` of its own) or a stale orphan — there is no chat for
  * the user to land on, and the push would be a nameless notification that
  * deep-links nowhere.
  *
@@ -736,7 +737,7 @@ export async function firePush(evt) {
     if (shouldSuppressUnresolvedNotification(payload, label)) {
       console.log(
         `[push] ${payload.kind} sid=${sid} suppressed=unresolvable-session ` +
-          `(no tmux @bui-session-id → subagent/orphan)`,
+          `(no tmux @manta-session-id → subagent/orphan)`,
       );
       return;
     }

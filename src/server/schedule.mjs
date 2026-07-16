@@ -19,8 +19,9 @@ import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { STATE_DIRNAME } from "../shared/paths.mjs";
 
-const STORE_PATH = join(homedir(), ".bui-mobile", "schedule.json");
+const STORE_PATH = join(homedir(), STATE_DIRNAME, "schedule.json");
 
 // minute-granularity cron only needs sub-minute polling. 30s guarantees every
 // minute is observed at least once; the lastFiredMinute guard makes a second

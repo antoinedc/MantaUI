@@ -22,7 +22,7 @@ type Props = { onClose: () => void };
 //
 // Surface area is the subset of desktop Settings that makes sense on a
 // device with no SSH layer:
-//   - Server URL (localStorage["bui_server"]) — how the mobile/web client
+//   - Server URL (localStorage["manta_server"]) — how the mobile/web client
 //     finds the box; this is the single most important setting.
 //   - Trust mode (chatAutoAllow) — bypasses permission prompts.
 //   - Default model — global default for new sessions and /clear.
@@ -50,13 +50,13 @@ export function MobileSettings({ onClose }: Props) {
     refresh,
   } = useStore();
 
-  // The browser-served URL the client points at. localStorage["bui_server"]
+  // The browser-served URL the client points at. localStorage["manta_server"]
   // is the override knob from httpApi.ts; empty string means "use page
   // origin", which works when the client is served from the same host as
   // the API (the named Cloudflare tunnel deployment). Show the current
   // resolved value as placeholder so users know what's in effect.
   const [serverUrl, setServerUrl] = useState(
-    () => localStorage.getItem("bui_server") ?? "",
+    () => localStorage.getItem("manta_server") ?? "",
   );
   const [trust, setTrust] = useState(chatAutoAllow);
   const [autoRename, setAutoRename] = useState(autoRenameSessions);
@@ -192,8 +192,8 @@ export function MobileSettings({ onClose }: Props) {
       // configUpdate so a server-URL change takes effect immediately for
       // the rpc call below (httpApi.ts reads localStorage on every rpc).
       const trimmed = serverUrl.trim();
-      if (trimmed) localStorage.setItem("bui_server", trimmed);
-      else localStorage.removeItem("bui_server");
+      if (trimmed) localStorage.setItem("manta_server", trimmed);
+      else localStorage.removeItem("manta_server");
 
       await window.api.configUpdate({
         chatAutoAllow: trust,

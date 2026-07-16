@@ -81,18 +81,18 @@ type BuiltinCommand = {
   // Returns false to fall through to opencode/prompt path (useful for
   // disabled commands).
 };
-const BUI_BUILTIN_COMMANDS: BuiltinCommand[] = [
+const MANTA_BUILTIN_COMMANDS: BuiltinCommand[] = [
   { name: "clear", description: "Start a fresh chat in this window" },
   { name: "fork", description: "Copy this session's history into a new window" },
   { name: "compact", description: "Summarize to free context" },
   { name: "help", description: "Show available commands" },
 ];
-const BUI_BUILTIN_NAMES = new Set(BUI_BUILTIN_COMMANDS.map((c) => c.name));
+const MANTA_BUILTIN_NAMES = new Set(MANTA_BUILTIN_COMMANDS.map((c) => c.name));
 
 function buildHelpText(): string {
   const lines = [
     "Slash commands (bui-local):",
-    ...BUI_BUILTIN_COMMANDS.map((c) => `  /${c.name.padEnd(8)} — ${c.description}`),
+    ...MANTA_BUILTIN_COMMANDS.map((c) => `  /${c.name.padEnd(8)} — ${c.description}`),
     "",
     "Shortcuts:",
     "  ⏎               send",
@@ -132,7 +132,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const cacheTtl = useStore((s) => s.cacheTtl);
   // Server-owned resource cards (⏰ schedules, 🔑 secrets, 🪝 webhooks) —
   // state, refresh callbacks, poll effects, session resets, and the mobile
-  // `bui-open-*` window-event bridges. Extracted to a self-contained hook
+  // `manta-open-*` window-event bridges. Extracted to a self-contained hook
   // (BET-63) because none of it touches the SSE / pin-to-bottom / message core.
   const resources = useSessionResources(sessionId);
   const {
@@ -459,12 +459,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         }
       }
     };
-    window.addEventListener("bui-scroll-to-question", onEvt);
-    return () => window.removeEventListener("bui-scroll-to-question", onEvt);
+    window.addEventListener("manta-scroll-to-question", onEvt);
+    return () => window.removeEventListener("manta-scroll-to-question", onEvt);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  // (bui-open-schedules / -secrets / -webhooks mobile bridges moved to
+  // (manta-open-schedules / -secrets / -webhooks mobile bridges moved to
   // useSessionResources.)
 
   // Perform the deferred scroll once the question cards actually exist (cold
@@ -650,7 +650,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     const slashMatch = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
     const cmdName = slashMatch ? slashMatch[1] : null;
 
-    if (cmdName && BUI_BUILTIN_NAMES.has(cmdName)) {
+    if (cmdName && MANTA_BUILTIN_NAMES.has(cmdName)) {
       setRunning(false);
       // bui builtins are renderer-only — no prompt actually sent, so strip
       // the optimistic transcript entry we just added.
@@ -1104,7 +1104,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   // ===== Drag-drop attachments =====
   //
-  // Files dropped anywhere on the panel are shipped to ~/.bui-uploads/<session>/
+  // Files dropped anywhere on the panel are shipped to ~/.manta-uploads/<session>/
   // and each gets a chip above the input ("uploading" → "ready"; failures keep
   // the chip with an error tooltip). TWO transports, decided per file:
   //   - OS path available (Electron preload's webUtils via getPathForFile) →

@@ -12,6 +12,7 @@ import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { STATE_DIRNAME } from "../shared/paths.mjs";
 
 // ============================================================
 // Config persistence (real implementation — renderer depends on it)
@@ -27,7 +28,7 @@ import { join, dirname } from "node:path";
 // and desktop-only concepts (Mac clipboard, drag-drop local paths, peek-remote-file)
 // are no-ops documented below.
 
-const CONFIG_PATH = join(homedir(), ".bui-mobile", "config.json");
+const CONFIG_PATH = join(homedir(), STATE_DIRNAME, "config.json");
 
 // atomicWrite — write to a temp file then rename over the target.
 // rename(2) is atomic on the same filesystem, so a crash mid-write
@@ -202,50 +203,50 @@ export async function fsListDirs(partial) {
 // which the user can revert — same risk as on desktop).
 //
 // TmuxConfigStatus shape from shared/types.ts:
-//   { buiManaged: boolean; backupExists: boolean }
+//   { mantaManaged: boolean; backupExists: boolean }
 
-const BUI_BEGIN = "# --- bui begin ---";
-const BUI_END   = "# --- bui end ---";
+const MANTA_BEGIN = "# --- manta begin ---";
+const MANTA_END   = "# --- manta end ---";
 
-const BUI_BLOCK_BODY = [
+const MANTA_BLOCK_BODY = [
   "set -g status off",
   "set -g escape-time 10",
   "set -g focus-events on",
 ].join("\n");
 
-const BUI_BLOCK = `\n${BUI_BEGIN}\n${BUI_BLOCK_BODY}\n${BUI_END}\n`;
+const MANTA_BLOCK = `\n${MANTA_BEGIN}\n${MANTA_BLOCK_BODY}\n${MANTA_END}\n`;
 
 export async function tmuxConfigStatus() {
-  // Read ~/.tmux.conf and ~/.tmux.conf.pre-bui directly — no SSH needed.
+  // Read ~/.tmux.conf and ~/.tmux.conf.pre-manta directly — no SSH needed.
   const tmuxConf = join(homedir(), ".tmux.conf");
-  const tmuxConfBak = join(homedir(), ".tmux.conf.pre-bui");
-  let buiManaged = false;
+  const tmuxConfBak = join(homedir(), ".tmux.conf.pre-manta");
+  let mantaManaged = false;
   let backupExists = false;
   try {
     const content = await readFile(tmuxConf, "utf-8");
-    buiManaged = content.includes(BUI_BEGIN);
+    mantaManaged = content.includes(MANTA_BEGIN);
   } catch {
-    buiManaged = false;
+    mantaManaged = false;
   }
   backupExists = existsSync(tmuxConfBak);
-  return { buiManaged, backupExists };
+  return { mantaManaged, backupExists };
 }
 
 export async function tmuxSetupConfig() {
   const tmuxConf = join(homedir(), ".tmux.conf");
-  const tmuxConfBak = join(homedir(), ".tmux.conf.pre-bui");
+  const tmuxConfBak = join(homedir(), ".tmux.conf.pre-manta");
 
   // Read current config (may not exist)
   let current = "";
   try { current = await readFile(tmuxConf, "utf-8"); } catch { current = ""; }
 
-  if (!current.includes(BUI_BEGIN)) {
+  if (!current.includes(MANTA_BEGIN)) {
     // Backup original if not already backed up
     if (current && !existsSync(tmuxConfBak)) {
       await atomicWrite(tmuxConfBak, current);
     }
-    // Append bui block (full-file rewrite — atomic to avoid blank tmux.conf on crash)
-    await atomicWrite(tmuxConf, current + BUI_BLOCK);
+    // Append manta block (full-file rewrite — atomic to avoid blank tmux.conf on crash)
+    await atomicWrite(tmuxConf, current + MANTA_BLOCK);
     // Try to source it into the live tmux server (best-effort)
     await run("tmux", ["source-file", tmuxConf]).catch(() => {});
   }
@@ -255,19 +256,19 @@ export async function tmuxSetupConfig() {
 
 export async function tmuxRestoreConfig() {
   const tmuxConf = join(homedir(), ".tmux.conf");
-  const tmuxConfBak = join(homedir(), ".tmux.conf.pre-bui");
+  const tmuxConfBak = join(homedir(), ".tmux.conf.pre-manta");
 
   if (existsSync(tmuxConfBak)) {
     // Restore original backup (full-file rewrite — atomic to avoid blank tmux.conf on crash)
     const original = await readFile(tmuxConfBak, "utf-8");
     await atomicWrite(tmuxConf, original);
   } else {
-    // Strip bui block in place (full-file rewrite — atomic)
+    // Strip manta block in place (full-file rewrite — atomic)
     try {
       const content = await readFile(tmuxConf, "utf-8");
-      // Remove from BUI_BEGIN line to BUI_END line (inclusive)
+      // Remove from MANTA_BEGIN line to MANTA_END line (inclusive)
       const stripped = content.replace(
-        new RegExp(`\\n?${escapeRegex(BUI_BEGIN)}[\\s\\S]*?${escapeRegex(BUI_END)}\\n?`, "g"),
+        new RegExp(`\\n?${escapeRegex(MANTA_BEGIN)}[\\s\\S]*?${escapeRegex(MANTA_END)}\\n?`, "g"),
         "",
       );
       await atomicWrite(tmuxConf, stripped);

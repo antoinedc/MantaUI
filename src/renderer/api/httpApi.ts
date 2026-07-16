@@ -20,7 +20,7 @@ import { shouldForceReconnect } from "../chatUtils";
 
 // ---------------------------------------------------------------------------
 // Server base URL resolution (3 deployment contexts):
-//   1. localStorage["bui_server"] override (Settings screen / power users) —
+//   1. localStorage["manta_server"] override (Settings screen / power users) —
 //      always wins. This is how the Capacitor APK points itself at the box.
 //   2. Page served over http(s) from a real host (tunnel / LAN / domain) →
 //      same-origin. Critical for the HTTPS cloudflare tunnel: hardcoding
@@ -28,21 +28,21 @@ import { shouldForceReconnect } from "../chatUtils";
 //      location.origin carries the page's own scheme, so no protocol skew.
 //   3. Otherwise (Capacitor http://localhost, file:) → no fallback. The
 //      mobile/web client is currently descoped from v1; fail fast with a
-//      clear error so a tester knows to set localStorage["bui_server"]
+//      clear error so a tester knows to set localStorage["manta_server"]
 //      rather than silently hitting some hardcoded box.
 // ---------------------------------------------------------------------------
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
 
 export function serverBase(): string {
-  const v = localStorage.getItem("bui_server");
+  const v = localStorage.getItem("manta_server");
   if (v) return v.replace(/\/+$/, "");
   const { protocol, hostname, origin } = window.location;
   if ((protocol === "https:" || protocol === "http:") && !LOCAL_HOSTS.has(hostname)) {
     return origin.replace(/\/+$/, "");
   }
   throw new Error(
-    "bui mobile/web server not configured. Set localStorage['bui_server'] " +
+    "bui mobile/web server not configured. Set localStorage['manta_server'] " +
     "to your server URL (e.g. http://192.168.1.10:8787) and reload.",
   );
 }
@@ -54,8 +54,8 @@ export function serverBase(): string {
 // bui-server now gates every data route behind a single shared box_token,
 // presented as `Authorization: Bearer <box_token>`. The token is obtained via
 // the pairing handshake (POST /auth/claim, done by M1-T2's pairing UI) and
-// persisted client-side in localStorage["bui_token"] — a sibling of the
-// existing localStorage["bui_server"] key.
+// persisted client-side in localStorage["manta_token"] — a sibling of the
+// existing localStorage["manta_server"] key.
 //
 // Two request families:
 //   • fetch (/rpc, /api/*) — can set headers → send the Bearer header.
@@ -66,8 +66,8 @@ export function serverBase(): string {
 // The helpers below are pure (no fetch, no DOM beyond the injected token) so
 // the request-building logic is unit-testable without a live server.
 
-/** Storage key holding the box_token (sibling of "bui_server"). */
-export const TOKEN_KEY = "bui_token";
+/** Storage key holding the box_token (sibling of "manta_server"). */
+export const TOKEN_KEY = "manta_token";
 
 /**
  * Thrown when the server rejects a request with HTTP 401 (missing/invalid
@@ -125,7 +125,7 @@ export function withTokenParam(url: string, token: string | null): string {
 
 /**
  * Persist the box_token so subsequent rpc/upload/download/WS calls authenticate.
- * Sibling of localStorage["bui_server"]. Wrapped so a private-mode / disabled
+ * Sibling of localStorage["manta_server"]. Wrapped so a private-mode / disabled
  * localStorage throws a clear error the pairing UI can surface rather than
  * silently "succeeding" and then 401-looping.
  */
@@ -367,7 +367,7 @@ function dispatchFrame(data: unknown) {
 // only the wiring — the live WebSocket constructor, the frame dispatch, and
 // the resync trigger.
 //
-// GOTCHA: serverBase() (inside wsUrl()) can throw if localStorage["bui_server"]
+// GOTCHA: serverBase() (inside wsUrl()) can throw if localStorage["manta_server"]
 // is unset on a non-localhost page (mobile/web descope — fail-fast intent).
 // on() is called synchronously from React useEffects, so an uncaught throw
 // white-screens the renderer. The controller catches url() throws, reports
@@ -620,7 +620,7 @@ export const httpApi: Api = {
 
   // -- agent → device file push (outbox) --
   // The mobile server's outbox poller (src/server/outbox.mjs) publishes
-  // `agentFile` bus events when the AI drops a file in ~/.bui-outbox/. On a
+  // `agentFile` bus events when the AI drops a file in ~/.manta-outbox/. On a
   // device these always arrive as a confirm toast (autoPulled:false) since
   // there's no silent disk write — the user taps Save → agentPullFile triggers
   // a browser download.

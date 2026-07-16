@@ -63,8 +63,8 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
       // Seed the two localStorage keys httpApi reads for its base URL + token.
       let seeded = true;
       try {
-        localStorage.setItem("bui_server", seed.bui_server);
-        localStorage.setItem("bui_token", seed.bui_token);
+        localStorage.setItem("manta_server", seed.manta_server);
+        localStorage.setItem("manta_token", seed.manta_token);
       } catch (e) {
         // localStorage unavailable is fatal for http mode (httpApi can't read
         // its base) — fall back to preload rather than a 401-looping client.

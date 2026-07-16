@@ -70,7 +70,7 @@ the experience is a bit nicer with it on. Restorable from the same panel.
   Mac. Requires the chat-mode setup above.
 
 The two coexist: each tmux window is one or the other (recognized by a
-`@bui-session-id` tmux user-option).
+`@manta-session-id` tmux user-option).
 
 ## Keybindings
 
@@ -91,15 +91,16 @@ The two coexist: each tmux window is one or the other (recognized by a
 - **Mac**: `<userData>/config.json` — `serverUrl`, `boxId`, `boxToken`, project
   metadata (default cwd per project), settings.
 - **Remote**: tmux sessions/windows are the source of truth.
-  - `~/.bui-uploads/<session>/<batch>/` — drag-and-drop attachments. Auto
+  - `~/.manta-uploads/<session>/<batch>/` — drag-and-drop attachments. Auto
     cleaned hourly (configurable in Settings; `0` disables).
-  - `~/.tmux.conf.pre-bui` — backup of your tmux config if you opted in
+  - `~/.tmux.conf.pre-manta` — backup of your tmux config if you opted in
     to the bui tmux setup.
   - `~/.config/opencode/opencode.jsonc` — opencode config. Bootstrap writes
-    a minimal one; if you had your own, it's backed up to `.pre-bui`.
-  - tmux session `bui-opencode` — bui's chat-mode windows talk to a
-    long-running `opencode serve` on `127.0.0.1:4096`, proxied by bui-server
-    (no SSH hop). Survives bui restarts.
+    a minimal one; if you had your own, it's backed up to `.pre-manta`.
+  - the **`opencode-serve` systemd --user service** (NOT a `bui-opencode` tmux
+    session — that reference elsewhere is stale) — chat-mode windows talk to
+    this long-running `opencode serve` on `127.0.0.1:4096`, proxied by
+    bui-server (no SSH hop). Survives bui restarts.
 
 ## Box server (mobile/web) — self-install
 
@@ -113,19 +114,19 @@ curl -fsSL https://bui.useronda.com/install.sh | bash
 
 The installer downloads a pre-built release tarball (no dev toolchain needed on
 the box), runs `npm ci --omit=dev`, installs a `systemd --user` unit
-(`bui-server.service`), waits for the server to come up on `127.0.0.1:8787`, then
+(`manta-server.service`), waits for the server to come up on `127.0.0.1:8787`, then
 runs `bui pair` and prints the code. Re-running upgrades in place and **preserves
-your box identity** in `~/.bui-mobile/` — the server owns identity (`ensureAuth`
+your box identity** in `~/.manta/` — the server owns identity (`ensureAuth`
 in `src/server/auth.mjs`); the installer never regenerates it.
 
 Overrides (env):
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `BUI_TARBALL_URL` | (built from host+version) | full tarball URL — local testing / mirror |
-| `BUI_RELEASE_HOST` | `https://bui.useronda.com` | host for the default tarball URL |
-| `BUI_HOME` | `~/bui` | where the code is unpacked |
-| `BUI_MOBILE_PORT` | `8787` | server port |
+| `MANTA_TARBALL_URL` | (built from host+version) | full tarball URL — local testing / mirror |
+| `MANTA_RELEASE_HOST` | `https://bui.useronda.com` | host for the default tarball URL |
+| `MANTA_HOME` | `~/bui` | where the code is unpacked |
+| `MANTA_MOBILE_PORT` | `8787` | server port |
 
 Manage it: `systemctl --user {status,restart} bui-server`, logs
 `journalctl --user -u bui-server -f`. Mint a fresh pairing code any time with
@@ -145,7 +146,7 @@ git clone git@github.com:antoinedc/better-ui.git ~/bui
 cd ~/bui
 npm install
 npm run build:mobile        # build the renderer bundle into mobile/www/
-npm run mobile              # start the server on 0.0.0.0:8787 (BUI_MOBILE_HOST/PORT override)
+npm run mobile              # start the server on 0.0.0.0:8787 (MANTA_MOBILE_HOST/PORT override)
 ```
 
 Then, on the box, mint a pairing code:
@@ -154,8 +155,8 @@ Then, on the box, mint a pairing code:
 npm run pair               # GET 127.0.0.1:8787/auth/pair, prints the code
 ```
 
-To run it under systemd yourself, copy `scripts/systemd/bui-server.service`,
-substitute the `@@BUI_HOME@@` / `@@NODE_BIN@@` / `@@BUI_PORT@@` placeholders,
+To run it under systemd yourself, copy `scripts/systemd/manta-server.service`,
+substitute the `@@MANTA_HOME@@` / `@@NODE_BIN@@` / `@@MANTA_PORT@@` placeholders,
 drop it in `~/.config/systemd/user/`, then
 `systemctl --user daemon-reload && systemctl --user enable --now bui-server`
 (and `loginctl enable-linger $USER` so it survives logout).

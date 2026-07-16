@@ -72,7 +72,7 @@ export function parseSessions(sessStdout, winStdout) {
 
 export async function listProjects() {
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
-  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@bui-session-id}`;
+  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}`;
   const sess = await run("tmux", ["list-sessions", "-F", sessFmt]).catch(() => ({ stdout: "" }));
   const wins = await run("tmux", ["list-windows", "-a", "-F", winFmt]).catch(() => ({ stdout: "" }));
   return parseSessions(sess.stdout, wins.stdout);
@@ -172,7 +172,7 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, o
     await mkdir(expandTildePath(cwd), { recursive: true });
   }
   // Chat-mode: create the opencode session BEFORE the tmux window so we can
-  // stamp @bui-session-id on it. Without the stamp the renderer sees
+  // stamp @manta-session-id on it. Without the stamp the renderer sees
   // opencodeSessionId === null and renders Terminal instead of ChatPanel —
   // this was the BET-113 regression.
   const sid = await maybeCreateChatSession(
@@ -206,7 +206,7 @@ export async function newWindow({ sessionName, windowName, cwd, chatMode, oc }) 
 
 /**
  * Create a new tmux window and return its index (integer).
- * Used by fork/clear composites which need to stamp @bui-session-id on the
+ * Used by fork/clear composites which need to stamp @manta-session-id on the
  * new window immediately after creation.
  *
  * @param {string} sessionName
@@ -251,7 +251,7 @@ export async function selectWindow({ sessionName, windowIndex }) {
 }
 
 /**
- * Stamp (or update) the @bui-session-id user-option on a tmux window.
+ * Stamp (or update) the @manta-session-id user-option on a tmux window.
  * This is how the renderer knows a window is a chat-mode window and which
  * opencode session it belongs to.
  *
@@ -263,6 +263,6 @@ export async function restampSessionId(sessionName, windowIndex, sessionId) {
   await run("tmux", [
     "set-window-option",
     "-t", `${sessionName}:${windowIndex}`,
-    "@bui-session-id", sessionId,
+    "@manta-session-id", sessionId,
   ]);
 }

@@ -11,7 +11,7 @@
 //
 // What goes in (the box's runtime surface only):
 //   src/            — the server (src/server/**) + shared code it imports
-//   scripts/        — install.sh, bui-pair.mjs, install-lib.mjs, systemd unit
+//   scripts/        — install.sh, manta-pair.mjs, install-lib.mjs, systemd unit
 //   mobile/www/     — PRE-BUILT renderer bundle (this is why the box needs no
 //                     Vite/electron toolchain)
 //   package.json    — the "mobile"/"pair" npm scripts + prod deps list

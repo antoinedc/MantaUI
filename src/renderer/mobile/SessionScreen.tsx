@@ -121,7 +121,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   // Rename uses tmux:rename-window — it renames the underlying tmux window
   // (the unit the user sees as a "session" in mobile UI). Works for BOTH
   // chat windows and terminal windows because both ARE tmux windows; the
-  // chat-mode distinction is the @bui-session-id user-option, not the
+  // chat-mode distinction is the @manta-session-id user-option, not the
   // window kind. Same channel desktop's Sidebar.tsx commitRename uses.
   const startRename = () => {
     setRenameValue(win.name);
@@ -326,7 +326,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                         // Open the ScheduledTasksCard inside ChatPanel via the
                         // window CustomEvent bridge (the sheet is outside it).
                         window.dispatchEvent(
-                          new CustomEvent("bui-open-schedules", {
+                          new CustomEvent("manta-open-schedules", {
                             detail: { sessionId: sid },
                           }),
                         );
@@ -338,9 +338,9 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                     <button
                       onClick={() => {
                         // Open the SecretsCard inside ChatPanel via the window
-                        // CustomEvent bridge (mirror of bui-open-schedules).
+                        // CustomEvent bridge (mirror of manta-open-schedules).
                         window.dispatchEvent(
-                          new CustomEvent("bui-open-secrets", {
+                          new CustomEvent("manta-open-secrets", {
                             detail: { sessionId: sid },
                           }),
                         );
@@ -352,9 +352,9 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                     <button
                       onClick={() => {
                         // Open the WebhooksCard inside ChatPanel via the window
-                        // CustomEvent bridge (mirror of bui-open-schedules).
+                        // CustomEvent bridge (mirror of manta-open-schedules).
                         window.dispatchEvent(
-                          new CustomEvent("bui-open-webhooks", {
+                          new CustomEvent("manta-open-webhooks", {
                             detail: { sessionId: sid },
                           }),
                         );

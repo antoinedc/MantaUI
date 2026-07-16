@@ -12,22 +12,22 @@ import {
 } from "../pairPayload";
 
 describe("parsePairPayload", () => {
-  it("parses the canonical bui://pair form", () => {
-    expect(parsePairPayload("bui://pair?server=http://box:8787&code=123456")).toEqual({
+  it("parses the canonical manta://pair form", () => {
+    expect(parsePairPayload("manta://pair?server=http://box:8787&code=123456")).toEqual({
       serverUrl: "http://box:8787",
       code: "123456",
     });
   });
 
   it("coerces a scheme-less bare host to http://", () => {
-    expect(parsePairPayload("bui://pair?server=192.168.1.10:8787&code=123456")).toEqual({
+    expect(parsePairPayload("manta://pair?server=192.168.1.10:8787&code=123456")).toEqual({
       serverUrl: "http://192.168.1.10:8787",
       code: "123456",
     });
   });
 
   it("accepts the id/token alias and the https /m/ deferred form", () => {
-    expect(parsePairPayload("bui://pair?id=http://box:8787&token=123456")?.code).toBe("123456");
+    expect(parsePairPayload("manta://pair?id=http://box:8787&token=123456")?.code).toBe("123456");
     expect(
       parsePairPayload("https://l.example.com/m/x?server=http://box:8787&code=123456")?.serverUrl,
     ).toBe("http://box:8787");
@@ -38,11 +38,11 @@ describe("parsePairPayload", () => {
       "",
       "not a url",
       "https://example.com/hello", // https but not /m/
-      "bui://other?server=http://box:8787&code=123456", // wrong host
-      "bui://pair?code=123456", // missing server
-      "bui://pair?server=http://box:8787", // missing code
-      "bui://pair?server=http://box:8787&code=12345", // 5 digits
-      "bui://pair?server=http://box:8787&code=1234567", // 7 digits
+      "manta://other?server=http://box:8787&code=123456", // wrong host
+      "manta://pair?code=123456", // missing server
+      "manta://pair?server=http://box:8787", // missing code
+      "manta://pair?server=http://box:8787&code=12345", // 5 digits
+      "manta://pair?server=http://box:8787&code=1234567", // 7 digits
     ]) {
       expect(parsePairPayload(raw)).toBeNull();
     }

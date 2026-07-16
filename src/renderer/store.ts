@@ -17,7 +17,7 @@ const OPENCODE_FANOUT_CONCURRENCY = 4;
 // Overlay the desktop-local pairing secrets (serverUrl/boxToken) onto a config
 // snapshot. In http mode window.api.configGet() returns the bui-server's config,
 // which never carries these — they live only on this desktop, mirrored into
-// localStorage by main.tsx (bui_server/bui_token) at boot. Reading them here
+// localStorage by main.tsx (manta_server/manta_token) at boot. Reading them here
 // keeps resolveTransportMode() from seeing an empty boxToken and forcing
 // onboarding on an already-paired install. A missing/blank local value leaves
 // the incoming config field untouched, so this is a no-op on mobile/web and on
@@ -25,7 +25,7 @@ const OPENCODE_FANOUT_CONCURRENCY = 4;
 function mergeLocalPairing(cfg: AppConfig): AppConfig {
   let serverUrl = "";
   try {
-    serverUrl = localStorage.getItem("bui_server") ?? "";
+    serverUrl = localStorage.getItem("manta_server") ?? "";
   } catch {
     /* localStorage unavailable (private mode / SSR) — treat as no override */
   }
@@ -336,7 +336,7 @@ export const useStore = create<State>((set, get) => ({
     // In http mode window.api.configGet() returns the bui-SERVER's config,
     // which structurally lacks the desktop-local pairing secrets
     // (serverUrl/boxId/boxToken). Those live only on this desktop — mirrored
-    // into localStorage["bui_server"]/["bui_token"] by main.tsx at boot (and by
+    // into localStorage["manta_server"]/["manta_token"] by main.tsx at boot (and by
     // the pairing step via applyPairing). Overlay them so applyConfig doesn't
     // blank the pairing and flip the app back into onboarding on every refresh.
     get().applyConfig(mergeLocalPairing(cfg));

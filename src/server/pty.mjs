@@ -71,7 +71,7 @@ export function spawnShellPty({ cwd, cols, rows, launcher }) {
   }
 
   // Plain shell-in-cwd (base "terminal" mode): an interactive LOGIN shell.
-  // BUI_TERMINAL=1 marks this as a bui embedded terminal so a user's rc file
+  // MANTA_TERMINAL=1 marks this as a bui embedded terminal so a user's rc file
   // can skip hostile interactive-login behaviour — notably a tmux auto-attach
   // block (common in ~/.bashrc), which would otherwise hijack this shell into a
   // blank tmux alternate-screen and the terminal would look frozen/empty. The
@@ -79,7 +79,7 @@ export function spawnShellPty({ cwd, cols, rows, launcher }) {
   // so it never triggers such blocks.
   return ptySpawnNative(shell, ["-l"], {
     ...size,
-    env: { ...size.env, BUI_TERMINAL: "1" },
+    env: { ...size.env, MANTA_TERMINAL: "1" },
   });
 }
 

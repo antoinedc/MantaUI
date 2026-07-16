@@ -36,7 +36,7 @@ function fakeOc(sessionId = "ses_chat123") {
 
 function findSetSid(cmds) {
   return cmds.find(
-    (c) => c.args.includes("set-window-option") && c.args.includes("@bui-session-id"),
+    (c) => c.args.includes("set-window-option") && c.args.includes("@manta-session-id"),
   );
 }
 
@@ -65,7 +65,7 @@ test("parseSessions keeps a session that has no windows yet", () => {
 
 test("parseSessions extracts opencodeSessionId from the 6th column (chat windows)", () => {
   const sess = "Capo\t1";
-  // 6 columns now: session, index, name, active, pane, @bui-session-id
+  // 6 columns now: session, index, name, active, pane, @manta-session-id
   const wins =
     "Capo\t1\tmain\t0\t/home/dev/projects/capo\t\n" +              // plain window: empty sid -> null
     "Capo\t2\tchat\t1\t/home/dev/projects/capo\tses_1c9c9e6a2ffe"; // chat window: sid present
@@ -125,11 +125,11 @@ test("isMissingSessionError returns false for non-Error inputs", () => {
 //
 // The "chat mode (opencode)" toggle in the new-session / new-window dialog
 // must (1) create an opencode session, (2) launch the holder pane instead of
-// a shell, and (3) stamp @bui-session-id on the new window. Without the stamp
+// a shell, and (3) stamp @manta-session-id on the new window. Without the stamp
 // the renderer sees opencodeSessionId === null and renders Terminal, not
 // ChatPanel — the exact regression from commit 81f5779.
 
-test("newWindow chatMode:true creates an opencode session AND stamps @bui-session-id", async () => {
+test("newWindow chatMode:true creates an opencode session AND stamps @manta-session-id", async () => {
   const cmds = installFakeTmux();
   const oc = fakeOc("ses_abc");
   try {
@@ -150,9 +150,9 @@ test("newWindow chatMode:true creates an opencode session AND stamps @bui-sessio
   const newWin = cmds.find((c) => c.args.includes("new-window"));
   assert.ok(newWin, "new-window issued");
   assert.ok(newWin.args.includes(CHAT_HOLDER_CMD), "holder cmd passed to new-window");
-  // (3) @bui-session-id stamped with the created session id.
+  // (3) @manta-session-id stamped with the created session id.
   const stamp = findSetSid(cmds);
-  assert.ok(stamp, "set-window-option @bui-session-id issued");
+  assert.ok(stamp, "set-window-option @manta-session-id issued");
   assert.ok(stamp.args.includes("ses_abc"), "stamp carries the opencode session id");
 });
 
@@ -171,13 +171,13 @@ test("newWindow chatMode:false stays a plain window — no session, no stamp, no
     _setRun(null);
   }
   assert.equal(oc.created.length, 0, "no opencode session created for a plain window");
-  assert.equal(findSetSid(cmds), undefined, "no @bui-session-id stamp for a plain window");
+  assert.equal(findSetSid(cmds), undefined, "no @manta-session-id stamp for a plain window");
   const newWin = cmds.find((c) => c.args.includes("new-window"));
   assert.ok(newWin, "new-window issued");
   assert.ok(!newWin.args.includes(CHAT_HOLDER_CMD), "no holder cmd for a plain window");
 });
 
-test("newSession chatMode:true creates an opencode session AND stamps @bui-session-id", async () => {
+test("newSession chatMode:true creates an opencode session AND stamps @manta-session-id", async () => {
   const cmds = installFakeTmux();
   const oc = fakeOc("ses_sess1");
   try {
@@ -197,7 +197,7 @@ test("newSession chatMode:true creates an opencode session AND stamps @bui-sessi
   assert.ok(newSess, "new-session issued");
   assert.ok(newSess.args.includes(CHAT_HOLDER_CMD), "holder cmd passed to new-session");
   const stamp = findSetSid(cmds);
-  assert.ok(stamp, "set-window-option @bui-session-id issued");
+  assert.ok(stamp, "set-window-option @manta-session-id issued");
   assert.ok(stamp.args.includes("ses_sess1"), "stamp carries the opencode session id");
 });
 
@@ -216,7 +216,7 @@ test("newSession chatMode:false stays a plain session — no session create, no 
     _setRun(null);
   }
   assert.equal(oc.created.length, 0, "no opencode session for a plain session");
-  assert.equal(findSetSid(cmds), undefined, "no @bui-session-id stamp for a plain session");
+  assert.equal(findSetSid(cmds), undefined, "no @manta-session-id stamp for a plain session");
 });
 
 test("newWindow chatMode:true throws when no opencode client is injected", async () => {

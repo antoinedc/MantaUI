@@ -2,7 +2,7 @@
 //
 // Lets an opencode session see what OTHER sessions in the SAME workspace are
 // doing. A "workspace" is a tmux session (bui project); each window is an
-// app-session. Sibling windows = peers. The crux is the `@bui-session-id`
+// app-session. Sibling windows = peers. The crux is the `@manta-session-id`
 // tmux user-option, surfaced by tmux.listProjects() as window.opencodeSessionId.
 //
 // The remote AI calls the global opencode `peers_list` / `peers_inspect` tools

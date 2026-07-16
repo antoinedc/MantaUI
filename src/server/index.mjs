@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import { pipeline } from "node:stream/promises";
+import { UPLOAD_DIRNAME, OUTBOX_DIRNAME } from "../shared/paths.mjs";
 import { WebSocketServer } from "ws";
 import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
@@ -86,13 +87,13 @@ push.setDesktopSink((payload) =>
 // eslint-disable-next-line no-unused-vars
 const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
 
-// Agent → device file push: watch ~/.bui-outbox/ for files the AI drops and
+// Agent → device file push: watch ~/.manta-outbox/ for files the AI drops and
 // publish `agentFile` bus events so connected devices show a "Save" toast
 // (parity with the desktop outbox poller; see src/server/outbox.mjs).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopOutboxPoller } = startOutboxPoller(bus, { intervalMs: 3000 });
 
-// Scheduled-prompt engine: durable jobs in ~/.bui-mobile/schedule.json, fired
+// Scheduled-prompt engine: durable jobs in ~/.manta/schedule.json, fired
 // by re-submitting the stored prompt into its opencode session via
 // oc.sendPrompt — the scheduled work then streams into the user's open
 // ChatPanel as a new turn. Server-owned (survives Mac-app-close / reboot).
@@ -122,10 +123,10 @@ const webhookEngine = createWebhookEngine({
 // the public webhook delivery leg (/hook/<token>, self-authenticated). The box
 // identity ({box_id, box_token}) is generated + persisted 0600 on first run.
 //
-// Enforcement is ON by default. BUI_AUTH_DISABLED=1 is an escape hatch for an
+// Enforcement is ON by default. MANTA_AUTH_DISABLED=1 is an escape hatch for an
 // existing self-hoster mid-upgrade who hasn't paired yet — it disables the gate
 // and prints a loud warning. New deployments should never set it.
-const authEnforced = process.env.BUI_AUTH_DISABLED !== "1";
+const authEnforced = process.env.MANTA_AUTH_DISABLED !== "1";
 const boxAuth = await ensureAuth();
 const authEngine = createAuthEngine({ auth: boxAuth, enforce: authEnforced });
 // Rate limiter for the unauthenticated /auth/* surface (the brute-force target).
@@ -135,7 +136,7 @@ const authRateLimit = createRateLimiter({
 });
 if (!authEnforced) {
   console.warn(
-    "[auth] ⚠️  BUI_AUTH_DISABLED=1 — the box server is UNAUTHENTICATED. " +
+    "[auth] ⚠️  MANTA_AUTH_DISABLED=1 — the box server is UNAUTHENTICATED. " +
       "Anyone who can reach this port has full access. Unset it and pair a device.",
   );
 } else {
@@ -143,7 +144,7 @@ if (!authEnforced) {
 }
 
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
-// serves HTML pages from ~/.bui-mobile/pages/<subdomain>/index.html. Caddy
+// serves HTML pages from ~/.manta/pages/<subdomain>/index.html. Caddy
 // reverse-proxies *.bui.antoinedc.com to this port. Pages are registered by
 // the remote AI's global opencode `serve_page` tool → POST /api/serve-page.
 // See src/server/servePage.mjs + docs/.
@@ -227,8 +228,8 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
   push.firePush(evt);
 });
 
-const PORT = Number(process.env.BUI_MOBILE_PORT ?? 8787);
-const HOST = process.env.BUI_MOBILE_HOST ?? "0.0.0.0";
+const PORT = Number(process.env.MANTA_MOBILE_PORT ?? 8787);
+const HOST = process.env.MANTA_MOBILE_HOST ?? "0.0.0.0";
 
 // ---------- static file serving ----------
 
@@ -334,15 +335,15 @@ function readRawBody(req, limit = 64 * 1024) {
 
 // ---------- uploads ----------
 //
-// Layout matches the Electron path (~/.bui-uploads/<session>/<ts>/<file>) so
+// Layout matches the Electron path (~/.manta-uploads/<session>/<ts>/<file>) so
 // the existing cleanup conventions apply. Client sends one request per file
 // with raw bytes; filename + batch id come in headers. No multipart parser.
 
-const UPLOAD_ROOT = join(homedir(), ".bui-uploads");
+const UPLOAD_ROOT = join(homedir(), UPLOAD_DIRNAME);
 // Agent → device download root. The mobile mirror of the desktop outbox pull:
 // the device fetches a server-local file the AI dropped here. Constrained to
 // this dir so a crafted ?path= can't read arbitrary files off the box.
-const OUTBOX_ROOT = join(homedir(), ".bui-outbox");
+const OUTBOX_ROOT = join(homedir(), OUTBOX_DIRNAME);
 const SESSION_RE = /^[A-Za-z0-9._-]+$/;
 const BATCH_RE = /^[0-9]{6,20}$/;
 
@@ -392,7 +393,7 @@ async function handleUpload(req, res, url) {
   res.end(JSON.stringify({ path: target }));
 }
 
-// Agent → device download: stream a file from ~/.bui-outbox/ back to the
+// Agent → device download: stream a file from ~/.manta-outbox/ back to the
 // device as a browser download. Path-traversal guarded — the resolved path
 // must stay inside OUTBOX_ROOT. Deletes the source on success so the outbox
 // stays a one-shot mailbox, matching the desktop pullToDownloads semantics.
@@ -522,7 +523,7 @@ const server = createServer(async (req, res) => {
   // Every route below this line requires a valid box_token, EXCEPT the public
   // webhook delivery leg (/hook/<token>, self-authenticated via its own
   // token+HMAC). /auth/* handled above; OPTIONS handled above. When the gate is
-  // disabled (BUI_AUTH_DISABLED=1) authorize() allows everything.
+  // disabled (MANTA_AUTH_DISABLED=1) authorize() allows everything.
   {
     // The HTTP /events route can also be consumed as an EventSource (SSE) by a
     // non-WS client, which likewise can't set an Authorization header — so honor
@@ -827,7 +828,7 @@ const server = createServer(async (req, res) => {
   // GET    /api/serve-page        → {pages:[{subdomain, url, expiresAt, ...}]}
   // DELETE /api/serve-page?subdomain= → {deleted:bool}
   // Created by the remote AI's global opencode `serve_page` tool. Source files
-  // are copied into ~/.bui-mobile/pages/<subdomain>/index.html and served by the
+  // are copied into ~/.manta/pages/<subdomain>/index.html and served by the
   // in-process file server on 127.0.0.1:20080. Caddy reverse-proxies
   // *.bui.antoinedc.com to that port. Pages expire after TTL (default 24h).
   if (path === "/api/serve-page") {
@@ -1226,5 +1227,5 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`bui-mobile listening on http://${HOST}:${PORT}`);
+  console.log(`manta listening on http://${HOST}:${PORT}`);
 });

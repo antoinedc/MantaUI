@@ -5,7 +5,7 @@
 // secrets (🔑), and inbound webhooks (🪝). Each is the same shape:
 //
 //   - a `show*` toggle (opened by the composer toolbar or a mobile ⋯-sheet
-//     `bui-open-*` window CustomEvent),
+//     `manta-open-*` window CustomEvent),
 //   - a list of metadata + an error string,
 //   - a `refresh*` callback that re-fetches over the `schedule:*` / `secrets:*`
 //     / `webhook:*` window.api channels,
@@ -167,34 +167,34 @@ export function useSessionResources(sessionId: string): SessionResources {
 
   // Mobile entry point for the schedules card: the ⋯ sheet (outside ChatPanel)
   // dispatches a window CustomEvent rather than reaching into this component's
-  // state. Mirrors the bui-scroll-to-question bridge.
+  // state. Mirrors the manta-scroll-to-question bridge.
   useEffect(() => {
     const onOpenSchedules = (e: Event) => {
       const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
       if (detail?.sessionId === sessionId) setShowSchedules(true);
     };
-    window.addEventListener("bui-open-schedules", onOpenSchedules);
-    return () => window.removeEventListener("bui-open-schedules", onOpenSchedules);
+    window.addEventListener("manta-open-schedules", onOpenSchedules);
+    return () => window.removeEventListener("manta-open-schedules", onOpenSchedules);
   }, [sessionId]);
 
-  // Mobile entry point for the secrets card (mirror of bui-open-schedules).
+  // Mobile entry point for the secrets card (mirror of manta-open-schedules).
   useEffect(() => {
     const onOpenSecrets = (e: Event) => {
       const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
       if (detail?.sessionId === sessionId) setShowSecrets(true);
     };
-    window.addEventListener("bui-open-secrets", onOpenSecrets);
-    return () => window.removeEventListener("bui-open-secrets", onOpenSecrets);
+    window.addEventListener("manta-open-secrets", onOpenSecrets);
+    return () => window.removeEventListener("manta-open-secrets", onOpenSecrets);
   }, [sessionId]);
 
-  // Mobile entry point for the webhooks card (mirror of bui-open-schedules).
+  // Mobile entry point for the webhooks card (mirror of manta-open-schedules).
   useEffect(() => {
     const onOpenWebhooks = (e: Event) => {
       const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
       if (detail?.sessionId === sessionId) setShowWebhooks(true);
     };
-    window.addEventListener("bui-open-webhooks", onOpenWebhooks);
-    return () => window.removeEventListener("bui-open-webhooks", onOpenWebhooks);
+    window.addEventListener("manta-open-webhooks", onOpenWebhooks);
+    return () => window.removeEventListener("manta-open-webhooks", onOpenWebhooks);
   }, [sessionId]);
 
   return {

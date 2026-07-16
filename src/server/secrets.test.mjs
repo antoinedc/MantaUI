@@ -247,7 +247,7 @@ test("provideSecret resolves a project-scoped secret", async () => {
 // ----------------------------------------------------------------------------
 
 async function tmpStore() {
-  const dir = await mkdtemp(join(tmpdir(), "bui-secrets-test-"));
+  const dir = await mkdtemp(join(tmpdir(), "manta-secrets-test-"));
   return { dir, path: join(dir, "secrets.json") };
 }
 

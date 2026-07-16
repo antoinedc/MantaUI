@@ -2,7 +2,7 @@
 //
 // Two paths to the same outcome (server URL + 6-digit code → claim token):
 //   • Scan: tap "Scan QR code" → expo-camera CameraView decodes a
-//     bui://pair?server=…&code=… QR → decideScan → claim → Sessions.
+//     manta://pair?server=…&code=… QR → decideScan → claim → Sessions.
 //   • Manual: type the server URL + 6-digit code (the fallback for Expo Go on a
 //     simulator, which has no camera). Always available.
 //

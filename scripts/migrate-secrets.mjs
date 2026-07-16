@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // migrate-secrets.mjs — consolidate secrets scattered across credential files on
-// the box into the bui secret store (~/.bui-mobile/secrets.json), so agents can
+// the box into the manta secret store (~/.manta/secrets.json), so agents can
 // read them via the secret_list / secret_provide opencode tools.
 //
 // LEAK-SAFE BY DESIGN: this runs ON THE BOX, reads each source file locally, and
-// POSTs the value straight to bui-server (127.0.0.1:8787). The VALUE never passes
+// POSTs the value straight to manta-server (127.0.0.1:8787). The VALUE never passes
 // through the AI transcript — this script prints only KEY NAMES, scope, and the
 // SOURCE file, never the secret itself. Canonical credential files are left
 // untouched (the native CLIs still use them); this only COPIES the values.
@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { join, basename } from "node:path";
 
 const APPLY = process.argv.includes("--apply");
-const BUI_SERVER = process.env.BUI_SERVER_URL || "http://127.0.0.1:8787";
+const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 const HOME = homedir();
 
 // bui projects (tmux workspaces) → repo dir. Edit if your layout differs.
@@ -309,7 +309,7 @@ for (const g of [...groups.keys()].sort()) {
 
 if (!APPLY) {
   console.log("DRY RUN. Re-run with --apply to import these into the bui store.");
-  console.log("(Values are read locally and POSTed straight to bui-server — they");
+  console.log("(Values are read locally and POSTed straight to manta-server — they");
   console.log(" never appear in this output or any AI transcript.)");
   process.exit(0);
 }
@@ -318,7 +318,7 @@ console.log("Importing…");
 let ok = 0;
 for (const f of final) {
   try {
-    const res = await fetch(`${BUI_SERVER}/api/secrets`, {
+    const res = await fetch(`${MANTA_SERVER}/api/secrets`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({

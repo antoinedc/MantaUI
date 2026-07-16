@@ -16,7 +16,7 @@ export type ScanDecision =
 const INVALID_QR_MESSAGE = "That's not a bui pairing QR code.";
 
 /**
- * Decide what to do with a decoded QR string. A valid `bui://pair?...` (or the
+ * Decide what to do with a decoded QR string. A valid `manta://pair?...` (or the
  * deferred-deeplink https form) yields `{ kind: "pair", payload }`; anything
  * else (a URL to a website, a wifi QR, a truncated string) yields
  * `{ kind: "invalid" }` with a user-facing message. Pure — reuses the ported

@@ -184,7 +184,7 @@ export function useVoice(params: {
         case "new-session":
         case "open-settings":
           window.dispatchEvent(
-            new CustomEvent("bui-voice-app-action", { detail: action }),
+            new CustomEvent("manta-voice-app-action", { detail: action }),
           );
           return;
         case "unknown": {

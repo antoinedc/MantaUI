@@ -148,7 +148,7 @@ source's own event id is enough for our single-user case), per-hook scopes.
 Hooks live on **bui-server**, the always-on systemd process, so they survive
 Mac-app-close, chat navigation, and box reboot (systemd `enable-linger`).
 
-- **Store**: `~/.bui-mobile/webhooks.json`, atomic temp-rename writes (same
+- **Store**: `~/.manta/webhooks.json`, atomic temp-rename writes (same
   pattern as `schedule.json` / `local.mjs`). Shape:
   ```json
   { "hooks": [ {
@@ -245,7 +245,7 @@ management routes stay loopback-only in practice (desktop reaches them over the
 Modeled on `ScheduledTasksCard` / `SecretsCard` (pinned card above the composer,
 renders on desktop AND mobile with no mobile-CSS edits). Opened by a
 `🪝 webhooks` button in `SessionToolbar` (desktop) or a `Webhooks` item in the
-mobile `⋯` sheet (`SessionScreen.tsx` → `bui-open-webhooks` window CustomEvent).
+mobile `⋯` sheet (`SessionScreen.tsx` → `manta-open-webhooks` window CustomEvent).
 
 Card contents per hook: `label` · delivery URL (copy button) · signed/unsigned
 badge (unsigned = red) · last-delivered relative time + delivery count · a `✕`

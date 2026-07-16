@@ -1,7 +1,7 @@
 // install-lib.mjs — pure, testable helpers for the VPS self-install flow.
 //
 // The bash entrypoint (scripts/install.sh) and the pairing CLI
-// (scripts/bui-pair.mjs) both stay THIN: all the logic that is worth testing —
+// (scripts/manta-pair.mjs) both stay THIN: all the logic that is worth testing —
 // resolving the tarball URL / install home, waiting for the server health
 // endpoint, formatting the pairing block, and deciding whether an existing box
 // identity must be preserved — lives here as small pure functions with injected
@@ -11,13 +11,14 @@
 //   * The script NEVER generates box_id/box_token — src/server/auth.mjs owns
 //     identity (ensureAuth). This module only DETECTS an existing auth.json so
 //     a re-run preserves it (idempotency), it never writes one.
-//   * Overrides come from the environment: BUI_TARBALL_URL and BUI_HOME.
+//   * Overrides come from the environment: MANTA_TARBALL_URL and MANTA_HOME.
 //     Defaults are applied when unset/empty.
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { STATE_DIRNAME } from "../src/shared/paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (single source of truth, shared with the shell via `--print-config`)
@@ -30,18 +31,18 @@ export const DEFAULT_PORT = 8787;
 export const HEALTH_PATH = "/auth/status";
 
 // Default release host. The repo is private; CI publishes a versioned tarball
-// the installer downloads (no git clone on the VPS). `BUI_TARBALL_URL` overrides
+// the installer downloads (no git clone on the VPS). `MANTA_TARBALL_URL` overrides
 // the whole URL for local testing; otherwise we build it from host + version.
 export const DEFAULT_RELEASE_HOST = "https://bui.useronda.com";
 
-// Where the box lives once installed. `~/.bui-mobile/` (auth.json + config.json)
-// is deliberately OUTSIDE this dir so an upgrade that replaces BUI_HOME never
-// touches box identity. `BUI_HOME` overrides the code location only.
+// Where the box lives once installed. `~/.manta/` (auth.json + config.json)
+// is deliberately OUTSIDE this dir so an upgrade that replaces MANTA_HOME never
+// touches box identity. `MANTA_HOME` overrides the code location only.
 export const DEFAULT_HOME_DIRNAME = "bui";
 
 // Persisted box identity — the file ensureAuth() writes on first server run.
 // Its presence is the idempotency signal: "identity already exists, preserve it."
-export const AUTH_DIRNAME = ".bui-mobile";
+export const AUTH_DIRNAME = STATE_DIRNAME;
 export const AUTH_FILENAME = "auth.json";
 
 // ---------------------------------------------------------------------------
@@ -50,7 +51,7 @@ export const AUTH_FILENAME = "auth.json";
 
 // Read a var from an env-like object, treating "" the same as unset so an
 // exported-but-empty override falls back to the default (a common shell
-// footgun: `BUI_HOME= curl ... | bash`).
+// footgun: `MANTA_HOME= curl ... | bash`).
 function envVal(env, key) {
   const v = env?.[key];
   return typeof v === "string" && v !== "" ? v : undefined;
@@ -61,23 +62,23 @@ function envVal(env, key) {
  * Injectable `home` for tests (defaults to os.homedir()).
  *
  * Returns:
- *   buiHome      — where the code is unpacked (BUI_HOME || ~/bui)
- *   authDir      — ~/.bui-mobile (never inside buiHome)
- *   authFile     — ~/.bui-mobile/auth.json (idempotency probe target)
- *   tarballUrl   — explicit BUI_TARBALL_URL, else null (resolved per-version)
- *   releaseHost  — BUI_RELEASE_HOST || DEFAULT_RELEASE_HOST
- *   port         — BUI_MOBILE_PORT || DEFAULT_PORT
+ *   buiHome      — where the code is unpacked (MANTA_HOME || ~/bui)
+ *   authDir      — ~/.manta (never inside buiHome)
+ *   authFile     — ~/.manta/auth.json (idempotency probe target)
+ *   tarballUrl   — explicit MANTA_TARBALL_URL, else null (resolved per-version)
+ *   releaseHost  — MANTA_RELEASE_HOST || DEFAULT_RELEASE_HOST
+ *   port         — MANTA_MOBILE_PORT || DEFAULT_PORT
  *   healthUrl    — http://127.0.0.1:<port>/auth/status
  */
 export function resolveConfig({ env = process.env, home = homedir() } = {}) {
-  const buiHome = envVal(env, "BUI_HOME") ?? join(home, DEFAULT_HOME_DIRNAME);
+  const buiHome = envVal(env, "MANTA_HOME") ?? join(home, DEFAULT_HOME_DIRNAME);
   const authDir = join(home, AUTH_DIRNAME);
   const authFile = join(authDir, AUTH_FILENAME);
-  const tarballUrl = envVal(env, "BUI_TARBALL_URL") ?? null;
+  const tarballUrl = envVal(env, "MANTA_TARBALL_URL") ?? null;
   const releaseHost = stripTrailingSlash(
-    envVal(env, "BUI_RELEASE_HOST") ?? DEFAULT_RELEASE_HOST,
+    envVal(env, "MANTA_RELEASE_HOST") ?? DEFAULT_RELEASE_HOST,
   );
-  const port = parsePort(envVal(env, "BUI_MOBILE_PORT")) ?? DEFAULT_PORT;
+  const port = parsePort(envVal(env, "MANTA_MOBILE_PORT")) ?? DEFAULT_PORT;
   return {
     buiHome,
     authDir,
@@ -103,7 +104,7 @@ export function parsePort(value) {
 
 /**
  * Resolve the tarball download URL.
- *   - If BUI_TARBALL_URL is set (via resolveConfig → cfg.tarballUrl), use it
+ *   - If MANTA_TARBALL_URL is set (via resolveConfig → cfg.tarballUrl), use it
  *     verbatim. This is the local-test / mirror override.
  *   - Otherwise build `<releaseHost>/releases/bui-<version>.tar.gz`.
  *
@@ -137,7 +138,7 @@ export function isValidVersion(version) {
  *
  * Returns { preserveIdentity, authFile, reason }:
  *   preserveIdentity=true  → auth.json present; the server must NOT regenerate
- *                            it and the installer must not delete ~/.bui-mobile.
+ *                            it and the installer must not delete ~/.manta.
  *   preserveIdentity=false → fresh box; first server start mints identity.
  *
  * This function NEVER writes anything — it only reports. The single source of
@@ -285,11 +286,11 @@ export function formatExpiry(expiresAt) {
 //
 // install.sh calls:
 //   eval "$(node scripts/install-lib.mjs print-config --version <v>)"
-// which sets BUI_HOME / BUI_AUTH_FILE / BUI_TARBALL_URL / BUI_PORT in the shell,
+// which sets MANTA_HOME / MANTA_AUTH_FILE / MANTA_TARBALL_URL / MANTA_PORT in the shell,
 // and:
 //   node scripts/install-lib.mjs check-identity
 // which prints "preserve" or "fresh" (exit 0) so the shell knows whether to
-// keep ~/.bui-mobile untouched.
+// keep ~/.manta untouched.
 
 // Emit KEY=VALUE lines the shell can `eval`. Values are single-quoted so paths
 // with spaces survive; embedded single quotes are escaped the POSIX way.
@@ -300,12 +301,12 @@ export function renderShellConfig(cfg, { version } = {}) {
     version,
   });
   const kv = {
-    BUI_HOME: cfg.buiHome,
-    BUI_AUTH_DIR: cfg.authDir,
-    BUI_AUTH_FILE: cfg.authFile,
-    BUI_TARBALL_URL: tarball,
-    BUI_PORT: String(cfg.port),
-    BUI_HEALTH_URL: cfg.healthUrl,
+    MANTA_HOME: cfg.buiHome,
+    MANTA_AUTH_DIR: cfg.authDir,
+    MANTA_AUTH_FILE: cfg.authFile,
+    MANTA_TARBALL_URL: tarball,
+    MANTA_PORT: String(cfg.port),
+    MANTA_HEALTH_URL: cfg.healthUrl,
   };
   return Object.entries(kv)
     .map(([k, v]) => `${k}=${shellQuote(String(v))}`)

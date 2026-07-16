@@ -20,7 +20,7 @@
 //     client (via the injectable local-fetch leg).
 //
 // AUTH: reuses the box identity minted by `src/server/auth.mjs`
-// (`~/.bui-mobile/auth.json` → { box_id, box_token }). We do NOT invent a new
+// (`~/.manta/auth.json` → { box_id, box_token }). We do NOT invent a new
 // identity; `loadAuth()` is the single source, and the handshake presents the
 // same `Authorization: Bearer <box_token>` + `x-box-id: <box_id>` the relay's
 // `parseHandshake` expects.
@@ -212,7 +212,7 @@ function makeDefaultLocalFetch(localBase) {
  * @param {string} [opts.relayUrl]   relay base ws/wss URL (default DEFAULT_RELAY_URL / env RELAY_URL)
  * @param {string} [opts.localBase]  local box server base (default DEFAULT_LOCAL_BASE)
  * @param {{box_id:string,box_token:string}} [opts.auth]
- *   box identity; defaults to loadAuth() from ~/.bui-mobile/auth.json.
+ *   box identity; defaults to loadAuth() from ~/.manta/auth.json.
  * @param {(url:string,o:{headers:object})=>Promise<Transport>} [opts.connect]
  *   INJECTABLE outbound-WS opener. Resolves with a transport once connected,
  *   rejects if the connection fails. Defaults to the real `ws` adapter.
@@ -242,7 +242,7 @@ export function createRelayAgent(opts = {}) {
   if (!auth || !isValidToken(auth.box_id) || !isValidToken(auth.box_token)) {
     throw new Error(
       "createRelayAgent: valid { box_id, box_token } required " +
-        "(run the box server once to mint ~/.bui-mobile/auth.json, or pass opts.auth)",
+        "(run the box server once to mint ~/.manta/auth.json, or pass opts.auth)",
     );
   }
   const localFetch = opts.localFetch || makeDefaultLocalFetch(localBase);

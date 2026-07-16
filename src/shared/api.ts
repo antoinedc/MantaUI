@@ -143,7 +143,7 @@ export interface Api {
   openExternal(url: string): Promise<void>;
 
   // Agent → laptop file push (outbox). `onAgentFileReady` fires when a file
-  // appears in the remote ~/.bui-outbox/. `agentPullFile` pulls it to the
+  // appears in the remote ~/.manta-outbox/. `agentPullFile` pulls it to the
   // downloads dir (used by the require-confirm toast's Save button); returns
   // the saved local path. `revealInFolder` opens Finder at the saved file.
   onAgentFileReady(cb: (ev: AgentFileReady) => void): () => void;

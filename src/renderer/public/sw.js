@@ -103,7 +103,7 @@ self.addEventListener("notificationclick", (event) => {
           if ("focus" in client) {
             client.focus();
             if (sessionId && "postMessage" in client) {
-              client.postMessage({ type: "bui-open-session", sessionId });
+              client.postMessage({ type: "manta-open-session", sessionId });
             }
             return undefined;
           }

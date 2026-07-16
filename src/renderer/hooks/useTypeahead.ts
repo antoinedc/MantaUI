@@ -32,13 +32,13 @@ import type {
 // bui-local slash commands. These are handled in the renderer (not forwarded
 // to opencode's /command endpoint) because opencode doesn't ship equivalents
 // — they're terminal-TUI conventions users expect to "just work".
-const BUI_BUILTIN_COMMANDS = [
+const MANTA_BUILTIN_COMMANDS = [
   { name: "clear", description: "Start a fresh chat in this window" },
   { name: "fork", description: "Copy this session's history into a new window" },
   { name: "compact", description: "Summarize to free context" },
   { name: "help", description: "Show available commands" },
 ] as const;
-const BUI_BUILTIN_NAMES = new Set(BUI_BUILTIN_COMMANDS.map((c) => c.name));
+const MANTA_BUILTIN_NAMES = new Set(MANTA_BUILTIN_COMMANDS.map((c) => c.name));
 
 export type Typeahead = {
   // Popup state — null when closed.
@@ -195,7 +195,7 @@ export function useTypeahead(params: {
     if (!typeahead) return [];
     const q = typeahead.query.toLowerCase();
     if (typeahead.mode === "command") {
-      const builtins = filterCommands([...BUI_BUILTIN_COMMANDS], q).map((c) => ({
+      const builtins = filterCommands([...MANTA_BUILTIN_COMMANDS], q).map((c) => ({
         kind: "command" as const,
         key: c.name,
         primary: `/${c.name}`,
@@ -203,7 +203,7 @@ export function useTypeahead(params: {
       }));
       const ocRows = dedupeAgainstBuiltins(
         filterCommands(commands ?? [], q),
-        BUI_BUILTIN_NAMES,
+        MANTA_BUILTIN_NAMES,
       ).map((c) => ({
         kind: "command" as const,
         key: c.name,
