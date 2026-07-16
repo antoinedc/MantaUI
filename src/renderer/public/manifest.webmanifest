@@ -4,8 +4,8 @@
   "description": "Remote claude / opencode over tmux",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0e0f12",
-  "theme_color": "#0e0f12",
+  "background_color": "#0B1020",
+  "theme_color": "#0B1020",
   "start_url": ".",
   "scope": ".",
   "icons": [

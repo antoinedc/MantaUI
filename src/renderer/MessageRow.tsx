@@ -111,7 +111,7 @@ export const ActiveTodos = memo(function ActiveTodos({ todos }: { todos: Array<R
           textCls = "text-text font-semibold";
         } else if (isCompleted) {
           icon = "✓";
-          iconColor = "#22c55e";
+          iconColor = "#22C79A";
           textCls = "text-text-faint";
         } else if (isCancelled) {
           icon = "⊘";

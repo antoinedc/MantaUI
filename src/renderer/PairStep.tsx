@@ -27,8 +27,8 @@ import { useStore } from "./store";
 //   onSkip   — user chose "Skip setup"; the shell persists onboardingSkipped
 //              and drops to the normal app (handled by the shell's skip()).
 
-const ACCENT = "#7c9cff"; // matches Onboarding.tsx + the app's accent token
-const DANGER = "#f87171"; // inline error text (no dedicated tailwind token)
+const ACCENT = "#5A88FF"; // matches Onboarding.tsx + the app's accent token
+const DANGER = "#FF7A88"; // inline error text (no dedicated tailwind token)
 
 export function PairStep({
   onPaired,

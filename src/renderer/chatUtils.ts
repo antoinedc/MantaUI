@@ -145,10 +145,10 @@ export function formatClockTime(ms: number | null | undefined): string {
 }
 
 export function ctxStageColor(pct: number): string {
-  if (pct < 50) return "#22c55e"; // green-500
-  if (pct < 75) return "#eab308"; // yellow-500
-  if (pct < 90) return "#f97316"; // orange-500
-  return "#ef4444"; // red-500
+  if (pct < 50) return "#22C79A"; // green-500
+  if (pct < 75) return "#F7C15A"; // yellow-500
+  if (pct < 90) return "#F0A934"; // orange-500
+  return "#F0505F"; // red-500
 }
 
 // ===== Streamed-text flush boundaries =====

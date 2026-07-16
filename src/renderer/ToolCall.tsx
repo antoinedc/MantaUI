@@ -58,13 +58,13 @@ export function formatFileDiff(additions: number, deletions: number): React.Reac
 // blink grey while running/pending, turn green on completion, red on error.
 export function bulletStyle(part: OpencodePart): { color: string; pulse: boolean } {
   if (part.type !== "tool") {
-    return { color: "#6b7280", pulse: false };           // text/other: grey
+    return { color: "#5C6578", pulse: false };           // text/other: grey
   }
   const status = String(((part as Record<string, unknown>).state as { status?: string } | undefined)?.status ?? "");
-  if (status === "completed") return { color: "#22c55e", pulse: false }; // green
-  if (status === "error") return { color: "#ef4444", pulse: false };     // red
+  if (status === "completed") return { color: "#22C79A", pulse: false }; // green
+  if (status === "error") return { color: "#F0505F", pulse: false };     // red
   // "running" / "pending" / unknown-but-active → blinking grey
-  return { color: "#6b7280", pulse: true };
+  return { color: "#5C6578", pulse: true };
 }
 
 // Memoized so re-renders of a memo'd MessageRow whose parts haven't
@@ -355,10 +355,10 @@ function TaskBody({ state }: { state: ToolState }) {
 
   const statusColor =
     effectiveStatus === "completed"
-      ? "#22c55e"
+      ? "#22C79A"
       : effectiveStatus === "error"
-        ? "#ef4444"
-        : "#6b7280"; // running / pending / unknown
+        ? "#F0505F"
+        : "#5C6578"; // running / pending / unknown
   const statusPulse = effectiveStatus === "running" || effectiveStatus === "pending";
 
   const onToggle = ctx ? () => ctx.toggle(info.childSessionId) : null;
@@ -416,7 +416,7 @@ function TaskBody({ state }: { state: ToolState }) {
                 <span>·</span>
                 {/* Inline hex matches `CACHE_WRITE_COLOR` / the truncation
                     badge elsewhere; the theme has no `warning` token. */}
-                <span style={{ color: "#f59e0b" }}>⚠ truncated</span>
+                <span style={{ color: "#F0A934" }}>⚠ truncated</span>
               </>
             )}
           </div>
@@ -433,7 +433,7 @@ function TaskBody({ state }: { state: ToolState }) {
           {childFetch === "error" && !childMsgs && (
             // Inline hex — theme has no `error` token; matches bulletStyle()'s
             // red used for failed tool calls.
-            <div style={{ color: "#ef4444" }}>Failed to load subagent transcript.</div>
+            <div style={{ color: "#F0505F" }}>Failed to load subagent transcript.</div>
           )}
           {childMsgs && childMsgs.length > 0 && (
             <div className="flex flex-col gap-2">

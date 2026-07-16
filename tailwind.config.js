@@ -4,10 +4,10 @@ export default {
   theme: {
     extend: {
       colors: {
-        bg: { DEFAULT: "#0e0f12", elev: "#15171c", soft: "#1b1e25" },
-        border: { DEFAULT: "#262932", strong: "#383c47" },
-        text: { DEFAULT: "#e6e7ea", muted: "#9aa0aa", faint: "#6b7280" },
-        accent: { DEFAULT: "#7c9cff", soft: "#3a4a8a" },
+        bg: { DEFAULT: "#0B1020", elev: "#12182F", soft: "#171F3A" },
+        border: { DEFAULT: "#253055", strong: "#33406B" },
+        text: { DEFAULT: "#F8FAFC", muted: "#A7B1C4", faint: "#5C6578" },
+        accent: { DEFAULT: "#5A88FF", soft: "#1740AE" },
       },
       fontFamily: {
         mono: ["JetBrains Mono", "SF Mono", "Menlo", "Consolas", "monospace"],
