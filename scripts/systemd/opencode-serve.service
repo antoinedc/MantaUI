@@ -1,0 +1,40 @@
+# opencode-serve.service — systemd --user unit for the opencode chat backend
+# (BET-153).
+#
+# Pairs with scripts/systemd/manta-server.service: that unit serves the box
+# HTTP API (mobile / web), this unit serves the opencode chat backend on
+# loopback 127.0.0.1:4096. The two live in the same `systemctl --user`
+# session and have NO ordering dependency — manta-server's opencode.mjs HTTP
+# proxy just talks to 127.0.0.1:4096 regardless of which unit binds it.
+#
+# The installer (scripts/install.sh step E) substitutes the @@…@@ placeholders
+# and writes the result to ~/.config/systemd/user/opencode-serve.service,
+# then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now opencode-serve
+# A nohup fallback (logging to $AUTH_DIR/opencode.log) kicks in on hosts
+# without systemctl, mirroring the manta-server fallback.
+#
+# Bind is 127.0.0.1 on purpose: the chat backend is NOT exposed directly.
+# Everything reaches it through manta-server's auth-gated reverse proxy,
+# which itself is loopback-only. The chat service needs Anthropic OAuth
+# (the `opencode-claude-auth@latest` plugin seeded by install.sh step C),
+# which it picks up from the user's `~/.claude/.credentials.json` — the
+# only auth prerequisite the installer assumes.
+
+[Unit]
+Description=opencode server (manta chat backend)
+Documentation=https://github.com/antoinedc/MantaUI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@@OPENCODE_BIN@@ serve --port 4096 --hostname 127.0.0.1
+Restart=on-failure
+RestartSec=2
+# Give opencode a moment to flush pending SSE frames on stop before SIGKILL.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

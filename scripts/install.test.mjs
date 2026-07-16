@@ -11,6 +11,10 @@ import {
   formatPairingOutput,
   formatExpiry,
   renderShellConfig,
+  stripJsoncLineComments,
+  mergeOpencodeConfig,
+  renderSystemdUnit,
+  OPENCODE_CLAUDE_AUTH_PLUGIN,
   DEFAULT_PORT,
   DEFAULT_RELEASE_HOST,
 } from "./install-lib.mjs";
@@ -309,4 +313,217 @@ test("renderShellConfig single-quotes values with spaces safely", () => {
   const cfg = resolveConfig({ env: { MANTA_HOME: "/opt/my bui" }, home: HOME });
   const out = renderShellConfig(cfg, { version: "0.0.1" });
   assert.match(out, /MANTA_HOME='\/opt\/my bui'/);
+});
+
+// ----------------------------------------------------------------------------
+// stripJsoncLineComments — keeps // inside strings intact
+// ----------------------------------------------------------------------------
+
+test("stripJsoncLineComments removes line comments, preserves strings", () => {
+  const src = `{
+    // drop this
+    "model": "claude-sonnet-4-6", // also a comment
+    "note": "http://example.com", // url must survive
+    "label": "// not a comment"
+  }`;
+  const out = stripJsoncLineComments(src);
+  assert.doesNotMatch(out, /drop this/);
+  assert.doesNotMatch(out, /also a comment/);
+  assert.match(out, /"note": "http:\/\/example\.com"/);
+  assert.match(out, /"label": "\/\/ not a comment"/);
+});
+
+// ----------------------------------------------------------------------------
+// mergeOpencodeConfig — MERGE, never clobber; idempotent; corrupt-safe
+// ----------------------------------------------------------------------------
+
+test("mergeOpencodeConfig on empty input seeds plugin only", () => {
+  const { text, corrupt, plugin } = mergeOpencodeConfig("");
+  assert.equal(corrupt, false, "empty input is not corrupt");
+  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  const parsed = JSON.parse(text);
+  assert.deepEqual(parsed.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  assert.equal(parsed.theme, undefined);
+});
+
+test("mergeOpencodeConfig preserves unrelated keys (model, theme, provider)", () => {
+  const before = JSON.stringify(
+    {
+      $schema: "https://opencode.ai/config.json",
+      theme: "system",
+      model: "anthropic/claude-sonnet-4-6",
+      provider: {
+        voska: {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Voska AI",
+          options: { baseURL: "https://api.example.com/v1", apiKey: "sk-test" },
+          models: {},
+        },
+      },
+    },
+    null,
+    2,
+  );
+  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
+  assert.equal(corrupt, false);
+  const after = JSON.parse(text);
+  assert.equal(after.theme, "system");
+  assert.equal(after.model, "anthropic/claude-sonnet-4-6");
+  assert.equal(after.$schema, "https://opencode.ai/config.json");
+  assert.equal(after.provider.voska.options.baseURL, "https://api.example.com/v1");
+  assert.equal(after.provider.voska.options.apiKey, "sk-test");
+  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig is byte-identical when plugin already present", () => {
+  const before = JSON.stringify(
+    { theme: "system", plugin: [OPENCODE_CLAUDE_AUTH_PLUGIN] },
+    null,
+    2,
+  ) + "\n";
+  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
+  assert.equal(corrupt, false);
+  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  assert.equal(text, before);
+});
+
+test("mergeOpencodeConfig appends without duplicating an existing match", () => {
+  // The auth plugin is already present (1st slot); the new entry is appended.
+  const before = JSON.stringify(
+    { plugin: [OPENCODE_CLAUDE_AUTH_PLUGIN, "some-other-plugin"] },
+    null,
+    2,
+  ) + "\n";
+  const { text, plugin } = mergeOpencodeConfig(before);
+  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN, "some-other-plugin"]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN, "some-other-plugin"]);
+});
+
+test("mergeOpencodeConfig appends the auth plugin at the END when missing", () => {
+  // Order-preserving: existing entries stay where they were; the new one is appended.
+  const before = JSON.stringify(
+    { plugin: ["some-other-plugin"] },
+    null,
+    2,
+  ) + "\n";
+  const { text, plugin } = mergeOpencodeConfig(before);
+  assert.deepEqual(plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig strips JSONC comments and merges plugin", () => {
+  const jsonc = `{
+    // top-level comment
+    "theme": "system", // inline
+    "plugin": ["already-there"]
+  }`;
+  const { text, corrupt, plugin } = mergeOpencodeConfig(jsonc);
+  assert.equal(corrupt, false);
+  const after = JSON.parse(text);
+  assert.equal(after.theme, "system");
+  assert.deepEqual(plugin, ["already-there", OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig flags corrupt JSONC and starts from {}", () => {
+  const { text, corrupt, plugin } = mergeOpencodeConfig("{ broken: not-json,");
+  assert.equal(corrupt, true);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig coerces non-object root to {} + corrupt", () => {
+  const { text, corrupt } = mergeOpencodeConfig("[1,2,3]");
+  assert.equal(corrupt, true);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig tolerates a malformed plugin array (drops non-strings)", () => {
+  const before = JSON.stringify(
+    { plugin: ["keep-me", null, 42, { junk: true }, "also-keep"] },
+    null,
+    2,
+  );
+  const { plugin } = mergeOpencodeConfig(before);
+  // Non-strings are dropped; the new auth plugin is appended.
+  assert.deepEqual(plugin, ["keep-me", "also-keep", OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig is null/undefined safe (treated as empty)", () => {
+  const a = mergeOpencodeConfig(null);
+  const b = mergeOpencodeConfig(undefined);
+  assert.equal(a.corrupt, false);
+  assert.equal(b.corrupt, false);
+  assert.deepEqual(a.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  assert.deepEqual(b.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+// ----------------------------------------------------------------------------
+// renderSystemdUnit — placeholder substitution used by install.sh
+// ----------------------------------------------------------------------------
+
+test("renderSystemdUnit substitutes placeholders verbatim", () => {
+  const tpl = `ExecStart=@@OPENCODE_BIN@@ serve --port @@OPENCODE_PORT@@
+WorkingDirectory=@@MANTA_HOME@@
+`;
+  const out = renderSystemdUnit(tpl, {
+    OPENCODE_BIN: "/usr/local/bin/opencode",
+    OPENCODE_PORT: "4096",
+    MANTA_HOME: "/home/dev/manta",
+  });
+  assert.match(out, /ExecStart=\/usr\/local\/bin\/opencode serve --port 4096/);
+  assert.match(out, /WorkingDirectory=\/home\/dev\/manta/);
+  assert.doesNotMatch(out, /@@/);
+});
+
+test("renderSystemdUnit refuses values containing the token (loop guard)", () => {
+  assert.throws(
+    () =>
+      renderSystemdUnit("X=@@A@@", {
+        A: "x@@A@@y",
+      }),
+    /contains the token/,
+  );
+});
+
+test("renderSystemdUnit rejects non-string template / non-object placeholders", () => {
+  assert.throws(() => renderSystemdUnit(null, {}), /must be a string/);
+  assert.throws(() => renderSystemdUnit("X=@@A@@", null), /placeholders object required/);
+});
+
+// ----------------------------------------------------------------------------
+// waitForHealth — acceptAnyStatus option (default true, opt-in strict mode)
+// ----------------------------------------------------------------------------
+
+test("waitForHealth acceptAnyStatus=false requires 2xx/3xx (rejects 401)", async () => {
+  const res = await waitForHealth("http://127.0.0.1:4096/", {
+    maxAttempts: 3,
+    acceptAnyStatus: false,
+    fetchFn: async () => ({ status: 401 }),
+    sleep: async () => {},
+  });
+  assert.equal(res.ok, false, "401 must NOT count as healthy when acceptAnyStatus=false");
+  assert.equal(res.attempts, 3);
+  assert.match(res.error, /non-2xx status 401/);
+});
+
+test("waitForHealth acceptAnyStatus=false accepts a 200", async () => {
+  const res = await waitForHealth("http://127.0.0.1:4096/", {
+    acceptAnyStatus: false,
+    fetchFn: async () => ({ status: 200 }),
+    sleep: async () => {},
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.status, 200);
+});
+
+test("waitForHealth acceptAnyStatus=true (default) accepts 404 as healthy", async () => {
+  const res = await waitForHealth("http://127.0.0.1:4096/", {
+    fetchFn: async () => ({ status: 404 }),
+    sleep: async () => {},
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.status, 404);
 });
