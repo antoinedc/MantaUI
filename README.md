@@ -48,7 +48,7 @@ the onboarding flow:
 
 1. **Pair with your box.** Run the self-install script on your Linux box:
    ```bash
-   curl -fsSL https://app.mantaui.com/install.sh | bash
+   curl -fsSL https://mantaui.com/install.sh | bash
    ```
    It installs bui-server, starts it, and prints a 6-digit pairing code.
    Enter the code in the Manta onboarding screen (along with your box's URL).
@@ -113,7 +113,7 @@ pairing flow. On a fresh Linux VPS, one command installs and starts it and
 prints a 6-digit pairing code to enter in the desktop app:
 
 ```bash
-curl -fsSL https://app.mantaui.com/install.sh | bash
+curl -fsSL https://mantaui.com/install.sh | bash
 ```
 
 The installer downloads a pre-built release tarball (no dev toolchain needed on
