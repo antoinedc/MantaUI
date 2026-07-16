@@ -342,6 +342,41 @@ function readRawBody(req, limit = 64 * 1024) {
   });
 }
 
+// ---------- tiny HTTP helpers ----------
+//
+// respondJson — write a JSON response (the most common response shape in this
+// file). Pulling it out eliminates a verbatim writeHead+end boilerplate that
+// the duplication-gate flagged between /auth/pair and /relay/status
+// (10-27 line clones) — every JSON-shaped handler in this file now goes
+// through here. Status code + body shape stay identical to the inline
+// versions they replace.
+//
+// requireLoopback — gate a handler on the loopback-direct check used by
+// /auth/pair and /relay/status. Returns true (proceed) when the request is
+// loopback-direct; on a non-loopback caller it writes the standard 403 and
+// returns false, so the caller MUST `return` immediately. The error message
+// is passed in so each endpoint can phrase the rejection for its own
+// surface (a pairing-code mint vs. a relay-status read need different hints).
+// The check itself is unchanged (isLocalDirectRequest in auth.mjs) — this
+// is a pure refactor, the loopback gate's semantics are preserved bit-for-bit.
+function respondJson(res, status, obj) {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(obj));
+}
+
+function requireLoopback(req, res, errorMessage) {
+  if (
+    isLocalDirectRequest({
+      remoteAddress: req.socket?.remoteAddress,
+      headers: req.headers,
+    })
+  ) {
+    return true;
+  }
+  respondJson(res, 403, { error: errorMessage });
+  return false;
+}
+
 // ---------- uploads ----------
 //
 // Layout matches the Electron path (~/.manta-uploads/<session>/<ts>/<file>) so
@@ -471,8 +506,7 @@ const server = createServer(async (req, res) => {
       req.socket?.remoteAddress ||
       "unknown";
     if (!authRateLimit(ip)) {
-      res.writeHead(429, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "rate limited" }));
+      respondJson(res, 429, { error: "rate limited" });
       return;
     }
     try {
@@ -481,49 +515,38 @@ const server = createServer(async (req, res) => {
         // Remote-reachable minting would let anyone claim the box_token in two
         // requests. Loopback alone is insufficient — cloudflared proxies public
         // traffic from 127.0.0.1 — so also reject proxy-injected forwarding
-        // headers. See isLocalDirectRequest in auth.mjs.
+        // headers. See isLocalDirectRequest in auth.mjs (reused via
+        // requireLoopback below).
         if (
-          !isLocalDirectRequest({
-            remoteAddress: req.socket?.remoteAddress,
-            headers: req.headers,
-          })
+          !requireLoopback(
+            req,
+            res,
+            "pairing codes can only be minted from the box itself (run `bui pair` locally)",
+          )
         ) {
-          res.writeHead(403, { "content-type": "application/json" });
-          res.end(
-            JSON.stringify({
-              error: "pairing codes can only be minted from the box itself (run `bui pair` locally)",
-            }),
-          );
           return;
         }
         const result = authEngine.pair();
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            pairing_code: result.pairing_code,
-            box_id: result.box_id,
-            expiresAt: result.expiresAt,
-          }),
-        );
+        respondJson(res, 200, {
+          pairing_code: result.pairing_code,
+          box_id: result.box_id,
+          expiresAt: result.expiresAt,
+        });
         return;
       }
       if (req.method === "POST" && path === "/auth/claim") {
         const body = await readJsonBody(req);
         const result = authEngine.claim({ pairing_code: body?.pairing_code });
         if (!result.ok) {
-          res.writeHead(result.status ?? 400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: result.error }));
+          respondJson(res, result.status ?? 400, { error: result.error });
           return;
         }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ box_token: result.box_token, box_id: result.box_id }));
+        respondJson(res, 200, { box_token: result.box_token, box_id: result.box_id });
         return;
       }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -545,24 +568,14 @@ const server = createServer(async (req, res) => {
   //                treats anything-but-connected as "not yet" and re-polls.
   if (req.method === "GET" && path === "/relay/status") {
     if (
-      !isLocalDirectRequest({
-        remoteAddress: req.socket?.remoteAddress,
-        headers: req.headers,
-      })
+      !requireLoopback(req, res, "relay status is loopback-only (run this from the box)")
     ) {
-      res.writeHead(403, { "content-type": "application/json" });
-      res.end(
-        JSON.stringify({
-          error: "relay status is loopback-only (run this from the box)",
-        }),
-      );
       return;
     }
     const cfg = await local.configGet();
     const enabled = shouldStartRelayAgent(cfg);
     const connected = relayAgent ? relayAgent.status() === "connected" : false;
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ enabled, connected }));
+    respondJson(res, 200, { enabled, connected });
     return;
   }
 

@@ -145,6 +145,62 @@ function makeClock() {
 }
 
 // ---------------------------------------------------------------------------
+// Test-fixture helpers (BET-155 — dedupe)
+//
+// makeStubAgent — the canonical agent-fixture setup used by almost every test
+// below: a fake relay endpoint, a manual clock, and an agent wired to both
+// with silent log/warn. The duplication-gate flagged this 8-line setup as a
+// 12+ line intra-file clone repeated across many tests; folding it into a
+// helper drops each test back to a 3-line setup and removes the clone.
+//
+// Tests that need to override a knob (`backoff`, `localFetch`, `failFirst`)
+// pass it through `opts`; everything else stays identical so a reader
+// scanning tests sees the SAME shape in every "agent does X" test. `failFirst`
+// is a first-class key (passed to makeFakeRelay) because that's how the
+// reconnect tests have always described the dial-failure contract.
+//
+// captureFetchHeaders — wraps `body()` with a stubbed global fetch that
+// captures the `init?.headers` of every outbound call, then restores the
+// real fetch in a `finally` so a thrown assertion can't leak the stub to
+// sibling tests. The two makeDefaultLocalFetch tests use it; the 8-line
+// stub/restore preamble was an intra-file clone of itself.
+function makeStubAgent(opts = {}) {
+  const { failFirst, ...agentOpts } = opts;
+  const relay = makeFakeRelay(
+    failFirst != null ? { failFirst } : undefined,
+  );
+  const clock = makeClock();
+  const agent = createRelayAgent({
+    auth: AUTH,
+    connect: relay.connect,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    log: silent,
+    warn: silent,
+    ...agentOpts,
+  });
+  return { relay, clock, agent };
+}
+
+async function captureFetchHeaders(body) {
+  const seen = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url, headers: init?.headers });
+    return {
+      status: 200,
+      headers: new Map(),
+      text: async () => "",
+    };
+  };
+  try {
+    return { seen, result: await body() };
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // pure: config surface + backoff parity
 // ---------------------------------------------------------------------------
 
@@ -188,16 +244,7 @@ test("backoff mirror full-jitter stays within [0, capped] and uses injected rng"
 // ---------------------------------------------------------------------------
 
 test("dials out and authenticates with the box_id + box_token handshake", async () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { relay, clock, agent } = makeStubAgent();
 
   await agent.start();
 
@@ -227,19 +274,9 @@ test("reconnects with increasing backoff on repeated dial failures and never giv
   // The first 3 dial attempts fail; the 4th succeeds. Backoff must be armed
   // after each failure with a strictly non-decreasing (growing) delay, and the
   // loop must never stop retrying on its own.
-  const relay = makeFakeRelay({ failFirst: 3 });
-  const clock = makeClock();
   // Deterministic delays: no jitter so growth is observable.
   const backoff = createBackoff({ base: 100, max: 10000, jitter: false });
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    backoff,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { relay, clock, agent } = makeStubAgent({ failFirst: 3, backoff });
 
   await agent.start(); // attempt 1 → fails, arms a reconnect timer
   assert.equal(agent.isConnected(), false);
@@ -266,18 +303,8 @@ test("reconnects with increasing backoff on repeated dial failures and never giv
 });
 
 test("a drop after a successful connect triggers reconnect (tunnel resurrection)", async () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
   const backoff = createBackoff({ base: 50, max: 1000, jitter: false });
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    backoff,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { relay, clock, agent } = makeStubAgent({ backoff });
 
   await agent.start();
   assert.equal(agent.isConnected(), true);
@@ -302,8 +329,6 @@ test("a drop after a successful connect triggers reconnect (tunnel resurrection)
 // ---------------------------------------------------------------------------
 
 test("proxies a relay REQUEST to the local box server and streams the RESPONSE back", async () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
   const localCalls = [];
   const localFetch = async (req) => {
     localCalls.push(req);
@@ -313,15 +338,7 @@ test("proxies a relay REQUEST to the local box server and streams the RESPONSE b
       body: JSON.stringify({ projects: ["p1", "p2"] }),
     };
   };
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    localFetch,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { relay, clock, agent } = makeStubAgent({ localFetch });
 
   await agent.start();
 
@@ -355,20 +372,10 @@ test("proxies a relay REQUEST to the local box server and streams the RESPONSE b
 });
 
 test("a failing local fetch replies with a correlated ERROR frame, not a hang", async () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
   const localFetch = async () => {
     throw new Error("ECONNREFUSED 127.0.0.1:8787");
   };
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    localFetch,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { relay, agent } = makeStubAgent({ localFetch });
 
   await agent.start();
   relay.sendToClient({
@@ -390,16 +397,7 @@ test("a failing local fetch replies with a correlated ERROR frame, not a hang", 
 });
 
 test("answers a relay PING with a correlated PONG", async () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { relay, agent } = makeStubAgent();
   await agent.start();
 
   relay.sendToClient({ type: FRAME_TYPES.PING, id: 99 });
@@ -417,16 +415,7 @@ test("answers a relay PING with a correlated PONG", async () => {
 // ---------------------------------------------------------------------------
 
 test("stop() leaves no open sockets or timers (clean teardown)", async () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { relay, clock, agent } = makeStubAgent();
   await agent.start();
   assert.equal(agent.isConnected(), true);
 
@@ -457,15 +446,7 @@ test("stop() during an in-flight dial does not connect afterwards", async () => 
       },
     };
   };
-  const clock = makeClock();
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { agent, clock } = makeStubAgent({ connect });
 
   const startP = agent.start();
   agent.stop(); // stop while the dial is still pending
@@ -516,19 +497,7 @@ test("makeDefaultLocalFetch overwrites a foreign Authorization header with the B
   // must NOT be forwarded to 127.0.0.1:8787. The box server authenticates every
   // request with its own box_token, so the agent installs that bearer no matter
   // what the inbound value was.
-  const seen = [];
-  const stubFetch = async (url, init) => {
-    seen.push({ url, headers: init?.headers });
-    return {
-      status: 200,
-      headers: new Map([["content-type", "application/json"]]),
-      text: async () => "{}",
-    };
-  };
-  // Replace global fetch for this test only.
-  const origFetch = globalThis.fetch;
-  globalThis.fetch = stubFetch;
-  try {
+  const { seen } = await captureFetchHeaders(async () => {
     const localFetch = makeDefaultLocalFetch("http://127.0.0.1:8787", AUTH);
     await localFetch({
       method: "GET",
@@ -536,33 +505,20 @@ test("makeDefaultLocalFetch overwrites a foreign Authorization header with the B
       headers: { authorization: "Bearer account-token-from-device" },
       body: undefined,
     });
-    assert.equal(seen.length, 1);
-    assert.equal(
-      seen[0].headers.authorization,
-      `Bearer ${BOX_TOKEN}`,
-      "Authorization is the BOX token, not the foreign account token",
-    );
-  } finally {
-    globalThis.fetch = origFetch;
-  }
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(
+    seen[0].headers.authorization,
+    `Bearer ${BOX_TOKEN}`,
+    "Authorization is the BOX token, not the foreign account token",
+  );
 });
 
 test("makeDefaultLocalFetch is case-insensitive about the Authorization key", async () => {
   // HTTP headers are case-insensitive; "Authorization", "authorization", and
   // "AUTHORIZATION" are the same header name. A client that capitalized the
   // key differently must still lose the inbound value to the BOX bearer.
-  const seen = [];
-  const stubFetch = async (_url, init) => {
-    seen.push(init?.headers);
-    return {
-      status: 200,
-      headers: new Map(),
-      text: async () => "",
-    };
-  };
-  const origFetch = globalThis.fetch;
-  globalThis.fetch = stubFetch;
-  try {
+  const { seen } = await captureFetchHeaders(async () => {
     const localFetch = makeDefaultLocalFetch("http://127.0.0.1:8787", AUTH);
     for (const variant of ["Authorization", "authorization", "AUTHORIZATION", "AuThOrIzAtIoN"]) {
       await localFetch({
@@ -572,34 +528,25 @@ test("makeDefaultLocalFetch is case-insensitive about the Authorization key", as
         body: undefined,
       });
     }
-    assert.equal(seen.length, 4);
-    for (const headers of seen) {
-      assert.equal(
-        headers.authorization,
-        `Bearer ${BOX_TOKEN}`,
-        "every variant must collapse to the BOX bearer (lowercase key)",
-      );
-      // No stale "Authorization"/"AUTHORIZATION" key with the foreign value.
-      for (const k of Object.keys(headers)) {
-        if (k.toLowerCase() === "authorization" && k !== "authorization") {
-          assert.fail(`foreign key "${k}" survived in outbound headers`);
-        }
+  });
+  assert.equal(seen.length, 4);
+  for (const { headers } of seen) {
+    assert.equal(
+      headers.authorization,
+      `Bearer ${BOX_TOKEN}`,
+      "every variant must collapse to the BOX bearer (lowercase key)",
+    );
+    // No stale "Authorization"/"AUTHORIZATION" key with the foreign value.
+    for (const k of Object.keys(headers)) {
+      if (k.toLowerCase() === "authorization" && k !== "authorization") {
+        assert.fail(`foreign key "${k}" survived in outbound headers`);
       }
     }
-  } finally {
-    globalThis.fetch = origFetch;
   }
 });
 
 test("makeDefaultLocalFetch installs the BOX bearer when no Authorization was inbound", async () => {
-  const seen = [];
-  const stubFetch = async (_url, init) => {
-    seen.push(init?.headers);
-    return { status: 200, headers: new Map(), text: async () => "" };
-  };
-  const origFetch = globalThis.fetch;
-  globalThis.fetch = stubFetch;
-  try {
+  const { seen } = await captureFetchHeaders(async () => {
     const localFetch = makeDefaultLocalFetch("http://127.0.0.1:8787", AUTH);
     await localFetch({
       method: "GET",
@@ -607,25 +554,16 @@ test("makeDefaultLocalFetch installs the BOX bearer when no Authorization was in
       headers: { "x-device-id": "phone-1", accept: "application/json" },
       body: undefined,
     });
-    assert.equal(seen.length, 1);
-    assert.equal(seen[0].authorization, `Bearer ${BOX_TOKEN}`);
-    // Unrelated headers pass through unchanged (and keep their original case).
-    assert.equal(seen[0]["x-device-id"], "phone-1");
-    assert.equal(seen[0].accept, "application/json");
-  } finally {
-    globalThis.fetch = origFetch;
-  }
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].headers.authorization, `Bearer ${BOX_TOKEN}`);
+  // Unrelated headers pass through unchanged (and keep their original case).
+  assert.equal(seen[0].headers["x-device-id"], "phone-1");
+  assert.equal(seen[0].headers.accept, "application/json");
 });
 
 test("makeDefaultLocalFetch preserves unrelated headers when overwriting auth", async () => {
-  const seen = [];
-  const stubFetch = async (_url, init) => {
-    seen.push(init?.headers);
-    return { status: 200, headers: new Map(), text: async () => "" };
-  };
-  const origFetch = globalThis.fetch;
-  globalThis.fetch = stubFetch;
-  try {
+  const { seen } = await captureFetchHeaders(async () => {
     const localFetch = makeDefaultLocalFetch("http://127.0.0.1:8787", AUTH);
     await localFetch({
       method: "GET",
@@ -638,15 +576,13 @@ test("makeDefaultLocalFetch preserves unrelated headers when overwriting auth", 
       },
       body: undefined,
     });
-    assert.equal(seen.length, 1);
-    const h = seen[0];
-    assert.equal(h.authorization, `Bearer ${BOX_TOKEN}`);
-    assert.equal(h["x-request-id"], "abc-123");
-    assert.equal(h["x-forwarded-for"], "1.2.3.4");
-    assert.equal(h.accept, "*/*");
-  } finally {
-    globalThis.fetch = origFetch;
-  }
+  });
+  assert.equal(seen.length, 1);
+  const h = seen[0].headers;
+  assert.equal(h.authorization, `Bearer ${BOX_TOKEN}`);
+  assert.equal(h["x-request-id"], "abc-123");
+  assert.equal(h["x-forwarded-for"], "1.2.3.4");
+  assert.equal(h.accept, "*/*");
 });
 
 test("makeDefaultLocalFetch requires a valid box_token (never accepts a missing/foreign one)", () => {
@@ -664,33 +600,9 @@ test("the agent's default localFetch is the overwriting one (ADR-1 wired by defa
   // outbound HTTP request to 127.0.0.1:8787 carries the BOX bearer, even
   // though the inbound frame carried a foreign "Authorization" header. This
   // is the contract install.sh + the box-server's auth gate rely on.
-  const relay = makeFakeRelay();
-  const clock = makeClock();
-  const seenByGlobalFetch = [];
-  const stubFetch = async (url, init) => {
-    seenByGlobalFetch.push({ url, headers: init?.headers });
-    return {
-      status: 200,
-      headers: new Map([["content-type", "application/json"]]),
-      text: async () => '{"ok":true}',
-    };
-  };
-  const origFetch = globalThis.fetch;
-  globalThis.fetch = stubFetch;
-  try {
-    const agent = createRelayAgent({
-      auth: AUTH,
-      connect: relay.connect,
-      // Intentionally do NOT pass a custom localFetch — exercise the default
-      // factory `makeDefaultLocalFetch(localBase, auth)` which the agent
-      // wires up when opts.localFetch is absent.
-      setTimer: clock.setTimer,
-      clearTimer: clock.clearTimer,
-      log: silent,
-      warn: silent,
-    });
+  const { relay, agent } = makeStubAgent();
+  const { seen } = await captureFetchHeaders(async () => {
     await agent.start();
-
     relay.sendToClient({
       type: FRAME_TYPES.REQUEST,
       id: 1,
@@ -704,25 +616,22 @@ test("the agent's default localFetch is the overwriting one (ADR-1 wired by defa
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-
-    assert.equal(seenByGlobalFetch.length, 1, "exactly one outbound call to the local box server");
-    assert.match(
-      seenByGlobalFetch[0].url,
-      /^http:\/\/127\.0\.0\.1:8787\/api\/projects$/,
-      "URL is the local box server + the relay-forwarded path",
-    );
-    assert.equal(
-      seenByGlobalFetch[0].headers.authorization,
-      `Bearer ${BOX_TOKEN}`,
-      "the outbound HTTP request carries the BOX bearer, NOT the foreign token",
-    );
-    // Unrelated headers still pass through (case preserved).
-    assert.equal(seenByGlobalFetch[0].headers["x-device-id"], "phone-1");
-
     agent.stop();
-  } finally {
-    globalThis.fetch = origFetch;
-  }
+  });
+
+  assert.equal(seen.length, 1, "exactly one outbound call to the local box server");
+  assert.match(
+    String(seen[0].url ?? ""),
+    /^http:\/\/127\.0\.0\.1:8787\/api\/projects$/,
+    "URL is the local box server + the relay-forwarded path",
+  );
+  assert.equal(
+    seen[0].headers.authorization,
+    `Bearer ${BOX_TOKEN}`,
+    "the outbound HTTP request carries the BOX bearer, NOT the foreign token",
+  );
+  // Unrelated headers still pass through (case preserved).
+  assert.equal(seen[0].headers["x-device-id"], "phone-1");
 });
 
 // ---------------------------------------------------------------------------
@@ -730,46 +639,19 @@ test("the agent's default localFetch is the overwriting one (ADR-1 wired by defa
 // ---------------------------------------------------------------------------
 
 test("status() is \"stopped\" before start()", () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { agent } = makeStubAgent();
   assert.equal(agent.status(), "stopped");
 });
 
 test("status() is \"connected\" after a successful start()", async () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { agent } = makeStubAgent();
   await agent.start();
   assert.equal(agent.status(), "connected");
   agent.stop();
 });
 
 test("status() is \"connecting\" after a drop while the reconnect is armed", async () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { relay, agent } = makeStubAgent();
   await agent.start();
   relay.dropLink();
   await Promise.resolve();
@@ -778,16 +660,7 @@ test("status() is \"connecting\" after a drop while the reconnect is armed", asy
 });
 
 test("status() is \"stopped\" after stop() and ignores later drop events", async () => {
-  const relay = makeFakeRelay();
-  const clock = makeClock();
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { relay, agent } = makeStubAgent();
   await agent.start();
   agent.stop();
   assert.equal(agent.status(), "stopped");
@@ -800,16 +673,7 @@ test("status() is \"stopped\" after stop() and ignores later drop events", async
 test("status() is \"connecting\" between a failed dial and the next attempt", async () => {
   // failFirst=1: first dial fails, the agent arms a reconnect; before the
   // next attempt fires the agent is neither connected nor stopped.
-  const relay = makeFakeRelay({ failFirst: 1 });
-  const clock = makeClock();
-  const agent = createRelayAgent({
-    auth: AUTH,
-    connect: relay.connect,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    log: silent,
-    warn: silent,
-  });
+  const { agent } = makeStubAgent({ failFirst: 1 });
   await agent.start(); // attempt 1 fails → reconnect armed
   assert.equal(agent.status(), "connecting");
   agent.stop();
