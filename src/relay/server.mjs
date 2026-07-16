@@ -378,7 +378,7 @@ export function createPairHandler({
  */
 export async function routePair({ parsed, store, proxyRequest, rateLimiter, now = () => Date.now(), warn = console.warn }) {
   const boxId = parsed.box_id ?? parsed.boxId;
-  const code = parsed.code ?? parsed.pairing_code ?? parsed.code ?? parsed.pairingCode;
+  const code = parsed.code ?? parsed.pairing_code ?? parsed.pairingCode;
 
   // Validate shapes BEFORE rate-limiting so a malformed request doesn't burn a
   // bucket token a legitimate retry would otherwise have.
