@@ -672,10 +672,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">About</h3>
                 <div className="text-sm text-text-faint">
-                  Better UI v0.0.1
+                  Manta UI v0.0.1
                 </div>
                 <div className="text-xs text-text-faint mt-2">
-                  Desktop client for remote Claude Code sessions over SSH+tmux.
+                  Desktop client for remote Claude Code sessions.
                 </div>
               </div>
             </div>

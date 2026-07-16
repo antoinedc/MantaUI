@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-        <string>bui</string>
+        <string>Manta</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -55,6 +55,6 @@
 	     the promise rejects with NotAllowedError before showing any
 	     prompt. Shown verbatim in the system permission dialog. -->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>bui uses the microphone to capture voice prompts for the AI assistant.</string>
+	<string>Manta uses the microphone to capture voice prompts for the AI assistant.</string>
 </dict>
 </plist>

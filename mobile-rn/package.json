@@ -2,7 +2,7 @@
   "name": "bui-mobile-rn",
   "version": "0.0.1",
   "private": true,
-  "description": "bui mobile app (Expo React Native) — QR pairing + read-only session list (M3.2, BET-74)",
+  "description": "Manta mobile app (Expo React Native) — QR pairing + read-only session list (M3.2, BET-74)",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",

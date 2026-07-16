@@ -1,7 +1,7 @@
 {
   "name": "mobile",
   "version": "1.0.0",
-  "description": "Capacitor wrapper — packages the bui mobile web client as native Android/iOS shells",
+  "description": "Capacitor wrapper — packages the Manta mobile web client as native Android/iOS shells",
   "private": true,
   "scripts": {
     "sync": "bash sync-web.sh && npx cap sync android",

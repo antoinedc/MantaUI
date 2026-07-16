@@ -1,4 +1,4 @@
-# electron-builder config for Better UI desktop app.
+# electron-builder config for Manta UI desktop app.
 #
 # Builds:
 #   - macOS: .dmg (signed + notarized when identities are available)
@@ -15,7 +15,7 @@
 # These are NOT committed to the repo — set them in CI or locally.
 
 appId: com.betterui.app
-productName: Better UI
+productName: Manta UI
 
 directories:
   output: dist/desktop
@@ -49,7 +49,7 @@ linux:
     - target: AppImage
       arch:
         - x64
-  executableName: better-ui
+  executableName: manta-ui
   artifactName: "${productName}-${version}-${arch}.AppImage"
 
 win:
