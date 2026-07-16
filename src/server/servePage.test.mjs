@@ -37,24 +37,24 @@ test("isValidSubdomain accepts max 63-char name", () => {
 // ---------------------------------------------------------------------------
 
 test("extractSubdomain pulls the page name from a Host header", () => {
-  assert.equal(extractSubdomain("preview.bui.antoinedc.com"), "preview");
-  assert.equal(extractSubdomain("my-design.bui.antoinedc.com"), "my-design");
+  assert.equal(extractSubdomain("preview.pages.mantaui.com"), "preview");
+  assert.equal(extractSubdomain("my-design.pages.mantaui.com"), "my-design");
 });
 
 test("extractSubdomain strips the port and lowercases", () => {
-  assert.equal(extractSubdomain("Preview.bui.antoinedc.com:20080"), "preview");
+  assert.equal(extractSubdomain("Preview.pages.mantaui.com:20080"), "preview");
 });
 
 test("extractSubdomain returns null for non-matching hosts", () => {
   assert.equal(extractSubdomain("example.com"), null);
-  assert.equal(extractSubdomain("bui.antoinedc.com"), null); // no subdomain
+  assert.equal(extractSubdomain("pages.mantaui.com"), null); // no subdomain
   assert.equal(extractSubdomain(""), null);
   assert.equal(extractSubdomain(null), null);
 });
 
 test("extractSubdomain rejects multi-level subdomains", () => {
-  // a.b.bui.antoinedc.com — "a.b" contains a dot, not a valid page name
-  assert.equal(extractSubdomain("a.b.bui.antoinedc.com"), null);
+  // a.b.pages.mantaui.com — "a.b" contains a dot, not a valid page name
+  assert.equal(extractSubdomain("a.b.pages.mantaui.com"), null);
 });
 
 test("extractSubdomain honors a custom suffix", () => {

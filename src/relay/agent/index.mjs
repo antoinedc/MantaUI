@@ -51,7 +51,7 @@ import {
 // Default relay endpoint. Overridable via RELAY_URL or the `relayUrl` option.
 // wss:// in production (TLS-terminated by the relay's front door); ws:// only
 // for a same-box dev relay.
-export const DEFAULT_RELAY_URL = "wss://bui.dev.antoinedc.com";
+export const DEFAULT_RELAY_URL = "wss://relay.mantaui.com";
 
 // Default local box server the client proxies requests to. The box server binds
 // 0.0.0.0:8787 (src/server/index.mjs); we reach it over loopback.

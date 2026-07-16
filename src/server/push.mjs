@@ -39,7 +39,7 @@ const VAPID_PATH = join(DIR, "vapid.json");
 const SUBS_PATH = join(DIR, "push-subs.json");
 
 // VAPID `subject` must be a mailto: or https: URI identifying the sender.
-const VAPID_SUBJECT = "mailto:bui@useronda.com";
+const VAPID_SUBJECT = "mailto:app@mantaui.com";
 
 async function atomicWrite(path, data) {
   await mkdir(dirname(path), { recursive: true });

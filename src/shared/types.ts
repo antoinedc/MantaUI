@@ -503,7 +503,7 @@ export type SecretInput = {
 export type WebhookMeta = {
   id: string; // 8-char hex store id (used for delete)
   label: string; // human label, e.g. "multica CAPO-123 done"
-  url: string | null; // public delivery URL (https://bui.useronda.com/hook/<token>)
+  url: string | null; // public delivery URL (https://app.mantaui.com/hook/<token>)
   unsigned: boolean; // true = no HMAC signature required (discouraged)
   sessionID: string | null; // the session this hook wakes
   instructions: string; // standing directive prepended to each delivery

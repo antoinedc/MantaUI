@@ -119,7 +119,7 @@ test("toMeta strips secret and token, keeps url + metadata", () => {
     token: "t".repeat(32),
     secret: "whsec_xyz",
     label: "l",
-    url: "https://bui.useronda.com/hook/" + "t".repeat(32),
+    url: "https://app.mantaui.com/hook/" + "t".repeat(32),
     unsigned: false,
     sessionID: "ses_1",
     deliveries: 4,

@@ -147,7 +147,7 @@ function makeClock() {
 // ---------------------------------------------------------------------------
 
 test("DEFAULT_RELAY_URL is the dev relay wss endpoint", () => {
-  assert.equal(DEFAULT_RELAY_URL, "wss://bui.dev.antoinedc.com");
+  assert.equal(DEFAULT_RELAY_URL, "wss://relay.mantaui.com");
 });
 
 test("backoff mirror matches ExponentialBackoff semantics (no jitter, capped growth)", () => {

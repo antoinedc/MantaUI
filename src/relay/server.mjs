@@ -25,7 +25,7 @@
 //     both phone surfaces move together (and Stage 5 swaps them in one place).
 //
 // PORT: 127.0.0.1:20787 by default (bui 20xxx block; loopback because Caddy /
-//   the `bui.dev.antoinedc.com` vhost fronts it). Override with RELAY_PORT /
+//   the `relay.mantaui.com` vhost fronts it). Override with RELAY_PORT /
 //   RELAY_HOST. RELAY_PORT=0 selects an ephemeral port (tests, dev).
 //
 // WHAT'S STILL DEFERRED (live-provisioning, do NOT block on it here — same seams

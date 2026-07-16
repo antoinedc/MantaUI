@@ -95,10 +95,10 @@ test("parsePort accepts valid ports, rejects junk", () => {
 test("resolveTarballUrl builds default URL from host + version", () => {
   const url = resolveTarballUrl({
     tarballUrl: null,
-    releaseHost: "https://bui.useronda.com",
+    releaseHost: "https://app.mantaui.com",
     version: "0.0.1",
   });
-  assert.equal(url, "https://bui.useronda.com/releases/bui-0.0.1.tar.gz");
+  assert.equal(url, "https://app.mantaui.com/releases/bui-0.0.1.tar.gz");
 });
 
 test("resolveTarballUrl uses explicit override verbatim", () => {

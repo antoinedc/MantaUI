@@ -143,7 +143,7 @@ export function toMeta(hook) {
 
 // Build the public delivery URL for a token. The base is configurable so a
 // future custom domain doesn't require a code change.
-export function deliveryUrl(token, base = process.env.MANTA_PUBLIC_URL || "https://bui.useronda.com") {
+export function deliveryUrl(token, base = process.env.MANTA_PUBLIC_URL || "https://app.mantaui.com") {
   return `${base.replace(/\/+$/, "")}/hook/${token}`;
 }
 

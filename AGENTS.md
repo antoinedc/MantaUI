@@ -268,8 +268,8 @@ also accept `?token=`. Default bind `127.0.0.1:8787`. Internet access is a
   (`MANTA_MOBILE_HOST=127.0.0.1`, port 8787).
 - `~/.config/systemd/user/bui-tunnel.service` (`Requires=bui-server`) →
   `cloudflared tunnel --config ~/.cloudflared/config.yml run bui`.
-- Permanent URL: **https://bui.useronda.com** (named tunnel
-  `6cdca2ea-…`, zone `useronda.com`). Stable across restarts — the iOS
+- Permanent URL: **https://app.mantaui.com** (named tunnel
+  `6cdca2ea-…`, zone `mantaui.com`). Stable across restarts — the iOS
   PWA install stays valid.
 - Manage: `systemctl --user {status,restart} bui-tunnel bui-server`;
   logs `journalctl --user -u bui-tunnel`.
@@ -356,7 +356,7 @@ IS the box — local execution, no hop.
 **Config schema (post-pairing):**
 ```json
 {
-  "serverUrl": "https://bui.useronda.com",
+  "serverUrl": "https://app.mantaui.com",
   "boxId": "<32-hex-char>",
   "boxToken": "<32-hex-char>",
   "projects": [{ "tmuxSession": "...", "defaultCwd": "..." }]
@@ -518,7 +518,7 @@ generates on the box. Follows the same "bui tools" pattern as the scheduler
   `/tmp` cleanup; updating = re-call `serve_page` with the same subdomain).
 - **In-process file server on `127.0.0.1:20080`** (`createFileServer`/
   `startFileServer`, started in `index.mjs` alongside the schedule poller).
-  Routes by **Host header**: `<sub>.bui.antoinedc.com` → that subdomain's
+  Routes by **Host header**: `<sub>.pages.mantaui.com` → that subdomain's
   `index.html`. `extractSubdomain` (pure, tested) rejects non-matching hosts
   and multi-level subdomains. Re-reads from disk per request with `no-store`,
   so an overwrite of the page file is live immediately.
@@ -528,11 +528,11 @@ generates on the box. Follows the same "bui tools" pattern as the scheduler
   immediately. A request for a subdomain whose dir was deleted externally
   prunes the stale registry entry.
 - **Public path is the system Caddy, NOT the Cloudflare tunnel.** Distinct from
-  bui's own `bui.useronda.com` tunnel. `/etc/caddy/Caddyfile` has a
-  `*.bui.antoinedc.com` block → `reverse_proxy 127.0.0.1:20080` with an **OVH
+  bui's own `app.mantaui.com` tunnel. `/etc/caddy/Caddyfile` has a
+  `*.pages.mantaui.com` block → `reverse_proxy 127.0.0.1:20080` with an **OVH
   DNS-01 wildcard cert** (3-level subdomain, needs its own `tls { dns ovh … }`
-  block — not covered by the `*.dev` single-level wildcard). DNS: `*.bui`
-  A-record → `157.90.224.92` in the OVH `antoinedc.com` zone (OVH creds are
+  block — not covered by the `*.dev` single-level wildcard). DNS: `*.pages`
+  A-record → `157.90.224.92` in the OVH `mantaui.com` zone (OVH creds are
   root-only at `/etc/caddy/ovh.env`; the python `ovh` module + passwordless
   sudo were used to add the record). Caddy reload: `sudo systemctl reload caddy`.
 - **No UI card (v1).** Unlike the scheduler there's no ChatPanel management

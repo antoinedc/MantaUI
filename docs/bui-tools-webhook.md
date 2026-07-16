@@ -55,7 +55,7 @@ goes green", "let GitHub notify this chat on a new issue".
   land back in the **same chat session** the user is in.
 - The tool returns the **public delivery URL and the signing secret** so the
   agent can configure the external system:
-  `https://bui.useronda.com/hook/<token>` + `secret: whsec_…`.
+  `https://app.mantaui.com/hook/<token>` + `secret: whsec_…`.
 
 `webhook_list` shows this session's hooks (id, label, url, created, last
 delivery time). `webhook_delete` removes one by id (revokes the token).
@@ -63,7 +63,7 @@ delivery time). `webhook_delete` removes one by id (revokes the token).
 ### What an external actor sends
 
 ```
-POST https://bui.useronda.com/hook/<token>
+POST https://app.mantaui.com/hook/<token>
 X-Bui-Signature: sha256=<hmac>          # required unless the hook is unsigned
 Content-Type: application/json
 { "event": "task.completed", "key": "CAPO-123", "result": "merged", ... }
@@ -103,7 +103,7 @@ defense-in-depth on top of the signature.
 Every prior bui tool endpoint binds to `127.0.0.1` (same box, implicit trust).
 A webhook is **the first endpoint that must be reachable by an external,
 untrusted actor**, so it goes through the public Cloudflare tunnel
-(`bui.useronda.com`). And the payload it carries becomes a prompt in a session
+(`app.mantaui.com`). And the payload it carries becomes a prompt in a session
 that may have **`chatAutoAllow` on** (the dangerously-skip-permissions
 equivalent). Unauthenticated public text → auto-approving agent is a
 prompt-injection → RCE path. This is designed in from line one, not bolted on.
@@ -235,8 +235,8 @@ Two route families, added alongside the existing `/api/*` blocks:
   distinctly and, if desired, apply edge rate-limiting.
 
 **Exposure:** `/hook/*` is served by bui-server (port 8787) and reached through
-the existing `bui.useronda.com` Cloudflare tunnel — no new tunnel, no new Caddy
-block needed (distinct from the `*.bui.antoinedc.com` serve-page path). The
+the existing `app.mantaui.com` Cloudflare tunnel — no new tunnel, no new Caddy
+block needed (distinct from the `*.pages.mantaui.com` serve-page path). The
 management routes stay loopback-only in practice (desktop reaches them over the
 `-L 18787` forward); only `/hook/*` is meant for the internet.
 
