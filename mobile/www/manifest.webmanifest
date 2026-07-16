@@ -1,6 +1,6 @@
 {
-  "name": "Better UI",
-  "short_name": "bui",
+  "name": "Manta UI",
+  "short_name": "Manta",
   "description": "Remote claude / opencode over tmux",
   "display": "standalone",
   "orientation": "portrait",

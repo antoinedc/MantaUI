@@ -321,7 +321,7 @@ export function App() {
       if (typeof Notification === "undefined") return;
       const show = () => {
         try {
-          const n = new Notification(payload.title || "Better UI", {
+          const n = new Notification(payload.title || "Manta UI", {
             body: payload.body || "",
             tag: payload.tag,
           });

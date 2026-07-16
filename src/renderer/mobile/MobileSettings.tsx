@@ -266,7 +266,7 @@ export function MobileSettings({ onClose }: Props) {
           />
           <div className="text-xs text-text-faint">
             Leave blank to use the page's own origin (default). Override only
-            if your bui server is on a different host (e.g.{" "}
+            if your Manta server is on a different host (e.g.{" "}
             <code className="text-text-muted">https://bui.example.com</code>).
             Changes take effect after Save.
           </div>

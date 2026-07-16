@@ -148,7 +148,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                 <path d="M2 12l10 5 10-5" />
               </svg>
             </div>
-            <span className="text-xl font-semibold tracking-tight">bui</span>
+            <span className="text-xl font-semibold tracking-tight">Manta</span>
           </div>
           {!isSuccess && <ProgressRail current={pos} />}
         </div>
@@ -175,7 +175,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                   className="inline-flex items-center gap-2 px-6 py-2.5 rounded-md text-sm font-medium text-bg"
                   style={{ background: ACCENT }}
                 >
-                  Open bui
+                  Open Manta
                   <ArrowRight />
                 </button>
               </div>

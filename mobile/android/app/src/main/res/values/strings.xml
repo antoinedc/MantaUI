@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">bui</string>
-    <string name="title_activity_main">bui</string>
+    <string name="app_name">Manta</string>
+    <string name="title_activity_main">Manta</string>
     <string name="package_name">com.antoinedc.bui</string>
     <string name="custom_url_scheme">com.antoinedc.bui</string>
 </resources>

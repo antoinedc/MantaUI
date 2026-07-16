@@ -30,7 +30,7 @@ self.addEventListener("push", (event) => {
   } catch (e) {
     payload = {};
   }
-  const title = payload.title || "Better UI";
+  const title = payload.title || "Manta UI";
   const body = payload.body || "";
   const tag = payload.tag || undefined;
   // Carry everything the click handler needs to either deep-link or post a
