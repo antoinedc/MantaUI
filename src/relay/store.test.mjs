@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openStore, BOX_STATUS } from "./store.mjs";
+import { openStore, BOX_STATUS, hashToken, hashEquals } from "./store.mjs";
 
 const BOX_A = "0123456789abcdef0123456789abcdef"; // 32 hex
 const BOX_B = "fedcba9876543210fedcba9876543210";
@@ -250,4 +250,105 @@ test("indexed queries use their indexes (EXPLAIN QUERY PLAN smoke)", () => {
   const boxPlan = s.explain("SELECT * FROM boxes WHERE box_id = ?", BOX_A).join(" ");
   assert.doesNotMatch(boxPlan, /\bSCAN boxes\b(?!.*INDEX)/);
   s.close();
+});
+
+// ---------------------------------------------------------------------------
+// box_credentials (BET-152 / ADR-4 TOFU)
+// ---------------------------------------------------------------------------
+
+test("setBoxCredential: first insert returns the row; a second insert for the same box_id throws", () => {
+  const s = openStore();
+  const hash = hashToken("box-token-A");
+  const r1 = s.setBoxCredential(BOX_A, hash);
+  assert.equal(r1.box_id, BOX_A);
+  assert.equal(r1.token_hash, hash);
+
+  // TOFU must not silently overwrite: a relay bug must not be able to rotate a
+  // credential, so the second insert is a hard error from the UNIQUE constraint.
+  assert.throws(() => s.setBoxCredential(BOX_A, hashToken("rotated-token")), /UNIQUE|constraint/i);
+
+  // The stored row is untouched (still the original hash).
+  assert.equal(s.getBoxCredential(BOX_A).token_hash, hash);
+  s.close();
+});
+
+test("getBoxCredential: null for unknown box; rejects malformed box_id", () => {
+  const s = openStore();
+  assert.equal(s.getBoxCredential(BOX_A), null);
+  assert.throws(() => s.getBoxCredential("not-hex"), /invalid box_id/);
+  s.close();
+});
+
+test("setBoxCredential rejects empty token_hash and malformed box_id", () => {
+  const s = openStore();
+  assert.throws(() => s.setBoxCredential(BOX_A, ""), /token_hash required/);
+  assert.throws(() => s.setBoxCredential("bad", "x".repeat(64)), /invalid box_id/);
+  s.close();
+});
+
+// ---------------------------------------------------------------------------
+// account_tokens (BET-152 / ADR-5)
+// ---------------------------------------------------------------------------
+
+test("addAccountToken: insert + lookup by hash; unknown hash → null", () => {
+  const s = openStore();
+  const t = "11112222333344445555666677778888";
+  const hash = hashToken(t);
+  const row = s.addAccountToken(hash, "acct-1");
+  assert.equal(row.token_hash, hash);
+  assert.equal(row.account_id, "acct-1");
+
+  assert.equal(s.getAccountByTokenHash(hash), "acct-1");
+  assert.equal(s.getAccountByTokenHash(hashToken("never-issued")), null);
+  assert.equal(s.getAccountByTokenHash(""), null, "empty hash → null");
+  assert.equal(s.getAccountByTokenHash(null), null, "non-string hash → null");
+  s.close();
+});
+
+test("addAccountToken: many tokens per account (devices) and revoke-sweep read", () => {
+  const s = openStore();
+  const h1 = hashToken("device-1-token");
+  const h2 = hashToken("device-2-token");
+  s.addAccountToken(h1, "acct-x");
+  s.addAccountToken(h2, "acct-x");
+  s.addAccountToken(hashToken("other-account-token"), "acct-y");
+
+  const xTokens = s.listAccountTokensForAccount("acct-x").map((r) => r.token_hash).sort();
+  assert.deepEqual(xTokens, [h1, h2].sort());
+  assert.equal(s.listAccountTokensForAccount("acct-y").length, 1);
+  assert.equal(s.listAccountTokensForAccount("nobody").length, 0);
+  s.close();
+});
+
+test("addAccountToken rejects empty token_hash / account_id", () => {
+  const s = openStore();
+  assert.throws(() => s.addAccountToken("", "acct-1"), /token_hash required/);
+  assert.throws(() => s.addAccountToken("x".repeat(64), ""), /invalid account_id/);
+  assert.throws(() => s.addAccountToken("x".repeat(64), 123), /invalid account_id/);
+  s.close();
+});
+
+// ---------------------------------------------------------------------------
+// hashToken / hashEquals (timing-safe hex compare)
+// ---------------------------------------------------------------------------
+
+test("hashToken is stable, lowercase, 64-hex", () => {
+  const a = hashToken("hello");
+  const b = hashToken("hello");
+  assert.equal(a, b);
+  assert.match(a, /^[0-9a-f]{64}$/);
+  // Distinct inputs produce distinct digests.
+  assert.notEqual(a, hashToken("HELLO"));
+});
+
+test("hashEquals: same digest → true; any mismatch → false; constant-time shape guard", () => {
+  const a = hashToken("one");
+  const b = hashToken("two");
+  assert.equal(hashEquals(a, a), true);
+  assert.equal(hashEquals(a, b), false);
+  // Shape mismatches → false (no Buffer length mismatch thrown out of timingSafeEqual).
+  assert.equal(hashEquals("short", "short"), false, "non-hex input → empty buffer → false");
+  assert.equal(hashEquals(123, 123), false, "non-string input → false");
+  assert.equal(hashEquals(null, undefined), false);
+  assert.equal(hashEquals("aa", "aaaa"), false, "different-length inputs → false");
 });

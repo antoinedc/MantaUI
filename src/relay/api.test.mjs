@@ -8,7 +8,7 @@ import {
   isGatedSubpath,
 } from "./api.mjs";
 import { createRelayServer, createDefaultVerifier } from "./index.mjs";
-import { openStore, BOX_STATUS } from "./store.mjs";
+import { openStore, BOX_STATUS, hashToken } from "./store.mjs";
 import { encodeFrame, decodeFrame, FRAME_TYPES } from "./protocol.mjs";
 
 const BOX_A = "0123456789abcdef0123456789abcdef"; // 32 hex
@@ -35,11 +35,15 @@ const noProxy = async () => {
 };
 
 // Auth that maps the two account tokens; anything else → null.
-function makeAuth() {
-  return createDefaultPhoneAuth({
-    accountTokens: { [ACCT_1]: ACCT_1, [ACCT_2]: ACCT_2 },
-    warn: silent,
-  });
+// Seeded into a fresh in-memory store: device tokens map to their own account
+// id (the same opaque identifier; this matches what /pair mints today).
+function makeAuth(storeArg) {
+  const store = storeArg || openStore();
+  store.addAccountToken(hashToken(ACCT_1), ACCT_1);
+  store.addAccountToken(hashToken(ACCT_2), ACCT_2);
+  const auth = createDefaultPhoneAuth({ store, warn: silent });
+  // expose the store so callers can use it for fixtures
+  return Object.assign(auth, { _store: store });
 }
 
 function bearer(token) {
@@ -67,23 +71,24 @@ test("isGatedSubpath: transcript/stream/prompt/pty are gated; metadata is free",
 // pure: default phone auth seam
 // ---------------------------------------------------------------------------
 
-test("createDefaultPhoneAuth: mapped token → accountId; unknown/malformed → null", () => {
-  const auth = makeAuth();
-  assert.deepEqual(auth({ headers: bearer(ACCT_1) }), { accountId: ACCT_1 });
-  assert.equal(auth({ headers: bearer("deadbeefdeadbeefdeadbeefdeadbeef") }), null, "unknown token");
-  assert.equal(auth({ headers: bearer("not-hex") }), null, "malformed token");
-  assert.equal(auth({ headers: {} }), null, "no token");
+test("createDefaultPhoneAuth: throws without a store (no dev-open fallback)", () => {
+  assert.throws(() => createDefaultPhoneAuth(), /store required/);
 });
 
-test("createDefaultPhoneAuth: DEV-OPEN (no map) treats a well-formed token as the account", () => {
-  const auth = createDefaultPhoneAuth({ warn: silent });
+test("createDefaultPhoneAuth: store-known token → accountId; unknown/malformed → null", () => {
+  const auth = makeAuth();
   assert.deepEqual(auth({ headers: bearer(ACCT_1) }), { accountId: ACCT_1 });
-  assert.equal(auth({ headers: bearer("bad") }), null);
+  assert.deepEqual(auth({ headers: bearer(ACCT_2) }), { accountId: ACCT_2 });
+  assert.equal(auth({ headers: bearer("deadbeefdeadbeefdeadbeefdeadbeef") }), null, "unknown well-formed token");
+  assert.equal(auth({ headers: bearer("not-hex") }), null, "malformed token");
+  assert.equal(auth({ headers: {} }), null, "no token");
+  auth._store.close();
 });
 
 test("createDefaultPhoneAuth: falls back to ?token= query when no header", () => {
   const auth = makeAuth();
   assert.deepEqual(auth({ path: `/api/boxes?token=${ACCT_1}` }), { accountId: ACCT_1 });
+  auth._store.close();
 });
 
 // ---------------------------------------------------------------------------
@@ -308,7 +313,7 @@ test("end-to-end: phone metadata request is forwarded to a live box and the fram
   const relay = createRelayServer({
     wss,
     store,
-    verifyBox: createDefaultVerifier({ warn: silent }),
+    verifyBox: createDefaultVerifier({ store, warn: silent, log: silent }),
     log: silent,
     warn: silent,
   });

@@ -28,12 +28,12 @@
 //   the `relay.mantaui.com` vhost fronts it). Override with RELAY_PORT /
 //   RELAY_HOST. RELAY_PORT=0 selects an ephemeral port (tests, dev).
 //
-// WHAT'S STILL DEFERRED (live-provisioning, do NOT block on it here — same seams
-// M2 left open): real Apple x5c/verifyJws crypto, real APNs/FCM certs + prod
-// PushSender, and the IAP-bound verifyBox/authenticatePhone lookups. This file
-// only COMPOSES the DEV-OPEN/structural defaults into a runnable service.
+// WHAT'S STILL DEFERRED (live-provisioning, do NOT block on it here): real Apple
+// x5c/verifyJws crypto, real APNs/FCM certs + prod PushSender. The relay's box
+// auth (TOFU, BET-152) and account-token mint are now real (store-backed).
 
 import http from "node:http";
+import { randomBytes } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { STATE_DIRNAME } from "../shared/paths.mjs";
 
@@ -45,8 +45,11 @@ import {
 } from "./api.mjs";
 import { createReceiptValidator, bindReceipt } from "./iap.mjs";
 import { createRelayPush } from "./push.mjs";
-import { openStore } from "./store.mjs";
-import { isValidToken } from "../server/webhooks.mjs";
+import { openStore, hashToken } from "./store.mjs";
+import {
+  isValidToken,
+  createRateLimiter,
+} from "../server/webhooks.mjs";
 
 export const DEFAULT_RELAY_PORT = 20787;
 
@@ -54,10 +57,25 @@ export const DEFAULT_RELAY_PORT = 20787;
 // upgrade is rejected (a stray WS upgrade must not fall into the HTTP router).
 const BOX_UPGRADE_PATH = "/box";
 
-// Cap on an IAP/push request body so an unbounded POST can't exhaust memory
-// before the phone is even authenticated. 256 KiB is generous for a JWS +
-// token registration; larger bodies are refused with 413.
+// Cap on an IAP/push + /pair request body so an unbounded POST can't exhaust
+// memory before the phone is even authenticated. 256 KiB is generous for a JWS
+// + token registration; larger bodies are refused with 413.
 const MAX_BODY_BYTES = 256 * 1024;
+
+// The /pair bootstrap endpoint is UNAUTHENTICATED (the device has nothing to
+// present yet — the whole point of /pair is to GET credentials). Rate-limited
+// to mirror the box's own /auth/* limiter (src/server/auth.mjs AUTH_RL_*):
+// capacity 10, refill 0.2/sec ≈ 12/min sustained — a human pairing needs a
+// handful of hits; a guesser is throttled hard. Combined with the 5-min code
+// TTL and the 10^6 pairing-code space, the code is not brute-forceable in the
+// window.
+export const PAIR_RL_CAPACITY = 10;
+export const PAIR_RL_REFILL_PER_SEC = 0.2;
+
+// A pairing code is exactly 6 decimal digits (matches the box-side
+// isValidPairingCode in src/server/auth.mjs). Stricter than isValidToken so a
+// pairing body can't smuggle a path or extra payload via the code field.
+const PAIR_CODE_RE = /^\d{6}$/;
 
 /**
  * Create (but do not start) the combined relay service: one http.Server serving
@@ -71,12 +89,15 @@ const MAX_BODY_BYTES = 256 * 1024;
  *                               storePath when omitted.
  * @param {string} [opts.storePath]  file path for the shared store (e.g.
  *                               ~/.manta/relay.sqlite); ":memory:" default.
- * @param {Map|object|null} [opts.boxTokens]     box-leg verifier seam.
- * @param {Map|object|null} [opts.accountTokens] phone-auth seam.
  * @param {(req)=>({accountId:string}|null)} [opts.authenticatePhone]
- *   shared phone auth; defaults to createDefaultPhoneAuth({ accountTokens }).
+ *   shared phone auth; defaults to createDefaultPhoneAuth({ store, warn }).
+ * @param {(boxId,req,o?)=>Promise<{status,headers?,body?}>} [opts.proxyRequest]
+ *   override the box-leg proxyRequest (tests inject a fake that bypasses the
+ *   live tunnel; production uses boxLeg.proxyRequest).
  * @param {(jws:string)=>object} [opts.verifyJws]  IAP crypto seam (structural default).
  * @param {object} [opts.pushSender]  a PushSender (stub default).
+ * @param {(key:string)=>boolean} [opts.pairRateLimiter]  take(key)=>bool for the
+ *   unauthenticated /pair bootstrap; created if omitted.
  * @param {() => number} [opts.now=Date.now]
  * @param {(...a)=>void} [opts.log]
  * @param {(...a)=>void} [opts.warn]
@@ -89,8 +110,6 @@ export function createRelayService(opts = {}) {
         : DEFAULT_RELAY_PORT,
     host = process.env.RELAY_HOST || "127.0.0.1",
     storePath,
-    boxTokens = null,
-    accountTokens = null,
     verifyJws,
     pushSender,
     now = () => Date.now(),
@@ -105,7 +124,7 @@ export function createRelayService(opts = {}) {
   // ONE phone-auth seam shared by the API and the IAP/push routes so both phone
   // surfaces authenticate identically and Stage 5 swaps them in one place.
   const authenticatePhone =
-    opts.authenticatePhone || createDefaultPhoneAuth({ accountTokens, warn });
+    opts.authenticatePhone || createDefaultPhoneAuth({ store, warn });
 
   // The subscription gate is also shared so the IAP validate route and the API's
   // 402 gate consult the SAME "is a receipt bound + unexpired?" logic.
@@ -118,17 +137,30 @@ export function createRelayService(opts = {}) {
   const boxLeg = createRelayServer({
     wss,
     store,
-    boxTokens,
     log,
     warn,
     now,
   });
 
+  // /pair uses the box leg's proxyRequest to forward the claim to the box's
+  // own /auth/claim over its live tunnel. Tests inject a fake via opts.proxyRequest
+  // to simulate offline / claim-rejected boxes without a real tunnel.
+  const proxyRequest = opts.proxyRequest || boxLeg.proxyRequest;
+
+  // /pair rate limiter (unauthenticated, see PAIR_RL_* constants).
+  const pairRateLimiter =
+    opts.pairRateLimiter ||
+    createRateLimiter({
+      capacity: PAIR_RL_CAPACITY,
+      refillPerSec: PAIR_RL_REFILL_PER_SEC,
+      now,
+    });
+
   // --- Phone-facing API (Stage 4) ------------------------------------------
   // Wire it with the box leg's proxyRequest and the SHARED store + auth + gate.
   const api = createRelayApi({
     store,
-    proxyRequest: boxLeg.proxyRequest,
+    proxyRequest,
     authenticatePhone,
     hasActiveSubscription,
     now,
@@ -155,11 +187,25 @@ export function createRelayService(opts = {}) {
     warn,
   });
 
+  // --- /pair bootstrap (BET-152) -------------------------------------------
+  // Unauthenticated (it IS the bootstrap). Rate-limited; on success mints a
+  // device token and replies 200 {box_id, account_id, account_token}. The
+  // account_token is the ONLY time the plaintext appears — the relay stores
+  // only its sha256.
+  const pairHandler = createPairHandler({
+    store,
+    proxyRequest,
+    rateLimiter: pairRateLimiter,
+    now,
+    warn,
+  });
+
   // --- The single http.Server ----------------------------------------------
   const server = http.createServer((req, res) => {
-    // Try the IAP/push routes first; they call res and return true when they
-    // own the path. Otherwise fall through to the phone API router.
-    iapPushHandler(req, res, () => apiHandler(req, res));
+    // /pair is unauthenticated (bootstrap) — try it first so a missing/wrong
+    // body never reaches the authenticated IAP/push path. Then IAP/push, then
+    // the phone API router.
+    pairHandler(req, res, () => iapPushHandler(req, res, () => apiHandler(req, res)));
   });
 
   // Route WS upgrades: only /box reaches the box leg; anything else is refused.
@@ -239,6 +285,168 @@ export function createRelayService(opts = {}) {
     _authenticatePhone: authenticatePhone,
     _hasActiveSubscription: hasActiveSubscription,
     _receiptValidator: receiptValidator,
+    _pairHandler: pairHandler,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// POST /pair — the phone bootstrap (BET-152 / ADR-2, ADR-5)
+//
+// UNAUTHENTICATED (it is the bootstrap — the device has no credential yet).
+// Rate-limited per box_id (mirrors the box's own /auth/* limiter so a brute
+// force attempt is bounded the same way on both sides).
+//
+// On success: mints an account_token, stores hashToken(account_token) in
+// account_tokens, returns the PLAINTEXT account_token to the device (the ONLY
+// time it leaves the relay), and 200 { box_id, account_id, account_token }.
+//
+// On the box side: /pair proxies the user-presented 6-digit code to the box's
+// own POST /auth/claim over the box's LIVE tunnel. The box is the source of
+// truth on whether the code is valid. The relay NEVER sees the box_token —
+// the box's response body is discarded entirely (ADR-1).
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the /pair request handler. Owns exactly `POST /pair` and calls
+ * `next()` for everything else so the IAP/push + API chain handles the rest.
+ *
+ * @param {object} opts
+ * @param {object} opts.store
+ * @param {(boxId,req,o?)=>Promise<{status,headers?,body?}>} opts.proxyRequest
+ * @param {(key:string)=>boolean} opts.rateLimiter
+ * @param {() => number} [opts.now=Date.now]
+ * @param {(msg:string)=>void} [opts.warn]
+ */
+export function createPairHandler({
+  store,
+  proxyRequest,
+  rateLimiter,
+  now = () => Date.now(),
+  warn = console.warn,
+}) {
+  if (!store) throw new Error("createPairHandler: store required");
+  if (typeof proxyRequest !== "function") {
+    throw new Error("createPairHandler: proxyRequest required");
+  }
+  if (typeof rateLimiter !== "function") {
+    throw new Error("createPairHandler: rateLimiter required");
+  }
+
+  return function handle(req, res, next) {
+    const pathname = (req.url || "/").split("?")[0];
+    if (pathname !== "/pair") return next();
+    if (req.method !== "POST") {
+      return sendJson(res, 405, { error: "method_not_allowed" });
+    }
+
+    readBody(req, (err, body) => {
+      if (err) {
+        return sendJson(res, err.code === "too_large" ? 413 : 400, {
+          error: err.code === "too_large" ? "payload_too_large" : "bad_request",
+        });
+      }
+
+      let parsed;
+      try {
+        parsed = body ? JSON.parse(body) : {};
+      } catch {
+        return sendJson(res, 400, { error: "invalid_json" });
+      }
+
+      routePair({ parsed, store, proxyRequest, rateLimiter, now, warn })
+        .then((resp) => sendJson(res, resp.status, resp.json))
+        .catch((e) => {
+          warn(`[relay-pair] handler error: ${String(e?.message || e)}`);
+          sendJson(res, 500, { error: "internal_error" });
+        });
+    });
+  };
+}
+
+/**
+ * Pure-ish /pair routing core (BET-152). Returns { status, json } so it can be
+ * tested directly, like routeIapPush. The PROXIED box response body is
+ * DISCARDED — only its status tells us whether the box accepted the claim.
+ * The relay must never store, log, or return the box_token.
+ *
+ * Errors:
+ *   400 bad_request      — malformed box_id or pairing code.
+ *   429 rate_limited     — per-box bucket exhausted.
+ *   401 claim_rejected   — box replied non-200 (do NOT leak box body).
+ *   503 box_offline      — no live tunnel for this box_id.
+ *   504 box_timeout      — tunnel live but no answer.
+ */
+export async function routePair({ parsed, store, proxyRequest, rateLimiter, now = () => Date.now(), warn = console.warn }) {
+  const boxId = parsed.box_id ?? parsed.boxId;
+  const code = parsed.code ?? parsed.pairing_code ?? parsed.pairingCode;
+
+  // Validate shapes BEFORE rate-limiting so a malformed request doesn't burn a
+  // bucket token a legitimate retry would otherwise have.
+  if (!isValidToken(boxId) || typeof code !== "string" || !PAIR_CODE_RE.test(code)) {
+    return { status: 400, json: { error: "bad_request" } };
+  }
+
+  if (!rateLimiter(`pair:${boxId}`)) {
+    return { status: 429, json: { error: "rate_limited" } };
+  }
+
+  // Ask the live box to confirm the 6-digit code via its own /auth/claim.
+  let resp;
+  try {
+    resp = await proxyRequest(boxId, {
+      method: "POST",
+      path: "/auth/claim",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+  } catch (err) {
+    if (err?.code === "no_tunnel") {
+      return { status: 503, json: { error: "box_offline" } };
+    }
+    // Timeout or any other proxy failure.
+    return { status: 504, json: { error: "box_timeout" } };
+  }
+
+  const boxStatus = Number.isInteger(resp?.status) ? resp.status : 0;
+  if (boxStatus !== 200) {
+    // Box rejected (or any other non-200). Do NOT leak the box body — it can
+    // carry diagnostic detail a brute-forcer would mine.
+    return { status: 401, json: { error: "claim_rejected" } };
+  }
+
+  // Discard the box body entirely (it contains the box_token — ADR-1). We only
+  // learn "the code was good" via the 200 status.
+  void resp.body;
+
+  // Bind or reuse the box's account (one account per box per ADR-5). The
+  // `bindings.box_id` FK requires the boxes row to exist; /pair is the FIRST
+  // time the relay learns about a box if it hasn't dialed in yet, so upsert
+  // the box row first (offline — the box-leg dial-in upserts as ONLINE when
+  // the tunnel comes up).
+  if (!store.getBox(boxId)) {
+    store.upsertBox(boxId, { status: "offline", at: now() });
+  }
+  let binding = store.getBinding(boxId);
+  let accountId;
+  if (!binding) {
+    accountId = randomBytes(16).toString("hex"); // 32-char hex, opaque
+    store.bindBox(boxId, accountId, { at: now() });
+  } else {
+    accountId = binding.account_id;
+  }
+
+  // Mint a fresh device token. Storing only the sha256 — the plaintext is the
+  // payload returned to the device on this single 200 reply.
+  const accountToken = randomBytes(16).toString("hex");
+  store.addAccountToken(hashToken(accountToken), accountId, { at: now() });
+
+  return {
+    status: 200,
+    json: {
+      box_id: boxId,
+      account_id: accountId,
+      account_token: accountToken,
+    },
   };
 }
 

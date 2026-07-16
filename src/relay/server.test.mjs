@@ -17,12 +17,12 @@ import assert from "node:assert/strict";
 import { WebSocket } from "ws";
 
 import { createRelayService } from "./server.mjs";
-import { openStore } from "./store.mjs";
+import { openStore, hashToken } from "./store.mjs";
 import { encodeFrame, decodeFrame, FRAME_TYPES } from "./protocol.mjs";
 
 const BOX_A = "0123456789abcdef0123456789abcdef"; // 32 hex
 const TOKEN_A = "11112222333344445555666677778888"; // box token (32 hex)
-const ACCT_1 = "aaaabbbbccccddddeeeeffff00001111"; // phone token == account (DEV-OPEN)
+const ACCT_1 = "aaaabbbbccccddddeeeeffff00001111"; // phone device token (32-hex)
 const silent = () => {};
 
 // ---------------------------------------------------------------------------
@@ -46,14 +46,20 @@ function txPayload({ otid = "1000000999", productId = "sub.monthly", expiresDate
 // boot the real combined service on an ephemeral port with a shared store
 // ---------------------------------------------------------------------------
 
-async function makeService(t) {
+async function makeService(t, { proxyRequest, pairRateLimiter, warnSink } = {}) {
   const store = openStore(); // in-memory, shared so the test can bindBox()
+  // Pre-seed ACCT_1 as a known device token → account. In the new world the
+  // /pair endpoint mints these tokens at runtime; tests that exercise phone
+  // API/IAP/push routes just need ONE valid bearer to be in the store.
+  store.addAccountToken(hashToken(ACCT_1), ACCT_1);
   const svc = createRelayService({
     port: 0,
     host: "127.0.0.1",
     store,
+    proxyRequest,
+    pairRateLimiter,
     log: silent,
-    warn: silent,
+    warn: warnSink || silent,
   });
   const { port } = await svc.start();
   t.after(async () => {
@@ -62,7 +68,8 @@ async function makeService(t) {
   return { svc, store, port, base: `http://127.0.0.1:${port}`, wsBase: `ws://127.0.0.1:${port}` };
 }
 
-// A phone HTTP request with a bearer token (== account id in DEV-OPEN).
+// A phone HTTP request with a bearer token (the minted device token, whose
+// sha256 maps to the authed account in the store).
 async function phone(base, method, path, { token = ACCT_1, body } = {}) {
   const headers = {};
   if (token) headers.authorization = `Bearer ${token}`;
@@ -253,6 +260,215 @@ test("a GET on an IAP route is 405 (routes are POST-only)", async (t) => {
   const { base } = await makeService(t);
   const res = await phone(base, "GET", "/api/iap/validate");
   assert.equal(res.status, 405);
+});
+
+// ---------------------------------------------------------------------------
+// POST /pair — phone bootstrap (BET-152)
+//
+// A fake proxyRequest simulates the box's /auth/claim reply. The relay must:
+//   - mint an account_token + bind box_id → account_id,
+//   - return the token plaintext ONCE,
+//   - accept subsequent phone API calls with that token (list boxes → bound),
+//   - keep the box's response body out of any output,
+//   - rate-limit per box_id,
+//   - reject malformed shapes BEFORE any proxy call / rate-limit burn,
+//   - second pair of the same box_id reuses account_id but issues a fresh token.
+// ---------------------------------------------------------------------------
+
+// Fake box: every claim is decided by `reply(boxId, code)` -> { status, body }.
+// Records every call so a test can assert "no proxy call happened" for the
+// malformed branch.
+function fakeBox(reply) {
+  const calls = [];
+  return {
+    calls,
+    proxyRequest: async (boxId, req) => {
+      calls.push({ boxId, ...req });
+      let body;
+      try {
+        body = JSON.parse(req.body || "{}");
+      } catch {
+        body = {};
+      }
+      return reply(boxId, body.code);
+    },
+  };
+}
+
+const OK_BOX = () => ({
+  status: 200,
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ box_token: "BOX_TOKEN_LEAKED_FROM_BOX" }),
+});
+
+test("POST /pair: happy path mints a device token usable by the phone API", async (t) => {
+  const box = fakeBox(OK_BOX);
+  const { svc, store, base } = await makeService(t, { proxyRequest: box.proxyRequest });
+
+  const res = await phone(base, "POST", "/pair", { token: null, body: { box_id: BOX_A, code: "123456" } });
+  assert.equal(res.status, 200, "200 with minted account");
+  assert.equal(res.json.box_id, BOX_A);
+  assert.match(res.json.account_id, /^[0-9a-f]{32}$/, "account_id is opaque 32-hex");
+  assert.match(res.json.account_token, /^[0-9a-f]{32}$/, "account_token is plaintext 32-hex");
+
+  // The relay must NOT log/store/return the box_token (ADR-1). Asserting the
+  // account_token is distinct from it is the proxy: the relay never asked for
+  // the box_token in plaintext either, so any leak would be visible as the
+  // box body surfacing in /pair's response — it doesn't.
+  assert.notEqual(res.json.account_token, "BOX_TOKEN_LEAKED_FROM_BOX");
+  assert.equal(box.calls.length, 1, "one /auth/claim proxied");
+  assert.equal(box.calls[0].path, "/auth/claim");
+  assert.equal(box.calls[0].method, "POST");
+  assert.equal(box.calls[0].boxId, BOX_A);
+
+  // The plaintext account_token (sha256 in the store) authenticates the phone
+  // API: GET /api/boxes must now show the bound box.
+  const bearer = res.json.account_token;
+  const list = await phone(base, "GET", "/api/boxes", { token: bearer });
+  assert.equal(list.status, 200);
+  assert.equal(list.json.boxes.length, 1);
+  assert.equal(list.json.boxes[0].box_id, BOX_A);
+
+  // Store side: exactly one binding, exactly one token row, both pointing at
+  // the same account_id.
+  const binding = store.getBinding(BOX_A);
+  assert.ok(binding, "binding persisted");
+  assert.equal(binding.account_id, res.json.account_id);
+  assert.equal(store.listAccountTokensForAccount(res.json.account_id).length, 1);
+  // Store has the HASH, never the plaintext.
+  assert.equal(
+    store.getAccountByTokenHash(hashToken(bearer)),
+    res.json.account_id,
+    "store can look up by sha256(plaintext)",
+  );
+  assert.equal(store.getAccountByTokenHash(bearer), null, "store has no plaintext token row");
+});
+
+test("POST /pair: offline box (proxyRequest rejects no_tunnel) → 503, no binding/token", async (t) => {
+  const calls = [];
+  const proxyRequest = async () => {
+    calls.push("called");
+    const err = new Error("no tunnel");
+    err.code = "no_tunnel";
+    throw err;
+  };
+  const { svc, store, base } = await makeService(t, { proxyRequest });
+
+  const res = await phone(base, "POST", "/pair", { token: null, body: { box_id: BOX_A, code: "654321" } });
+  assert.equal(res.status, 503);
+  assert.equal(res.json.error, "box_offline");
+  assert.equal(calls.length, 1, "proxy called exactly once");
+  assert.equal(store.getBinding(BOX_A), null, "no binding persisted");
+});
+
+test("POST /pair: wrong code (box replies non-200) → 401, no binding/token, box body NOT leaked", async (t) => {
+  const calls = [];
+  const proxyRequest = async (_boxId, _req) => {
+    calls.push("called");
+    return {
+      status: 401,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ error: "pairing failed", detail: "BOX_INTERNAL_TRACE_INFO" }),
+    };
+  };
+  const { store, base } = await makeService(t, { proxyRequest });
+
+  const res = await phone(base, "POST", "/pair", { token: null, body: { box_id: BOX_A, code: "111111" } });
+  assert.equal(res.status, 401);
+  assert.equal(res.json.error, "claim_rejected");
+  // The box body MUST NOT appear in the relay's response (the box's internal
+  // error text is not the relay's to expose).
+  assert.equal(
+    JSON.stringify(res.json).includes("BOX_INTERNAL_TRACE_INFO"),
+    false,
+    "box body is not leaked",
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(store.getBinding(BOX_A), null);
+});
+
+test("POST /pair: second pair of the same box reuses account_id but issues a fresh token", async (t) => {
+  const box = fakeBox(OK_BOX);
+  const { svc, store, base } = await makeService(t, { proxyRequest: box.proxyRequest });
+
+  const first = await phone(base, "POST", "/pair", { token: null, body: { box_id: BOX_A, code: "222222" } });
+  assert.equal(first.status, 200);
+  const second = await phone(base, "POST", "/pair", { token: null, body: { box_id: BOX_A, code: "333333" } });
+  assert.equal(second.status, 200);
+
+  assert.equal(first.json.account_id, second.json.account_id, "account_id reused");
+  assert.notEqual(first.json.account_token, second.json.account_token, "distinct tokens");
+
+  assert.equal(box.calls.length, 2, "two box claims");
+  assert.equal(store.listAccountTokensForAccount(first.json.account_id).length, 2, "two token rows");
+
+  // Both tokens must work as phone bearers (the list shows the bound box once).
+  const list1 = await phone(base, "GET", "/api/boxes", { token: first.json.account_token });
+  const list2 = await phone(base, "GET", "/api/boxes", { token: second.json.account_token });
+  assert.equal(list1.json.boxes.length, 1);
+  assert.equal(list2.json.boxes.length, 1);
+});
+
+test("POST /pair: malformed box_id or code → 400 with no proxy call and no rate-limit burn", async (t) => {
+  const calls = [];
+  const proxyRequest = async () => {
+    calls.push("called");
+    return OK_BOX();
+  };
+  // Tiny rate limiter to assert the malformed branch does NOT burn a token.
+  const used = new Set();
+  const pairRateLimiter = (key) => {
+    if (used.has(key)) return false;
+    used.add(key);
+    return true;
+  };
+  const { store, base } = await makeService(t, { proxyRequest, pairRateLimiter });
+
+  const badCases = [
+    { box_id: "not-hex", code: "123456" },
+    { box_id: BOX_A, code: "abc" },                  // not 6 digits
+    { box_id: BOX_A, code: "12345" },               // 5 digits
+    { box_id: BOX_A, code: "1234567" },             // 7 digits
+    { box_id: BOX_A, code: " 123456" },             // leading space
+    { box_id: BOX_A },                              // missing code
+  ];
+  for (const body of badCases) {
+    const res = await phone(base, "POST", "/pair", { token: null, body });
+    assert.equal(res.status, 400, `malformed ${JSON.stringify(body)} → 400`);
+    assert.equal(res.json.error, "bad_request");
+  }
+  assert.equal(calls.length, 0, "no proxy call for malformed input");
+  assert.equal(used.size, 0, "rate-limiter bucket NOT burned for malformed input");
+
+  // After all malformed, a valid request from the SAME box_id still has full bucket.
+  const ok = await phone(base, "POST", "/pair", { token: null, body: { box_id: BOX_A, code: "555555" } });
+  assert.equal(ok.status, 200);
+});
+
+test("POST /pair: GET is 405; box body NEVER proxied through on rejection", async (t) => {
+  const box = fakeBox(OK_BOX);
+  const { base } = await makeService(t, { proxyRequest: box.proxyRequest });
+  const get = await phone(base, "GET", "/pair");
+  assert.equal(get.status, 405);
+});
+
+test("POST /pair: rate limit kicks in after PAIR_RL_CAPACITY per-box_id hits", async (t) => {
+  // Drainable limiter — capacity 2, no refill inside the test window.
+  let calls = 0;
+  const pairRateLimiter = () => {
+    calls += 1;
+    return calls <= 2;
+  };
+  const box = fakeBox(OK_BOX);
+  const { base } = await makeService(t, { proxyRequest: box.proxyRequest, pairRateLimiter });
+
+  const r1 = await phone(base, "POST", "/pair", { token: null, body: { box_id: BOX_A, code: "000001" } });
+  const r2 = await phone(base, "POST", "/pair", { token: null, body: { box_id: BOX_A, code: "000002" } });
+  const r3 = await phone(base, "POST", "/pair", { token: null, body: { box_id: BOX_A, code: "000003" } });
+  assert.equal(r1.status, 200);
+  assert.equal(r2.status, 200);
+  assert.equal(r3.status, 429, "third hit throttled");
+  assert.equal(r3.json.error, "rate_limited");
 });
 
 // ---------------------------------------------------------------------------
