@@ -21,18 +21,17 @@
 //   and the box_id as ?box_id=<box_id> query param (or an `x-box-id` header).
 //   Both must pass isValidToken (32-hex) shape validation from webhooks.mjs, and
 //   then an injectable verifyBox({boxId, token}) decides acceptance. The default
-//   verifier consults an optional boxTokens map (box_id → expected box_token,
-//   constant-time compared); if no map is configured it runs in DEV-OPEN mode
-//   (any well-formed pair accepted) and logs a loud warning — the real
-//   credential source (IAP-bound box_secret) is wired in Stage 5. verifyBox is
-//   the single seam Stage 5 replaces; nothing else here changes.
+//   verifier (createDefaultVerifier) implements trust-on-first-use via the
+//   store: sha256(token) is recorded on the first dial-out for a box_id; later
+//   dial-outs must hash-compare (constant-time). verifyBox remains the seam for
+//   an out-of-store verifier (e.g. Stage-5 IAP-bound secrets); nothing else
+//   here changes.
 //
 // PORT: 20787 by default (bui 20xxx block per AGENTS.md), override with
 //   RELAY_PORT. Bind host override with RELAY_HOST (default 0.0.0.0).
 
 import { WebSocketServer } from "ws";
 import { isValidToken, createRateLimiter } from "../server/webhooks.mjs";
-import { tokenMatches } from "../server/auth.mjs";
 import {
   RoutingTable,
   PendingRequests,
@@ -40,7 +39,7 @@ import {
   decodeFrame,
   FRAME_TYPES,
 } from "./protocol.mjs";
-import { openStore, BOX_STATUS } from "./store.mjs";
+import { openStore, BOX_STATUS, hashToken, hashEquals } from "./store.mjs";
 
 export const DEFAULT_RELAY_PORT = 20787;
 
@@ -110,43 +109,48 @@ export function parseHandshake({ url, headers = {}, host = "localhost" } = {}) {
 }
 
 /**
- * Build the default box verifier.
+ * Build the default box verifier (BET-152 / ADR-4: trust-on-first-use).
  *
- * @param {object} [opts]
- * @param {Map<string,string>|Record<string,string>|null} [opts.boxTokens]
- *   Optional box_id → expected box_token map. When provided, a handshake is
- *   accepted only if the presented token constant-time matches the stored one.
- *   When omitted (null), the relay runs DEV-OPEN: any shape-valid {boxId, token}
- *   is accepted (a loud warning is logged once). Stage 5 replaces this with the
- *   IAP-bound credential lookup.
+ * Behavior:
+ *   - Shape gate with isValidToken first (a malformed id/token is NEVER
+ *     accepted, and NEVER registers — so a scanner can not seed itself).
+ *   - Look up the stored credential for `boxId` in the store.
+ *     - No row → first dial-out: persist `sha256(token)`, log the TOFU
+ *       registration, accept.
+ *     - Row present → accept iff `hashEquals(row.token_hash, hashToken(token))`.
+ *     - Hash mismatch → reject (the box presented a different token for the
+ *       same box_id; either the box owner rotated without us, or someone is
+ *       trying to squat the id).
+ *
+ * `store` is REQUIRED. There is no dev-open fallback: a relay with no
+ * credential store is misconfigured and every handshake must reject.
+ *
+ * @param {object} opts
+ * @param {object} opts.store  an openStore() handle (getBoxCredential /
+ *                              setBoxCredential). Required.
  * @param {(msg:string)=>void} [opts.warn]  injectable warn sink (tests silence).
+ * @param {(msg:string)=>void} [opts.log]   injectable log sink for the TOFU
+ *                                            registration line (tests silence).
  */
-export function createDefaultVerifier({ boxTokens = null, warn = console.warn } = {}) {
-  const lookup =
-    boxTokens == null
-      ? null
-      : boxTokens instanceof Map
-        ? boxTokens
-        : new Map(Object.entries(boxTokens));
-
-  let warnedOpen = false;
+export function createDefaultVerifier({ store, warn = console.warn, log = console.log } = {}) {
+  if (!store || typeof store.getBoxCredential !== "function") {
+    throw new Error("createDefaultVerifier: store required");
+  }
   return function verifyBox({ boxId, token }) {
-    // Shape gate first — both must be 32-hex. A malformed id/token is never
-    // accepted, even in dev-open mode.
+    // Shape gate first — a malformed id/token is NEVER accepted AND never
+    // registers, so an attacker can't probe to seed a row.
     if (!isValidToken(boxId) || !isValidToken(token)) return false;
-    if (lookup == null) {
-      if (!warnedOpen) {
-        warnedOpen = true;
-        warn(
-          "[relay] DEV-OPEN auth: accepting any well-formed box handshake. " +
-            "Configure boxTokens (or a Stage-5 verifier) before production.",
-        );
-      }
+    const cred = store.getBoxCredential(boxId);
+    if (!cred) {
+      // First dial-out for this box_id → trust-on-first-use: persist sha256
+      // (NOT the plaintext token — ADR-1) and accept. setBoxCredential throws
+      // on a UNIQUE collision, which surfaces as a hard reject (a stale in-mem
+      // routing race or a deliberate double-register attempt).
+      store.setBoxCredential(boxId, hashToken(token));
+      log(`[relay] box ${boxId.slice(0, 8)} registered (TOFU)`);
       return true;
     }
-    const expected = lookup.get(boxId);
-    if (typeof expected !== "string") return false;
-    return tokenMatches(expected, token);
+    return hashEquals(cred.token_hash, hashToken(token));
   };
 }
 
@@ -210,8 +214,7 @@ export function wsTransport(ws, { onError } = {}) {
  * @param {object} [opts.store]        an openStore() handle; created in-memory if omitted.
  * @param {string} [opts.storePath]    path passed to openStore when store omitted.
  * @param {(a:{boxId:string,token:string})=>boolean} [opts.verifyBox]
- *   box handshake verifier; defaults to createDefaultVerifier({ boxTokens }).
- * @param {Map|object|null} [opts.boxTokens]  passed to the default verifier.
+ *   box handshake verifier; defaults to createDefaultVerifier({ store, log, warn }).
  * @param {object} [opts.routingTable] a RoutingTable; created if omitted.
  * @param {(...a)=>void} [opts.log]     injectable logger (default console.log).
  * @param {(...a)=>void} [opts.warn]    injectable warn (default console.warn).
@@ -232,7 +235,6 @@ export function createRelayServer(opts = {}) {
     host = process.env.RELAY_HOST || "0.0.0.0",
     storePath,
     verifyBox,
-    boxTokens = null,
     log = console.log,
     warn = console.warn,
     now = () => Date.now(),
@@ -244,7 +246,7 @@ export function createRelayServer(opts = {}) {
   const routing = opts.routingTable || new RoutingTable({
     onEvict: (boxId) => log(`[relay] evicted stale socket for box ${short(boxId)}`),
   });
-  const verify = verifyBox || createDefaultVerifier({ boxTokens, warn });
+  const verify = verifyBox || createDefaultVerifier({ store, log, warn });
   const rl =
     rateLimiter ||
     createRateLimiter({
