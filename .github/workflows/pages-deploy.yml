@@ -1,0 +1,63 @@
+# pages-deploy — publishes website/ to GitHub Pages on the custom domain
+# mantaui.com. Uses the "Deploy from GitHub Actions" Pages source (no
+# gh-pages branch). See BET-146 for the ticket/decision record.
+#
+# Also copies scripts/install.sh into the published artifact as /install.sh
+# so `curl -fsSL https://mantaui.com/install.sh | bash` serves the real
+# script byte-for-byte. scripts/install.sh itself stays the single source of
+# truth (owned by BET-148) — this is a copy step at deploy time only, never a
+# second copy checked into git.
+#
+# One-time manual owner step (not done by this workflow, see PR description):
+#   1. Repo Settings → Pages → Source → "GitHub Actions".
+#   2. Point mantaui.com's DNS (A/ALIAS, since it's an apex domain) at GitHub
+#      Pages, or use a CNAME-flattening DNS provider.
+
+name: pages-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "scripts/install.sh"
+      - ".github/workflows/pages-deploy.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble Pages artifact
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/pages-site
+          mkdir -p /tmp/pages-site
+          cp -r website/. /tmp/pages-site/
+          cp scripts/install.sh /tmp/pages-site/install.sh
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: /tmp/pages-site
+
+  deploy:
+    needs: build
+    runs-on: self-hosted
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
