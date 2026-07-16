@@ -47,6 +47,7 @@ import {
   AUTH_RL_CAPACITY,
   AUTH_RL_REFILL_PER_SEC,
 } from "./auth.mjs";
+import { createRelayAgent, shouldStartRelayAgent } from "../relay/agent/index.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -142,6 +143,14 @@ if (!authEnforced) {
 } else {
   console.log(`[auth] gate enabled — box_id ${boxAuth.box_id}`);
 }
+
+// Relay-agent handle (BET-151 ADR-1). Populated below in the listen() callback
+// when shouldStartRelayAgent(config) returns true. Read by GET /relay/status
+// (loopback-only) so install.sh can poll for the handshake without standing up
+// its own websocket. Null = agent never started (config opted out, or the
+// listener never got that far — in either case /relay/status returns
+// `connected: false`).
+let relayAgent = null;
 
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
 // serves HTML pages from ~/.manta/pages/<subdomain>/index.html. Caddy
@@ -516,6 +525,44 @@ const server = createServer(async (req, res) => {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: String(e?.message ?? e) }));
     }
+    return;
+  }
+
+  // ---------- Relay status (LOOPBACK-ONLY) ----------
+  // GET /relay/status → { enabled, connected }
+  //
+  // Loopback-gated (same check /auth/pair uses) because the answer leaks
+  // whether this box has reached the relay — useful intel for an attacker
+  // probing the box's outbound posture, and not needed by any remote client.
+  // The renderer never calls this; it's consumed by `install.sh` (and any
+  // future ops tooling on the box itself).
+  //
+  //   enabled   — true iff `shouldStartRelayAgent(config)` (config-derived;
+  //                absent key → true, see agent/index.mjs)
+  //   connected — true iff the agent's `status()` is "connected" right now
+  //                (the live WS handshake to relay.mantaui.com succeeded).
+  //                "connecting" / "stopped" both collapse to false — install.sh
+  //                treats anything-but-connected as "not yet" and re-polls.
+  if (req.method === "GET" && path === "/relay/status") {
+    if (
+      !isLocalDirectRequest({
+        remoteAddress: req.socket?.remoteAddress,
+        headers: req.headers,
+      })
+    ) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: "relay status is loopback-only (run this from the box)",
+        }),
+      );
+      return;
+    }
+    const cfg = await local.configGet();
+    const enabled = shouldStartRelayAgent(cfg);
+    const connected = relayAgent ? relayAgent.status() === "connected" : false;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ enabled, connected }));
     return;
   }
 
@@ -1228,4 +1275,53 @@ server.on("upgrade", (req, socket, head) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`manta listening on http://${HOST}:${PORT}`);
+
+  // Start the box-side relay agent (BET-151 ADR-1 / BET-155). The agent dials
+  // OUT to relay.mantaui.com from this box and authenticates with boxAuth, so
+  // it MUST be created after ensureAuth() has run (which it has — see above)
+  // and AFTER the box server is listening (so the agent's first request proxy
+  // can land). Fire-and-forget: the agent's reconnect/backoff loop runs on its
+  // own timers and never blocks this path — a slow relay handshake must NOT
+  // hold up the HTTP server, and a relay outage must NOT crash the box server.
+  //
+  // Opt-out: write `"relayEnabled": false` to ~/.manta/config.json
+  // (shouldStartRelayAgent() handles the default-on case). No env override —
+  // configGet() is the single switch, mirroring how chatAutoAllow is gated.
+  //
+  // The agent owns its own reconnect/backoff — do NOT add another retry loop.
+  // The agent already logs `[relay-agent] connected …` / `tunnel closed;
+  // reconnecting`; we only log the one-shot boot decision here.
+  local
+    .configGet()
+    .then((cfg) => {
+      if (!shouldStartRelayAgent(cfg)) {
+        console.log(
+          "[relay-agent] disabled via config (relayEnabled=false); box reachable only via direct ingress.",
+        );
+        return;
+      }
+      let agent;
+      try {
+        agent = createRelayAgent({ localBase: `http://127.0.0.1:${PORT}` });
+      } catch (err) {
+        console.warn(
+          `[relay-agent] could not construct (auth missing?): ${String(err?.message ?? err)}`,
+        );
+        return;
+      }
+      relayAgent = agent;
+      agent.start().catch((err) => {
+        console.warn(
+          `[relay-agent] first connect rejected: ${String(err?.message ?? err)}`,
+        );
+      });
+      console.log(
+        `[relay-agent] dialing ${agent.boxId.slice(0, 8)}… (relay.mantaui.com)`,
+      );
+    })
+    .catch((err) => {
+      console.warn(
+        `[relay-agent] could not start (config read failed): ${String(err?.message ?? err)}`,
+      );
+    });
 });

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   createRelayAgent,
   createBackoff,
+  makeDefaultLocalFetch,
+  shouldStartRelayAgent,
   DEFAULT_RELAY_URL,
   RECONNECT_BASE_MS,
   RECONNECT_MAX_MS,
@@ -474,4 +476,341 @@ test("stop() during an in-flight dial does not connect afterwards", async () => 
   assert.equal(agent.isConnected(), false, "never adopts a socket opened after stop");
   assert.equal(closed, true, "the raced-open socket is closed");
   assert.equal(clock.pendingCount(), 0);
+});
+
+// ---------------------------------------------------------------------------
+// shouldStartRelayAgent — ADR-1 config decision (BET-155)
+// ---------------------------------------------------------------------------
+
+test("shouldStartRelayAgent defaults to true (relay-first product default)", () => {
+  assert.equal(shouldStartRelayAgent(undefined), true);
+  assert.equal(shouldStartRelayAgent(null), true);
+  assert.equal(shouldStartRelayAgent({}), true);
+  assert.equal(shouldStartRelayAgent({ relayEnabled: undefined }), true);
+});
+
+test("shouldStartRelayAgent returns true for relayEnabled=true", () => {
+  assert.equal(shouldStartRelayAgent({ relayEnabled: true }), true);
+});
+
+test("shouldStartRelayAgent returns false ONLY for relayEnabled=false (opt-out)", () => {
+  assert.equal(shouldStartRelayAgent({ relayEnabled: false }), false);
+});
+
+test("shouldStartRelayAgent treats truthy non-booleans as enabled (no over-engineering)", () => {
+  // The only way to opt out is the literal boolean `false`. Anything else
+  // (a stray "no", 0 wrapped in JSON's quirks, a stale schema) keeps the
+  // relay on — re-enabling is one config flip away, and a silent "no" would
+  // be invisible to the operator.
+  assert.equal(shouldStartRelayAgent({ relayEnabled: "no" }), true);
+  assert.equal(shouldStartRelayAgent({ relayEnabled: 0 }), true);
+  assert.equal(shouldStartRelayAgent({ relayEnabled: "" }), true);
+});
+
+// ---------------------------------------------------------------------------
+// makeDefaultLocalFetch — ADR-1 auth overwrite (BET-155)
+// ---------------------------------------------------------------------------
+
+test("makeDefaultLocalFetch overwrites a foreign Authorization header with the BOX bearer", async () => {
+  // A foreign (account) token presented by the device / carried in frame.headers
+  // must NOT be forwarded to 127.0.0.1:8787. The box server authenticates every
+  // request with its own box_token, so the agent installs that bearer no matter
+  // what the inbound value was.
+  const seen = [];
+  const stubFetch = async (url, init) => {
+    seen.push({ url, headers: init?.headers });
+    return {
+      status: 200,
+      headers: new Map([["content-type", "application/json"]]),
+      text: async () => "{}",
+    };
+  };
+  // Replace global fetch for this test only.
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = stubFetch;
+  try {
+    const localFetch = makeDefaultLocalFetch("http://127.0.0.1:8787", AUTH);
+    await localFetch({
+      method: "GET",
+      path: "/api/projects",
+      headers: { authorization: "Bearer account-token-from-device" },
+      body: undefined,
+    });
+    assert.equal(seen.length, 1);
+    assert.equal(
+      seen[0].headers.authorization,
+      `Bearer ${BOX_TOKEN}`,
+      "Authorization is the BOX token, not the foreign account token",
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("makeDefaultLocalFetch is case-insensitive about the Authorization key", async () => {
+  // HTTP headers are case-insensitive; "Authorization", "authorization", and
+  // "AUTHORIZATION" are the same header name. A client that capitalized the
+  // key differently must still lose the inbound value to the BOX bearer.
+  const seen = [];
+  const stubFetch = async (_url, init) => {
+    seen.push(init?.headers);
+    return {
+      status: 200,
+      headers: new Map(),
+      text: async () => "",
+    };
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = stubFetch;
+  try {
+    const localFetch = makeDefaultLocalFetch("http://127.0.0.1:8787", AUTH);
+    for (const variant of ["Authorization", "authorization", "AUTHORIZATION", "AuThOrIzAtIoN"]) {
+      await localFetch({
+        method: "GET",
+        path: "/x",
+        headers: { [variant]: "Bearer leaked-token" },
+        body: undefined,
+      });
+    }
+    assert.equal(seen.length, 4);
+    for (const headers of seen) {
+      assert.equal(
+        headers.authorization,
+        `Bearer ${BOX_TOKEN}`,
+        "every variant must collapse to the BOX bearer (lowercase key)",
+      );
+      // No stale "Authorization"/"AUTHORIZATION" key with the foreign value.
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase() === "authorization" && k !== "authorization") {
+          assert.fail(`foreign key "${k}" survived in outbound headers`);
+        }
+      }
+    }
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("makeDefaultLocalFetch installs the BOX bearer when no Authorization was inbound", async () => {
+  const seen = [];
+  const stubFetch = async (_url, init) => {
+    seen.push(init?.headers);
+    return { status: 200, headers: new Map(), text: async () => "" };
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = stubFetch;
+  try {
+    const localFetch = makeDefaultLocalFetch("http://127.0.0.1:8787", AUTH);
+    await localFetch({
+      method: "GET",
+      path: "/api/projects",
+      headers: { "x-device-id": "phone-1", accept: "application/json" },
+      body: undefined,
+    });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].authorization, `Bearer ${BOX_TOKEN}`);
+    // Unrelated headers pass through unchanged (and keep their original case).
+    assert.equal(seen[0]["x-device-id"], "phone-1");
+    assert.equal(seen[0].accept, "application/json");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("makeDefaultLocalFetch preserves unrelated headers when overwriting auth", async () => {
+  const seen = [];
+  const stubFetch = async (_url, init) => {
+    seen.push(init?.headers);
+    return { status: 200, headers: new Map(), text: async () => "" };
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = stubFetch;
+  try {
+    const localFetch = makeDefaultLocalFetch("http://127.0.0.1:8787", AUTH);
+    await localFetch({
+      method: "GET",
+      path: "/x",
+      headers: {
+        authorization: "Bearer stale-device-token",
+        "x-request-id": "abc-123",
+        "x-forwarded-for": "1.2.3.4", // explicitly NOT a thing we strip; pass-through
+        accept: "*/*",
+      },
+      body: undefined,
+    });
+    assert.equal(seen.length, 1);
+    const h = seen[0];
+    assert.equal(h.authorization, `Bearer ${BOX_TOKEN}`);
+    assert.equal(h["x-request-id"], "abc-123");
+    assert.equal(h["x-forwarded-for"], "1.2.3.4");
+    assert.equal(h.accept, "*/*");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("makeDefaultLocalFetch requires a valid box_token (never accepts a missing/foreign one)", () => {
+  assert.throws(() => makeDefaultLocalFetch("http://127.0.0.1:8787", null), /box_token/);
+  assert.throws(() => makeDefaultLocalFetch("http://127.0.0.1:8787", undefined), /box_token/);
+  assert.throws(
+    () => makeDefaultLocalFetch("http://127.0.0.1:8787", { box_id: BOX_ID, box_token: "bad" }),
+    /box_token/,
+  );
+  assert.throws(() => makeDefaultLocalFetch("http://127.0.0.1:8787", {}), /box_token/);
+});
+
+test("the agent's default localFetch is the overwriting one (ADR-1 wired by default)", async () => {
+  // End-to-end: drive a real REQUEST frame through the agent and verify the
+  // outbound HTTP request to 127.0.0.1:8787 carries the BOX bearer, even
+  // though the inbound frame carried a foreign "Authorization" header. This
+  // is the contract install.sh + the box-server's auth gate rely on.
+  const relay = makeFakeRelay();
+  const clock = makeClock();
+  const seenByGlobalFetch = [];
+  const stubFetch = async (url, init) => {
+    seenByGlobalFetch.push({ url, headers: init?.headers });
+    return {
+      status: 200,
+      headers: new Map([["content-type", "application/json"]]),
+      text: async () => '{"ok":true}',
+    };
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = stubFetch;
+  try {
+    const agent = createRelayAgent({
+      auth: AUTH,
+      connect: relay.connect,
+      // Intentionally do NOT pass a custom localFetch — exercise the default
+      // factory `makeDefaultLocalFetch(localBase, auth)` which the agent
+      // wires up when opts.localFetch is absent.
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      log: silent,
+      warn: silent,
+    });
+    await agent.start();
+
+    relay.sendToClient({
+      type: FRAME_TYPES.REQUEST,
+      id: 1,
+      method: "GET",
+      path: "/api/projects",
+      headers: {
+        authorization: "Bearer attacker-supplied-token",
+        "x-device-id": "phone-1",
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(seenByGlobalFetch.length, 1, "exactly one outbound call to the local box server");
+    assert.match(
+      seenByGlobalFetch[0].url,
+      /^http:\/\/127\.0\.0\.1:8787\/api\/projects$/,
+      "URL is the local box server + the relay-forwarded path",
+    );
+    assert.equal(
+      seenByGlobalFetch[0].headers.authorization,
+      `Bearer ${BOX_TOKEN}`,
+      "the outbound HTTP request carries the BOX bearer, NOT the foreign token",
+    );
+    // Unrelated headers still pass through (case preserved).
+    assert.equal(seenByGlobalFetch[0].headers["x-device-id"], "phone-1");
+
+    agent.stop();
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// status() — coarse live-state snapshot for /relay/status (BET-155)
+// ---------------------------------------------------------------------------
+
+test("status() is \"stopped\" before start()", () => {
+  const relay = makeFakeRelay();
+  const clock = makeClock();
+  const agent = createRelayAgent({
+    auth: AUTH,
+    connect: relay.connect,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    log: silent,
+    warn: silent,
+  });
+  assert.equal(agent.status(), "stopped");
+});
+
+test("status() is \"connected\" after a successful start()", async () => {
+  const relay = makeFakeRelay();
+  const clock = makeClock();
+  const agent = createRelayAgent({
+    auth: AUTH,
+    connect: relay.connect,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    log: silent,
+    warn: silent,
+  });
+  await agent.start();
+  assert.equal(agent.status(), "connected");
+  agent.stop();
+});
+
+test("status() is \"connecting\" after a drop while the reconnect is armed", async () => {
+  const relay = makeFakeRelay();
+  const clock = makeClock();
+  const agent = createRelayAgent({
+    auth: AUTH,
+    connect: relay.connect,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    log: silent,
+    warn: silent,
+  });
+  await agent.start();
+  relay.dropLink();
+  await Promise.resolve();
+  assert.equal(agent.status(), "connecting", "stays 'connecting' through the backoff window");
+  agent.stop();
+});
+
+test("status() is \"stopped\" after stop() and ignores later drop events", async () => {
+  const relay = makeFakeRelay();
+  const clock = makeClock();
+  const agent = createRelayAgent({
+    auth: AUTH,
+    connect: relay.connect,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    log: silent,
+    warn: silent,
+  });
+  await agent.start();
+  agent.stop();
+  assert.equal(agent.status(), "stopped");
+  // A late drop must not flip the state — stop() is permanent.
+  relay.dropLink();
+  await Promise.resolve();
+  assert.equal(agent.status(), "stopped");
+});
+
+test("status() is \"connecting\" between a failed dial and the next attempt", async () => {
+  // failFirst=1: first dial fails, the agent arms a reconnect; before the
+  // next attempt fires the agent is neither connected nor stopped.
+  const relay = makeFakeRelay({ failFirst: 1 });
+  const clock = makeClock();
+  const agent = createRelayAgent({
+    auth: AUTH,
+    connect: relay.connect,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    log: silent,
+    warn: silent,
+  });
+  await agent.start(); // attempt 1 fails → reconnect armed
+  assert.equal(agent.status(), "connecting");
+  agent.stop();
 });

@@ -324,7 +324,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Wait for health, then mint + print a pairing code.
+# 8. Wait for health, then verify the relay handshake, then mint + print a
+#    pairing code. Devices pair THROUGH the relay (relay.mantaui.com) — the
+#    install must confirm the box agent actually reached the relay before
+#    handing the pairing code back. If the handshake never completes we warn
+#    (the box still works locally) and continue — operators can read the
+#    journalctl hint and diagnose later.
 # ---------------------------------------------------------------------------
 log "Waiting for the server to become healthy at $MANTA_HEALTH_URL…"
 node -e '
@@ -338,9 +343,59 @@ node -e '
 
 ok "Server is healthy."
 
+# Derive the loopback base (drop the /auth/status path) — waitForRelay takes a
+# base URL and appends /relay/status itself.
+MANTA_RELAY_BASE="$(printf '%s\n' "$MANTA_HEALTH_URL" | sed 's#/auth/status$##')"
+log "Waiting for the relay handshake at $MANTA_RELAY_BASE/relay/status…"
+# waitForRelay is best-effort — relay outage never fails the install. We log
+# the state on stderr and emit exactly one of "connected|disabled|degraded" on
+# stdout so the bash below can branch on it without re-fetching.
+RELAY_CHECK="$(MANTA_RELAY_BASE="$MANTA_RELAY_BASE" node -e '
+  import("'"$LIB"'").then(async (m) => {
+    const r = await m.waitForRelay(process.env.MANTA_RELAY_BASE, { maxAttempts: 30, intervalMs: 1000 });
+    if (r.ok && r.connected) {
+      console.error("connected after " + r.attempts + " attempt(s)");
+      process.stdout.write("connected");
+    } else if (r.ok && !r.enabled) {
+      console.error("relay disabled by config");
+      process.stdout.write("disabled");
+    } else if (r.ok && !r.connected) {
+      console.error("not connected after " + r.attempts + " attempt(s)");
+      process.stdout.write("degraded");
+    } else {
+      console.error(r.error || "unknown failure");
+      process.stdout.write("degraded");
+    }
+  }).catch((e) => {
+    console.error(String(e));
+    process.stdout.write("degraded");
+  });
+' 2>/dev/null || echo degraded)"
+export MANTA_RELAY_BASE
+
+case "$RELAY_CHECK" in
+  connected) ok "Relay link established (relay.mantaui.com).";;
+  disabled)
+    log "Relay disabled by config (relayEnabled=false) — devices will pair via direct ingress only.";;
+  *)
+    warn "Relay handshake did not complete — the box is reachable locally; journalctl --user -u manta-server -n 50 will show why."
+    warn "  Re-run later: systemctl --user restart manta-server"
+    ;;
+esac
+
 log "Minting pairing code…"
 # Delegate to the same `manta pair` CLI the user runs later (loopback GET /auth/pair).
 node "$MANTA_HOME/scripts/manta-pair.mjs" || die "failed to mint pairing code (is the server local-reachable?)"
+
+# Read the box_id from ~/.manta/auth.json via the tested install-lib loader
+# (NEVER re-parse the JSON in bash — auth.json's shape belongs to the server).
+BOX_ID_DISPLAY="$(node -e '
+  import("'"$LIB"'").then((m) => {
+    const id = m.readBoxIdentity(process.env.MANTA_AUTH_FILE);
+    process.stdout.write(id?.box_id ?? "");
+  }).catch(() => process.stdout.write(""));
+' 2>/dev/null || true)"
+export BOX_ID_DISPLAY
 
 cat <<EOF
 
@@ -353,6 +408,19 @@ Chat backend (opencode-serve) on http://127.0.0.1:4096:
   systemctl --user status opencode-serve
   systemctl --user restart opencode-serve
   journalctl --user -u opencode-serve -f
+
+Your box pairs with devices THROUGH the relay (relay.mantaui.com) — no public
+port on this box, no tunnel, no reverse proxy to set up. The desktop / mobile
+app discovers it via the relay using the box_id below.
+EOF
+
+if [ -n "$BOX_ID_DISPLAY" ]; then
+  printf '\n  Box ID:        %s\n' "$BOX_ID_DISPLAY"
+fi
+
+cat <<EOF
+
+  (Pairing code printed above by manta pair — re-run any time to mint a fresh one.)
 
 Re-run this installer any time to upgrade in place (your box identity is preserved).
 Run 'manta pair' (or 'npm run pair' in $MANTA_HOME) to mint a fresh pairing code.

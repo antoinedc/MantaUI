@@ -182,16 +182,45 @@ async function defaultConnect(url, { headers } = {}) {
 // Local-fetch leg (default localFetch()). Calls the box server over loopback.
 // ---------------------------------------------------------------------------
 
-// Turn a decoded REQUEST frame into a real call against the local box server and
-// return a normalized { status, headers, body } response. `body` on the frame,
-// when present, is a UTF-8 string (JSON payloads are already text). Binary
-// request bodies are out of scope for the metadata path.
-function makeDefaultLocalFetch(localBase) {
+// ADR-1 (BET-151): every relay→box proxied request must be authenticated to the
+// LOCAL box server with the BOX's own `box_token`. Devices only ever hold an
+// account token presented to the RELAY; they never see the box_token. So when
+// the agent forwards a REQUEST frame to 127.0.0.1:8787 it must UNCONDITIONALLY
+// overwrite any inbound `Authorization` header — including a foreign one
+// accidentally carried in `frame.headers` — with `Bearer <box_token>`. Trusting
+// the inbound value would let a misconfigured client pin the wrong auth and
+// leak the box_token through the relay.
+//
+// `auth` is `{ box_id, box_token }`; in production it's whatever `loadAuth()`
+// returned for the local box. The function is exported (named) so tests can
+// drive it with a synthetic auth without standing up the whole agent.
+//
+// Header keys are matched case-insensitively (HTTP headers are case-insensitive;
+// `Authorization`, `authorization`, and `AUTHORIZATION` all mean the same name).
+// `frame.headers` is left unmutated (caller still owns the frame).
+export function makeDefaultLocalFetch(localBase, auth) {
+  if (!auth || !isValidToken(auth?.box_token)) {
+    throw new Error(
+      "makeDefaultLocalFetch: valid { box_token } required " +
+        "(the box's own identity — never the device's account token)",
+    );
+  }
+  const bearer = `Bearer ${auth.box_token}`;
   return async function defaultLocalFetch({ method, path, headers, body }) {
     const url = `${localBase}${path.startsWith("/") ? path : `/${path}`}`;
+    // Copy the inbound headers verbatim, then drop ANY `authorization` key
+    // (case-insensitive) and unconditionally install the BOX bearer.
+    const outHeaders = {};
+    if (headers && typeof headers === "object") {
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase() === "authorization") continue;
+        outHeaders[k] = headers[k];
+      }
+    }
+    outHeaders.authorization = bearer;
     const res = await fetch(url, {
       method,
-      headers: headers || undefined,
+      headers: outHeaders,
       body: body != null && method !== "GET" && method !== "HEAD" ? body : undefined,
     });
     const respHeaders = {};
@@ -199,6 +228,24 @@ function makeDefaultLocalFetch(localBase) {
     const text = await res.text();
     return { status: res.status, headers: respHeaders, body: text };
   };
+}
+
+// ADR-1 (BET-151) — pure config decision: should the box server start the relay
+// agent at boot? The product default is YES (relay-first is the path to a paid
+// mobile app — BET-151). The owner's box can opt out by writing
+// `"relayEnabled": false` into `~/.manta/config.json` (e.g. self-hosted with
+// direct-HTTPS only). No env override here on purpose — configGet() is the
+// single switch, mirroring how `chatAutoAllow` is gated.
+//
+// Truth table (tested):
+//   undefined / null config   → true (relay-first default)
+//   { relayEnabled: true }    → true
+//   { relayEnabled: false }   → false
+//   { relayEnabled: "no" }    → true (only `=== false` opts out — same shape
+//                                 as a JS truthy check; do NOT over-engineer)
+export function shouldStartRelayAgent(config) {
+  if (config == null) return true;
+  return config.relayEnabled !== false;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,12 +259,16 @@ function makeDefaultLocalFetch(localBase) {
  * @param {string} [opts.relayUrl]   relay base ws/wss URL (default DEFAULT_RELAY_URL / env RELAY_URL)
  * @param {string} [opts.localBase]  local box server base (default DEFAULT_LOCAL_BASE)
  * @param {{box_id:string,box_token:string}} [opts.auth]
- *   box identity; defaults to loadAuth() from ~/.manta/auth.json.
+ *   box identity; defaults to loadAuth() from ~/.manta/auth.json. Plumbed into
+ *   `makeDefaultLocalFetch` so every proxied request carries the BOX's own
+ *   `Bearer <box_token>` to 127.0.0.1:8787 (ADR-1) — never a device token.
  * @param {(url:string,o:{headers:object})=>Promise<Transport>} [opts.connect]
  *   INJECTABLE outbound-WS opener. Resolves with a transport once connected,
  *   rejects if the connection fails. Defaults to the real `ws` adapter.
  * @param {(req:{method,path,headers,body})=>Promise<{status,headers,body}>} [opts.localFetch]
- *   INJECTABLE local-server leg. Defaults to global fetch against localBase.
+ *   INJECTABLE local-server leg. Defaults to `makeDefaultLocalFetch(localBase,
+ *   auth)`, which overwrites any inbound `Authorization` header with the box's
+ *   own bearer before calling `fetch`.
  * @param {{next():number,reset():void,attempt():number}} [opts.backoff]
  *   INJECTABLE reconnect backoff (ExponentialBackoff-compatible). Default mirror
  *   of src/shared/net/backoff.ts.
@@ -245,7 +296,7 @@ export function createRelayAgent(opts = {}) {
         "(run the box server once to mint ~/.manta/auth.json, or pass opts.auth)",
     );
   }
-  const localFetch = opts.localFetch || makeDefaultLocalFetch(localBase);
+  const localFetch = opts.localFetch || makeDefaultLocalFetch(localBase, auth);
 
   // Per-box streams inbound over the tunnel (Stage-4 SSE/PTY). We own a registry
   // so a relay→box STREAM_* frame is routed, but the box→phone direction (this
@@ -255,6 +306,7 @@ export function createRelayAgent(opts = {}) {
   let transport = null; // current live transport, or null while (re)connecting
   let reconnectTimer = null;
   let stopped = false; // set by stop(); halts the reconnect loop permanently
+  let started = false; // set by start(); the agent only counts as "live" once start() ran
   let connecting = false;
 
   // Build the authenticated dial-out URL + headers. The relay's parseHandshake
@@ -407,6 +459,7 @@ export function createRelayAgent(opts = {}) {
   // until the first connection is established (tests use this).
   async function start() {
     stopped = false;
+    started = true;
     await openOnce();
   }
 
@@ -443,6 +496,25 @@ export function createRelayAgent(opts = {}) {
     start,
     stop,
     ping,
+    // Coarse live-state snapshot for the box-server's /relay/status endpoint
+    // (install.sh + the renderer dashboard want to know whether the relay
+    // handshake succeeded). Three states, no partial ambiguity:
+    //   "stopped"    — stop() was called (or before start()); never reconnects
+    //   "connected"  — a live transport is open (socket → relay is up)
+    //   "connecting" — a dial is in flight OR a reconnect is scheduled
+    // `connecting` is intentionally sticky across reconnects so a UI asking
+    // "is the link healthy?" doesn't flicker connected/connecting during the
+    // backoff window — the link is alive in the sense that the loop hasn't
+    // given up, it just isn't open yet.
+    status() {
+      // "stopped" covers two real states: never started AND stop()'d. Both
+      // mean the agent is NOT currently trying to reach the relay. A UI or
+      // `/relay/status` consumer treats them identically — the link is down
+      // for a reason the box server can explain, not just transient silence.
+      if (!started || stopped) return "stopped";
+      if (transport) return "connected";
+      return "connecting";
+    },
     // introspection for tests / Stage-4 wiring
     boxId: auth.box_id,
     isConnected: () => transport != null,

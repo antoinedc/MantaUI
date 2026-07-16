@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   resolveConfig,
@@ -8,6 +10,8 @@ import {
   isValidVersion,
   checkIdentity,
   waitForHealth,
+  waitForRelay,
+  readBoxIdentity,
   formatPairingOutput,
   formatExpiry,
   renderShellConfig,
@@ -249,6 +253,221 @@ test("waitForHealth gives up after the attempt cap", async () => {
 test("waitForHealth requires a url and a fetch", async () => {
   await assert.rejects(() => waitForHealth("", { fetchFn: async () => ({ status: 200 }) }), /url required/);
   await assert.rejects(() => waitForHealth("http://x", { fetchFn: null }), /no fetch/);
+});
+
+// ----------------------------------------------------------------------------
+// waitForRelay — polls /relay/status, install.sh's relay-handshake probe
+// ----------------------------------------------------------------------------
+
+test("waitForRelay returns connected=true on a 2xx with connected:true", async () => {
+  const r = await waitForRelay("http://127.0.0.1:8787", {
+    maxAttempts: 3,
+    intervalMs: 10,
+    fetchFn: async () => ({
+      status: 200,
+      json: async () => ({ enabled: true, connected: true }),
+    }),
+    sleep: async () => {},
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.enabled, true);
+  assert.equal(r.connected, true);
+  assert.equal(r.attempts, 1, "no sleep before a first-try success");
+});
+
+test("waitForRelay returns enabled=false (short-circuit) on enabled:false", async () => {
+  // The server is up and reports the agent is disabled (config opted out).
+  // install.sh treats this as success-with-no-relay — NOT a failure.
+  let calls = 0;
+  const r = await waitForRelay("http://127.0.0.1:8787", {
+    maxAttempts: 5,
+    intervalMs: 10,
+    fetchFn: async () => {
+      calls++;
+      return { status: 200, json: async () => ({ enabled: false, connected: false }) };
+    },
+    sleep: async () => {},
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.enabled, false);
+  assert.equal(r.connected, false);
+  assert.equal(calls, 1, "settles immediately — no reason to re-poll a disabled agent");
+});
+
+test("waitForRelay retries on ECONNREFUSED and succeeds on the next attempt", async () => {
+  let calls = 0;
+  const sleeps = [];
+  const r = await waitForRelay("http://127.0.0.1:8787", {
+    maxAttempts: 5,
+    intervalMs: 250,
+    fetchFn: async () => {
+      calls++;
+      if (calls < 3) throw new Error("ECONNREFUSED");
+      return { status: 200, json: async () => ({ enabled: true, connected: true }) };
+    },
+    sleep: async (ms) => sleeps.push(ms),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.attempts, 3);
+  assert.deepEqual(sleeps, [250, 250], "slept between the two failed attempts");
+});
+
+test("waitForRelay keeps retrying while connected:false (server up, handshake still pending)", async () => {
+  // Server is up, but the agent is mid-backoff — connected flips to true on
+  // attempt 4. install.sh keeps polling until maxAttempts because that's the
+  // only way to learn whether the handshake eventually succeeds.
+  let calls = 0;
+  const r = await waitForRelay("http://127.0.0.1:8787", {
+    maxAttempts: 5,
+    intervalMs: 5,
+    fetchFn: async () => {
+      calls++;
+      const connected = calls >= 4;
+      return { status: 200, json: async () => ({ enabled: true, connected }) };
+    },
+    sleep: async () => {},
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.connected, true);
+  assert.equal(r.attempts, 4);
+});
+
+test("waitForRelay gives up after maxAttempts and reports connected:false", async () => {
+  // The "degraded" path install.sh warn()s on. The lib returns ok=false so
+  // callers can decide whether to surface it; install.sh treats both ok=false
+  // and connected=false as a warn (never a die).
+  const r = await waitForRelay("http://127.0.0.1:8787", {
+    maxAttempts: 3,
+    intervalMs: 1,
+    fetchFn: async () => ({
+      status: 200,
+      json: async () => ({ enabled: true, connected: false }),
+    }),
+    sleep: async () => {},
+  });
+  assert.equal(r.ok, true, "the server answered every poll — that's a successful probe");
+  assert.equal(r.connected, false, "but the agent isn't connected yet");
+  assert.equal(r.attempts, 3);
+});
+
+test("waitForRelay tolerates a non-JSON body (still reports ok=true)", async () => {
+  // Defensive: a 200 with an empty/non-JSON body shouldn't crash the poll.
+  const r = await waitForRelay("http://127.0.0.1:8787", {
+    maxAttempts: 1,
+    intervalMs: 0,
+    fetchFn: async () => ({
+      status: 200,
+      json: async () => {
+        throw new Error("not json");
+      },
+    }),
+    sleep: async () => {},
+  });
+  assert.equal(r.ok, true);
+  // body couldn't be parsed → defaults are conservative (false).
+  assert.equal(r.enabled, false);
+  assert.equal(r.connected, false);
+});
+
+test("waitForRelay treats a non-2xx as 'not yet' and retries", async () => {
+  // A 403 from /relay/status means a non-loopback caller hit it — install.sh
+  // is running locally so this won't happen, but the lib must be defensive.
+  let calls = 0;
+  const r = await waitForRelay("http://127.0.0.1:8787", {
+    maxAttempts: 3,
+    intervalMs: 1,
+    fetchFn: async () => {
+      calls++;
+      if (calls < 2) return { status: 403, json: async () => ({}) };
+      return { status: 200, json: async () => ({ enabled: true, connected: true }) };
+    },
+    sleep: async () => {},
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.attempts, 2);
+});
+
+test("waitForRelay appends /relay/status to the base and strips trailing slashes", async () => {
+  const urls = [];
+  await waitForRelay("http://127.0.0.1:8787/", {
+    maxAttempts: 1,
+    intervalMs: 0,
+    fetchFn: async (u) => {
+      urls.push(u);
+      return { status: 200, json: async () => ({ enabled: true, connected: true }) };
+    },
+    sleep: async () => {},
+  });
+  assert.deepEqual(urls, ["http://127.0.0.1:8787/relay/status"]);
+});
+
+test("waitForRelay gives up with ok=false when the server never responds", async () => {
+  const r = await waitForRelay("http://127.0.0.1:8787", {
+    maxAttempts: 4,
+    intervalMs: 1,
+    fetchFn: async () => {
+      throw new Error("ECONNREFUSED");
+    },
+    sleep: async () => {},
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.attempts, 4);
+  assert.equal(r.connected, false);
+  assert.match(r.error, /did not connect/);
+  assert.match(r.error, /ECONNREFUSED/);
+});
+
+test("waitForRelay requires a base and a fetch", async () => {
+  await assert.rejects(() => waitForRelay("", { fetchFn: async () => ({}) }), /healthUrlBase required/);
+  await assert.rejects(() => waitForRelay("http://x", { fetchFn: null }), /no fetch/);
+});
+
+// ----------------------------------------------------------------------------
+// readBoxIdentity — install.sh's auth.json reader (re-export of loadAuth)
+// ----------------------------------------------------------------------------
+
+test("readBoxIdentity returns the box identity from a valid auth.json", () => {
+  // loadAuth (the underlying reader) takes a path and reads the real fs —
+  // already unit-tested in src/server/auth.test.mjs. Here we round-trip
+  // through a temp file to confirm install.sh's re-export actually calls it
+  // and surfaces the box_id (the install heredoc consumes this).
+  const dir = mkdtempSync(join(tmpdir(), "manta-install-readid-"));
+  const authFile = join(dir, "auth.json");
+  writeFileSync(
+    authFile,
+    JSON.stringify({
+      box_id: "0123456789abcdef0123456789abcdef",
+      box_token: "11112222333344445555666677778888",
+      created_at: 1700000000000,
+    }),
+  );
+  try {
+    const id = readBoxIdentity(authFile);
+    assert.ok(id, "readBoxIdentity returned an identity for a valid auth.json");
+    assert.equal(id.box_id, "0123456789abcdef0123456789abcdef");
+    assert.equal(id.box_token, "11112222333344445555666677778888");
+    assert.equal(id.created_at, 1700000000000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readBoxIdentity returns null when the file is missing (fresh box — install must not crash)", () => {
+  // install.sh must not blow up if auth.json hasn't been written yet (the
+  // server mints it on first start, which may be a moment after this script
+  // runs). The fallback path is to omit the Box ID line from the heredoc.
+  assert.equal(readBoxIdentity("/definitely/not/here/auth.json"), null);
+});
+
+test("readBoxIdentity returns null on a corrupt auth.json (server will mint a fresh one)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-install-readid-"));
+  const authFile = join(dir, "auth.json");
+  writeFileSync(authFile, "not json{");
+  try {
+    assert.equal(readBoxIdentity(authFile), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ----------------------------------------------------------------------------
