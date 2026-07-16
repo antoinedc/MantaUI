@@ -8,7 +8,7 @@ import {
   wsTransport,
   DEFAULT_RELAY_PORT,
 } from "./index.mjs";
-import { openStore, BOX_STATUS } from "./store.mjs";
+import { openStore, BOX_STATUS, hashToken } from "./store.mjs";
 import { encodeFrame, decodeFrame, FRAME_TYPES } from "./protocol.mjs";
 
 const BOX_A = "0123456789abcdef0123456789abcdef"; // 32 hex
@@ -53,32 +53,55 @@ test("parseHandshake: missing creds → nulls; malformed url → nulls", () => {
 });
 
 // ---------------------------------------------------------------------------
-// pure: default verifier
+// pure: default verifier (BET-152 / ADR-4 TOFU)
 // ---------------------------------------------------------------------------
 
-test("createDefaultVerifier: dev-open accepts any well-formed pair, rejects malformed", () => {
-  const v = createDefaultVerifier({ warn: silent });
-  assert.equal(v({ boxId: BOX_A, token: TOKEN_A }), true);
-  assert.equal(v({ boxId: "bad", token: TOKEN_A }), false);
-  assert.equal(v({ boxId: BOX_A, token: "bad" }), false);
+test("createDefaultVerifier: throws without a store (no dev-open fallback)", () => {
+  assert.throws(() => createDefaultVerifier(), /store required/);
 });
 
-test("createDefaultVerifier: with boxTokens map, only exact token matches", () => {
-  const v = createDefaultVerifier({
-    boxTokens: { [BOX_A]: TOKEN_A },
-    warn: silent,
-  });
+test("createDefaultVerifier: first dial-out registers + accepts; same token re-accepts", () => {
+  const store = openStore();
+  const v = createDefaultVerifier({ store, warn: silent, log: silent });
+
+  // First sight: row created, accepted.
   assert.equal(v({ boxId: BOX_A, token: TOKEN_A }), true);
+  const cred = store.getBoxCredential(BOX_A);
+  assert.ok(cred, "credential row persisted on first sight");
+  assert.equal(cred.token_hash, hashToken(TOKEN_A), "stored hash is sha256(token)");
+
+  // Re-present the same pair: still accepted, no second row, same hash.
+  assert.equal(v({ boxId: BOX_A, token: TOKEN_A }), true);
+  assert.equal(store.getBoxCredential(BOX_A).token_hash, hashToken(TOKEN_A));
+  store.close();
+});
+
+test("createDefaultVerifier: wrong token for a known box rejects; store row untouched", () => {
+  const store = openStore();
+  const v = createDefaultVerifier({ store, warn: silent, log: silent });
+
+  assert.equal(v({ boxId: BOX_A, token: TOKEN_A }), true, "register");
+  const originalHash = store.getBoxCredential(BOX_A).token_hash;
+
   assert.equal(v({ boxId: BOX_A, token: TOKEN_B }), false, "wrong token rejected");
-  assert.equal(v({ boxId: BOX_B, token: TOKEN_B }), false, "unknown box rejected");
+  assert.equal(
+    store.getBoxCredential(BOX_A).token_hash,
+    originalHash,
+    "stored credential NOT rotated by a wrong-token attempt",
+  );
+  store.close();
 });
 
-test("createDefaultVerifier: accepts a Map as well as a plain object", () => {
-  const v = createDefaultVerifier({
-    boxTokens: new Map([[BOX_A, TOKEN_A]]),
-    warn: silent,
-  });
-  assert.equal(v({ boxId: BOX_A, token: TOKEN_A }), true);
+test("createDefaultVerifier: malformed handshake rejects BEFORE any row is created", () => {
+  const store = openStore();
+  const v = createDefaultVerifier({ store, warn: silent, log: silent });
+
+  // Malformed shapes must reject AND must not register anything.
+  assert.equal(v({ boxId: "not-hex", token: TOKEN_A }), false);
+  assert.equal(v({ boxId: BOX_A, token: "not-hex" }), false);
+  // The valid-shape box row is untouched (none created, none modified).
+  assert.equal(store.getBoxCredential(BOX_A), null, "no row created from a malformed handshake");
+  store.close();
 });
 
 // ---------------------------------------------------------------------------
@@ -103,17 +126,17 @@ test("wsTransport.send encodes frame objects and forwards strings; swallows enco
 // integration: real loopback ws server, real box client sockets
 // ---------------------------------------------------------------------------
 
-// Build a relay on an ephemeral port with an in-memory store and injected
-// verifier. Returns { relay, store, url } and registers teardown.
-async function makeRelay(t, { verifyBox } = {}) {
-  const store = openStore(); // in-memory
+// Build a relay on an ephemeral port with an in-memory store and the default
+// (store-backed) verifier. Returns { relay, store, url } and registers teardown.
+async function makeRelay(t, { verifyBox, store: injectedStore } = {}) {
+  const store = injectedStore || openStore(); // in-memory
   const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((r) => wss.once("listening", r));
   const { port } = wss.address();
   const relay = createRelayServer({
     wss,
     store,
-    verifyBox: verifyBox || createDefaultVerifier({ warn: silent }),
+    verifyBox: verifyBox || createDefaultVerifier({ store, warn: silent, log: silent }),
     log: silent,
     warn: silent,
   });
@@ -163,8 +186,11 @@ test("authenticated box registers in RoutingTable + persists an online box row",
 });
 
 test("bad-token handshake is rejected: socket closed, no registration, no box row", async (t) => {
-  const verifyBox = createDefaultVerifier({ boxTokens: { [BOX_A]: TOKEN_A }, warn: silent });
-  const { relay, store, url } = await makeRelay(t, { verifyBox });
+  // Pre-seed the store so BOX_A is a KNOWN box (its credential is hash(TOKEN_A))
+  // — a wrong-token dial-out must be rejected AND not allowed to re-register.
+  const store = openStore();
+  store.setBoxCredential(BOX_A, hashToken(TOKEN_A));
+  const { relay, url } = await makeRelay(t, { store });
 
   const ws = connectBox(url, { boxId: BOX_A, token: TOKEN_B }); // wrong token
   const [code] = await once(ws, "close");

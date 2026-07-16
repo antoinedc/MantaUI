@@ -28,11 +28,10 @@
 // AUTH (phone leg): reuses `src/server/webhooks.mjs` isValidToken (shape) +
 // createRateLimiter (per account/box token bucket). WHO a phone is (which
 // account) is decided by an injectable `authenticatePhone(req)` seam. The
-// default extracts a bearer token, shape-validates it, and (when an
-// `accountTokens` map is configured) maps token→account_id; with no map it runs
-// DEV-OPEN (a well-formed token IS the account id) and logs once — Stage 5
-// replaces this seam with the IAP-account lookup. This mirrors the box-leg
-// verifier seam in index.mjs so both auth surfaces move together.
+// default (createDefaultPhoneAuth) extracts a bearer token, shape-validates it,
+// and looks up sha256(token) in the store's `account_tokens` table — only
+// tokens minted at /pair time resolve. The seam itself remains so a future
+// Stage-5 IAP-account lookup can be injected without touching the router.
 //
 // TESTABILITY: the router core operates on a NORMALIZED request object
 // ({ method, path, headers, body }) and returns a normalized response
@@ -42,6 +41,7 @@
 // same core in a Node `http` request listener for the CLI entry.
 
 import { isValidToken, createRateLimiter } from "../server/webhooks.mjs";
+import { hashToken } from "./store.mjs";
 
 // Per-phone-token rate limit for the API surface. A phone polls its box list and
 // proxies a handful of requests; a token hammering the relay is throttled.
@@ -84,44 +84,29 @@ export function isGatedSubpath(subpath) {
 // ---------------------------------------------------------------------------
 
 /**
- * Build the default phone authenticator.
+ * Build the default phone authenticator (BET-152 / ADR-5).
  *
  * Extracts a bearer token from `Authorization: Bearer <t>` (or `?token=<t>`),
- * shape-validates it with isValidToken, and resolves it to an account_id:
- *   - with an `accountTokens` map (token → account_id): only a mapped token
- *     authenticates; unknown/malformed → null (401).
- *   - without a map (DEV-OPEN): a well-formed token IS the account_id; logs once.
- *     Stage 5 replaces this with the IAP-bound account lookup.
+ * shape-validates it with isValidToken, and resolves it to an account_id by
+ * looking up `sha256(token)` in the store's `account_tokens` table. The store
+ * is REQUIRED (no dev-open fallback): a relay with no token store has no
+ * known accounts and every phone request must reject.
  *
  * Returns a function (normReq) => { accountId } | null.
  *
- * @param {object} [opts]
- * @param {Map<string,string>|Record<string,string>|null} [opts.accountTokens]
- * @param {(msg:string)=>void} [opts.warn]
+ * @param {object} opts
+ * @param {object} opts.store    an openStore() handle (getAccountByTokenHash).
+ *                                Required.
+ * @param {(msg:string)=>void} [opts.warn]  injectable warn sink (tests silence).
  */
-export function createDefaultPhoneAuth({ accountTokens = null, warn = console.warn } = {}) {
-  const lookup =
-    accountTokens == null
-      ? null
-      : accountTokens instanceof Map
-        ? accountTokens
-        : new Map(Object.entries(accountTokens));
-  let warnedOpen = false;
-
+export function createDefaultPhoneAuth({ store, warn = console.warn } = {}) {
+  if (!store || typeof store.getAccountByTokenHash !== "function") {
+    throw new Error("createDefaultPhoneAuth: store required");
+  }
   return function authenticatePhone(req) {
     const token = extractBearer(req);
     if (!isValidToken(token)) return null;
-    if (lookup == null) {
-      if (!warnedOpen) {
-        warnedOpen = true;
-        warn(
-          "[relay-api] DEV-OPEN phone auth: a well-formed token IS the account. " +
-            "Configure accountTokens (or a Stage-5 IAP lookup) before production.",
-        );
-      }
-      return { accountId: token };
-    }
-    const accountId = lookup.get(token);
+    const accountId = store.getAccountByTokenHash(hashToken(token));
     return typeof accountId === "string" && accountId ? { accountId } : null;
   };
 }
@@ -180,12 +165,11 @@ export function createDefaultSubscriptionCheck(store, now = () => Date.now()) {
  * Create the phone-facing relay API.
  *
  * @param {object} opts
- * @param {object} opts.store                a relay store (bindings/boxes/receipts).
+ * @param {object} opts.store                a relay store (bindings/boxes/receipts/account_tokens).
  * @param {(boxId,req,o?)=>Promise<{status,headers?,body?}>} opts.proxyRequest
  *   the box-tunnel proxy from createRelayServer().proxyRequest.
  * @param {(req)=>({accountId:string}|null)} [opts.authenticatePhone]
- *   phone auth seam; default createDefaultPhoneAuth({ accountTokens }).
- * @param {Map|object|null} [opts.accountTokens]  passed to the default auth.
+ *   phone auth seam; default createDefaultPhoneAuth({ store, warn }).
  * @param {(boxId:string)=>boolean} [opts.hasActiveSubscription]
  *   gate seam; default createDefaultSubscriptionCheck(store, now).
  * @param {(key:string)=>boolean} [opts.rateLimiter]  take(key)=>bool; created if omitted.
@@ -196,7 +180,6 @@ export function createRelayApi(opts = {}) {
   const {
     store,
     proxyRequest,
-    accountTokens = null,
     now = () => Date.now(),
     warn = console.warn,
   } = opts;
@@ -207,7 +190,7 @@ export function createRelayApi(opts = {}) {
   }
 
   const authenticatePhone =
-    opts.authenticatePhone || createDefaultPhoneAuth({ accountTokens, warn });
+    opts.authenticatePhone || createDefaultPhoneAuth({ store, warn });
   const hasActiveSubscription =
     opts.hasActiveSubscription || createDefaultSubscriptionCheck(store, now);
   const rl =

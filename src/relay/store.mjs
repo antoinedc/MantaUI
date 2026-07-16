@@ -53,6 +53,7 @@
 // store. Migrations are idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so
 // opening an existing DB is a no-op re-apply, never a destructive one.
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import sqliteWasm from "node-sqlite3-wasm";
 import { isValidToken } from "../server/webhooks.mjs";
 
@@ -131,6 +132,31 @@ CREATE TABLE IF NOT EXISTS metering (
   updated_at   INTEGER NOT NULL,
   FOREIGN KEY (box_id) REFERENCES boxes(box_id) ON DELETE CASCADE
 );
+
+-- Box handshake credentials (BET-152 / ADR-4): trust-on-first-use. The relay
+-- accepts a box's first dial-out by storing sha256(box_token); subsequent
+-- dial-outs must match. box_id is 32-hex random = unguessable, so TOFU
+-- squatting requires the id, which only the box owner has. INSERT only — a
+-- re-register is rejected by the store layer, so a second box claiming an
+-- existing box_id cannot silently rotate the credential.
+CREATE TABLE IF NOT EXISTS box_credentials (
+  box_id     TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+-- Phone account tokens (BET-152 / ADR-5): each successful POST /pair mints a
+-- fresh 32-hex token (the device token), stored here as a sha256 hash. One
+-- account owns many tokens (devices); multiple tokens map to the same
+-- account_id. The relay never sees plaintext tokens at rest — only the
+-- compare path uses hashEquals (constant-time) on lookup.
+CREATE TABLE IF NOT EXISTS account_tokens (
+  token_hash TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+-- "all tokens for account X" (logout-everywhere / revoke sweep).
+CREATE INDEX IF NOT EXISTS idx_account_tokens_account ON account_tokens(account_id);
 `;
 
 // ---------------------------------------------------------------------------
@@ -283,6 +309,29 @@ export function openStore({ path = ":memory:", now = () => Date.now() } = {}) {
     listMetering: db.prepare(`SELECT * FROM metering ORDER BY updated_at DESC`),
     resetMetering: db.prepare(`
       UPDATE metering SET ingress = 0, egress = 0, updated_at = ? WHERE box_id = ?
+    `),
+
+    // Box handshake credentials (BET-152 / ADR-4 TOFU). INSERT only — a second
+    // setBoxCredential() for the same box_id must throw (TOFU never overwrites
+    // an existing credential).
+    insertBoxCredential: db.prepare(`
+      INSERT INTO box_credentials (box_id, token_hash, created_at)
+      VALUES (?, ?, ?)
+    `),
+    getBoxCredential: db.prepare(`SELECT * FROM box_credentials WHERE box_id = ?`),
+
+    // Phone account tokens (BET-152 / ADR-5). token_hash is the sha256 of the
+    // device token (32-hex plaintext) handed to the phone at /pair time; the
+    // relay only ever stores/looks up the hash.
+    insertAccountToken: db.prepare(`
+      INSERT INTO account_tokens (token_hash, account_id, created_at)
+      VALUES (?, ?, ?)
+    `),
+    getAccountTokenByHash: db.prepare(`
+      SELECT * FROM account_tokens WHERE token_hash = ?
+    `),
+    listAccountTokensForAccount: db.prepare(`
+      SELECT * FROM account_tokens WHERE account_id = ?
     `),
   };
 
@@ -470,6 +519,66 @@ export function openStore({ path = ":memory:", now = () => Date.now() } = {}) {
   }
 
   // -------------------------------------------------------------------------
+  // box_credentials (BET-152 / ADR-4 TOFU)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Record the sha256 of a box's box_token on its first dial-out. INSERT only:
+   * a second call for the same box_id throws (TOFU never overwrites). The
+   * caller (createDefaultVerifier) shape-gates the token first; this layer's
+   * guarantee is "if you call it twice, you get an error" so a relay bug can't
+   * silently rotate a credential.
+   *
+   * Returns the inserted row.
+   */
+  function setBoxCredential(boxId, tokenHash, { at = now() } = {}) {
+    assertBoxId(boxId);
+    if (typeof tokenHash !== "string" || !tokenHash) {
+      throw new Error("setBoxCredential: token_hash required (non-empty string)");
+    }
+    // INSERT only — let the UNIQUE constraint turn a second-insert collision
+    // into a programmatic error the verifier can surface as a hard reject.
+    stmts.insertBoxCredential.run(boxId, tokenHash, at);
+    return getBoxCredential(boxId);
+  }
+
+  function getBoxCredential(boxId) {
+    assertBoxId(boxId);
+    return stmts.getBoxCredential.get(boxId) ?? null;
+  }
+
+  // -------------------------------------------------------------------------
+  // account_tokens (BET-152 / ADR-5)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Mint a device token for an account. `tokenHash` is sha256(account_token)
+   * — the plaintext is handed back to the phone at /pair time and is never
+   * stored. Returns the stored row.
+   */
+  function addAccountToken(tokenHash, accountId, { at = now() } = {}) {
+    if (typeof tokenHash !== "string" || !tokenHash) {
+      throw new Error("addAccountToken: token_hash required (non-empty string)");
+    }
+    assertAccountId(accountId);
+    stmts.insertAccountToken.run(tokenHash, accountId, at);
+    return stmts.getAccountTokenByHash.get(tokenHash) ?? null;
+  }
+
+  /** Look up an account_id by the sha256 of a presented device token. */
+  function getAccountByTokenHash(tokenHash) {
+    if (typeof tokenHash !== "string" || !tokenHash) return null;
+    const row = stmts.getAccountTokenByHash.get(tokenHash);
+    return row ? row.account_id : null;
+  }
+
+  /** All stored token hashes for an account (logout-everywhere / revoke sweep). */
+  function listAccountTokensForAccount(accountId) {
+    assertAccountId(accountId);
+    return stmts.listAccountTokensForAccount.all(accountId);
+  }
+
+  // -------------------------------------------------------------------------
   // lifecycle / introspection
   // -------------------------------------------------------------------------
 
@@ -516,6 +625,13 @@ export function openStore({ path = ":memory:", now = () => Date.now() } = {}) {
     getUsage,
     listUsage,
     resetUsage,
+    // box_credentials (BET-152 / ADR-4)
+    setBoxCredential,
+    getBoxCredential,
+    // account_tokens (BET-152 / ADR-5)
+    addAccountToken,
+    getAccountByTokenHash,
+    listAccountTokensForAccount,
     // lifecycle
     close,
     explain,
@@ -563,4 +679,41 @@ function assertByteCount(n, field) {
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
     throw new Error(`store: invalid ${field} byte count (want non-negative integer)`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Token hashing (BET-152 / ADR-1, ADR-4, ADR-5)
+//
+// The relay never stores or compares plaintext device tokens / box_tokens at
+// rest: every row carries a sha256 hex digest, and the compare path uses
+// constant-time Buffer equality so a network attacker cannot binary-search a
+// secret byte-by-byte from response latency. `hashToken` + `hashEquals` are
+// exported (rather than inlined at call sites) so every caller uses the same
+// primitives and the timing-safe compare cannot accidentally degrade into a
+// short-circuit `===` somewhere.
+// ---------------------------------------------------------------------------
+
+/** sha256(token) as lowercase hex. Token coerced to string first. */
+export function hashToken(token) {
+  return createHash("sha256").update(String(token), "utf8").digest("hex");
+}
+
+/**
+ * Constant-time equality of two lowercase hex digests. Returns false on any
+ * shape mismatch (length, non-hex) — the compare only runs when both inputs
+ * are equal-length Buffers, the precondition timingSafeEqual demands.
+ */
+export function hashEquals(aHex, bHex) {
+  if (typeof aHex !== "string" || typeof bHex !== "string") return false;
+  if (aHex.length !== bHex.length) return false;
+  let a;
+  let b;
+  try {
+    a = Buffer.from(aHex, "hex");
+    b = Buffer.from(bHex, "hex");
+  } catch {
+    return false;
+  }
+  if (a.length === 0 || a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
