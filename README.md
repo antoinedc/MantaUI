@@ -1,12 +1,16 @@
-# bui
+<img src="docs/brand/manta-logo.png" alt="Manta" width="72" />
 
-A macOS desktop client for working with Claude on a remote Linux box over
-HTTP+tmux. Sidebar of projects (tmux sessions) with multiple windows each;
-xterm.js terminal in one tab type, a native React chat panel powered by
+# Manta UI
+
+Electron + mobile/web client for driving remote `claude` / opencode coding
+sessions over HTTPS, from desktop or phone.
+
+Sidebar of projects (tmux sessions) with multiple windows each; xterm.js
+terminal in one tab type, a native React chat panel powered by
 [opencode](https://opencode.ai) in the other.
 
-The remote stays a stock tmux server — bui never installs daemons or
-agents on it. Closing bui leaves your work running; reopening re-attaches.
+The remote stays a stock tmux server — Manta never installs daemons or
+agents on it. Closing Manta leaves your work running; reopening re-attaches.
 
 ## Status
 
@@ -15,7 +19,7 @@ in-tree but descoped from this beta — ignore it.
 
 ## Requirements
 
-**Mac (where bui runs)**
+**Mac (where Manta runs)**
 - macOS 12+ on Apple Silicon (Intel may work, untested)
 - Node 20+ and `npm`
 - Xcode Command Line Tools (`xcode-select --install`) — needed by
@@ -47,16 +51,16 @@ the onboarding flow:
    curl -fsSL https://app.mantaui.com/install.sh | bash
    ```
    It installs bui-server, starts it, and prints a 6-digit pairing code.
-   Enter the code in the bui onboarding screen (along with your box's URL).
+   Enter the code in the Manta onboarding screen (along with your box's URL).
 2. **Pick AI providers.** After pairing, select which providers to use
    (Anthropic comes pre-connected via opencode auth; add OpenAI/DeepSeek/etc.
    with your own API keys).
-3. **Create your first project.** Enter a directory path, and bui creates
+3. **Create your first project.** Enter a directory path, and Manta creates
    a tmux session for it.
 
 Optional: in the "Remote tmux config" section, click **Set up tmux config**
 to append a small fenced block to your remote `~/.tmux.conf` (mouse on,
-status off, allow-passthrough on, snappy escape). bui works without it but
+status off, allow-passthrough on, snappy escape). Manta works without it but
 the experience is a bit nicer with it on. Restorable from the same panel.
 
 ## Two tab types
@@ -64,7 +68,7 @@ the experience is a bit nicer with it on. Restorable from the same panel.
 - **Terminal window** — xterm.js attached to a tmux window. Same UX as
   `ssh user@host -t tmux a -t name`. Drop-in for any existing tmux
   workflow (claude TUI, vim, REPLs, ad-hoc shells).
-- **Chat window** — bui's own React chat panel, backed by opencode. Tool
+- **Chat window** — Manta's own React chat panel, backed by opencode. Tool
   calls, permission prompts, slash commands, model picker, file mentions,
   drag-and-drop image / PDF / file attachments, screenshot detection on
   Mac. Requires the chat-mode setup above.
@@ -94,13 +98,13 @@ The two coexist: each tmux window is one or the other (recognized by a
   - `~/.manta-uploads/<session>/<batch>/` — drag-and-drop attachments. Auto
     cleaned hourly (configurable in Settings; `0` disables).
   - `~/.tmux.conf.pre-manta` — backup of your tmux config if you opted in
-    to the bui tmux setup.
+    to the Manta tmux setup.
   - `~/.config/opencode/opencode.jsonc` — opencode config. Bootstrap writes
     a minimal one; if you had your own, it's backed up to `.pre-manta`.
   - the **`opencode-serve` systemd --user service** (NOT a `bui-opencode` tmux
     session — that reference elsewhere is stale) — chat-mode windows talk to
     this long-running `opencode serve` on `127.0.0.1:4096`, proxied by
-    bui-server (no SSH hop). Survives bui restarts.
+    bui-server (no SSH hop). Survives Manta restarts.
 
 ## Box server (mobile/web) — self-install
 
@@ -142,7 +146,7 @@ If you'd rather clone the repo directly (e.g. during development, or before a
 release tarball exists):
 
 ```bash
-git clone git@github.com:antoinedc/better-ui.git ~/bui
+git clone git@github.com:antoinedc/MantaUI.git ~/bui
 cd ~/bui
 npm install
 npm run build:mobile        # build the renderer bundle into mobile/www/
