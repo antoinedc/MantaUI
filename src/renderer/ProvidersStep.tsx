@@ -42,9 +42,9 @@ import { PlusIcon, StepFooter } from "./onboardingUi";
 //   onBack     — go to the previous step (Pair).
 //   onContinue — advance to Step 3 (Model). Enabled once ≥1 provider connected.
 
-const ACCENT = "#7c9cff";
-const DANGER = "#f87171";
-const SUCCESS = "#4ade80";
+const ACCENT = "#5A88FF";
+const DANGER = "#FF7A88";
+const SUCCESS = "#22C79A";
 
 type AddForm = null | "openai" | "custom";
 
@@ -221,17 +221,17 @@ function ProviderCard({
       disabled={!clickable}
       className="flex-1 flex flex-col items-center gap-3 rounded-md border p-4 text-center transition-colors disabled:cursor-default"
       style={{
-        borderColor: connected || active ? ACCENT : "#262932",
-        background: connected || active ? "#1b1e25" : "transparent",
+        borderColor: connected || active ? ACCENT : "#253055",
+        background: connected || active ? "#171F3A" : "transparent",
         boxShadow: connected || active ? `0 0 0 3px rgba(124,156,255,0.15)` : undefined,
       }}
     >
       <div
         className="w-10 h-10 rounded flex items-center justify-center text-base font-bold"
         style={{
-          background: connected ? ACCENT : "#14161b",
-          border: `1.5px solid ${connected ? ACCENT : "#262932"}`,
-          color: connected ? "#0e0f12" : "#9aa0aa",
+          background: connected ? ACCENT : "#12182F",
+          border: `1.5px solid ${connected ? ACCENT : "#253055"}`,
+          color: connected ? "#0B1020" : "#A7B1C4",
         }}
       >
         {plus ? <PlusIcon /> : letter}
@@ -240,7 +240,7 @@ function ProviderCard({
         <div className="text-[13px] font-semibold text-text">{name}</div>
         <div
           className="text-[11px] mt-0.5"
-          style={{ color: connected ? SUCCESS : "#6b7280" }}
+          style={{ color: connected ? SUCCESS : "#5C6578" }}
         >
           {status}
         </div>

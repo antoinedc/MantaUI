@@ -173,23 +173,23 @@ describe("formatClockTime", () => {
 
 describe("ctxStageColor", () => {
   it("returns green below 50%", () => {
-    expect(ctxStageColor(0)).toBe("#22c55e");
-    expect(ctxStageColor(49)).toBe("#22c55e");
+    expect(ctxStageColor(0)).toBe("#22C79A");
+    expect(ctxStageColor(49)).toBe("#22C79A");
   });
 
   it("returns yellow from 50% to 74%", () => {
-    expect(ctxStageColor(50)).toBe("#eab308");
-    expect(ctxStageColor(74)).toBe("#eab308");
+    expect(ctxStageColor(50)).toBe("#F7C15A");
+    expect(ctxStageColor(74)).toBe("#F7C15A");
   });
 
   it("returns orange from 75% to 89%", () => {
-    expect(ctxStageColor(75)).toBe("#f97316");
-    expect(ctxStageColor(89)).toBe("#f97316");
+    expect(ctxStageColor(75)).toBe("#F0A934");
+    expect(ctxStageColor(89)).toBe("#F0A934");
   });
 
   it("returns red from 90% and above", () => {
-    expect(ctxStageColor(90)).toBe("#ef4444");
-    expect(ctxStageColor(100)).toBe("#ef4444");
+    expect(ctxStageColor(90)).toBe("#F0505F");
+    expect(ctxStageColor(100)).toBe("#F0505F");
   });
 });
 

@@ -14,9 +14,9 @@ type Props = {
 };
 
 function dotColor(running: boolean, attention: boolean): string {
-  if (attention) return "#f59e0b";
-  if (running) return "#22c55e";
-  return "#6b7280";
+  if (attention) return "#F0A934";
+  if (running) return "#22C79A";
+  return "#5C6578";
 }
 
 function typeLabel(w: TmuxWindow, running: boolean, attention: boolean): string {
