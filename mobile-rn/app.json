@@ -4,7 +4,7 @@
     "slug": "bui",
     "version": "0.0.1",
     "orientation": "portrait",
-    "scheme": "bui",
+    "scheme": "manta",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {

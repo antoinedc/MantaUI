@@ -6,15 +6,15 @@ import {
 } from "./pairPayload";
 
 describe("parsePairPayload", () => {
-  it("accepts the primary bui://pair?server=&code= form", () => {
+  it("accepts the primary manta://pair?server=&code= form", () => {
     expect(
-      parsePairPayload("bui://pair?server=http://box:8787&code=123456"),
+      parsePairPayload("manta://pair?server=http://box:8787&code=123456"),
     ).toEqual({ serverUrl: "http://box:8787", code: "123456" });
   });
 
   it("accepts the id/token alias and normalizes it to server/code", () => {
     expect(
-      parsePairPayload("bui://pair?id=http://box:8787&token=123456"),
+      parsePairPayload("manta://pair?id=http://box:8787&token=123456"),
     ).toEqual({ serverUrl: "http://box:8787", code: "123456" });
   });
 
@@ -28,19 +28,19 @@ describe("parsePairPayload", () => {
 
   it("trims surrounding whitespace before parsing", () => {
     expect(
-      parsePairPayload("  bui://pair?server=http://box:8787&code=123456  "),
+      parsePairPayload("  manta://pair?server=http://box:8787&code=123456  "),
     ).toEqual({ serverUrl: "http://box:8787", code: "123456" });
   });
 
   it("normalizes a bare-host server via normalizeServerUrl and strips trailing slashes", () => {
     // bare host:port (no scheme) → http:// prefixed
     expect(
-      parsePairPayload("bui://pair?server=box:8787&code=123456"),
+      parsePairPayload("manta://pair?server=box:8787&code=123456"),
     ).toEqual({ serverUrl: "http://box:8787", code: "123456" });
     // trailing slashes stripped
     expect(
       parsePairPayload(
-        "bui://pair?server=" +
+        "manta://pair?server=" +
           encodeURIComponent("http://box:8787///") +
           "&code=123456",
       ),
@@ -50,7 +50,7 @@ describe("parsePairPayload", () => {
   it("URL-decodes an encoded server value", () => {
     expect(
       parsePairPayload(
-        "bui://pair?server=" +
+        "manta://pair?server=" +
           encodeURIComponent("http://192.168.1.10:8787") +
           "&code=654321",
       ),
@@ -61,16 +61,16 @@ describe("parsePairPayload", () => {
     const bad: Array<[string, string]> = [
       ["empty string", ""],
       ["whitespace only", "   "],
-      ["a non-bui https URL", "https://example.com"],
-      ["a non-bui http URL", "http://example.com?server=http://box:8787&code=123456"],
-      ["bui scheme but wrong host", "bui://connect?server=http://box:8787&code=123456"],
-      ["missing code", "bui://pair?server=http://box:8787"],
-      ["missing server", "bui://pair?code=123456"],
-      ["empty server", "bui://pair?server=&code=123456"],
-      ["empty code", "bui://pair?server=http://box:8787&code="],
-      ["5-digit code", "bui://pair?server=http://box:8787&code=12345"],
-      ["7-digit code", "bui://pair?server=http://box:8787&code=1234567"],
-      ["non-numeric code", "bui://pair?server=http://box:8787&code=abcdef"],
+      ["a non-manta https URL", "https://example.com"],
+      ["a non-manta http URL", "http://example.com?server=http://box:8787&code=123456"],
+      ["manta scheme but wrong host", "manta://connect?server=http://box:8787&code=123456"],
+      ["missing code", "manta://pair?server=http://box:8787"],
+      ["missing server", "manta://pair?code=123456"],
+      ["empty server", "manta://pair?server=&code=123456"],
+      ["empty code", "manta://pair?server=http://box:8787&code="],
+      ["5-digit code", "manta://pair?server=http://box:8787&code=12345"],
+      ["7-digit code", "manta://pair?server=http://box:8787&code=1234567"],
+      ["non-numeric code", "manta://pair?server=http://box:8787&code=abcdef"],
       ["syntactically invalid URL", "::::not a url::::"],
       ["plain text", "hello world"],
     ];
@@ -83,11 +83,11 @@ describe("parsePairPayload", () => {
 });
 
 describe("buildPairPayload", () => {
-  it("produces the canonical bui://pair?server=<enc>&code= string", () => {
+  it("produces the canonical manta://pair?server=<enc>&code= string", () => {
     expect(
       buildPairPayload({ serverUrl: "http://box:8787", code: "123456" }),
     ).toBe(
-      "bui://pair?server=" +
+      "manta://pair?server=" +
         encodeURIComponent("http://box:8787") +
         "&code=123456",
     );

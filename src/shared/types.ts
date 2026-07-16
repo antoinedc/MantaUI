@@ -31,7 +31,7 @@ export type AppConfig = {
   onboardingSkipped?: boolean;
   // ----- Agent → laptop file push (outbox) -----
   // The reverse of drag-and-drop upload: the remote AI drops a file into
-  // `~/.bui-outbox/` and bui scp-pulls it to the Mac. An outbox poller in
+  // `~/.manta-outbox/` and bui scp-pulls it to the Mac. An outbox poller in
   // main watches that dir over the warm ControlMaster.
   //
   // Trust flag, analogous to chatAutoAllow. When true, detected outbox files
@@ -118,7 +118,7 @@ export type TmuxWindow = {
   active: boolean;
   paneCurrentPath: string;
   // For chat-mode windows: the opencode session id stamped on the tmux window
-  // as user-option `@bui-session-id`. Null for claude-TUI windows (the default).
+  // as user-option `@manta-session-id`. Null for claude-TUI windows (the default).
   // Presence of this id is THE signal that the renderer should show ChatPanel
   // instead of Terminal for this window.
   opencodeSessionId: string | null;
@@ -140,8 +140,8 @@ export type Project = {
 };
 
 export type TmuxConfigStatus = {
-  buiManaged: boolean;   // ~/.tmux.conf currently has bui's config
-  backupExists: boolean; // ~/.tmux.conf.pre-bui exists (restore is possible)
+  mantaManaged: boolean;   // ~/.tmux.conf currently has bui's config
+  backupExists: boolean; // ~/.tmux.conf.pre-manta exists (restore is possible)
 };
 
 // One entry per `git worktree list --porcelain` block, run from the user's
@@ -272,7 +272,7 @@ export const IPC = {
   agentPullFile: "agent:pull-file",
   // Reveal a local file in Finder / the OS file manager.
   revealInFolder: "shell:reveal-in-folder",
-  // main → renderer push: a new file appeared in the remote ~/.bui-outbox/.
+  // main → renderer push: a new file appeared in the remote ~/.manta-outbox/.
   // Payload: { remotePath, name, size, sessionName?, autoPulled, localPath? }.
   // When config.allowAgentPush is on, main pulls first and sets autoPulled:true
   // + localPath; otherwise it's a confirm prompt (autoPulled:false).
@@ -387,7 +387,7 @@ export const IPC = {
   opencodeRunCommand: "opencode:run-command",
   // /clear: drop the current session's history by creating a fresh opencode
   // session in the same directory, then re-stamping the tmux window's
-  // @bui-session-id user-option. The renderer notices the new id and
+  // @manta-session-id user-option. The renderer notices the new id and
   // unmounts/remounts ChatPanel.
   opencodeClearSession: "opencode:clear-session",
   // Auto-rename: generate a short 1-2 word title for a session by spawning a
@@ -418,7 +418,7 @@ export const IPC = {
   authClaim: "auth:claim",
   // Mint a one-time pairing code for mobile device pairing (BET-80).
   // GET <serverUrl>/auth/pair → { pairing_code, box_id, expiresAt }
-  // The desktop renders the code in a QR (bui://pair?id=<boxId>&token=<code>)
+  // The desktop renders the code in a QR (manta://pair?id=<boxId>&token=<code>)
   // and lets the mobile app scan it. Main owns the fetch over the SSH tunnel.
   // Result: { pairingCode, boxId, expiresAt } or { error }.
   authPair: "auth:pair",
@@ -471,7 +471,7 @@ export const IPC = {
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
 // value (bui-server strips it; only secret_provide materializes the value, to a
-// 0600 file on the box). Store: ~/.bui-mobile/secrets.json.
+// 0600 file on the box). Store: ~/.manta/secrets.json.
 export type SecretScope = "shared" | "session" | "project";
 export type SecretMeta = {
   id: string; // 8-char hex store id (used for delete)
@@ -499,7 +499,7 @@ export type SecretInput = {
 
 // An inbound webhook's METADATA — what the UI and `webhook_list` see. NEVER
 // carries the signing secret (returned once at create, then stripped). Store:
-// ~/.bui-mobile/webhooks.json.
+// ~/.manta/webhooks.json.
 export type WebhookMeta = {
   id: string; // 8-char hex store id (used for delete)
   label: string; // human label, e.g. "multica CAPO-123 done"
@@ -512,7 +512,7 @@ export type WebhookMeta = {
   deliveries: number; // total deliveries
 };
 
-// A durable scheduled-prompt job (bui-server store: ~/.bui-mobile/schedule.json).
+// A durable scheduled-prompt job (manta store: ~/.manta/schedule.json).
 export type ScheduledJob = {
   id: string; // 8-char hex
   cron: string; // 5-field expression (local time)
@@ -527,7 +527,7 @@ export type ScheduledJob = {
 
 // ----- Agent → laptop file push (outbox) -----
 
-// main → renderer push when a file is detected in the remote ~/.bui-outbox/.
+// main → renderer push when a file is detected in the remote ~/.manta-outbox/.
 // One per detected file. The toast (store-backed, rendered by the active
 // ChatPanel) either confirms the pull (autoPulled:false) or just announces a
 // completed pull (autoPulled:true, localPath set).
@@ -538,7 +538,7 @@ export type AgentFileReady = {
   name: string;
   // Byte size from the remote `stat`, for display. 0 if unknown.
   size: number;
-  // tmux/project session inferred from the outbox subdir (~/.bui-outbox/<session>/…),
+  // tmux/project session inferred from the outbox subdir (~/.manta-outbox/<session>/…),
   // or null when the file was dropped at the outbox root.
   sessionName: string | null;
   // True when allowAgentPush was on and main already pulled the file.

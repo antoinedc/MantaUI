@@ -4,7 +4,7 @@
 // The desktop pair screen differs from the mobile one (renderer/mobile/
 // pairingLogic.ts) in one way: the desktop user also types the SERVER URL to
 // pair against (the mobile client already knows its own base from
-// localStorage["bui_server"]). So Step 1's submit gate is "a non-empty server
+// localStorage["manta_server"]). So Step 1's submit gate is "a non-empty server
 // URL AND a 6-digit code", and the claim is performed by the main process over
 // the `auth:claim` IPC channel (which persists config on success).
 //

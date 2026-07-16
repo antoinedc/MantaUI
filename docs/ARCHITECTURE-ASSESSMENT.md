@@ -26,7 +26,7 @@ BUI is **~7700 LoC in ChatPanel.tsx alone**, with a monolithic but functional ar
 
 3. **No auth** — `0.0.0.0:8787` open to internet. Cannot ship commercially.
 
-4. **Mobile is PWA, not native** — requires manual `localStorage['bui_server']` config. Not App Store-ready.
+4. **Mobile is PWA, not native** — requires manual `localStorage['manta_server']` config. Not App Store-ready.
 
 5. **No auto-update** — README says "pull from git for new versions."
 
@@ -166,7 +166,7 @@ The codebase has **repeated connectivity fixes** because:
 - QR scanner integration (Capacitor barcode scanner)
 - Pairing flow (QR + deferred deeplink)
 - Auto-connect to box (box_id + pairing token)
-- Remove `localStorage['bui_server']` manual config
+- Remove `localStorage['manta_server']` manual config
 - Secure storage (Keychain/Keystore) for box_token
 
 **M4: Paywall**

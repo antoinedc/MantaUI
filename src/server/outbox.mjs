@@ -1,7 +1,7 @@
 // Agent → device outbox poller for the mobile server.
 //
 // The mobile mirror of the desktop outbox poller (src/main/index.ts). The
-// remote AI drops a file into ~/.bui-outbox/ (optionally a session subdir) and
+// remote AI drops a file into ~/.manta-outbox/ (optionally a session subdir) and
 // we surface it to connected devices as an `agentFile` bus event. Because the
 // server IS the box (no SSH hop), detection is a plain local `readdir` rather
 // than a `find` over the ControlMaster.
@@ -17,9 +17,9 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, basename } from "node:path";
+import { OUTBOX_DIRNAME } from "../shared/paths.mjs";
 
 const POLL_MS = 3000;
-const OUTBOX_DIRNAME = ".bui-outbox";
 
 // List every file in the outbox: loose files at the root plus one level of
 // session subdirs (matches the desktop `find -maxdepth 2 -type f`). Returns []

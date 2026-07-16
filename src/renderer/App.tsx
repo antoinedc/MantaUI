@@ -198,7 +198,7 @@ export function App() {
   }, []);
 
   // Agent → laptop file push. Same single-listener pattern as screenshots: a
-  // file the remote AI dropped in ~/.bui-outbox/ surfaces as one global toast
+  // file the remote AI dropped in ~/.manta-outbox/ surfaces as one global toast
   // the active ChatPanel renders. Guarded — the mobile httpApi shim doesn't
   // implement onAgentFileReady (no outbox concept when the server IS the box).
   useEffect(() => {
@@ -443,7 +443,7 @@ export function App() {
   }, [projects, activeProjectName, activeWindowByProject, setActive]);
 
   // Voice command → app-scoped action bus. ChatPanel dispatches a
-  // `bui-voice-app-action` CustomEvent for actions it doesn't own
+  // `manta-voice-app-action` CustomEvent for actions it doesn't own
   // (switch-window / new-session / open-settings). Keeping the routing
   // here avoids drilling refs into every panel and matches how the
   // ⌘1..9 / ⌥⌘↑↓ shortcuts already work above.
@@ -472,9 +472,9 @@ export function App() {
           .catch(() => {});
       }
     };
-    window.addEventListener("bui-voice-app-action", handler as EventListener);
+    window.addEventListener("manta-voice-app-action", handler as EventListener);
     return () =>
-      window.removeEventListener("bui-voice-app-action", handler as EventListener);
+      window.removeEventListener("manta-voice-app-action", handler as EventListener);
   }, [projects, setActive]);
 
   const activeProject = activeProjectName

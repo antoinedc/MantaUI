@@ -23,7 +23,7 @@
 //
 // This reuses the webhooks.mjs security toolkit (isValidToken shape, constant-
 // time compare, token-bucket rate limiter) so there is one crypto story on the
-// box. Store: ~/.bui-mobile/auth.json (0600), same pattern as
+// box. Store: ~/.manta/auth.json (0600), same pattern as
 // schedule.mjs / secrets.mjs / webhooks.mjs.
 //
 // SCOPE (M1): the server-side auth core only — token gen/persist, the pairing
@@ -36,8 +36,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { STATE_DIRNAME } from "../shared/paths.mjs";
 
-const STORE_PATH = join(homedir(), ".bui-mobile", "auth.json");
+const STORE_PATH = join(homedir(), STATE_DIRNAME, "auth.json");
 
 // Pairing codes are short-lived by design: a device must claim within this
 // window or the code expires and the user re-opens the pair screen.
@@ -343,7 +344,7 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
  * Build the stateful auth engine used by index.mjs. Owns the box identity, the
  * pairing registry, and the per-request gate.
  *
- * When `enforce` is false (env escape hatch BUI_AUTH_DISABLED=1), the gate
+ * When `enforce` is false (env escape hatch MANTA_AUTH_DISABLED=1), the gate
  * allows everything and the server prints a loud one-time warning — this exists
  * only so an existing self-hoster who upgrades isn't instantly locked out of
  * their own box before they've paired. The DEFAULT is enforce=true.

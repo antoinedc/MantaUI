@@ -9,7 +9,7 @@ import { useStore, type WindowStatusUI } from "./store";
 import type { Project, WorktreeInfo } from "../shared/types";
 import { classifyCacheAge, formatAge, selectCacheTtlMs } from "./chatUtils";
 
-const COLLAPSE_KEY = "bui:collapsed-projects";
+const COLLAPSE_KEY = "manta:collapsed-projects";
 
 function loadCollapsed(): Set<string> {
   try {

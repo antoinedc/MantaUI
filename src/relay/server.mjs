@@ -35,6 +35,7 @@
 
 import http from "node:http";
 import { WebSocketServer } from "ws";
+import { STATE_DIRNAME } from "../shared/paths.mjs";
 
 import { createRelayServer } from "./index.mjs";
 import {
@@ -69,7 +70,7 @@ const MAX_BODY_BYTES = 256 * 1024;
  * @param {object} [opts.store]  a shared openStore() handle; created from
  *                               storePath when omitted.
  * @param {string} [opts.storePath]  file path for the shared store (e.g.
- *                               ~/.bui-mobile/relay.sqlite); ":memory:" default.
+ *                               ~/.manta/relay.sqlite); ":memory:" default.
  * @param {Map|object|null} [opts.boxTokens]     box-leg verifier seam.
  * @param {Map|object|null} [opts.accountTokens] phone-auth seam.
  * @param {(req)=>({accountId:string}|null)} [opts.authenticatePhone]
@@ -493,11 +494,11 @@ const isMain =
   process.argv[1]?.endsWith("src/relay/server.mjs");
 
 if (isMain) {
-  // Default the shared store to a file under ~/.bui-mobile so a restart keeps
+  // Default the shared store to a file under ~/.manta so a restart keeps
   // box bindings + receipts. RELAY_STORE_PATH overrides.
   const storePath =
     process.env.RELAY_STORE_PATH ||
-    (process.env.HOME ? `${process.env.HOME}/.bui-mobile/relay.sqlite` : undefined);
+    (process.env.HOME ? `${process.env.HOME}/${STATE_DIRNAME}/relay.sqlite` : undefined);
   const svc = createRelayService({ storePath });
   svc
     .start()

@@ -18,30 +18,30 @@ import {
 const HOME = "/home/tester";
 
 // ----------------------------------------------------------------------------
-// resolveConfig — arg/env parsing with BUI_HOME / BUI_TARBALL_URL overrides
+// resolveConfig — arg/env parsing with MANTA_HOME / MANTA_TARBALL_URL overrides
 // ----------------------------------------------------------------------------
 
 test("resolveConfig applies defaults when env is empty", () => {
   const cfg = resolveConfig({ env: {}, home: HOME });
   assert.equal(cfg.buiHome, join(HOME, "bui"));
-  assert.equal(cfg.authDir, join(HOME, ".bui-mobile"));
-  assert.equal(cfg.authFile, join(HOME, ".bui-mobile", "auth.json"));
+  assert.equal(cfg.authDir, join(HOME, ".manta"));
+  assert.equal(cfg.authFile, join(HOME, ".manta", "auth.json"));
   assert.equal(cfg.tarballUrl, null);
   assert.equal(cfg.releaseHost, DEFAULT_RELEASE_HOST);
   assert.equal(cfg.port, DEFAULT_PORT);
   assert.equal(cfg.healthUrl, `http://127.0.0.1:${DEFAULT_PORT}/auth/status`);
 });
 
-test("resolveConfig honors BUI_HOME override", () => {
-  const cfg = resolveConfig({ env: { BUI_HOME: "/opt/bui" }, home: HOME });
+test("resolveConfig honors MANTA_HOME override", () => {
+  const cfg = resolveConfig({ env: { MANTA_HOME: "/opt/bui" }, home: HOME });
   assert.equal(cfg.buiHome, "/opt/bui");
-  // auth dir stays under HOME, never inside BUI_HOME — identity survives upgrades
-  assert.equal(cfg.authDir, join(HOME, ".bui-mobile"));
+  // auth dir stays under HOME, never inside MANTA_HOME — identity survives upgrades
+  assert.equal(cfg.authDir, join(HOME, ".manta"));
 });
 
-test("resolveConfig honors BUI_TARBALL_URL override", () => {
+test("resolveConfig honors MANTA_TARBALL_URL override", () => {
   const cfg = resolveConfig({
-    env: { BUI_TARBALL_URL: "file:///tmp/bui-test.tar.gz" },
+    env: { MANTA_TARBALL_URL: "file:///tmp/bui-test.tar.gz" },
     home: HOME,
   });
   assert.equal(cfg.tarballUrl, "file:///tmp/bui-test.tar.gz");
@@ -49,7 +49,7 @@ test("resolveConfig honors BUI_TARBALL_URL override", () => {
 
 test("resolveConfig treats empty-string env vars as unset (shell footgun)", () => {
   const cfg = resolveConfig({
-    env: { BUI_HOME: "", BUI_TARBALL_URL: "", BUI_MOBILE_PORT: "" },
+    env: { MANTA_HOME: "", MANTA_TARBALL_URL: "", MANTA_MOBILE_PORT: "" },
     home: HOME,
   });
   assert.equal(cfg.buiHome, join(HOME, "bui"));
@@ -57,16 +57,16 @@ test("resolveConfig treats empty-string env vars as unset (shell footgun)", () =
   assert.equal(cfg.port, DEFAULT_PORT);
 });
 
-test("resolveConfig strips trailing slash from BUI_RELEASE_HOST", () => {
+test("resolveConfig strips trailing slash from MANTA_RELEASE_HOST", () => {
   const cfg = resolveConfig({
-    env: { BUI_RELEASE_HOST: "https://mirror.example.com/" },
+    env: { MANTA_RELEASE_HOST: "https://mirror.example.com/" },
     home: HOME,
   });
   assert.equal(cfg.releaseHost, "https://mirror.example.com");
 });
 
-test("resolveConfig honors BUI_MOBILE_PORT and derives healthUrl", () => {
-  const cfg = resolveConfig({ env: { BUI_MOBILE_PORT: "9999" }, home: HOME });
+test("resolveConfig honors MANTA_MOBILE_PORT and derives healthUrl", () => {
+  const cfg = resolveConfig({ env: { MANTA_MOBILE_PORT: "9999" }, home: HOME });
   assert.equal(cfg.port, 9999);
   assert.equal(cfg.healthUrl, "http://127.0.0.1:9999/auth/status");
 });
@@ -155,9 +155,9 @@ test("checkIdentity reports preserve when auth.json exists", () => {
     },
   });
   assert.equal(res.preserveIdentity, true);
-  assert.equal(res.authFile, join(HOME, ".bui-mobile", "auth.json"));
+  assert.equal(res.authFile, join(HOME, ".manta", "auth.json"));
   assert.match(res.reason, /preserving/);
-  assert.deepEqual(seen, [join(HOME, ".bui-mobile", "auth.json")]);
+  assert.deepEqual(seen, [join(HOME, ".manta", "auth.json")]);
 });
 
 test("checkIdentity reports fresh when auth.json missing", () => {
@@ -298,15 +298,15 @@ test("formatExpiry handles epoch-ms, ISO string, and junk", () => {
 test("renderShellConfig emits eval-able KEY=VALUE lines", () => {
   const cfg = resolveConfig({ env: {}, home: HOME });
   const out = renderShellConfig(cfg, { version: "0.0.1" });
-  assert.match(out, new RegExp(`BUI_HOME='${join(HOME, "bui")}'`));
-  assert.match(out, /BUI_AUTH_FILE='.*\.bui-mobile\/auth\.json'/);
-  assert.match(out, /BUI_TARBALL_URL='.*\/releases\/bui-0\.0\.1\.tar\.gz'/);
-  assert.match(out, /BUI_PORT='8787'/);
-  assert.match(out, /BUI_HEALTH_URL='http:\/\/127\.0\.0\.1:8787\/auth\/status'/);
+  assert.match(out, new RegExp(`MANTA_HOME='${join(HOME, "bui")}'`));
+  assert.match(out, /MANTA_AUTH_FILE='.*\.manta\/auth\.json'/);
+  assert.match(out, /MANTA_TARBALL_URL='.*\/releases\/bui-0\.0\.1\.tar\.gz'/);
+  assert.match(out, /MANTA_PORT='8787'/);
+  assert.match(out, /MANTA_HEALTH_URL='http:\/\/127\.0\.0\.1:8787\/auth\/status'/);
 });
 
 test("renderShellConfig single-quotes values with spaces safely", () => {
-  const cfg = resolveConfig({ env: { BUI_HOME: "/opt/my bui" }, home: HOME });
+  const cfg = resolveConfig({ env: { MANTA_HOME: "/opt/my bui" }, home: HOME });
   const out = renderShellConfig(cfg, { version: "0.0.1" });
-  assert.match(out, /BUI_HOME='\/opt\/my bui'/);
+  assert.match(out, /MANTA_HOME='\/opt\/my bui'/);
 });

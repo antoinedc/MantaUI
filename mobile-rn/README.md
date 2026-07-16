@@ -14,7 +14,7 @@ with **zero Apple credentials**.
 
 ## What it does
 
-1. **Pairing screen** — scan the `bui://pair?server=…&code=…` QR shown by the
+1. **Pairing screen** — scan the `manta://pair?server=…&code=…` QR shown by the
    desktop app, OR enter the server URL + 6-digit pairing code manually (the
    fallback for Expo Go on a simulator, which has no camera). On success the
    box_token is stored in the device keychain.

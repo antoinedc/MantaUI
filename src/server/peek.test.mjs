@@ -122,7 +122,7 @@ async function startPeekServer(testDir) {
 }
 
 test("/api/peek serves a text file with correct content", async () => {
-  const testDir = join(homedir(), ".bui-test-peek-" + Date.now());
+  const testDir = join(homedir(), ".manta-test-peek-" + Date.now());
   await mkdir(testDir, { recursive: true });
   const testFile = join(testDir, "test.txt");
   await writeFile(testFile, "hello world");
@@ -181,7 +181,7 @@ test("/api/peek returns 404 for non-existent file", async () => {
 });
 
 test("/api/peek returns 404 for directory", async () => {
-  const testDir = join(homedir(), ".bui-test-peek-dir-" + Date.now());
+  const testDir = join(homedir(), ".manta-test-peek-dir-" + Date.now());
   await mkdir(testDir, { recursive: true });
   const { server, port } = await startPeekServer();
   try {
@@ -198,9 +198,9 @@ test("/api/peek returns 404 for directory", async () => {
 test("/api/peek expands ~ to home directory", async () => {
   // Create a file in home dir
   const ts = Date.now();
-  const testFile = join(homedir(), `.bui-test-peek-home-${ts}.txt`);
+  const testFile = join(homedir(), `.manta-test-peek-home-${ts}.txt`);
   await writeFile(testFile, "home file content");
-  const relativePath = `~/.bui-test-peek-home-${ts}.txt`;
+  const relativePath = `~/.manta-test-peek-home-${ts}.txt`;
 
   const { server, port } = await startPeekServer();
   try {
@@ -214,7 +214,7 @@ test("/api/peek expands ~ to home directory", async () => {
 });
 
 test("/api/peek serves JSON with correct content-type", async () => {
-  const testDir = join(homedir(), ".bui-test-peek-json-" + Date.now());
+  const testDir = join(homedir(), ".manta-test-peek-json-" + Date.now());
   await mkdir(testDir, { recursive: true });
   const testFile = join(testDir, "data.json");
   await writeFile(testFile, '{"key":"value"}');

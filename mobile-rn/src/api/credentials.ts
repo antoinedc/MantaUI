@@ -1,6 +1,6 @@
 // credentials.ts — persist { serverUrl, boxId, boxToken } in the device keychain
 // via expo-secure-store. This is the RN equivalent of the web client's
-// localStorage["bui_server"] / localStorage["bui_token"] pair — but backed by
+// localStorage["manta_server"] / localStorage["manta_token"] pair — but backed by
 // the iOS Keychain / Android Keystore so the box_token is stored at rest
 // encrypted, not in plaintext.
 //
@@ -9,9 +9,9 @@
 
 import * as SecureStore from "expo-secure-store";
 
-const KEY_SERVER = "bui_server";
-const KEY_BOX_ID = "bui_box_id";
-const KEY_BOX_TOKEN = "bui_box_token";
+const KEY_SERVER = "manta_server";
+const KEY_BOX_ID = "manta_box_id";
+const KEY_BOX_TOKEN = "manta_box_token";
 
 export interface StoredCredentials {
   serverUrl: string;

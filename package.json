@@ -13,7 +13,7 @@
     "rename:dev": "bash scripts/rename-dev-app.sh",
     "postinstall": "electron-rebuild -f -w node-pty || true; bash scripts/rename-dev-app.sh || true",
     "mobile": "node src/server/index.mjs",
-    "pair": "node scripts/bui-pair.mjs",
+    "pair": "node scripts/manta-pair.mjs",
     "pack": "node scripts/release/pack.mjs",
     "pack:desktop": "electron-vite build && electron-builder --config electron-builder.yml",
     "test": "vitest run && node --test src/server/*.test.mjs src/relay/*.test.mjs src/relay/agent/*.test.mjs scripts/*.test.mjs",

@@ -30,7 +30,7 @@ device.
    the restart. **Order: ship the client update, confirm devices are on it, then
    deploy + restart the server with the gate on.**
 
-2. **Know your escape hatch.** `BUI_AUTH_DISABLED=1` in the server's environment
+2. **Know your escape hatch.** `MANTA_AUTH_DISABLED=1` in the server's environment
    makes `createAuthEngine` construct with `enforce: false` — the gate allows
    every request and the server prints a loud one-time warning on boot. This is
    the "don't lock me out" lever. Keep it ready but do **not** leave it on in a
@@ -49,12 +49,12 @@ device.
 
 ### 1. Deploy the server with the gate ON (default)
 
-Deploy the M1 build. Do **not** set `BUI_AUTH_DISABLED`. On restart the server
+Deploy the M1 build. Do **not** set `MANTA_AUTH_DISABLED`. On restart the server
 logs that enforcement is active. At this point every existing device sees `401`
 and drops to its pairing screen.
 
 > If you want a zero-downtime cutover for a device you can't immediately reach,
-> deploy first with `BUI_AUTH_DISABLED=1`, pair every device (steps 2–3), then
+> deploy first with `MANTA_AUTH_DISABLED=1`, pair every device (steps 2–3), then
 > remove the env var and restart once more to enforce. This trades a brief
 > unauthenticated window for not stranding a device.
 
@@ -88,7 +88,7 @@ POST /auth/claim  {"pairing_code":"847291"}
 → 429 {"error":"rate limited"}                        # too many attempts
 ```
 
-On `200` the client persists `box_token` in `localStorage["bui_token"]` and
+On `200` the client persists `box_token` in `localStorage["manta_token"]` and
 reloads into the session list. The token is long-lived — the device does **not**
 re-pair on every launch, only reloads persist it across restarts.
 
@@ -130,7 +130,7 @@ that's the same steps 2–3: mint a fresh code on the box, enter it on the devic
 
 If a rollout goes wrong and devices are stranded:
 
-1. Set `BUI_AUTH_DISABLED=1` in the server environment and restart. The gate
+1. Set `MANTA_AUTH_DISABLED=1` in the server environment and restart. The gate
    goes fully permissive; every device works again with no token (the client
    simply never hits a `401`).
 2. Diagnose (was the client build too old? did a device fail to persist its

@@ -58,8 +58,8 @@ export function selectDesktopTransport(_config, hasPreload) {
 }
 
 // The two localStorage keys the httpApi client reads for its base URL + token
-// (see src/renderer/api/httpApi.ts serverBase()/clientToken(): "bui_server" and
-// "bui_token"). On the desktop the paired credentials live in config.json
+// (see src/renderer/api/httpApi.ts serverBase()/clientToken(): "manta_server" and
+// "manta_token"). On the desktop the paired credentials live in config.json
 // (serverUrl + boxToken), not localStorage — so before installing httpApi we
 // SEED these keys from config. Pure: returns the {key,value} pairs to write so
 // the seeding is testable without a DOM. Returns null when the config isn't a
@@ -70,8 +70,8 @@ export function desktopHttpClientSeed(config) {
   const serverUrl = typeof cfg.serverUrl === "string" ? cfg.serverUrl.trim() : "";
   if (serverUrl === "" || !isValidBoxToken(cfg.boxToken)) return null;
   return {
-    bui_server: serverUrl.replace(/\/+$/, ""),
-    bui_token: cfg.boxToken,
+    manta_server: serverUrl.replace(/\/+$/, ""),
+    manta_token: cfg.boxToken,
   };
 }
 

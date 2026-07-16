@@ -63,7 +63,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
   const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
   // Mobile pairing — one-time code minted on demand. The QR encodes
-  // `bui://pair?id=<boxId>&token=<pairingCode>`; the mobile app scans this to
+  // `manta://pair?id=<boxId>&token=<pairingCode>`; the mobile app scans this to
   // auto-connect. `pairing` is null until the user clicks "Generate code".
   // `pairingExpiry` is a Date parsed from the server's expiresAt ISO string,
   // used to compute the remaining seconds for the countdown UI.
@@ -230,7 +230,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {activeTab === "connection" && (
             <div className="max-w-2xl space-y-6">
               {/* Mobile pairing (BET-80): generate a QR code the mobile app can scan
-                  to auto-connect. The QR encodes `bui://pair?id=<boxId>&token=<code>`.
+                  to auto-connect. The QR encodes `manta://pair?id=<boxId>&token=<code>`.
                   The code is one-time, valid for ~5 minutes. A new code supersedes
                   any prior code. */}
               <div>
@@ -621,7 +621,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       Auto-save files the AI sends
                       <span className="block text-xs text-text-faint mt-1">
                         When the AI drops a file in{" "}
-                        <code className="text-text-muted">~/.bui-outbox</code> on the remote, save it to your
+                        <code className="text-text-muted">~/.manta-outbox</code> on the remote, save it to your
                         downloads folder without asking. Off = a toast asks before each file is saved.
                       </span>
                     </span>

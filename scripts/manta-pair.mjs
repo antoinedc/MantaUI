@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// bui-pair.mjs — the `bui pair` CLI.
+// manta-pair.mjs — the `bui pair` CLI.
 //
 // Mints a fresh pairing code by hitting the LOOPBACK-only endpoint
 // GET http://127.0.0.1:8787/auth/pair and pretty-printing the
@@ -29,8 +29,8 @@ async function main() {
     res = await fetch(url, { method: "GET" });
   } catch (e) {
     fail(
-      `Could not reach bui-server at ${url}\n` +
-        `  Is it running?  systemctl --user status bui-server\n` +
+      `Could not reach manta-server at ${url}\n` +
+        `  Is it running?  systemctl --user status manta-server\n` +
         `  (${e?.message ?? e})`,
     );
     return;
@@ -38,7 +38,7 @@ async function main() {
 
   if (res.status === 403) {
     fail(
-      "bui-server refused to mint a pairing code: this command must run ON the box.\n" +
+      "manta-server refused to mint a pairing code: this command must run ON the box.\n" +
         "  Pairing codes are loopback-only. Run `bui pair` directly on the server\n" +
         "  (or over an SSH -L 8787 forward that terminates on the box).",
     );
@@ -53,7 +53,7 @@ async function main() {
     } catch {
       /* non-JSON body — ignore */
     }
-    fail(`bui-server returned HTTP ${res.status}${detail}`);
+    fail(`manta-server returned HTTP ${res.status}${detail}`);
     return;
   }
 
@@ -61,7 +61,7 @@ async function main() {
   try {
     data = await res.json();
   } catch (e) {
-    fail(`bui-server returned an unparseable response (${e?.message ?? e})`);
+    fail(`manta-server returned an unparseable response (${e?.message ?? e})`);
     return;
   }
 
@@ -73,7 +73,7 @@ async function main() {
     });
     process.stdout.write(block + "\n");
   } catch (e) {
-    fail(`unexpected pairing response from bui-server (${e?.message ?? e})`);
+    fail(`unexpected pairing response from manta-server (${e?.message ?? e})`);
   }
 }
 

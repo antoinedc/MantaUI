@@ -134,12 +134,12 @@ describe("desktopHttpClientSeed (BET-58)", () => {
   it("returns the localStorage seed for a valid paired config", () => {
     expect(
       desktopHttpClientSeed({ boxToken: HEX32, serverUrl: "http://box:8787" }),
-    ).toEqual({ bui_server: "http://box:8787", bui_token: HEX32 });
+    ).toEqual({ manta_server: "http://box:8787", manta_token: HEX32 });
   });
   it("trims trailing slashes from serverUrl", () => {
     expect(
       desktopHttpClientSeed({ boxToken: HEX32, serverUrl: "http://box:8787///" }),
-    ).toEqual({ bui_server: "http://box:8787", bui_token: HEX32 });
+    ).toEqual({ manta_server: "http://box:8787", manta_token: HEX32 });
   });
   it("returns null when boxToken is missing/invalid", () => {
     expect(desktopHttpClientSeed({ serverUrl: "http://box:8787" })).toBeNull();

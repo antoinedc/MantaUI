@@ -1,5 +1,5 @@
 {
-  "name": "bui-mobile-rn",
+  "name": "manta-mobile-rn",
   "version": "0.0.1",
   "private": true,
   "description": "Manta mobile app (Expo React Native) — QR pairing + read-only session list (M3.2, BET-74)",

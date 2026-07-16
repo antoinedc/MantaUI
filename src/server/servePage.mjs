@@ -3,7 +3,7 @@
 // The remote AI calls the global opencode `serve_page` tool
 // (docs/opencode-tools/serve-page.ts), which POSTs to bui-server's
 // /api/serve-page. The source file is copied into a stable directory
-// under ~/.bui-mobile/pages/<subdomain>/, and an in-process HTTP server
+// under ~/.manta/pages/<subdomain>/, and an in-process HTTP server
 // on 127.0.0.1:20080 serves it. Caddy reverse-proxies *.bui.antoinedc.com
 // to this port, so the page is accessible at https://<sub>.bui.antoinedc.com.
 //
@@ -17,9 +17,10 @@ import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname, extname } from "node:path";
+import { STATE_DIRNAME } from "../shared/paths.mjs";
 
-const STORE_PATH = join(homedir(), ".bui-mobile", "serve-page.json");
-const PAGES_DIR = join(homedir(), ".bui-mobile", "pages");
+const STORE_PATH = join(homedir(), STATE_DIRNAME, "serve-page.json");
+const PAGES_DIR = join(homedir(), STATE_DIRNAME, "pages");
 const FILE_SERVER_PORT = 20080;
 const FILE_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TTL_HOURS = 24;
@@ -59,7 +60,7 @@ async function atomicWrite(path, data) {
 }
 
 // ---------------------------------------------------------------------------
-// Store — durable registry in ~/.bui-mobile/serve-page.json
+// Store — durable registry in ~/.manta/serve-page.json
 // ---------------------------------------------------------------------------
 
 export function loadPages(path = STORE_PATH) {

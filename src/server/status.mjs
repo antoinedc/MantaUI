@@ -16,7 +16,7 @@ const CAPTURE_LINES = 40;
 const CAPTURE_CONCURRENCY = 8;
 
 // Sentinel that won't appear in captured terminal content (ANSI-stripped text).
-export const MARK = "__BUI_PANE__";
+export const MARK = "__MANTA_PANE__";
 
 // Patterns — kept identical to src/main/status.ts.
 //

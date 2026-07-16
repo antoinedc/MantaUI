@@ -79,7 +79,7 @@ survive: Mac app close, chat session navigation, and box reboot (systemd
 `enable-linger`). This is strictly more durable than Claude Code's
 session-scoped `/loop`, which dies with the session.
 
-- **Store**: `~/.bui-mobile/schedule.json`, atomic temp-rename writes (same
+- **Store**: `~/.manta/schedule.json`, atomic temp-rename writes (same
   pattern as `local.mjs` config). Shape:
   ```json
   { "jobs": [ {

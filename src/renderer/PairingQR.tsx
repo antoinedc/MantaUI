@@ -1,6 +1,6 @@
 // PairingQR — renders a QR code image for mobile device pairing.
 //
-// The QR encodes `bui://pair?id=<boxId>&token=<pairingCode>`, which the mobile
+// The QR encodes `manta://pair?id=<boxId>&token=<pairingCode>`, which the mobile
 // app scans to auto-connect. We use the `qrcode` npm package to generate a
 // data URL, then render it as an <img> tag. The data URL is memoized so we
 // don't regenerate on every render (QR generation is CPU-bound).
@@ -28,10 +28,10 @@ export function PairingQR({
   const [error, setError] = useState<string | null>(null);
 
   const url = useMemo(() => {
-    // bui://pair?id=<boxId>&token=<pairingCode>
+    // manta://pair?id=<boxId>&token=<pairingCode>
     // The mobile app's deep link parser (src/renderer/mobile/pairPayload.ts)
     // accepts both `server`/`code` and the M6 alias `id`/`token`.
-    return `bui://pair?id=${encodeURIComponent(boxId)}&token=${encodeURIComponent(pairingCode)}`;
+    return `manta://pair?id=${encodeURIComponent(boxId)}&token=${encodeURIComponent(pairingCode)}`;
   }, [boxId, pairingCode]);
 
   useEffect(() => {

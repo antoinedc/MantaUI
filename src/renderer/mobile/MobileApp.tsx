@@ -156,7 +156,7 @@ export function MobileApp() {
   }, [setScreenshotToast]);
 
   // Agent → device file push. The mobile server's outbox poller publishes
-  // `agentFile` events when the AI drops a file in ~/.bui-outbox/. On a device
+  // `agentFile` events when the AI drops a file in ~/.manta-outbox/. On a device
   // these arrive as a Save toast (the active ChatPanel renders it); tapping
   // Save triggers a browser download via GET /api/download.
   useEffect(() => {
@@ -175,7 +175,7 @@ export function MobileApp() {
   // pending QuestionCard into view. The window global is a latch for the
   // cold-start case (panel mounts after this runs); the event covers the warm
   // case (panel already mounted on that session). See ChatPanel's
-  // bui-scroll-to-question handler.
+  // manta-scroll-to-question handler.
   const openSessionForNotif = (
     projectName: string,
     windowIndex: number,
@@ -185,7 +185,7 @@ export function MobileApp() {
       sessionId;
     openSession(projectName, windowIndex);
     window.dispatchEvent(
-      new CustomEvent("bui-scroll-to-question", { detail: { sessionId } }),
+      new CustomEvent("manta-scroll-to-question", { detail: { sessionId } }),
     );
   };
 
@@ -231,7 +231,7 @@ export function MobileApp() {
     if (!navigator.serviceWorker) return;
     const onMsg = (e: MessageEvent) => {
       const d = e.data as { type?: string; sessionId?: string } | undefined;
-      if (d?.type === "bui-open-session" && d.sessionId) {
+      if (d?.type === "manta-open-session" && d.sessionId) {
         pendingNotif.current = d.sessionId;
         const owner = resolveSessionOwner(useStore.getState().projects, d.sessionId);
         if (owner) {

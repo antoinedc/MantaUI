@@ -144,12 +144,12 @@ describe("AuthRequiredError", () => {
 });
 
 // ---------------------------------------------------------------------------
-// TOKEN_KEY — sibling of the existing bui_server key
+// TOKEN_KEY — sibling of the existing manta_server key
 // ---------------------------------------------------------------------------
 
 describe("TOKEN_KEY", () => {
-  it("is the bui_token localStorage key", () => {
-    expect(TOKEN_KEY).toBe("bui_token");
+  it("is the manta_token localStorage key", () => {
+    expect(TOKEN_KEY).toBe("manta_token");
   });
 });
 

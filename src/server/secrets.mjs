@@ -25,20 +25,21 @@
 //                 key of the same name for that session.
 //
 // Server-owned + durable (survives Mac-app-close / reboot), same pattern as
-// schedule.mjs / servePage.mjs. Store: ~/.bui-mobile/secrets.json (0600).
-// Materialized files: ~/.bui-secrets/ (dir 0700, files 0600).
+// schedule.mjs / servePage.mjs. Store: ~/.manta/secrets.json (0600).
+// Materialized files: ~/.manta-secrets/ (dir 0700, files 0600).
 
 import { readFile, writeFile, rename, mkdir, chmod, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { STATE_DIRNAME, SECRETS_DIRNAME } from "../shared/paths.mjs";
 
-const STORE_PATH = join(homedir(), ".bui-mobile", "secrets.json");
+const STORE_PATH = join(homedir(), STATE_DIRNAME, "secrets.json");
 // Where `secret_provide` writes the materialized value files. Shared secrets go
 // directly under here; session-scoped under sessions/<sessionID>/ so two
 // sessions can hold same-named secrets without colliding on disk.
-const SECRETS_DIR = join(homedir(), ".bui-secrets");
+const SECRETS_DIR = join(homedir(), SECRETS_DIRNAME);
 
 // ---------------------------------------------------------------------------
 // Pure helpers (tested)
@@ -125,8 +126,8 @@ function sameSlot(a, scope, owner, key) {
 }
 
 // Path the value file is materialized to for a resolved entry. Shared →
-// ~/.bui-secrets/<key>; session → ~/.bui-secrets/sessions/<sessionID>/<key>;
-// project → ~/.bui-secrets/projects/<project>/<key>.
+// ~/.manta-secrets/<key>; session → ~/.manta-secrets/sessions/<sessionID>/<key>;
+// project → ~/.manta-secrets/projects/<project>/<key>.
 export function materializedPath(entry, dir = SECRETS_DIR) {
   if (entry.scope === "session" && entry.sessionID) {
     return join(dir, "sessions", entry.sessionID, entry.key);
@@ -270,7 +271,7 @@ export function listSecrets({ sessionID, project, includeAll = false } = {}, { l
 // ---------------------------------------------------------------------------
 
 // Resolve `key` for `sessionID`, write its value to a 0600 file under
-// ~/.bui-secrets/, and return { ok, path, key, hint }. The VALUE IS NEVER
+// ~/.manta-secrets/, and return { ok, path, key, hint }. The VALUE IS NEVER
 // RETURNED — only the path, so nothing secret reaches the transcript. The
 // caller (secret_provide tool) instructs the agent to use $(cat <path>).
 export async function provideSecret(

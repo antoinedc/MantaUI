@@ -577,7 +577,7 @@ export async function generateSessionTitle({ directory, instruction }) {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title: "bui-auto-title" }),
+        body: JSON.stringify({ title: "manta-auto-title" }),
       },
     );
     if (!createRes.ok) {

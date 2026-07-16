@@ -27,7 +27,7 @@ export type Attachment = {
   mime: string;
   status: "uploading" | "ready" | "error";
   errorMsg?: string;
-  source: "drop" | "paste" | "mention"; // "drop"/"paste" = scp'd to ~/.bui-uploads, "mention" = path from /find/file
+  source: "drop" | "paste" | "mention"; // "drop"/"paste" = scp'd to ~/.manta-uploads, "mention" = path from /find/file
   // When true this chip is NOT sent as a multimodal FilePart (the model
   // can't decode it — csv/code/text/etc). Instead its remote path is
   // appended to the outgoing message as `@<path>` so the AI reads it with
@@ -244,7 +244,7 @@ export function guessMime(filename: string): string {
 export type ModelSelection = { providerID: string; modelID: string; variant?: string };
 
 export function modelKey(sessionId: string): string {
-  return `bui:chat:${sessionId}:model`;
+  return `manta:chat:${sessionId}:model`;
 }
 
 export function readSavedModel(sessionId: string): ModelSelection | null {
@@ -276,7 +276,7 @@ export function writeSavedModel(sessionId: string, m: ModelSelection | null): vo
 export type SessionMode = "chat" | "terminal" | `tui:${string}`;
 
 export function modeKey(sessionId: string): string {
-  return `bui:session:${sessionId}:mode`;
+  return `manta:session:${sessionId}:mode`;
 }
 
 // `availableLaunchers` is the CURRENT set of launchers the box reports (see
