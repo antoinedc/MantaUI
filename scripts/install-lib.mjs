@@ -182,6 +182,7 @@ export async function waitForHealth(
   {
     maxAttempts = 60,
     intervalMs = 1000,
+    acceptAnyStatus = true,
     fetchFn = globalThis.fetch,
     sleep = defaultSleep,
   } = {},
@@ -198,9 +199,16 @@ export async function waitForHealth(
       const res = await fetchFn(url);
       // Any HTTP answer means the socket is bound and serving.
       if (res && typeof res.status === "number") {
-        return { ok: true, attempts: attempt, status: res.status };
+        if (acceptAnyStatus) {
+          return { ok: true, attempts: attempt, status: res.status };
+        }
+        if (res.status >= 200 && res.status < 400) {
+          return { ok: true, attempts: attempt, status: res.status };
+        }
+        lastError = new Error(`non-2xx status ${res.status}`);
+      } else {
+        lastError = new Error("fetch returned no status");
       }
-      lastError = new Error("fetch returned no status");
     } catch (e) {
       lastError = e;
     }
@@ -217,6 +225,149 @@ export async function waitForHealth(
 
 function defaultSleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ---------------------------------------------------------------------------
+// opencode.jsonc merge — pure, used by install.sh step C (BET-153)
+// ---------------------------------------------------------------------------
+//
+// opencode.jsonc allows `//` line comments and trailing commas (JSONC). The
+// plugin we seed lives in the top-level `plugin: string[]`. We MERGE — never
+// clobber — so any other config the user has set (theme, model, mcp, …) is
+// preserved across re-installs.
+//
+// Behavior:
+//   * Strip `//` line comments (respecting strings — "//" inside a quoted
+//     value must survive).
+//   * JSON.parse the remainder. On parse failure → caller backs the file up
+//     to `.pre-manta` and starts from `{}` (matches the documented
+//     skills.urls merge pattern in src/server/local.mjs).
+//   * Append `opencode-claude-auth@latest` to the `plugin` array IF not
+//     already present (any version — re-installs are no-ops).
+//   * Serialize with 2-space indent + trailing newline.
+//
+// Pure: no fs/network/sleep. Returns { text, corrupt }. `corrupt` is true
+// only when the input text was non-empty but unparseable; an empty input
+// is treated as `{}` (first install) and is not "corrupt".
+
+// Strip `//` line comments without eating `//` inside strings. Pure, single-
+// pass; matches the behavior of providers.mjs's stripLineComments (same rule,
+// kept independent so the install lib has zero dependency on the server
+// modules — install.sh runs even before the tarball is unpacked).
+export function stripJsoncLineComments(text) {
+  let out = "";
+  let inStr = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      out += c;
+      if (c === "\\" && i + 1 < text.length) {
+        out += text[i + 1];
+        i += 1;
+        continue;
+      }
+      if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') {
+      out += c;
+      inStr = true;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "/") {
+      const nl = text.indexOf("\n", i);
+      if (nl === -1) break;
+      i = nl;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+// Plugin we seed into every opencode.jsonc. The `@latest` is the official
+// installer's version tag — we use the official opencode plugin registry
+// (no version pinning in v1; the install is the source of truth for what
+// version is "current").
+export const OPENCODE_CLAUDE_AUTH_PLUGIN = "opencode-claude-auth@latest";
+
+/**
+ * Merge `opencode-claude-auth@latest` into the top-level `plugin` array of an
+ * existing opencode.jsonc. Pure: receives raw text, returns raw text.
+ *
+ * @param {string} existingText  Raw file contents (possibly empty, possibly
+ *                               containing JSONC `//` comments).
+ * @returns {{ text: string, corrupt: boolean, plugin: string[] }}
+ *   - text    — the new file contents (always well-formed JSON, 2-space
+ *               indent, trailing newline). The caller writes this to disk.
+ *   - corrupt — true iff the input was non-empty AND failed to parse.
+ *               Caller decides whether to back the original up to
+ *               `.pre-manta` before overwriting. An empty input is treated
+ *               as `{}` and is NOT corrupt (first install).
+ *   - plugin  — the post-merge plugin array (handy for tests + the summary
+ *               log in install.sh).
+ */
+export function mergeOpencodeConfig(existingText) {
+  const raw = typeof existingText === "string" ? existingText : "";
+  const stripped = stripJsoncLineComments(raw).trim();
+  let cfg = {};
+  let corrupt = false;
+  if (stripped.length > 0) {
+    try {
+      cfg = JSON.parse(stripped);
+      if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
+        cfg = {};
+        corrupt = true;
+      }
+    } catch {
+      cfg = {};
+      corrupt = true;
+    }
+  }
+  // Deep-merge ONLY the `plugin` key. Every other key is spread through
+  // untouched (theme, model, mcp, provider, …).
+  const plugins = Array.isArray(cfg.plugin) ? cfg.plugin.filter((p) => typeof p === "string") : [];
+  if (!plugins.includes(OPENCODE_CLAUDE_AUTH_PLUGIN)) {
+    plugins.push(OPENCODE_CLAUDE_AUTH_PLUGIN);
+  }
+  const next = { ...cfg, plugin: plugins };
+  const text = JSON.stringify(next, null, 2) + "\n";
+  return { text, corrupt, plugin: plugins };
+}
+
+// ---------------------------------------------------------------------------
+// Systemd unit placeholder substitution — pure, used by install.sh steps E
+// and the existing manta-server step (BET-153).
+// ---------------------------------------------------------------------------
+//
+// Mirrors what `sed -e 's|@@K@@|V|g' …` does in the shell, but as a pure
+// function so the substitution is unit-testable (the "no @@ left after sed"
+// hygiene check) and install.sh stays a thin orchestrator.
+//
+// `placeholders` is a plain { KEY: value } map. Each @@KEY@@ in `template`
+// is replaced verbatim — values are NOT shell-quoted, because systemd unit
+// files don't need quoting and a value with a `|` would otherwise confuse
+// sed. Callers must keep values simple (paths + ports — no special chars).
+export function renderSystemdUnit(template, placeholders) {
+  if (typeof template !== "string") {
+    throw new Error("renderSystemdUnit: template must be a string");
+  }
+  if (!placeholders || typeof placeholders !== "object") {
+    throw new Error("renderSystemdUnit: placeholders object required");
+  }
+  let out = template;
+  for (const [key, value] of Object.entries(placeholders)) {
+    const token = `@@${key}@@`;
+    // String.replaceAll keeps the semantics obvious; for-loop above ensures
+    // we visit every key. Guard against values containing the token (would
+    // re-substitute on the next iteration).
+    const v = String(value);
+    if (v.includes(token)) {
+      throw new Error(`renderSystemdUnit: placeholder value for ${key} contains the token ${token}`);
+    }
+    out = out.split(token).join(v);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -344,9 +495,44 @@ async function cliMain(argv) {
     );
     return 0;
   }
+  if (cmd === "merge-opencode-config") {
+    // Read raw text from stdin, write the merged text to stdout, and the
+    // `corrupt` flag to stderr (so install.sh can branch on it for the
+    // `.pre-manta` backup). Pure: no fs writes here.
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    const raw = Buffer.concat(chunks).toString("utf-8");
+    const { text, corrupt } = mergeOpencodeConfig(raw);
+    if (corrupt) process.stderr.write("corrupt=1\n");
+    process.stdout.write(text);
+    return 0;
+  }
+  if (cmd === "render-systemd-unit") {
+    // node install-lib.mjs render-systemd-unit --template <path> --placeholder K=V [--placeholder K=V ...]
+    // Replaces @@K@@ in the template file with V (verbatim, no quoting).
+    // Writes the rendered text to stdout. install.sh uses this to substitute
+    // the opencode-serve unit's @@OPENCODE_BIN@@ placeholder (sed was an
+    // option but a lib function is unit-testable + lib-quoteable).
+    const tplPath = flags.template;
+    if (!tplPath) {
+      process.stderr.write("render-systemd-unit: --template <path> required\n");
+      return 2;
+    }
+    const { readFileSync } = await import("node:fs");
+    const tpl = readFileSync(tplPath, "utf-8");
+    // Strip the --template flag + value out of `flags` and treat everything
+    // else as a placeholder; values can contain `=` so split on the FIRST `=`.
+    const placeholders = {};
+    for (const [k, v] of Object.entries(flags)) {
+      if (k === "template" || k === "version") continue;
+      placeholders[k] = v;
+    }
+    process.stdout.write(renderSystemdUnit(tpl, placeholders));
+    return 0;
+  }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|tarball-url> [--version X]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|tarball-url|merge-opencode-config|render-systemd-unit> [--version X]\n",
   );
   return 2;
 }
@@ -356,6 +542,17 @@ function parseFlags(args) {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--version") {
       out.version = args[++i];
+    } else if (args[i] === "--template") {
+      out.template = args[++i];
+    } else if (args[i] === "--placeholder") {
+      // --placeholder KEY=VAL  (value may itself contain `=`; split on FIRST)
+      const kv = args[++i] ?? "";
+      const eq = kv.indexOf("=");
+      if (eq === -1) {
+        process.stderr.write(`install-lib: --placeholder expects KEY=VAL (got ${JSON.stringify(kv)})\n`);
+        process.exit(2);
+      }
+      out[kv.slice(0, eq)] = kv.slice(eq + 1);
     }
   }
   return out;

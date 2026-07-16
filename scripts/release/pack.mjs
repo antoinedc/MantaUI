@@ -10,13 +10,19 @@
 // `mobile/www/` here.
 //
 // What goes in (the box's runtime surface only):
-//   src/            — the server (src/server/**) + shared code it imports
-//   scripts/        — install.sh, manta-pair.mjs, install-lib.mjs, systemd unit
-//   mobile/www/     — PRE-BUILT renderer bundle (this is why the box needs no
-//                     Vite/electron toolchain)
-//   package.json    — the "mobile"/"pair" npm scripts + prod deps list
-//   package-lock.json — pins prod deps for `npm ci`
-//   README.md       — manual-install fallback reference
+//   src/               — the server (src/server/**) + shared code it imports
+//   scripts/           — install.sh, manta-pair.mjs, install-lib.mjs, systemd units
+//   docs/opencode-tools/ — the bui-native opencode tool bundle (notify.ts,
+//                         peers.ts, schedule.ts, secrets.ts, serve-page.ts,
+//                         webhook.ts, AGENTS.md). install.sh step D REAL-copies
+//                         these into ~/.config/opencode/tools/ + appends
+//                         AGENTS.md to ~/.config/opencode/AGENTS.md. Symlinking
+//                         misses ~/.config/opencode/node_modules resolution.
+//   mobile/www/        — PRE-BUILT renderer bundle (this is why the box needs no
+//                        Vite/electron toolchain)
+//   package.json       — the "mobile"/"pair" npm scripts + prod deps list
+//   package-lock.json  — pins prod deps for `npm ci`
+//   README.md          — manual-install fallback reference
 //
 // What's excluded: the Electron desktop build, node_modules, .git, dist, tests,
 // dev configs — none of it runs on the box.
@@ -52,6 +58,7 @@ function parseArgs(argv) {
 const INCLUDE = [
   "src",
   "scripts",
+  "docs/opencode-tools",
   "mobile/www",
   "package.json",
   "package-lock.json",

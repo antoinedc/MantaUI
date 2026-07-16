@@ -131,7 +131,168 @@ fi
 ok "Dependencies installed."
 
 # ---------------------------------------------------------------------------
-# 6. systemd --user unit: substitute placeholders and enable.
+# 6. Chat stack provisioning (opencode + bui-native tools + tmux presence).
+#    Independent of the relay work — a fresh VPS just needs claude code
+#    installed (~/.claude/.credentials.json exists). Re-running is a no-op
+#    except for version upgrades; every step is safe to run twice.
+# ---------------------------------------------------------------------------
+
+# --- A. tmux presence gate (hard requirement of the product). -------------
+# §1 already verified tmux exists; we re-state it here as a section-level
+# gate so a missing-tmux failure surfaces in the chat stack section, not
+# buried at the top. We deliberately do NOT auto-install distro packages —
+# the installer never assumes root.
+if ! command -v tmux >/dev/null 2>&1; then
+  die "missing prerequisite for chat stack: tmux
+      Install it and re-run. Suggested:
+        apt-get install -y tmux        # Debian/Ubuntu
+        yum install -y tmux            # RHEL/Fedora/Amazon Linux"
+fi
+ok "tmux present."
+
+# --- B. opencode install (idempotent via official installer). ------------
+# We use opencode's official installer; no version pinning in v1 — the
+# installer is the source of truth for "current". Re-running is a no-op
+# when the binary is already on PATH.
+OPENCODE_BIN="$(command -v opencode || true)"
+if [ -n "$OPENCODE_BIN" ]; then
+  ok "opencode already installed ($("$OPENCODE_BIN" --version 2>/dev/null | head -n1 || echo "$OPENCODE_BIN"))."
+else
+  log "Installing opencode (official installer)…"
+  # The installer writes to ~/.local/bin/opencode by default; that dir is on
+  # PATH for most distros but not all. We source the installer's PATH hint
+  # if it added anything, then re-check.
+  curl -fsSL https://opencode.ai/install | bash \
+    || die "opencode install failed — install manually: https://opencode.ai"
+  OPENCODE_BIN="$(command -v opencode || true)"
+  if [ -z "$OPENCODE_BIN" ]; then
+    die "opencode still not on PATH after install. Try: export PATH=\"\$HOME/.local/bin:\$PATH\" and re-run."
+  fi
+  ok "opencode installed ($("$OPENCODE_BIN" --version 2>/dev/null | head -n1 || echo "$OPENCODE_BIN"))."
+fi
+
+# --- C. opencode config seeding — MERGE the plugin entry, never clobber. --
+# Target: ~/.config/opencode/opencode.jsonc. Required:
+#   plugin: ["opencode-claude-auth@latest", ...]
+# All other keys (theme, model, mcp, provider, …) are preserved. On parse
+# failure we back the file up to .pre-manta and start from {} — matches the
+# documented skills.urls merge pattern in src/server/local.mjs.
+OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
+OPENCODE_CONFIG="$OPENCODE_CONFIG_DIR/opencode.jsonc"
+mkdir -p "$OPENCODE_CONFIG_DIR"
+OPENCODE_CONFIG_BACKUP="$OPENCODE_CONFIG.pre-manta"
+if [ -f "$OPENCODE_CONFIG" ]; then
+  log "Seeding opencode-claude-auth plugin (merging into existing $OPENCODE_CONFIG)…"
+  existing="$(cat "$OPENCODE_CONFIG" 2>/dev/null || true)"
+else
+  log "Seeding opencode-claude-auth plugin (no existing $OPENCODE_CONFIG — creating)…"
+  existing=""
+fi
+merged="$(printf '%s' "$existing" | node "$LIB" merge-opencode-config 2>/tmp/opencode-merge.err)" \
+  || die "merge-opencode-config failed (see /tmp/opencode-merge.err)"
+if grep -q '^corrupt=1' /tmp/opencode-merge.err 2>/dev/null; then
+  cp "$OPENCODE_CONFIG" "$OPENCODE_CONFIG_BACKUP" 2>/dev/null \
+    && warn "opencode.jsonc was unparseable — original backed up to $OPENCODE_CONFIG_BACKUP, starting from {}." \
+    || warn "opencode.jsonc was unparseable and the backup FAILED — installer continues but original is NOT preserved."
+fi
+printf '%s' "$merged" > "$OPENCODE_CONFIG"
+ok "opencode.jsonc seeded."
+
+# --- D. manta opencode tools + agent guidance (REAL copies, not symlinks).
+# Per AGENTS.md ("Mobile / web client"): opencode resolves tool imports from
+# the file's REAL path; a symlink into the tarball tree misses
+# ~/.config/opencode/node_modules/@opencode-ai/plugin and the tool silently
+# never registers. So we cp — same inode-disjoint paths.
+OPENCODE_TOOLS_SRC="$MANTA_HOME/docs/opencode-tools"
+OPENCODE_TOOLS_DIR="$OPENCODE_CONFIG_DIR/tools"
+OPENCODE_AGENTS="$OPENCODE_CONFIG_DIR/AGENTS.md"
+if [ -d "$OPENCODE_TOOLS_SRC" ]; then
+  mkdir -p "$OPENCODE_TOOLS_DIR"
+  log "Copying bui-native opencode tools into $OPENCODE_TOOLS_DIR…"
+  # cp -f overwrites — tools are versioned with the tarball, so a re-run
+  # naturally picks up upgrades.
+  cp -f "$OPENCODE_TOOLS_SRC"/*.ts "$OPENCODE_TOOLS_DIR/" \
+    || die "failed to copy opencode tools from $OPENCODE_TOOLS_SRC"
+  ok "opencode tools copied."
+else
+  warn "$OPENCODE_TOOLS_SRC not found in tarball — skipping tool copy (was docs/opencode-tools/* added to release/pack.mjs?)."
+fi
+# AGENTS.md append with marker guard — idempotency by a single grep on a
+# stable line ("## bui scheduled tasks"). A re-run with the marker present
+# is a clean no-op.
+if [ -f "$OPENCODE_TOOLS_SRC/AGENTS.md" ]; then
+  if [ -f "$OPENCODE_AGENTS" ] && grep -q '^## bui scheduled tasks' "$OPENCODE_AGENTS"; then
+    ok "opencode AGENTS.md already contains bui guidance — skipping append."
+  else
+    log "Appending bui opencode agent guidance to $OPENCODE_AGENTS…"
+    {
+      [ -f "$OPENCODE_AGENTS" ] && cat "$OPENCODE_AGENTS" && printf '\n'
+      cat "$OPENCODE_TOOLS_SRC/AGENTS.md"
+    } > "$OPENCODE_AGENTS.tmp" && mv "$OPENCODE_AGENTS.tmp" "$OPENCODE_AGENTS"
+    ok "opencode AGENTS.md updated."
+  fi
+fi
+
+# --- E. opencode-serve systemd --user unit (or nohup fallback). ----------
+# Mirrors the manta-server install path right below: substitute the
+# @@OPENCODE_BIN@@ placeholder, install to ~/.config/systemd/user/, then
+# enable --now. Health-wait reuses the existing waitForHealth lib with
+# acceptAnyStatus:true (any HTTP status = listener is up — opencode's HTTP
+# surface is minimal and may not respond to a bare GET /). Same fallback
+# chain as manta-server when systemctl is unavailable.
+OC_UNIT_SRC="$MANTA_HOME/scripts/systemd/opencode-serve.service"
+OC_UNIT="$UNIT_DIR/opencode-serve.service"
+[ -f "$OC_UNIT_SRC" ] || die "missing systemd template: $OC_UNIT_SRC"
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl --user is-active --quiet opencode-serve.service 2>/dev/null; then
+    ok "opencode-serve already active — skipping (re-run picks up unit upgrades via daemon-reload below)."
+  else
+    log "Installing opencode-serve systemd --user unit…"
+    mkdir -p "$UNIT_DIR"
+    rendered="$(node "$LIB" render-systemd-unit \
+      --template "$OC_UNIT_SRC" \
+      --placeholder OPENCODE_BIN="$OPENCODE_BIN")" \
+      || die "render-systemd-unit failed (see lib)"
+    printf '%s' "$rendered" > "$OC_UNIT"
+    systemctl --user daemon-reload
+    systemctl --user enable --now opencode-serve.service
+  fi
+else
+  if pgrep -f 'opencode serve --port 4096' >/dev/null 2>&1; then
+    ok "opencode-serve already running (nohup) — skipping."
+  else
+    warn "systemctl not found. Starting opencode-serve in the background instead."
+    warn "It will NOT survive reboot — set up your own supervisor for that."
+    ( nohup "$OPENCODE_BIN" serve --port 4096 --hostname 127.0.0.1 >"$AUTH_DIR/opencode.log" 2>&1 & )
+  fi
+fi
+# Health-wait: opencode is loopback-only on :4096. acceptAnyStatus:true is
+# the default in waitForHealth; we pass it explicitly so a future reader
+# sees the intent ("any response = listening").
+log "Waiting for opencode-serve at http://127.0.0.1:4096/…"
+node -e '
+  import("'"$LIB"'").then(async (m) => {
+    const r = await m.waitForHealth("http://127.0.0.1:4096/", {
+      maxAttempts: 30,
+      intervalMs: 1000,
+      acceptAnyStatus: true,
+    });
+    if (!r.ok) { console.error(r.error); process.exit(1); }
+    console.error("healthy after " + r.attempts + " attempt(s) (status " + r.status + ")");
+  }).catch((e) => { console.error(String(e)); process.exit(1); });
+' || die "opencode-serve did not become healthy at http://127.0.0.1:4096/ — check logs:
+      systemctl --user status opencode-serve ; journalctl --user -u opencode-serve -n 50
+      or: tail -f $AUTH_DIR/opencode.log"
+ok "opencode-serve is healthy."
+
+# --- F. Final summary block (extended heredoc) ----------------------------
+# We extend the heredoc that prints at the end (originally section 7).
+# The chat-stack bits live in this script (section 6) and show their own
+# ok lines above; the heredoc only needs to surface the next-step nudge
+# and the claude credentials warning.
+
+# ---------------------------------------------------------------------------
+# 7. manta-server systemd --user unit: substitute placeholders and enable.
 # ---------------------------------------------------------------------------
 NODE_BIN="$(command -v node)"
 UNIT_SRC="$MANTA_HOME/scripts/systemd/manta-server.service"
@@ -163,7 +324,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Wait for health, then mint + print a pairing code.
+# 8. Wait for health, then mint + print a pairing code.
 # ---------------------------------------------------------------------------
 log "Waiting for the server to become healthy at $MANTA_HEALTH_URL…"
 node -e '
@@ -188,6 +349,25 @@ Installed. Manage the server with:
   systemctl --user restart manta-server
   journalctl --user -u manta-server -f
 
+Chat backend (opencode-serve) on http://127.0.0.1:4096:
+  systemctl --user status opencode-serve
+  systemctl --user restart opencode-serve
+  journalctl --user -u opencode-serve -f
+
 Re-run this installer any time to upgrade in place (your box identity is preserved).
 Run 'manta pair' (or 'npm run pair' in $MANTA_HOME) to mint a fresh pairing code.
 EOF
+
+# --- Final claude credentials check (warn — not die — per BET-153 step F).
+# The only auth prerequisite we assume is the user has run/authed `claude`
+# on this box at least once, producing ~/.claude/.credentials.json.
+# opencode-serve reads that on first start; without it the chat backend
+# starts but rejects all chat requests with a 401 until the user
+# authenticates.
+if [ -f "$HOME/.claude/.credentials.json" ]; then
+  ok "claude credentials detected — chat backend will authenticate on first request."
+else
+  warn "no \$HOME/.claude/.credentials.json — chat will start but reject requests until you authenticate."
+  warn "Run \`claude\` once on this box to sign in, then:"
+  warn "  systemctl --user restart opencode-serve"
+fi
