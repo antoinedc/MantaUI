@@ -454,16 +454,22 @@ export function createRelayServer(opts = {}) {
    * @param {{method:string,path:string,headers?:object,body?:string}} req
    * @param {{
    *   onHead: ({status:number, headers:object}) => void,
-   *   onData: (text:string) => void,
+   *   onData: (text:string, frame?:object) => void,
    *   onEnd:  () => void,
    *   onAbort: (reason:string) => void,
    * }} callbacks
-   * @returns {{ streamId: number, abort: (reason?:string) => void }}
+   * @param {object} [opts]
+   * @param {string|number} [opts.streamId]   override the monotonic stream
+   *   id. Defaults to `nextStreamId++`. Use a stable string discriminator
+   *   (e.g. "pty") when the box agent dispatches STREAM_OPEN by stream-type
+   *   rather than by id (BET-158 — the agent reads `frame.stream` and routes
+   *   to the pty WS bridge when it sees "pty").
+   * @returns {{ streamId: string|number, abort: (reason?:string) => void }}
    *   The caller keeps `streamId` for logging; `abort()` is the public way to
    *   cancel the stream (frees the relay-side id, sends STREAM_ABORT to the
    *   box so the local fetch ends).
    */
-  function streamRequest(boxId, req, callbacks) {
+  function streamRequest(boxId, req, callbacks, opts = {}) {
     const transport = routing.lookup(boxId);
     if (!transport) {
       // Synchronous no-tunnel: no consumer registered yet, so fire onAbort
@@ -485,12 +491,16 @@ export function createRelayServer(opts = {}) {
       }
       return { streamId: -1, abort: () => {} };
     }
-    // Allocate a fresh stream id for this transport. The frame's `id` is
-    // reused as the request-correlating id (the agent echoes it in its
-    // response-side frames); the registry routes by `stream` (the relay-
-    // assigned id), so a stale `id` on a same-stream id won't misroute.
-    const streamId = nextStreamId++;
-    const requestId = streamId;
+    // Allocate a fresh stream id for this transport. The `id` field stays
+    // numeric (the protocol's validator rejects non-integer ids) and is
+    // used to correlate the request-side STREAM_OPEN with the agent's
+    // response-side STREAM_OPEN. The `stream` field is the logical stream
+    // id — a monotonic number by default, or a string discriminator
+    // (BET-158 — "pty") when the caller wants the agent to dispatch by
+    // stream type. The relay's inbound registry keys off `stream`, so
+    // both numeric and string keys work.
+    const streamId = opts.streamId ?? nextStreamId++;
+    const requestId = nextStreamId++;
     let closed = false;
 
     // The consumer reads off `frame.status`/`frame.headers` for the response

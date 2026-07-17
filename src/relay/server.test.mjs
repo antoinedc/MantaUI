@@ -16,9 +16,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
 
-import { createRelayService } from "./server.mjs";
+import { createRelayService, routePtyUpgrade, handlePtyUpgrade, bridgeDevicePty } from "./server.mjs";
 import { openStore, hashToken } from "./store.mjs";
 import { encodeFrame, decodeFrame, FRAME_TYPES } from "./protocol.mjs";
+import { createDefaultPhoneAuth, createDefaultSubscriptionCheck } from "./api.mjs";
+import { bindReceipt } from "./iap.mjs";
 
 const BOX_A = "0123456789abcdef0123456789abcdef"; // 32 hex
 const TOKEN_A = "11112222333344445555666677778888"; // box token (32 hex)
@@ -469,6 +471,252 @@ test("POST /pair: rate limit kicks in after PAIR_RL_CAPACITY per-box_id hits", a
   assert.equal(r2.status, 200);
   assert.equal(r3.status, 429, "third hit throttled");
   assert.equal(r3.json.error, "rate_limited");
+});
+
+// ---------------------------------------------------------------------------
+// /box/:id/pty upgrade — BET-158
+//
+// 1) routePtyUpgrade pure gate (auth + ownership + subscription, no socket).
+// 2) Full upgrade against the running service: a device WS at /box/<id>/pty
+//    is auth-gated + subscription-gated, and when both pass the bridge
+//    opens a tunnel stream to the box.
+// ---------------------------------------------------------------------------
+
+// A complete set of deps for routePtyUpgrade — same shape createRelayService
+// hands to the upgrade handler. Tests can pass a fresh store + the same
+// auth seam the running service uses so the gate logic is exercised exactly
+// as it would be in production.
+function makeRouteFixture({ subscribed = false, owned = true } = {}) {
+  const store = openStore();
+  store.addAccountToken(hashToken(ACCT_1), ACCT_1);
+  if (owned) {
+    store.upsertBox(BOX_A);
+    store.bindBox(BOX_A, ACCT_1);
+  }
+  const authenticatePhone = createDefaultPhoneAuth({ store });
+  const hasActiveSubscription = createDefaultSubscriptionCheck(store, () => Date.now());
+  // Stub a receipt bound to BOX_A when `subscribed` is true — hasActiveSubscription
+  // reads the store, not the receipt validator, so any row with no expiry is enough.
+  if (subscribed) {
+    bindReceipt(store, {
+      boxId: BOX_A,
+      transaction: {
+        originalTransactionId: "test-otid",
+        productId: "sub.monthly",
+        expiresAt: null,
+      },
+      raw: "jws",
+    }, { now: () => Date.now() });
+  }
+  return { store, authenticatePhone, hasActiveSubscription };
+}
+
+test("routePtyUpgrade: rejects bad box_id shape with 404", () => {
+  const fix = makeRouteFixture();
+  const url = new URL("ws://x/box/nothex/pty?session=abc");
+  const d = routePtyUpgrade({
+    url, boxId: "nothex", headers: { authorization: `Bearer ${ACCT_1}` },
+    ...fix,
+  });
+  assert.equal(d.kind, "reject");
+  assert.equal(d.status, 404);
+});
+
+test("routePtyUpgrade: rejects missing/invalid phone token with 401", () => {
+  const fix = makeRouteFixture();
+  const url = new URL(`ws://x/box/${BOX_A}/pty?session=abc`);
+  const d = routePtyUpgrade({
+    url, boxId: BOX_A, headers: {}, ...fix,
+  });
+  assert.equal(d.kind, "reject");
+  assert.equal(d.status, 401);
+});
+
+test("routePtyUpgrade: rejects a box the account does NOT own with 404", () => {
+  const fix = makeRouteFixture({ owned: false });
+  const url = new URL(`ws://x/box/${BOX_A}/pty?session=abc`);
+  const d = routePtyUpgrade({
+    url, boxId: BOX_A, headers: { authorization: `Bearer ${ACCT_1}` },
+    ...fix,
+  });
+  assert.equal(d.kind, "reject");
+  assert.equal(d.status, 404);
+});
+
+test("routePtyUpgrade: rejects a subscription-gated box with 402 when no receipt bound", () => {
+  const fix = makeRouteFixture({ subscribed: false });
+  const url = new URL(`ws://x/box/${BOX_A}/pty?session=abc`);
+  const d = routePtyUpgrade({
+    url, boxId: BOX_A, headers: { authorization: `Bearer ${ACCT_1}` },
+    ...fix,
+  });
+  assert.equal(d.kind, "reject");
+  assert.equal(d.status, 402);
+});
+
+test("routePtyUpgrade: accepts a valid, owned, subscribed box and strips ?token= from subpath", () => {
+  const fix = makeRouteFixture({ subscribed: true });
+  const url = new URL(
+    `ws://x/box/${BOX_A}/pty?session=abc&cols=100&rows=40&token=${ACCT_1}`,
+  );
+  const d = routePtyUpgrade({
+    url, boxId: BOX_A, headers: { authorization: `Bearer ${ACCT_1}` },
+    ...fix,
+  });
+  assert.equal(d.kind, "ok");
+  assert.equal(d.boxId, BOX_A);
+  // ?token= must be stripped — the relay strips it because (ADR-1) the box
+  // authenticates with its OWN box_token, not the device's account token.
+  assert.equal(d.subpath.includes("token="), false, "?token= must be stripped from the subpath");
+  assert.equal(d.subpath.includes("session=abc"), true);
+  assert.equal(d.subpath.includes("cols=100"), true);
+  assert.equal(d.subpath.startsWith("?"), true);
+});
+
+test("upgrade routing: /box still reaches the box leg", async (t) => {
+  const { wsBase } = await makeService(t);
+  // Sanity: an upgrade to /box works (existing behavior).
+  const ws = new WebSocket(`${wsBase}/box?box_id=${BOX_A}&token=${TOKEN_A}`);
+  await once(ws, "open");
+  ws.close();
+});
+
+test("upgrade routing: /box/<id>/anything-else is refused with 404 (no fallthrough)", async (t) => {
+  const { wsBase } = await makeService(t);
+  const ws = new WebSocket(`${wsBase}/box/${BOX_A}/foo`);
+  const [event] = await Promise.race([
+    once(ws, "unexpected-response").then(() => ["unexpected"]),
+    once(ws, "error").then(() => ["error"]),
+  ]);
+  assert.ok(event === "error" || event === "unexpected", "non-/pty upgrade must not silently match");
+});
+
+// Listen for either an "unexpected-response" (server sent an HTTP status
+// before the WS upgrade completed) or an "error" (the socket was destroyed
+// mid-handshake). Returns { kind, status? } — the WS library fires
+// `unexpected-response` with the http.IncomingMessage when the server
+// writes a real HTTP error, and `error` when the socket is closed
+// abruptly. The relay uses both depending on timing; either is valid for
+// asserting the gate.
+async function expectUpgradeStatus(ws, expectedStatus, label) {
+  // Race for unexpected-response first; fall back to error so we don't
+  // hang if the server's tcp-write is too fast for the WS library's
+  // upgrade-completion check.
+  let unexpected;
+  let error;
+  const settled = new Promise((resolve) => {
+    ws.once("unexpected-response", (_msg, res) => {
+      unexpected = { status: res.statusCode };
+      resolve();
+    });
+    ws.once("error", () => {
+      error = true;
+      resolve();
+    });
+  });
+  await settled;
+  if (unexpected) {
+    assert.equal(unexpected.status, expectedStatus, `${label}: expected ${expectedStatus}, got ${unexpected.status}`);
+    return;
+  }
+  // An "error" without a response object means the relay accepted the
+  // socket but rejected with a non-standard response (or destroyed it
+  // before any bytes were sent). We can only assert that the upgrade did
+  // not succeed; the test should rely on `unexpected` for status pinning.
+  assert.fail(`${label}: expected HTTP ${expectedStatus} but got an error before the upgrade response`);
+}
+
+test("upgrade routing: /box/<id>/pty without auth → 401 close", async (t) => {
+  const { svc, store, wsBase } = await makeService(t);
+  store.upsertBox(BOX_A);
+  store.bindBox(BOX_A, ACCT_1);
+  const ws = new WebSocket(`${wsBase}/box/${BOX_A}/pty?session=abc`);
+  await expectUpgradeStatus(ws, 401, "no auth");
+  ws.terminate();
+});
+
+test("upgrade routing: /box/<id>/pty for an unowned box → 404", async (t) => {
+  const { store, wsBase } = await makeService(t);
+  store.upsertBox(BOX_A);
+  store.bindBox(BOX_A, "ffffffffffffffffffffffffffffffff"); // owned by someone else
+  const ws = new WebSocket(`${wsBase}/box/${BOX_A}/pty?session=abc&token=${ACCT_1}`);
+  await expectUpgradeStatus(ws, 404, "unowned box");
+  ws.terminate();
+});
+
+test("upgrade routing: /box/<id>/pty with valid auth but no subscription → 402", async (t) => {
+  const { svc, store, wsBase } = await makeService(t);
+  store.upsertBox(BOX_A);
+  store.bindBox(BOX_A, ACCT_1);
+  const ws = new WebSocket(`${wsBase}/box/${BOX_A}/pty?session=abc&token=${ACCT_1}`);
+  await expectUpgradeStatus(ws, 402, "no subscription");
+  ws.terminate();
+});
+
+test("upgrade routing: /box/<id>/pty with valid auth + subscription → bridge to box leg", async (t) => {
+  const { svc, store, wsBase } = await makeService(t);
+  store.upsertBox(BOX_A);
+  store.bindBox(BOX_A, ACCT_1);
+  // Bind an active receipt so the subscription gate opens.
+  bindReceipt(store, {
+    boxId: BOX_A,
+    transaction: {
+      originalTransactionId: "test-1",
+      productId: "sub.monthly",
+      expiresAt: null,
+    },
+    raw: "jws",
+  }, { now: () => Date.now() });
+
+  // Dial the box leg so the relay has a live transport to bridge to.
+  const boxWs = new WebSocket(`${wsBase}/box?box_id=${BOX_A}&token=${TOKEN_A}`);
+  await once(boxWs, "open");
+  await waitFor(() => svc.boxLeg.routing.has(BOX_A));
+
+  // The box leg auto-answers STREAM_OPEN request forms with a canned
+  // STREAM_OPEN (response form) + END so the device-side bridge sees the
+  // handshake complete; we watch the box socket to verify the relay sent
+  // exactly one STREAM_OPEN with stream:"pty".
+  const sentFrames = [];
+  boxWs.on("message", (data) => {
+    const f = decodeFrame(data);
+    if (f) sentFrames.push(f);
+    if (f?.type === FRAME_TYPES.STREAM_OPEN && f.stream) {
+      // Answer with the response form so the bridge's onHead fires.
+      boxWs.send(encodeFrame({
+        type: FRAME_TYPES.STREAM_OPEN,
+        id: f.id,
+        stream: f.stream,
+        status: 101,
+        headers: {},
+      }));
+      // ...and immediately end it so the device's WS closes cleanly.
+      boxWs.send(encodeFrame({
+        type: FRAME_TYPES.STREAM_END,
+        id: f.id,
+        stream: f.stream,
+      }));
+    }
+  });
+
+  const deviceWs = new WebSocket(
+    `${wsBase}/box/${BOX_A}/pty?session=abc&token=${ACCT_1}`,
+  );
+  await once(deviceWs, "open");
+  // Wait for the device to close (the box leg sends STREAM_END immediately
+  // above; the bridge closes the device WS in response).
+  await once(deviceWs, "close");
+
+  // Exactly one STREAM_OPEN went down the tunnel, with stream="pty" and
+  // the path stripped of ?token= (the device's account token).
+  const open = sentFrames.find((f) => f.type === FRAME_TYPES.STREAM_OPEN);
+  assert.ok(open, "STREAM_OPEN was sent down the tunnel");
+  assert.equal(open.method, "GET", "method preserved");
+  assert.equal(open.stream, "pty", "stream discriminator is 'pty'");
+  assert.match(open.path, /^\/pty\?session=abc$/, "device path forwarded, ?token= stripped");
+
+  boxWs.close();
+  deviceWs.terminate();
 });
 
 // ---------------------------------------------------------------------------

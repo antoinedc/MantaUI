@@ -25,6 +25,7 @@ test("encode/decode round-trips every frame type", () => {
     { type: FRAME_TYPES.RESPONSE, id: 1, status: 200, body: "ok" },
     { type: FRAME_TYPES.STREAM_OPEN, id: 2, stream: "s1", method: "GET", path: "/sse" },
     { type: FRAME_TYPES.STREAM_DATA, id: 2, stream: "s1", data: "chunk" },
+    { type: FRAME_TYPES.STREAM_DATA, id: 3, stream: "s1", data: "A0=", enc: "b64" },
     { type: FRAME_TYPES.STREAM_END, id: 2, stream: "s1" },
     { type: FRAME_TYPES.STREAM_ABORT, id: 3, stream: "s2", reason: "cancel" },
     { type: FRAME_TYPES.ERROR, id: 4, code: 500, message: "boom" },
@@ -142,6 +143,78 @@ test("decodeFrame drops STREAM_OPEN that violates exactly-one-of (BET-156)", () 
     stream: "s",
   });
   assert.equal(decodeFrame(neither), null);
+});
+
+// ---------------------------------------------------------------------------
+// STREAM_DATA enc field (BET-158) — optional encoding marker on the data
+// payload. Default is utf8 when absent so SSE frames (BET-156) keep round-
+// tripping unchanged; explicit enc="b64" is the binary-safe form for raw
+// terminal I/O over /pty.
+// ---------------------------------------------------------------------------
+
+test("STREAM_DATA enc='b64' round-trips a base64 payload byte-for-byte", () => {
+  // A real raw-terminal byte sequence (escape codes + ASCII): the data path
+  // is buffer → base64 → STREAM_DATA → decodeFrame → Buffer.compare → 0.
+  const raw = Buffer.from([0x1b, 0x5b, 0x32, 0x4a, 0x00, 0x01, 0xff, 0xfe, 0x0a]);
+  const frame = {
+    type: FRAME_TYPES.STREAM_DATA,
+    id: 7,
+    stream: "pty-1",
+    data: raw.toString("base64"),
+    enc: "b64",
+  };
+  const wire = encodeFrame(frame);
+  const back = decodeFrame(wire);
+  assert.ok(back, "frame decodes");
+  assert.equal(back.enc, "b64", "enc marker preserved");
+  const decoded = Buffer.from(back.data, "base64");
+  assert.equal(decoded.length, raw.length, "decoded length matches");
+  assert.equal(Buffer.compare(decoded, raw), 0, "decoded bytes equal the original");
+});
+
+test("STREAM_DATA without enc decodes as utf8 (default — backwards-compat with SSE)", () => {
+  // The /events SSE path emits DATA frames WITHOUT an enc field; the default
+  // must be utf8 so the SSE wire shape from BET-156 round-trips untouched.
+  const frame = {
+    type: FRAME_TYPES.STREAM_DATA,
+    id: 11,
+    stream: "sse-1",
+    data: "data: hello\n\n",
+  };
+  const back = decodeFrame(encodeFrame(frame));
+  assert.ok(back, "frame decodes");
+  assert.equal(back.enc, undefined, "enc absent on the wire stays absent");
+  assert.equal(back.data, "data: hello\n\n", "utf8 payload preserved");
+});
+
+test("decodeFrame rejects STREAM_DATA with an unknown enc value", () => {
+  // A typo'd enc ("base64", "BASE64", "binary") must be a wire error — the
+  // caller intended binary but the field says otherwise; silently misrouting
+  // would corrupt terminal I/O without any signal at the framing layer.
+  const bad = JSON.stringify({
+    v: PROTOCOL_VERSION,
+    type: FRAME_TYPES.STREAM_DATA,
+    id: 1,
+    stream: "s",
+    data: "A0=",
+    enc: "base64", // typo: we only know "b64"
+  });
+  assert.equal(decodeFrame(bad), null);
+});
+
+test("encodeFrame accepts enc='b64' on STREAM_DATA without validating the data is valid base64", () => {
+  // The framing layer is opaque to the payload — it carries strings, the
+  // caller is responsible for encoding correctness. Encoding is what we
+  // declare in `enc`; we don't double-check that `data` happens to be valid
+  // base64 (a future enc like "hex" would share the same principle).
+  const frame = {
+    type: FRAME_TYPES.STREAM_DATA,
+    id: 1,
+    stream: "s",
+    data: "not-valid-base64-but-allowed",
+    enc: "b64",
+  };
+  assert.doesNotThrow(() => encodeFrame(frame), "encodeFrame does not validate the payload body");
 });
 
 // ---------------------------------------------------------------------------

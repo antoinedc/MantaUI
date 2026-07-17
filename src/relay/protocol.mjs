@@ -68,9 +68,18 @@ export const FRAME_TYPES = Object.freeze({
   //                                     `id` echoes the request STREAM_OPEN's id
   //                                     for correlation (the box agent sets the
   //                                     SAME stream id the relay assigned).
-  //   STREAM_DATA: { id, stream, data }  — `data` is a string; binary payloads
-  //                                        are base64 by convention (caller's
-  //                                        responsibility, opaque to framing).
+  //   STREAM_DATA: { id, stream, data, enc? }
+  //     `data` is a string; encoding is signaled by the optional `enc` field.
+  //     - enc="utf8" (default when absent): `data` is a UTF-8 string. SSE/JSON
+  //       chunks ride this form (BET-156). Defaulting to utf8 when absent is a
+  //       backwards-compat shim so existing SSE frames keep round-tripping.
+  //     - enc="b64": `data` is a base64-encoded byte string. Raw terminal I/O
+  //       for /pty rides this form (BET-158) — box-side ws messages are
+  //       Buffers, the agent base64-encodes them so the JSON text frame stays
+  //       a single uniform wire form, and the relay decodes before forwarding
+  //       binary to the device WS.
+  //     Encoding is the CALLER's responsibility; the framing layer only carries
+  //     the wire form and validates the `enc` value when present.
   //   STREAM_END:  { id, stream }
   //   STREAM_ABORT:{ id, stream, reason? }
   // Exactly one of {method, status} is present — that is how the demux tells
@@ -222,6 +231,12 @@ function validateFrameShape(frame, { context }) {
       requireStreamId(frame, context);
       if (typeof frame.data !== "string") {
         throw new Error(`${context}: stream-data missing string data`);
+      }
+      // `enc` is optional. When present it MUST be one of the known encodings;
+      // an unknown value is a wire error so a typo doesn't silently misroute
+      // bytes that the consumer expected to be utf8.
+      if (frame.enc !== undefined && frame.enc !== "utf8" && frame.enc !== "b64") {
+        throw new Error(`${context}: stream-data unknown enc ${JSON.stringify(frame.enc)}`);
       }
       break;
     case FRAME_TYPES.ERROR:
