@@ -47,6 +47,7 @@ import {
   AUTH_RL_CAPACITY,
   AUTH_RL_REFILL_PER_SEC,
 } from "./auth.mjs";
+import { createRelayAgent, shouldStartRelayAgent } from "../relay/agent/index.mjs";
 import * as push from "./push.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -57,6 +58,27 @@ const PROJECT_ROOT = join(__dirname, "..", "..");
 const PUBLIC_DIR = join(PROJECT_ROOT, "mobile", "www");
 
 const bus = createBus();
+// Shared deps passed to store-mutating helpers so they can publish the
+// `*.updated` bus event the renderer cards listen for (JobCard, WebhooksCard,
+// etc). Single source of truth — every endpoint that creates/deletes a
+// store entry uses this same deps object.
+const BUS_PUBLISH_DEPS = { publish: (evt) => bus.publish(evt) };
+
+// DELETE handler for /api/<store> endpoints: `?id=<id>` → store.deleteFn(id,
+// BUS_PUBLISH_DEPS) → 200 {deleted:bool}. The boilerplate (id-required 400,
+// the await + publish-deps call, the success response) is identical across
+// /api/schedule, /api/webhook, and /api/secrets — extracting it removes a
+// 22-line intra-file clone jscpd flagged in BET-155.
+async function handleApiDelete(req, url, res, deleteFn) {
+  const id = url.searchParams.get("id");
+  if (!id) {
+    respondJson(res, 400, { error: "id is required" });
+    return;
+  }
+  const result = await deleteFn(id, BUS_PUBLISH_DEPS);
+  respondJson(res, 200, { deleted: result.deleted });
+}
+
 const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
 
 // Resolve a caller's bui project (tmux session) name from its opencode
@@ -142,6 +164,14 @@ if (!authEnforced) {
 } else {
   console.log(`[auth] gate enabled — box_id ${boxAuth.box_id}`);
 }
+
+// Relay-agent handle (BET-151 ADR-1). Populated below in the listen() callback
+// when shouldStartRelayAgent(config) returns true. Read by GET /relay/status
+// (loopback-only) so install.sh can poll for the handshake without standing up
+// its own websocket. Null = agent never started (config opted out, or the
+// listener never got that far — in either case /relay/status returns
+// `connected: false`).
+let relayAgent = null;
 
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
 // serves HTML pages from ~/.manta/pages/<subdomain>/index.html. Caddy
@@ -283,9 +313,13 @@ function safeJoin(root, sub) {
   return target;
 }
 
-// Read + JSON-parse a request body, capped at 64KB (push subscriptions are
-// ~1KB; the cap guards against a runaway/hostile body).
-function readJsonBody(req, limit = 64 * 1024) {
+// Read a request body, capped at 64KB (push subscriptions are ~1KB; the cap
+// guards against a runaway/hostile body).
+//   parse=true  → JSON.parse the bytes (the common path for /api/* POSTs).
+//   parse=false → return the EXACT UTF-8 string (webhook delivery needs the
+//                 raw bytes to recompute the HMAC; parsing + re-serializing
+//                 would change whitespace).
+function readBody(req, { parse = true, limit = 64 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -299,10 +333,12 @@ function readJsonBody(req, limit = 64 * 1024) {
       chunks.push(c);
     });
     req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf-8").trim();
-      if (!raw) return resolve({});
+      const raw = Buffer.concat(chunks).toString("utf-8");
+      if (!parse) return resolve(raw);
+      const trimmed = raw.trim();
+      if (!trimmed) return resolve({});
       try {
-        resolve(JSON.parse(raw));
+        resolve(JSON.parse(trimmed));
       } catch (e) {
         reject(e);
       }
@@ -311,26 +347,46 @@ function readJsonBody(req, limit = 64 * 1024) {
   });
 }
 
-// Read a request body as a raw UTF-8 string (NOT parsed). Webhook delivery
-// needs the EXACT bytes the sender signed to recompute the HMAC, so it can't go
-// through readJsonBody (which parses + would re-serialize). Capped like
-// readJsonBody.
-function readRawBody(req, limit = 64 * 1024) {
-  return new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    req.on("data", (c) => {
-      size += c.length;
-      if (size > limit) {
-        reject(new Error("body too large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-    req.on("error", reject);
-  });
+// JSON-parse variant. Thin shim kept for the /api/* call sites so each one
+// reads as `await readJsonBody(req)` instead of `await readBody(req, { parse: true })`.
+const readJsonBody = (req, limit) => readBody(req, { parse: true, limit });
+// Raw-bytes variant for webhook HMAC. Thin shim — see `readBody` for why we
+// need exact bytes (parsing + re-serializing would change whitespace).
+const readRawBody = (req, limit) => readBody(req, { parse: false, limit });
+
+// ---------- tiny HTTP helpers ----------
+//
+// respondJson — write a JSON response (the most common response shape in this
+// file). Pulling it out eliminates a verbatim writeHead+end boilerplate that
+// the duplication-gate flagged between /auth/pair and /relay/status
+// (10-27 line clones) — every JSON-shaped handler in this file now goes
+// through here. Status code + body shape stay identical to the inline
+// versions they replace.
+//
+// requireLoopback — gate a handler on the loopback-direct check used by
+// /auth/pair and /relay/status. Returns true (proceed) when the request is
+// loopback-direct; on a non-loopback caller it writes the standard 403 and
+// returns false, so the caller MUST `return` immediately. The error message
+// is passed in so each endpoint can phrase the rejection for its own
+// surface (a pairing-code mint vs. a relay-status read need different hints).
+// The check itself is unchanged (isLocalDirectRequest in auth.mjs) — this
+// is a pure refactor, the loopback gate's semantics are preserved bit-for-bit.
+function respondJson(res, status, obj) {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(obj));
+}
+
+function requireLoopback(req, res, errorMessage) {
+  if (
+    isLocalDirectRequest({
+      remoteAddress: req.socket?.remoteAddress,
+      headers: req.headers,
+    })
+  ) {
+    return true;
+  }
+  respondJson(res, 403, { error: errorMessage });
+  return false;
 }
 
 // ---------- uploads ----------
@@ -359,14 +415,12 @@ function safeBasename(name) {
 async function handleUpload(req, res, url) {
   const session = url.searchParams.get("session");
   if (!session || !SESSION_RE.test(session)) {
-    res.writeHead(400, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "bad session" }));
+    respondJson(res, 400, { error: "bad session" });
     return;
   }
   const rawName = req.headers["x-filename"];
   if (typeof rawName !== "string" || !rawName) {
-    res.writeHead(400, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "missing X-Filename" }));
+    respondJson(res, 400, { error: "missing X-Filename" });
     return;
   }
   let decoded;
@@ -385,12 +439,10 @@ async function handleUpload(req, res, url) {
     await mkdir(dir, { recursive: true });
     await pipeline(req, createWriteStream(target));
   } catch (e) {
-    res.writeHead(500, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    respondJson(res, 500, { error: String(e?.message ?? e) });
     return;
   }
-  res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify({ path: target }));
+  respondJson(res, 200, { path: target });
 }
 
 // Agent → device download: stream a file from ~/.manta-outbox/ back to the
@@ -401,8 +453,7 @@ async function handleDownload(req, res, url) {
   const raw = url.searchParams.get("path") ?? "";
   const resolved = resolve(raw);
   if (resolved !== OUTBOX_ROOT && !resolved.startsWith(OUTBOX_ROOT + "/")) {
-    res.writeHead(403, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "path outside outbox" }));
+    respondJson(res, 403, { error: "path outside outbox" });
     return;
   }
   try {
@@ -418,8 +469,7 @@ async function handleDownload(req, res, url) {
     await rm(resolved, { force: true }).catch(() => {});
   } catch (e) {
     if (!res.headersSent) {
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 404, { error: String(e?.message ?? e) });
     } else {
       res.destroy();
     }
@@ -462,8 +512,7 @@ const server = createServer(async (req, res) => {
       req.socket?.remoteAddress ||
       "unknown";
     if (!authRateLimit(ip)) {
-      res.writeHead(429, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "rate limited" }));
+      respondJson(res, 429, { error: "rate limited" });
       return;
     }
     try {
@@ -472,50 +521,67 @@ const server = createServer(async (req, res) => {
         // Remote-reachable minting would let anyone claim the box_token in two
         // requests. Loopback alone is insufficient — cloudflared proxies public
         // traffic from 127.0.0.1 — so also reject proxy-injected forwarding
-        // headers. See isLocalDirectRequest in auth.mjs.
+        // headers. See isLocalDirectRequest in auth.mjs (reused via
+        // requireLoopback below).
         if (
-          !isLocalDirectRequest({
-            remoteAddress: req.socket?.remoteAddress,
-            headers: req.headers,
-          })
+          !requireLoopback(
+            req,
+            res,
+            "pairing codes can only be minted from the box itself (run `bui pair` locally)",
+          )
         ) {
-          res.writeHead(403, { "content-type": "application/json" });
-          res.end(
-            JSON.stringify({
-              error: "pairing codes can only be minted from the box itself (run `bui pair` locally)",
-            }),
-          );
           return;
         }
         const result = authEngine.pair();
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            pairing_code: result.pairing_code,
-            box_id: result.box_id,
-            expiresAt: result.expiresAt,
-          }),
-        );
+        respondJson(res, 200, {
+          pairing_code: result.pairing_code,
+          box_id: result.box_id,
+          expiresAt: result.expiresAt,
+        });
         return;
       }
       if (req.method === "POST" && path === "/auth/claim") {
         const body = await readJsonBody(req);
         const result = authEngine.claim({ pairing_code: body?.pairing_code });
         if (!result.ok) {
-          res.writeHead(result.status ?? 400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: result.error }));
+          respondJson(res, result.status ?? 400, { error: result.error });
           return;
         }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ box_token: result.box_token, box_id: result.box_id }));
+        respondJson(res, 200, { box_token: result.box_token, box_id: result.box_id });
         return;
       }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
+    return;
+  }
+
+  // ---------- Relay status (LOOPBACK-ONLY) ----------
+  // GET /relay/status → { enabled, connected }
+  //
+  // Loopback-gated (same check /auth/pair uses) because the answer leaks
+  // whether this box has reached the relay — useful intel for an attacker
+  // probing the box's outbound posture, and not needed by any remote client.
+  // The renderer never calls this; it's consumed by `install.sh` (and any
+  // future ops tooling on the box itself).
+  //
+  //   enabled   — true iff `shouldStartRelayAgent(config)` (config-derived;
+  //                absent key → true, see agent/index.mjs)
+  //   connected — true iff the agent's `status()` is "connected" right now
+  //                (the live WS handshake to relay.mantaui.com succeeded).
+  //                "connecting" / "stopped" both collapse to false — install.sh
+  //                treats anything-but-connected as "not yet" and re-polls.
+  if (req.method === "GET" && path === "/relay/status") {
+    if (
+      !requireLoopback(req, res, "relay status is loopback-only (run this from the box)")
+    ) {
+      return;
+    }
+    const cfg = await local.configGet();
+    const enabled = shouldStartRelayAgent(cfg);
+    const connected = relayAgent ? relayAgent.status() === "connected" : false;
+    respondJson(res, 200, { enabled, connected });
     return;
   }
 
@@ -576,11 +642,9 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && path === "/api/projects") {
     try {
       const projects = await tmux.listProjects();
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(projects));
+      respondJson(res, 200, projects);
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -603,8 +667,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && path === "/api/peek") {
     const raw = url.searchParams.get("path") ?? "";
     if (!raw) {
-      res.writeHead(400, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "path is required" }));
+      respondJson(res, 400, { error: "path is required" });
       return;
     }
     // Expand ~ to $HOME so callers can pass ~/foo/bar.
@@ -615,8 +678,7 @@ const server = createServer(async (req, res) => {
     // Guard: resolved path must stay inside the user's home dir.
     const home = homedir() + "/";
     if (resolved !== home && !resolved.startsWith(home)) {
-      res.writeHead(403, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "path outside home directory" }));
+      respondJson(res, 403, { error: "path outside home directory" });
       return;
     }
     let s;
@@ -624,17 +686,14 @@ const server = createServer(async (req, res) => {
       s = await stat(resolved);
     } catch (e) {
       if (e?.code === "ENOENT") {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "not found" }));
+        respondJson(res, 404, { error: "not found" });
         return;
       }
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
       return;
     }
     if (!s.isFile()) {
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "not a file" }));
+      respondJson(res, 404, { error: "not a file" });
       return;
     }
     const ext = extname(resolved);
@@ -648,8 +707,7 @@ const server = createServer(async (req, res) => {
       await pipeline(createReadStream(resolved), res);
     } catch (e) {
       if (!res.headersSent) {
-        res.writeHead(500, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+        respondJson(res, 500, { error: String(e?.message ?? e) });
       } else {
         res.destroy();
       }
@@ -679,11 +737,10 @@ const server = createServer(async (req, res) => {
             sessionID: body?.sessionID,
             directory: body?.directory,
           },
-          { publish: (evt) => bus.publish(evt) },
+          BUS_PUBLISH_DEPS,
         );
         if (!result.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: result.error }));
+          respondJson(res, 400, { error: result.error });
           return;
         }
         res.writeHead(200, { "content-type": "application/json" });
@@ -699,27 +756,16 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET") {
         const sessionID = url.searchParams.get("sessionID") || undefined;
         const jobs = await listJobs(sessionID);
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ jobs }));
+        respondJson(res, 200, { jobs });
         return;
       }
       if (req.method === "DELETE") {
-        const id = url.searchParams.get("id");
-        if (!id) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "id is required" }));
-          return;
-        }
-        const result = await deleteJob(id, { publish: (evt) => bus.publish(evt) });
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ deleted: result.deleted }));
+        await handleApiDelete(req, url, res, deleteJob);
         return;
       }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -746,11 +792,10 @@ const server = createServer(async (req, res) => {
             directory: body?.directory,
             unsigned: body?.unsigned,
           },
-          { publish: (evt) => bus.publish(evt) },
+          BUS_PUBLISH_DEPS,
         );
         if (!result.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: result.error }));
+          respondJson(res, 400, { error: result.error });
           return;
         }
         res.writeHead(200, { "content-type": "application/json" });
@@ -762,27 +807,16 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET") {
         const sessionID = url.searchParams.get("sessionID") || undefined;
         const hooks = await listHooks(sessionID);
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ hooks }));
+        respondJson(res, 200, { hooks });
         return;
       }
       if (req.method === "DELETE") {
-        const id = url.searchParams.get("id");
-        if (!id) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "id is required" }));
-          return;
-        }
-        const result = await deleteHook(id, { publish: (evt) => bus.publish(evt) });
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ deleted: result.deleted }));
+        await handleApiDelete(req, url, res, deleteHook);
         return;
       }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -796,8 +830,7 @@ const server = createServer(async (req, res) => {
   // 429 rate-limited. See src/server/webhooks.mjs.
   if (path.startsWith("/hook/")) {
     if (req.method !== "POST") {
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
       return;
     }
     const token = path.slice("/hook/".length);
@@ -816,8 +849,7 @@ const server = createServer(async (req, res) => {
         ),
       );
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -842,11 +874,10 @@ const server = createServer(async (req, res) => {
             ttlHours: body?.ttlHours,
             sessionID: body?.sessionID,
           },
-          { publish: (evt) => bus.publish(evt) },
+          BUS_PUBLISH_DEPS,
         );
         if (!result.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: result.error }));
+          respondJson(res, 400, { error: result.error });
           return;
         }
         res.writeHead(200, { "content-type": "application/json" });
@@ -861,27 +892,22 @@ const server = createServer(async (req, res) => {
       }
       if (req.method === "GET") {
         const pages = listPages();
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ pages }));
+        respondJson(res, 200, { pages });
         return;
       }
       if (req.method === "DELETE") {
         const subdomain = url.searchParams.get("subdomain");
         if (!subdomain) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "subdomain is required" }));
+          respondJson(res, 400, { error: "subdomain is required" });
           return;
         }
-        const result = await unregisterPage(subdomain, { publish: (evt) => bus.publish(evt) });
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ deleted: result.deleted }));
+        const result = await unregisterPage(subdomain, BUS_PUBLISH_DEPS);
+        respondJson(res, 200, { deleted: result.deleted });
         return;
       }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -899,8 +925,7 @@ const server = createServer(async (req, res) => {
         const body = await readJsonBody(req);
         const message = typeof body?.message === "string" ? body.message.trim() : "";
         if (!message) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "message is required" }));
+          respondJson(res, 400, { error: "message is required" });
           return;
         }
         await push.fireNotify({
@@ -909,15 +934,12 @@ const server = createServer(async (req, res) => {
           urgent: !!body?.urgent,
           sessionID: body?.sessionID,
         });
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
+        respondJson(res, 200, { ok: true });
         return;
       }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -942,12 +964,10 @@ const server = createServer(async (req, res) => {
           ? await inspectPeer({ sessionID, directory, target })
           : await listPeers({ sessionID, directory });
         if (!result.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: result.error }));
+          respondJson(res, 400, { error: result.error });
           return;
         }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(result));
+        respondJson(res, 200, result);
         return;
       }
       if (req.method === "POST") {
@@ -959,19 +979,15 @@ const server = createServer(async (req, res) => {
           message: body?.message,
         });
         if (!result.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: result.error }));
+          respondJson(res, 400, { error: result.error });
           return;
         }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(result));
+        respondJson(res, 200, result);
         return;
       }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -1008,19 +1024,15 @@ const server = createServer(async (req, res) => {
           project,
         });
         if (!result.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: result.error }));
+          respondJson(res, 400, { error: result.error });
           return;
         }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ path: result.path, key: result.key, hint: result.hint }));
+        respondJson(res, 200, { path: result.path, key: result.key, hint: result.hint });
         return;
       }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -1046,15 +1058,13 @@ const server = createServer(async (req, res) => {
             project,
             hint: body?.hint,
           },
-          { publish: (evt) => bus.publish(evt) },
+          BUS_PUBLISH_DEPS,
         );
         if (!result.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: result.error }));
+          respondJson(res, 400, { error: result.error });
           return;
         }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ meta: result.meta }));
+        respondJson(res, 200, { meta: result.meta });
         return;
       }
       if (req.method === "GET") {
@@ -1063,27 +1073,16 @@ const server = createServer(async (req, res) => {
         const all = url.searchParams.get("all") === "1";
         const project = all ? null : await resolveProjectName({ sessionID, directory });
         const secrets = listSecrets({ sessionID, project, includeAll: all });
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ secrets }));
+        respondJson(res, 200, { secrets });
         return;
       }
       if (req.method === "DELETE") {
-        const id = url.searchParams.get("id");
-        if (!id) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "id is required" }));
-          return;
-        }
-        const result = await deleteSecret(id, { publish: (evt) => bus.publish(evt) });
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ deleted: result.deleted }));
+        await handleApiDelete(req, url, res, deleteSecret);
         return;
       }
-      res.writeHead(405, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "method not allowed" }));
+      respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -1099,11 +1098,9 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && path === "/push/vapid") {
     try {
       const key = await push.getVapidPublic();
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ key }));
+      respondJson(res, 200, { key });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -1112,8 +1109,7 @@ const server = createServer(async (req, res) => {
     try {
       body = await readJsonBody(req);
     } catch {
-      res.writeHead(400, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "bad json" }));
+      respondJson(res, 400, { error: "bad json" });
       return;
     }
     try {
@@ -1143,15 +1139,12 @@ const server = createServer(async (req, res) => {
         });
         result = { ok: true };
       } else {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "not found" }));
+        respondJson(res, 404, { error: "not found" });
         return;
       }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(result));
+      respondJson(res, 200, result);
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
   }
@@ -1228,4 +1221,53 @@ server.on("upgrade", (req, socket, head) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`manta listening on http://${HOST}:${PORT}`);
+
+  // Start the box-side relay agent (BET-151 ADR-1 / BET-155). The agent dials
+  // OUT to relay.mantaui.com from this box and authenticates with boxAuth, so
+  // it MUST be created after ensureAuth() has run (which it has — see above)
+  // and AFTER the box server is listening (so the agent's first request proxy
+  // can land). Fire-and-forget: the agent's reconnect/backoff loop runs on its
+  // own timers and never blocks this path — a slow relay handshake must NOT
+  // hold up the HTTP server, and a relay outage must NOT crash the box server.
+  //
+  // Opt-out: write `"relayEnabled": false` to ~/.manta/config.json
+  // (shouldStartRelayAgent() handles the default-on case). No env override —
+  // configGet() is the single switch, mirroring how chatAutoAllow is gated.
+  //
+  // The agent owns its own reconnect/backoff — do NOT add another retry loop.
+  // The agent already logs `[relay-agent] connected …` / `tunnel closed;
+  // reconnecting`; we only log the one-shot boot decision here.
+  local
+    .configGet()
+    .then((cfg) => {
+      if (!shouldStartRelayAgent(cfg)) {
+        console.log(
+          "[relay-agent] disabled via config (relayEnabled=false); box reachable only via direct ingress.",
+        );
+        return;
+      }
+      let agent;
+      try {
+        agent = createRelayAgent({ localBase: `http://127.0.0.1:${PORT}` });
+      } catch (err) {
+        console.warn(
+          `[relay-agent] could not construct (auth missing?): ${String(err?.message ?? err)}`,
+        );
+        return;
+      }
+      relayAgent = agent;
+      agent.start().catch((err) => {
+        console.warn(
+          `[relay-agent] first connect rejected: ${String(err?.message ?? err)}`,
+        );
+      });
+      console.log(
+        `[relay-agent] dialing ${agent.boxId.slice(0, 8)}… (relay.mantaui.com)`,
+      );
+    })
+    .catch((err) => {
+      console.warn(
+        `[relay-agent] could not start (config read failed): ${String(err?.message ?? err)}`,
+      );
+    });
 });

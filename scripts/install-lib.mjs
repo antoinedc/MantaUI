@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { STATE_DIRNAME } from "../src/shared/paths.mjs";
+import { loadAuth } from "../src/server/auth.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (single source of truth, shared with the shell via `--print-config`)
@@ -369,6 +370,140 @@ export function renderSystemdUnit(template, placeholders) {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Relay-handshake poller (BET-151 / BET-155)
+// ---------------------------------------------------------------------------
+//
+// Poll the box-server's loopback-only GET /relay/status until the in-process
+// relay agent reports `connected: true` (the dial-out to relay.mantaui.com
+// succeeded and the WS handshake completed). The shape mirrors `waitForHealth`
+// — same injectable fetchFn/sleep, same `{ ok, attempts, ... }` return — so
+// install.sh can use one mental model for both waits.
+//
+// Unlike `waitForHealth` (which dies the install on failure), this one MUST
+// NOT fail the install: a relay outage or a network hiccup on the VPS still
+// leaves the box working locally. install.sh treats `ok=false` or
+// `connected=false` as a `warn` (with the journalctl hint), not a `die`.
+//
+// `healthUrlBase` is the server's loopback base WITHOUT any path
+// (e.g. `http://127.0.0.1:8787`). The endpoint `/relay/status` is appended
+// here so the install script doesn't have to know the route — same shape as
+// MANTA_HEALTH_URL minus the path component.
+//
+// Return shape:
+//   { ok: true,  enabled, connected, attempts, status }   — got a 2xx
+//   { ok: false, enabled: null, connected: false, attempts, error } — gave up
+export async function waitForRelay(
+  healthUrlBase,
+  {
+    maxAttempts = 30,
+    intervalMs = 1000,
+    fetchFn = globalThis.fetch,
+    sleep = defaultSleep,
+  } = {},
+) {
+  if (typeof healthUrlBase !== "string" || healthUrlBase === "") {
+    throw new Error("waitForRelay: healthUrlBase required");
+  }
+  if (typeof fetchFn !== "function") {
+    throw new Error("waitForRelay: no fetch available (pass fetchFn)");
+  }
+  const base = stripTrailingSlash(healthUrlBase);
+  const url = `${base}/relay/status`;
+
+  let lastError = null;
+  // Track the last settled state across attempts so the final return carries
+  // the most recent truthful answer even if we exit via the maxAttempts cap
+  // (e.g. the server is up but the agent is mid-handshake and never finishes).
+  let lastEnabled = null;
+  let lastConnected = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetchFn(url);
+      if (res && typeof res.status === "number") {
+        // 2xx = server is up AND answered the relay status route. The body
+        // tells us whether the agent is enabled and (if so) whether it's
+        // connected. Tolerate a missing/non-JSON body — we already know the
+        // server is alive, which is all this loop needs to settle.
+        let body = {};
+        try {
+          body = await res.json();
+        } catch {
+          /* non-JSON body; treat as no info beyond the status code */
+        }
+        if (res.status >= 200 && res.status < 300) {
+          const enabled = body.enabled === true;
+          const connected = body.connected === true;
+          lastEnabled = enabled;
+          lastConnected = connected;
+          // Short-circuit ONLY when the answer is final. Two terminal states:
+          //   connected=true  → the handshake succeeded, install.sh can ok()
+          //   enabled=false   → config opted out, no point polling further
+          // Anything else means "the agent is enabled but hasn't connected
+          // yet" — keep polling until the handshake resolves or we exhaust.
+          if (connected || !enabled) {
+            return {
+              ok: true,
+              enabled,
+              connected,
+              attempts: attempt,
+              status: res.status,
+            };
+          }
+        } else {
+          // 403 from /relay/status means the install ran from somewhere that
+          // isn't loopback (rare — would only happen via a port-forward mistake).
+          // We treat any non-2xx as "not yet" and retry, same as waitForHealth.
+          lastError = new Error(`server returned HTTP ${res.status}`);
+        }
+      } else {
+        lastError = new Error("fetch returned no status");
+      }
+    } catch (e) {
+      lastError = e;
+    }
+    if (attempt < maxAttempts) await sleep(intervalMs);
+  }
+  // Out of attempts. We MAY have a known state from a recent 2xx (the server
+  // answered but the handshake never landed) — return that, with ok=true so
+  // install.sh doesn't treat a server-up-but-handshake-degraded case as a
+  // server-down failure. ok=false is reserved for "we never reached the
+  // server at all" (everything below the loop was ECONNREFUSED).
+  if (lastEnabled !== null) {
+    return {
+      ok: true,
+      enabled: lastEnabled,
+      connected: lastConnected === true,
+      attempts: maxAttempts,
+    };
+  }
+  return {
+    ok: false,
+    enabled: null,
+    connected: false,
+    attempts: maxAttempts,
+    error: `relay did not connect at ${url} after ${maxAttempts} attempts: ${
+      lastError?.message ?? lastError ?? "unknown"
+    }`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Box-identity loader (BET-151 / BET-155)
+// ---------------------------------------------------------------------------
+//
+// Thin re-export of `loadAuth` from src/server/auth.mjs so install.sh can print
+// the box_id alongside the pairing code without re-parsing JSON in bash. The
+// server (src/server/auth.mjs) is the single source of truth for identity
+// shape and validation; install.sh never writes here and never invents its
+// own token reader.
+//
+// Returns `{ box_id, box_token, created_at }` on success, or `null` if the
+// file is missing/corrupt (the box will mint a fresh identity on first
+// start, so an absent auth.json at install time is not an error — install.sh
+// falls back to "the server will mint an identity on first start").
+export const readBoxIdentity = loadAuth;
 
 // ---------------------------------------------------------------------------
 // Pairing-output formatter
