@@ -1,0 +1,15 @@
+# /etc/cron.d/manta-backup — nightly backup of the prod relay store.
+#
+# INSTALL on the prod box (human step — see BET-163):
+#   install -m 0644 scripts/prod/manta-backup.cron /etc/cron.d/manta-backup
+#
+# Runs at 03:17 UTC daily. The script (scripts/prod/backup-relay.sh) is the
+# single source of truth — this file is a thin cron wrapper.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MANTA_HOME=/opt/manta
+BUI_NOTIFY_URL=
+BUI_NOTIFY_SECRET=
+
+17 3 * * * root /opt/manta/scripts/prod/backup-relay.sh >> /var/log/manta-backup.log 2>&1

@@ -1,0 +1,21 @@
+# /etc/fail2ban/jail.local — sshd jail only.
+#
+# INSTALL on the prod box (human step — see BET-163):
+#   apt-get install -y fail2ban
+#   install -m 0644 scripts/prod/jail.local /etc/fail2ban/jail.local
+#   systemctl enable --now fail2ban
+#   fail2ban-client status sshd
+#
+# SSH only on purpose. Do NOT add an HTTP jail — Caddy/relay have their own
+# rate limits (src/relay/api.mjs PHONE_RL, PAIR_RL) and a naive HTTP jail
+# would ban legitimate NATed users behind a shared egress.
+
+[DEFAULT]
+# Honour the distributor's defaults (sshd already ships in jail.conf); this
+# file only narrows/enables the sshd jail and overrides any tuning we want.
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled = true

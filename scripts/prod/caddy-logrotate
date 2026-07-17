@@ -1,0 +1,26 @@
+# /etc/logrotate.d/caddy — rotate Caddy access logs daily, keep 14, compressed.
+#
+# INSTALL on the prod box (human step — see BET-163). ONLY install if the
+# Caddyfile on the box writes to /var/log/caddy/ — check first:
+#   grep -E '^\s*log\s' /etc/caddy/Caddyfile
+# If Caddy logs only to journald (default in many setups), the journald cap
+# already covers it; SKIP this file (do not install dead logrotate config).
+#
+#   install -m 0644 scripts/prod/caddy-logrotate /etc/logrotate.d/caddy
+#
+# `postrotate` sends SIGHUP via systemctl reload — Caddy reopens files.
+# `delaycompress` lets yesterday's log stay readable while today's compresses.
+
+/var/log/caddy/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 caddy caddy
+    sharedscripts
+    postrotate
+        systemctl reload caddy >/dev/null 2>&1 || true
+    endscript
+}

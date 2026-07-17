@@ -1,0 +1,32 @@
+# /etc/apt/apt.conf.d/50unattended-upgrades — security-only auto updates.
+#
+# INSTALL on the prod box (human step — see BET-163):
+#   apt-get install -y unattended-upgrades
+#   dpkg-reconfigure -f noninteractive unattended-upgrades   # enables the timer
+#   install -m 0644 scripts/prod/50unattended-upgrades /etc/apt/apt.conf.d/50unattended-upgrades
+#   unattended-upgrade --dry-run --debug     # verify
+#
+# ONLY the `-security` origin is enabled. `-updates` is deliberately commented
+# out — feature patches on a prod box can change behaviour underfoot, and a
+# kernel surprise is worse than a delayed feature patch. Apply non-security
+# updates intentionally, on your own schedule, after reviewing the diff.
+
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    // "${distro_id}:${distro_codename}-updates";
+};
+
+// Auto-removal of unused dependencies (keeps /var/cache/apt tidy).
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+
+// Don't disturb a kernel upgrade on a prod box — let a human reboot.
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+
+// Email the maintainer on errors. Unset by default (no SMTP relay on this box);
+// flip to a real address when a relay is set up.
+Unattended-Upgrade::Mail ""
+
+// Logging — visible via `journalctl -u unattended-upgrades`.
+Unattended-Upgrade::SyslogEnable "true";
