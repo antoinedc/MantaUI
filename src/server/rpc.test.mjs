@@ -214,3 +214,35 @@ test("opencode:discover-models accepts positional (baseURL, apiKey) args", async
     globalThis.fetch = origFetch;
   }
 });
+
+// BET-161: the `auth:pair` /rpc channel. authEngine.pair() returns snake_case
+// ({ pairing_code, box_id, expiresAt }); the handler translates to the
+// camelCase AuthPairResult the renderer expects. Failures must surface as
+// { ok:false, error } — a rejected promise would crash the renderer, which
+// expects the classified result shape (see Settings.tsx).
+test("auth:pair translates snake_case authEngine.pair() output to AuthPairResult", async () => {
+  const { deps } = makeDeps([]);
+  deps.authPair = async () => ({
+    pairing_code: "123456",
+    box_id: "abc",
+    expiresAt: "2026-01-01T00:00:00Z",
+  });
+  const handlers = buildHandlers(deps);
+  const result = await dispatch(handlers, "auth:pair", []);
+  assert.deepEqual(result, {
+    ok: true,
+    pairingCode: "123456",
+    boxId: "abc",
+    expiresAt: "2026-01-01T00:00:00Z",
+  });
+});
+
+test("auth:pair returns { ok:false, error } when authEngine.pair() throws", async () => {
+  const { deps } = makeDeps([]);
+  deps.authPair = async () => {
+    throw new Error("rate limited");
+  };
+  const handlers = buildHandlers(deps);
+  const result = await dispatch(handlers, "auth:pair", []);
+  assert.deepEqual(result, { ok: false, error: "rate limited" });
+});

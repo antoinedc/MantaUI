@@ -79,7 +79,11 @@ async function handleApiDelete(req, url, res, deleteFn) {
   respondJson(res, 200, { deleted: result.deleted });
 }
 
-const rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local });
+// rpcHandlers is built further down — after authEngine exists — so the
+// `auth:pair` channel can call authEngine.pair() in-process. The dispatch
+// only fires inside the HTTP request handler below, which runs lazily once
+// the listen() callback returns, so the late binding is safe.
+let rpcHandlers = null;
 
 // Resolve a caller's bui project (tmux session) name from its opencode
 // sessionID and/or cwd, so project-scoped secrets resolve to the right
@@ -164,6 +168,11 @@ if (!authEnforced) {
 } else {
   console.log(`[auth] gate enabled — box_id ${boxAuth.box_id}`);
 }
+
+// Now that authEngine exists, wire the /rpc dispatch — the `auth:pair` channel
+// needs authEngine.pair() (GET /auth/pair is loopback-only, so the renderer can
+// only reach it through this in-process call, not as an HTTP round-trip).
+rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local, authPair: () => authEngine.pair() });
 
 // Relay-agent handle (BET-151 ADR-1). Populated below in the listen() callback
 // when shouldStartRelayAgent(config) returns true. Read by GET /relay/status

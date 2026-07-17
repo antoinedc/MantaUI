@@ -530,8 +530,10 @@ export const httpApi: Api = {
   // the mobile client authenticates via the localStorage Bearer token.)
   authClaim: (input) => claimAgainst(input.serverUrl, input.code),
 
-  // Mobile pairing code mint (BET-80): GET /auth/pair. Desktop routes through
-  // the SSH tunnel via IPC (window.api.authPair); mobile calls this directly.
+  // Mobile pairing code mint (BET-161): POST /rpc/auth:pair. Both desktop and
+  // mobile go through the same /rpc channel — GET /auth/pair is loopback-only
+  // (cloudflared proxies public traffic from 127.0.0.1), so a remote renderer
+  // can't reach it as HTTP. The /rpc handler calls authEngine.pair() in-process.
   // Returns { pairingCode, boxId, expiresAt } or { error }.
   authPair: () => rpc<AuthPairResult>(IPC.authPair),
 

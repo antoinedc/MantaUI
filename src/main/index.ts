@@ -17,20 +17,6 @@ import {
 import { checkForUpdates } from "./autoUpdate.js";
 import { IPC, type AppConfig, type AuthClaimInput } from "../shared/types.js";
 
-// Parse a non-2xx /auth/pair response body into a user-facing error string.
-// The server returns { error: "..." } for 403 (not loopback), 429 (rate limit),
-// and 5xx (server error). We extract the `error` field if present, otherwise
-// fall back to a generic message.
-function tryParsePairError(raw: string): string | null {
-  try {
-    const body = JSON.parse(raw);
-    if (body && typeof body.error === "string") return body.error;
-  } catch {
-    /* not JSON — fall through */
-  }
-  return null;
-}
-
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
@@ -271,51 +257,5 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.authClaim, (_e, input: AuthClaimInput) =>
     claimPairing(input, (patch) => commit(patch)),
   );
-
-  // Mobile pairing code mint (BET-80): GET /auth/pair over HTTPS.
-  // Returns { pairingCode, boxId, expiresAt } for the desktop to render as a
-  // QR. The /auth/pair endpoint is exempt from the auth gate, so no Bearer
-  // token is needed.
-  ipcMain.handle(IPC.authPair, async () => {
-    const cfg = config;
-    if (!cfg.serverUrl) return { ok: false as const, error: "not connected" };
-    try {
-      const url = `${cfg.serverUrl.replace(/\/+$/, "")}/auth/pair`;
-      const res = await fetch(url, {
-        method: "GET",
-        signal: AbortSignal.timeout(4000),
-      });
-      let raw = "";
-      try { raw = await res.text(); } catch { /* bodyless */ }
-      if (!res.ok) {
-        const msg = tryParsePairError(raw);
-        return { ok: false, error: msg || `server ${res.status}` };
-      }
-      try {
-        const body = JSON.parse(raw) as {
-          pairing_code?: string;
-          box_id?: string;
-          expiresAt?: string;
-        };
-        if (
-          typeof body.pairing_code === "string" &&
-          typeof body.box_id === "string" &&
-          typeof body.expiresAt === "string"
-        ) {
-          return {
-            ok: true,
-            pairingCode: body.pairing_code,
-            boxId: body.box_id,
-            expiresAt: body.expiresAt,
-          };
-        }
-        return { ok: false, error: "unexpected response shape" };
-      } catch {
-        return { ok: false, error: "bad JSON from server" };
-      }
-    } catch {
-      return { ok: false, error: "server unreachable" };
-    }
-  });
 
 }
