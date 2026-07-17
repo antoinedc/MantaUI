@@ -70,12 +70,13 @@ the pairing code, and get to work.
 - **Two window types** per tmux window: a raw **terminal** (xterm.js attached
   over a WebSocket PTY) or a **chat panel** (opencode session; recognized by
   the `@manta-session-id` tmux user-option). They coexist freely.
-- **Connectivity**: today a box is reached directly (any HTTPS ingress you
-  like — cloudflared, Tailscale, reverse proxy). The **relay**
-  (`relay.mantaui.com`) is rolling out as the default: the box dials OUT a
-  WebSocket tunnel, devices connect to `relay.mantaui.com/box/<box_id>`, and
-  no inbound networking is needed on the box at all. Usage metering and the
-  subscription gate live at the relay.
+- **Connectivity**: the **relay** (`relay.mantaui.com`) is the default: the box
+  dials OUT a WebSocket tunnel, devices connect to
+  `relay.mantaui.com/box/<box_id>`, and no inbound networking is needed on
+  the box at all. Usage metering and the subscription gate live at the
+  relay. (Self-hosting without the relay still works — point a phone at any
+  HTTPS ingress you bring, e.g. cloudflared, Tailscale, reverse proxy —
+  but the desktop pairing UI ships the relay path first.)
 
 ## Quick start (human version)
 
@@ -179,8 +180,10 @@ npm test              # vitest (renderer) + node:test (server/relay/scripts)
 npm run dev           # main-process/preload changes need full restart, not HMR
 ```
 
-Onboarding accepts a direct box URL + code today; relay pairing
-(`manta://pair?box=<box_id>&code=<code>`) is landing with the relay epic.
+Onboarding accepts a relay pair link (`manta://pair?box=<box_id>&code=<code>`)
+or a direct box URL + code. The relay path is the default — the desktop
+app pastes the link from `scripts/install.sh` output and routes through
+`relay.mantaui.com`.
 
 ## Keybindings
 
@@ -279,8 +282,10 @@ steps in each file's header are human-only (agent Hard Rule #4 forbids
 ## Known gaps
 
 - macOS-first; Linux/Windows desktop builds untested.
-- Relay end-to-end (pair + SSE + PTY through `relay.mantaui.com`) is in
-  flight — until it lands, a box needs its own ingress for remote access.
+- The iOS / Android native apps are not yet in the App Store / Play Store
+  — the PWA is the only phone client shipping today. Native apps + operated
+  APNs / FCM land when the subscription ships (BET-166 publishes the
+  binaries; the subscription itself is gated on app-store review).
 - `npm run dev` requires full restart for main-process/preload changes.
 
 ## Reporting issues
