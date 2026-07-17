@@ -1,26 +1,33 @@
 import { useRef, useState } from "react";
 import { normalizeCode } from "../shared/claim.mjs";
 import { normalizeServerUrl, isValidServerUrl, canConnect } from "./pairStepLogic";
+import { parsePairPayload } from "./mobile/pairPayload";
 import { useStore } from "./store";
 
-// PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2).
+// PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2;
+// extended BET-156 for relay-paired flows).
 //
 // Mounts into Onboarding.tsx's step-1 slot. Owns the pairing form:
 //   • a server-URL input (prefilled from config if the user has paired before)
 //   • a 6-digit monospace pairing code input (auto-focused)
+//   • an OPTIONAL "pair link" paste input (BET-156): a single textbox that
+//     runs parsePairPayload on submit and routes to the same claim call —
+//     reuse the exact same form/input styling as the existing screen
 //   • inline errors for every claim-failure branch (wrong/expired code,
 //     rate-limited, unreachable server, malformed response)
 //   • its own Connect button (gated by canConnect) + a "Skip setup" link
 //
 // The claim itself runs in the MAIN process over the `auth:claim` IPC channel
-// (window.api.authClaim), which POSTs <serverUrl>/auth/claim and, on success,
-// persists { serverUrl, boxId, boxToken } to config.json. We mirror those into
-// the store (applyPairing) so resolveTransportMode reads "http" immediately,
-// then call onPaired() to let the shell advance to Step 2.
+// (window.api.authClaim), which POSTs either <serverUrl>/auth/claim (direct
+// HTTPS) or https://relay.mantaui.com/pair (relay-paired; ADR-2/3) and, on
+// success, persists { serverUrl, boxId, boxToken } to config.json. We mirror
+// those into the store (applyPairing) so resolveTransportMode reads "http"
+// immediately, then call onPaired() to let the shell advance to Step 2.
 //
 // All non-React logic (URL normalization, the submit gate, the 6-digit
 // contract, HTTP-outcome classification) is pure + unit-tested in
-// pairStepLogic.ts + src/shared/claim.test.ts — this file is just the wiring.
+// pairStepLogic.ts + src/shared/claim.test.ts + pairPayload.test.ts — this
+// file is just the wiring.
 //
 // Props:
 //   onPaired — successful claim; the shell advances to the next step.
@@ -41,15 +48,53 @@ export function PairStep({
   // mount — the store's serverUrl is already populated (App gates on `loaded`).
   const [serverUrl, setServerUrl] = useState(() => useStore.getState().serverUrl ?? "");
   const [code, setCode] = useState("");
+  const [pairLink, setPairLink] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
+  const pairLinkRef = useRef<HTMLInputElement>(null);
 
-  const connectEnabled = canConnect({ serverUrl, code, submitting });
+  // When the user pastes a pair link, the link's payload takes precedence
+  // over any typed server/code fields. The submit gate follows.
+  const linkHasContent = pairLink.trim() !== "";
+  const connectEnabled =
+    linkHasContent || canConnect({ serverUrl, code, submitting });
 
   const connect = async () => {
     // Mirror the pure gate so an Enter keypress can't fire from a non-ready
     // state (the button is also disabled, but Enter bypasses that).
+    if (submitting) return;
+    if (linkHasContent) {
+      // Pair link wins: parse it, then route to the same claim call.
+      const payload = parsePairPayload(pairLink);
+      if (!payload) {
+        setError("Couldn't read that pair link — paste the full manta://pair?… line.");
+        pairLinkRef.current?.focus();
+        return;
+      }
+      setSubmitting(true);
+      setError(null);
+      // Relay form sends serverUrl:"" (see AuthClaimInput) so the same input
+      // shape works for both the desktop IPC and httpApi's mobile authClaim.
+      const result = await window.api.authClaim({
+        serverUrl: payload.serverUrl ?? "",
+        boxId: payload.boxId ?? undefined,
+        code: payload.code,
+      });
+      if (result.ok) {
+        useStore.getState().applyPairing({
+          serverUrl: payload.serverUrl ?? `https://relay.mantaui.com/box/${payload.boxId}`,
+          boxId: result.boxId,
+          boxToken: result.boxToken,
+        });
+        setSubmitting(false);
+        onPaired();
+        return;
+      }
+      setSubmitting(false);
+      setError(result.message);
+      return;
+    }
     if (!canConnect({ serverUrl, code, submitting })) return;
     setSubmitting(true);
     setError(null);
@@ -83,7 +128,8 @@ export function PairStep({
 
   // A bad/empty URL is only flagged once the user has typed something, so a
   // pristine field doesn't show a scary red border on first paint.
-  const urlLooksBad = serverUrl.trim() !== "" && !isValidServerUrl(serverUrl);
+  const urlLooksBad =
+    serverUrl.trim() !== "" && !isValidServerUrl(serverUrl);
 
   return (
     <div>
@@ -136,8 +182,8 @@ export function PairStep({
             aria-invalid={error != null}
             placeholder="000000"
             maxLength={6}
-            disabled={submitting}
-            value={code}
+            disabled={submitting || linkHasContent}
+            value={linkHasContent ? "" : code}
             onChange={(e) => {
               setCode(normalizeCode(e.target.value));
               setError(null);
@@ -150,6 +196,33 @@ export function PairStep({
               bui pair
             </code>
           </p>
+        </div>
+
+        {/* Pair link (BET-156) — an optional single-paste field that runs
+            parsePairPayload and routes to the SAME claim call. Reuses the
+            exact form/input styling of the existing fields. */}
+        <div className="flex flex-col gap-1.5">
+          <label
+            htmlFor="pair-link"
+            className="text-xs font-medium text-text-muted"
+          >
+            Or paste a pair link{" "}
+            <span className="text-text-faint font-normal">(optional)</span>
+          </label>
+          <input
+            id="pair-link"
+            ref={pairLinkRef}
+            type="text"
+            spellCheck={false}
+            placeholder="manta://pair?box=…&code=…"
+            disabled={submitting}
+            value={pairLink}
+            onChange={(e) => {
+              setPairLink(e.target.value);
+              setError(null);
+            }}
+            className="w-full rounded-md bg-bg-soft border border-border px-3 py-2.5 text-sm text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
+          />
         </div>
 
         {error && (

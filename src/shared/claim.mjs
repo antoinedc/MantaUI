@@ -1,7 +1,16 @@
-// claim.mjs — pure, framework-free classification of a POST /auth/claim outcome.
+// claim.mjs — pure, framework-free classification of a pairing-claim outcome.
 //
-// The /auth/claim handshake (exchange a 6-digit pairing code for a box_token +
-// box_id) is reached from THREE places that must all agree on how an HTTP
+// Two wire shapes share this classifier:
+//   • the box's POST /auth/claim  (BET-49, direct-HTTPS) — returns
+//     { ok, box_token, box_id }. The token IS the box_token (the box's own
+//     identity); persisted as config.boxToken, presented as Bearer to the box.
+//   • the relay's POST /pair       (BET-156, ADR-2/3) — returns
+//     { box_id, account_id, account_token }. The desktop stores the
+//     account_token in the SAME config.boxToken slot and presents it as Bearer
+//     to the relay; from the renderer's POV it's still "the token that pairs
+//     the device to the box's surface" — the relay's /box/:box_id/* proxy
+//     makes the box appear under that URL.
+// Both shapes are reached from THREE places that must all agree on how an HTTP
 // outcome maps to a user-facing result:
 //   • the mobile/web client   (src/renderer/mobile/pairingLogic.ts re-exports)
 //   • the desktop onboarding   (src/renderer/onboarding/PairStep.tsx via IPC)
@@ -12,13 +21,14 @@
 // renderer tsconfig and the main tsconfig without crossing the process
 // boundary) is the single source of truth: a 403 means "wrong code" and a 429
 // means "rate limited" in exactly one place. Token-shape validation of a 200
-// body is delegated to parseClaimResponse (src/shared/transport.mjs) so a
-// malformed box_token can never be persisted from any entry point.
+// body is delegated to parseClaimResponse (direct) or parseRelayClaimResponse
+// (relay), each gating its own field names so a malformed token can never be
+// persisted from any entry point.
 //
 // Pure (no fetch, no DOM, no Node built-ins) → unit-tested in
 // src/shared/claim.test.ts.
 
-import { parseClaimResponse } from "./transport.mjs";
+import { parseClaimResponse, isValidBoxToken } from "./transport.mjs";
 
 // A pairing code is exactly 6 decimal digits (mirrors the server's
 // isValidPairingCode in src/server/auth.mjs — kept in sync so a client rejects
@@ -90,4 +100,45 @@ export function classifyClaimResult(status, body) {
 /** Result for a fetch that never produced an HTTP response (offline, DNS, …). */
 export function networkFailure() {
   return fail("network");
+}
+
+/**
+ * Parse a relay /pair response body. Shape per BET-156:
+ *   200 { box_id, account_id, account_token }
+ *      — `account_token` is the desktop's "boxToken" slot (it authenticates
+ *        the device to the RELAY, not to the box; ADR-1 keeps box_token
+ *        server-side).
+ * Any non-200, any missing field, any non-32-hex token → invalid_response.
+ * Pure + tested (the relay never sees the value classified away — the
+ * desktop's branch handles its own persistence decision).
+ */
+export function parseRelayClaimResponse(json) {
+  if (!json || typeof json !== "object") {
+    return { ok: false, error: "invalid_response" };
+  }
+  const boxId = json.box_id;
+  const accountToken = json.account_token;
+  if (!isValidBoxToken(boxId) || !isValidBoxToken(accountToken)) {
+    return { ok: false, error: "invalid_response" };
+  }
+  return { ok: true, boxId, accountToken };
+}
+
+/**
+ * Classify a relay /pair HTTP outcome into a typed ClaimOutcome. Mirrors
+ * `classifyClaimResult` exactly (same status → same `kind` mapping) so the
+ * renderer's single error-handling path keeps working unchanged for both
+ * branches. The 200 body parser is the only difference (account_token vs
+ * box_token field name).
+ */
+export function classifyRelayClaimResult(status, body) {
+  if (status === 200) {
+    const parsed = parseRelayClaimResponse(body);
+    if (parsed.ok) return { ok: true, boxToken: parsed.accountToken, boxId: parsed.boxId };
+    return fail("invalid_response");
+  }
+  if (status === 429) return fail("rate_limited");
+  if (status === 400 || status === 403) return fail("wrong_code");
+  if (status >= 500) return fail("server_error");
+  return fail("server_error");
 }
