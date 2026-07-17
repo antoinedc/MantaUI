@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 import {
   resolveConfig,
   parsePort,
@@ -24,6 +26,62 @@ import {
 } from "./install-lib.mjs";
 
 const HOME = "/home/tester";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const INSTALL_SH = join(__dirname, "install.sh");
+
+/**
+ * Source scripts/install.sh in test mode (MANTA_INSTALL_TEST_MODE=1) after
+ * applying `preBody` (mocks / overrides), then call `bootstrap_node`. Returns
+ * the captured stdout+stderr as a single string. The harness writes a tiny bash
+ * script to a temp file so we don't fight bash quoting rules.
+ *
+ * Mock pattern: define functions AFTER sourcing install.sh. Bash uses the
+ * latest definition, so the test's mocks override install.sh's helpers. The
+ * test mock for `command` is what makes "node missing on PATH" testable in a
+ * sandbox that already has node installed.
+ *
+ * Never throws — bootstrap_node's `die` calls `exit 1`, which would otherwise
+ * propagate via execSync's thrown-on-non-zero-exit behavior. The harness
+ * swallows the error and returns the captured output (with BOOTSTRAP_EXIT=NNN
+ * appended) so the test can assert on the message + exit code together.
+ */
+function runBootstrap({ preBody = "" } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-bootstrap-"));
+  const script = join(dir, "test.sh");
+  writeFileSync(
+    script,
+    `#!/usr/bin/env bash
+set +e
+export MANTA_INSTALL_TEST_MODE=1
+source '${INSTALL_SH}'
+${preBody}
+bootstrap_node
+rc=$?
+echo "BOOTSTRAP_EXIT=$rc"
+exit $rc
+`,
+    { mode: 0o755 },
+  );
+  try {
+    try {
+      return execSync(`bash ${script}`, {
+        env: { ...process.env, PATH: process.env.PATH },
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e) {
+      // execSync throws when the child exits non-zero (bootstrap_node calls
+      // `die` → `exit 1` for the failure paths). The stderr/stdout is on
+      // the error object — concatenate and return so callers can assert on
+      // the message AND the BOOTSTRAP_EXIT=N marker.
+      const out = (e.stdout ?? "") + (e.stderr ?? "");
+      // execSync's stdout/stderr are string when encoding is set.
+      return out;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 // ----------------------------------------------------------------------------
 // resolveConfig — arg/env parsing with MANTA_HOME / MANTA_TARBALL_URL overrides
@@ -745,4 +803,222 @@ test("waitForHealth acceptAnyStatus=true (default) accepts 404 as healthy", asyn
   });
   assert.equal(res.ok, true);
   assert.equal(res.status, 404);
+});
+
+// ----------------------------------------------------------------------------
+// install.sh — bash syntax + bootstrap_node (BET-162 F1 fix)
+// ----------------------------------------------------------------------------
+//
+// These tests shell out to bash because install.sh is bash, not JS. They use
+// the MANTA_INSTALL_TEST_MODE=1 sentinel (added in install.sh) which bails
+// before the install body runs and only loads the bash helpers
+// (log/ok/warn/die + bootstrap_node + install_node_via_* + require_cmd). The
+// unit tests then exercise the helpers with mocked apt/dnf/yum call sites so
+// nothing hits the network.
+
+test("install.sh is bash-syntax-clean (bash -n)", () => {
+  // Sanity check that the script parses. The harness writes it to a temp
+  // file so the bash error message includes a useful path; bash -n itself
+  // doesn't need to write, but the temp-file dance keeps the assertion
+  // independent of where the test runner lives.
+  const dir = mkdtempSync(join(tmpdir(), "manta-install-syntax-"));
+  const script = join(dir, "install.sh");
+  writeFileSync(script, readFileSync(INSTALL_SH));
+  try {
+    execSync(`bash -n ${script}`, { stdio: "pipe" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap_node is a no-op when node is already on PATH (idempotent)", () => {
+  // The harness's bash env has node on PATH (the test runner depends on it).
+  // The mock for install_node_via_apt MUST NOT fire — bootstrap_node should
+  // early-return at the `command -v node` check. This is the re-run path:
+  // a box that already has node should NOT touch apt.
+  const out = runBootstrap({
+    preBody: `
+# Mock the apt installer — if this fires, the no-op guarantee is broken.
+install_node_via_apt() {
+  echo "MOCK_APT_CALLED" >&2
+  return 0
+}
+install_node_via_dnf() {
+  echo "MOCK_DNF_CALLED" >&2
+  return 0
+}
+install_node_via_yum() {
+  echo "MOCK_YUM_CALLED" >&2
+  return 0
+}
+`,
+  });
+  assert.doesNotMatch(out, /MOCK_APT_CALLED/);
+  assert.doesNotMatch(out, /MOCK_DNF_CALLED/);
+  assert.doesNotMatch(out, /MOCK_YUM_CALLED/);
+  assert.doesNotMatch(out, /bootstrap_node|NodeSource/, "no bootstrap log lines when node is on PATH");
+  assert.match(out, /BOOTSTRAP_EXIT=0/);
+});
+
+test("bootstrap_node calls install_node_via_apt on Debian/Ubuntu when node is missing", () => {
+  // Pretend node is missing by shadowing `command -v node`. The bash test
+  // env has node, so without the shadow bootstrap_node would no-op.
+  const out = runBootstrap({
+    preBody: `
+# Pretend \`command -v node\` always fails.
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+
+# Force the Debian/Ubuntu distro branch (no /etc/os-release in some sandboxes).
+detect_distro_id() { echo "ubuntu"; }
+
+# Mock the apt installer — if this fires, the call site is wired right.
+install_node_via_apt() {
+  echo "MOCK_APT_CALLED"
+  return 0
+}
+`,
+  });
+  assert.match(out, /MOCK_APT_CALLED/, "apt installer was called");
+  assert.match(out, /bootstrapping Node\.js 20\.x/);
+  // The mock returns 0, so the install is "successful" — but bootstrap_node
+  // re-checks `command -v node` afterwards and our shadow still says "missing",
+  // so it dies. That's the expected flow when the install doesn't actually
+  // put node on PATH (a real apt install would).
+  assert.match(out, /node is still missing after bootstrap/);
+});
+
+test("bootstrap_node calls install_node_via_dnf on Fedora when node is missing", () => {
+  const out = runBootstrap({
+    preBody: `
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+detect_distro_id() { echo "fedora"; }
+install_node_via_dnf() {
+  echo "MOCK_DNF_CALLED"
+  return 0
+}
+`,
+  });
+  assert.match(out, /MOCK_DNF_CALLED/);
+  assert.match(out, /node is still missing after bootstrap/);
+});
+
+test("bootstrap_node calls install_node_via_yum on RHEL when dnf is absent", () => {
+  const out = runBootstrap({
+    preBody: `
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+detect_distro_id() { echo "rhel"; }
+# Make dnf fail so yum is tried as the fallback.
+install_node_via_dnf() {
+  echo "MOCK_DNF_CALLED"
+  return 1
+}
+install_node_via_yum() {
+  echo "MOCK_YUM_CALLED"
+  return 0
+}
+`,
+  });
+  assert.match(out, /MOCK_DNF_CALLED/);
+  assert.match(out, /MOCK_YUM_CALLED/);
+  assert.match(out, /node is still missing after bootstrap/);
+});
+
+test("bootstrap_node dies with a clear hint when the distro installer fails", () => {
+  // The mock returns non-zero — install_node_via_apt fails. The script
+  // MUST surface the failure as a `die` with the manual-install hint, NOT
+  // silently swallow it.
+  const out = runBootstrap({
+    preBody: `
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+detect_distro_id() { echo "ubuntu"; }
+install_node_via_apt() {
+  echo "MOCK_APT_FAIL"
+  return 1
+}
+`,
+  });
+  assert.match(out, /MOCK_APT_FAIL/);
+  assert.match(out, /Node\.js install via apt failed/);
+  assert.match(out, /Install manually: https:\/\/nodejs\.org/);
+});
+
+test("bootstrap_node dies with a manual-install hint for unknown distros", () => {
+  // distro='arch' isn't in our case statement — the user gets the same
+  // "install manually" hint as the require_cmd failures (BET-162 F1 tone).
+  const out = runBootstrap({
+    preBody: `
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+detect_distro_id() { echo "arch"; }
+`,
+  });
+  assert.match(out, /not auto-bootstrapped/);
+  assert.match(out, /https:\/\/nodejs\.org/, "manual-install hint points at nodejs.org");
+});
+
+test("bootstrap_node dies with a manual-install hint when /etc/os-release is unreadable", () => {
+  const out = runBootstrap({
+    preBody: `
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+detect_distro_id() { echo ""; }
+`,
+  });
+  assert.match(out, /\/etc\/os-release is unreadable/);
+  assert.match(out, /https:\/\/nodejs\.org/, "manual-install hint points at nodejs.org");
+});
+
+test("bootstrap_node dies when node + curl are missing together", () => {
+  // The bootstrap path itself depends on curl + tar to fetch the NodeSource
+  // setup script. If those are gone too, we must NOT try to apt-install
+  // curl — that would silently sudo over a hostile environment. The hint
+  // is "install everything manually and re-run" — same tone as require_cmd.
+  const out = runBootstrap({
+    preBody: `
+command() {
+  # Pretend node, curl, AND tar are all missing.
+  case " $2 " in
+    " node "|" curl "|" tar ") return 1 ;;
+  esac
+  builtin command "$@"
+}
+# If we DID call the apt installer, this would catch the bug.
+install_node_via_apt() {
+  echo "MOCK_APT_CALLED" >&2
+  return 0
+}
+`,
+  });
+  assert.doesNotMatch(out, /MOCK_APT_CALLED/);
+  assert.match(out, /node is missing and so are:/);
+  assert.match(out, /curl/);
+  assert.match(out, /tar/);
 });
