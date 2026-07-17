@@ -549,14 +549,25 @@ export type AgentFileReady = {
 
 // ----- Onboarding pairing (BET-49) -----
 
-// Input for the desktop auth:claim channel. `serverUrl` is the base URL of the
-// bui-server to pair with (e.g. "http://box.example:8787"); `code` is the
-// 6-digit pairing code minted on the box (`bui pair`). On success main persists
-// { serverUrl, boxId, boxToken } to config. The typed OUTCOME lives in
+// Input for the desktop auth:claim channel. The mobile/web client always
+// supplies a non-empty `serverUrl` (direct-HTTPS pairing, BET-49). The desktop
+// onboarding shell (BET-156) accepts EITHER `serverUrl` OR `boxId` (the
+// relay-paired form); when `boxId` is set, `serverUrl` MUST be an empty
+// string (the same field stays required so httpApi — which is mobile-only —
+// sees an unchanged type signature, per BET-156's "do not modify httpApi"
+// rule):
+//   • serverUrl non-empty → POST <serverUrl>/auth/claim { code } (BET-49).
+//   • boxId set, serverUrl "" → POST https://relay.mantaui.com/pair
+//     { box_id, code } (BET-156). Persists
+//     { serverUrl: "<RELAY_BASE>/box/<box_id>", boxId, boxToken } so every
+//     downstream /rpc + /events + upload hits the relay's /box/:box_id/*
+//     proxy with zero new data-path code (ADR-3).
+// `code` is the 6-digit pairing code (either flow). The typed OUTCOME lives in
 // src/shared/claim.mjs (ClaimOutcome) — imported by preload/main directly so
 // types.ts stays dependency-free.
 export type AuthClaimInput = {
   serverUrl: string;
+  boxId?: string;
   code: string;
 };
 

@@ -230,6 +230,52 @@ export function makeDefaultLocalFetch(localBase, auth) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Streaming local-fetch leg (BET-156). Calls the box server over loopback but
+// returns the response body as a stream (ReadableStream<Uint8Array>) instead
+// of buffering. Used for SSE/PTY where buffering would defeat streaming.
+// ---------------------------------------------------------------------------
+
+// ADR-1 applies identically to the streaming fetch: every outbound request
+// carries the box's own `Bearer <box_token>` regardless of what the inbound
+// frame carried. Same case-insensitive header-stripping as makeDefaultLocalFetch.
+//
+// The returned function resolves with `{ status, headers, body }` where `body`
+// is the response's ReadableStream — the caller (handleStreamOpen) reads it
+// chunk-by-chunk and pumps each chunk as a STREAM_DATA frame.
+//
+// We do NOT consume the body here: stream consumers own the lifecycle and the
+// relay decides when to abort/end. If the local fetch rejects (offline / TLS
+// / etc.) the returned promise rejects — the caller emits STREAM_ABORT.
+export function makeDefaultLocalFetchStream(localBase, auth) {
+  if (!auth || !isValidToken(auth?.box_token)) {
+    throw new Error(
+      "makeDefaultLocalFetchStream: valid { box_token } required " +
+        "(the box's own identity — never the device's account token)",
+    );
+  }
+  const bearer = `Bearer ${auth.box_token}`;
+  return async function defaultLocalFetchStream({ method, path, headers, body }) {
+    const url = `${localBase}${path.startsWith("/") ? path : `/${path}`}`;
+    const outHeaders = {};
+    if (headers && typeof headers === "object") {
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase() === "authorization") continue;
+        outHeaders[k] = headers[k];
+      }
+    }
+    outHeaders.authorization = bearer;
+    const res = await fetch(url, {
+      method,
+      headers: outHeaders,
+      body: body != null && method !== "GET" && method !== "HEAD" ? body : undefined,
+    });
+    const respHeaders = {};
+    for (const [k, v] of res.headers) respHeaders[k] = v;
+    return { status: res.status, headers: respHeaders, body: res.body };
+  };
+}
+
 // ADR-1 (BET-151) — pure config decision: should the box server start the relay
 // agent at boot? The product default is YES (relay-first is the path to a paid
 // mobile app — BET-151). The owner's box can opt out by writing
@@ -269,6 +315,11 @@ export function shouldStartRelayAgent(config) {
  *   INJECTABLE local-server leg. Defaults to `makeDefaultLocalFetch(localBase,
  *   auth)`, which overwrites any inbound `Authorization` header with the box's
  *   own bearer before calling `fetch`.
+ * @param {(req:{method,path,headers,body})=>Promise<{status,headers,body}>} [opts.localFetchStream]
+ *   INJECTABLE streaming local-server leg. Same auth-overwrite semantics as
+ *   `localFetch`, but returns the response body as a ReadableStream (used for
+ *   SSE/PTY where buffering would defeat streaming). Defaults to
+ *   `makeDefaultLocalFetchStream(localBase, auth)`.
  * @param {{next():number,reset():void,attempt():number}} [opts.backoff]
  *   INJECTABLE reconnect backoff (ExponentialBackoff-compatible). Default mirror
  *   of src/shared/net/backoff.ts.
@@ -297,6 +348,8 @@ export function createRelayAgent(opts = {}) {
     );
   }
   const localFetch = opts.localFetch || makeDefaultLocalFetch(localBase, auth);
+  const localFetchStream =
+    opts.localFetchStream || makeDefaultLocalFetchStream(localBase, auth);
 
   // Per-box streams inbound over the tunnel (Stage-4 SSE/PTY). We own a registry
   // so a relay→box STREAM_* frame is routed, but the box→phone direction (this
@@ -357,6 +410,130 @@ export function createRelayAgent(opts = {}) {
     }
   }
 
+  // --- stream proxy (BET-156) ---------------------------------------------
+
+  // Handle a relay→box STREAM_OPEN request form: open a streaming local fetch,
+  // forward the response head (status + headers) back as STREAM_OPEN (response
+  // form), then pump the response body as STREAM_DATA frames and STREAM_END on
+  // clean completion. Aborts (STREAM_ABORT) on local-fetch error / read error.
+  //
+  // The relay assigned the stream id; the agent must echo the SAME id in its
+  // outbound frames so the relay's inbound registry routes them to the right
+  // consumer. The frame's `id` is the request's correlating id (kept around
+  // for parity with non-stream REQUEST/RESPONSE).
+  async function handleStreamOpen(frame) {
+    const t = transport;
+    if (!t) return; // socket dropped between recv and dispatch; relay will retry
+
+    let res;
+    try {
+      res = await localFetchStream({
+        method: frame.method,
+        path: frame.path,
+        headers: frame.headers,
+        body: frame.body,
+      });
+    } catch (err) {
+      if (transport !== t) return;
+      try {
+        t.send({
+          type: FRAME_TYPES.STREAM_ABORT,
+          id: frame.id,
+          stream: frame.stream,
+          reason: String(err?.message || err),
+        });
+      } catch {
+        /* socket closing; ignore */
+      }
+      return;
+    }
+
+    // Guard: the socket may have dropped while we awaited the local call.
+    if (transport !== t) {
+      try { res.body?.cancel?.(); } catch { /* ignore */ }
+      return;
+    }
+
+    // Send the response head as STREAM_OPEN (response form). The relay's inbound
+    // stream registry delivers this to the consumer's onOpen; that consumer
+    // writes status + headers to the phone's HTTP response.
+    const respHeaders = {};
+    if (res.headers) {
+      // Headers from node:fetch is a Headers object; from a fake test fixture
+      // it's typically a Map. Both are iterable as [k, v] pairs — Object.entries
+      // doesn't work on either (they're not plain objects), so iterate directly.
+      for (const [k, v] of res.headers) respHeaders[k] = v;
+    }
+    try {
+      t.send({
+        type: FRAME_TYPES.STREAM_OPEN,
+        id: frame.id,
+        stream: frame.stream,
+        status: res.status,
+        headers: respHeaders,
+      });
+    } catch {
+      try { res.body?.cancel?.(); } catch { /* ignore */ }
+      return;
+    }
+
+    // Pump body chunks as STREAM_DATA frames. The local fetch returns a
+    // ReadableStream<Uint8Array>; we decode each chunk with TextDecoder
+    // (stream:true handles multi-byte UTF-8 boundaries across chunks) so the
+    // relay gets a string per frame — STREAM_DATA.data must be a string by
+    // protocol.
+    if (!res.body) {
+      t.send({ type: FRAME_TYPES.STREAM_END, id: frame.id, stream: frame.stream });
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        // Decode with stream:true so any unterminated multi-byte char at the
+        // chunk tail is held over to the next chunk (TextDecoder docs).
+        const chunk = decoder.decode(value, { stream: true });
+        if (chunk) {
+          if (transport !== t) return; // socket dropped mid-pump
+          t.send({
+            type: FRAME_TYPES.STREAM_DATA,
+            id: frame.id,
+            stream: frame.stream,
+            data: chunk,
+          });
+        }
+      }
+      // Flush any tail bytes the decoder held over.
+      const tail = decoder.decode();
+      if (tail) {
+        if (transport !== t) return;
+        t.send({
+          type: FRAME_TYPES.STREAM_DATA,
+          id: frame.id,
+          stream: frame.stream,
+          data: tail,
+        });
+      }
+      if (transport !== t) return;
+      t.send({ type: FRAME_TYPES.STREAM_END, id: frame.id, stream: frame.stream });
+    } catch (err) {
+      try {
+        if (transport === t) {
+          t.send({
+            type: FRAME_TYPES.STREAM_ABORT,
+            id: frame.id,
+            stream: frame.stream,
+            reason: String(err?.message || err),
+          });
+        }
+      } catch {
+        /* socket closing; ignore */
+      }
+    }
+  }
+
   // Dispatch one decoded inbound frame.
   function onFrame(frame) {
     if (!frame) return; // decodeFrame dropped malformed/oversized/unknown input
@@ -366,15 +543,26 @@ export function createRelayAgent(opts = {}) {
         void handleRequest(frame);
         break;
       case FRAME_TYPES.STREAM_OPEN:
+        // Request-side open from the relay → open a local streaming fetch and
+        // pipe the response back over STREAM_OPEN (response form) + DATA + END.
+        // The agent IS the local producer for SSE/PTY streams; the inbound
+        // stream registry (this.streams) is for the box→relay direction
+        // (already-driven, no-op for the request form here).
+        // Guard on the form: a response-side STREAM_OPEN (status, no method)
+        // arriving from the relay is a protocol error — drop.
+        if (typeof frame.method === "string") {
+          void handleStreamOpen(frame);
+        } else {
+          warn("[relay-agent] ignored STREAM_OPEN without method (response form from relay is invalid)");
+        }
+        break;
       case FRAME_TYPES.STREAM_DATA:
       case FRAME_TYPES.STREAM_END:
       case FRAME_TYPES.STREAM_ABORT:
-        // TODO(Stage 4): PTY/SSE stream proxying. The mux is wired (streams
-        // registry routes these to a per-stream consumer), but the box→phone
-        // SSE/PTY producers that OPEN those streams need the Stage-4 phone-facing
-        // endpoints to exercise end-to-end. Until then a relay→box stream frame
-        // is routed if a consumer is registered and otherwise dropped — never
-        // misrouted. No request/response path depends on this.
+        // Box→relay stream frames — routed through the per-transport inbound
+        // stream registry. (No box-side consumer registers these today, so
+        // the registry's drop-on-no-consumer invariant is fine: a stray
+        // STREAM_DATA from the relay is a protocol bug, not a data path.)
         streams.handleFrame(frame);
         break;
       case FRAME_TYPES.PONG:

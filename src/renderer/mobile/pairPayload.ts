@@ -1,28 +1,47 @@
 // pairPayload.ts — pure parser + builder for the pairing deeplink/QR payload
-// (BET-73, M3.1). No DOM, no fetch, no camera: this is the pure-before-wired
-// foundation that stage 2 (camera → auto-connect) imports.
+// (BET-73, M3.1; extended BET-156 for relay-paired flows). No DOM, no fetch,
+// no camera: this is the pure-before-wired foundation that stage 2 (camera →
+// auto-connect) imports, and that the desktop's relay-paired onboarding reuses
+// for a single-paste "pair link" input.
 //
 // A desktop "Pair phone" panel encodes a payload into a QR; the mobile app
-// scans it (or resolves it from a deferred deeplink) and auto-connects. Two URL
-// shapes carry the SAME two fields (server + code); this module normalizes both
-// into a single { serverUrl, code } and provides the inverse builder used as a
-// round-trip oracle in tests (and later by the desktop QR panel in M6).
+// scans it (or resolves it from a deferred deeplink) and auto-connects. The
+// payload carries ONE of two addressing shapes, both keyed by a 6-digit pairing
+// code:
+//   • serverUrl (direct-HTTPS):  manta://pair?server=<url>&code=<6-digit>
+//   • boxId     (relay-paired):  manta://pair?box=<box_id>&code=<6-digit>
+// This module normalizes either into a single { serverUrl, boxId, code } and
+// provides the inverse builders used as round-trip oracles in tests (and by
+// the desktop QR panel + the install.sh heredoc).
 //
 //   1. Custom scheme (primary — what the desktop panel renders):
 //        manta://pair?server=<url>&code=<6-digit>
-//      M6-spec alias, also accepted:
-//        manta://pair?id=<serverUrl-or-boxId>&token=<code>
+//        manta://pair?box=<box_id>&code=<6-digit>
+//      M6-spec alias, also accepted (serverUrl form):
+//        manta://pair?id=<serverUrl>&token=<code>
 //   2. Deferred-deeplink https form (Branch/Firebase style):
 //        https://<host>/m/<payload>?server=<url>&code=<6-digit>
+//        https://<host>/m/<payload>?box=<box_id>&code=<6-digit>
 //
-// The validation contract (server URL shape, 6-digit code) is SINGLE-SOURCED:
-// we delegate to normalizeServerUrl / isValidServerUrl (../pairStepLogic) and
-// normalizeCode (../../shared/claim.mjs) rather than re-implementing it here.
+// The validation contract (server URL shape, 6-digit code, box_id 32-hex
+// shape) is SINGLE-SOURCED: we delegate to normalizeServerUrl /
+// isValidServerUrl (../pairStepLogic) and normalizeCode (../../shared/claim.mjs)
+// rather than re-implementing it here. boxId shape is checked with
+// isValidBoxToken from src/shared/transport.mjs (the SAME 32-hex gate as
+// src/server/webhooks.mjs isValidToken, kept in sync there for exactly this
+// use case — the renderer cannot import from src/server/* because the box
+// server pulls Node built-ins, which Vite's renderer build externalizes
+// and the import then fails at build time).
 
 import { normalizeServerUrl, isValidServerUrl } from "../pairStepLogic";
 import { normalizeCode } from "../../shared/claim.mjs";
+import { isValidBoxToken } from "../../shared/transport.mjs";
 
-export type PairPayload = { serverUrl: string; code: string };
+export type PairPayload = {
+  serverUrl: string | null;
+  boxId: string | null;
+  code: string;
+};
 
 /**
  * Coerce a raw server value into a normalized, valid http(s) URL string, or
@@ -43,13 +62,27 @@ function coerceServerUrl(raw: string): string | null {
 }
 
 /**
+ * Coerce a raw boxId value to a validated 32-hex string, or null. The shape is
+ * the same 32-hex token the box handshake / `loadAuth` use; reusing
+ * isValidBoxToken keeps the box-credential shape in ONE renderer-safe place
+ * (mirrored from src/server/webhooks.mjs isValidToken). Trims whitespace.
+ */
+function coerceBoxId(raw: string): string | null {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed) return null;
+  return isValidBoxToken(trimmed) ? trimmed : null;
+}
+
+/**
  * Parse a raw scanned/deeplinked string into a PairPayload, or null for any
- * malformed / foreign input: not a bui pair URL, missing server or code, code
- * not exactly 6 digits, or an unparseable URL. Whitespace is trimmed.
+ * malformed / foreign input: not a bui pair URL, missing both server and box,
+ * code not exactly 6 digits, or an unparseable URL. Whitespace is trimmed.
  *
- * Accepts either query spelling — `server`/`code` (primary) or the M6 alias
- * `id`/`token` — and both URL shapes (custom `manta://pair` scheme and the
- * `https://host/m/...` deferred-deeplink form).
+ * Accepts either query spelling — `server`/`code` (primary), the M6 alias
+ * `id`/`token`, or the relay form `box`/`code` — and both URL shapes (custom
+ * `manta://pair` scheme and the `https://host/m/...` deferred-deeplink form).
+ *
+ * Exactly ONE of server / box must be present. Both or neither → null.
  */
 export function parsePairPayload(raw: string): PairPayload | null {
   const input = String(raw ?? "").trim();
@@ -79,12 +112,20 @@ export function parsePairPayload(raw: string): PairPayload | null {
   }
 
   const q = url.searchParams;
-  // Primary spelling wins; fall back to the id/token alias.
+  // Primary spellings win; fall back to the id/token alias for the server form
+  // only (the alias was the M6 serverUrl shorthand — it is NOT a boxId alias).
   const rawServer = q.get("server") ?? q.get("id") ?? "";
+  const rawBox = q.get("box") ?? "";
   const rawCode = q.get("code") ?? q.get("token") ?? "";
 
   const serverUrl = coerceServerUrl(rawServer);
-  if (!serverUrl) return null;
+  const boxId = coerceBoxId(rawBox);
+
+  // Exactly one of {server, box} must be present. Both or neither → reject.
+  // (An old QR with `id=<boxId>` will fail coerceServerUrl AND the id alias
+  // does not route to boxId — by design, since the alias predates relay and
+  // any boxId-looking value under `id` was always a server URL in the M6 spec.)
+  if ((serverUrl ? 1 : 0) + (boxId ? 1 : 0) !== 1) return null;
 
   const code = normalizeCode(rawCode);
   // normalizeCode strips non-digits and clamps to 6, so a 7-digit input would
@@ -93,17 +134,20 @@ export function parsePairPayload(raw: string): PairPayload | null {
   if (!/^\d{6}$/.test(code)) return null;
   if ((String(rawCode).match(/\d/g) ?? []).length !== 6) return null;
 
-  return { serverUrl, code };
+  return { serverUrl: serverUrl ?? null, boxId: boxId ?? null, code };
 }
 
 /**
- * Inverse of parsePairPayload: produce the canonical custom-scheme string
+ * Inverse of parsePairPayload for the direct-HTTPS form: produce the canonical
+ * custom-scheme string
  *   manta://pair?server=<url-encoded>&code=<code>
- * Used as a round-trip oracle in tests and later by the desktop QR panel (M6).
+ * Used as a round-trip oracle in tests and by the desktop QR panel.
  * The server URL is URL-encoded so reserved characters survive the query.
  */
 export function buildPairPayload(p: PairPayload): string {
-  const serverUrl = normalizeServerUrl(p.serverUrl);
-  const code = normalizeCode(p.code);
-  return `manta://pair?server=${encodeURIComponent(serverUrl)}&code=${code}`;
+  if (p.boxId) {
+    return `manta://pair?box=${encodeURIComponent(p.boxId)}&code=${p.code}`;
+  }
+  const serverUrl = normalizeServerUrl(p.serverUrl ?? "");
+  return `manta://pair?server=${encodeURIComponent(serverUrl)}&code=${p.code}`;
 }

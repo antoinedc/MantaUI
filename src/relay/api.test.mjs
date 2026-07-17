@@ -6,6 +6,7 @@ import {
   createDefaultPhoneAuth,
   createDefaultSubscriptionCheck,
   isGatedSubpath,
+  isStreamingSubpath,
 } from "./api.mjs";
 import { createRelayServer, createDefaultVerifier } from "./index.mjs";
 import { openStore, BOX_STATUS, hashToken } from "./store.mjs";
@@ -53,6 +54,19 @@ function bearer(token) {
 async function parseBody(resp) {
   return typeof resp.body === "string" && resp.body ? JSON.parse(resp.body) : null;
 }
+
+// ---------------------------------------------------------------------------
+// pure: streaming classification (BET-156 §3)
+// ---------------------------------------------------------------------------
+
+test("isStreamingSubpath: /events is streaming; metadata + gated-but-buffered paths are not", () => {
+  for (const p of ["/events", "/events/", "/events?token=abc"]) {
+    assert.equal(isStreamingSubpath(p), true, `${p} should be streaming`);
+  }
+  for (const p of ["/", "/projects", "/transcript", "/prompt", "/pty", "/message", "/stream"]) {
+    assert.equal(isStreamingSubpath(p), false, `${p} should NOT be streaming`);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // pure: gated-path classification
@@ -393,4 +407,191 @@ test("end-to-end: no live tunnel → proxyRequest rejects no_tunnel → 503", as
     headers: bearer(ACCT_1),
   });
   assert.equal(resp.status, 503, "offline box → 503");
+});
+
+// ---------------------------------------------------------------------------
+// end-to-end streaming proxy over a REAL relay + REAL box socket (BET-156 §3)
+// ---------------------------------------------------------------------------
+
+// Fake box that auto-replies to STREAM_OPEN (request form) with a canned head
+// + N DATA chunks + END. Mirrors the SSE shape: text/event-stream, no body
+// length (the box leaves Content-Length off, but we still strip it in api.mjs
+// defensively — see stripForStream).
+function installAutoStreamBox(ws, { chunks = [], status = 200, headers = {}, reason = null } = {}) {
+  ws.on("message", (data) => {
+    const f = decodeFrame(data);
+    if (!f || f.type !== FRAME_TYPES.STREAM_OPEN) return;
+    if (typeof f.method !== "string") return; // ignore response-form
+    ws.send(encodeFrame({ type: FRAME_TYPES.STREAM_OPEN, id: f.id, stream: f.stream, status, headers }));
+    for (const c of chunks) {
+      ws.send(encodeFrame({ type: FRAME_TYPES.STREAM_DATA, id: f.id, stream: f.stream, data: c }));
+    }
+    if (reason != null) {
+      ws.send(encodeFrame({ type: FRAME_TYPES.STREAM_ABORT, id: f.id, stream: f.stream, reason }));
+    } else {
+      ws.send(encodeFrame({ type: FRAME_TYPES.STREAM_END, id: f.id, stream: f.stream }));
+    }
+  });
+}
+
+test("end-to-end: phone /events request streams OPEN→DATA×n→END to the phone's HTTP response", async (t) => {
+  const store = openStore();
+  store.upsertBox(BOX_A, { status: BOX_STATUS.ONLINE, at: 1 });
+  store.bindBox(BOX_A, ACCT_1, { at: 1 });
+  store.upsertReceipt({ originalTransactionId: "t-events", boxId: BOX_A, expiresAt: null });
+
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((r) => wss.once("listening", r));
+  const relay = createRelayServer({ wss, store, verifyBox: createDefaultVerifier({ store, warn: silent, log: silent }), log: silent, warn: silent });
+
+  const boxWs = new WebSocket(`ws://127.0.0.1:${wss.address().port}/box?box_id=${BOX_A}&token=${BOX_TOKEN_A}`);
+  await once(boxWs, "open");
+  installAutoStreamBox(boxWs, {
+    chunks: ["data: hello\n\n", "data: world\n\n", "data: end\n\n"],
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+  await waitFor(() => relay.routing.has(BOX_A));
+
+  t.after(async () => {
+    boxWs.close();
+    await waitFor(() => !relay.routing.has(BOX_A));
+    await relay.close();
+    await new Promise((r) => wss.close(() => r()));
+  });
+
+  const api = createRelayApi({
+    store,
+    proxyRequest: relay.proxyRequest,
+    streamRequest: relay.streamRequest,
+    authenticatePhone: makeAuth(),
+    warn: silent,
+  });
+
+  // Simulate the phone's HTTP request by capturing the events the streaming
+  // sink would receive. The api's route() returns a __stream sentinel whose
+  // handler drives the sink from STREAM_* frames.
+  const events = [];
+  const resp = await api.route(
+    { method: "GET", path: `/box/${BOX_A}/events?token=foo`, headers: bearer(ACCT_1) },
+    (e) => events.push(e),
+  );
+  assert.ok(resp.__stream, "the api returns the __stream sentinel for /events");
+  // Drive the stream: this kicks off the STREAM_* request to the box leg.
+  const handle = resp.handler();
+  // Wait for the full sequence.
+  await waitFor(() => events.some((e) => e.kind === "end"), { timeoutMs: 2000 });
+
+  // Sequence: head → 3× data → end.
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["head", "data", "data", "data", "end"],
+    "frame sequence is head→data×3→end",
+  );
+  assert.equal(events[0].status, 200);
+  assert.equal(events[0].headers["content-type"], "text/event-stream");
+  assert.deepEqual(
+    events.slice(1, -1).map((e) => e.data),
+    ["data: hello\n\n", "data: world\n\n", "data: end\n\n"],
+    "chunks preserved in order",
+  );
+  assert.equal(handle.streamId >= 1, true);
+});
+
+test("end-to-end: phone /events request — STREAM_ABORT from the box surfaces as onAbort", async (t) => {
+  const store = openStore();
+  store.upsertBox(BOX_A, { status: BOX_STATUS.ONLINE, at: 1 });
+  store.bindBox(BOX_A, ACCT_1, { at: 1 });
+  store.upsertReceipt({ originalTransactionId: "t-events-abort", boxId: BOX_A, expiresAt: null });
+
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((r) => wss.once("listening", r));
+  const relay = createRelayServer({ wss, store, verifyBox: createDefaultVerifier({ store, warn: silent, log: silent }), log: silent, warn: silent });
+
+  const boxWs = new WebSocket(`ws://127.0.0.1:${wss.address().port}/box?box_id=${BOX_A}&token=${BOX_TOKEN_A}`);
+  await once(boxWs, "open");
+  installAutoStreamBox(boxWs, { chunks: ["partial "], reason: "box exploded" });
+  await waitFor(() => relay.routing.has(BOX_A));
+
+  t.after(async () => {
+    boxWs.close();
+    await waitFor(() => !relay.routing.has(BOX_A));
+    await relay.close();
+    await new Promise((r) => wss.close(() => r()));
+  });
+
+  const api = createRelayApi({
+    store,
+    proxyRequest: relay.proxyRequest,
+    streamRequest: relay.streamRequest,
+    authenticatePhone: makeAuth(),
+    warn: silent,
+  });
+
+  const events = [];
+  const resp = await api.route(
+    { method: "GET", path: `/box/${BOX_A}/events`, headers: bearer(ACCT_1) },
+    (e) => events.push(e),
+  );
+  resp.handler();
+  await waitFor(() => events.some((e) => e.kind === "abort"), { timeoutMs: 2000 });
+
+  assert.equal(events[0].kind, "head", "head fires even on abort");
+  assert.equal(events[1].kind, "data");
+  assert.equal(events[1].data, "partial ");
+  assert.equal(events[2].kind, "abort");
+  assert.equal(events[2].reason, "box exploded");
+  assert.equal(events.some((e) => e.kind === "end"), false, "no onEnd on abort");
+});
+
+test("non-SSE proxied paths still use the buffered path (no behavior change)", async (t) => {
+  // Even with streamRequest configured, a non-/events path goes through the
+  // regular REQUEST/RESPONSE channel — proving the streaming branch is a
+  // strict subpath carve-out, not a behavior change for the rest.
+  const store = openStore();
+  store.upsertBox(BOX_A, { status: BOX_STATUS.ONLINE, at: 1 });
+  store.bindBox(BOX_A, ACCT_1, { at: 1 });
+
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((r) => wss.once("listening", r));
+  const relay = createRelayServer({ wss, store, verifyBox: createDefaultVerifier({ store, warn: silent, log: silent }), log: silent, warn: silent });
+
+  let streamUsed = false;
+  const boxWs = new WebSocket(`ws://127.0.0.1:${wss.address().port}/box?box_id=${BOX_A}&token=${BOX_TOKEN_A}`);
+  await once(boxWs, "open");
+  boxWs.on("message", (data) => {
+    const f = decodeFrame(data);
+    if (!f) return;
+    if (f.type === FRAME_TYPES.STREAM_OPEN) streamUsed = true;
+    if (f.type === FRAME_TYPES.REQUEST) {
+      boxWs.send(encodeFrame({ type: FRAME_TYPES.RESPONSE, id: f.id, status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ ok: true }) }));
+    }
+  });
+  await waitFor(() => relay.routing.has(BOX_A));
+
+  t.after(async () => {
+    boxWs.close();
+    await waitFor(() => !relay.routing.has(BOX_A));
+    await relay.close();
+    await new Promise((r) => wss.close(() => r()));
+  });
+
+  const api = createRelayApi({
+    store,
+    proxyRequest: relay.proxyRequest,
+    streamRequest: relay.streamRequest,
+    authenticatePhone: makeAuth(),
+    warn: silent,
+  });
+
+  const resp = await api.route({
+    method: "GET",
+    path: `/box/${BOX_A}/projects`,
+    headers: bearer(ACCT_1),
+  });
+  assert.equal(resp.status, 200);
+  assert.equal(resp.__stream, undefined, "non-SSE path is NOT a __stream sentinel");
+  assert.equal(JSON.parse(resp.body).ok, true);
+  await waitFor(() => !streamUsed, { timeoutMs: 1000 });
+  assert.equal(streamUsed, false, "/projects did NOT trigger the streaming path");
 });

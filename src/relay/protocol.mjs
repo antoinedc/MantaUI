@@ -61,12 +61,21 @@ export const FRAME_TYPES = Object.freeze({
   RESPONSE: "response",
 
   // Stream multiplexing (SSE / PTY). All carry a `stream` id.
-  //   STREAM_OPEN: { id, stream, method?, path?, headers? }
+  //   STREAM_OPEN  request form  (relay → box): { id, stream, method, path?, headers? }
+  //                                     opens a logical stream on the box.
+  //   STREAM_OPEN  response form (box → relay): { id, stream, status, headers? }
+  //                                     reports the upstream response head.
+  //                                     `id` echoes the request STREAM_OPEN's id
+  //                                     for correlation (the box agent sets the
+  //                                     SAME stream id the relay assigned).
   //   STREAM_DATA: { id, stream, data }  — `data` is a string; binary payloads
   //                                        are base64 by convention (caller's
   //                                        responsibility, opaque to framing).
   //   STREAM_END:  { id, stream }
   //   STREAM_ABORT:{ id, stream, reason? }
+  // Exactly one of {method, status} is present — that is how the demux tells
+  // a request-side open from a response-side open. Both or neither is a wire
+  // error (decodeFrame drops the frame).
   STREAM_OPEN: "stream-open",
   STREAM_DATA: "stream-data",
   STREAM_END: "stream-end",
@@ -191,6 +200,20 @@ function validateFrameShape(frame, { context }) {
       }
       break;
     case FRAME_TYPES.STREAM_OPEN:
+      requireStreamId(frame, context);
+      // Exactly-one-of {method, status}: a request-side open carries the
+      // upstream method/path; a response-side open carries the upstream
+      // status. Both or neither → wire error.
+      {
+        const hasMethod = typeof frame.method === "string" && frame.method !== "";
+        const hasStatus = Number.isInteger(frame.status);
+        if (hasMethod === hasStatus) {
+          throw new Error(
+            `${context}: stream-open must carry exactly one of method or status`,
+          );
+        }
+      }
+      break;
     case FRAME_TYPES.STREAM_END:
     case FRAME_TYPES.STREAM_ABORT:
       requireStreamId(frame, context);
@@ -346,7 +369,13 @@ export class PendingRequests {
 // clean up so a later stream can reuse the id cleanly.
 //
 // A consumer is an object with optional callbacks:
-//   { onData(payload, frame), onEnd(frame), onAbort(reason, frame) }
+//   { onOpen(frame), onData(payload, frame), onEnd(frame), onAbort(reason, frame) }
+// `onOpen` is invoked with the full STREAM_OPEN frame (the consumer reads off
+// `status`/`headers` for response-side opens or `method`/`path` for request-
+// side opens — the registry doesn't distinguish the two, by design). All
+// callbacks are wrapped in try/catch so a throwing consumer cannot corrupt
+// the registry or the demux loop.
+//
 // Registering a consumer for a stream id is how the owner subscribes.
 export class StreamRegistry {
   constructor() {
@@ -379,11 +408,7 @@ export class StreamRegistry {
     if (frame == null) return false;
     switch (frame.type) {
       case FRAME_TYPES.STREAM_OPEN:
-        // Open frames are informational to an already-subscribed registry: the
-        // consumer is registered locally via open(); a peer's STREAM_OPEN just
-        // confirms the id. If we have no consumer yet, drop (nothing to route
-        // to — the owner subscribes before it expects data).
-        return this._streams.has(frame.stream);
+        return this._deliverOpen(frame);
       case FRAME_TYPES.STREAM_DATA:
         return this._deliverData(frame);
       case FRAME_TYPES.STREAM_END:
@@ -393,6 +418,22 @@ export class StreamRegistry {
       default:
         return false;
     }
+  }
+
+  _deliverOpen(frame) {
+    // Open frames are delivered to an already-subscribed consumer (the
+    // consumer is registered locally via open() BEFORE it expects data; a
+    // peer's STREAM_OPEN confirms the stream and carries the response head for
+    // response-side opens). An open for an unknown id is dropped — the owner
+    // subscribes before it expects data, so a stray open is a protocol bug.
+    const st = this._streams.get(frame.stream);
+    if (!st || st.closed) return false;
+    try {
+      st.consumer.onOpen?.(frame);
+    } catch {
+      /* isolate consumer errors */
+    }
+    return true;
   }
 
   _deliverData(frame) {
