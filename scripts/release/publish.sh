@@ -65,9 +65,7 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
-  die "tag v${VERSION} already exists — a tag means 'published and verified'."
-  die "If you really mean to re-publish the same version (idempotent), delete"
-  die "the tag first: git tag -d v${VERSION} && git push origin :v${VERSION}"
+  die "tag v${VERSION} already exists — a tag means 'published and verified'. To re-publish the same version (idempotent), delete the tag first: git tag -d v${VERSION} && git push origin :v${VERSION}"
 fi
 
 if [ ! -f "${TARBALL}" ]; then
