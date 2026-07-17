@@ -240,6 +240,38 @@ session by POST). Install/update = copy to `~/.config/opencode/tools/`
 - DNS on Cloudflare (apex/www/relay DNS-only → Caddy does TLS; wildcard
   `*.pages.<domain>` via DNS-01).
 
+### Prod box ops
+
+Ops scripts + configs are committed under `scripts/prod/` so the box is
+rebuildable from git. None of these touch application code; the install
+steps in each file's header are human-only (agent Hard Rule #4 forbids
+`ssh root@...`).
+
+- **Backups** (`scripts/prod/backup-relay.sh`, cron `manta-backup` at
+  03:17 UTC): the relay SQLite store is captured with `sqlite3 .backup`
+  (online, no torn writes) and the whole `~/.manta/` dir is tarballed
+  alongside; both ship to `dev@157.90.224.92:~/backups/manta-prod/` via
+  `scp`, with 7-day retention on both ends.
+- **Restore** (one-off, on a fresh box): `scp` the most recent
+  `relay-YYYY-MM-DD.{sqlite,tar.gz}` pair from `~/backups/manta-prod/`,
+  then `sqlite3 ~/.manta/relay.sqlite ".restore" <sqlite-file>` and untar
+  the tarball over `~/.manta/`. Verify with
+  `sqlite3 ~/.manta/relay.sqlite ".tables"`.
+- **Monitoring** (`scripts/prod/healthcheck.mjs`, scheduled every 10 min
+  on the dev box via `schedule_create`): off-site probes of `mantaui.com`,
+  `relay.mantaui.com` (expects 401 — the auth gate IS the healthy
+  answer), `app.mantaui.com`, `/install.sh`, `/releases/manta-latest.tar.gz`.
+  On failure the opencode turn calls `notify` urgent:true naming the
+  failing URL.
+- **Log caps** (`scripts/prod/systemd-journald.conf`,
+  `scripts/prod/caddy-logrotate`): journald capped at 500M; Caddy access
+  logs (only if they exist on the box — check first) rotated daily with
+  14 generations.
+- **Patches** (`scripts/prod/50unattended-upgrades`): security origin
+  only; updates left to a human reboot window.
+- **Brute-force** (`scripts/prod/jail.local`): sshd jail only — no HTTP
+  jail (Caddy/relay have their own rate limits).
+
 ## Known gaps
 
 - macOS-first; Linux/Windows desktop builds untested.
