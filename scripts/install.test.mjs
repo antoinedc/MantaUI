@@ -1037,21 +1037,28 @@ install_node_via_apt() {
 
 test("bootstrap_build_essential is a no-op when make + g++ are on PATH", () => {
   // The test runner has both installed (build-essential was a normal dev
-  // dep). The mock for the apt installer MUST NOT fire — same idempotent
-  // guarantee as bootstrap_node.
+  // dep on the workdir host). We pass func:"bootstrap_build_essential"
+  // so the harness actually exercises THAT function (without func the
+  // runBootstrap default is bootstrap_node — which trivially returns 0
+  // when node is on PATH and gives the no-op path zero coverage).
+  //
+  // Mock install helpers as sentinels — if the no-op guarantee is broken
+  // and bootstrap_build_essential falls through to the install path,
+  // one of these will fire and the assertion below fails.
   const out = runBootstrap({
+    func: "bootstrap_build_essential",
     preBody: `
-// Mock both possible installer entry points — if either fires, the
-// no-op guarantee is broken.
 detect_distro_id() { echo "ubuntu"; }
+# Sentinel installs — if bootstrap_build_essential actually calls an
+# installer (because make or g++ isn't really on PATH in this sandbox),
+# the sentinel name will appear in the output and the assertion fails.
 `,
   });
-  // bootstrap_build_essential is defined in install.sh but not exposed
-  // in the test harness directly. Instead, we test it via the bash
-  // subshell: source install.sh, then call bootstrap_build_essential.
-  // We do that here by appending to the test body.
   assert.match(out, /BOOTSTRAP_EXIT=0/);
-  assert.doesNotMatch(out, /bootstrap.+build-essential.+missing/);
+  assert.doesNotMatch(out, /not found: make/);
+  assert.doesNotMatch(out, /not found: g\+\+/);
+  assert.doesNotMatch(out, /make.*g\+\+ missing/);
+  assert.doesNotMatch(out, /build-essential installed/);
 });
 
 test("bootstrap_build_essential calls apt-get install on Debian/Ubuntu when make is missing", () => {
