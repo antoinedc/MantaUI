@@ -26,7 +26,7 @@ Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 
 // Email the maintainer on errors. Unset by default (no SMTP relay on this box);
 // flip to a real address when a relay is set up.
-Unattended-Upgrade::Mail ""
+Unattended-Upgrade::Mail "";
 
 // Logging — visible via `journalctl -u unattended-upgrades`.
 Unattended-Upgrade::SyslogEnable "true";
