@@ -35,6 +35,7 @@ import { isValidToken, createRateLimiter } from "../server/webhooks.mjs";
 import {
   RoutingTable,
   PendingRequests,
+  StreamRegistry,
   encodeFrame,
   decodeFrame,
   FRAME_TYPES,
@@ -272,6 +273,21 @@ export function createRelayServer(opts = {}) {
   // fresh reconnect's pending requests.
   const pendingByTransport = new Map(); // transport -> PendingRequests
 
+  // Per-box INBOUND stream registry (BET-156). Phone→box stream requests are
+  // opened on the relay via streamRequest(); the relay assigns a stream id,
+  // registers a consumer in the box's per-transport registry, and forwards a
+  // STREAM_OPEN request frame down the tunnel. The box's agent responds with
+  // STREAM_OPEN (response form) + STREAM_DATA + STREAM_END, all routed through
+  // this registry. Keyed by the live transport (not box_id) so a stale
+  // socket's late frames can't settle a fresh reconnect's streams.
+  const inboundStreamsByTransport = new Map(); // transport -> StreamRegistry
+
+  // Monotonic stream id source for streamRequest. Starts at 1 so stream ids
+  // never collide with REQUEST ids (PendingRequests owns its own counter
+  // starting at 1 too — both spaces are independent of each other, but
+  // keeping them distinct makes wire captures easier to read).
+  let nextStreamId = 1;
+
   /**
    * Handle a single verified/authenticated box connection. Wires the ws into a
    * transport, registers it in the RoutingTable, persists the box row online,
@@ -286,6 +302,12 @@ export function createRelayServer(opts = {}) {
     // Correlation for phone→box proxied requests routed over THIS socket.
     const pending = new PendingRequests({ now });
     pendingByTransport.set(transport, pending);
+
+    // Inbound stream registry for phone→box stream requests routed over THIS
+    // socket. Created per-transport so a reconnect's fresh registry doesn't
+    // carry stale entries from the previous socket.
+    const inboundStreams = new StreamRegistry();
+    inboundStreamsByTransport.set(transport, inboundStreams);
 
     // Register the live socket (evicts+closes any stale socket for this box).
     routing.register(boxId, transport);
@@ -311,6 +333,15 @@ export function createRelayServer(opts = {}) {
         case FRAME_TYPES.RESPONSE:
           pending.resolve(frame);
           break;
+        case FRAME_TYPES.STREAM_OPEN:
+        case FRAME_TYPES.STREAM_DATA:
+        case FRAME_TYPES.STREAM_END:
+        case FRAME_TYPES.STREAM_ABORT:
+          // Box→relay stream frames. The registry routes by stream id to the
+          // consumer registered by streamRequest() (api.mjs). A frame for an
+          // unknown stream id is dropped — the StreamRegistry's invariant.
+          inboundStreams.handleFrame(frame);
+          break;
         case FRAME_TYPES.ERROR:
           if (!pending.rejectFromError(frame)) {
             warn(`[relay] box ${short(boxId)} error: ${frame.message || frame.code || "unknown"}`);
@@ -327,6 +358,11 @@ export function createRelayServer(opts = {}) {
       // response hangs across a box disconnect, then drop the correlation map.
       pending.rejectAll(new Error("box tunnel closed"));
       pendingByTransport.delete(transport);
+      // Abort every live stream on this transport so phone-side streaming
+      // responses close cleanly (BET-156 §3). The registry's onAbort callbacks
+      // fire before we drop the map so handlers see the abort, not a hang.
+      try { inboundStreams.abortAll("box tunnel closed"); } catch { /* ignore */ }
+      inboundStreamsByTransport.delete(transport);
       // Only unregister if THIS socket is still the registered one (a fast
       // reconnect may have already replaced us — don't clobber the fresh one).
       routing.unregister(boxId, transport);
@@ -387,6 +423,156 @@ export function createRelayServer(opts = {}) {
       ...(req.body != null ? { body: req.body } : {}),
     });
     return promise;
+  }
+
+  /**
+   * Proxy a single phone→box STREAMING request over the box's live tunnel and
+   * pipe the box's stream back through the provided callbacks. The caller
+   * (api.mjs's /box/:box_id/* handler) drives the phone's HTTP response from
+   * these callbacks — onHead → writeHead; onData → write; onEnd / onAbort →
+   * end. There is NO returned promise to await because the stream is the
+   * response itself; the caller signals completion via end() in onEnd/onAbort.
+   *
+   * Rejects synchronously (returns `{ noTunnel: true }` shape via callback)
+   * when the box has no live socket OR no inbound-stream registry — the caller
+   * treats both as a 503 box_offline. Streams are NOT bounded by the
+   * request/response timeout (SSE/PTY are long-lived by design); the caller
+   * decides its own end-of-stream policy (relay close, device disconnect, …).
+   *
+   * Wire contract (BET-156 §3):
+   *   • The relay assigns a monotonic stream id, registers a consumer in the
+   *     box's per-transport inbound registry, and sends a STREAM_OPEN request
+   *     form down the tunnel.
+   *   • The box agent responds with STREAM_OPEN (response form, status+headers)
+   *     → onHead({ status, headers }) fires.
+   *   • The box agent pumps the response body as STREAM_DATA frames →
+   *     onData(text) fires per frame.
+   *   • The box agent sends STREAM_END (or STREAM_ABORT on error) → onEnd /
+   *     onAbort(reason) fires.
+   *
+   * @param {string} boxId
+   * @param {{method:string,path:string,headers?:object,body?:string}} req
+   * @param {{
+   *   onHead: ({status:number, headers:object}) => void,
+   *   onData: (text:string) => void,
+   *   onEnd:  () => void,
+   *   onAbort: (reason:string) => void,
+   * }} callbacks
+   * @returns {{ streamId: number, abort: (reason?:string) => void }}
+   *   The caller keeps `streamId` for logging; `abort()` is the public way to
+   *   cancel the stream (frees the relay-side id, sends STREAM_ABORT to the
+   *   box so the local fetch ends).
+   */
+  function streamRequest(boxId, req, callbacks) {
+    const transport = routing.lookup(boxId);
+    if (!transport) {
+      // Synchronous no-tunnel: no consumer registered yet, so fire onAbort
+      // directly. The caller decides whether to surface 503 or close the
+      // phone response.
+      try {
+        callbacks.onAbort("no_tunnel");
+      } catch {
+        /* caller ignored */
+      }
+      return { streamId: -1, abort: () => {} };
+    }
+    const inboundStreams = inboundStreamsByTransport.get(transport);
+    if (!inboundStreams) {
+      try {
+        callbacks.onAbort("no_tunnel");
+      } catch {
+        /* ignore */
+      }
+      return { streamId: -1, abort: () => {} };
+    }
+    // Allocate a fresh stream id for this transport. The frame's `id` is
+    // reused as the request-correlating id (the agent echoes it in its
+    // response-side frames); the registry routes by `stream` (the relay-
+    // assigned id), so a stale `id` on a same-stream id won't misroute.
+    const streamId = nextStreamId++;
+    const requestId = streamId;
+    let closed = false;
+
+    // The consumer reads off `frame.status`/`frame.headers` for the response
+    // head, then receives per-chunk DATA frames and END/ABORT.
+    inboundStreams.open(streamId, {
+      onOpen: (frame) => {
+        if (closed) return;
+        try {
+          callbacks.onHead({
+            status: frame.status,
+            headers: frame.headers || {},
+          });
+        } catch {
+          /* ignore caller errors */
+        }
+      },
+      onData: (text) => {
+        if (closed) return;
+        try {
+          callbacks.onData(text);
+        } catch {
+          /* ignore */
+        }
+      },
+      onEnd: () => {
+        if (closed) return;
+        closed = true;
+        try {
+          callbacks.onEnd();
+        } catch {
+          /* ignore */
+        }
+      },
+      onAbort: (reason) => {
+        if (closed) return;
+        closed = true;
+        try {
+          callbacks.onAbort(reason || "aborted");
+        } catch {
+          /* ignore */
+        }
+      },
+    });
+
+    // Send the request-side STREAM_OPEN. Body is only forwarded for non-GET/
+    // non-HEAD methods (same rule as the request-frame branch).
+    transport.send({
+      type: FRAME_TYPES.STREAM_OPEN,
+      id: requestId,
+      stream: streamId,
+      method: req.method,
+      path: req.path,
+      ...(req.headers ? { headers: req.headers } : {}),
+      ...(req.body != null && req.method !== "GET" && req.method !== "HEAD"
+        ? { body: req.body }
+        : {}),
+    });
+
+    // Public abort: tear down the consumer locally + send STREAM_ABORT to the
+    // box so the local fetch there closes. Idempotent — a second call is a
+    // no-op (the onAbort consumer would have fired already or the stream is
+    // already closed).
+    function abort(reason) {
+      if (closed) return;
+      closed = true;
+      // Locally free the id (the registry's abort fires the consumer's onAbort
+      // — but the consumer's onAbort short-circuits via the closed flag above,
+      // so callbacks.onAbort is invoked exactly once, here).
+      inboundStreams.abort(streamId, reason || "client aborted");
+      try {
+        transport.send({
+          type: FRAME_TYPES.STREAM_ABORT,
+          id: requestId,
+          stream: streamId,
+          reason: reason || "client aborted",
+        });
+      } catch {
+        /* socket closing; ignore */
+      }
+    }
+
+    return { streamId, abort };
   }
 
   // The connection handler: runs AFTER the ws handshake completes. We do the
@@ -478,6 +664,8 @@ export function createRelayServer(opts = {}) {
     close,
     // phone→box request correlation (Stage-4 phone-facing proxy calls this)
     proxyRequest,
+    // phone→box streaming request correlation (BET-156 §3 — /events, future /pty)
+    streamRequest,
     // exposed for tests / Stage 4 wiring
     _onConnection: onConnection,
     _acceptBox: acceptBox,

@@ -23,7 +23,7 @@ test("encode/decode round-trips every frame type", () => {
   const samples = [
     { type: FRAME_TYPES.REQUEST, id: 1, method: "GET", path: "/x", boxId: BOX_A },
     { type: FRAME_TYPES.RESPONSE, id: 1, status: 200, body: "ok" },
-    { type: FRAME_TYPES.STREAM_OPEN, id: 2, stream: "s1", path: "/sse" },
+    { type: FRAME_TYPES.STREAM_OPEN, id: 2, stream: "s1", method: "GET", path: "/sse" },
     { type: FRAME_TYPES.STREAM_DATA, id: 2, stream: "s1", data: "chunk" },
     { type: FRAME_TYPES.STREAM_END, id: 2, stream: "s1" },
     { type: FRAME_TYPES.STREAM_ABORT, id: 3, stream: "s2", reason: "cancel" },
@@ -98,6 +98,50 @@ test("encodeFrame throws on structurally invalid frames", () => {
   assert.throws(() => encodeFrame("x"));
   assert.throws(() => encodeFrame({ type: "nope", id: 1 }));
   assert.throws(() => encodeFrame({ type: FRAME_TYPES.REQUEST, id: 1 })); // no method/path
+});
+
+test("encodeFrame rejects STREAM_OPEN without method (request form) or status (response form)", () => {
+  // Method required on the request form…
+  assert.throws(
+    () => encodeFrame({ type: FRAME_TYPES.STREAM_OPEN, id: 1, stream: "s", path: "/x" }),
+    /exactly one of method or status/,
+  );
+  // …and status required on the response form.
+  assert.throws(
+    () => encodeFrame({ type: FRAME_TYPES.STREAM_OPEN, id: 2, stream: "s", headers: {} }),
+    /exactly one of method or status/,
+  );
+  // Both present → also rejected.
+  assert.throws(
+    () =>
+      encodeFrame({ type: FRAME_TYPES.STREAM_OPEN, id: 3, stream: "s", method: "GET", status: 200 }),
+    /exactly one of method or status/,
+  );
+  // Each form encodes cleanly.
+  assert.ok(encodeFrame({ type: FRAME_TYPES.STREAM_OPEN, id: 4, stream: "s", method: "GET", path: "/sse" }));
+  assert.ok(encodeFrame({ type: FRAME_TYPES.STREAM_OPEN, id: 5, stream: "s", status: 200, headers: { "content-type": "text/event-stream" } }));
+});
+
+test("decodeFrame drops STREAM_OPEN that violates exactly-one-of (BET-156)", () => {
+  // Method + status (both) → wire error, decode returns null.
+  // Build the raw string directly because encodeFrame refuses to emit it.
+  const both = JSON.stringify({
+    v: PROTOCOL_VERSION,
+    type: FRAME_TYPES.STREAM_OPEN,
+    id: 1,
+    stream: "s",
+    method: "GET",
+    status: 200,
+  });
+  assert.equal(decodeFrame(both), null);
+  // Neither method nor status → wire error, decode returns null.
+  const neither = JSON.stringify({
+    v: PROTOCOL_VERSION,
+    type: FRAME_TYPES.STREAM_OPEN,
+    id: 1,
+    stream: "s",
+  });
+  assert.equal(decodeFrame(neither), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -207,17 +251,37 @@ test("PendingRequests.rejectAll rejects every in-flight request on transport clo
 
 function collectingConsumer() {
   const data = [];
+  const opens = [];
   let ended = false;
   let aborted = null;
   return {
     data,
+    opens,
     get ended() { return ended; },
     get aborted() { return aborted; },
+    onOpen: (frame) => { opens.push(frame); },
     onData: (payload) => data.push(payload),
     onEnd: () => { ended = true; },
     onAbort: (reason) => { aborted = reason ?? "aborted"; },
   };
 }
+
+test("StreamRegistry delivers STREAM_OPEN to the consumer's onOpen (BET-156)", () => {
+  // Response-side opens carry { status, headers } — the consumer reads those
+  // out of the onOpen frame. The registry doesn't parse; it just delivers.
+  const reg = new StreamRegistry();
+  const c = collectingConsumer();
+  reg.open("s1", c);
+  const headFrame = { type: FRAME_TYPES.STREAM_OPEN, id: 1, stream: "s1", status: 200, headers: { "content-type": "text/event-stream" } };
+  assert.equal(reg.handleFrame(headFrame), true, "delivered");
+  assert.equal(c.opens.length, 1);
+  assert.equal(c.opens[0].status, 200);
+  assert.equal(c.opens[0].headers["content-type"], "text/event-stream");
+  // A STREAM_OPEN for an unknown stream id is dropped (no consumer subscribed).
+  const c2 = collectingConsumer();
+  const reg2 = new StreamRegistry();
+  assert.equal(reg2.handleFrame(headFrame), false, "dropped — no consumer");
+});
 
 test("StreamRegistry keeps two concurrent streams isolated + routes to correct consumer", () => {
   const reg = new StreamRegistry();
@@ -449,7 +513,7 @@ test("end-to-end: request/response + a muxed stream over one fake transport", as
   // Open a stream and collect chunks.
   const c = collectingConsumer();
   reg.open("sX", c);
-  a.send(encodeFrame({ type: FRAME_TYPES.STREAM_OPEN, id: pr.nextId(), stream: "sX", path: "/sse" }));
+  a.send(encodeFrame({ type: FRAME_TYPES.STREAM_OPEN, id: pr.nextId(), stream: "sX", method: "GET", path: "/sse" }));
   assert.deepEqual(c.data, ["c1", "c2"]);
   assert.equal(c.ended, true);
   assert.equal(reg.has("sX"), false, "stream cleaned up after end");

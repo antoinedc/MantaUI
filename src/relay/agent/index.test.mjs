@@ -4,6 +4,7 @@ import {
   createRelayAgent,
   createBackoff,
   makeDefaultLocalFetch,
+  makeDefaultLocalFetchStream,
   shouldStartRelayAgent,
   DEFAULT_RELAY_URL,
   RECONNECT_BASE_MS,
@@ -677,4 +678,211 @@ test("status() is \"connecting\" between a failed dial and the next attempt", as
   await agent.start(); // attempt 1 fails → reconnect armed
   assert.equal(agent.status(), "connecting");
   agent.stop();
+});
+
+// ---------------------------------------------------------------------------
+// SSE/PTY streaming path (BET-156 §3) — STREAM_OPEN (request form) is proxied
+// to a streaming local fetch; the agent forwards the response head + body as
+// STREAM_OPEN (response form) + STREAM_DATA + STREAM_END, preserving chunk
+// boundaries so SSE bytes arrive at the phone as they leave the box.
+// ---------------------------------------------------------------------------
+
+// A minimal Response-shaped object that exposes `body` as a web ReadableStream
+// the test can pump chunks into. Mirrors what node:fetch returns for an SSE
+// response. enqueue() pushes a chunk; close() ends the stream.
+function makeFakeStreamResponse({ status = 200, headers = {} } = {}) {
+  let controller;
+  const body = new ReadableStream({
+    start(c) {
+      controller = c;
+    },
+  });
+  // jsdom + Node 18+: ReadableStream is global on Node 18+; if missing, we
+  // surface a clearer error.
+  return {
+    response: {
+      status,
+      headers: new Map(Object.entries(headers)),
+      body,
+    },
+    enqueue(chunk) {
+      controller.enqueue(typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk);
+    },
+    close() {
+      try { controller.close(); } catch { /* already closed */ }
+    },
+    error(reason) {
+      try { controller.error(reason); } catch { /* already closed */ }
+    },
+  };
+}
+
+test("agent turns an event-stream local response into OPEN→DATA×n→END frames preserving chunk boundaries", async () => {
+  // The relay sends a STREAM_OPEN (request form) down the tunnel. The agent
+  // opens a streaming local fetch, gets back an SSE-style response, and
+  // pumps the body chunk-by-chunk as STREAM_DATA frames preserving the
+  // chunk boundaries (the relay's api side asserts res.write was called
+  // once per DATA — the byte-ordering matches what the box server sent).
+  const stream = makeFakeStreamResponse({
+    status: 200,
+    headers: { "content-type": "text/event-stream", "cache-control": "no-store" },
+  });
+  const localFetchStream = async () => stream.response;
+
+  const { relay, agent } = makeStubAgent({ localFetchStream });
+  await agent.start();
+
+  relay.sendToClient({
+    type: FRAME_TYPES.STREAM_OPEN,
+    id: 7,
+    stream: "relay-stream-1",
+    method: "GET",
+    path: "/events?token=abc",
+  });
+
+  // Wait for STREAM_OPEN (response form) to be sent before pumping data.
+  for (let i = 0; i < 20 && !relay.clientSent().some((f) => f && f.type === FRAME_TYPES.STREAM_OPEN && f.stream === "relay-stream-1"); i++) {
+    await Promise.resolve();
+  }
+  // Pump three chunks in distinct boundary-preserving units.
+  stream.enqueue("data: hello\n\n");
+  // Let the agent read each chunk and send a STREAM_DATA frame.
+  for (let i = 0; i < 20 && relay.clientSent().filter((f) => f && f.type === FRAME_TYPES.STREAM_DATA && f.stream === "relay-stream-1").length < 1; i++) {
+    await Promise.resolve();
+  }
+  stream.enqueue("data: world\n\n");
+  for (let i = 0; i < 20 && relay.clientSent().filter((f) => f && f.type === FRAME_TYPES.STREAM_DATA && f.stream === "relay-stream-1").length < 2; i++) {
+    await Promise.resolve();
+  }
+  stream.enqueue("data: end\n\n");
+  for (let i = 0; i < 20 && relay.clientSent().filter((f) => f && f.type === FRAME_TYPES.STREAM_DATA && f.stream === "relay-stream-1").length < 3; i++) {
+    await Promise.resolve();
+  }
+  stream.close();
+  // Wait for STREAM_END.
+  for (let i = 0; i < 30 && !relay.clientSent().some((f) => f && f.type === FRAME_TYPES.STREAM_END && f.stream === "relay-stream-1"); i++) {
+    await Promise.resolve();
+  }
+
+  const sent = relay.clientSent().filter((f) => f && f.stream === "relay-stream-1");
+  // Sequence: OPEN, DATA, DATA, DATA, END — in order.
+  assert.deepEqual(
+    sent.map((f) => f.type),
+    ["stream-open", "stream-data", "stream-data", "stream-data", "stream-end"],
+    "frame sequence is OPEN→DATA×3→END",
+  );
+  // The response-side STREAM_OPEN carries the upstream status + headers
+  // verbatim, so the relay's api side can writeHead(status, headers).
+  const headFrame = sent[0];
+  assert.equal(headFrame.id, 7, "response-side STREAM_OPEN echoes the request id");
+  assert.equal(headFrame.stream, "relay-stream-1", "same stream id");
+  assert.equal(headFrame.status, 200);
+  assert.equal(headFrame.headers["content-type"], "text/event-stream");
+  // Chunk boundaries: three DATA frames, each with its chunk's bytes.
+  assert.deepEqual(
+    sent.slice(1, -1).map((f) => f.data),
+    ["data: hello\n\n", "data: world\n\n", "data: end\n\n"],
+    "chunk boundaries preserved across STREAM_DATA frames",
+  );
+
+  agent.stop();
+});
+
+test("agent emits STREAM_ABORT when the streaming local fetch rejects", async () => {
+  const localFetchStream = async () => {
+    throw new Error("ECONNREFUSED 127.0.0.1:8787");
+  };
+  const { relay, agent } = makeStubAgent({ localFetchStream });
+  await agent.start();
+
+  relay.sendToClient({
+    type: FRAME_TYPES.STREAM_OPEN,
+    id: 9,
+    stream: "relay-stream-err",
+    method: "GET",
+    path: "/events?token=x",
+  });
+  for (let i = 0; i < 30 && !relay.clientSent().some((f) => f && f.type === FRAME_TYPES.STREAM_ABORT && f.stream === "relay-stream-err"); i++) {
+    await Promise.resolve();
+  }
+
+  const abort = relay.clientSent().find(
+    (f) => f && f.type === FRAME_TYPES.STREAM_ABORT && f.stream === "relay-stream-err",
+  );
+  assert.ok(abort, "a STREAM_ABORT frame was sent back");
+  assert.equal(abort.id, 9);
+  assert.match(abort.reason, /ECONNREFUSED/);
+
+  agent.stop();
+});
+
+test("agent ignores STREAM_OPEN in response form (no method) — protocol guard", async () => {
+  // A response-form STREAM_OPEN arriving from the relay is a wire protocol
+  // bug (the relay never sends response forms). The agent warns and drops
+  // it instead of treating it as a request to open a local fetch.
+  const localFetchStream = async () => {
+    throw new Error("should not be called");
+  };
+  const { relay, agent } = makeStubAgent({ localFetchStream });
+  await agent.start();
+
+  relay.sendToClient({
+    type: FRAME_TYPES.STREAM_OPEN,
+    id: 11,
+    stream: "ghost-stream",
+    status: 200,
+    headers: {},
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const sent = relay.clientSent().filter((f) => f && f.stream === "ghost-stream");
+  assert.equal(sent.length, 0, "no frames sent in response to a response-form STREAM_OPEN");
+
+  agent.stop();
+});
+
+// ---------------------------------------------------------------------------
+// makeDefaultLocalFetchStream — ADR-1 auth overwrite (mirrors localFetch test)
+// ---------------------------------------------------------------------------
+
+test("makeDefaultLocalFetchStream overwrites a foreign Authorization header with the BOX bearer", async () => {
+  const seen = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url, headers: init?.headers });
+    // The streaming path doesn't actually read body here — we just need the
+    // fetch call to be exercised; the assertions are on headers + URL.
+    return {
+      status: 200,
+      headers: new Map([["content-type", "text/event-stream"]]),
+      body: new ReadableStream({ start(c) { c.close(); } }),
+    };
+  };
+  try {
+    const localFetchStream = makeDefaultLocalFetchStream("http://127.0.0.1:8787", AUTH);
+    await localFetchStream({
+      method: "GET",
+      path: "/events?token=abc",
+      headers: { authorization: "Bearer account-token-from-device" },
+      body: undefined,
+    });
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+  assert.equal(seen.length, 1);
+  assert.equal(
+    seen[0].headers.authorization,
+    `Bearer ${BOX_TOKEN}`,
+    "Authorization is the BOX token, not the foreign account token",
+  );
+});
+
+test("makeDefaultLocalFetchStream requires a valid box_token (never accepts a missing/foreign one)", () => {
+  assert.throws(() => makeDefaultLocalFetchStream("http://127.0.0.1:8787", null), /box_token/);
+  assert.throws(() => makeDefaultLocalFetchStream("http://127.0.0.1:8787", undefined), /box_token/);
+  assert.throws(
+    () => makeDefaultLocalFetchStream("http://127.0.0.1:8787", { box_id: BOX_ID, box_token: "bad" }),
+    /box_token/,
+  );
 });

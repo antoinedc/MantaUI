@@ -385,7 +385,19 @@ esac
 
 log "Minting pairing code…"
 # Delegate to the same `manta pair` CLI the user runs later (loopback GET /auth/pair).
-node "$MANTA_HOME/scripts/manta-pair.mjs" || die "failed to mint pairing code (is the server local-reachable?)"
+# We CAPTURE stdout this time so the install-sh heredoc below can quote the
+# ready-to-paste `manta://pair?box=…&code=…` link — BET-156 §1. manta-pair.mjs
+# prints a stable "  Pairing code:  NNNNNN" line via formatPairingOutput, which
+# we sed-extract (no second JSON round-trip; the format is the contract).
+PAIR_BLOCK="$(node "$MANTA_HOME/scripts/manta-pair.mjs" 2>/dev/null || true)"
+# Echo the formatted block so the user still sees it on stdout (the heredoc
+# below ONLY surfaces the box id + ready-to-paste link, not the full block).
+printf '%s\n' "$PAIR_BLOCK"
+PAIR_CODE="$(printf '%s\n' "$PAIR_BLOCK" | sed -n 's/^  Pairing code:[[:space:]]\+\([0-9]\{6\}\).*/\1/p' | head -n1)"
+export PAIR_CODE
+if [ -z "$PAIR_CODE" ]; then
+  warn "could not extract a 6-digit code from manta-pair.mjs output — pair link will be omitted."
+fi
 
 # Read the box_id from ~/.manta/auth.json via the tested install-lib loader
 # (NEVER re-parse the JSON in bash — auth.json's shape belongs to the server).
@@ -416,6 +428,15 @@ EOF
 
 if [ -n "$BOX_ID_DISPLAY" ]; then
   printf '\n  Box ID:        %s\n' "$BOX_ID_DISPLAY"
+fi
+
+# Ready-to-paste pair link (BET-156 §1) — the desktop app parses this directly
+# via parsePairPayload and routes through the relay's /pair endpoint. Both
+# BOX_ID_DISPLAY and PAIR_CODE are loaded via tested helpers, so this is safe
+# even if either is missing (we just print the available half, never crash).
+if [ -n "${BOX_ID_DISPLAY:-}" ] && [ -n "${PAIR_CODE:-}" ]; then
+  printf '\n  Pair link:     manta://pair?box=%s&code=%s\n' "$BOX_ID_DISPLAY" "$PAIR_CODE"
+  printf '                 (paste into the desktop app, or scan as a QR)\n'
 fi
 
 cat <<EOF

@@ -271,6 +271,131 @@ test("DEFAULT_RELAY_PORT is the bui 20xxx-block port", () => {
 });
 
 // ---------------------------------------------------------------------------
+// streamRequest — phone→box STREAM_* proxy (BET-156 §3, SSE/PTY plumbing)
+// ---------------------------------------------------------------------------
+
+// A fake box client that auto-replies to STREAM_OPEN (request form) with a
+// canned head + DATA + END sequence. Lets us drive streamRequest end-to-end
+// over a real WebSocket pair without standing up the agent.
+function installAutoStreamBox(ws, { chunks = [], reason = null, status = 200, headers = {} } = {}) {
+  ws.on("message", (data) => {
+    const f = decodeFrame(data);
+    if (!f || f.type !== FRAME_TYPES.STREAM_OPEN) return;
+    if (typeof f.method !== "string") return; // ignore response-form opens (relay never sends them)
+    // Send the response head, then chunks, then end (or abort).
+    ws.send(encodeFrame({
+      type: FRAME_TYPES.STREAM_OPEN,
+      id: f.id,
+      stream: f.stream,
+      status,
+      headers,
+    }));
+    for (const c of chunks) {
+      ws.send(encodeFrame({
+        type: FRAME_TYPES.STREAM_DATA,
+        id: f.id,
+        stream: f.stream,
+        data: c,
+      }));
+    }
+    if (reason != null) {
+      ws.send(encodeFrame({
+        type: FRAME_TYPES.STREAM_ABORT,
+        id: f.id,
+        stream: f.stream,
+        reason,
+      }));
+    } else {
+      ws.send(encodeFrame({
+        type: FRAME_TYPES.STREAM_END,
+        id: f.id,
+        stream: f.stream,
+      }));
+    }
+  });
+}
+
+test("streamRequest: relays a box-side stream OPEN→DATA×n→END in order to the caller", async (t) => {
+  const { relay, url } = await makeRelay(t);
+  const ws = connectBox(url, { boxId: BOX_A, token: TOKEN_A });
+  await once(ws, "open");
+  await waitFor(() => relay.routing.has(BOX_A));
+  installAutoStreamBox(ws, {
+    chunks: ["data: hello\n\n", "data: world\n\n"],
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+
+  // Drive the stream request synchronously — the callbacks fire async on the
+  // inbound message path (WebSocket I/O runs on the libuv loop, not microtasks).
+  const events = { head: null, data: [], end: null, abort: null };
+  relay.streamRequest(BOX_A, { method: "GET", path: "/events" }, {
+    onHead: (h) => { events.head = h; },
+    onData: (t) => { events.data.push(t); },
+    onEnd: () => { events.end = true; },
+    onAbort: (r) => { events.abort = r; },
+  });
+
+  // Poll on a real timer until the full sequence has arrived. waitFor uses
+  // setTimeout (libuv), which interleaves with the WS I/O — Promise.resolve()
+  // alone would not yield long enough for the I/O callbacks to fire.
+  await waitFor(() => events.head && events.end, { timeoutMs: 2000 });
+  // A tiny extra tick to capture any straggler events (the test asserts on
+  // .end / .abort not firing too).
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.ok(events.head, "onHead fired");
+  assert.equal(events.head.status, 200);
+  assert.equal(events.head.headers["content-type"], "text/event-stream");
+  assert.deepEqual(events.data, ["data: hello\n\n", "data: world\n\n"], "chunks preserved in order");
+  assert.equal(events.end, true, "onEnd fired");
+  assert.equal(events.abort, null, "no abort");
+
+  ws.close();
+  await once(ws, "close");
+});
+
+test("streamRequest: relays a box-side STREAM_ABORT as onAbort(reason)", async (t) => {
+  const { relay, url } = await makeRelay(t);
+  const ws = connectBox(url, { boxId: BOX_A, token: TOKEN_A });
+  await once(ws, "open");
+  await waitFor(() => relay.routing.has(BOX_A));
+  installAutoStreamBox(ws, { chunks: ["partial "], reason: "box exploded" });
+
+  const events = { head: null, data: [], end: null, abort: null };
+  relay.streamRequest(BOX_A, { method: "GET", path: "/events" }, {
+    onHead: (h) => { events.head = h; },
+    onData: (t) => { events.data.push(t); },
+    onEnd: () => { events.end = true; },
+    onAbort: (r) => { events.abort = r; },
+  });
+  await waitFor(() => events.head && events.abort, { timeoutMs: 2000 });
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.ok(events.head, "onHead fired even on abort (the head frame arrived first)");
+  assert.deepEqual(events.data, ["partial "], "data frame before the abort is preserved");
+  assert.equal(events.abort, "box exploded", "onAbort(reason) fired");
+  assert.equal(events.end, null, "onEnd did NOT fire");
+
+  ws.close();
+  await once(ws, "close");
+});
+
+test("streamRequest: no live tunnel → onAbort fires synchronously, no wire activity", async (t) => {
+  const { relay, url: _ } = await makeRelay(t);
+  // Deliberately do NOT connect a box. routing.has(BOX_A) === false.
+  let abortCalled = null;
+  const handle = relay.streamRequest(BOX_A, { method: "GET", path: "/events" }, {
+    onHead: () => { throw new Error("onHead should not fire without a tunnel"); },
+    onData: () => { throw new Error("onData should not fire without a tunnel"); },
+    onEnd: () => { throw new Error("onEnd should not fire without a tunnel"); },
+    onAbort: (r) => { abortCalled = r; },
+  });
+  assert.equal(abortCalled, "no_tunnel", "synchronous onAbort('no_tunnel')");
+  assert.equal(handle.streamId, -1, "no stream id assigned");
+});
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 

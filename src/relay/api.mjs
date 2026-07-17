@@ -158,6 +158,38 @@ export function createDefaultSubscriptionCheck(store, now = () => Date.now()) {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming classification — which subpaths are stream-muxed (BET-156 §3)
+// ---------------------------------------------------------------------------
+//
+// The relay can forward a phone request to the box via the buffered
+// proxyRequest path (request + response, body buffered at the box's local
+// fetch — fine for JSON/snapshots) OR via the streaming streamRequest path
+// (SSE-style incremental chunks pumped as STREAM_* frames — required for
+// /events so the phone's EventSource receives bytes as the box emits them).
+// The decision is subpath-based, NOT content-type-based: the relay doesn't
+// know what the box will return until it asks, and asking first would defeat
+// the streaming behavior we want.
+//
+// The list is deliberately small and explicit (mirrors GATED_PREFIXES): every
+// path here must be a known streaming endpoint on the box server. Adding a new
+// entry is a one-line change AND a contract change with the box — both must
+// land together. Don't add a wildcard.
+const STREAMING_SUBPATH_PREFIXES = ["/events"];
+
+/**
+ * Classify a proxied box subpath as streaming (forwarded via STREAM_* frames)
+ * or buffered (forwarded via REQUEST/RESPONSE). Pure + exported so a test
+ * pins the boundary directly.
+ */
+export function isStreamingSubpath(subpath) {
+  if (typeof subpath !== "string" || !subpath) return false;
+  const clean = subpath.split("?")[0];
+  return STREAMING_SUBPATH_PREFIXES.some(
+    (p) => clean === p || clean.startsWith(`${p}/`),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The relay API — normalized-request router + Node http adapter
 // ---------------------------------------------------------------------------
 
@@ -168,6 +200,13 @@ export function createDefaultSubscriptionCheck(store, now = () => Date.now()) {
  * @param {object} opts.store                a relay store (bindings/boxes/receipts/account_tokens).
  * @param {(boxId,req,o?)=>Promise<{status,headers?,body?}>} opts.proxyRequest
  *   the box-tunnel proxy from createRelayServer().proxyRequest.
+ * @param {(boxId,req,callbacks)=>{streamId:number,abort:(reason?:string)=>void}} [opts.streamRequest]
+ *   the streaming box-tunnel proxy from createRelayServer().streamRequest. Used
+ *   for /events (and any future streaming subpath); non-streaming requests keep
+ *   using proxyRequest so the buffered path is unchanged. Optional for
+ *   backwards-compat — when omitted, streaming subpaths fall back to the
+ *   buffered path (SSE bytes arrive all at once, which is the pre-BET-156
+ *   behavior and lets older relays still satisfy the rest of the surface).
  * @param {(req)=>({accountId:string}|null)} [opts.authenticatePhone]
  *   phone auth seam; default createDefaultPhoneAuth({ store, warn }).
  * @param {(boxId:string)=>boolean} [opts.hasActiveSubscription]
@@ -180,6 +219,7 @@ export function createRelayApi(opts = {}) {
   const {
     store,
     proxyRequest,
+    streamRequest,
     now = () => Date.now(),
     warn = console.warn,
   } = opts;
@@ -204,17 +244,22 @@ export function createRelayApi(opts = {}) {
   // -------------------------------------------------------------------------
   // Route a single normalized request. Returns a normalized response. Never
   // throws — a handler fault becomes a 500 so the HTTP layer always has a reply.
+  //
+  // `streamingSink` is optional. When the request is for a streaming subpath
+  // (/events), dispatch sets up the STREAM_* proxy and pipes every frame into
+  // the sink instead of returning a buffered response. The nodeHandler sees
+  // the `__stream` sentinel on the returned response and drives the sink.
   // -------------------------------------------------------------------------
-  async function route(req) {
+  async function route(req, streamingSink) {
     try {
-      return await dispatch(req);
+      return await dispatch(req, streamingSink);
     } catch (err) {
       warn(`[relay-api] handler error: ${String(err?.message || err)}`);
       return json(500, { error: "internal_error" });
     }
   }
 
-  async function dispatch(req) {
+  async function dispatch(req, streamingSink) {
     const method = (req.method || "GET").toUpperCase();
     const pathname = (req.path || "/").split("?")[0];
 
@@ -286,6 +331,37 @@ export function createRelayApi(opts = {}) {
         return json(402, { error: "payment_required", box_id: boxId });
       }
 
+      // Streaming subpaths (/events etc) take the STREAM_* path: the relay
+      // opens a stream to the box, then drives the phone's HTTP response
+      // from the box's STREAM_* frames. The router signals "I'm handling
+      // this inline" by returning a __stream sentinel whose `handler` the
+      // nodeHandler drives directly.
+      //
+      // When streamRequest is not configured (older relay) we fall through
+      // to the buffered path — pre-BET-156 behavior, the phone gets the
+      // full body at end-of-stream. Better than refusing the request.
+      if (isStreamingSubpath(subpath) && streamRequest) {
+        let resolved = false;
+        return {
+          __stream: true,
+          handler: () => {
+            if (resolved) return;
+            resolved = true;
+            return streamRequest(boxId, {
+              method,
+              path: subpath,
+              headers: sanitizeForwardHeaders(req.headers),
+              body: req.body,
+            }, {
+              onHead: (h) => streamingSink({ kind: "head", status: h.status, headers: h.headers }),
+              onData: (data) => streamingSink({ kind: "data", data }),
+              onEnd: () => streamingSink({ kind: "end" }),
+              onAbort: (reason) => streamingSink({ kind: "abort", reason: String(reason || "aborted") }),
+            });
+          },
+        };
+      }
+
       // Forward to the box's live tunnel. The relay preserves the phone's method
       // + body and forwards the subpath (not the /box/:box_id prefix) so the box
       // server sees the request as if made locally.
@@ -318,6 +394,11 @@ export function createRelayApi(opts = {}) {
   // -------------------------------------------------------------------------
   function nodeHandler() {
     return (httpReq, httpRes) => {
+      // streamHandle hoisted to the listener scope so the httpReq.on("close")
+      // handler below can abort an in-flight stream when the phone hangs up.
+      // It is assigned after dispatch resolves (the stream isn't opened until
+      // the route returns the __stream sentinel).
+      let streamHandle = null;
       const chunks = [];
       httpReq.on("data", (c) => chunks.push(c));
       httpReq.on("end", () => {
@@ -328,7 +409,52 @@ export function createRelayApi(opts = {}) {
           headers: httpReq.headers || {},
           body,
         };
-        route(req).then((resp) => {
+
+        // The streaming sink drives httpRes from STREAM_* frames. It's only
+        // invoked when dispatch returns the __stream sentinel; for buffered
+        // responses we use the regular writeHead+end below.
+        let headWritten = false;
+        const streamingSink = (event) => {
+          try {
+            switch (event.kind) {
+              case "head": {
+                // Content-Length must NOT be set for streaming responses
+                // (BET-156 §3). The box may have sent one in its response head;
+                // strip it. Cache-Control: no-store is required so the phone
+                // doesn't cache stale event-stream chunks.
+                const headers = stripForStream(event.headers);
+                headers["cache-control"] = "no-store";
+                httpRes.writeHead(event.status, headers);
+                httpRes.flushHeaders();
+                headWritten = true;
+                break;
+              }
+              case "data":
+                if (headWritten && event.data) httpRes.write(event.data);
+                break;
+              case "end":
+                if (headWritten) httpRes.end();
+                break;
+              case "abort":
+                if (headWritten) httpRes.end();
+                break;
+              default:
+                break;
+            }
+          } catch {
+            /* socket already closed */
+          }
+        };
+
+        route(req, streamingSink).then((resp) => {
+          if (resp && resp.__stream) {
+            // Streaming branch: dispatch armed the stream proxy and will pipe
+            // every STREAM_* frame through streamingSink. The handle returned
+            // by streamRequest is what we abort if the phone hangs up.
+            streamHandle = resp.handler();
+            return;
+          }
+          // Buffered branch (unchanged behavior).
           const headers = { ...(resp.headers || {}) };
           const payload = resp.body == null ? "" : resp.body;
           if (!hasHeader(headers, "content-type")) {
@@ -338,10 +464,19 @@ export function createRelayApi(opts = {}) {
           httpRes.end(payload);
         });
       });
+      // Phone hang-up mid-stream → abort the relay-side stream so the box's
+      // local fetch ends and no STREAM_DATA frames get sent to a dead socket.
+      httpReq.on("close", () => {
+        if (streamHandle && typeof streamHandle.abort === "function") {
+          try { streamHandle.abort("client disconnected"); } catch { /* ignore */ }
+        }
+      });
       httpReq.on("error", () => {
         try {
-          httpRes.writeHead(400);
-          httpRes.end();
+          if (!httpRes.headersSent) {
+            httpRes.writeHead(400);
+            httpRes.end();
+          }
         } catch {
           /* response may already be sent */
         }
@@ -410,6 +545,23 @@ function sanitizeForwardHeaders(headers) {
     if (!DROP.has(k.toLowerCase())) out[k] = v;
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+// Strip headers that MUST NOT be on a streaming response (BET-156 §3):
+//   • content-length — chunked transfer uses no Content-Length; if the box
+//     advertised one we set it ourselves or Node may complain.
+//   • transfer-encoding — Node controls this once we flushHeaders; any value
+//     from the box could conflict with the chunked encoding we initiate.
+// The result is the headers map to pass to writeHead.
+function stripForStream(headers) {
+  const out = {};
+  const DROP = new Set(["content-length", "transfer-encoding"]);
+  if (headers && typeof headers === "object") {
+    for (const [k, v] of Object.entries(headers)) {
+      if (!DROP.has(k.toLowerCase())) out[k] = v;
+    }
+  }
+  return out;
 }
 
 function hasHeader(headers, name) {
