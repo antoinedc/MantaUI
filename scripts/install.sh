@@ -202,11 +202,76 @@ bootstrap_node() {
   ok "node $(node --version 2>/dev/null || echo unknown) installed via NodeSource."
 }
 
+# Bootstrap build-essential (make + g++) — required for node-pty's native
+# binding to compile during npm install. Same auto-install pattern as
+# bootstrap_node: idempotent no-op when present, distro-aware install
+# when missing. Simpler than node — no custom repo needed, just the
+# distro's package manager + build-essential (or gcc-c++ on RHEL family).
+bootstrap_build_essential() {
+  if command -v make >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1; then
+    return 0  # no-op when both make + g++ are on PATH
+  fi
+
+  local mode
+  mode="$(package_install_mode)" || {
+    die "make/g++ missing and neither root nor sudo is available.
+        Install build-essential manually:
+          apt-get install -y build-essential   # Debian/Ubuntu
+          dnf install -y gcc-c++ make           # Fedora/RHEL
+          yum install -y gcc-c++ make           # RHEL/CentOS
+        then re-run the installer."
+  }
+
+  log "make/g++ missing — bootstrapping build-essential (mode=$mode)…"
+  local distro
+  distro="$(detect_distro_id)"
+
+  case "$distro" in
+    ubuntu|debian)
+      if [ "$mode" = "root" ]; then
+        apt-get install -y build-essential
+      else
+        warn "this installer needs to install build-essential, which requires sudo."
+        warn "you'll be prompted for your sudo password."
+        sudo apt-get install -y build-essential
+      fi
+      ;;
+    fedora|amzn|rhel|centos|rocky|almalinux|ol)
+      if [ "$mode" = "root" ]; then
+        (command -v dnf >/dev/null 2>&1 && dnf install -y gcc-c++ make) \
+          || yum install -y gcc-c++ make
+      else
+        warn "this installer needs to install build-essential, which requires sudo."
+        warn "you'll be prompted for your sudo password."
+        (command -v dnf >/dev/null 2>&1 && sudo dnf install -y gcc-c++ make) \
+          || sudo yum install -y gcc-c++ make
+      fi
+      ;;
+    "")
+      die "make/g++ missing and /etc/os-release is unreadable.
+          Install build-essential manually (apt-get install -y build-essential
+          on Debian/Ubuntu), then re-run the installer."
+      ;;
+    *)
+      die "make/g++ missing and your distro ('$distro') is not auto-bootstrapped.
+          Install build-essential manually:
+            apt-get install -y build-essential   # Debian/Ubuntu
+            dnf install -y gcc-c++ make           # Fedora/RHEL
+          then re-run the installer."
+      ;;
+  esac
+
+  if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+    die "make/g++ still missing after bootstrap. Install manually."
+  fi
+  ok "build-essential installed (make $(make --version 2>/dev/null | head -n1 | awk '{print $NF}'), g++ $(g++ --version 2>/dev/null | head -n1 | awk '{print $NF}'))."
+}
+
 # Test mode: when sourced by scripts/install.test.mjs with MANTA_INSTALL_TEST_MODE=1,
-# only the bash helpers (log/ok/warn/die + bootstrap_node + its distro-specific
-# installers + require_cmd) are loaded. The actual install does NOT run. Lets the
-# unit tests exercise bootstrap_node / install_node_via_* without hitting the
-# network. See scripts/install.test.mjs "bootstrap_node" cases.
+# only the bash helpers (log/ok/warn/die + bootstrap_node + bootstrap_build_essential
+# + their distro-specific installers + require_cmd) are loaded. The actual install
+# does NOT run. Lets the unit tests exercise the bootstrap paths without hitting the
+# network. See scripts/install.test.mjs "bootstrap_*" cases.
 if [ "${MANTA_INSTALL_TEST_MODE:-0}" = "1" ]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -214,8 +279,8 @@ fi
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# 1. Prerequisites — bootstrap node, then verify the rest; report-and-instruct
-#    if missing (never silent sudo).
+# 1. Prerequisites — bootstrap node + build-essential, then verify the rest;
+#    report-and-instruct if missing (never silent sudo).
 # ---------------------------------------------------------------------------
 require_cmd() {
   local cmd="$1" hint="$2"
@@ -241,6 +306,11 @@ require_cmd tmux "apt-get install -y tmux"
 # instead of a confusing crash later in the script.
 require_cmd node "install Node.js LTS: https://nodejs.org  (nvm: 'nvm install --lts')"
 require_cmd npm  "ships with Node.js — reinstall Node if npm is missing"
+
+# Bootstrap build-essential (make + g++) for node-pty's native binding compile.
+# Same idempotent pattern as bootstrap_node. Done BEFORE npm ci so the node-pty
+# postinstall script can find a C++ toolchain.
+bootstrap_build_essential
 
 # Node 20+ required (matches the desktop app / server runtime).
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
@@ -303,6 +373,13 @@ LIB="$MANTA_HOME/scripts/install-lib.mjs"
 # MANTA_HEALTH_URL, …). Version comes from package.json when unset.
 pkg_version="$(node -p 'require("./package.json").version' 2>/dev/null || echo "$MANTA_VERSION")"
 eval "$(MANTA_HOME="$MANTA_HOME" node "$LIB" print-config --version "$pkg_version")"
+# Export the values the install body passes into the node subprocess via
+# process.env (waitForHealth / waitForRelay). Pre-BET-170 the script used
+# `process.env.MANTA_HEALTH_URL` without ever exporting it, so the value
+# silently fell through to undefined → "waitForHealth: url required".
+# Exporting here is a single-line fix; the lib still emits KEY=VALUE for
+# the shell-side uses (e.g. the heredoc).
+export MANTA_HOME MANTA_AUTH_DIR MANTA_AUTH_FILE MANTA_TARBALL_URL MANTA_PORT MANTA_HEALTH_URL
 
 # ---------------------------------------------------------------------------
 # 4. Idempotency: report whether we're preserving an existing box identity.
@@ -332,6 +409,13 @@ ok "Dependencies installed."
 #    except for version upgrades; every step is safe to run twice.
 # ---------------------------------------------------------------------------
 
+# UNIT_DIR is referenced by step 6E (opencode-serve) AND step 7
+# (manta-server) below; define it once, up front. (Pre-BET-170 this
+# was only referenced in step 7; the opencode-serve addition in
+# commit 6d6a0d4 silently relied on bash's lack of strict unset-var
+# checking until `set -u` was added.)
+UNIT_DIR="$HOME/.config/systemd/user"
+
 # --- A. tmux presence gate (hard requirement of the product). -------------
 # §1 already verified tmux exists; we re-state it here as a section-level
 # gate so a missing-tmux failure surfaces in the chat stack section, not
@@ -354,14 +438,29 @@ if [ -n "$OPENCODE_BIN" ]; then
   ok "opencode already installed ($("$OPENCODE_BIN" --version 2>/dev/null | head -n1 || echo "$OPENCODE_BIN"))."
 else
   log "Installing opencode (official installer)…"
-  # The installer writes to ~/.local/bin/opencode by default; that dir is on
-  # PATH for most distros but not all. We source the installer's PATH hint
-  # if it added anything, then re-check.
+  # The installer writes to ~/.opencode/bin/opencode (per the installer's
+  # current shape) and appends `export PATH=...` to ~/.bashrc. Bash
+  # non-interactive shells (which is how install.sh runs) don't source
+  # .bashrc, so the binary isn't on PATH in the current shell — we add
+  # it explicitly. The fallback covers the documented path; if the
+  # installer shape changes, the test bootstrap_node path covers it.
   curl -fsSL https://opencode.ai/install | bash \
     || die "opencode install failed — install manually: https://opencode.ai"
+  # Refresh PATH from .bashrc if the installer wrote there, then also
+  # probe the well-known install location as a safety net.
+  if [ -f "$HOME/.bashrc" ]; then
+    # shellcheck disable=SC1090
+    set +e
+    # shellcheck disable=SC1090
+    . "$HOME/.bashrc" 2>/dev/null || true
+    set -e
+  fi
+  if [ -x "$HOME/.opencode/bin/opencode" ]; then
+    export PATH="$HOME/.opencode/bin:$PATH"
+  fi
   OPENCODE_BIN="$(command -v opencode || true)"
   if [ -z "$OPENCODE_BIN" ]; then
-    die "opencode still not on PATH after install. Try: export PATH=\"\$HOME/.local/bin:\$PATH\" and re-run."
+    die "opencode still not on PATH after install. Try: export PATH=\"\$HOME/.opencode/bin:\$PATH\" and re-run."
   fi
   ok "opencode installed ($("$OPENCODE_BIN" --version 2>/dev/null | head -n1 || echo "$OPENCODE_BIN"))."
 fi
@@ -491,7 +590,6 @@ ok "opencode-serve is healthy."
 # ---------------------------------------------------------------------------
 NODE_BIN="$(command -v node)"
 UNIT_SRC="$MANTA_HOME/scripts/systemd/manta-server.service"
-UNIT_DIR="$HOME/.config/systemd/user"
 [ -f "$UNIT_SRC" ] || die "missing systemd template: $UNIT_SRC"
 
 if command -v systemctl >/dev/null 2>&1; then
