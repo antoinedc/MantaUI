@@ -30,6 +30,12 @@
 #                  install.sh is ALSO content-verified: the served body must
 #                  byte-match the repo's scripts/install.sh (a 200 alone does
 #                  not prove the deploy took — a stale file also 200s).
+#                  The served tarball is ALSO content-verified: download
+#                  manta-<version>.tar.gz, extract, and cmp its
+#                  scripts/install.sh + scripts/install-lib.mjs against the
+#                  repo's copies — a stale tarball also 200s (BET-172), and
+#                  a fresh VPS running the one-liner silently runs the
+#                  stale installer.
 #                  Fail loudly on any non-200 or content mismatch.
 #   6. tag         git tag v<version> && git push origin v<version> (a tag
 #                  means "published and verified").
@@ -168,6 +174,36 @@ if [ "${LOCAL_INSTALL_SHA}" != "${SERVED_INSTALL_SHA}" ]; then
   die "install.sh mismatch: served=${SERVED_INSTALL_SHA} repo=${LOCAL_INSTALL_SHA} — web-root sync did not take"
 fi
 ok "served install.sh matches repo (${LOCAL_INSTALL_SHA})"
+
+# A 200 on the tarball is NOT enough either — a stale tarball also 200s
+# (BET-172: pre-BET-170 tarball kept serving despite subsequent fix landings).
+# Fetch the served tarball and cmp its install.sh + install-lib.mjs against
+# the repo's copies. Drift here means a fresh VPS would run an installer
+# older than the repo it's built from — re-pack with `npm run pack` and
+# re-publish.
+log "Verifying served tarball contains current install.sh + install-lib.mjs…"
+TARBALL_TMP="$(mktemp -t manta-tarball-XXXXXX.tar.gz)"
+trap 'rm -f "${TARBALL_TMP}" "${TARBALL_EXTRACT_DIR:-}"' EXIT
+if ! curl -fsSL -o "${TARBALL_TMP}" "${SITE}/releases/manta-${VERSION}.tar.gz"; then
+  die "could not download served tarball ${SITE}/releases/manta-${VERSION}.tar.gz"
+fi
+TARBALL_EXTRACT_DIR="$(mktemp -d -t manta-tarball-XXXXXX)"
+# pack.mjs builds the tarball with root `manta-<version>/`; extract with
+# --strip-components=1 so install.sh lands at ${TARBALL_EXTRACT_DIR}/install.sh
+# (matches the runtime layout where scripts/install.sh lives under $MANTA_HOME).
+tar -xzf "${TARBALL_TMP}" -C "${TARBALL_EXTRACT_DIR}" --strip-components=1
+# The pure logic install.sh calls lives in scripts/install-lib.mjs.
+for f in scripts/install.sh scripts/install-lib.mjs; do
+  if [ ! -f "${TARBALL_EXTRACT_DIR}/${f}" ]; then
+    die "served tarball is missing ${f} — republish required (tarball contents do not match the release allowlist in pack.mjs)"
+  fi
+  if ! cmp -s "${f}" "${TARBALL_EXTRACT_DIR}/${f}"; then
+    TARBALL_HASH="$(sha256sum "${TARBALL_EXTRACT_DIR}/${f}" | awk '{print $1}')"
+    LOCAL_HASH="$(sha256sum "${f}" | awk '{print $1}')"
+    die "tarball drift: ${f} in served tarball (sha ${TARBALL_HASH}) ≠ repo (sha ${LOCAL_HASH}) — re-run \`npm run pack\` then re-publish"
+  fi
+done
+ok "served tarball contents match repo (install.sh, install-lib.mjs)"
 
 if [ "${#DMGS[@]}" -gt 0 ]; then
   check_200 "${SITE}/downloads/Manta-latest.dmg"
