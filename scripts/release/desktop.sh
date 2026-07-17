@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# desktop.sh — build the Manta UI desktop installers and print the owner's
-# publish checklist.
+# desktop.sh — build the Manta UI desktop installers.
 #
 #   bash scripts/release/desktop.sh [--mac-only|--linux-only]
 #
@@ -9,8 +8,9 @@
 #      `--publish never` tells electron-builder to emit the
 #      `latest-mac.yml` / `latest-linux.yml` files next to the binaries
 #      (electron-updater's "generic" feed) but to NOT upload anything.
-#   2. Print the exact `scp` commands the owner runs to publish to the prod
-#      box. Nothing is uploaded by this script — the owner decides.
+#   2. Print the exact publish command the owner runs to ship the artifacts
+#      to the prod box. Nothing is uploaded by this script — see
+#      `scripts/release/publish.sh` for the single source of upload truth.
 #
 # Where the owner sends artifacts (per BET-154):
 #   - /var/www/mantaui/updates/  — full output dir, includes the latest-*.yml
@@ -103,7 +103,6 @@ if [ -z "${LATEST_APPIMAGE}" ] && [ "${BUILD_LINUX}" -eq 1 ]; then
   exit 1
 fi
 
-ALL_ARTIFACTS=( "${DMGS[@]}" "${APPIMAGES[@]}" )
 FEEDS=()
 [ -f "${OUTPUT_DIR}/latest-mac.yml" ]   && FEEDS+=( "${OUTPUT_DIR}/latest-mac.yml" )
 [ -f "${OUTPUT_DIR}/latest-linux.yml" ] && FEEDS+=( "${OUTPUT_DIR}/latest-linux.yml" )
@@ -113,36 +112,14 @@ cat <<EOF
 
 ✓ Build complete. Artifacts in ${OUTPUT_DIR}/.
 
-Owner publishes by hand (NOT done by this script):
+To publish, run:
 
-  # 1. Send binaries + feed yml to /var/www/mantaui/updates/ (the
-  #    electron-updater "generic" feed root).
-  scp ${ALL_ARTIFACTS[*]} ${FEEDS[*]} \\
-      ${PROD_HOST}:/var/www/mantaui/updates/
+  bash scripts/release/publish.sh
 
-  # 2. Send the human-facing binaries to /var/www/mantaui/downloads/.
-  scp ${ALL_ARTIFACTS[*]} \\
-      ${PROD_HOST}:/var/www/mantaui/downloads/
-
-  # 3. Refresh the stable copies the website's "Download" buttons link to.
-EOF
-if [ -n "${LATEST_DMG}" ]; then
-  cat <<EOF
-  ssh ${PROD_HOST} 'cd /var/www/mantaui/downloads \\
-      && cp "${LATEST_DMG}" Manta-latest.dmg'
-EOF
-fi
-if [ -n "${LATEST_APPIMAGE}" ]; then
-  cat <<EOF
-  ssh ${PROD_HOST} 'cd /var/www/mantaui/downloads \\
-      && cp "${LATEST_APPIMAGE}" Manta-latest.AppImage'
-EOF
-fi
-cat <<EOF
-
-  # 4. Verify (must 200 + version match package.json):
-  #    curl -sI https://mantaui.com/downloads/Manta-latest.dmg
-  #    curl -s  https://mantaui.com/updates/latest-mac.yml
+(That script uploads the tarball + desktop binaries, deploys the relay, and
+verifies every URL. It picks up the latest dmg/AppImage from ${OUTPUT_DIR}/ —
+this script's only job was to BUILD them. Re-run \`publish.sh\` from any host
+that has the artifacts; pass MANTA_PROD_HOST=... for a non-prod target.)
 
 Latest dmg       : ${LATEST_DMG:-"(none — mac skipped)"}
 Latest AppImage  : ${LATEST_APPIMAGE:-"(none — linux skipped)"}

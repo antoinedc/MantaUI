@@ -209,25 +209,29 @@ session by POST). Install/update = copy to `~/.config/opencode/tools/`
 
 ## Releases (maintainer runbook)
 
+In order. No decisions, no extra steps:
+
 1. Bump `package.json` version.
-2. `npm run pack` → `dist/manta-<version>.tar.gz`; upload to the release
-   host: `/var/www/mantaui/releases/manta-<version>.tar.gz` (+ copy to
-   `manta-latest.tar.gz`).
-3. Desktop: `bash scripts/release/desktop.sh` → `.dmg` / `.AppImage` in
-   `dist/desktop/` (signing via `CSC_LINK`/`CSC_KEY_PASSWORD` env; unsigned
-   in beta). The script prints the exact `scp` commands to publish to the
-   prod box — `/var/www/mantaui/updates/` (electron-updater "generic"
-   feed) and `/var/www/mantaui/downloads/` (human-facing binaries,
-   including the `Manta-latest.{dmg,AppImage}` copies the website links
-   to). Auto-update is wired via `electron-builder.yml` → `publish:
-   { provider: generic, url: https://mantaui.com/updates }`;
-   electron-updater reads the URL from `app-update.yml` baked at build
-   time, no code override needed.
-4. Sync `scripts/install.sh` to the site root if it changed.
-5. Verify: `curl -sI https://mantaui.com/install.sh` and the tarball URL,
-   plus `curl -sI https://mantaui.com/downloads/Manta-latest.dmg` and
-   `curl -s https://mantaui.com/updates/latest-mac.yml` (version must
-   match `package.json`).
+2. `npm run pack` — produces `dist/manta-<version>.tar.gz`.
+3. (Mac only, on a Mac) `bash scripts/release/desktop.sh` — produces
+   `dist/desktop/*.dmg` and the `latest-*.yml` updater feeds. Linux
+   builds run on any host.
+4. `bash scripts/release/publish.sh` — uploads the tarball + desktop
+   artifacts, deploys the relay, HEAD-checks every URL, tags
+   `v<version>`. Idempotent: re-publishing the same version is a safe
+   no-op. Override the target with `MANTA_PROD_HOST=...` for staging.
+
+Done.
+
+**Rollback:** point `manta-latest.tar.gz` at the previous tarball on the
+prod box and roll the relay back:
+
+```
+ssh $MANTA_PROD_HOST 'cd /var/www/mantaui/releases \\
+    && cp -f manta-<prev-version>.tar.gz manta-latest.tar.gz \\
+    && git -C /opt/manta checkout v<prev-version> \\
+    && systemctl restart manta-relay'
+```
 
 ## Production infra (ours)
 
