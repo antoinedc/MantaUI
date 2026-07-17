@@ -762,29 +762,30 @@ export function bridgeDevicePty({ ws, boxId, subpath, boxLeg, warn = console.war
   // Binary frames are unexpected on the wire (the device contract is text
   // JSON control strings — see BET-158 design) but we forward them as base64
   // STREAM_DATA so a future protocol upgrade doesn't drop bytes.
+  //
+  // BET-158 reviewer fix: route every outbound DATA through
+  // streamHandle.send(), which stamps the frame's `id` field with the
+  // numeric requestId. The previous ad-hoc helper (sendStreamData) used
+  // streamId as both `id` and `stream` — when streamId === "pty" (the BET-158
+  // string discriminator), the protocol validator rejects the frame's
+  // non-integer id and the frame is silently dropped. Going through send()
+  // is the only safe way to ship frames on a discriminator-keyed stream.
   ws.on("message", (raw, isBinary) => {
     if (boxClosed) return;
-    const frame = streamHandle;
-    if (!frame) return;
-    const boxLeg_ = boxLeg;
+    if (!streamHandle || typeof streamHandle.send !== "function") return;
     try {
       if (isBinary) {
         // base64-encode and forward with enc:"b64" — matches the box-side
         // direction convention so the box agent decodes uniformly.
         const b64 = Buffer.isBuffer(raw) ? raw.toString("base64") : Buffer.from(raw).toString("base64");
-        // streamRequest doesn't expose a send() for outbound DATA; we use
-        // the box leg's underlying transport via a dedicated path. For now
-        // we rely on the relay's existing per-transport stream registry to
-        // deliver outbound DATA via the matching inbound consumer (see the
-        // agent's handleStreamOpen consumer registered for stream:"pty").
-        //
-        // The simpler route is to use the box leg's transport directly to
-        // send a STREAM_DATA frame. This is exposed below as a small helper
-        // on the box leg (routing-table lookup + frame send).
-        sendStreamData(boxLeg_, boxId, frame.streamId, b64, "b64");
+        if (!streamHandle.send(b64, { enc: "b64" })) {
+          closeBoth("send dropped");
+        }
       } else {
         const text = typeof raw === "string" ? raw : Buffer.from(raw).toString("utf8");
-        sendStreamData(boxLeg_, boxId, frame.streamId, text, "utf8");
+        if (!streamHandle.send(text)) {
+          closeBoth("send dropped");
+        }
       }
     } catch (err) {
       warn(`[relay-pty] device→box send failed: ${String(err?.message || err)}`);
@@ -802,25 +803,6 @@ export function bridgeDevicePty({ ws, boxId, subpath, boxLeg, warn = console.war
   ws.on("error", () => {
     // ws fires 'error' then 'close'; cleanup runs in close.
   });
-}
-
-// Send a STREAM_DATA frame to the box's transport for the given stream id.
-// Looked up via the box leg's routing table; uses the same frame shape the
-// agent's STREAM_OPEN consumer expects (enc:"b64" for binary payloads, no
-// enc / utf8 for text). Falls through to a no-op if the transport has gone
-// away (the box's close handler aborts the consumer).
-function sendStreamData(boxLeg, boxId, streamId, data, enc) {
-  if (!boxLeg || typeof boxLeg.routing?.send !== "function") return;
-  const transport = boxLeg.routing.lookup(boxId);
-  if (!transport) return;
-  const frame = {
-    type: "stream-data",
-    id: streamId,
-    stream: streamId,
-    data,
-  };
-  if (enc === "b64") frame.enc = "b64";
-  transport.send(frame);
 }
 
 // ---------------------------------------------------------------------------

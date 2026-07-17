@@ -719,6 +719,133 @@ test("upgrade routing: /box/<id>/pty with valid auth + subscription → bridge t
   deviceWs.terminate();
 });
 
+test("bridge: device WS message → STREAM_DATA with numeric id lands on the box leg (regression)", async (t) => {
+  // BET-158 reviewer fix: the previous implementation built STREAM_DATA
+  // with `id: streamId` where streamId === "pty" (the string discriminator).
+  // Protocol's id validator rejects non-integer ids, the frame was silently
+  // dropped by wsTransport's onError hook, and the device→box direction
+  // was read-only. This test sends a real device message and asserts the
+  // box leg sees STREAM_DATA with a numeric id (the stream's requestId)
+  // — the only thing that proves the wire path is fixed.
+  const { svc, store, wsBase } = await makeService(t);
+  store.upsertBox(BOX_A);
+  store.bindBox(BOX_A, ACCT_1);
+  bindReceipt(store, {
+    boxId: BOX_A,
+    transaction: {
+      originalTransactionId: "test-1",
+      productId: "sub.monthly",
+      expiresAt: null,
+    },
+    raw: "jws",
+  }, { now: () => Date.now() });
+
+  const boxWs = new WebSocket(`${wsBase}/box?box_id=${BOX_A}&token=${TOKEN_A}`);
+  await once(boxWs, "open");
+  await waitFor(() => svc.boxLeg.routing.has(BOX_A));
+
+  // Track every frame the box leg sees; answer STREAM_OPEN request forms
+  // with the response form so the bridge's onHead fires, but DO NOT send
+  // STREAM_END — we want the stream to stay open so device messages flow.
+  const sentFrames = [];
+  boxWs.on("message", (data) => {
+    const f = decodeFrame(data);
+    if (f) sentFrames.push(f);
+    if (f?.type === FRAME_TYPES.STREAM_OPEN && f.stream) {
+      boxWs.send(encodeFrame({
+        type: FRAME_TYPES.STREAM_OPEN,
+        id: f.id,
+        stream: f.stream,
+        status: 101,
+        headers: {},
+      }));
+    }
+  });
+
+  const deviceWs = new WebSocket(
+    `${wsBase}/box/${BOX_A}/pty?session=abc&token=${ACCT_1}`,
+  );
+  await once(deviceWs, "open");
+  // Wait for the relay to confirm the open (response-form STREAM_OPEN
+  // echoed back from the box leg → bridge's onHead → bridge sets up the
+  // stream consumer). The frame's `id` must be a finite integer — that's
+  // the requestId the bridge uses for outbound DATA.
+  for (let i = 0; i < 30; i++) {
+    const open = sentFrames.find(
+      (f) => f && f.type === FRAME_TYPES.STREAM_OPEN && f.stream === "pty",
+    );
+    if (open && Number.isInteger(open.id)) break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  // Drive a device WS message — the JSON control string the box /pty
+  // handler expects. The bridge must convert this to STREAM_DATA with a
+  // numeric id (NOT "pty") and forward it down the tunnel.
+  deviceWs.send(JSON.stringify({ type: "data", data: "ls\n" }));
+
+  for (let i = 0; i < 30; i++) {
+    const dataFrame = sentFrames.find(
+      (f) => f && f.type === FRAME_TYPES.STREAM_DATA && f.stream === "pty",
+    );
+    if (dataFrame) {
+      assert.ok(
+        Number.isInteger(dataFrame.id),
+        `STREAM_DATA.id must be a finite integer (regression: the prior
+         implementation used streamId === "pty" — a string — and the
+         protocol's id validator silently dropped the frame). Got id=${JSON.stringify(dataFrame.id)}`,
+      );
+      assert.equal(dataFrame.stream, "pty", "stream discriminator preserved");
+      // The bridge forwards the device's text frame verbatim — the box
+      // agent's handleStreamOpenPty consumer parses the JSON and routes
+      // to pty.write. The relay stays transport-agnostic, so the raw JSON
+      // text rides through as-is.
+      assert.equal(
+        dataFrame.data,
+        JSON.stringify({ type: "data", data: "ls\n" }),
+        "utf8 passthrough: device text frame forwarded verbatim",
+      );
+      assert.equal(dataFrame.enc, undefined, "utf8 default: no enc field");
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const dataFrame = sentFrames.find(
+    (f) => f && f.type === FRAME_TYPES.STREAM_DATA && f.stream === "pty",
+  );
+  assert.ok(dataFrame, "STREAM_DATA reached the box leg end-to-end");
+
+  // Also exercise the binary direction: a binary WS frame is base64-encoded
+  // and forwarded with enc:"b64". This is the box→relay direction's mirror
+  // for raw terminal bytes (devices shouldn't send binary frames in v1, but
+  // the bridge must not silently drop them either).
+  const rawBytes = Buffer.from([0x1b, 0x5b, 0x32, 0x4a, 0x00, 0x01, 0xff]);
+  deviceWs.send(rawBytes, { binary: true });
+
+  for (let i = 0; i < 30; i++) {
+    const binaryFrame = sentFrames.filter(
+      (f) => f && f.type === FRAME_TYPES.STREAM_DATA && f.stream === "pty",
+    )[1];
+    if (binaryFrame) {
+      assert.ok(
+        Number.isInteger(binaryFrame.id),
+        `binary STREAM_DATA.id must also be numeric (same regression guard)`,
+      );
+      assert.equal(binaryFrame.enc, "b64", "binary frames carry enc:'b64'");
+      assert.equal(
+        Buffer.from(binaryFrame.data, "base64").compare(rawBytes),
+        0,
+        "binary payload base64 round-trips byte-for-byte",
+      );
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  // Tear down cleanly.
+  deviceWs.close();
+  boxWs.close();
+});
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------

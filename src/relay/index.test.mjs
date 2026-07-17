@@ -393,6 +393,120 @@ test("streamRequest: no live tunnel → onAbort fires synchronously, no wire act
   });
   assert.equal(abortCalled, "no_tunnel", "synchronous onAbort('no_tunnel')");
   assert.equal(handle.streamId, -1, "no stream id assigned");
+  assert.equal(handle.send("x"), false, "send() on a no-tunnel handle is a no-op false");
+});
+
+test("streamRequest: send() stamps the frame's id with the numeric requestId (BET-158)", async (t) => {
+  // Regression guard for the BET-158 reviewer-found bug: the prior
+  // implementation forwarded device messages as STREAM_DATA with
+  // id=streamId where streamId === "pty" (string discriminator). The
+  // protocol validator rejects non-integer ids, the frame was silently
+  // dropped, and terminals were read-only. streamRequest.send() now uses
+  // the numeric requestId so this stays broken no matter which stream id
+  // the caller picks (numeric or "pty" string discriminator).
+  const { relay, url } = await makeRelay(t);
+  const ws = connectBox(url, { boxId: BOX_A, token: TOKEN_A });
+  await once(ws, "open");
+  await waitFor(() => relay.routing.has(BOX_A));
+
+  const sent = [];
+  ws.on("message", (data) => {
+    const f = decodeFrame(data);
+    if (f) sent.push(f);
+  });
+
+  // Open a pty stream (string discriminator). The relay's STREAM_OPEN
+  // request form carries the numeric requestId as its `id` (already the
+  // case) AND the string "pty" as its `stream` (also already the case).
+  const handle = relay.streamRequest(
+    BOX_A,
+    { method: "GET", path: "/pty?session=abc" },
+    {
+      onAbort() {},
+      onHead() {},
+      onData() {},
+      onEnd() {},
+    },
+    { streamId: "pty" },
+  );
+  assert.equal(handle.streamId, "pty", "stream id stays the discriminator");
+  assert.ok(
+    Number.isInteger(handle.requestId),
+    "requestId is numeric — frame id validator requires an integer",
+  );
+
+  // Wait for the STREAM_OPEN to land on the box leg.
+  let streamOpen = null;
+  for (let i = 0; i < 30; i++) {
+    streamOpen = sent.find(
+      (f) => f && f.type === FRAME_TYPES.STREAM_OPEN && f.stream === "pty",
+    );
+    if (streamOpen) break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.ok(streamOpen, "STREAM_OPEN stream='pty' went down the tunnel");
+  assert.ok(
+    Number.isInteger(streamOpen.id),
+    "STREAM_OPEN.id is numeric even with stream='pty' (string discriminator)",
+  );
+  assert.equal(streamOpen.id, handle.requestId, "STREAM_OPEN.id === requestId");
+
+  // Send STREAM_DATA via the handle. The relay stamps id=requestId, NOT
+  // streamId, so the protocol validator accepts the frame regardless of
+  // which stream-id form the caller used.
+  assert.equal(handle.send("ls\n"), true, "send() returns true on a live tunnel");
+
+  for (let i = 0; i < 30; i++) {
+    const dataFrame = sent.find(
+      (f) => f && f.type === FRAME_TYPES.STREAM_DATA && f.stream === "pty",
+    );
+    if (dataFrame) {
+      assert.equal(
+        dataFrame.id,
+        handle.requestId,
+        "STREAM_DATA.id stamped with numeric requestId (NOT streamId='pty')",
+      );
+      assert.equal(dataFrame.data, "ls\n");
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  // Send with enc:'b64' (binary path).
+  const rawBytes = Buffer.from([0x1b, 0x5b, 0x32, 0x4a]);
+  assert.equal(handle.send(rawBytes.toString("base64"), { enc: "b64" }), true);
+  for (let i = 0; i < 30; i++) {
+    const all = sent.filter(
+      (f) => f && f.type === FRAME_TYPES.STREAM_DATA && f.stream === "pty",
+    );
+    if (all.length >= 2) {
+      const b64Frame = all[all.length - 1];
+      assert.equal(b64Frame.enc, "b64", "binary frames carry enc:'b64'");
+      assert.equal(
+        Buffer.from(b64Frame.data, "base64").compare(rawBytes),
+        0,
+        "binary payload byte-for-byte",
+      );
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+
+  ws.close();
+});
+
+test("streamRequest: send() returns false on a closed stream / gone transport", async (t) => {
+  // No-op handle shape: streamRequest without a tunnel returns a
+  // no-op handle whose send() is a silent false — a caller can poll
+  // without try/catching.
+  const { relay, url: _ } = await makeRelay(t);
+  let abortCalled = null;
+  const handle = relay.streamRequest(BOX_A, { method: "GET", path: "/x" }, {
+    onAbort: (r) => { abortCalled = r; },
+    onHead() {}, onData() {}, onEnd() {},
+  });
+  assert.equal(handle.send("x"), false);
+  assert.equal(handle.send("x", { enc: "b64" }), false);
+  assert.equal(abortCalled, "no_tunnel");
 });
 
 // ---------------------------------------------------------------------------
