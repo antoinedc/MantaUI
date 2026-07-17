@@ -20,15 +20,202 @@
 # lives in scripts/install-lib.mjs and is unit-tested (scripts/install.test.mjs).
 # This shell stays a thin orchestrator.
 
-set -euo pipefail
-
+# === Always-defined helpers (test-safe: defined even in test mode) ===========
+# These are defined BEFORE the test-mode guard and the install body so the unit
+# tests in scripts/install.test.mjs can source this script and call bootstrap_node
+# / install_node_via_* / require_cmd without the install body running.
 log()  { printf '\033[36m▸\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 1. Prerequisites — verify; report-and-instruct if missing (never silent sudo).
+# Prerequisite bootstrap (BET-162 F1 fix) — installs Node.js when missing.
+# Mirrors the "report-and-instruct, never silent sudo" tone of require_cmd,
+# but actually performs the install when missing. Idempotent: re-running with
+# node already on PATH is a no-op (no apt/dnf/yum call, no curl).
+# ---------------------------------------------------------------------------
+
+# Detect distro ID from /etc/os-release. Echoes the ID (without quotes), or
+# empty string if unreadable. Pure: uses a subshell so /etc/os-release's vars
+# do NOT leak into the caller's environment.
+detect_distro_id() {
+  ( . /etc/os-release 2>/dev/null && printf '%s' "${ID:-}" ) || true
+}
+
+# Returns "root" / "sudo" via stdout; returns 1 if neither is available.
+# Tests stub install_node_via_* directly so they don't exercise this, but it's
+# kept simple + side-effect-free for symmetry.
+package_install_mode() {
+  if [ "$(id -u)" -eq 0 ]; then
+    printf 'root'
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    printf 'sudo'
+    return 0
+  fi
+  return 1
+}
+
+# Install nodejs via apt + NodeSource 20.x repo (Debian/Ubuntu). Exposed so
+# scripts/install.test.mjs can stub it with a mock and verify the call site
+# without hitting the network.
+install_node_via_apt() {
+  local mode
+  mode="$(package_install_mode)" || {
+    die "node is missing and neither root nor sudo is available.
+        Install Node.js 20+ manually: https://nodejs.org  (nvm: 'nvm install --lts')
+        then re-run the installer."
+  }
+  local ns_script="/tmp/manta-nodesource-setup_20.x.sh"
+  log "Downloading NodeSource 20.x setup script…"
+  curl -fsSL https://deb.nodesource.com/setup_20.x -o "$ns_script" \
+    || { warn "failed to download NodeSource setup script"; return 1; }
+  log "Adding NodeSource 20.x apt repository (mode=$mode)…"
+  if [ "$mode" = "root" ]; then
+    bash "$ns_script" && apt-get install -y nodejs
+  else
+    warn "this installer needs to install Node.js, which requires sudo."
+    warn "you'll be prompted for your sudo password."
+    sudo bash "$ns_script" && sudo apt-get install -y nodejs
+  fi
+  local rc=$?
+  rm -f "$ns_script"
+  return $rc
+}
+
+# Install nodejs via dnf + NodeSource 20.x (Fedora / Amazon Linux / RHEL 8+).
+install_node_via_dnf() {
+  local mode
+  mode="$(package_install_mode)" || {
+    die "node is missing and neither root nor sudo is available.
+        Install Node.js 20+ manually: https://nodejs.org  (nvm: 'nvm install --lts')
+        then re-run the installer."
+  }
+  local ns_script="/tmp/manta-nodesource-setup_20.x.sh"
+  log "Downloading NodeSource 20.x setup script…"
+  curl -fsSL https://rpm.nodesource.com/setup_20.x -o "$ns_script" \
+    || { warn "failed to download NodeSource setup script"; return 1; }
+  log "Adding NodeSource 20.x dnf repository (mode=$mode)…"
+  if [ "$mode" = "root" ]; then
+    bash "$ns_script" && dnf install -y nodejs
+  else
+    warn "this installer needs to install Node.js, which requires sudo."
+    warn "you'll be prompted for your sudo password."
+    sudo bash "$ns_script" && sudo dnf install -y nodejs
+  fi
+  local rc=$?
+  rm -f "$ns_script"
+  return $rc
+}
+
+# Install nodejs via yum + NodeSource 20.x (older RHEL/CentOS where dnf is absent).
+install_node_via_yum() {
+  local mode
+  mode="$(package_install_mode)" || {
+    die "node is missing and neither root nor sudo is available.
+        Install Node.js 20+ manually: https://nodejs.org  (nvm: 'nvm install --lts')
+        then re-run the installer."
+  }
+  local ns_script="/tmp/manta-nodesource-setup_20.x.sh"
+  log "Downloading NodeSource 20.x setup script…"
+  curl -fsSL https://rpm.nodesource.com/setup_20.x -o "$ns_script" \
+    || { warn "failed to download NodeSource setup script"; return 1; }
+  log "Adding NodeSource 20.x yum repository (mode=$mode)…"
+  if [ "$mode" = "root" ]; then
+    bash "$ns_script" && yum install -y nodejs
+  else
+    warn "this installer needs to install Node.js, which requires sudo."
+    warn "you'll be prompted for your sudo password."
+    sudo bash "$ns_script" && sudo yum install -y nodejs
+  fi
+  local rc=$?
+  rm -f "$ns_script"
+  return $rc
+}
+
+# Top-level: ensure node is on PATH. Idempotent — early-returns when already
+# present (no curl / apt / dnf / yum call). Distro-specific installer is
+# selected by detect_distro_id; unknown distros die with a manual-install
+# hint (same tone as require_cmd failures).
+bootstrap_node() {
+  if command -v node >/dev/null 2>&1; then
+    return 0  # no-op when node is already on PATH (the common idempotent path)
+  fi
+
+  # The bootstrap path itself needs curl + tar to download the NodeSource
+  # setup script. If those are also missing, we can't auto-fix — bail with a
+  # clear manual-install hint (same tone as the require_cmd failures).
+  local missing=""
+  for cmd in curl tar; do
+    command -v "$cmd" >/dev/null 2>&1 || missing="$missing $cmd"
+  done
+  if [ -n "$missing" ]; then
+    die "node is missing and so are:$missing.
+        Install Node.js 20+ and the missing tools manually, then re-run:
+          apt-get install -y curl tar nodejs   # Debian/Ubuntu
+          dnf install -y curl tar nodejs       # Fedora
+          yum install -y curl tar nodejs       # RHEL/CentOS
+        or use the installer from https://nodejs.org."
+  fi
+
+  log "node is missing — bootstrapping Node.js 20.x via NodeSource."
+  local distro
+  distro="$(detect_distro_id)"
+
+  case "$distro" in
+    ubuntu|debian)
+      install_node_via_apt \
+        || die "Node.js install via apt failed.
+            Install manually: https://nodejs.org  (nvm: 'nvm install --lts')
+            then re-run the installer."
+      ;;
+    fedora|amzn)
+      install_node_via_dnf \
+        || die "Node.js install via dnf failed.
+            Install manually: https://nodejs.org  (nvm: 'nvm install --lts')
+            then re-run the installer."
+      ;;
+    rhel|centos|rocky|almalinux|ol)
+      install_node_via_dnf \
+        || install_node_via_yum \
+        || die "Node.js install via dnf/yum failed.
+            Install manually: https://nodejs.org  (nvm: 'nvm install --lts')
+            then re-run the installer."
+      ;;
+    "")
+      die "node is missing and /etc/os-release is unreadable.
+          Install Node.js 20+ manually: https://nodejs.org  (nvm: 'nvm install --lts')
+          then re-run the installer."
+      ;;
+    *)
+      die "node is missing and your distro ('$distro') is not auto-bootstrapped.
+          Install Node.js 20+ manually: https://nodejs.org  (nvm: 'nvm install --lts')
+          then re-run the installer."
+      ;;
+  esac
+
+  if ! command -v node >/dev/null 2>&1; then
+    die "node is still missing after bootstrap. Install manually: https://nodejs.org"
+  fi
+  ok "node $(node --version 2>/dev/null || echo unknown) installed via NodeSource."
+}
+
+# Test mode: when sourced by scripts/install.test.mjs with MANTA_INSTALL_TEST_MODE=1,
+# only the bash helpers (log/ok/warn/die + bootstrap_node + its distro-specific
+# installers + require_cmd) are loaded. The actual install does NOT run. Lets the
+# unit tests exercise bootstrap_node / install_node_via_* without hitting the
+# network. See scripts/install.test.mjs "bootstrap_node" cases.
+if [ "${MANTA_INSTALL_TEST_MODE:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# 1. Prerequisites — bootstrap node, then verify the rest; report-and-instruct
+#    if missing (never silent sudo).
 # ---------------------------------------------------------------------------
 require_cmd() {
   local cmd="$1" hint="$2"
@@ -39,13 +226,21 @@ require_cmd() {
   fi
 }
 
-log "Checking prerequisites (node, npm, git, tmux, curl, tar)…"
+# Bootstrap node FIRST (idempotent no-op when already present). Doing this
+# before the prereq verify means a fresh cloud image with curl+tar but no
+# node still completes the install end-to-end.
+bootstrap_node
+
+log "Checking prerequisites (curl, tar, git, tmux, node, npm)…"
 require_cmd curl "apt-get install -y curl   # or your distro's package manager"
 require_cmd tar  "apt-get install -y tar"
-require_cmd node "install Node.js LTS: https://nodejs.org  (nvm: 'nvm install --lts')"
-require_cmd npm  "ships with Node.js — reinstall Node if npm is missing"
 require_cmd git  "apt-get install -y git"
 require_cmd tmux "apt-get install -y tmux"
+# Defense-in-depth: bootstrap_node guarantees node on PATH, but require it
+# again so a failure in the bootstrap path still produces a clean error
+# instead of a confusing crash later in the script.
+require_cmd node "install Node.js LTS: https://nodejs.org  (nvm: 'nvm install --lts')"
+require_cmd npm  "ships with Node.js — reinstall Node if npm is missing"
 
 # Node 20+ required (matches the desktop app / server runtime).
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
