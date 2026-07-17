@@ -869,3 +869,27 @@ they land to close the loop.
 
 Filed as BET-172 (F2), BET-173 (F3), BET-174 (F4) sub-issues under
 BET-160 §2.
+
+## Addendum — F2 / F3 already addressed in flight (F4 still open)
+
+While this re-run was happening, a parallel BET-170 follow-up branch
+(`multica/BET-170-installer-installs-node`) was being updated. As of
+`2026-07-17T14:51:00Z` (after this re-run completed) the branch carries:
+
+- `7a9ecee fix(install): live re-run — bootstrap build-essential + fix 3 latent bugs (BET-170)`
+- `6f65714 test(install): exercise bootstrap_build_essential in its no-op test (BET-170)`
+
+These two commits cover **F2 (bootstrap_build_essential before `npm ci`)
+and F3 (`. ~/.bashrc` after the opencode installer so the current shell
+sees the new PATH; error hint also fixed to point at the real install
+path)**. The branch is **NOT YET MERGED to `main`** — `origin/main` HEAD
+is still `0d9e286`, the prod `/opt/manta` checkout is still `dec0768`, and
+the live tarball `https://mantaui.com/releases/manta-latest.tar.gz` is
+still the `Jul 16 16:07:48` one (PRE-BET-170). Until that branch merges
++ `publish.sh` re-runs (operator action), **all three findings (F2, F3,
+F4) remain live blockers** for a fresh Hetzner VPS.
+
+When the follow-up lands AND the tarball is republished, the BET-160 §2
+acceptance criterion is one more live re-run away from passing — at that
+point this whole section becomes "passed on the second attempt, no
+follow-up needed".
