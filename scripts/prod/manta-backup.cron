@@ -9,7 +9,7 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 MANTA_HOME=/opt/manta
-BUI_NOTIFY_URL=
-BUI_NOTIFY_SECRET=
+MANTA_NOTIFY_URL=
+MANTA_NOTIFY_SECRET=
 
 17 3 * * * root /opt/manta/scripts/prod/backup-relay.sh >> /var/log/manta-backup.log 2>&1

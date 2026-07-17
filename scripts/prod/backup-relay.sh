@@ -8,7 +8,7 @@
 # Then scps both artifacts to the dev box under ~/backups/manta-prod/.
 # Retains 7 days of history locally and remotely; older artifacts are pruned.
 #
-# Notify on failure (optional): if BUI_NOTIFY_URL is set (a bui webhook URL
+# Notify on failure (optional): if MANTA_NOTIFY_URL is set (a manta webhook URL
 # with HMAC signing), POST a signed JSON body naming what failed so the
 # maintainer's opencode session can wake and alert. The dev-box watcher
 # (`scripts/prod/healthcheck.mjs` via schedule_create) is the belt-and-
@@ -24,11 +24,11 @@
 #   # Verify the prod box can ssh to the dev box as `dev`:
 #   ssh -o BatchMode=yes dev@157.90.224.92 true || \
 #       ssh-copy-id -i /root/.ssh/id_rsa.pub dev@157.90.224.92
-#   # Set BUI_NOTIFY_URL (optional): the bui webhook URL the maintainer
+#   # Set MANTA_NOTIFY_URL (optional): the manta webhook URL the maintainer
 #   # generated on the dev box and shared out-of-band.
 #
 # Override (env): MANTA_HOME, RELAY_STORE_PATH, BACKUP_DIR, REMOTE_DIR,
-#                 REMOTE_USER, REMOTE_HOST, BUI_NOTIFY_URL, BUI_NOTIFY_SECRET,
+#                 REMOTE_USER, REMOTE_HOST, MANTA_NOTIFY_URL, MANTA_NOTIFY_SECRET,
 #                 KEEP_DAYS.
 
 set -euo pipefail
@@ -49,8 +49,8 @@ REMOTE_HOST="${REMOTE_HOST:-157.90.224.92}"
 REMOTE_DIR="${REMOTE_DIR:-/home/${REMOTE_USER}/backups/manta-prod}"
 
 # Notify (optional). Both must be set to enable POST-on-failure.
-BUI_NOTIFY_URL="${BUI_NOTIFY_URL:-}"
-BUI_NOTIFY_SECRET="${BUI_NOTIFY_SECRET:-}"
+MANTA_NOTIFY_URL="${MANTA_NOTIFY_URL:-}"
+MANTA_NOTIFY_SECRET="${MANTA_NOTIFY_SECRET:-}"
 
 LOG_TAG="manta-backup"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -71,21 +71,21 @@ hmac_sha256_hex() {
   printf '%s' "$2" | openssl dgst -sha256 -hmac "$1" -hex | awk '{print $NF}'
 }
 
-# POST a signed JSON body to BUI_NOTIFY_URL with X-Bui-Signature header.
+# POST a signed JSON body to MANTA_NOTIFY_URL with X-Bui-Signature header.
 # Never echoes the secret; never invokes if URL/secret unset.
 notify_failure() {
   local reason="$*"
-  [ -n "$BUI_NOTIFY_URL" ] && [ -n "$BUI_NOTIFY_SECRET" ] || return 0
+  [ -n "$MANTA_NOTIFY_URL" ] && [ -n "$MANTA_NOTIFY_SECRET" ] || return 0
   local body sig
   body=$(printf '{"source":"backup-relay","ts":"%s","reason":"%s","box":"prod"}' \
     "$TS" "$(printf '%s' "$reason" | sed 's/"/\\"/g; s/\\/\\\\/g')")
-  sig=$(hmac_sha256_hex "$BUI_NOTIFY_SECRET" "$body")
+  sig=$(hmac_sha256_hex "$MANTA_NOTIFY_SECRET" "$body")
   # Best-effort: log but do not mask the original failure.
   curl -fsS --max-time 10 -X POST \
     -H "Content-Type: application/json" \
     -H "X-Bui-Signature: sha256=${sig}" \
     --data "$body" \
-    "$BUI_NOTIFY_URL" >/dev/null 2>&1 || warn "notify POST failed (ignoring — original error already logged)"
+    "$MANTA_NOTIFY_URL" >/dev/null 2>&1 || warn "notify POST failed (ignoring — original error already logged)"
 }
 
 require_cmd() {
