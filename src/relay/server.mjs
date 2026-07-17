@@ -43,6 +43,7 @@ import {
   createDefaultPhoneAuth,
   createDefaultSubscriptionCheck,
 } from "./api.mjs";
+import { createBoxMeter } from "./metering.mjs";
 import { createReceiptValidator, bindReceipt } from "./iap.mjs";
 import { createRelayPush } from "./push.mjs";
 import { openStore, hashToken } from "./store.mjs";
@@ -158,9 +159,16 @@ export function createRelayService(opts = {}) {
 
   // --- Phone-facing API (Stage 4) ------------------------------------------
   // Wire it with the box leg's proxyRequest and the SHARED store + auth + gate.
+  // The per-box meter (BET-157 §1) is the COGS instrument: every phone→box
+  // request the api proxies is gated by the rate cap and counted into
+  // store.getUsage(boxId) — surfaced as bytes_in/bytes_out on boxView. Built
+  // once here so both the buffered proxy branch and the STREAM_DATA pump
+  // (api.mjs) share the same meter instance.
+  const meter = createBoxMeter({ store, now, warn });
   const api = createRelayApi({
     store,
     proxyRequest,
+    meter,
     authenticatePhone,
     hasActiveSubscription,
     now,
@@ -277,6 +285,7 @@ export function createRelayService(opts = {}) {
     boxLeg,
     api,
     push,
+    meter,
     port,
     host,
     start,

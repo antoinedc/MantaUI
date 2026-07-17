@@ -9,6 +9,7 @@ import {
   isStreamingSubpath,
 } from "./api.mjs";
 import { createRelayServer, createDefaultVerifier } from "./index.mjs";
+import { createBoxMeter, FREE_RL_CAPACITY } from "./metering.mjs";
 import { openStore, BOX_STATUS, hashToken } from "./store.mjs";
 import { encodeFrame, decodeFrame, FRAME_TYPES } from "./protocol.mjs";
 
@@ -594,4 +595,228 @@ test("non-SSE proxied paths still use the buffered path (no behavior change)", a
   assert.equal(JSON.parse(resp.body).ok, true);
   await waitFor(() => !streamUsed, { timeoutMs: 1000 });
   assert.equal(streamUsed, false, "/projects did NOT trigger the streaming path");
+});
+
+// ---------------------------------------------------------------------------
+// byte metering (BET-157) — meter wired into the api proxy branch + boxView
+// ---------------------------------------------------------------------------
+
+test("metering: proxied request records ingress+egress bytes for the right box_id", async (t) => {
+  const store = seededStore();
+  t.after(() => store.close());
+  // The proxy path POSTs to /prompt (gated). Bind an active receipt so the
+  // 402 gate doesn't fire before the proxy branch — metering is what we're
+  // testing here.
+  store.upsertReceipt({ originalTransactionId: "t-meter-prompt", boxId: BOX_A, expiresAt: null });
+  const meter = createBoxMeter({ store, warn: silent });
+
+  // The proxyRequest fake reflects the forwarded body back as JSON so the
+  // response body is non-empty — exercising both ingress and egress.
+  const proxyRequest = async (_boxId, fwd) => ({
+    status: 200,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ echo: fwd.body ?? "" }),
+  });
+  const api = createRelayApi({
+    store,
+    proxyRequest,
+    meter,
+    authenticatePhone: makeAuth(),
+    warn: silent,
+  });
+
+  // Pre-flight: BOX_A has no usage row yet.
+  assert.equal(store.getUsage(BOX_A), null);
+
+  // POST a known-size body so ingress is deterministic.
+  const reqBody = '{"hello":"world"}';
+  const resp = await api.route({
+    method: "POST",
+    path: `/box/${BOX_A}/prompt`,
+    headers: { ...bearer(ACCT_1), "content-type": "application/json" },
+    body: reqBody,
+  });
+  assert.equal(resp.status, 200);
+
+  const usage = store.getUsage(BOX_A);
+  assert.ok(usage, "BOX_A has a usage row after one proxied request");
+  // ingress = body bytes (req.body is the JSON above — 17 bytes; headers are
+  // NOT metered per BET-157 §2).
+  assert.equal(usage.ingress, Buffer.byteLength(reqBody), "ingress = body byte length");
+  // egress = body byte length of the buffered response.
+  assert.equal(usage.egress, Buffer.byteLength(resp.body), "egress = response body bytes");
+  assert.equal(usage.egress, Buffer.byteLength('{"echo":"{\\"hello\\":\\"world\\"}"}'));
+
+  // Per-box isolation: BOX_B has no usage (its free bucket is still full).
+  assert.equal(store.getUsage(BOX_B), null, "BOX_B was not proxied through");
+
+  // A second request accumulates (does not overwrite).
+  await api.route({
+    method: "POST",
+    path: `/box/${BOX_A}/prompt`,
+    headers: { ...bearer(ACCT_1), "content-type": "application/json" },
+    body: reqBody,
+  });
+  const after = store.getUsage(BOX_A);
+  assert.equal(after.ingress, usage.ingress * 2, "second request doubles ingress");
+  assert.equal(after.egress, usage.egress * 2, "second request doubles egress");
+});
+
+test("metering: over-cap box → 429 and proxyRequest is NOT called", async (t) => {
+  const store = seededStore();
+  t.after(() => store.close());
+  // Freeze the clock so the token bucket never refills during the burst.
+  const meter = createBoxMeter({ store, now: () => 1000, warn: silent });
+
+  // Drain BOX_A's free bucket — every subsequent allow() returns false.
+  for (let i = 0; i < FREE_RL_CAPACITY + 2; i++) {
+    meter.allow(BOX_A, { paid: false });
+  }
+
+  let proxyCalls = 0;
+  const proxyRequest = async () => {
+    proxyCalls += 1;
+    return {
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ok: true }),
+    };
+  };
+  const api = createRelayApi({
+    store,
+    proxyRequest,
+    meter,
+    authenticatePhone: makeAuth(),
+    warn: silent,
+  });
+
+  // Free (metadata) subpath — same gate as gated, BET-157 §3.
+  const resp = await api.route({
+    method: "GET",
+    path: `/box/${BOX_A}/projects`,
+    headers: bearer(ACCT_1),
+  });
+  assert.equal(resp.status, 429, "over-cap free subpath → 429");
+  assert.equal(proxyCalls, 0, "proxyRequest NOT called for over-cap request");
+  const body = await parseBody(resp);
+  assert.equal(body.error, "quota_exceeded");
+  assert.equal(body.box_id, BOX_A);
+
+  // The rejection must NOT have recorded usage.
+  assert.equal(store.getUsage(BOX_A), null, "rejected requests leave no usage row");
+});
+
+test("metering: boxView exposes bytes_in/bytes_out from the store", async (t) => {
+  const store = seededStore();
+  t.after(() => store.close());
+  const meter = createBoxMeter({ store, warn: silent });
+  meter.record(BOX_A, { ingress: 123, egress: 456 });
+
+  const api = createRelayApi({
+    store,
+    proxyRequest: noProxy,
+    meter,
+    authenticatePhone: makeAuth(),
+    warn: silent,
+  });
+
+  // /api/boxes/:id detail — bytes_* are surfaced from the metering row.
+  const detail = await api.route({
+    method: "GET",
+    path: `/api/boxes/${BOX_A}`,
+    headers: bearer(ACCT_1),
+  });
+  assert.equal(detail.status, 200);
+  const body = await parseBody(detail);
+  assert.equal(body.box.bytes_in, 123);
+  assert.equal(body.box.bytes_out, 456);
+
+  // /api/boxes list — same fields per box (zero when no usage yet).
+  const list = await api.route({
+    method: "GET",
+    path: "/api/boxes",
+    headers: bearer(ACCT_1),
+  });
+  assert.equal(list.status, 200);
+  const lb = await parseBody(list);
+  const a = lb.boxes.find((x) => x.box_id === BOX_A);
+  assert.ok(a, "BOX_A is in the list");
+  assert.equal(a.bytes_in, 123);
+  assert.equal(a.bytes_out, 456);
+
+  // BOX_B was never metered — its boxView shows zeros.
+  const lb2 = await parseBody(
+    await api.route({ method: "GET", path: "/api/boxes", headers: bearer(ACCT_2) }),
+  );
+  const b = lb2.boxes.find((x) => x.box_id === BOX_B);
+  assert.equal(b.bytes_in, 0);
+  assert.equal(b.bytes_out, 0);
+});
+
+test("metering: streamed /events path records ingress once + per-chunk egress (chunk pump)", async (t) => {
+  const store = openStore();
+  store.upsertBox(BOX_A, { status: BOX_STATUS.ONLINE, at: 1 });
+  store.bindBox(BOX_A, ACCT_1, { at: 1 });
+  store.upsertReceipt({ originalTransactionId: "t-meter-stream", boxId: BOX_A, expiresAt: null });
+
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((r) => wss.once("listening", r));
+  const relay = createRelayServer({
+    wss,
+    store,
+    verifyBox: createDefaultVerifier({ store, warn: silent, log: silent }),
+    log: silent,
+    warn: silent,
+  });
+
+  // Fake box serves three SSE chunks.
+  const boxWs = new WebSocket(
+    `ws://127.0.0.1:${wss.address().port}/box?box_id=${BOX_A}&token=${BOX_TOKEN_A}`,
+  );
+  await once(boxWs, "open");
+  const chunks = ["data: a\n\n", "data: bb\n\n", "data: ccc\n\n"];
+  installAutoStreamBox(boxWs, { chunks, status: 200, headers: { "content-type": "text/event-stream" } });
+  await waitFor(() => relay.routing.has(BOX_A));
+
+  t.after(async () => {
+    boxWs.close();
+    await waitFor(() => !relay.routing.has(BOX_A));
+    await relay.close();
+    await new Promise((r) => wss.close(() => r()));
+  });
+
+  const meter = createBoxMeter({ store, warn: silent });
+  const api = createRelayApi({
+    store,
+    proxyRequest: relay.proxyRequest,
+    streamRequest: relay.streamRequest,
+    meter,
+    authenticatePhone: makeAuth(),
+    warn: silent,
+  });
+
+  // Send a request with a known body so ingress is exact (the box ignores the
+  // body but metering still counts it).
+  const reqBody = "hi";
+  const events = [];
+  const resp = await api.route(
+    {
+      method: "GET",
+      path: `/box/${BOX_A}/events`,
+      headers: { ...bearer(ACCT_1), "content-type": "text/plain" },
+      body: reqBody,
+    },
+    (e) => events.push(e),
+  );
+  assert.ok(resp.__stream, "/events returns the __stream sentinel");
+  // Drive the stream — the handler records ingress once at this point.
+  resp.handler();
+  await waitFor(() => events.some((e) => e.kind === "end"), { timeoutMs: 2000 });
+
+  // Verify egress recorded per-chunk: each chunk's bytes show up in store.
+  const expectedEgress = chunks.reduce((n, c) => n + Buffer.byteLength(c), 0);
+  const usage = store.getUsage(BOX_A);
+  assert.ok(usage, "BOX_A has a usage row after streamed request");
+  assert.equal(usage.ingress, Buffer.byteLength(reqBody), "ingress recorded once on stream open");
+  assert.equal(usage.egress, expectedEgress, "egress = sum of chunk byte lengths");
 });
