@@ -872,6 +872,8 @@ BET-160 §2. F2 and F3 are already being addressed in the in-flight
 `multica/BET-170-installer-installs-node` branch (see Addendum below)
 and don't need new BET-160 sub-issues of their own.
 
+  - BET-172: <mention://issue/71a0c8ec-394c-4d1a-8f9e-d479c624a0e1>
+
 ## Addendum — F2 / F3 already addressed in flight (F4 still open)
 
 While this re-run was happening, a parallel BET-170 follow-up branch
