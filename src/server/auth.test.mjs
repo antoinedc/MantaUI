@@ -121,20 +121,21 @@ test("isPublicAssetPath allows the SPA shell + PWA assets", () => {
 });
 
 // ----------------------------------------------------------------------------
-// query-param token fallback — /events ONLY (BET-51; /pty removed in BET-138)
+// query-param token fallback — /events + /pty (BET-51; /pty re-added in BET-158)
 // ----------------------------------------------------------------------------
 
-test("queryTokenAllowedForPath allows ONLY /events", () => {
+test("queryTokenAllowedForPath allows /events AND /pty", () => {
   assert.equal(queryTokenAllowedForPath("/events"), true);
+  // BET-158: /pty is back (binary-safe terminal WS that the relay bridges).
+  assert.equal(queryTokenAllowedForPath("/pty"), true);
   // every other route must present a real Bearer header
-  assert.equal(queryTokenAllowedForPath("/pty"), false);
   assert.equal(queryTokenAllowedForPath("/api/projects"), false);
   assert.equal(queryTokenAllowedForPath("/rpc/tmux"), false);
   assert.equal(queryTokenAllowedForPath("/auth/status"), false);
   assert.equal(queryTokenAllowedForPath("/"), false);
   assert.equal(queryTokenAllowedForPath("/events/../api/projects"), false);
-  // exactly the one path, nothing more
-  assert.deepEqual([...QUERY_TOKEN_PATHS].sort(), ["/events"]);
+  // exactly the two paths, nothing more
+  assert.deepEqual([...QUERY_TOKEN_PATHS].sort(), ["/events", "/pty"]);
 });
 
 test("authorizationForRequest: header always wins on any route", () => {
@@ -147,15 +148,20 @@ test("authorizationForRequest: header always wins on any route", () => {
     authorizationForRequest("/events", `Bearer ${HEX32}`, HEX32B),
     `Bearer ${HEX32}`,
   );
+  assert.equal(
+    authorizationForRequest("/pty", `Bearer ${HEX32}`, HEX32B),
+    `Bearer ${HEX32}`,
+  );
   // whitespace-only header is treated as absent → falls through to query rules
   assert.equal(authorizationForRequest("/events", "   ", HEX32), `Bearer ${HEX32}`);
+  assert.equal(authorizationForRequest("/pty", "   ", HEX32), `Bearer ${HEX32}`);
 });
 
-test("authorizationForRequest: ?token= honored ONLY on /events", () => {
-  // stream path: query token becomes a Bearer value
+test("authorizationForRequest: ?token= honored on /events AND /pty", () => {
+  // stream paths: query token becomes a Bearer value
   assert.equal(authorizationForRequest("/events", "", HEX32), `Bearer ${HEX32}`);
+  assert.equal(authorizationForRequest("/pty", "", HEX32), `Bearer ${HEX32}`);
   // any other route ignores ?token= entirely → empty (gate then 401s)
-  assert.equal(authorizationForRequest("/pty", undefined, HEX32), "");
   assert.equal(authorizationForRequest("/api/projects", "", HEX32), "");
   assert.equal(authorizationForRequest("/rpc/tmux", null, HEX32), "");
   assert.equal(authorizationForRequest("/auth/status", "", HEX32), "");
@@ -173,6 +179,9 @@ test("authorizationForRequest result feeds authorize() end-to-end", () => {
   // valid ?token= on /events → authorized
   const okAuth = authorizationForRequest("/events", "", AUTH.box_token);
   assert.equal(eng.authorize({ method: "GET", path: "/events", authorization: okAuth }).ok, true);
+  // valid ?token= on /pty → authorized (BET-158 — relay → box /pty WS path)
+  const ptyAuth = authorizationForRequest("/pty", "", AUTH.box_token);
+  assert.equal(eng.authorize({ method: "GET", path: "/pty", authorization: ptyAuth }).ok, true);
   // same token as ?token= on a NON-stream route → not applied → 401
   const blockedAuth = authorizationForRequest("/api/projects", "", AUTH.box_token);
   const blocked = eng.authorize({ method: "GET", path: "/api/projects", authorization: blockedAuth });

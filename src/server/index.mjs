@@ -19,6 +19,7 @@ import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
+import { attachPtyWs } from "./ptyWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { startOutboxPoller } from "./outbox.mjs";
@@ -1182,16 +1183,18 @@ const server = createServer(async (req, res) => {
   res.end("not found");
 });
 
-// ---------- WebSocket: /events live stream ----------
+// ---------- WebSocket: /events live stream + /pty terminal bridge ----------
 //
-// URL: /events (optionally ?token=<box_token> for header-less WS clients).
-// SSE alternative for iOS standalone PWAs, which can't reliably receive
-// EventSource. Same bus + envelope as the HTTP /events SSE route.
+// /events — SSE alternative for iOS standalone PWAs, which can't reliably
+// receive EventSource. Same bus + envelope as the HTTP /events SSE route.
 //
-// (BET-138: the /pty WS route this section used to also handle — one raw
-// PTY per connection, attached via tmux attach-session — was removed. The
-// pty:* RPC channels Terminal.tsx uses never rode this WS; they go over the
-// normal Bearer-gated /rpc/* HTTP path, same as every other RPC channel.)
+// /pty (BET-158) — binary-safe terminal WS. Bridges to the ephemeral
+// pty module (src/server/pty.mjs) the same way Terminal.tsx uses pty:* RPC
+// channels, but over a single low-latency WS so the relay can forward raw
+// bytes frame-by-frame through STREAM_* mux frames with enc:"b64". Client→
+// server is JSON control strings (typed messages: data/resize); server→
+// client is raw terminal bytes. The endpoint is gated like the rest of the
+// surface; browsers without an Authorization header use ?token=<box_token>.
 
 const wss = new WebSocketServer({ noServer: true });
 
@@ -1200,10 +1203,11 @@ server.on("upgrade", (req, socket, head) => {
 
   // Auth gate for WS upgrades. Browsers can't set an Authorization header on a
   // WebSocket, so the token also travels as a ?token= query param; non-browser
-  // clients may still use the header. /events is gated. The ?token= fallback
-  // is scoped to /events ONLY by authorizationForRequest (a header always
-  // wins; the query token is honored only on that stream path). Reject with
-  // an HTTP 401 handshake response before the upgrade.
+  // clients may still use the header. /events + /pty are gated. The ?token=
+  // fallback is scoped to those paths ONLY by authorizationForRequest (a
+  // header always wins; the query token is honored only on the allowlisted
+  // stream paths). Reject with an HTTP 401 handshake response before the
+  // upgrade.
   const wsAuth = authEngine.authorize({
     method: "GET",
     path: url.pathname,
@@ -1223,6 +1227,15 @@ server.on("upgrade", (req, socket, head) => {
     // Live event stream over WS (SSE alternative for iOS standalone PWAs,
     // which can't reliably receive EventSource). Same bus + envelope.
     wss.handleUpgrade(req, socket, head, (ws) => attachEventsWs(bus, ws));
+    return;
+  }
+  if (url.pathname === "/pty") {
+    // Binary-safe terminal bridge (BET-158). Driven by the relay's agent
+    // (ws://127.0.0.1:8787/pty?<query>&token=<box_token>) so devices on the
+    // other side of the relay get a single muxed WS to their box. Direct
+    // clients (no relay) can connect here with either a header bearer or
+    // ?token=<box_token>.
+    wss.handleUpgrade(req, socket, head, (ws) => attachPtyWs(ws, url));
     return;
   }
   socket.destroy();

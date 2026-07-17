@@ -156,8 +156,21 @@ export function createDefaultVerifier({ store, warn = console.warn, log = consol
 }
 
 // ---------------------------------------------------------------------------
-// WS → protocol transport adapter
+// noopStreamHandle — return shape for `streamRequest` when the box has no
+// live tunnel (or no inbound-stream registry). The caller treats
+// `streamId === -1` as "didn't open", and `abort`/`send` are no-ops. Kept
+// exported from this module so tests can stub a transport-less call site.
 // ---------------------------------------------------------------------------
+function noopStreamHandle() {
+  return {
+    streamId: -1,
+    requestId: -1,
+    abort() {},
+    send() { return false; },
+  };
+}
+
+
 
 // Adapt a live `ws` WebSocket to the tiny transport contract the Stage-1
 // RoutingTable/PendingRequests/StreamRegistry are written against
@@ -454,16 +467,33 @@ export function createRelayServer(opts = {}) {
    * @param {{method:string,path:string,headers?:object,body?:string}} req
    * @param {{
    *   onHead: ({status:number, headers:object}) => void,
-   *   onData: (text:string) => void,
+   *   onData: (text:string, frame?:object) => void,
    *   onEnd:  () => void,
    *   onAbort: (reason:string) => void,
    * }} callbacks
-   * @returns {{ streamId: number, abort: (reason?:string) => void }}
-   *   The caller keeps `streamId` for logging; `abort()` is the public way to
-   *   cancel the stream (frees the relay-side id, sends STREAM_ABORT to the
-   *   box so the local fetch ends).
+   * @param {object} [opts]
+   * @param {string|number} [opts.streamId]   override the monotonic stream
+   *   id. Defaults to `nextStreamId++`. Use a stable string discriminator
+   *   (e.g. "pty") when the box agent dispatches STREAM_OPEN by stream-type
+   *   rather than by id (BET-158 — the agent reads `frame.stream` and routes
+   *   to the pty WS bridge when it sees "pty").
+   * @returns {{
+   *   streamId: string|number,
+   *   requestId: number,
+   *   abort: (reason?:string) => void,
+   *   send: (data: string, opts?: { enc?: "utf8"|"b64" }) => boolean,
+   * }}
+   *   `streamId` is the logical stream id (numeric by default, or the
+   *   caller-supplied string discriminator). `requestId` is the numeric
+   *   correlation id STREAM_* frames use to address this stream — frame
+   *   fields are validated as integers (protocol.mjs:183-185), so callers
+   *   that build outbound frames MUST stamp this id, NOT streamId, into
+   *   the frame's `id` field. `abort()` cancels the stream and sends
+   *   STREAM_ABORT to the box. `send(data, { enc })` pushes a STREAM_DATA
+   *   frame on this stream and returns true on success / false if the
+   *   stream is closed or the transport is gone.
    */
-  function streamRequest(boxId, req, callbacks) {
+  function streamRequest(boxId, req, callbacks, opts = {}) {
     const transport = routing.lookup(boxId);
     if (!transport) {
       // Synchronous no-tunnel: no consumer registered yet, so fire onAbort
@@ -474,7 +504,7 @@ export function createRelayServer(opts = {}) {
       } catch {
         /* caller ignored */
       }
-      return { streamId: -1, abort: () => {} };
+      return noopStreamHandle();
     }
     const inboundStreams = inboundStreamsByTransport.get(transport);
     if (!inboundStreams) {
@@ -483,14 +513,18 @@ export function createRelayServer(opts = {}) {
       } catch {
         /* ignore */
       }
-      return { streamId: -1, abort: () => {} };
+      return noopStreamHandle();
     }
-    // Allocate a fresh stream id for this transport. The frame's `id` is
-    // reused as the request-correlating id (the agent echoes it in its
-    // response-side frames); the registry routes by `stream` (the relay-
-    // assigned id), so a stale `id` on a same-stream id won't misroute.
-    const streamId = nextStreamId++;
-    const requestId = streamId;
+    // Allocate a fresh stream id for this transport. The `id` field stays
+    // numeric (the protocol's validator rejects non-integer ids) and is
+    // used to correlate the request-side STREAM_OPEN with the agent's
+    // response-side STREAM_OPEN. The `stream` field is the logical stream
+    // id — a monotonic number by default, or a string discriminator
+    // (BET-158 — "pty") when the caller wants the agent to dispatch by
+    // stream type. The relay's inbound registry keys off `stream`, so
+    // both numeric and string keys work.
+    const streamId = opts.streamId ?? nextStreamId++;
+    const requestId = nextStreamId++;
     let closed = false;
 
     // The consumer reads off `frame.status`/`frame.headers` for the response
@@ -507,10 +541,10 @@ export function createRelayServer(opts = {}) {
           /* ignore caller errors */
         }
       },
-      onData: (text) => {
+      onData: (text, dataFrame) => {
         if (closed) return;
         try {
-          callbacks.onData(text);
+          callbacks.onData(text, dataFrame);
         } catch {
           /* ignore */
         }
@@ -572,7 +606,38 @@ export function createRelayServer(opts = {}) {
       }
     }
 
-    return { streamId, abort };
+    // Public send: push a STREAM_DATA frame for this stream. The protocol
+    // requires `id` to be a non-negative integer (protocol.mjs:183-185), so
+    // the relay ALWAYS stamps `requestId` (the numeric correlation id) —
+    // not `streamId` — into the frame's `id` field. The caller may pass
+    // `streamId === "pty"` (string discriminator, BET-158) without tripping
+    // the validator. Returns false on a closed stream / gone transport.
+    //
+    // `enc` defaults to "utf8" — the SSE/JSON control frames ride this form.
+    // For raw binary data (raw terminal bytes over /pty), pass
+    // `enc: "b64"` and pre-base64-encode the payload. The encoding is the
+    // CALLER's responsibility (mirrors the wire-side framing layer is
+    // opaque to payload content).
+    function send(data, sendOpts = {}) {
+      if (closed) return false;
+      if (!transport || !routing.lookup(boxId)) return false;
+      const enc = sendOpts.enc;
+      const frame = {
+        type: FRAME_TYPES.STREAM_DATA,
+        id: requestId,
+        stream: streamId,
+        data,
+      };
+      if (enc === "b64") frame.enc = "b64";
+      try {
+        transport.send(frame);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    return { streamId, requestId, abort, send };
   }
 
   // The connection handler: runs AFTER the ws handshake completes. We do the

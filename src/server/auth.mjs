@@ -189,16 +189,19 @@ export function isPublicAssetPath(path) {
 // ?token=<box_token> query param instead. This is DELIBERATELY limited to
 // /events: every other route must present a real Bearer header, so a token
 // can never leak into a proxy/referrer log for a normal data request.
-// (BET-138: the /pty WebSocket route this fallback used to also cover was
-// removed — the pty:* RPC channels used by Terminal.tsx never needed it,
-// they ride the normal Bearer-gated /rpc/* path.)
+// (BET-138 removed the /pty WS — BET-158 brings it back as a binary-safe
+// terminal WS that the relay bridges via STREAM_* frames. The relay agent
+// connects to it with the box's own box_token (ADR-1) and the device connects
+// to the relay under /box/<id>/pty, so ?token= on /pty only matters for the
+// non-relay path — e.g. an old direct-mode client that uses WS for the
+// terminal instead of the pty:* RPC channels.)
 //
 // Pure + testable: given a path, the Authorization header value, and the raw
 // ?token= query value, return the effective Authorization value to feed into
 // authorize(). The header always wins when present (non-browser clients keep
 // using it); the query token is honored only as a fallback and only on the
-// allowlisted stream path.
-export const QUERY_TOKEN_PATHS = new Set(["/events"]);
+// allowlisted stream paths (/events, /pty).
+export const QUERY_TOKEN_PATHS = new Set(["/events", "/pty"]);
 
 export function queryTokenAllowedForPath(path) {
   return QUERY_TOKEN_PATHS.has(path);

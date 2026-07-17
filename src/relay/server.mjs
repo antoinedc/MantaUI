@@ -58,6 +58,13 @@ export const DEFAULT_RELAY_PORT = 20787;
 // upgrade is rejected (a stray WS upgrade must not fall into the HTTP router).
 const BOX_UPGRADE_PATH = "/box";
 
+// The device-facing terminal WS upgrade path. Parsed relative to /box/:id/pty
+// — the path that a relay-paired device connects to so its terminal bytes
+// flow through the tunnel's STREAM_* mux. The path is intentionally narrow
+// (no wildcards) so an upgrade to /box/<id>/anything-else is rejected cleanly
+// rather than silently misrouted.
+const DEVICE_PTY_UPGRADE_RE = /^\/box\/([^/]+)\/pty$/;
+
 // Cap on an IAP/push + /pair request body so an unbounded POST can't exhaust
 // memory before the phone is even authenticated. 256 KiB is generous for a JWS
 // + token registration; larger bodies are refused with 413.
@@ -216,25 +223,54 @@ export function createRelayService(opts = {}) {
     pairHandler(req, res, () => iapPushHandler(req, res, () => apiHandler(req, res)));
   });
 
-  // Route WS upgrades: only /box reaches the box leg; anything else is refused.
+  // A second noServer WebSocketServer dedicated to device-facing /pty upgrades
+  // (BET-158). Kept separate from `wss` (the box leg) so each 'connection'
+  // handler stays single-purpose — adding a third path later (chat, prompts,
+  // …) gets its own wss rather than forking the box leg's connection handler.
+  const ptyWss = new WebSocketServer({ noServer: true });
+
+  // Route WS upgrades:
+  //   /box           → box dial-out (existing — box leg)
+  //   /box/:id/pty   → device terminal WS (BET-158 — phone-authenticated,
+  //                    subscription-gated, tunnel-bridged)
+  // Anything else is refused with a clean 404 so a stray upgrade can't hang.
   server.on("upgrade", (req, socket, head) => {
-    let pathname = "/";
+    let url;
     try {
-      pathname = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname;
+      url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     } catch {
-      pathname = "/";
-    }
-    if (pathname !== BOX_UPGRADE_PATH) {
-      // Not a box dial-out; reject cleanly so a stray upgrade can't hang.
-      socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+      socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      // Feed the accepted socket into the box leg's own 'connection' handler,
-      // which does the credential parse + verify + acceptBox.
-      wss.emit("connection", ws, req);
-    });
+    const pathname = url.pathname;
+
+    if (pathname === BOX_UPGRADE_PATH) {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        // Feed the accepted socket into the box leg's own 'connection' handler,
+        // which does the credential parse + verify + acceptBox.
+        wss.emit("connection", ws, req);
+      });
+      return;
+    }
+
+    const ptyMatch = DEVICE_PTY_UPGRADE_RE.exec(pathname);
+    if (ptyMatch) {
+      const boxId = ptyMatch[1];
+      handlePtyUpgrade(req, socket, head, {
+        boxId,
+        url,
+        authenticatePhone,
+        store,
+        hasActiveSubscription,
+        boxLeg,
+        ptyWss,
+      });
+      return;
+    }
+
+    socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+    socket.destroy();
   });
 
   function start() {
@@ -273,6 +309,11 @@ export function createRelayService(opts = {}) {
       /* already closed */
     }
     try {
+      ptyWss.close();
+    } catch {
+      /* already closed */
+    }
+    try {
       store.close();
     } catch {
       /* already closed by boxLeg.close() */
@@ -295,6 +336,7 @@ export function createRelayService(opts = {}) {
     _hasActiveSubscription: hasActiveSubscription,
     _receiptValidator: receiptValidator,
     _pairHandler: pairHandler,
+    _ptyWss: ptyWss,
   };
 }
 
@@ -457,6 +499,310 @@ export async function routePair({ parsed, store, proxyRequest, rateLimiter, now 
       account_token: accountToken,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Device terminal WS — /box/:id/pty upgrade (BET-158)
+//
+// A relay-paired device connects a raw WebSocket to `/box/:id/pty` for
+// terminal I/O. The relay bridges this socket to the box's local /pty WS over
+// the tunnel's STREAM_* mux:
+//   • device → box: WS text frames (JSON control strings) → STREAM_DATA
+//     (utf8 passthrough — the JSON frames are already text).
+//   • box → device: STREAM_DATA { enc:"b64" } → base64-decoded binary WS
+//     frames (raw terminal bytes).
+//
+// Auth + ownership + subscription mirror the HTTP /box/:id proxy path:
+//   1. Authenticate via authenticatePhone (Authorization header or ?token=).
+//   2. Ownership: the box must be bound to this account (404 otherwise).
+//   3. Subscription gate: /pty is a gated subpath (402 close otherwise).
+//   4. StreamRequest over the box leg (rejects synchronously when the box
+//      has no live tunnel — 503 close).
+//
+// Encoding rule (BET-158): device→box frames are the JSON control strings
+// already-utf8; box→device frames are raw bytes that the agent base64-
+// encodes. The relay decodes the base64 before forwarding to the device WS
+// so a browser terminal sees raw bytes.
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure-ish handshake for the /box/:id/pty upgrade. Returns one of:
+ *   { kind: "ok", accountId, boxId, subpath }
+ *   { kind: "reject", status, body }
+ * so the upgrade handler can map rejections to a 4xx HTTP handshake response
+ * before the WebSocket is created — keeps the auth/subscription/ownership
+ * testable without a real socket.
+ *
+ * `url` is the parsed upgrade URL. `subpath` is the portion of the original
+ * query AFTER `?token=` is stripped — the relay forwards it to the box's
+ * own /pty endpoint, which only sees ?session=&cwd=&cols=&rows=&launcher=…
+ *
+ * @param {object} args
+ * @param {URL}    args.url
+ * @param {string} args.boxId
+ * @param {object} args.headers     node http req.headers
+ * @param {(req)=>({accountId}|null)} args.authenticatePhone
+ * @param {object} args.store
+ * @param {(boxId)=>boolean} args.hasActiveSubscription
+ */
+export function routePtyUpgrade({ url, boxId, headers, authenticatePhone, store, hasActiveSubscription }) {
+  if (!isValidToken(boxId)) {
+    return { kind: "reject", status: 404, body: "not_found" };
+  }
+  // Pass the path WITH the query string — api.mjs's authenticatePhone reads
+  // ?token= from the URL via parseQuery(req.path) (mirrors how httpApi.ts
+  // and the device's authHeaders accept either header or query token).
+  const fullPath = url.pathname + url.search;
+  const auth = authenticatePhone({
+    method: "GET",
+    path: fullPath,
+    headers: headers || {},
+  });
+  if (!auth || !auth.accountId) {
+    return { kind: "reject", status: 401, body: "unauthorized" };
+  }
+  const binding = store.getBinding(boxId);
+  if (!binding || binding.account_id !== auth.accountId) {
+    return { kind: "reject", status: 404, body: "not_found" };
+  }
+  if (!hasActiveSubscription(boxId)) {
+    return { kind: "reject", status: 402, body: "payment_required" };
+  }
+  // Strip ?token= (the device-side credential) before forwarding the query
+  // down the tunnel — the agent will inject the BOX token itself (ADR-1).
+  const subQuery = stripTokenParam(url.searchParams);
+  return {
+    kind: "ok",
+    accountId: auth.accountId,
+    boxId,
+    subpath: subQuery,
+  };
+}
+
+/**
+ * Strip a `?token=` query param from a URLSearchParams, returning the
+ * remaining query string with a leading `?` (or empty string).
+ */
+function stripTokenParam(params) {
+  const out = new URLSearchParams();
+  for (const [k, v] of params) {
+    if (k === "token") continue;
+    out.append(k, v);
+  }
+  const s = out.toString();
+  return s ? `?${s}` : "";
+}
+
+/**
+ * Drive the upgrade side: run routePtyUpgrade, then either
+ * (a) reject the socket with the proper HTTP status, or
+ * (b) open a stream to the box and bridge WS↔STREAM_*.
+ *
+ * Pure test entry point (`ptyWss` injectable so tests can spy on the
+ * handleUpgrade call). The default ptyWss comes from the service-level
+ * closure above (a noServer WebSocketServer dedicated to /pty).
+ */
+export function handlePtyUpgrade(
+  req,
+  socket,
+  head,
+  { boxId, url, authenticatePhone, store, hasActiveSubscription, boxLeg, ptyWss, warn = console.warn } = {},
+) {
+  if (!ptyWss || typeof ptyWss.handleUpgrade !== "function") {
+    socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+  const decision = routePtyUpgrade({
+    url,
+    boxId,
+    headers: req.headers || {},
+    authenticatePhone,
+    store,
+    hasActiveSubscription,
+  });
+  if (decision.kind === "reject") {
+    socket.write(`HTTP/1.1 ${decision.status} ${reasonText(decision.status)}\r\nConnection: close\r\n\r\n`);
+    socket.destroy();
+    return;
+  }
+
+  ptyWss.handleUpgrade(req, socket, head, (ws) => {
+    ptyWss.emit("connection", ws, req);
+    // Hand off the live WS to the bridge. We pass an injectable bridge so
+    // tests can drive the streamRequest/stream frames without spinning up
+    // a real box leg — see server.test.mjs.
+    bridgeDevicePty({
+      ws,
+      boxId: decision.boxId,
+      subpath: decision.subpath,
+      boxLeg,
+      warn,
+    });
+  });
+}
+
+function reasonText(status) {
+  if (status === 401) return "Unauthorized";
+  if (status === 402) return "Payment Required";
+  if (status === 404) return "Not Found";
+  return "Bad Request";
+}
+
+/**
+ * Bidirectional WS↔STREAM_* bridge for the device-facing /pty socket. Opens
+ * a tunnel stream to the box with `stream:"pty"`, wires:
+ *   • ws.on("message", text) → STREAM_DATA with utf8 data (no enc).
+ *   • STREAM_DATA { enc:"b64" } from box → ws.send(Buffer.from(data, "base64")).
+ *     A STREAM_DATA without enc is forwarded as a text frame (defensive — the
+ *     agent always sets enc:"b64" for the box→device direction, but a future
+ *     device message format change shouldn't silently misroute bytes).
+ *   • ws.close / box STREAM_END / STREAM_ABORT → close both sides.
+ *
+ * Closing either side aborts the OTHER — a half-open terminal is a worse
+ * failure mode than a clean teardown (the desktop Terminal reconnect loop is
+ * the recovery path).
+ */
+export function bridgeDevicePty({ ws, boxId, subpath, boxLeg, warn = console.warn }) {
+  let deviceClosed = false;
+  let boxClosed = false;
+  let streamHandle = null;
+
+  function closeBoth(reason) {
+    if (deviceClosed && boxClosed) return;
+    // Close device side first — closing the WS unblocks the device's
+    // reconnect controller (httpApi's WsReconnectController) faster than
+    // waiting for the box leg's STREAM_ABORT to round-trip.
+    if (!deviceClosed) {
+      deviceClosed = true;
+      try {
+        ws.close(1000, reason || "closed");
+      } catch {
+        /* already closing */
+      }
+    }
+    if (!boxClosed) {
+      boxClosed = true;
+      try {
+        streamHandle?.abort(reason);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // Open the tunnel stream. streamRequest() rejects synchronously with
+  // { noTunnel } semantics (fires onAbort("no_tunnel") and returns
+  // { streamId: -1, abort: noop }) when the box has no live socket. We map
+  // that to closing the device WS with a 1014 (bad gateway) so the client
+  // surfaces "box offline" instead of an open socket that nothing happens on.
+  const streamCallbacks = {
+    onHead: (_h) => {
+      // No HTTP head to write — the device WS is its own head. The box
+      // agent will immediately start sending STREAM_DATA frames; nothing to
+      // do here. (Kept as an explicit no-op for symmetry with /events and
+      // future debug logs.)
+    },
+    onData: (data, frame) => {
+      if (deviceClosed) return;
+      try {
+        // Box→device: raw terminal bytes. Default enc="utf8" means a text
+        // payload — forward as text. enc="b64" means binary base64 — decode
+        // and send as a binary frame.
+        const enc = frame?.enc;
+        if (enc === "b64") {
+          ws.send(Buffer.from(data, "base64"));
+        } else {
+          // Default utf8 — send as a text frame so the device's terminal
+          // sees the bytes the agent decoded.
+          ws.send(typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
+        }
+      } catch (err) {
+        warn(`[relay-pty] device send failed: ${String(err?.message || err)}`);
+        closeBoth("device send failed");
+      }
+    },
+    onEnd: () => {
+      boxClosed = true;
+      closeBoth("box ended");
+    },
+    onAbort: (reason) => {
+      boxClosed = true;
+      closeBoth(String(reason || "aborted"));
+    },
+  };
+
+  try {
+    streamHandle = boxLeg.streamRequest(
+      boxId,
+      { method: "GET", path: `/pty${subpath}`, headers: {}, body: undefined },
+      streamCallbacks,
+      // BET-158 — use the stable "pty" discriminator so the box agent
+      // routes the STREAM_OPEN to the pty WS bridge (handleStreamOpenPty)
+      // rather than the utf8 SSE pump (handleStreamOpen). The protocol
+      // accepts string stream ids; the relay-side numeric stream counter
+      // would still work, but the agent's onFrame dispatch reads frame.stream
+      // and switches behavior on the literal "pty" string.
+      { streamId: "pty" },
+    );
+    if (!streamHandle || streamHandle.streamId === -1) {
+      // streamRequest already fired onAbort("no_tunnel") — just close the
+      // device WS so the client sees the disconnect and reconnects (or the
+      // renderer surfaces "box offline" via the /relay/status heartbeat).
+      try { ws.close(1014, "box_offline"); } catch { /* ignore */ }
+      return;
+    }
+  } catch (err) {
+    warn(`[relay-pty] streamRequest failed: ${String(err?.message || err)}`);
+    try { ws.close(1014, "stream_open_failed"); } catch { /* ignore */ }
+    return;
+  }
+
+  // Device → box: text frames are the JSON control strings (utf8 passthrough).
+  // Binary frames are unexpected on the wire (the device contract is text
+  // JSON control strings — see BET-158 design) but we forward them as base64
+  // STREAM_DATA so a future protocol upgrade doesn't drop bytes.
+  //
+  // BET-158 reviewer fix: route every outbound DATA through
+  // streamHandle.send(), which stamps the frame's `id` field with the
+  // numeric requestId. The previous ad-hoc helper (sendStreamData) used
+  // streamId as both `id` and `stream` — when streamId === "pty" (the BET-158
+  // string discriminator), the protocol validator rejects the frame's
+  // non-integer id and the frame is silently dropped. Going through send()
+  // is the only safe way to ship frames on a discriminator-keyed stream.
+  ws.on("message", (raw, isBinary) => {
+    if (boxClosed) return;
+    if (!streamHandle || typeof streamHandle.send !== "function") return;
+    try {
+      if (isBinary) {
+        // base64-encode and forward with enc:"b64" — matches the box-side
+        // direction convention so the box agent decodes uniformly.
+        const b64 = Buffer.isBuffer(raw) ? raw.toString("base64") : Buffer.from(raw).toString("base64");
+        if (!streamHandle.send(b64, { enc: "b64" })) {
+          closeBoth("send dropped");
+        }
+      } else {
+        const text = typeof raw === "string" ? raw : Buffer.from(raw).toString("utf8");
+        if (!streamHandle.send(text)) {
+          closeBoth("send dropped");
+        }
+      }
+    } catch (err) {
+      warn(`[relay-pty] device→box send failed: ${String(err?.message || err)}`);
+      closeBoth("send failed");
+    }
+  });
+
+  ws.on("close", () => {
+    deviceClosed = true;
+    if (!boxClosed) {
+      try { streamHandle?.abort("device closed"); } catch { /* ignore */ }
+      boxClosed = true;
+    }
+  });
+  ws.on("error", () => {
+    // ws fires 'error' then 'close'; cleanup runs in close.
+  });
 }
 
 // ---------------------------------------------------------------------------

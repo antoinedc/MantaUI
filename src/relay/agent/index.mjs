@@ -295,6 +295,94 @@ export function shouldStartRelayAgent(config) {
 }
 
 // ---------------------------------------------------------------------------
+// Local PTY-connect leg (BET-158). Opens a WebSocket to the box server's own
+// /pty endpoint (ws://127.0.0.1:8787/pty?<query>) so the relay can bridge a
+// device-side terminal WS to the box's ephemeral pty module over STREAM_*.
+//
+// `query` is the device-side query string with ?token= ALREADY STRIPPED —
+// the relay strips it because (ADR-1) the box authenticates with its OWN
+// box_token, not the device's account token. We append ?token=<box_token>
+// here so the box's auth gate admits us.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the default local PTY WebSocket opener (BET-158).
+ *
+ * Resolves with a transport-style wrapper:
+ *   { send(text|Buffer), onMessage(cb), onClose(cb), close() }
+ * shaped like the existing wsTransport / defaultConnect so the rest of the
+ * agent stays transport-agnostic. `cb` callbacks receive raw `Buffer`s
+ * because ws sends binary terminal bytes as Buffers, not strings.
+ *
+ * The `ws` package is lazily imported so tests that inject a fake
+ * `localPtyConnect` never pull it in (mirror of defaultConnect's lazy
+ * import).
+ */
+export function makeDefaultLocalPtyConnect(localBase, auth) {
+  if (!auth || !isValidToken(auth?.box_token)) {
+    throw new Error(
+      "makeDefaultLocalPtyConnect: valid { box_token } required " +
+        "(the box's own identity — never the device's account token)",
+    );
+  }
+  return async function defaultLocalPtyConnect({ path }) {
+    const { WebSocket } = await import("ws");
+    // The box server's /pty handler is loopback-only and gated by the box's
+    // own auth engine — append ?token=<box_token> so a browser-style client
+    // (the agent never sets headers on a ws handshake in this path) is
+    // admitted without an Authorization header. ADR-1: only the box's own
+    // token ever touches the box server's auth gate from the relay path.
+    const base = localBase.replace(/^http/, "ws");
+    const url = `${base}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(auth.box_token)}`;
+    const ws = new WebSocket(url);
+
+    const msgCbs = [];
+    const closeCbs = [];
+    let openResolved = false;
+
+    const transport = {
+      ws,
+      send(payload) {
+        if (typeof payload === "string" || Buffer.isBuffer(payload)) {
+          try {
+            ws.send(payload);
+          } catch {
+            /* socket closing */
+          }
+        }
+      },
+      onMessage(cb) {
+        msgCbs.push(cb);
+      },
+      onClose(cb) {
+        closeCbs.push(cb);
+      },
+      close() {
+        try { ws.close(); } catch { /* already closing */ }
+      },
+    };
+
+    ws.on("message", (data) => {
+      // ws hands us Buffer; keep Buffer (terminal bytes are raw, NOT utf8).
+      for (const cb of msgCbs.slice()) cb(data);
+    });
+    ws.on("close", () => {
+      for (const cb of closeCbs.slice()) cb();
+    });
+    ws.on("error", () => {
+      // ws fires 'error' then 'close'; close handler drives teardown.
+    });
+
+    await new Promise((resolve, reject) => {
+      ws.once("open", () => { openResolved = true; resolve(); });
+      ws.once("error", (err) => { if (!openResolved) reject(err); });
+    });
+
+    return transport;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // RelayAgent — the dial-out client
 // ---------------------------------------------------------------------------
 
@@ -320,6 +408,14 @@ export function shouldStartRelayAgent(config) {
  *   `localFetch`, but returns the response body as a ReadableStream (used for
  *   SSE/PTY where buffering would defeat streaming). Defaults to
  *   `makeDefaultLocalFetchStream(localBase, auth)`.
+ * @param {(req:{path})=>Promise<PtyTransport>} [opts.localPtyConnect]
+ *   INJECTABLE local PTY WebSocket opener (BET-158). Resolves with a
+ *   transport { send, onMessage, onClose, close } when the WS is open.
+ *   Defaults to `makeDefaultLocalPtyConnect(localBase, auth)` which dials
+ *   ws://127.0.0.1:8787/pty?<query>&token=<box_token> (ADR-1: the box
+ *   authenticates with its OWN token, not the device's account token).
+ *   The `ws` package is lazy-loaded by the default so tests can inject a
+ *   fake without pulling in the real network stack.
  * @param {{next():number,reset():void,attempt():number}} [opts.backoff]
  *   INJECTABLE reconnect backoff (ExponentialBackoff-compatible). Default mirror
  *   of src/shared/net/backoff.ts.
@@ -350,6 +446,8 @@ export function createRelayAgent(opts = {}) {
   const localFetch = opts.localFetch || makeDefaultLocalFetch(localBase, auth);
   const localFetchStream =
     opts.localFetchStream || makeDefaultLocalFetchStream(localBase, auth);
+  const localPtyConnect =
+    opts.localPtyConnect || makeDefaultLocalPtyConnect(localBase, auth);
 
   // Per-box streams inbound over the tunnel (Stage-4 SSE/PTY). We own a registry
   // so a relay→box STREAM_* frame is routed, but the box→phone direction (this
@@ -534,6 +632,146 @@ export function createRelayAgent(opts = {}) {
     }
   }
 
+  // --- pty stream bridge (BET-158) ----------------------------------------
+
+  // Handle a relay→box STREAM_OPEN request form with stream="pty": open a local
+  // WebSocket to the box's /pty endpoint and bridge WS↔STREAM_* in both
+  // directions:
+  //   • ws.on("message", Buffer) → STREAM_DATA { enc:"b64" } (raw terminal bytes
+  //     are binary; base64 keeps the JSON text frame uniform).
+  //   • relay STREAM_DATA from the device (utf8 passthrough — JSON control
+  //     strings like { type:"data", data } or { type:"resize", cols, rows })
+  //     → ws.send(text).
+  //
+  // Encoding (BET-158 §"Encoding rule"):
+  //   device → box frames are JSON control strings — utf8 passthrough, no
+  //     enc field (default utf8).
+  //   box → device frames are raw terminal BYTES — agent base64-encodes and
+  //     stamps enc:"b64" so the relay decodes once before forwarding binary
+  //     to the device WS.
+  //
+  // The bridge is best-effort on disconnect: a STREAM_END/ABORT from either
+  // side closes the other. Backoff / reconnect is NOT the agent's job — a
+  // dropped pty stream just ends (the desktop Terminal reconnect loop is the
+  // recovery path).
+  async function handleStreamOpenPty(frame) {
+    const t = transport;
+    if (!t) return;
+
+    let ptyWs;
+    try {
+      ptyWs = await localPtyConnect({ path: frame.path });
+    } catch (err) {
+      if (transport !== t) return;
+      try {
+        t.send({
+          type: FRAME_TYPES.STREAM_ABORT,
+          id: frame.id,
+          stream: frame.stream,
+          reason: String(err?.message || err),
+        });
+      } catch {
+        /* socket closing; ignore */
+      }
+      return;
+    }
+
+    if (transport !== t) {
+      try { ptyWs.close(); } catch { /* ignore */ }
+      return;
+    }
+
+    // Confirm the open so the relay's STREAM_OPEN consumer fires onHead and
+    // starts writing the device's WS. No status / headers to forward — the
+    // device WS is its own head — but the protocol requires a response-side
+    // STREAM_OPEN to deliver the open confirmation.
+    try {
+      t.send({
+        type: FRAME_TYPES.STREAM_OPEN,
+        id: frame.id,
+        stream: frame.stream,
+        status: 101,
+        headers: {},
+      });
+    } catch {
+      try { ptyWs.close(); } catch { /* ignore */ }
+      return;
+    }
+
+    // Subscribe THIS stream to the inbound registry so relay→box STREAM_DATA
+    // / STREAM_ABORT frames (the device-side control strings and aborts)
+    // route to onData / onAbort. StreamRegistry fires consumer callbacks on
+    // match; the default callback shape is { onData, onEnd, onAbort }.
+    let localClosed = false;
+    const closeLocal = (reason) => {
+      if (localClosed) return;
+      localClosed = true;
+      try { ptyWs.close(); } catch { /* already closed */ }
+    };
+    const closeTunnel = (kind, reason) => {
+      if (transport !== t) return;
+      try {
+        t.send({
+          type: kind,
+          id: frame.id,
+          stream: frame.stream,
+          ...(reason ? { reason: String(reason) } : {}),
+        });
+      } catch {
+        /* socket closing */
+      }
+    };
+
+    streams.open(frame.stream, {
+      onData: (text, dataFrame) => {
+        if (localClosed) return;
+        try {
+          // device→box: utf8 passthrough (JSON control strings). The relay
+          // already stripped the device's ?token= before sending the
+          // STREAM_OPEN's path, so we forward the text verbatim — no
+          // encoding fix-up needed.
+          const payload = typeof text === "string" ? text : Buffer.from(text).toString("utf8");
+          ptyWs.send(payload);
+        } catch (err) {
+          warn(`[relay-agent] pty send failed: ${String(err?.message || err)}`);
+          closeLocal("send failed");
+          closeTunnel(FRAME_TYPES.STREAM_ABORT, err?.message || "send failed");
+        }
+      },
+      onEnd: () => {
+        closeLocal("relay ended");
+      },
+      onAbort: (reason) => {
+        closeLocal(reason);
+      },
+    });
+
+    // box → relay: raw bytes → base64 STREAM_DATA.
+    ptyWs.onMessage((buf) => {
+      if (transport !== t) return;
+      try {
+        const b64 = Buffer.isBuffer(buf) ? buf.toString("base64") : Buffer.from(buf).toString("base64");
+        t.send({
+          type: FRAME_TYPES.STREAM_DATA,
+          id: frame.id,
+          stream: frame.stream,
+          data: b64,
+          enc: "b64",
+        });
+      } catch (err) {
+        warn(`[relay-agent] pty→tunnel send failed: ${String(err?.message || err)}`);
+        closeTunnel(FRAME_TYPES.STREAM_ABORT, err?.message || "send failed");
+      }
+    });
+
+    // box WS closes or errors → STREAM_END (clean) or STREAM_ABORT (error).
+    ptyWs.onClose(() => {
+      if (localClosed) return;
+      closeLocal("box ws closed");
+      closeTunnel(FRAME_TYPES.STREAM_END);
+    });
+  }
+
   // Dispatch one decoded inbound frame.
   function onFrame(frame) {
     if (!frame) return; // decodeFrame dropped malformed/oversized/unknown input
@@ -550,10 +788,18 @@ export function createRelayAgent(opts = {}) {
         // (already-driven, no-op for the request form here).
         // Guard on the form: a response-side STREAM_OPEN (status, no method)
         // arriving from the relay is a protocol error — drop.
-        if (typeof frame.method === "string") {
-          void handleStreamOpen(frame);
-        } else {
+        if (typeof frame.method !== "string") {
           warn("[relay-agent] ignored STREAM_OPEN without method (response form from relay is invalid)");
+          break;
+        }
+        // BET-158: the relay opens a STREAM_OPEN with stream="pty" for the
+        // /box/:id/pty device upgrade. That goes through the local PTY WS
+        // bridge (binary-safe, base64 on the box→relay direction) instead of
+        // the SSE-style utf8 stream fetch.
+        if (frame.stream === "pty") {
+          void handleStreamOpenPty(frame);
+        } else {
+          void handleStreamOpen(frame);
         }
         break;
       case FRAME_TYPES.STREAM_DATA:
