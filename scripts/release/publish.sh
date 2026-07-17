@@ -19,10 +19,18 @@
 #                  command the owner runs there and continue — desktop is a
 #                  separate leg, not a release blocker.
 #   4. relay       ssh <host> 'git -C /opt/manta pull && systemctl restart
-#                  manta-relay && systemctl is-active manta-relay'.
+#                  manta-relay && systemctl is-active manta-relay', then sync
+#                  the freshly-pulled scripts/install.sh into the Caddy web
+#                  root (/var/www/mantaui/install.sh) — the pull updates the
+#                  repo checkout, but Caddy serves install.sh statically from
+#                  the web root, so without this copy the advertised one-liner
+#                  keeps serving the stale installer (BET-171).
 #   5. verify      HEAD each published URL — tarball 200, install.sh 200,
 #                  and (if desktop uploaded) Manta-latest.{dmg,AppImage} 200.
-#                  Fail loudly on any non-200.
+#                  install.sh is ALSO content-verified: the served body must
+#                  byte-match the repo's scripts/install.sh (a 200 alone does
+#                  not prove the deploy took — a stale file also 200s).
+#                  Fail loudly on any non-200 or content mismatch.
 #   6. tag         git tag v<version> && git push origin v<version> (a tag
 #                  means "published and verified").
 #
@@ -48,9 +56,10 @@ SITE="${MANTA_SITE:-https://mantaui.com}"
 VERSION="$(node -p 'require("./package.json").version')"
 TARBALL="dist/manta-${VERSION}.tar.gz"
 DESKTOP_DIR="dist/desktop"
-RELEASES_DIR="/var/www/mantaui/releases"
-UPDATES_DIR="/var/www/mantaui/updates"
-DOWNLOADS_DIR="/var/www/mantaui/downloads"
+WEBROOT_DIR="/var/www/mantaui"
+RELEASES_DIR="${WEBROOT_DIR}/releases"
+UPDATES_DIR="${WEBROOT_DIR}/updates"
+DOWNLOADS_DIR="${WEBROOT_DIR}/downloads"
 
 log()  { printf '\033[36m▸\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
@@ -122,10 +131,18 @@ else
   ok "desktop published"
 fi
 
-# --- 4. relay ---------------------------------------------------------------
+# --- 4. relay + install.sh sync ---------------------------------------------
 log "Deploying relay on ${PROD_HOST}…"
 ssh "${PROD_HOST}" 'git -C /opt/manta pull && systemctl restart manta-relay && systemctl is-active manta-relay'
 ok "relay deployed"
+
+# Caddy serves install.sh statically from the web root, NOT from the repo
+# checkout. The git pull above updates /opt/manta/scripts/install.sh but leaves
+# the served copy stale — sync it explicitly (BET-171). Caddy re-reads static
+# files per request, so no reload is needed.
+log "Syncing install.sh into web root (${WEBROOT_DIR}/install.sh)…"
+ssh "${PROD_HOST}" "cp -f /opt/manta/scripts/install.sh ${WEBROOT_DIR}/install.sh"
+ok "install.sh synced to web root"
 
 # --- 5. verify --------------------------------------------------------------
 log "Verifying published URLs (${SITE})…"
@@ -140,6 +157,17 @@ check_200() {
 
 check_200 "${SITE}/releases/manta-${VERSION}.tar.gz"
 check_200 "${SITE}/install.sh"
+
+# A 200 on install.sh is not enough — a stale file also 200s (BET-171). Verify
+# the served body byte-matches the repo's scripts/install.sh so we know the
+# deploy actually took.
+log "Verifying served install.sh matches repo…"
+LOCAL_INSTALL_SHA="$(sha256sum scripts/install.sh | awk '{print $1}')"
+SERVED_INSTALL_SHA="$(curl -fsSL "${SITE}/install.sh" | sha256sum | awk '{print $1}')"
+if [ "${LOCAL_INSTALL_SHA}" != "${SERVED_INSTALL_SHA}" ]; then
+  die "install.sh mismatch: served=${SERVED_INSTALL_SHA} repo=${LOCAL_INSTALL_SHA} — web-root sync did not take"
+fi
+ok "served install.sh matches repo (${LOCAL_INSTALL_SHA})"
 
 if [ "${#DMGS[@]}" -gt 0 ]; then
   check_200 "${SITE}/downloads/Manta-latest.dmg"
