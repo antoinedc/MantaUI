@@ -27,12 +27,15 @@
 // shape) is SINGLE-SOURCED: we delegate to normalizeServerUrl /
 // isValidServerUrl (../pairStepLogic) and normalizeCode (../../shared/claim.mjs)
 // rather than re-implementing it here. boxId shape is checked with
-// isValidToken from src/server/webhooks.mjs (the same 32-hex gate the box
-// handshake uses).
+// isValidBoxToken from src/shared/transport.mjs (the SAME 32-hex gate as
+// src/server/webhooks.mjs isValidToken, kept in sync there for exactly this
+// use case — the renderer cannot import from src/server/* because the box
+// server pulls Node built-ins, which Vite's renderer build externalizes
+// and the import then fails at build time).
 
 import { normalizeServerUrl, isValidServerUrl } from "../pairStepLogic";
 import { normalizeCode } from "../../shared/claim.mjs";
-import { isValidToken } from "../../server/webhooks.mjs";
+import { isValidBoxToken } from "../../shared/transport.mjs";
 
 export type PairPayload = {
   serverUrl: string | null;
@@ -61,12 +64,13 @@ function coerceServerUrl(raw: string): string | null {
 /**
  * Coerce a raw boxId value to a validated 32-hex string, or null. The shape is
  * the same 32-hex token the box handshake / `loadAuth` use; reusing
- * isValidToken keeps the box-credential shape in ONE place. Trims whitespace.
+ * isValidBoxToken keeps the box-credential shape in ONE renderer-safe place
+ * (mirrored from src/server/webhooks.mjs isValidToken). Trims whitespace.
  */
 function coerceBoxId(raw: string): string | null {
   const trimmed = String(raw ?? "").trim();
   if (!trimmed) return null;
-  return isValidToken(trimmed) ? trimmed : null;
+  return isValidBoxToken(trimmed) ? trimmed : null;
 }
 
 /**
