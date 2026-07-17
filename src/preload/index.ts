@@ -3,7 +3,6 @@ import {
   IPC,
   type AppConfig,
   type AuthClaimInput,
-  type AuthPairResult,
   type DesktopNotifyPayload,
 } from "../shared/types.js";
 import type { ClaimOutcome } from "../shared/claim.mjs";
@@ -31,13 +30,6 @@ const api = {
   // { ok:false } result, NOT a rejected promise.
   authClaim: (input: AuthClaimInput): Promise<ClaimOutcome> =>
     ipcRenderer.invoke(IPC.authClaim, input),
-
-  // Mobile pairing code mint (BET-80): GET /auth/pair over the SSH tunnel.
-  // Returns { pairingCode, boxId, expiresAt } for the desktop to render as a
-  // QR. Resolves to an AuthPairResult — a failure is { ok:false, error }, NOT
-  // a rejected promise.
-  authPair: (): Promise<AuthPairResult> =>
-    ipcRenderer.invoke(IPC.authPair),
 
   clipboardWriteText: (text: string): Promise<void> =>
     ipcRenderer.invoke(IPC.clipboardWriteText, text),

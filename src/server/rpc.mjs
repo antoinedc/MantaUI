@@ -19,15 +19,16 @@ export async function dispatch(handlers, channel, args) {
   return fn(...args);
 }
 
-// Build the full handler map. Accepts { tmux, oc, pty, bus, local } where:
-//   tmux  — src/server/tmux.mjs namespace
-//   oc    — src/server/opencode.mjs namespace
-//   pty   — src/server/pty.mjs namespace
-//   bus   — event bus created by createBus() in events.mjs
-//   local — src/server/local.mjs namespace (git/fs/config/clipboard stubs)
+// Build the full handler map. Accepts { tmux, oc, pty, bus, local, authPair } where:
+//   tmux     — src/server/tmux.mjs namespace
+//   oc       — src/server/opencode.mjs namespace
+//   pty      — src/server/pty.mjs namespace
+//   bus      — event bus created by createBus() in events.mjs
+//   local    — src/server/local.mjs namespace (git/fs/config/clipboard stubs)
+//   authPair — () => authEngine.pair(); the `auth:pair` channel wraps it.
 // Channel key strings MUST match IPC.* values in src/shared/types.ts.
 // Arg shapes MUST match what src/preload/index.ts packs per channel.
-export function buildHandlers({ tmux, oc, pty, bus, local }) {
+export function buildHandlers({ tmux, oc, pty, bus, local, authPair }) {
   // Mirror of resolveProjectCwd() in src/main/index.ts. Renderer-supplied cwd
   // is preferred when it's a real path, but falls through to the project's
   // stored defaultCwd whenever the renderer sends nothing or the literal "~".
@@ -390,6 +391,21 @@ export function buildHandlers({ tmux, oc, pty, bus, local }) {
     // preload: ipcRenderer.invoke(IPC.webhookDelete, id) → args[0] = id
     "webhook:delete": (id) =>
       webhookDeleteHook(id, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- auth pairing code mint (BET-161) ----
+    // Mint a one-time mobile pairing code. Runs in-process on the box, so it
+    // satisfies the loopback-only minting invariant that the GET /auth/pair
+    // HTTP endpoint enforces (a remote httpApi caller can't hit that endpoint
+    // — it 403s non-loopback). authEngine.pair() returns snake_case;
+    // translate to the camelCase AuthPairResult the renderer expects.
+    "auth:pair": async () => {
+      try {
+        const r = await authPair();
+        return { ok: true, pairingCode: r.pairing_code, boxId: r.box_id, expiresAt: r.expiresAt };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
 
     // ---- pty channels (4 channels) ----
     //
