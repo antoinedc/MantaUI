@@ -88,9 +88,9 @@ export function spawnShellPty({ cwd, cols, rows, launcher }) {
 // One IPty per sessionKey. The caller composes sessionKey as
 // `${opencodeSessionId}:${modeId}` (modeId = "terminal" or a launcher id) so
 // Terminal mode and each TUI launcher mode of the same chat session get
-// independent, kept-warm PTYs. spawn() acts like the desktop spawnPty():
-//   - If a pty already exists for sessionKey, do not tear it down (same
-//     behaviour as src/main/pty.ts: "do NOT tear it down").
+// independent, kept-warm PTYs.
+//   - If a pty already exists for sessionKey, do NOT tear it down (avoids
+//     disconnect noise on remount; the incoming onEvent is dropped).
 //   - onEvent(ptyEvent) is called for every data/exit event. The RPC caller
 //     passes a closure that forwards to bus.publish.
 

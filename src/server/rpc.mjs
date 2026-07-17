@@ -29,9 +29,11 @@ export async function dispatch(handlers, channel, args) {
 // Channel key strings MUST match IPC.* values in src/shared/types.ts.
 // Arg shapes MUST match what src/preload/index.ts packs per channel.
 export function buildHandlers({ tmux, oc, pty, bus, local, authPair }) {
-  // Mirror of resolveProjectCwd() in src/main/index.ts. Renderer-supplied cwd
-  // is preferred when it's a real path, but falls through to the project's
-  // stored defaultCwd whenever the renderer sends nothing or the literal "~".
+  // The sole resolver for project cwd — no longer mirrored to a desktop-main
+  // copy (the src/main/index.ts duplicate was retired in the HTTP-only
+  // migration). Renderer-supplied cwd is preferred when it's a real path, but
+  // falls through to the project's stored defaultCwd whenever the renderer
+  // sends nothing or the literal "~".
   // opencode's session.create requires an absolute directory; per-pane
   // paneCurrentPath can drift (or be empty for fresh chat-holder panes), so
   // the workspace's defaultCwd is the canonical "where this project lives".
@@ -417,7 +419,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair }) {
     //   → args[0] = SpawnOptions { sessionKey, cwd, cols, rows, launcher? }
     //   Side-effect: data/exit events flow to bus as { kind:"pty", payload: PtyEvent }
     //   where PtyEvent = { kind:"data"|"exit", sessionKey, data? / code? }
-    //   (matches src/shared/types.ts PtyEvent and src/main/pty.ts emit shape)
+    //   (matches src/shared/types.ts PtyEvent)
     "pty:spawn": (opts) =>
       pty.spawn(opts, (e) => bus.publish({ kind: "pty", payload: e })),
 

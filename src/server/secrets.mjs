@@ -14,7 +14,7 @@
 //   key name + a human-written usage hint (all non-secret).
 //
 // The HUMAN sets secrets via the bui UI (a key-value card) → the value travels
-// renderer → IPC → SSH -L forward → here, never through opencode. There is NO
+// renderer → HTTPS → here, never through opencode. There is NO
 // `secret_set` tool, on purpose: if an agent could store a secret, the value
 // would pass through the transcript.
 //

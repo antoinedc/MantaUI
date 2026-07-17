@@ -1,10 +1,10 @@
 // Agent → device outbox poller for the mobile server.
 //
-// The mobile mirror of the desktop outbox poller (src/main/index.ts). The
-// remote AI drops a file into ~/.manta-outbox/ (optionally a session subdir) and
-// we surface it to connected devices as an `agentFile` bus event. Because the
-// server IS the box (no SSH hop), detection is a plain local `readdir` rather
-// than a `find` over the ControlMaster.
+// The mobile outbox poller — mobile + desktop both reach the same
+// /api/outbox listing over HTTPS, but the SCAN itself only runs on the box
+// (server IS the box, no SSH hop). The remote AI drops a file into
+// ~/.manta-outbox/ (optionally a session subdir) and we surface it to connected
+// devices as an `agentFile` bus event. Detection is a plain local `readdir`.
 //
 // IMPORTANT divergence from desktop: on a phone/browser there is no silent
 // "save straight to the user's disk" path — the device must trigger a browser

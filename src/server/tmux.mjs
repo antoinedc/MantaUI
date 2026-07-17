@@ -81,11 +81,9 @@ export async function listProjects() {
 // Chat-mode windows don't run a TUI — bui renders its own React ChatPanel
 // into the slot. The tmux pane just holds the window alive so the existing
 // project/window model still works. `sleep infinity` exits cleanly when the
-// window is killed (no zombies) and consumes no CPU. Mirrors
-// REMOTE_CHAT_HOLDER_CMD in the (now-deleted) desktop src/main/pty.ts.
+// window is killed (no zombies) and consumes no CPU.
 export const CHAT_HOLDER_CMD = "sleep infinity";
 
-// See src/main/pty.ts:sessionSurvivabilityCmd for the rationale.
 // `exit-empty off` keeps the tmux server alive across empty-session moments,
 // and `destroy-unattached off` keeps the per-project session pinned after
 // the last client detaches — without these, the next "new window" call can
@@ -96,9 +94,8 @@ async function applySessionSurvivability(name) {
 }
 
 // True iff err is the tmux "can't find session" stderr from `run()`'s
-// rejection. Pure + exported for testability — mirrors
-// `isMissingSessionError` in src/main/pty.ts so the desktop and mobile
-// transports have matching auto-heal behaviour.
+// rejection. Pure + exported for testability — desktop (over HTTPS) and
+// mobile transports both rely on the same auto-heal behaviour.
 export function isMissingSessionError(err, sessionName) {
   if (!err || typeof err.message !== "string") return false;
   if (/can.?t find session/i.test(err.message)) return true;
@@ -108,11 +105,10 @@ export function isMissingSessionError(err, sessionName) {
 
 // For chat-mode: create an opencode session in `cwd` and return its id;
 // non-chat is a no-op returning null. Centralised so the new-session and
-// new-window paths stay aligned. Mirrors maybeCreateChatSession in the
-// (now-deleted) desktop src/main/pty.ts. `oc` is the src/server/opencode.mjs
+// new-window paths stay aligned. `oc` is the src/server/opencode.mjs
 // namespace, injected by the rpc handler (kept as a param so tmux.mjs stays
-// dependency-injected + unit-testable). opencode is LOCAL to this box — no SSH
-// hop. `oc.createSession` expands a leading `~` itself (see expandTilde in
+// dependency-injected + unit-testable). opencode is LOCAL to this box.
+// `oc.createSession` expands a leading `~` itself (see expandTilde in
 // opencode.mjs), so the tilde-corruption chokepoint is already covered there.
 async function maybeCreateChatSession(oc, chatMode, cwd, title) {
   if (!chatMode) return null;
@@ -193,9 +189,8 @@ export async function newWindow({ sessionName, windowName, cwd, chatMode, oc }) 
   } catch (err) {
     // Auto-heal: the project's tmux session vanished between calls
     // (server restart, manual kill, etc.). Recreate it with this window
-    // as the first window — see src/main/pty.ts:tmuxNewWindow for the
-    // matching desktop-transport branch. We do NOT recreate the opencode
-    // session — `sid` is already resolved and reusable as the stamp.
+    // as the first window. We do NOT recreate the opencode session — `sid`
+    // is already resolved and reusable as the stamp.
     if (!isMissingSessionError(err, sessionName)) throw err;
     idx = await newSessionGetIndex(sessionName, cwd, windowName, !!chatMode);
     await applySessionSurvivability(sessionName);

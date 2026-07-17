@@ -120,7 +120,7 @@ export function isExemptPath(path) {
 // ---------------------------------------------------------------------------
 //
 // GET /auth/pair must be callable ONLY from the box itself (the `bui pair` CLI,
-// or a channel that terminates on the box like the desktop's SSH -L forward).
+// or any other channel that terminates on the box).
 // A bare loopback check is NOT enough: cloudflared runs on this box and proxies
 // PUBLIC traffic to 127.0.0.1:8787, so tunnel requests also arrive with a
 // loopback remoteAddress. What distinguishes them is the forwarding headers the

@@ -1,9 +1,10 @@
 // bui mobile server — runs on the Linux box, exposes tmux over HTTP+WS.
 // Serves a touch-friendly single-page client at /.
 //
-// Why local-exec (not the SSH wrapper from src/main/pty.ts):
-//   This process IS the remote. tmux + node-pty run in the same box, so we
-//   skip the ssh hop entirely. One less moving part, one less auth surface.
+// Why local-exec: this process IS the remote. tmux + node-pty run in the same
+// box, so we skip any transport hop entirely — desktop + mobile both reach
+// this server over HTTPS (paired, Bearer-token auth). One less moving part,
+// one less auth surface.
 
 import { createServer } from "node:http";
 import { readFile, stat, mkdir, rm } from "node:fs/promises";
@@ -731,9 +732,9 @@ const server = createServer(async (req, res) => {
   // GET    /api/schedule?sessionID=  → {jobs:[...]} (filtered when sessionID set)
   // DELETE /api/schedule?id=     → {deleted:bool}
   // Created by the remote AI's global opencode `schedule` tool; listed/deleted
-  // by the ScheduledTasksCard UI (via schedule:* window.api channels → rpc.mjs,
-  // and by the desktop over its SSH -L 18787 forward). Store mutations publish a
-  // `schedule.updated` bus event so the card refetches live.
+  // by the ScheduledTasksCard UI (via schedule:* window.api channels → rpc.mjs).
+  // Store mutations publish a `schedule.updated` bus event so the card
+  // refetches live.
   if (path === "/api/schedule") {
     try {
       if (req.method === "POST") {
@@ -786,10 +787,9 @@ const server = createServer(async (req, res) => {
   // GET    /api/webhook?sessionID=  → {hooks:[meta...]} (secret + token stripped)
   // DELETE /api/webhook?id=    → {deleted:bool}
   // Created by the remote AI's global opencode `webhook` tool; listed/deleted by
-  // the WebhooksCard UI (webhook:* window.api channels → rpc.mjs, and by the
-  // desktop over its SSH -L 18787 forward). The PUBLIC delivery route is
-  // POST /hook/<token> (separate, below). Store mutations publish a
-  // `webhook.updated` bus event so the card refetches live.
+  // the WebhooksCard UI (webhook:* window.api channels → rpc.mjs). The PUBLIC
+  // delivery route is POST /hook/<token> (separate, below). Store mutations
+  // publish a `webhook.updated` bus event so the card refetches live.
   if (path === "/api/webhook") {
     try {
       if (req.method === "POST") {

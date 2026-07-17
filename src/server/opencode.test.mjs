@@ -412,8 +412,9 @@ test("compactSession appends ?directory= from cache", async () => {
 // UNSCOPED /permission list (and 404s an unscoped reply) for a session bound
 // to a non-default directory. Without ?directory= the mobile PermissionCard
 // never appeared and trust-mode auto-allow failed with
-// PermissionNotFoundError — either way the turn hung. Mirrors the question
-// scoping + desktop src/main/opencode.ts.
+// PermissionNotFoundError — either way the turn hung. Same root cause as the
+// question scoping regression (an UNSCOPED call returns 200 / 404 without
+// reaching the session).
 // ---------------------------------------------------------------------------
 
 test("listPermissions appends ?directory= from cache", async () => {

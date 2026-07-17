@@ -1,9 +1,8 @@
-// opencode HTTP proxy — mobile server edition.
+// opencode HTTP proxy — server-side.
 //
 // Opencode runs on the SAME machine as this Node server, listening at
-// http://127.0.0.1:4096. No SSH tunnel or port-forward is needed. Every
-// function here is a direct port of src/main/opencode.ts's HTTP logic with
-// the AppConfig / ensureForward / SSH layers stripped out.
+// http://127.0.0.1:4096. No SSH tunnel or port-forward is needed; the desktop
+// + mobile clients reach this server over HTTPS (paired, Bearer-token auth).
 //
 // Export names are kept exactly as the rpc-wiring task expects them (see
 // task comments on each function).
@@ -33,9 +32,9 @@ export function apiUrl(path) {
 // socket lingers in TIME_WAIT. Under load (a reconcile/list sweep across many
 // sessions) this burst-creates thousands of one-shot sockets and can exhaust
 // the loopback ephemeral-port range → new connect() fails with EADDRNOTAVAIL.
-// Same class of bug as the desktop forwardFetch path (src/main/opencode.ts);
-// this side just hits opencode directly on the box instead of over an SSH
-// forward. There's no concurrency semaphore here (mobile fan-out is bounded by
+// Same socket-pooling rationale as the desktop's previous forwardFetch path —
+// but here the connection goes straight to opencode on this same box (no SSH
+// forward). There's no concurrency semaphore here (mobile fan-out is bounded by
 // a single client), so we just pool the sockets.
 //
 // http.Agent gives fetch a keep-alive pool so it reuses a bounded set of
@@ -83,8 +82,9 @@ export function _pooledOcRequest(url, init) {
 // regardless of the agent passed, so it can't be capped/controlled. So we issue
 // the request via http.request through our own http.Agent and adapt the
 // IncomingMessage into a WHATWG Response — every caller keeps using `.ok` /
-// `.status` / `.json()` / `.text()` unchanged. Same technique as the desktop
-// pooledRequest in src/main/opencode.ts.
+// `.status` / `.json()` / `.text()` unchanged. Same http.Agent-then-adapt
+// technique the desktop's previous pooledRequest used (over the SSH forward);
+// here the same pattern goes straight to opencode on this box.
 function ocFetch(url, init) {
   return (ocTransport ?? pooledOcRequest)(url, init);
 }
@@ -349,9 +349,8 @@ export function _onSessionDirectoryAdded(fn) {
 // opencode requires an ABSOLUTE directory: given `~/projects/x` it resolves
 // the tilde against its own server cwd ($HOME), persisting the corrupt
 // `/home/dev/~/projects/x`. resolveProjectCwd-fed callers (/clear) pass tilde
-// paths. The mobile server runs ON the opencode host, so a literal `~` /
-// `~/...` expands against this process's own $HOME. Mirrors the desktop fix
-// in src/main/opencode.ts:createSession.
+// paths. The server runs ON the opencode host, so a literal `~` / `~/...`
+// expands against this process's own $HOME.
 export function expandTilde(p) {
   if (typeof p !== "string" || !p.startsWith("~")) return p;
   const home = homedir();
@@ -555,12 +554,11 @@ export async function deleteSessionRaw(sessionId) {
   }
 }
 
-// Auto-rename: generate a 1-2 word title via a THROWAWAY session. Mirror of
-// desktop generateSessionTitle in src/main/opencode.ts — see that comment for
-// the full rationale (opencode has no one-shot completion endpoint, so we
-// create→prompt→poll→delete a hidden session). Returns the RAW model reply;
-// the renderer sanitizes it. Returns "" on timeout/failure so the caller
-// skips the rename rather than erroring.
+// Auto-rename: generate a 1-2 word title via a THROWAWAY session.
+// opencode has no one-shot completion endpoint, so we create→prompt→poll→delete
+// a hidden session. Returns the RAW model reply; the renderer sanitizes it.
+// Returns "" on timeout/failure so the caller skips the rename rather than
+// erroring.
 export async function generateSessionTitle({ directory, instruction }) {
   const absDir = expandTilde(directory);
   let model = null;
@@ -727,8 +725,7 @@ export async function listQuestions(sessionId) {
  *
  * opencode's /question endpoints are `?directory=`-scoped like prompt_async;
  * an UNSCOPED reply 200s but never resumes the blocked tool (agent hangs in
- * "processing"). Scope to the question's session directory. Mirrors the
- * desktop fix in src/main/opencode.ts:replyQuestion.
+ * "processing"). Scope to the question's session directory.
  * @param {{ requestId: string, answers: string[][], sessionId?: string }} opts
  */
 export async function replyQuestion({ requestId, answers, sessionId }) {
@@ -838,11 +835,11 @@ function _normalizeProviderModel(providerID, modelId, m) {
 /**
  * Get the current VCS branch for a working directory.
  *
- * Mirrors src/main/opencode.ts: we DO NOT call opencode's `GET /vcs`
- * because that endpoint caches branch state per-worker and never reflects
- * a `git checkout` performed in the user's terminal. Instead we shell out
- * to `git -C <dir> branch --show-current` directly. Returns null for empty
- * dir, non-git, detached HEAD, or any failure.
+ * We DO NOT call opencode's `GET /vcs` because that endpoint caches branch
+ * state per-worker and never reflects a `git checkout` performed in the
+ * user's terminal. Instead we shell out to `git -C <dir> branch --show-current`
+ * directly. Returns null for empty dir, non-git, detached HEAD, or any
+ * failure.
  *
  * @param {string} [directory]
  * @returns {Promise<string|null>}
