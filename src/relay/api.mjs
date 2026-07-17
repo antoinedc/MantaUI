@@ -211,6 +211,13 @@ export function isStreamingSubpath(subpath) {
  *   phone auth seam; default createDefaultPhoneAuth({ store, warn }).
  * @param {(boxId:string)=>boolean} [opts.hasActiveSubscription]
  *   gate seam; default createDefaultSubscriptionCheck(store, now).
+ * @param {object} [opts.meter]  the per-box meter from createBoxMeter({ store, now }).
+ *   When provided, the proxy branch enforces the per-box cap (over-cap → 429
+ *   `quota_exceeded`), records byte counters (ingress once on the request body,
+ *   egress once for buffered responses or per STREAM_DATA chunk for streamed
+ *   responses), and `boxView` exposes `bytes_in`/`bytes_out` from the store.
+ *   Optional so callers (and tests) without a meter still get full routing.
+ *   See BET-157 / metering.mjs for the contract.
  * @param {(key:string)=>boolean} [opts.rateLimiter]  take(key)=>bool; created if omitted.
  * @param {() => number} [opts.now=Date.now]
  * @param {(...a)=>void} [opts.warn]
@@ -220,6 +227,7 @@ export function createRelayApi(opts = {}) {
     store,
     proxyRequest,
     streamRequest,
+    meter = null,
     now = () => Date.now(),
     warn = console.warn,
   } = opts;
@@ -280,7 +288,7 @@ export function createRelayApi(opts = {}) {
     // GET /api/boxes — the authed account's boxes.
     if (method === "GET" && pathname === "/api/boxes") {
       const boxes = store.listBoxesForAccount(auth.accountId) || [];
-      return json(200, { boxes: boxes.map((b) => boxView(b)) });
+      return json(200, { boxes: boxes.map((b) => boxView(b, store.getUsage(b.box_id))) });
     }
 
     // /api/boxes/:box_id  and  /api/boxes/:box_id/revoke
@@ -308,7 +316,7 @@ export function createRelayApi(opts = {}) {
       if (method !== "GET") return json(405, { error: "method_not_allowed" });
       const box = store.getBox(boxId);
       if (!box) return json(404, { error: "not_found" });
-      return json(200, { box: boxView(box) });
+      return json(200, { box: boxView(box, store.getUsage(boxId)) });
     }
 
     // Phone→box PROXY:  /box/:box_id/<subpath>
@@ -341,12 +349,25 @@ export function createRelayApi(opts = {}) {
       // to the buffered path — pre-BET-156 behavior, the phone gets the
       // full body at end-of-stream. Better than refusing the request.
       if (isStreamingSubpath(subpath) && streamRequest) {
+        // Cap check before opening the stream (BET-157 §3): an over-cap
+        // request never frames STREAM_OPEN — we return a buffered 429 JSON
+        // so the phone sees the rejection as a status, not as a silently
+        // closed stream. GATED vs FREE is metered identically — the bucket
+        // selection uses hasActiveSubscription as the `paid` flag.
+        if (meter && !meter.allow(boxId, { paid: hasActiveSubscription(boxId) })) {
+          return json(429, { error: "quota_exceeded", box_id: boxId });
+        }
+        const ingress = Buffer.byteLength(req.body ?? "");
         let resolved = false;
         return {
           __stream: true,
           handler: () => {
             if (resolved) return;
             resolved = true;
+            // Record ingress once when the stream is actually opened (the
+            // box's STREAM_OPEN is being framed). Egress starts at 0 and is
+            // accumulated per STREAM_DATA chunk below.
+            if (meter) meter.record(boxId, { ingress, egress: 0 });
             return streamRequest(boxId, {
               method,
               path: subpath,
@@ -354,13 +375,30 @@ export function createRelayApi(opts = {}) {
               body: req.body,
             }, {
               onHead: (h) => streamingSink({ kind: "head", status: h.status, headers: h.headers }),
-              onData: (data) => streamingSink({ kind: "data", data }),
+              onData: (data) => {
+                // Per-chunk egress metering at the single place chunks are
+                // written (BET-157 §2). record() swallows its own errors so
+                // a metering write never breaks the phone's stream.
+                if (meter && data) {
+                  meter.record(boxId, { ingress: 0, egress: Buffer.byteLength(data) });
+                }
+                streamingSink({ kind: "data", data });
+              },
               onEnd: () => streamingSink({ kind: "end" }),
               onAbort: (reason) => streamingSink({ kind: "abort", reason: String(reason || "aborted") }),
             });
           },
         };
       }
+
+      // Pre-flight cap check on the buffered path (BET-157 §3): the rate-
+      // limit verdict decides whether we burn a tunnel round-trip. Recorded
+      // bytes come AFTER the round-trip succeeds (below) so a rejected or
+      // failed request leaves no usage.
+      if (meter && !meter.allow(boxId, { paid: hasActiveSubscription(boxId) })) {
+        return json(429, { error: "quota_exceeded", box_id: boxId });
+      }
+      const ingress = Buffer.byteLength(req.body ?? "");
 
       // Forward to the box's live tunnel. The relay preserves the phone's method
       // + body and forwards the subpath (not the /box/:box_id prefix) so the box
@@ -372,6 +410,15 @@ export function createRelayApi(opts = {}) {
           headers: sanitizeForwardHeaders(req.headers),
           body: req.body,
         });
+        // Record ingress + egress once the round-trip completes. On any
+        // throw below we intentionally do NOT record (a failed request costs
+        // nothing — the issue's over-cap rejection also avoids recording).
+        if (meter) {
+          meter.record(boxId, {
+            ingress,
+            egress: Buffer.byteLength(resp?.body ?? ""),
+          });
+        }
         return {
           status: Number.isInteger(resp?.status) ? resp.status : 502,
           headers: resp?.headers || { "content-type": "application/octet-stream" },
@@ -501,12 +548,18 @@ export function createRelayApi(opts = {}) {
 // out here (the store row only knows persisted status/last_seen); the router
 // reports persisted status. A live-tunnel flag would require the RoutingTable,
 // which the API layer doesn't own — status/last_seen is the durable answer.
-function boxView(b) {
+//
+// `usage` is the metering row from `store.getUsage(boxId)` (may be null when
+// the box has never been proxied through). When provided, `bytes_in` /
+// `bytes_out` are surfaced so clients see per-box usage with no extra endpoint.
+function boxView(b, usage = null) {
   return {
     box_id: b.box_id,
     status: b.status,
     created_at: b.created_at,
     last_seen: b.last_seen,
+    bytes_in: usage?.ingress ?? 0,
+    bytes_out: usage?.egress ?? 0,
   };
 }
 
