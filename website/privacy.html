@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — Manta UI</title>
+<meta name="description" content="What Manta UI stores on your box and on the relay, who sees it, and how to delete it.">
+<meta name="theme-color" content="#0B1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --navy-950:#0B1020;--navy-900:#0E1326;--navy-850:#12182F;--navy-800:#171F3A;
+  --navy-750:#1D2647;--navy-700:#253055;--navy-600:#33406B;--navy-500:#45537F;
+  --blue-300:#8AABFF;--blue-400:#5A88FF;--blue-500:#2E6BFF;--blue-600:#1E52DB;--blue-700:#1740AE;
+  --cyan-300:#9BEBFB;--cyan-400:#49D7F5;--cyan-500:#22BEE0;--cyan-600:#1298B8;
+  --slate-50:#F8FAFC;--slate-200:#CBD3E1;--slate-300:#A7B1C4;--slate-400:#7E889D;--slate-500:#5C6578;--slate-600:#434B5E;
+  --green-500:#22C79A;--amber-500:#F0A934;--red-500:#F0505F;
+  --surface-app:var(--navy-950);--surface-sunken:var(--navy-900);--surface-panel:var(--navy-850);
+  --surface-card:var(--navy-800);--surface-raised:var(--navy-750);--surface-inset:#070B17;
+  --border-subtle:#FFFFFF14;--border-default:var(--navy-700);--border-strong:var(--navy-600);
+  --text-primary:var(--slate-50);--text-secondary:var(--slate-200);--text-tertiary:var(--slate-400);--text-link:var(--cyan-400);
+  --fill-subtle:#FFFFFF0D;--fill-subtle-hover:#FFFFFF1A;
+  --font-sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --font-mono:'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace;
+  --gradient-brand:linear-gradient(135deg,var(--cyan-400) 0%,var(--blue-500) 100%);
+  --glow-cyan:0 0 0 1px rgba(73,215,245,.5),0 0 24px rgba(73,215,245,.35);
+  --shadow-md:0 8px 24px rgba(3,6,15,.55);--shadow-lg:0 18px 48px rgba(3,6,15,.6);--shadow-xl:0 32px 80px rgba(2,4,12,.7);
+  --radius-md:8px;--radius-lg:12px;--radius-xl:16px;--radius-full:999px;
+  --ease-out:cubic-bezier(0.22,1,0.36,1);
+  --content-max:1120px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--surface-app);color:var(--text-secondary);font-family:var(--font-sans);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text-link);text-decoration:none;transition:color .12s var(--ease-out)}
+a:hover{color:var(--cyan-300)}
+.mono{font-family:var(--font-mono)}
+
+/* nav (matches index.html) */
+header{position:sticky;top:0;z-index:100;backdrop-filter:blur(12px);background:rgba(11,16,32,.72);border-bottom:1px solid var(--border-subtle)}
+nav{display:flex;align-items:center;justify-content:space-between;height:60px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;color:var(--text-primary);font-size:17px;letter-spacing:-.01em}
+.brand img{width:30px;height:30px;object-fit:contain}
+.brand b{font-weight:800}
+.navlinks{display:flex;align-items:center;gap:28px;font-size:14px}
+.navlinks a{color:var(--text-tertiary)}
+.navlinks a:hover{color:var(--text-primary)}
+.wrap{max-width:var(--content-max);margin:0 auto;padding:0 24px}
+.btn{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 18px;border-radius:var(--radius-md);font-weight:600;font-size:14px;
+  border:1px solid transparent;cursor:pointer;transition:all .12s var(--ease-out);font-family:var(--font-sans)}
+.btn-ghost{background:var(--fill-subtle);color:var(--text-secondary);border-color:var(--border-default)}
+.btn-ghost:hover{background:var(--fill-subtle-hover);color:var(--text-primary);border-color:var(--border-strong)}
+@media(max-width:720px){.navlinks .hide-sm{display:none}}
+
+/* prose column */
+.doc{padding:80px 0 96px}
+.doc .wrap{max-width:780px}
+.doc h1{font-size:clamp(28px,4.2vw,42px);font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin-bottom:8px;line-height:1.15}
+.doc .lede{font-size:17px;color:var(--text-tertiary);margin-bottom:36px;line-height:1.55}
+.doc h2{font-size:22px;font-weight:700;color:var(--text-primary);margin:40px 0 12px;letter-spacing:-.01em}
+.doc h3{font-size:16px;font-weight:600;color:var(--text-primary);margin:24px 0 8px}
+.doc p{margin-bottom:14px;color:var(--text-secondary)}
+.doc ul{margin:0 0 14px 22px;color:var(--text-secondary)}
+.doc li{margin-bottom:6px}
+.doc code{font-family:var(--font-mono);font-size:13px;color:var(--cyan-300);background:#0E1B33;padding:1px 6px;border-radius:4px}
+.doc hr{border:0;border-top:1px solid var(--border-subtle);margin:32px 0}
+.doc .meta{font-size:13px;color:var(--slate-500);margin-bottom:24px}
+.doc .pill{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--amber-500);background:#F0A9341A;border:1px solid #F0A9343d;border-radius:var(--radius-full);padding:2px 10px;margin-bottom:18px}
+
+footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;color:var(--slate-500)}
+.foot{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px}
+.foot .brand{font-size:15px}
+.foot .brand img{width:24px;height:24px}
+.foot-links{display:flex;gap:22px}
+.foot-links a{color:var(--slate-400)}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
+      <div class="navlinks">
+        <a href="/">Home</a>
+        <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<div class="doc">
+  <div class="wrap">
+    <span class="pill">Draft — awaiting owner approval</span>
+    <h1>Privacy</h1>
+    <p class="meta">Plain-language summary of what Manta UI stores where, who can read it, and how to delete it.</p>
+    <p class="lede">Manta UI is a thin client. The interesting data lives on <em>your</em> Linux box; the relay only sees the parts that have to cross the public internet to reach your phone.</p>
+
+    <h2>What runs where</h2>
+    <p>Manta UI is two surfaces over the same protocol:</p>
+    <ul>
+      <li><b>The desktop app</b> (Electron) and <b>the phone client</b> (PWA today, native apps in flight) are thin clients — chat, terminal, and file browser over HTTPS.</li>
+      <li><b>The server</b> runs on your own Linux box. It owns your <code>tmux</code> sessions, your <code>opencode</code> chat sessions, your file uploads, your schedules, your secrets, your webhooks, and your notifications. Everything lives under <code>~/.manta/</code> on that box.</li>
+      <li><b>The relay</b> (<code>relay.mantaui.com</code>) is the operated backend that routes phone traffic to your box. Your box dials <em>out</em> to the relay over a WebSocket; nothing on the box needs an inbound port.</li>
+    </ul>
+
+    <h2>What's on your box</h2>
+    <ul>
+      <li><b>Box identity</b> — a random <code>box_id</code> (32 hex chars) and a <code>box_token</code> (HMAC key) under <code>~/.manta/auth.json</code> (<code>0600</code>). The token never leaves the box.</li>
+      <li><b>Pairing codes</b> — short-lived (5 min), loopback-only, one-time. Mints when you run <code>npm run pair</code> or hit <code>GET /auth/pair</code> from the box itself.</li>
+      <li><b>Device tokens</b> — issued to each paired desktop / phone. Stored locally in each app's <code>config.json</code>; the box keeps no per-device record beyond "is this token currently valid."</li>
+      <li><b>Your work</b> — every <code>tmux</code> session, every opencode chat, every uploaded file (<code>~/.manta-uploads/</code>, hourly auto-clean), every scheduled prompt, every webhook, every secret, every published page.</li>
+    </ul>
+    <p>Delete any of this by deleting the file. The installer's only hard rule is: <b>never regenerate <code>~/.manta/auth.json</code></b> — that would unpair every device.</p>
+
+    <h2>What's on the relay</h2>
+    <p>The relay holds the minimum it needs to route traffic and (when subscription lands) gate paid endpoints. It does not proxy your terminal bytes through anything except the encrypted box↔relay WebSocket.</p>
+    <ul>
+      <li><b>Box row</b> — <code>box_id</code>, first-seen, last-seen, online/offline status.</li>
+      <li><b>Account binding</b> — which account owns which box (one account ↔ many boxes; a box belongs to exactly one account).</li>
+      <li><b>Device tokens</b> — phone tokens stored as <code>sha256(token)</code>; the plaintext is handed to the phone once at <code>/pair</code> time and never persisted server-side.</li>
+      <li><b>Box handshake credential</b> — <code>sha256(box_token)</code>, trust-on-first-use (a second box claiming the same <code>box_id</code> is rejected).</li>
+      <li><b>Native push tokens</b> — APNs or FCM device tokens, so the relay can deliver a push when the box is on a different network than the phone. (Stage 5; not yet wired for production.)</li>
+      <li><b>IAP receipts</b> — Apple in-app-purchase receipts bound to a <code>box_id</code>. (Stage 5; in place, awaiting production deployment.)</li>
+      <li><b>Byte-usage counters</b> — per-box ingress and egress totals, the COGS signal the subscription meter reads.</li>
+    </ul>
+    <p>Retention is until you unbind the box (the relay drops the binding row + cascades the dependents) or delete the box. The relay has no concept of a "marketing profile" — it stores nothing about you beyond what's needed to route your traffic.</p>
+
+    <h2>What crosses the wire</h2>
+    <ul>
+      <li><b>Phone → box</b>: chat prompts, terminal keystrokes, file uploads. Authenticated with your device token; the box checks HMAC + expiry on every request.</li>
+      <li><b>Box → relay</b>: a single outbound WebSocket to <code>wss://relay.mantaui.com/box/&lt;box_id&gt;</code>, authenticated with your <code>box_token</code>. The relay cannot read the contents (it just forwards frames).</li>
+      <li><b>Relay → phone</b>: chat responses, terminal output, file download responses, push notifications. Web Push today (VAPID, PWA); native APNs/FCM in flight for the iOS / Android apps.</li>
+    </ul>
+
+    <h2>Push notifications</h2>
+    <p>When you have the phone client open in the background (or installed as a native app later), Manta may send a push when an agent needs you — a permission prompt, a question, an error, or a long-running task finishing. The push body carries the session name and a short snippet of the question. We do not include the full transcript in the push body.</p>
+
+    <h2>Cookies and analytics on this site</h2>
+    <p>This website (the one you're reading right now) does not set cookies, does not run analytics, does not embed trackers, and does not fingerprint your browser. The only outbound requests are to Google Fonts for typography.</p>
+
+    <h2>Third parties we use</h2>
+    <ul>
+      <li><b>Google Fonts</b> — typography CSS, loaded from <code>fonts.googleapis.com</code>. Google sees your IP. If you want to avoid that, the page degrades gracefully to system fonts.</li>
+      <li><b>Apple Push Notification service (APNs)</b> / <b>Firebase Cloud Messaging (FCM)</b> — for native push on the iOS / Android apps. Apple and Google see the push envelope and your IP.</li>
+      <li><b>Stripe / Apple IAP</b> — when the subscription ships, payment is handled by the app store; we never see your card number.</li>
+    </ul>
+
+    <h2>Open source</h2>
+    <p>Manta UI is open source. The server, relay, mobile web client, and desktop app are all on <a href="https://github.com/antoinedc/MantaUI">GitHub</a>. The only closed-source piece is the published iOS / Android app (which exists only because the stores require it).</p>
+
+    <h2>Your choices</h2>
+    <ul>
+      <li><b>Run the server yourself.</b> Every user runs their own server on their own hardware. You can point a phone at your own box directly, skip the relay entirely, and not share any data with us.</li>
+      <li><b>Use the relay.</b> If you go through <code>relay.mantaui.com</code>, you accept the relay's storage of the fields above. Unpair any time from your box: delete the device from the desktop app, or wipe <code>~/.manta/</code>.</li>
+      <li><b>Delete your data.</b> Uninstalling the desktop or phone app removes its local config. Wiping <code>~/.manta/</code> on the box removes identity + work. Asking us to forget a box drops the relay row + cascades.</li>
+    </ul>
+
+    <hr>
+    <h2>Contact</h2>
+    <p>Questions, deletion requests, or reports: <a href="mailto:app@mantaui.com">app@mantaui.com</a>.</p>
+    <p>This page is a draft awaiting owner approval before deploy. Until then, the canonical privacy story lives in the <a href="https://github.com/antoinedc/MantaUI">README</a> and <a href="https://github.com/antoinedc/MantaUI/tree/main/src/server">server source</a>.</p>
+  </div>
+</div>
+
+<footer>
+  <div class="wrap foot">
+    <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b style="font-weight:800">UI</b></span></div>
+    <div class="foot-links">
+      <a href="/">Home</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      <a href="https://github.com/antoinedc/MantaUI">GitHub</a>
+    </div>
+    <div>Built for people who pair with agents.</div>
+  </div>
+</footer>
+
+</body>
+</html>

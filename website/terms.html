@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms — Manta UI</title>
+<meta name="description" content="Terms of use for the Manta UI desktop client, mobile client, and operated relay.">
+<meta name="theme-color" content="#0B1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --navy-950:#0B1020;--navy-900:#0E1326;--navy-850:#12182F;--navy-800:#171F3A;
+  --navy-750:#1D2647;--navy-700:#253055;--navy-600:#33406B;--navy-500:#45537F;
+  --blue-300:#8AABFF;--blue-400:#5A88FF;--blue-500:#2E6BFF;--blue-600:#1E52DB;--blue-700:#1740AE;
+  --cyan-300:#9BEBFB;--cyan-400:#49D7F5;--cyan-500:#22BEE0;--cyan-600:#1298B8;
+  --slate-50:#F8FAFC;--slate-200:#CBD3E1;--slate-300:#A7B1C4;--slate-400:#7E889D;--slate-500:#5C6578;--slate-600:#434B5E;
+  --green-500:#22C79A;--amber-500:#F0A934;--red-500:#F0505F;
+  --surface-app:var(--navy-950);--surface-sunken:var(--navy-900);--surface-panel:var(--navy-850);
+  --surface-card:var(--navy-800);--surface-raised:var(--navy-750);--surface-inset:#070B17;
+  --border-subtle:#FFFFFF14;--border-default:var(--navy-700);--border-strong:var(--navy-600);
+  --text-primary:var(--slate-50);--text-secondary:var(--slate-200);--text-tertiary:var(--slate-400);--text-link:var(--cyan-400);
+  --fill-subtle:#FFFFFF0D;--fill-subtle-hover:#FFFFFF1A;
+  --font-sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --font-mono:'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace;
+  --gradient-brand:linear-gradient(135deg,var(--cyan-400) 0%,var(--blue-500) 100%);
+  --glow-cyan:0 0 0 1px rgba(73,215,245,.5),0 0 24px rgba(73,215,245,.35);
+  --shadow-md:0 8px 24px rgba(3,6,15,.55);--shadow-lg:0 18px 48px rgba(3,6,15,.6);--shadow-xl:0 32px 80px rgba(2,4,12,.7);
+  --radius-md:8px;--radius-lg:12px;--radius-xl:16px;--radius-full:999px;
+  --ease-out:cubic-bezier(0.22,1,0.36,1);
+  --content-max:1120px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--surface-app);color:var(--text-secondary);font-family:var(--font-sans);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text-link);text-decoration:none;transition:color .12s var(--ease-out)}
+a:hover{color:var(--cyan-300)}
+.mono{font-family:var(--font-mono)}
+
+/* nav (matches index.html) */
+header{position:sticky;top:0;z-index:100;backdrop-filter:blur(12px);background:rgba(11,16,32,.72);border-bottom:1px solid var(--border-subtle)}
+nav{display:flex;align-items:center;justify-content:space-between;height:60px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;color:var(--text-primary);font-size:17px;letter-spacing:-.01em}
+.brand img{width:30px;height:30px;object-fit:contain}
+.brand b{font-weight:800}
+.navlinks{display:flex;align-items:center;gap:28px;font-size:14px}
+.navlinks a{color:var(--text-tertiary)}
+.navlinks a:hover{color:var(--text-primary)}
+.wrap{max-width:var(--content-max);margin:0 auto;padding:0 24px}
+.btn{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 18px;border-radius:var(--radius-md);font-weight:600;font-size:14px;
+  border:1px solid transparent;cursor:pointer;transition:all .12s var(--ease-out);font-family:var(--font-sans)}
+.btn-ghost{background:var(--fill-subtle);color:var(--text-secondary);border-color:var(--border-default)}
+.btn-ghost:hover{background:var(--fill-subtle-hover);color:var(--text-primary);border-color:var(--border-strong)}
+@media(max-width:720px){.navlinks .hide-sm{display:none}}
+
+/* prose column */
+.doc{padding:80px 0 96px}
+.doc .wrap{max-width:780px}
+.doc h1{font-size:clamp(28px,4.2vw,42px);font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin-bottom:8px;line-height:1.15}
+.doc .lede{font-size:17px;color:var(--text-tertiary);margin-bottom:36px;line-height:1.55}
+.doc h2{font-size:22px;font-weight:700;color:var(--text-primary);margin:40px 0 12px;letter-spacing:-.01em}
+.doc h3{font-size:16px;font-weight:600;color:var(--text-primary);margin:24px 0 8px}
+.doc p{margin-bottom:14px;color:var(--text-secondary)}
+.doc ul{margin:0 0 14px 22px;color:var(--text-secondary)}
+.doc li{margin-bottom:6px}
+.doc code{font-family:var(--font-mono);font-size:13px;color:var(--cyan-300);background:#0E1B33;padding:1px 6px;border-radius:4px}
+.doc hr{border:0;border-top:1px solid var(--border-subtle);margin:32px 0}
+.doc .meta{font-size:13px;color:var(--slate-500);margin-bottom:24px}
+.doc .pill{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--amber-500);background:#F0A9341A;border:1px solid #F0A9343d;border-radius:var(--radius-full);padding:2px 10px;margin-bottom:18px}
+
+footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;color:var(--slate-500)}
+.foot{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px}
+.foot .brand{font-size:15px}
+.foot .brand img{width:24px;height:24px}
+.foot-links{display:flex;gap:22px}
+.foot-links a{color:var(--slate-400)}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
+      <div class="navlinks">
+        <a href="/">Home</a>
+        <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<div class="doc">
+  <div class="wrap">
+    <span class="pill">Draft — awaiting owner approval</span>
+    <h1>Terms</h1>
+    <p class="meta">The short version. Manta UI is open source, your box is yours, and we don't warranty anything — but we'll do our best.</p>
+    <p class="lede">These terms cover the desktop app, the phone client (PWA today, native apps in flight), and the operated relay at <code>relay.mantaui.com</code>. They do <em>not</em> cover anything your AI agent does inside your <code>tmux</code> session — that's between you and your model provider.</p>
+
+    <h2>Your box is yours</h2>
+    <p>Manta UI is software you run on hardware you own. The server runs under your user account on your Linux box; the desktop app runs on your Mac; the phone client runs on your phone. You are responsible for what runs on those machines and what your agents do with that access.</p>
+    <p>We do not host your code, your sessions, your files, or your transcripts. Everything you produce lives in <code>~/.manta/</code> on your box.</p>
+
+    <h2>The relay is our service</h2>
+    <p>If you choose to reach your box through the operated relay (<code>relay.mantaui.com</code>), you are using a service we run. The relay routes traffic between your phone and your box, and stores the minimum needed to do that — see the <a href="/privacy">Privacy</a> page.</p>
+    <ul>
+      <li>The relay accepts inbound HTTPS from your phone and proxies it to your box over the box's outbound WebSocket.</li>
+      <li>It does not inspect, log, or index the contents of your traffic.</li>
+      <li>It does enforce rate limits and a per-box byte meter (when subscription lands) — abuse will get a box rate-limited or dropped.</li>
+    </ul>
+
+    <h2>Acceptable use</h2>
+    <p>Don't use Manta UI to:</p>
+    <ul>
+      <li>Abuse the relay — no scanning, fuzzing, or volumetric traffic; we rate-limit per box.</li>
+      <li>Impersonate another box — the box↔relay handshake is trust-on-first-use; a box presenting a forged <code>box_id</code> loses its slot.</li>
+      <li>Reverse-engineer the relay to extract other users' traffic. (You can read the relay source — it's open source — but you cannot MITM another user's session.)</li>
+      <li>Use the relay as a general-purpose VPN, CDN, or proxy for non-Manta traffic.</li>
+      <li>Violate the law in any jurisdiction you operate from.</li>
+    </ul>
+
+    <h2>No warranty</h2>
+    <p>Manta UI is provided <b>as is</b>, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability arising from, out of, or in connection with the software or the use or other dealings in the software.</p>
+    <p>The desktop app is unsigned in beta — first launch will be blocked by macOS Gatekeeper. Right-click the <code>.dmg</code> in Finder → <b>Open</b> to bypass, or strip the quarantine attribute after install. We are working on signing for the first App Store release.</p>
+
+    <h2>Subscription</h2>
+    <!-- OWNER REVIEW: confirm the "free during beta" wording below or replace with the post-beta subscription terms. -->
+    <p><b>Free during beta.</b> The desktop app, the mobile web client, and the relay are free to use during the public beta. When the App Store release ships, the iOS / Android apps will require an in-app subscription to cover operated-push and metering costs; the server you self-host will remain free and source-available forever. Subscription terms and pricing will be published here and in the app stores before any paid tier activates.</p>
+
+    <h2>Changes to the service</h2>
+    <p>We may change, suspend, or discontinue any part of the operated relay with reasonable notice (a release note on the GitHub repo and an in-app banner). Self-hosted servers are unaffected — they don't depend on the relay at all.</p>
+
+    <h2>Data</h2>
+    <p>What we store, what crosses the wire, and how to delete it: see the <a href="/privacy">Privacy</a> page.</p>
+
+    <h2>Governing law</h2>
+    <!-- OWNER REVIEW: confirm or replace the jurisdiction below. -->
+    <p>These terms are governed by the laws of <em>[OWNER: jurisdiction]</em>, without regard to conflict-of-law provisions.</p>
+
+    <h2>Contact</h2>
+    <p>Questions, takedown requests, abuse reports: <a href="mailto:app@mantaui.com">app@mantaui.com</a>.</p>
+    <p>This page is a draft awaiting owner approval before deploy. The two <code>&lt;!-- OWNER REVIEW: … --&gt;</code> placeholders above need a human decision before this goes live.</p>
+  </div>
+</div>
+
+<footer>
+  <div class="wrap foot">
+    <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b style="font-weight:800">UI</b></span></div>
+    <div class="foot-links">
+      <a href="/">Home</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      <a href="https://github.com/antoinedc/MantaUI">GitHub</a>
+    </div>
+    <div>Built for people who pair with agents.</div>
+  </div>
+</footer>
+
+</body>
+</html>
