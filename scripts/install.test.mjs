@@ -5,11 +5,10 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   resolveConfig,
   parsePort,
-  resolveTarballUrl,
-  isValidVersion,
   checkIdentity,
   waitForHealth,
   waitForRelay,
@@ -31,23 +30,22 @@ const INSTALL_SH = join(__dirname, "install.sh");
 
 /**
  * Source scripts/install.sh in test mode (MANTA_INSTALL_TEST_MODE=1) after
- * applying `preBody` (mocks / overrides), then call the bootstrap function
- * named by `func` (default: `bootstrap_node`). Returns the captured
- * stdout+stderr as a single string. The harness writes a tiny bash script
- * to a temp file so we don't fight bash quoting rules.
+ * applying `preBody` (mocks / overrides), then call the helper named by
+ * `func` (default: bash's no-op `:`). Returns the captured stdout+stderr as
+ * a single string. The harness writes a tiny bash script to a temp file so
+ * we don't fight bash quoting rules.
  *
  * Mock pattern: define functions AFTER sourcing install.sh. Bash uses the
- * latest definition, so the test's mocks override install.sh's helpers. The
- * test mock for `command` is what makes "node missing on PATH" testable in a
- * sandbox that already has node installed.
+ * latest definition, so the test's mocks override install.sh's helpers.
+ * Tests shadow `uname` for require_arch; previously the deleted bootstrap_*
+ * tests shadowed `command` / `detect_distro_id`.
  *
- * Never throws — bootstrap_node / bootstrap_build_essential's `die` calls
- * `exit 1`, which would otherwise propagate via execSync's thrown-on-non-zero
- * behavior. The harness swallows the error and returns the captured output
- * (with BOOTSTRAP_EXIT=NNN appended) so the test can assert on the message
- * + exit code together.
+ * Never throws — helpers' `die` calls `exit 1`, which would otherwise
+ * propagate via execSync's thrown-on-non-zero behavior. The harness swallows
+ * the error and returns the captured output (with BOOTSTRAP_EXIT=NNN
+ * appended) so the test can assert on the message + exit code together.
  */
-function runBootstrap({ preBody = "", func = "bootstrap_node" } = {}) {
+function runBootstrap({ preBody = "", func = ":" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "manta-bootstrap-"));
   const script = join(dir, "test.sh");
   writeFileSync(
@@ -72,9 +70,9 @@ exit $rc
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (e) {
-      // execSync throws when the child exits non-zero (bootstrap_node calls
-      // `die` → `exit 1` for the failure paths). The stderr/stdout is on
-      // the error object — concatenate and return so callers can assert on
+      // execSync throws when the child exits non-zero (helpers' `die`
+      // → `exit 1` for the failure paths). The stderr/stdout is on the
+      // error object — concatenate and return so callers can assert on
       // the message AND the BOOTSTRAP_EXIT=N marker.
       const out = (e.stdout ?? "") + (e.stderr ?? "");
       // execSync's stdout/stderr are string when encoding is set.
@@ -154,59 +152,6 @@ test("parsePort accepts valid ports, rejects junk", () => {
   assert.equal(parsePort(""), undefined);
   assert.equal(parsePort(null), undefined);
   assert.equal(parsePort("80.5"), undefined);
-});
-
-// ----------------------------------------------------------------------------
-// resolveTarballUrl / isValidVersion
-// ----------------------------------------------------------------------------
-
-test("resolveTarballUrl builds default URL from host + version", () => {
-  const url = resolveTarballUrl({
-    tarballUrl: null,
-    releaseHost: "https://mantaui.com",
-    version: "0.0.1",
-  });
-  assert.equal(url, "https://mantaui.com/releases/manta-0.0.1.tar.gz");
-});
-
-test("resolveTarballUrl uses explicit override verbatim", () => {
-  const url = resolveTarballUrl({
-    tarballUrl: "file:///tmp/x.tar.gz",
-    releaseHost: "https://ignored.example.com",
-    version: "9.9.9",
-  });
-  assert.equal(url, "file:///tmp/x.tar.gz");
-});
-
-test("resolveTarballUrl strips trailing slash on host", () => {
-  const url = resolveTarballUrl({
-    tarballUrl: "",
-    releaseHost: "https://mirror.example.com/",
-    version: "1.2.3-rc.1",
-  });
-  assert.equal(url, "https://mirror.example.com/releases/manta-1.2.3-rc.1.tar.gz");
-});
-
-test("resolveTarballUrl rejects a path-traversal version", () => {
-  assert.throws(
-    () =>
-      resolveTarballUrl({
-        tarballUrl: null,
-        releaseHost: "https://x.com",
-        version: "../../etc/passwd",
-      }),
-    /invalid version/,
-  );
-});
-
-test("isValidVersion accepts semver-ish, rejects slashes", () => {
-  assert.equal(isValidVersion("0.0.1"), true);
-  assert.equal(isValidVersion("1.2.3-rc.1"), true);
-  assert.equal(isValidVersion("latest"), true);
-  assert.equal(isValidVersion("../x"), false);
-  assert.equal(isValidVersion("a/b"), false);
-  assert.equal(isValidVersion(""), false);
-  assert.equal(isValidVersion(null), false);
 });
 
 // ----------------------------------------------------------------------------
@@ -583,9 +528,11 @@ test("renderShellConfig emits eval-able KEY=VALUE lines", () => {
   const out = renderShellConfig(cfg, { version: "0.0.1" });
   assert.match(out, new RegExp(`MANTA_HOME='${join(HOME, "manta")}'`));
   assert.match(out, /MANTA_AUTH_FILE='.*\.manta\/auth\.json'/);
-  assert.match(out, /MANTA_TARBALL_URL='.*\/releases\/manta-0\.0\.1\.tar\.gz'/);
   assert.match(out, /MANTA_PORT='8787'/);
   assert.match(out, /MANTA_HEALTH_URL='http:\/\/127\.0\.0\.1:8787\/auth\/status'/);
+  // MANTA_TARBALL_URL is NOT emitted — install.sh derives the URL from the
+  // manifest. (resolveConfig still parses it for tests / future overrides.)
+  assert.doesNotMatch(out, /MANTA_TARBALL_URL=/);
 });
 
 test("renderShellConfig single-quotes values with spaces safely", () => {
@@ -808,15 +755,20 @@ test("waitForHealth acceptAnyStatus=true (default) accepts 404 as healthy", asyn
 });
 
 // ----------------------------------------------------------------------------
-// install.sh — bash syntax + bootstrap_node (BET-162 F1 fix)
+// install.sh — bash syntax + manifest_get / verify_sha256 / require_arch
 // ----------------------------------------------------------------------------
 //
 // These tests shell out to bash because install.sh is bash, not JS. They use
 // the MANTA_INSTALL_TEST_MODE=1 sentinel (added in install.sh) which bails
 // before the install body runs and only loads the bash helpers
-// (log/ok/warn/die + bootstrap_node + install_node_via_* + require_cmd). The
-// unit tests then exercise the helpers with mocked apt/dnf/yum call sites so
-// nothing hits the network.
+// (log/ok/warn/die + manifest_get + verify_sha256 + require_arch). The unit
+// tests then exercise the helpers with mocked `uname`/tmpfiles so nothing
+// hits the network.
+//
+// (Previous BET-162/170 cases — bootstrap_node, install_node_via_*, and
+// bootstrap_build_essential — are DELETED in BET-173: the installer no longer
+// installs Node or build-essential on the box. The tarball ships a vendored
+// Node runtime + prebuilt production deps.)
 
 test("install.sh is bash-syntax-clean (bash -n)", () => {
   // Sanity check that the script parses. The harness writes it to a temp
@@ -833,281 +785,158 @@ test("install.sh is bash-syntax-clean (bash -n)", () => {
   }
 });
 
-test("bootstrap_node is a no-op when node is already on PATH (idempotent)", () => {
-  // The harness's bash env has node on PATH (the test runner depends on it).
-  // The mock for install_node_via_apt MUST NOT fire — bootstrap_node should
-  // early-return at the `command -v node` check. This is the re-run path:
-  // a box that already has node should NOT touch apt.
+// ----------------------------------------------------------------------------
+// manifest_get — the bash helper install.sh uses to read key=value from the
+// release manifest BEFORE any node exists on the box.
+// ----------------------------------------------------------------------------
+
+test("manifest_get extracts each key from a well-formed manifest", () => {
+  // The harness sources install.sh, then echoes the value of each call into
+  // a tagged line we grep for. The manifest body is built inline.
   const out = runBootstrap({
     preBody: `
-# Mock the apt installer — if this fires, the no-op guarantee is broken.
-install_node_via_apt() {
-  echo "MOCK_APT_CALLED" >&2
-  return 0
-}
-install_node_via_dnf() {
-  echo "MOCK_DNF_CALLED" >&2
-  return 0
-}
-install_node_via_yum() {
-  echo "MOCK_YUM_CALLED" >&2
-  return 0
-}
+manifest='version=0.0.1
+file_linux_x64=manta-0.0.1-linux-x64.tar.gz
+sha256_linux_x64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+echo "V=\$(manifest_get "\$manifest" version)"
+echo "F=\$(manifest_get "\$manifest" file_linux_x64)"
+echo "S=\$(manifest_get "\$manifest" sha256_linux_x64)"
 `,
   });
-  assert.doesNotMatch(out, /MOCK_APT_CALLED/);
-  assert.doesNotMatch(out, /MOCK_DNF_CALLED/);
-  assert.doesNotMatch(out, /MOCK_YUM_CALLED/);
-  assert.doesNotMatch(out, /bootstrap_node|NodeSource/, "no bootstrap log lines when node is on PATH");
-  assert.match(out, /BOOTSTRAP_EXIT=0/);
+  assert.match(out, /V=0\.0\.1/);
+  assert.match(out, /F=manta-0\.0\.1-linux-x64\.tar\.gz/);
+  assert.match(out, /S=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/);
 });
 
-test("bootstrap_node calls install_node_via_apt on Debian/Ubuntu when node is missing", () => {
-  // Pretend node is missing by shadowing `command -v node`. The bash test
-  // env has node, so without the shadow bootstrap_node would no-op.
+test("manifest_get returns empty on a missing key (no false positives)", () => {
   const out = runBootstrap({
     preBody: `
-# Pretend \`command -v node\` always fails.
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-
-# Force the Debian/Ubuntu distro branch (no /etc/os-release in some sandboxes).
-detect_distro_id() { echo "ubuntu"; }
-
-# Mock the apt installer — if this fires, the call site is wired right.
-install_node_via_apt() {
-  echo "MOCK_APT_CALLED"
-  return 0
-}
+manifest='version=0.0.1
+file_linux_x64=manta-0.0.1-linux-x64.tar.gz'
+val="\$(manifest_get "\$manifest" sha256_linux_x64)"
+echo "VAL_LEN=\${#val}"
 `,
   });
-  assert.match(out, /MOCK_APT_CALLED/, "apt installer was called");
-  assert.match(out, /bootstrapping Node\.js 20\.x/);
-  // The mock returns 0, so the install is "successful" — but bootstrap_node
-  // re-checks `command -v node` afterwards and our shadow still says "missing",
-  // so it dies. That's the expected flow when the install doesn't actually
-  // put node on PATH (a real apt install would).
-  assert.match(out, /node is still missing after bootstrap/);
+  assert.match(out, /VAL_LEN=0/);
 });
 
-test("bootstrap_node calls install_node_via_dnf on Fedora when node is missing", () => {
+test("manifest_get ignores a second occurrence of the same key (head -n1)", () => {
+  // The manifest writer (pack.mjs) emits exactly one of each key, but if a
+  // future bug regresses to two, the installer must keep reading the FIRST
+  // (the published sha is the one Caddy serves; the second is whatever the
+  // operator hand-edited).
   const out = runBootstrap({
     preBody: `
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-detect_distro_id() { echo "fedora"; }
-install_node_via_dnf() {
-  echo "MOCK_DNF_CALLED"
-  return 0
-}
+manifest='file_linux_x64=manta-first.tar.gz
+file_linux_x64=manta-second.tar.gz'
+echo "F=\$(manifest_get "\$manifest" file_linux_x64)"
 `,
   });
-  assert.match(out, /MOCK_DNF_CALLED/);
-  assert.match(out, /node is still missing after bootstrap/);
+  assert.match(out, /F=manta-first\.tar\.gz/);
+  assert.doesNotMatch(out, /manta-second\.tar\.gz/);
 });
 
-test("bootstrap_node calls install_node_via_yum on RHEL when dnf is absent", () => {
+test("manifest_get tolerates values containing '=' (cut -d= -f2-)", () => {
+  // Some mirrors serve URLs as values — they contain '=' in query strings.
+  // The helper must not truncate at the first '='.
   const out = runBootstrap({
     preBody: `
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-detect_distro_id() { echo "rhel"; }
-# Make dnf fail so yum is tried as the fallback.
-install_node_via_dnf() {
-  echo "MOCK_DNF_CALLED"
-  return 1
-}
-install_node_via_yum() {
-  echo "MOCK_YUM_CALLED"
-  return 0
-}
+manifest='some_url=https://mirror.example.com/x?token=abc=def=='
+echo "U=\$(manifest_get "\$manifest" some_url)"
 `,
   });
-  assert.match(out, /MOCK_DNF_CALLED/);
-  assert.match(out, /MOCK_YUM_CALLED/);
-  assert.match(out, /node is still missing after bootstrap/);
-});
-
-test("bootstrap_node dies with a clear hint when the distro installer fails", () => {
-  // The mock returns non-zero — install_node_via_apt fails. The script
-  // MUST surface the failure as a `die` with the manual-install hint, NOT
-  // silently swallow it.
-  const out = runBootstrap({
-    preBody: `
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-detect_distro_id() { echo "ubuntu"; }
-install_node_via_apt() {
-  echo "MOCK_APT_FAIL"
-  return 1
-}
-`,
-  });
-  assert.match(out, /MOCK_APT_FAIL/);
-  assert.match(out, /Node\.js install via apt failed/);
-  assert.match(out, /Install manually: https:\/\/nodejs\.org/);
-});
-
-test("bootstrap_node dies with a manual-install hint for unknown distros", () => {
-  // distro='arch' isn't in our case statement — the user gets the same
-  // "install manually" hint as the require_cmd failures (BET-162 F1 tone).
-  const out = runBootstrap({
-    preBody: `
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-detect_distro_id() { echo "arch"; }
-`,
-  });
-  assert.match(out, /not auto-bootstrapped/);
-  assert.match(out, /https:\/\/nodejs\.org/, "manual-install hint points at nodejs.org");
-});
-
-test("bootstrap_node dies with a manual-install hint when /etc/os-release is unreadable", () => {
-  const out = runBootstrap({
-    preBody: `
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-detect_distro_id() { echo ""; }
-`,
-  });
-  assert.match(out, /\/etc\/os-release is unreadable/);
-  assert.match(out, /https:\/\/nodejs\.org/, "manual-install hint points at nodejs.org");
-});
-
-test("bootstrap_node dies when node + curl are missing together", () => {
-  // The bootstrap path itself depends on curl + tar to fetch the NodeSource
-  // setup script. If those are gone too, we must NOT try to apt-install
-  // curl — that would silently sudo over a hostile environment. The hint
-  // is "install everything manually and re-run" — same tone as require_cmd.
-  const out = runBootstrap({
-    preBody: `
-command() {
-  # Pretend node, curl, AND tar are all missing.
-  case " $2 " in
-    " node "|" curl "|" tar ") return 1 ;;
-  esac
-  builtin command "$@"
-}
-# If we DID call the apt installer, this would catch the bug.
-install_node_via_apt() {
-  echo "MOCK_APT_CALLED" >&2
-  return 0
-}
-`,
-  });
-  assert.doesNotMatch(out, /MOCK_APT_CALLED/);
-  assert.match(out, /node is missing and so are:/);
-  assert.match(out, /curl/);
-  assert.match(out, /tar/);
+  assert.match(out, /U=https:\/\/mirror\.example\.com\/x\?token=abc=def==/);
 });
 
 // ----------------------------------------------------------------------------
-// bootstrap_build_essential — auto-install make+g++ when missing (BET-170)
+// verify_sha256 — the sha256 check install.sh runs before extracting the
+// tarball. Dies loudly on mismatch (the operator must see why, not silently
+// continue with a corrupt tarball).
 // ----------------------------------------------------------------------------
-//
-// Discovered by the BET-170 live re-run: on a stock Hetzner Ubuntu 24.04
-// cloud image, the install got past bootstrap_node but failed at npm ci
-// because node-pty's native binding needs make + g++. The install script
-// used to assume build-essential was pre-installed; bootstrap_build_essential
-// makes that explicit so the install completes end-to-end on a fresh VPS.
 
-test("bootstrap_build_essential is a no-op when make + g++ are on PATH", () => {
-  // The test runner has both installed (build-essential was a normal dev
-  // dep on the workdir host). We pass func:"bootstrap_build_essential"
-  // so the harness actually exercises THAT function (without func the
-  // runBootstrap default is bootstrap_node — which trivially returns 0
-  // when node is on PATH and gives the no-op path zero coverage).
-  //
-  // Mock install helpers as sentinels — if the no-op guarantee is broken
-  // and bootstrap_build_essential falls through to the install path,
-  // one of these will fire and the assertion below fails.
+test("verify_sha256 passes when the file's hash matches the expected sha", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-verify-sha-"));
+  const file = join(dir, "blob");
+  writeFileSync(file, "hello world\n");
+  const expected = createHash("sha256").update(readFileSync(file)).digest("hex");
+  try {
+    const out = runBootstrap({
+      preBody: `
+verify_sha256 "${file}" "${expected}"
+echo "VERIFIED_OK=\$?"
+`,
+    });
+    assert.match(out, /VERIFIED_OK=0/);
+    assert.match(out, /BOOTSTRAP_EXIT=0/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("verify_sha256 dies with 'checksum mismatch' on a wrong sha", () => {
+  // `die` calls `exit 1`, so the harness captures the error stream and stops
+  // there — no separate exit-code marker is reachable. We assert on the die
+  // message (which carries both expected/actual hashes) — that's the
+  // user-facing signal anyway.
+  const dir = mkdtempSync(join(tmpdir(), "manta-verify-sha-"));
+  const file = join(dir, "blob");
+  writeFileSync(file, "hello world\n");
+  const wrongSha = "0".repeat(64);
+  try {
+    const out = runBootstrap({
+      preBody: `
+verify_sha256 "${file}" "${wrongSha}"
+`,
+    });
+    assert.match(out, /checksum mismatch for/);
+    assert.match(out, new RegExp(`expected: ${wrongSha}`));
+    assert.match(out, /actual:/);
+    assert.match(out, /corrupt download or stale manifest/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// require_arch — die unless uname -m reports x86_64. The harness overrides
+// `uname` via a function in preBody (same mocking style as the deleted
+// bootstrap_* tests used for `command` and `detect_distro_id`).
+// ----------------------------------------------------------------------------
+
+test("require_arch passes when uname emits x86_64", () => {
   const out = runBootstrap({
-    func: "bootstrap_build_essential",
     preBody: `
-detect_distro_id() { echo "ubuntu"; }
-# Sentinel installs — if bootstrap_build_essential actually calls an
-# installer (because make or g++ isn't really on PATH in this sandbox),
-# the sentinel name will appear in the output and the assertion fails.
+uname() { echo "x86_64"; }
+require_arch
+echo "RA_OK=\$?"
 `,
   });
+  assert.match(out, /RA_OK=0/);
   assert.match(out, /BOOTSTRAP_EXIT=0/);
-  assert.doesNotMatch(out, /not found: make/);
-  assert.doesNotMatch(out, /not found: g\+\+/);
-  assert.doesNotMatch(out, /make.*g\+\+ missing/);
-  assert.doesNotMatch(out, /build-essential installed/);
+  assert.doesNotMatch(out, /only x86_64 Linux is supported/);
 });
 
-test("bootstrap_build_essential calls apt-get install on Debian/Ubuntu when make is missing", () => {
+test("require_arch dies with a clear message on aarch64", () => {
+  // `die` calls `exit 1`, so the harness captures the error stream and
+  // stops there — no separate exit-code marker is reachable. Assert on the
+  // die message body (which carries the architecture the user has).
   const out = runBootstrap({
-    func: "bootstrap_build_essential",
     preBody: `
-# Pretend make (but NOT g++) is missing. Real \`make --version\` succeeds
-# in the test env, so we shadow command -v to selectively fail on "make".
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "make" ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-# detect_distro_id returns empty when sourced from /etc/os-release (no
-# such file in the test sandbox). The case statement then hits "" which
-# dies with the "unreadable" hint. Override to "ubuntu" to exercise the
-# apt path.
-detect_distro_id() { echo "ubuntu"; }
-# Force the "no root, no sudo" path so we exercise the die-with-hint
-# branch instead of actually running apt-get. The point of THIS test is
-# the safety guard: a box without sudo must NOT silently try to
-# apt-install make over a hostile environment.
-package_install_mode() { return 1; }
+uname() { echo "aarch64"; }
+require_arch
 `,
   });
-  // bootstrap dies with the "neither root nor sudo" hint. We don't
-  // grep for "apt-get install" in the output because the die message
-  // contains that text in the manual-install suggestion — instead we
-  // assert the specific die message AND that there's no actual apt
-  // output ("Reading package lists" is the first line of real apt-get).
-  assert.match(out, /make.*g\+\+ missing and neither root nor sudo/);
-  assert.doesNotMatch(out, /Reading package lists/, "apt-get never actually ran");
+  assert.match(out, /only x86_64 Linux is supported by this installer today/);
+  assert.match(out, /got: aarch64/);
 });
 
-test("bootstrap_build_essential dies with manual-install hint for unknown distros", () => {
+test("require_arch dies on armv7l too (no fallthrough for any non-x86_64)", () => {
   const out = runBootstrap({
-    func: "bootstrap_build_essential",
     preBody: `
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "make" ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-detect_distro_id() { echo "arch"; }
+uname() { echo "armv7l"; }
+require_arch
 `,
   });
-  assert.match(out, /make.*g\+\+ missing and your distro/);
-  assert.match(out, /not auto-bootstrapped/);
-  assert.match(out, /build-essential/);
+  assert.match(out, /only x86_64 Linux is supported/);
+  assert.match(out, /got: armv7l/);
 });

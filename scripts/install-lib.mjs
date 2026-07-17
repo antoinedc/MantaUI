@@ -32,8 +32,9 @@ export const DEFAULT_PORT = 8787;
 export const HEALTH_PATH = "/auth/status";
 
 // Default release host. The repo is private; CI publishes a versioned tarball
-// the installer downloads (no git clone on the VPS). `MANTA_TARBALL_URL` overrides
-// the whole URL for local testing; otherwise we build it from host + version.
+// + a manifest file the installer downloads (no git clone on the VPS).
+// `MANTA_TARBALL_URL` overrides the whole flow (skips manifest fetch + sha256)
+// for local testing.
 export const DEFAULT_RELEASE_HOST = "https://mantaui.com";
 
 // Where the box lives once installed. `~/.manta/` (auth.json + config.json)
@@ -66,7 +67,7 @@ function envVal(env, key) {
  *   buiHome      — where the code is unpacked (MANTA_HOME || ~/manta)
  *   authDir      — ~/.manta (never inside buiHome)
  *   authFile     — ~/.manta/auth.json (idempotency probe target)
- *   tarballUrl   — explicit MANTA_TARBALL_URL, else null (resolved per-version)
+ *   tarballUrl   — explicit MANTA_TARBALL_URL, else null (overrides manifest fetch)
  *   releaseHost  — MANTA_RELEASE_HOST || DEFAULT_RELEASE_HOST
  *   port         — MANTA_MOBILE_PORT || DEFAULT_PORT
  *   healthUrl    — http://127.0.0.1:<port>/auth/status
@@ -104,30 +105,10 @@ export function parsePort(value) {
 }
 
 /**
- * Resolve the tarball download URL.
- *   - If MANTA_TARBALL_URL is set (via resolveConfig → cfg.tarballUrl), use it
- *     verbatim. This is the local-test / mirror override.
- *   - Otherwise build `<releaseHost>/releases/manta-<version>.tar.gz`.
- *
- * `version` must be a plain semver-ish string (no slashes / traversal); we
- * validate it so a bogus package.json version can't smuggle a path.
+ * (removed: resolveTarballUrl + isValidVersion — install.sh now derives the
+ * URL from the manifest, not from version. The `tarball-url` CLI subcommand
+ * was the only other caller; it's gone too.)
  */
-export function resolveTarballUrl({ tarballUrl, releaseHost, version } = {}) {
-  if (typeof tarballUrl === "string" && tarballUrl !== "") return tarballUrl;
-  if (!isValidVersion(version)) {
-    throw new Error(
-      `resolveTarballUrl: invalid version ${JSON.stringify(version)} (expected e.g. "0.0.1")`,
-    );
-  }
-  const host = stripTrailingSlash(releaseHost || DEFAULT_RELEASE_HOST);
-  return `${host}/releases/manta-${version}.tar.gz`;
-}
-
-// A release version is digits/letters/dots/hyphens only — enough for semver +
-// prerelease tags (1.2.3, 1.2.3-rc.1) but no `/` or `..` path escapes.
-export function isValidVersion(version) {
-  return typeof version === "string" && /^[0-9A-Za-z][0-9A-Za-z.-]*$/.test(version);
-}
 
 // ---------------------------------------------------------------------------
 // Idempotency: detect an existing box identity so a re-run preserves it.
@@ -572,25 +553,24 @@ export function formatExpiry(expiresAt) {
 //
 // install.sh calls:
 //   eval "$(node scripts/install-lib.mjs print-config --version <v>)"
-// which sets MANTA_HOME / MANTA_AUTH_FILE / MANTA_TARBALL_URL / MANTA_PORT in the shell,
-// and:
+// which sets MANTA_HOME / MANTA_AUTH_FILE / MANTA_PORT / MANTA_HEALTH_URL in
+// the shell, and:
 //   node scripts/install-lib.mjs check-identity
 // which prints "preserve" or "fresh" (exit 0) so the shell knows whether to
 // keep ~/.manta untouched.
 
 // Emit KEY=VALUE lines the shell can `eval`. Values are single-quoted so paths
 // with spaces survive; embedded single quotes are escaped the POSIX way.
+//
+// Note: MANTA_TARBALL_URL is NOT emitted here. install.sh reads the manifest
+// itself to resolve the tarball, so this script no longer needs to be told
+// the URL by the shell. The `tarballUrl` field on `cfg` is preserved so
+// existing resolveConfig tests that probe MANTA_TARBALL_URL still pass.
 export function renderShellConfig(cfg, { version } = {}) {
-  const tarball = resolveTarballUrl({
-    tarballUrl: cfg.tarballUrl,
-    releaseHost: cfg.releaseHost,
-    version,
-  });
   const kv = {
     MANTA_HOME: cfg.buiHome,
     MANTA_AUTH_DIR: cfg.authDir,
     MANTA_AUTH_FILE: cfg.authFile,
-    MANTA_TARBALL_URL: tarball,
     MANTA_PORT: String(cfg.port),
     MANTA_HEALTH_URL: cfg.healthUrl,
   };
@@ -617,17 +597,6 @@ async function cliMain(argv) {
     const { preserveIdentity, reason } = checkIdentity(cfg);
     process.stdout.write((preserveIdentity ? "preserve" : "fresh") + "\n");
     process.stderr.write(reason + "\n");
-    return 0;
-  }
-  if (cmd === "tarball-url") {
-    const cfg = resolveConfig();
-    process.stdout.write(
-      resolveTarballUrl({
-        tarballUrl: cfg.tarballUrl,
-        releaseHost: cfg.releaseHost,
-        version: flags.version,
-      }) + "\n",
-    );
     return 0;
   }
   if (cmd === "merge-opencode-config") {
@@ -667,7 +636,7 @@ async function cliMain(argv) {
   }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|tarball-url|merge-opencode-config|render-systemd-unit> [--version X]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|render-systemd-unit> [--version X]\n",
   );
   return 2;
 }

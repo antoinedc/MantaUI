@@ -129,17 +129,27 @@ errors/done work from the PWA.
 
 ## Installer reference
 
-The installer downloads a pre-built tarball (no dev toolchain needed on the
-box), runs `npm ci --omit=dev`, installs the `manta-server` systemd --user
-unit, enables linger, health-waits, and prints a pairing code.
+The installer downloads a self-contained tarball that ships a vendored Node
+runtime + prebuilt production `node_modules` (node-pty's native binding
+already compiled). The box only needs `curl`, `tar`, `sha256sum`, `tmux`,
+and `git` — no Node preinstall, no compilers, no `sudo`, no package-manager
+calls. (Every launch-gate E2E failure previously came from the installer
+silently trying to `apt install nodejs` and friends; v2 removes that
+seam entirely.)
+
+What the installer does: fetch a key=value manifest over HTTPS → read
+`file_linux_x64` + `sha256_linux_x64` from it → download the tarball →
+sha256-verify → extract → atomic swap into `~/manta` → write systemd units
+pointing at the vendored node → start → print a pairing code.
 
 Overrides (env):
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `MANTA_TARBALL_URL` | (built from host+version) | full tarball URL — local testing / mirror |
-| `MANTA_RELEASE_HOST` | `https://mantaui.com` | host for the default tarball URL |
+| `MANTA_TARBALL_URL` | (built from manifest) | full tarball URL — local testing / mirror (skips manifest fetch + sha256 check, with a warn) |
+| `MANTA_RELEASE_HOST` | `https://mantaui.com` | host for the manifest + tarball |
 | `MANTA_HOME` | `~/manta` | where the code is unpacked |
+| `MANTA_VERSION` | `latest` | manifest version to fetch (e.g. `0.0.1`) |
 | `MANTA_MOBILE_PORT` | `8787` | server port |
 
 Manage: `systemctl --user {status,restart} manta-server`, logs
@@ -215,7 +225,9 @@ session by POST). Install/update = copy to `~/.config/opencode/tools/`
 In order. No decisions, no extra steps:
 
 1. Bump `package.json` version.
-2. `npm run pack` — produces `dist/manta-<version>.tar.gz`.
+2. `npm run pack` — produces `dist/manta-<version>-linux-x64.tar.gz` (the
+   self-contained tarball) AND `dist/manta-<version>.txt` (the key=value
+   manifest install.sh fetches first).
 3. (Mac only, on a Mac) `bash scripts/release/desktop.sh` — produces
    `dist/desktop/*.dmg` and the `latest-*.yml` updater feeds. Linux
    builds run on any host.
@@ -267,7 +279,9 @@ steps in each file's header are human-only (agent Hard Rule #4 forbids
 - **Monitoring** (`scripts/prod/healthcheck.mjs`, scheduled every 10 min
   on the dev box via `schedule_create`): off-site probes of `mantaui.com`,
   `relay.mantaui.com` (expects 401 — the auth gate IS the healthy
-  answer), `app.mantaui.com`, `/install.sh`, `/releases/manta-latest.tar.gz`.
+  answer), `app.mantaui.com`, `/install.sh`, `/releases/manta-latest.tar.gz`
+  (and the live `manta-latest.txt` manifest's `sha256_linux_x64` must match
+  the served tarball).
   On failure the opencode turn calls `notify` urgent:true naming the
   failing URL.
 - **Log caps** (`scripts/prod/systemd-journald.conf`,

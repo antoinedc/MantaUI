@@ -6,11 +6,16 @@
 # What it does (in order; each step idempotent and runs unconditionally unless
 # its artifact is missing — desktop is a separately-shippable leg, not a failure):
 #   1. preflight   refuse if git tree is dirty, if v<version> tag already
-#                  exists, or if dist/manta-<version>.tar.gz is absent (run
-#                  `npm run pack` first).
-#   2. tarball     scp dist/manta-<version>.tar.gz to
-#                  <host>:/var/www/mantaui/releases/ and refresh
-#                  manta-latest.tar.gz there.
+#                  exists, or if dist/manta-<version>-linux-x64.tar.gz OR
+#                  dist/manta-<version>.txt (the manifest) is absent.
+#                  (Run `npm run pack` first.)
+#   2. tarball     scp dist/manta-<version>-linux-x64.tar.gz + the manifest
+#                  to <host>:/var/www/mantaui/releases/. THEN (strictly last)
+#                  ssh to copy manta-<version>.txt → manta-latest.txt — this
+#                  ordering is the atomicity guarantee: a client either sees
+#                  the OLD manifest (and old tarball) or the NEW manifest
+#                  (with new tarball already uploaded). Drift between the two
+#                  is impossible.
 #   3. desktop     if dist/desktop/ has binaries: scp them + the latest-*.yml
 #                  feeds to <host>:/var/www/mantaui/updates/ and the binaries
 #                  to /var/www/mantaui/downloads/, then refresh
@@ -25,12 +30,12 @@
 #                  repo checkout, but Caddy serves install.sh statically from
 #                  the web root, so without this copy the advertised one-liner
 #                  keeps serving the stale installer (BET-171).
-#   5. verify      HEAD each published URL — tarball 200, install.sh 200,
-#                  and (if desktop uploaded) Manta-latest.{dmg,AppImage} 200.
-#                  install.sh is ALSO content-verified: the served body must
-#                  byte-match the repo's scripts/install.sh (a 200 alone does
-#                  not prove the deploy took — a stale file also 200s).
-#                  Fail loudly on any non-200 or content mismatch.
+#   5. verify      HEAD each published URL — tarball 200, manifest live with
+#                  matching version + tarball sha, install.sh 200, install.sh
+#                  body byte-matches the repo. Fail loudly on any non-200,
+#                  manifest drift, or install.sh drift. This makes the
+#                  script/tarball/manifest drift (the F4 class from BET-171)
+#                  fail the publish loudly.
 #   6. tag         git tag v<version> && git push origin v<version> (a tag
 #                  means "published and verified").
 #
@@ -54,7 +59,8 @@ PROD_HOST="${MANTA_PROD_HOST:-root@91.107.196.2}"
 SITE="${MANTA_SITE:-https://mantaui.com}"
 
 VERSION="$(node -p 'require("./package.json").version')"
-TARBALL="dist/manta-${VERSION}.tar.gz"
+TARBALL="dist/manta-${VERSION}-linux-x64.tar.gz"
+MANIFEST="dist/manta-${VERSION}.txt"
 DESKTOP_DIR="dist/desktop"
 WEBROOT_DIR="/var/www/mantaui"
 RELEASES_DIR="${WEBROOT_DIR}/releases"
@@ -81,13 +87,24 @@ if [ ! -f "${TARBALL}" ]; then
   die "${TARBALL} missing — run \`npm run pack\` first"
 fi
 
+if [ ! -f "${MANIFEST}" ]; then
+  die "${MANIFEST} missing — run \`npm run pack\` first (the tarball's manifest sidecar)"
+fi
+
 ok "preflight ok"
 
-# --- 2. tarball -------------------------------------------------------------
+# --- 2. tarball + manifest (atomicity: tarball first, manifest pointer last) -
 log "Uploading ${TARBALL} → ${PROD_HOST}:${RELEASES_DIR}/…"
 scp "${TARBALL}" "${PROD_HOST}:${RELEASES_DIR}/"
-ssh "${PROD_HOST}" "cd ${RELEASES_DIR} && cp -f manta-${VERSION}.tar.gz manta-latest.tar.gz"
-ok "tarball published"
+log "Uploading ${MANIFEST} → ${PROD_HOST}:${RELEASES_DIR}/…"
+scp "${MANIFEST}" "${PROD_HOST}:${RELEASES_DIR}/"
+
+# The latest-pointer copy goes LAST. Clients either see the old manifest (the
+# old tarball is still served too) OR the new manifest (and the new tarball is
+# already up). Drift between manifest and tarball is impossible.
+log "Publishing manifest pointer ${PROD_HOST}:${RELEASES_DIR}/manta-latest.txt…"
+ssh "${PROD_HOST}" "cd ${RELEASES_DIR} && cp -f manta-${VERSION}.txt manta-latest.txt"
+ok "tarball + manifest published"
 
 # --- 3. desktop (optional leg) ----------------------------------------------
 shopt -s nullglob
@@ -155,8 +172,30 @@ check_200() {
   ok "${url} → 200"
 }
 
-check_200 "${SITE}/releases/manta-${VERSION}.tar.gz"
+check_200 "${SITE}/releases/manta-${VERSION}-linux-x64.tar.gz"
 check_200 "${SITE}/install.sh"
+
+# Manifest + tarball drift check (BET-171 F4 class). The publish script just
+# pushed both files; we re-fetch the manifest over HTTPS and assert that the
+# served tarball's sha256 matches the manifest's sha256_linux_x64 line. A
+# failure here means we shipped a tarball + manifest that disagree — clients
+# would download the tarball, sha256-fail it, and die. Catch that HERE.
+log "Verifying manifest ↔ tarball drift…"
+SERVED_MANIFEST="$(curl -fsSL "${SITE}/releases/manta-latest.txt")"
+SERVED_VERSION="$(printf '%s\n' "$SERVED_MANIFEST" | grep '^version=' | head -n1 | cut -d= -f2-)"
+if [ "$SERVED_VERSION" != "$VERSION" ]; then
+  die "manifest not live: served version='${SERVED_VERSION}' expected='${VERSION}'"
+fi
+SERVED_FILE="$(printf '%s\n' "$SERVED_MANIFEST" | grep '^file_linux_x64=' | head -n1 | cut -d= -f2-)"
+SERVED_SHA="$(printf '%s\n' "$SERVED_MANIFEST" | grep '^sha256_linux_x64=' | head -n1 | cut -d= -f2-)"
+if [ -z "$SERVED_FILE" ] || [ -z "$SERVED_SHA" ]; then
+  die "served manifest is malformed (missing file_linux_x64 or sha256_linux_x64)"
+fi
+ACTUAL_SHA="$(curl -fsSL "${SITE}/releases/${SERVED_FILE}" | sha256sum | awk '{print $1}')"
+if [ "$ACTUAL_SHA" != "$SERVED_SHA" ]; then
+  die "tarball/manifest drift: served sha=${SERVED_SHA} actual=${ACTUAL_SHA} for ${SERVED_FILE}"
+fi
+ok "served manifest live (version=${VERSION}, sha=${ACTUAL_SHA})"
 
 # A 200 on install.sh is not enough — a stale file also 200s (BET-171). Verify
 # the served body byte-matches the repo's scripts/install.sh so we know the
