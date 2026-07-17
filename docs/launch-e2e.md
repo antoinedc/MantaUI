@@ -867,8 +867,10 @@ fixed. Each is a small, self-contained installer change; together they
 probably represent <100 LoC + tests. Re-run the live Hetzner E2E after
 they land to close the loop.
 
-Filed as BET-172 (F2), BET-173 (F3), BET-174 (F4) sub-issues under
-BET-160 §2.
+Filed as a single new sub-issue BET-172 (F4 — stale tarball) under
+BET-160 §2. F2 and F3 are already being addressed in the in-flight
+`multica/BET-170-installer-installs-node` branch (see Addendum below)
+and don't need new BET-160 sub-issues of their own.
 
 ## Addendum — F2 / F3 already addressed in flight (F4 still open)
 
