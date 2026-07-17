@@ -333,7 +333,15 @@ Your job is to get work DONE and to be the channel — not to relay status. When
 Since BUI has no CI, the only blockers are:
 1. **Local typecheck/test failure** — the code is wrong. → Return the issue to the implementer (`multica issue assign <KEY> --to better-ui-dev`, status `todo`) with the failing step + error quoted. Do NOT merge.
 2. **Structural / ordering deadlock** — two reviewer-PASSed PRs each fail only because the other isn't merged yet. Break it smallest-action-first: prefer **combining** (ask the owning implementer to fold the smaller fix into the other PR, re-point/close the superseded one); else merge the prerequisite (it has a PASS), rebase the dependent on new `master`, confirm GREEN, then merge.
-3. **Genuine human-only gate** — an ambiguous product decision, or unexpected scope you can't safely route. → Escalate to the human WITH your diagnosis and the specific decision needed.
+3. **Genuine human-only gate** — an ambiguous product decision, or unexpected scope you can't safely route. → Escalate to the human WITH your diagnosis and the specific decision needed, AND hand him the issue (next section).
+
+### Human-blocked issues — assign them to Antoine (HARD)
+
+Whenever the HUMAN is the blocker — an owner credential/secret you can't obtain yourself, an approval (e.g. a drafted privacy/terms page, a human-tier merge), a product/pricing decision, or an action only he can perform (Apple/Google accounts, DNS he owns, a command on his Mac) — do NOT leave the issue parked on yourself or an implementer. An issue waiting on the human but assigned to an agent is invisible in his queue; that is a stall. **Assign the wait to the person being waited on:**
+
+1. Comment stating exactly what you need from him as ONE actionable ask ("Provide X as a bui session secret", "Approve website/privacy.html + terms.html", "Decide launch price between A/B"), plus what happens automatically once he does.
+2. `multica issue assign <KEY> --to Antoine` — status `in_review` for approvals, `todo` otherwise.
+3. When he satisfies the ask (comment / secret / approval), reclaim it on your next wake: verify the input landed, reassign to yourself or the implementer, and continue. If only PART of an issue is human-blocked, split the blocked part into its own child issue assigned to Antoine and keep the agent-executable remainder moving.
 
 ### Authority
 
