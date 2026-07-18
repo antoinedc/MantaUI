@@ -483,17 +483,19 @@ describe("discoverModels", () => {
 // ---------------------------------------------------------------------------
 
 describe("getProviderEndpoints", () => {
-  it("returns a ProviderEndpoint[] array (not the raw {all,connected,default} object)", async () => {
-    const cfg = {
-      provider: {
-        voska: {
-          npm: "@ai-sdk/openai-compatible",
-          name: "Voska AI",
-          options: { baseURL: "https://api.voska.org/v1", apiKey: "vk-secret" },
-          models: { "voska-large": { id: "voska-large", name: "voska-large" } },
-        },
+  const VOSKA_CFG = {
+    provider: {
+      voska: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Voska AI",
+        options: { baseURL: "https://api.voska.org/v1", apiKey: "vk-secret" },
+        models: { "voska-large": { id: "voska-large", name: "voska-large" } },
       },
-    };
+    },
+  };
+
+  it("returns a ProviderEndpoint[] array (not the raw {all,connected,default} object)", async () => {
+    const cfg = VOSKA_CFG;
     const result = await getProviderEndpoints(async () => cfg);
     // BET-114 regression: the handler must hand the form an ARRAY of endpoints.
     assert.ok(Array.isArray(result), "expected an array, not the raw provider object");
@@ -501,16 +503,7 @@ describe("getProviderEndpoints", () => {
   });
 
   it("prefills a configured custom provider (Voska AI) with renderer-safe metadata", async () => {
-    const cfg = {
-      provider: {
-        voska: {
-          npm: "@ai-sdk/openai-compatible",
-          name: "Voska AI",
-          options: { baseURL: "https://api.voska.org/v1", apiKey: "vk-secret" },
-          models: { "voska-large": { id: "voska-large", name: "voska-large" } },
-        },
-      },
-    };
+    const cfg = VOSKA_CFG;
     const result = await getProviderEndpoints(async () => cfg);
     const voska = result.find((e) => e.id === "voska");
     assert.ok(voska, "Voska AI provider should be surfaced to the form");

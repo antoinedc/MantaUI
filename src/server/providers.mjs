@@ -367,6 +367,23 @@ export async function discoverModelsForEndpoint(baseURL, apiKey, readConfig = re
 }
 
 /**
+ * Serialize + atomically write opencode.jsonc. Shared write path for
+ * setProviders / setSubagents (and any future writer) so the mkdir +
+ * atomicWrite + error-shape contract lives in one place.
+ */
+async function writeOpencodeJsonc(cfg) {
+  const content = JSON.stringify(cfg, null, 2);
+  try {
+    await mkdir(dirname(OPENCODE_JSONC), { recursive: true });
+    await atomicWrite(OPENCODE_JSONC, content);
+    return { ok: true };
+  } catch (e) {
+    console.warn("[providers] write failed:", e);
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
  * Apply a set of provider mutations and write opencode.jsonc back.
  * Does NOT restart opencode; the caller decides (prompt-before-restart).
  */
@@ -380,15 +397,7 @@ export async function setProviders(ops) {
   }
   for (const id of ops.remove ?? []) cfg = removeProviderBlock(cfg, id);
   for (const input of ops.upsert ?? []) cfg = upsertProviderBlock(cfg, input);
-  const content = JSON.stringify(cfg, null, 2);
-  try {
-    await mkdir(dirname(OPENCODE_JSONC), { recursive: true });
-    await atomicWrite(OPENCODE_JSONC, content);
-    return { ok: true };
-  } catch (e) {
-    console.warn("[providers] write failed:", e);
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
+  return writeOpencodeJsonc(cfg);
 }
 
 /**
@@ -425,15 +434,7 @@ export async function setSubagents(ops) {
   }
   for (const name of ops.remove ?? []) cfg = removeAgentBlock(cfg, name);
   for (const input of ops.upsert ?? []) cfg = upsertAgentBlock(cfg, input);
-  const content = JSON.stringify(cfg, null, 2);
-  try {
-    await mkdir(dirname(OPENCODE_JSONC), { recursive: true });
-    await atomicWrite(OPENCODE_JSONC, content);
-    return { ok: true };
-  } catch (e) {
-    console.warn("[providers] write failed:", e);
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
+  return writeOpencodeJsonc(cfg);
 }
 
 /**
