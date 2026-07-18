@@ -62,26 +62,43 @@ workflows:
           pod install
       - name: Set up code signing (App Store profile via ASC API key)
         script: |
-          # IMPORTANT: Codemagic must CREATE its own distribution certificate so
-          # it holds the private key (a cert created elsewhere is unusable — no
-          # private key on the build machine → "Cannot save Signing Certificates
-          # without certificate private key" → empty profiles → archive fails).
+          # THE PRIVATE-KEY REQUIREMENT: a distribution certificate is only
+          # usable for signing by whoever holds its PRIVATE KEY. Earlier failures
+          # ("Cannot save Signing Certificates without certificate private key")
+          # happened because no private key existed on the build machine. So:
+          # generate a private key HERE, create a NEW cert FROM it, and use that
+          # key for every subsequent step.
           keychain initialize
-          # 1. Create a NEW distribution certificate + private key on this
-          #    machine (Codemagic generates the key locally and registers the
-          #    cert via the ASC API key). --create makes it if none exists.
+
+          # 1. Generate a fresh RSA private key on the build machine.
+          ssh-keygen -t rsa -b 2048 -m PEM -f /tmp/dist_key -q -N ""
+
+          # 2. Create a distribution certificate FROM that key via the ASC API
+          #    key. --save stores the resulting cert next to the key so
+          #    fetch/keychain steps can find both. Ignore failure if a cert of
+          #    this type already exists (max 2 distribution certs per account).
           app-store-connect certificates create \
-            --type DISTRIBUTION \
-            --save || true
-          # 2. Fetch signing files: this now finds the cert whose private key we
-          #    just generated, plus creates the App Store profile for the bundle.
+            --type IOS_DISTRIBUTION \
+            --certificate-key=@file:/tmp/dist_key \
+            --save || \
+          app-store-connect certificates list \
+            --type IOS_DISTRIBUTION \
+            --certificate-key=@file:/tmp/dist_key \
+            --save
+
+          # 3. Fetch signing files, passing the SAME private key so Codemagic can
+          #    match the cert to its key and build a usable p12 + create the
+          #    App Store provisioning profile for the bundle id.
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --platform IOS \
             --type IOS_APP_STORE \
+            --certificate-key=@file:/tmp/dist_key \
             --create
-          # 3. Import the certificate(s) into the keychain.
+
+          # 4. Import the certificate(s) into the keychain.
           keychain add-certificates
-          # 4. Write the profile's specifier into the Xcode project + the export
+
+          # 5. Write the profile's specifier into the Xcode project + the export
           #    options plist that build-ipa consumes.
           xcode-project use-profiles \
             --export-options-plist "$CM_BUILD_DIR/export_options.plist"
