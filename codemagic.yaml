@@ -62,16 +62,27 @@ workflows:
           pod install
       - name: Set up code signing (App Store profile via ASC API key)
         script: |
-          # Codemagic fetches/creates the distribution cert + App Store profile
-          # for the bundle id using the connected ASC API key, then wires them
-          # into the Xcode project. This replaces the manual signing dance.
+          # IMPORTANT: Codemagic must CREATE its own distribution certificate so
+          # it holds the private key (a cert created elsewhere is unusable — no
+          # private key on the build machine → "Cannot save Signing Certificates
+          # without certificate private key" → empty profiles → archive fails).
           keychain initialize
+          # 1. Create a NEW distribution certificate + private key on this
+          #    machine (Codemagic generates the key locally and registers the
+          #    cert via the ASC API key). --create makes it if none exists.
+          app-store-connect certificates create \
+            --type DISTRIBUTION \
+            --save || true
+          # 2. Fetch signing files: this now finds the cert whose private key we
+          #    just generated, plus creates the App Store profile for the bundle.
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --platform IOS \
             --type IOS_APP_STORE \
             --create
+          # 3. Import the certificate(s) into the keychain.
           keychain add-certificates
-          # use-profiles updates the Xcode project's signing settings AND writes
-          # an export options plist to a known path we pass to build-ipa below.
+          # 4. Write the profile's specifier into the Xcode project + the export
+          #    options plist that build-ipa consumes.
           xcode-project use-profiles \
             --export-options-plist "$CM_BUILD_DIR/export_options.plist"
       - name: Build + archive .ipa
