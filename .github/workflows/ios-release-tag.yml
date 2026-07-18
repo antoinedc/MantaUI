@@ -1,0 +1,117 @@
+# Auto-tag iOS releases on merge to main → triggers the Xcode Cloud workflow.
+#
+# WHY THIS EXISTS
+# ---------------
+# iOS builds/TestFlight delivery run in Xcode Cloud (Apple's CI), whose start
+# condition is a git TAG matching `ios-v*`. Xcode Cloud clones the tag, runs
+# mobile/ios/App/ci_scripts/ci_post_clone.sh (npm ci + build:mobile + cap sync
+# + pod install), archives the `App` scheme, and delivers to TestFlight. None of
+# that needs a local Mac — but SOMETHING has to create the tag.
+#
+# This workflow is that something: on every push to main it reads the iOS
+# marketing version (CFBundleShortVersionString == MARKETING_VERSION in the
+# Xcode project) and, if no `ios-v<version>` tag exists yet, creates and pushes
+# it. Pushing the tag is what fires Xcode Cloud. So the full chain is:
+#
+#   merge PR → main → (this) reads version → pushes ios-v<version> → Xcode Cloud
+#   → archive → TestFlight
+#
+# To ship a new TestFlight build: bump MARKETING_VERSION in
+# mobile/ios/App/App.xcodeproj/project.pbxproj (both Debug + Release configs),
+# merge to main, and this tags it automatically. If the version is unchanged the
+# tag already exists and this no-ops (safe on every push).
+#
+# MANUAL OVERRIDE
+# ---------------
+# workflow_dispatch lets a human/agent force a tag without a version bump —
+# useful to re-trigger a build. It appends a build suffix so it never collides
+# with an existing ios-v<version> tag (which would be rejected as duplicate).
+#
+# LOOP / SKIP GUARDS
+# ------------------
+# - Skips the mobile-bundle bot's `[skip ci]` commits (they carry no iOS change).
+# - Only pushes a tag that does NOT already exist, so re-runs on an unchanged
+#   version are no-ops — no duplicate-tag push failures.
+
+name: iOS release tag
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why force an iOS build (appended to the build metadata)"
+        required: false
+        default: "manual"
+
+concurrency:
+  group: ios-release-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: self-hosted
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so tag existence checks are accurate.
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read iOS marketing version
+        id: ver
+        run: |
+          set -euo pipefail
+          PBXPROJ="mobile/ios/App/App.xcodeproj/project.pbxproj"
+          # MARKETING_VERSION appears once per build config; they're kept in sync.
+          # Take the first, strip whitespace/semicolon.
+          VERSION="$(grep -m1 'MARKETING_VERSION' "$PBXPROJ" \
+            | sed -E 's/.*MARKETING_VERSION = ([^;]+);.*/\1/' \
+            | tr -d '[:space:]')"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read MARKETING_VERSION from $PBXPROJ"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "iOS marketing version: $VERSION"
+
+      - name: Create + push ios-v<version> tag if absent
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_REASON: ${{ github.event.inputs.reason }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          BASE_TAG="ios-v${VERSION}"
+
+          # On a manual dispatch, force a build even if the version tag exists,
+          # by appending a unique build suffix. On a normal push, only tag when
+          # the base version tag is new.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            SUFFIX="$(date -u +%Y%m%d%H%M%S)"
+            TAG="${BASE_TAG}-build.${SUFFIX}"
+            MSG="iOS build (manual: ${DISPATCH_REASON:-manual}) — ${TAG}"
+          else
+            TAG="$BASE_TAG"
+            MSG="iOS release ${TAG} (auto-tagged on merge to main)"
+          fi
+
+          # Refresh tags and skip if this exact tag already exists remotely.
+          git fetch --tags --quiet
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists — nothing to do (no version bump)."
+            exit 0
+          fi
+
+          git tag -a "$TAG" -m "$MSG"
+          git push origin "refs/tags/${TAG}"
+          echo "Pushed ${TAG} — Xcode Cloud will build + deliver to TestFlight."

@@ -1731,8 +1731,186 @@ agent blocks — so a not-yet-registered model still shows up.
 - Tests: `src/shared/subagentSync.test.ts` (naming + reconcile, 18),
   `src/server/providers.test.mjs` `syncSubagents` describe block (7),
   `src/server/opencodeAdmin.test.mjs` (restart, 3), `formatModelContextSize`
-  in `chatUtils.test.ts` (2). All pure/injected-I/O — no real opencode.jsonc
-  or systemctl call in the suite.
+   in `chatUtils.test.ts` (2). All pure/injected-I/O — no real opencode.jsonc
+   or systemctl call in the suite.
+
+## iOS release / TestFlight (Codemagic — the WORKING mechanism)
+
+The iOS app (the Capacitor wrapper in `mobile/ios/`) ships to TestFlight via
+**Codemagic CI**, configured by **`codemagic.yaml`** at the repo root. This
+section is the hard-won record of what works and — just as important — the dead
+ends, so nobody re-walks them.
+
+**TL;DR of the pipeline:** push a git tag `ios-v*` → Codemagic clones the repo,
+builds the web bundle, syncs Capacitor, pods, **creates its own distribution
+cert + App Store profile via the App Store Connect API key**, archives the
+`App` scheme, and uploads to TestFlight. No Mac in the loop. The box can drive
+the whole thing (trigger + monitor) over the Codemagic + ASC REST APIs.
+
+### Why Codemagic, NOT Xcode Cloud (do not retry Xcode Cloud)
+
+Xcode Cloud was tried first and **abandoned after 10 failed build runs**. It
+built + signed the archive fine every time but could **NEVER authenticate to
+App Store Connect to UPLOAD** the binary. The build log (fetched from the
+`app-store-export-archive-logs` in Xcode Cloud's LOG_BUNDLE artifact) always
+ended with:
+
+```
+App Store Connect request for store configuration failed for account
+Session Proxy Provider … Unable to authenticate with App Store Connect
+(…DVTServicesSessionProviderCredentialITunesAuthenticationContextError Code=1)
+```
+
+This is a **known Xcode Cloud auth-session bug**. It survived: accepting the
+Program License Agreement, registering a device UDID, creating a
+distribution cert + profile by hand, re-saving the workflow, AND
+disconnecting/reconnecting the GitHub source. The `action_required` /
+"Preparing build for App Store Connect failed" status and the ITMS-90035
+emails were all downstream of this one auth failure (the ITMS-90035 signature
+errors specifically came from Xcode Cloud's throwaway **ad-hoc / development**
+side-exports, which are red herrings — the app-store export signed correctly).
+**Do not reintroduce an Xcode Cloud workflow.** The stale files it left
+(`mobile/ios/App/App.xcodeproj/xcshareddata/xcschemes/App.xcscheme` and
+`mobile/ios/App/ci_scripts/ci_post_clone.sh`) are harmless leftovers; the
+shared scheme is still needed by Codemagic, the `ci_scripts/` post-clone is
+Xcode-Cloud-only and unused by Codemagic (safe to delete).
+
+### App Store Connect facts (constants used everywhere)
+
+- **App name**: MantaUI. **ASC app Apple ID**: `6792363427`.
+- **Bundle id**: `com.antoinedc.mantaui` (was `com.antoinedc.bui` originally —
+  renamed before anything shipped; the id is permanent post-release). Set in
+  `capacitor.config.json` `appId`, the iOS `PRODUCT_BUNDLE_IDENTIFIER` (both
+  Debug+Release configs), and the Android `applicationId`/`namespace`/
+  `MainActivity` package.
+- **On-device display name**: MantaUI (`CFBundleDisplayName` in
+  `mobile/ios/App/App/Info.plist` + `appName` in `capacitor.config.json`).
+- **Xcode target/scheme**: `App` (Capacitor convention — internal only, NOT
+  user-visible; do NOT rename it, that path throws "already taken by your team"
+  and breaks the scheme/pods/ci_scripts wiring).
+- **Team ID (seedId)**: `FSQ3HS4Z24`.
+
+### Signing — the crux, and every trap in order
+
+iOS code signing was THE blocker (every archive failure traced to it). The
+final working model, in `codemagic.yaml`'s "Set up code signing" step:
+
+1. `keychain initialize`
+2. **Generate an RSA private key ON the build machine**
+   (`ssh-keygen -t rsa -b 2048 -m PEM -f /tmp/dist_key -q -N ""`).
+3. **Create a distribution cert FROM that key** via the ASC API key
+   (`app-store-connect certificates create --type IOS_DISTRIBUTION
+   --certificate-key=@file:/tmp/dist_key --save`), falling back to
+   `certificates list … --save` if a cert already exists (max 2 distribution
+   certs/account).
+4. `app-store-connect fetch-signing-files "$BUNDLE_ID" --platform IOS
+   --type IOS_APP_STORE --certificate-key=@file:/tmp/dist_key --create` —
+   creates the App Store provisioning profile and assembles a usable p12.
+5. `keychain add-certificates`
+6. `xcode-project use-profiles --export-options-plist
+   "$CM_BUILD_DIR/export_options.plist"` — writes the profile specifier into
+   the Xcode project AND the export-options plist consumed by `build-ipa`.
+
+**THE ROOT-CAUSE LESSON — private-key custody.** A distribution certificate is
+only usable by whoever holds its **private key**. Every early failure
+("`Cannot save Signing Certificates without certificate private key`" →
+`use-profiles` finds `Provisioning Profiles: []` → xcodebuild `error: "App"
+requires a provisioning profile`) came from a cert whose private key was NOT on
+the Codemagic build machine. A cert created out-of-band (e.g. via the ASC API
+from the box, with the key on the box) is **worthless to Codemagic**. The build
+machine MUST generate the key and create the cert from it. This is step 2→3
+above and is the single most important thing in this section.
+
+**Dead ends that were tried and REMOVED (do not reintroduce):**
+- A declarative `environment: ios_signing:` block → resolves signing at
+  env-setup time (before scripts run) and fails "No matching profiles found"
+  when the profile doesn't exist yet. Removed; the script step creates it.
+- Hardcoding `PROVISIONING_PROFILE_SPECIFIER = "MantaUI App Store"` in the
+  Xcode project → the profile Codemagic installs on the machine isn't named
+  that, so xcodebuild errors "No profile … matching 'MantaUI App Store'".
+  Let `use-profiles` set the specifier instead.
+- `CODE_SIGN_STYLE = Automatic` in the project → conflicts with Codemagic's
+  Manual signing. The project's target Release config is now
+  `CODE_SIGN_STYLE = Manual` + `DEVELOPMENT_TEAM = FSQ3HS4Z24` +
+  `CODE_SIGN_IDENTITY[sdk=iphoneos*] = "Apple Distribution"` (no hardcoded
+  profile specifier — `use-profiles` fills it).
+- `--export-options-plist /tmp/export_options.plist` → wrong path;
+  `use-profiles` writes it to `$CM_BUILD_DIR/export_options.plist`. Both the
+  `use-profiles` and `build-ipa` calls must use the SAME `$CM_BUILD_DIR` path.
+
+### One-time human setup (already done, documented for re-setup)
+
+In the Codemagic web UI (codemagic.io):
+1. Connect the GitHub repo `antoinedc/MantaUI` as a Codemagic app.
+2. Team → Integrations → Developer Portal → add an **App Store Connect API
+   key** (Issuer ID + Key ID + the `.p8`). **GOTCHA: `codemagic.yaml` references
+   the integration by NAME** (`integrations: app_store_connect: <name>`). The
+   live integration is named **`APS Key`** — the YAML must match it exactly
+   (spaces + case). If you rename it in the UI, update the YAML.
+
+The ASC API key also lives in the bui Secrets card (`ASC_API_KEY_P8`,
+`ASC_KEY_ID`, `ASC_ISSUER_ID`, scope `project:manta`) so the box can drive the
+ASC API directly. A `CODEMAGIC_API_KEY` secret (same scope) lets the box drive
+Codemagic's API.
+
+### Triggering a release (from the box, hands-off)
+
+`codemagic.yaml`'s `triggering:` builds on git tag `ios-v*`. The box can:
+- **Trigger by tag**: push `ios-v<version>` (the `ios-release-tag.yml` GitHub
+  Actions workflow auto-creates `ios-v<MARKETING_VERSION>` on merge to main —
+  reads `MARKETING_VERSION` from `project.pbxproj`; idempotent, only tags a new
+  version; `workflow_dispatch` force-tags with a build suffix).
+- **Trigger by Codemagic API** (what was used during bring-up — does NOT need a
+  tag, good for iterating):
+  ```
+  CMK=$(secret_provide CODEMAGIC_API_KEY)         # path, use by reference
+  curl -s -X POST -H "x-auth-token: $(cat $CMK)" -H "Content-Type: application/json" \
+    -d '{"appId":"6a5bfe08d7050a29d2f33802","workflowId":"ios-testflight","branch":"<branch>"}' \
+    https://api.codemagic.io/builds
+  ```
+  Codemagic app id: `6a5bfe08d7050a29d2f33802`. Workflow id: `ios-testflight`.
+
+### Monitoring a build (from the box — Codemagic API)
+
+The GitHub commit-status the way Xcode Cloud reported does NOT exist for
+Codemagic; use its REST API. `x-auth-token: <CODEMAGIC_API_KEY>` on every call.
+
+- Status + steps: `GET https://api.codemagic.io/builds/<buildId>` →
+  `build.status` (`queued|preparing|building|publishing|finished|failed`) and
+  `build.buildActions[]` (each `{name,status}`).
+- **Failure diagnosis — the step summary log is TRUNCATED.** For the real
+  xcodebuild error, download the build's artifact bundle
+  (`build.artefacts[0].url`, note British spelling `artefacts`), unzip, and
+  grep `App.log` (the full xcodebuild log) for
+  `error:|The following build commands failed|No profile|private key`. The
+  per-step `logUrl` (under `buildActions[].subactions[].logUrl`) is HTML and
+  only holds the wrapper summary — good for the "Set up code signing" step's
+  `use-profiles` output ("`Provisioning Profiles: []`" is the empty-profile
+  tell), but the archive error only lives in the artifact `App.log`.
+- **Authoritative success signal**: the ASC API, NOT Codemagic's status. Query
+  `GET https://api.appstoreconnect.apple.com/v1/builds?filter[app]=6792363427
+  &sort=-uploadedDate` (ES256 JWT signed with the ASC `.p8`; the box has a
+  working signer at `/tmp/opencode/asc.mjs` — reconstructs the PEM because the
+  Secrets card flattens the `.p8` newlines into spaces). `processingState:
+  VALID` on a build = it's really in App Store Connect. During bring-up every
+  Xcode-Cloud "Build N" number was a REJECTED upload, never an accepted build —
+  so "did it actually land?" must be checked against ASC, not the CI status.
+
+### Distributing to testers (App Store Connect, human step)
+
+Internal testing (fast, no review, ≤100 testers): ASC → MantaUI → TestFlight →
+answer the build's **export-compliance** question (app uses only standard HTTPS
+→ exempt; make permanent with `ITSAppUsesNonExemptEncryption=false` in
+Info.plist), then add testers under Users and Access + assign to the Internal
+group. External testing (≤10,000, email or public link) requires a one-time
+Beta App Review of the first build.
+
+### Versioning
+
+`MARKETING_VERSION` (CFBundleShortVersionString) lives in
+`project.pbxproj` (both Debug+Release). Bump it to ship a new TestFlight
+version; the auto-tag workflow keys off it. `CURRENT_PROJECT_VERSION` (build
+number) — Codemagic/ASC handle uniqueness. First shipped version: `1.0.1`.
 
 ## Testing
 

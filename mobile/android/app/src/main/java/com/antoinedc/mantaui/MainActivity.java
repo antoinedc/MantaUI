@@ -1,4 +1,4 @@
-package com.antoinedc.bui;
+package com.antoinedc.mantaui;
 
 import com.getcapacitor.BridgeActivity;
 
