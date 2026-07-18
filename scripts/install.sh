@@ -34,6 +34,9 @@
 #   MANTA_HOME          where code is unpacked (default ~/manta)
 #   MANTA_MOBILE_PORT   server port (default 8787)
 #   MANTA_VERSION       version to fetch when MANTA_TARBALL_URL is unset (default: latest)
+#   MANTA_RELAY=off     disables the relay agent — devices connect directly to the box.
+#                       Only the exact value `off` opts in; unset/anything else = relay
+#                       (default). Read directly in bash, not via resolveConfig.
 #
 # The pure logic (URL/home resolution, health-wait, pairing format, idempotency)
 # lives in scripts/install-lib.mjs and is unit-tested (scripts/install.test.mjs).
@@ -382,6 +385,26 @@ main() {
   # ---------------------------------------------------------------------------
   # 7. manta-server systemd --user unit: substitute placeholders and enable.
   # ---------------------------------------------------------------------------
+  # MANTA_RELAY=off opt-out (BET-174): seed ~/.manta/config.json with
+  # {"relayEnabled":false} BEFORE the server first reads it. The merge CLI
+  # preserves any other keys the user may have set (projects, chatAutoAllow,
+  # …) and refuses to clobber an unparseable config (operator can fix by
+  # hand and re-run). WARN, not die — a bad config is not a blocking error
+  # for the install itself.
+  if [ "${MANTA_RELAY:-}" = "off" ]; then
+    log "MANTA_RELAY=off — seeding relayEnabled:false into $MANTA_AUTH_DIR/config.json"
+    if [ ! -d "$MANTA_AUTH_DIR" ]; then
+      mkdir -p "$MANTA_AUTH_DIR" || warn "could not create $MANTA_AUTH_DIR — merge-relay-disabled will try itself"
+    fi
+    if ! "$NODE" "$LIB" merge-relay-disabled --file "$MANTA_AUTH_DIR/config.json" 2>/tmp/manta-relay-merge.err; then
+      warn "could not update $MANTA_AUTH_DIR/config.json (see /tmp/manta-relay-merge.err)"
+      warn "  to finish opting out of the relay, set \"relayEnabled\": false in that file"
+      warn "  and run: systemctl --user restart manta-server"
+    else
+      ok "relay disabled in config (relayEnabled:false)."
+    fi
+  fi
+
   UNIT_SRC="$MANTA_HOME/scripts/systemd/manta-server.service"
   [ -f "$UNIT_SRC" ] || die "missing systemd template: $UNIT_SRC"
 
@@ -407,6 +430,16 @@ main() {
     warn "It will NOT survive reboot — set up your own supervisor for that."
     ( MANTA_MOBILE_HOST=127.0.0.1 MANTA_MOBILE_PORT="$MANTA_PORT" nohup "$NODE" "$MANTA_HOME/src/server/index.mjs" >"$AUTH_DIR/server.log" 2>&1 & )
     SERVER_MANAGED=nohup
+  fi
+
+  # On a re-run with MANTA_RELAY=off, the server is already up with the old
+  # config — `enable --now` won't restart it. One unconditional restart in
+  # the off-branch picks up the freshly-written relayEnabled:false. Fresh
+  # installs pay one cheap restart.
+  if [ "${MANTA_RELAY:-}" = "off" ] && [ "${SERVER_MANAGED:-}" = "systemd" ]; then
+    log "Restarting manta-server to pick up relayEnabled:false…"
+    systemctl --user restart manta-server.service \
+      || warn "systemctl --user restart manta-server failed — run it manually"
   fi
 
   # ---------------------------------------------------------------------------
@@ -506,21 +539,40 @@ Chat backend (opencode-serve) on http://127.0.0.1:4096:
   systemctl --user status opencode-serve
   systemctl --user restart opencode-serve
   journalctl --user -u opencode-serve -f
+EOF
+
+  # Trailing-pairing block is gated on RELAY_CHECK so the disabled mode
+  # doesn't surface a relay-shaped pair link (BET-174). The Box ID line and
+  # the footer are transport-independent and always printed.
+  case "$RELAY_CHECK" in
+    disabled)
+      cat <<EOF
+
+Relay is disabled — devices connect DIRECTLY to this box.
+manta-server listens on 127.0.0.1:8787 (loopback). Expose it over HTTPS
+with your own ingress (cloudflared, Tailscale, reverse proxy), then:
+  Desktop: enter your https URL + the pairing code above.
+  Phone:   open your https URL in the browser, add to home screen, pair.
+EOF
+      ;;
+    *)
+      cat <<EOF
 
 Your box pairs with devices THROUGH the relay (relay.mantaui.com) — no public
 port on this box, no tunnel, no reverse proxy to set up. The desktop / mobile
 app discovers it via the relay using the box_id below.
 EOF
+      ;;
+  esac
 
   if [ -n "$BOX_ID_DISPLAY" ]; then
     printf '\n  Box ID:        %s\n' "$BOX_ID_DISPLAY"
   fi
 
   # Ready-to-paste pair link (BET-156 §1) — the desktop app parses this directly
-  # via parsePairPayload and routes through the relay's /pair endpoint. Both
-  # BOX_ID_DISPLAY and PAIR_CODE are loaded via tested helpers, so this is safe
-  # even if either is missing (we just print the available half, never crash).
-  if [ -n "${BOX_ID_DISPLAY:-}" ] && [ -n "${PAIR_CODE:-}" ]; then
+  # via parsePairPayload and routes through the relay's /pair endpoint. SKIPPED
+  # in disabled mode (the link is relay-shaped and useless without the relay).
+  if [ "$RELAY_CHECK" != "disabled" ] && [ -n "${BOX_ID_DISPLAY:-}" ] && [ -n "${PAIR_CODE:-}" ]; then
     printf '\n  Pair link:     manta://pair?box=%s&code=%s\n' "$BOX_ID_DISPLAY" "$PAIR_CODE"
     printf '                 (paste into the desktop app, or scan as a QR)\n'
   fi

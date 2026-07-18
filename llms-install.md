@@ -1,0 +1,130 @@
+# Manta UI — AI agent install guide
+
+You are an AI coding agent installing Manta UI's box server on behalf of your
+user. Follow this document exactly. Do not improvise install steps: the
+installer script is the single mechanism; your job is the interview, running
+it with the right knobs, verifying, and reporting.
+
+## Safety invariants (never violate)
+
+- NEVER delete or regenerate `~/.manta/auth.json`. It is the box identity;
+  regenerating it unpairs every device the user has.
+- NEVER edit `~/.config/opencode/opencode.jsonc` destructively — the installer
+  merges what it needs; leave it alone.
+- NEVER run the installer as root or with sudo. It is a per-user, user-space
+  install (systemd --user + linger). It never installs system packages. If a
+  prerequisite is missing (e.g. tmux), show the user the exact install command
+  and ask them to run it or approve it — do not run sudo yourself unless the
+  user explicitly approves that command.
+- NEVER install Node.js or build tools — the installer ships its own Node
+  runtime inside the release tarball.
+- Re-running the installer is safe: it upgrades in place and preserves identity.
+
+## Step 1 — interview (ask BEFORE running anything)
+
+Ask the user exactly these two questions:
+
+1. **"Am I running on the Linux box you want to install Manta on, or should I
+   install on a remote box over SSH?"** If remote: ask for `user@host` (and
+   key/port if needed), then run every command below through
+   `ssh user@host '…'`. Verify SSH works with `ssh user@host 'echo ok'` first.
+2. **"How should your devices reach this box?**
+   - **Relay (default, recommended):** zero network setup. The box dials out
+     to relay.mantaui.com; your desktop and phone connect through it.
+   - **Self-hosted / direct:** no Manta infrastructure in the path. You bring
+     your own HTTPS ingress (Cloudflare tunnel, Tailscale, reverse proxy)
+     pointing at the box; devices connect straight to your URL."**
+
+If the user picks self-hosted, also ask what ingress they already have. You
+may help them set one up afterwards if they ask, but it is not part of this
+install: the minimum requirement is an HTTPS URL that reverse-proxies to
+`127.0.0.1:8787` on the box.
+
+Do NOT ask about chat mode (always installed), model providers, or projects —
+the desktop app's onboarding handles those.
+
+## Step 2 — preflight
+
+Run on the target box:
+
+- `uname -m` — must be `x86_64`. Anything else: stop and tell the user only
+  x86_64 Linux is supported today.
+- `for c in curl tar sha256sum tmux git; do command -v $c >/dev/null || echo "missing: $c"; done`
+  — all five are hard requirements the installer does NOT install. For any
+  missing one, give the user the exact command for their distro
+  (`sudo apt-get install -y tmux git` / `sudo dnf install -y tmux git`;
+  `sha256sum` is in coreutils) and wait for them to run or approve it.
+- `test -f ~/.claude/.credentials.json && echo present || echo missing` —
+  chat mode reuses the box's claude login. If missing, tell the user: chat
+  will 401 until they run `claude` once on this box and log in. Offer to
+  pause here while they do (then `systemctl --user restart opencode-serve`
+  after install), or continue and remind them at the end. Continue either way.
+- Do NOT check for or install Node — the installer vendors its own runtime.
+
+## Step 3 — install
+
+Relay mode (default):
+
+    curl -fsSL https://mantaui.com/install.sh | bash
+
+Self-hosted / direct mode:
+
+    curl -fsSL https://mantaui.com/install.sh | MANTA_RELAY=off bash
+
+Watch the output. The installer is idempotent and prints its own diagnostics.
+It downloads a self-contained release (app + Node runtime), verifies its
+checksum, installs to `~/manta`, sets up `manta-server` and `opencode-serve`
+systemd --user units, enables linger, and ends by printing a 6-digit pairing
+code, the box id, and (relay mode) a `manta://pair` link. Capture all of
+those for your final report.
+
+## Step 4 — verify
+
+- `systemctl --user is-active manta-server` → `active`
+- `systemctl --user is-active opencode-serve` → `active`
+- `curl -s http://127.0.0.1:8787/auth/status` → responds (any JSON)
+- Relay mode only: `curl -s http://127.0.0.1:8787/relay/status` → should show
+  connected. If not: `journalctl --user -u manta-server -n 50` and report the
+  error lines to the user.
+- Direct mode only: confirm with the user their ingress URL responds:
+  `curl -sI https://<their-url>/auth/status` from anywhere.
+
+Pairing codes are one-time with a ~5 minute TTL. If the printed code expires
+before the user enters it, mint a fresh one:
+`curl -s http://127.0.0.1:8787/auth/pair` (loopback-only, run on the box).
+
+## Step 5 — failure playbook
+
+- **Installer died at a checksum mismatch** → corrupt download or a release
+  being published right now; re-run once. If it persists, report it to the
+  user verbatim.
+- **Installer died at "server did not become healthy"** →
+  `journalctl --user -u manta-server -n 50`; most common cause is a stale
+  partial install — re-run the installer (safe; the previous install is kept
+  at `~/manta.prev` until a run succeeds).
+- **`systemctl --user` errors with "Failed to connect to bus"** → the user
+  SSH'd in without a session bus; run
+  `export XDG_RUNTIME_DIR=/run/user/$(id -u)` and retry, and make sure
+  `loginctl enable-linger $USER` succeeded (may need sudo).
+- **Relay shows degraded** → box has no outbound access to
+  relay.mantaui.com:443; check firewall/proxy, then
+  `systemctl --user restart manta-server`.
+- **Chat 401s** → `~/.claude/.credentials.json` missing (see preflight); after
+  the user logs in, `systemctl --user restart opencode-serve`.
+- Anything else: re-run the installer first (idempotent), then read the
+  journals of both units before attempting manual fixes.
+
+## Step 6 — report back to the user
+
+Tell the user, in this order:
+
+1. The **pairing code** (and that it expires in ~5 minutes — you can mint a
+   fresh one any time) and the **box id**.
+2. Relay mode: paste the `manta://pair` link into the desktop app, or enter
+   the code. Phone: install the app / open the relay URL and pair the same way.
+   Direct mode: on the desktop enter `https://<their-url>` + the code; on the
+   phone open `https://<their-url>`, add to home screen, pair with a fresh code.
+3. Everything else (providers, first project) happens in the desktop app's
+   onboarding.
+4. If claude login was missing: remind them to run `claude` on the box, then
+   `systemctl --user restart opencode-serve`.

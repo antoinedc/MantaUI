@@ -18,6 +18,7 @@ import {
   renderShellConfig,
   stripJsoncLineComments,
   mergeOpencodeConfig,
+  mergeRelayDisabled,
   renderSystemdUnit,
   OPENCODE_CLAUDE_AUTH_PLUGIN,
   DEFAULT_PORT,
@@ -687,6 +688,159 @@ test("mergeOpencodeConfig is null/undefined safe (treated as empty)", () => {
 });
 
 // ----------------------------------------------------------------------------
+// mergeRelayDisabled — sets relayEnabled:false on ~/.manta/config.json
+// (BET-174, mirrors mergeOpencodeConfig's safety contract)
+// ----------------------------------------------------------------------------
+
+test("mergeRelayDisabled on empty input seeds only relayEnabled:false", () => {
+  const a = mergeRelayDisabled("");
+  const b = mergeRelayDisabled("   \n  ");
+  const c = mergeRelayDisabled(undefined);
+  const d = mergeRelayDisabled(null);
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.equal(c.ok, true);
+  assert.equal(d.ok, true);
+  for (const r of [a, b, c, d]) {
+    const parsed = JSON.parse(r.text);
+    assert.deepEqual(parsed, { relayEnabled: false });
+  }
+});
+
+test("mergeRelayDisabled preserves unrelated keys", () => {
+  const before = JSON.stringify(
+    { projects: [{ name: "foo" }], chatAutoAllow: true },
+    null,
+    2,
+  );
+  const r = mergeRelayDisabled(before);
+  assert.equal(r.ok, true);
+  const after = JSON.parse(r.text);
+  assert.equal(after.relayEnabled, false);
+  assert.deepEqual(after.projects, [{ name: "foo" }]);
+  assert.equal(after.chatAutoAllow, true);
+});
+
+test("mergeRelayDisabled flips relayEnabled:true to false", () => {
+  const before = JSON.stringify({ relayEnabled: true, something: "else" }, null, 2);
+  const r = mergeRelayDisabled(before);
+  assert.equal(r.ok, true);
+  const after = JSON.parse(r.text);
+  assert.equal(after.relayEnabled, false);
+  assert.equal(after.something, "else");
+});
+
+test("mergeRelayDisabled rejects unparseable text (no clobber)", () => {
+  const r = mergeRelayDisabled("{oops");
+  assert.equal(r.ok, false);
+  assert.equal(r.text, undefined);
+  assert.match(r.error, /not valid JSON/);
+});
+
+test("mergeRelayDisabled rejects non-object JSON roots", () => {
+  const a = mergeRelayDisabled("[1,2]");
+  const b = mergeRelayDisabled('"a string"');
+  const c = mergeRelayDisabled("42");
+  const d = mergeRelayDisabled("null");
+  for (const r of [a, b, c, d]) {
+    assert.equal(r.ok, false);
+    assert.equal(r.text, undefined);
+  }
+  assert.match(a.error, /non-object root/);
+  assert.match(b.error, /non-object root/);
+  assert.match(c.error, /non-object root/);
+  assert.match(d.error, /non-object root/);
+});
+
+test("mergeRelayDisabled is idempotent (output fed back in → identical output)", () => {
+  const initial = JSON.stringify({ projects: [1, 2], chatAutoAllow: false }, null, 2);
+  const first = mergeRelayDisabled(initial);
+  assert.equal(first.ok, true);
+  // Pretty-print is canonical: feeding the first output back yields the same text.
+  const second = mergeRelayDisabled(first.text);
+  assert.equal(second.ok, true);
+  assert.equal(second.text, first.text);
+});
+
+// ----------------------------------------------------------------------------
+// merge-relay-disabled CLI subcommand — round-trip through node
+// ----------------------------------------------------------------------------
+
+test("merge-relay-disabled CLI writes a fresh config when the file is missing", () => {
+  // install.sh runs this CLI on a brand-new box where the server hasn't
+  // started yet → ~/.manta/config.json doesn't exist. The CLI must mkdir
+  // the parent dir and write a default {"relayEnabled":false}.
+  const dir = mkdtempSync(join(tmpdir(), "manta-relay-cli-"));
+  const cfg = join(dir, "config.json");
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} merge-relay-disabled --file ${cfg}`,
+      { stdio: "pipe" },
+    );
+    const written = readFileSync(cfg, "utf-8");
+    assert.deepEqual(JSON.parse(written), { relayEnabled: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge-relay-disabled CLI preserves existing keys and adds relayEnabled:false", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-relay-cli-"));
+  const cfg = join(dir, "config.json");
+  writeFileSync(
+    cfg,
+    JSON.stringify({ projects: [{ name: "alpha" }], chatAutoAllow: true }, null, 2),
+  );
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} merge-relay-disabled --file ${cfg}`,
+      { stdio: "pipe" },
+    );
+    const written = JSON.parse(readFileSync(cfg, "utf-8"));
+    assert.equal(written.relayEnabled, false);
+    assert.deepEqual(written.projects, [{ name: "alpha" }]);
+    assert.equal(written.chatAutoAllow, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge-relay-disabled CLI exits non-zero on garbage JSON and leaves the file untouched", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-relay-cli-"));
+  const cfg = join(dir, "config.json");
+  writeFileSync(cfg, "{oops");
+  try {
+    let err = "";
+    try {
+      execSync(
+        `node ${join(__dirname, "install-lib.mjs")} merge-relay-disabled --file ${cfg}`,
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+    } catch (e) {
+      err = (e.stderr ?? "") + (e.stdout ?? "");
+    }
+    assert.match(err, /not valid JSON/, "stderr explains the failure");
+    // File must remain exactly as it was — never clobber a config we can't parse.
+    assert.equal(readFileSync(cfg, "utf-8"), "{oops");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge-relay-disabled CLI requires --file", () => {
+  let err = "";
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} merge-relay-disabled`,
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (e) {
+    err = (e.stderr ?? "") + (e.stdout ?? "");
+  }
+  assert.match(err, /--file/);
+});
+
+// ----------------------------------------------------------------------------
 // renderSystemdUnit — placeholder substitution used by install.sh
 // ----------------------------------------------------------------------------
 
@@ -783,6 +937,35 @@ test("install.sh is bash-syntax-clean (bash -n)", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// BET-174: the final summary heredoc is gated on RELAY_CHECK so the disabled
+// mode (MANTA_RELAY=off) replaces the relay paragraph and skips the
+// manta://pair link. We assert on the script's structural shape — the heredoc
+// branches and the pair-link gate — so a regression that re-inlined the relay
+// paragraph or restored the pair link in disabled mode fails here.
+test("install.sh final summary gates on RELAY_CHECK (BET-174)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  // The disabled-mode block must exist verbatim.
+  assert.match(src, /Relay is disabled — devices connect DIRECTLY to this box\./);
+  assert.match(src, /manta-server listens on 127\.0\.0\.1:8787 \(loopback\)/);
+  // The relay paragraph (connected mode) must still exist.
+  assert.match(src, /Your box pairs with devices THROUGH the relay \(relay\.mantaui\.com\)/);
+  // The pair-link printf must be guarded by an `if [ "$RELAY_CHECK" != "disabled" ]`
+  // check on the SAME if-block (BET-174 spec: "skip the manta://pair link").
+  // We slice the relevant window and assert both pieces appear within it.
+  const pairLinkIdx = src.indexOf("manta://pair?box=%s&code=%s");
+  assert.notEqual(pairLinkIdx, -1, "pair-link printf is present in install.sh");
+  const guardIdx = src.lastIndexOf('RELAY_CHECK" != "disabled"', pairLinkIdx);
+  assert.notEqual(
+    guardIdx,
+    -1,
+    'pair-link printf is gated behind RELAY_CHECK != "disabled" (BET-174)',
+  );
+  assert.ok(
+    guardIdx < pairLinkIdx && pairLinkIdx - guardIdx < 200,
+    "guard appears immediately before the pair-link printf",
+  );
 });
 
 // ----------------------------------------------------------------------------
