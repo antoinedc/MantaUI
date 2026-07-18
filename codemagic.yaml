@@ -26,9 +26,12 @@ workflows:
     integrations:
       app_store_connect: APS Key  # MUST match the ASC API key integration name in the Codemagic UI exactly (Team > Integrations > Developer Portal)
     environment:
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.antoinedc.mantaui
+      # NOTE: no declarative `ios_signing:` block on purpose. That block makes
+      # Codemagic resolve signing at environment-setup time (before scripts run)
+      # and fails with "No matching profiles found" if the profile doesn't
+      # already exist. Instead the "Set up code signing" script below runs
+      # `app-store-connect fetch-signing-files --create`, which CREATES the
+      # distribution cert + App Store profile via the ASC API key if missing.
       vars:
         BUNDLE_ID: "com.antoinedc.mantaui"
         APP_STORE_APPLE_ID: 6792363427
