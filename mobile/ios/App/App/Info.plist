@@ -56,5 +56,11 @@
 	     prompt. Shown verbatim in the system permission dialog. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Manta uses the microphone to capture voice prompts for the AI assistant.</string>
+	<!-- App uses only standard HTTPS/TLS (exempt encryption). Declaring this
+	     false auto-answers the App Store Connect export-compliance question on
+	     every upload, so TestFlight builds skip the "Missing Compliance" gate
+	     and are immediately available to testers. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
