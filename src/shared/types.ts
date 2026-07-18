@@ -78,6 +78,16 @@ export type AppConfig = {
   // is always prepended by the binary once the upstream PR lands; these are
   // user-added extras. Empty array = no user-added registries.
   skillRegistryUrls?: string[];
+  // BET-123: models the user has explicitly deactivated from the "every
+  // model is auto-registered as a subagent" reconciliation. Entries are
+  // "providerID/modelID" strings. A model in this set never gets an
+  // opencode.jsonc `agent` block written for it (and any existing block is
+  // removed on the next sync) — deactivation is bui-side state, NOT opencode
+  // config, so a deactivated model isn't silently re-added on the next
+  // reconcile. Reuses the plain configGet/configUpdate channels like every
+  // other AppConfig field — no dedicated IPC channel needed. Absent/empty =
+  // every known model is registered.
+  deactivatedSubagents?: string[];
   // Anthropic prompt cache TTL used by opencode. Used ONLY to predict when
   // a chat session has gone stale (cache expired → the next user turn
   // would re-bill the entire cached prefix as cache_creation_input_tokens
@@ -361,6 +371,15 @@ export const IPC = {
   // Subagent management: list/set named subagent blocks in opencode.jsonc.
   opencodeGetSubagents: "opencode:get-subagents",
   opencodeSetSubagents: "opencode:set-subagents",
+  // BET-123: reconcile the full model list against configured agent blocks +
+  // AppConfig.deactivatedSubagents, applying only the diff. Returns the
+  // resulting SubagentDef[]. Idempotent — safe to call on every card open.
+  opencodeSyncSubagents: "opencode:sync-subagents",
+  // Restarts the box's opencode systemd --user service so a subagent/
+  // provider config write takes effect (opencode only re-reads `agent`/
+  // `provider` blocks at startup). Destructive: drops every in-flight
+  // opencode turn across all chat-mode windows. Callers must confirm with
+  // the user before invoking this — see SubagentsCard's restart button.
   opencodeRestart: "opencode:restart",
   // What opencode would use if prompt_async were called without a model.
   opencodeDefaultModel: "opencode:default-model",

@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OpencodeModel } from "../shared/types";
 import { CLAUDE_ORANGE, type ModelSelection } from "./chatShared";
+import { formatModelContextSize } from "./chatUtils";
 
 export function ModelPicker({
   modelLabel,
@@ -141,9 +142,9 @@ export function ModelPicker({
                         <span style={{ color: isActive(m) ? CLAUDE_ORANGE : "transparent" }}>●</span>
                         <span>{m.name}</span>
                       </span>
-                      {m.limit?.context ? (
+                      {formatModelContextSize(m.limit?.context) ? (
                         <span className="text-text-faint text-[10px] shrink-0">
-                          {Math.round(m.limit.context / 1000)}k
+                          {formatModelContextSize(m.limit?.context)}
                         </span>
                       ) : null}
                     </button>

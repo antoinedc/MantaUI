@@ -85,34 +85,46 @@ npm run test:server   # node:test only (src/server/)
 npm run test:watch    # vitest watch mode (renderer only)
 npm run dev           # main-process AND preload changes need a full Ctrl+C + restart
 npm run mobile        # mobile/web server on $MANTA_MOBILE_HOST:$MANTA_MOBILE_PORT (default 0.0.0.0:8787)
-npm run build:mobile  # Vite build of renderer → mobile/www/ for Capacitor
+npm run build:mobile  # Vite build of renderer → mobile/www/ (gitignored artifact; CI builds it on main)
 ```
 
 The preload bundle is built once at dev-server start; renderer HMR alone won't
 pick up new `window.api` methods. If you add an IPC channel and don't see it
 on `window.api`, you didn't restart.
 
-**MOBILE CHANGES NEED A REBUILD + COMMIT — source edits alone do NOTHING on a
-phone/browser.** The mobile/web client is served as a **pre-built static
-bundle** from `mobile/www/` (`src/server/index.mjs` `PUBLIC_DIR`), NOT live
-source. `mobile/www/` is **tracked in git** (not ignored). So any change that
-should reach mobile — `ChatPanel.tsx`, `mobile.css`, `src/renderer/**`, the
-service worker — requires:
+**MOBILE CHANGES REACH DEVICES ONLY AFTER THE BUNDLE IS REBUILT ON MAIN — but
+you no longer rebuild/commit it by hand.** The mobile/web client is served as a
+**pre-built static bundle** from `mobile/www/` (`src/server/index.mjs`
+`PUBLIC_DIR`), NOT live source. As of 2026-07-10 `mobile/www/` is **gitignored**
+(NOT tracked on branches) — the whole dir is a Vite build artifact whose source
+is `src/renderer/` + `src/renderer/public/`.
 
-```
-npm run build:mobile        # rebuilds mobile/www/ (Vite, content-hashed assets)
-git add mobile/www && git commit && git push
-```
+- **On a feature branch: just edit the source** (`ChatPanel.tsx`, `mobile.css`,
+  `src/renderer/**`, the service worker under `src/renderer/public/`). Do NOT
+  run `build:mobile` and commit `mobile/www/` — it's ignored, and committing it
+  is what used to make every two in-flight PRs conflict on the content-hashed
+  filenames + `index.html`'s `<script src>` (BET-118). If you want to preview on
+  a device before merge, `npm run build:mobile` locally and test — the output is
+  ignored, so nothing to un-stage.
+- **On merge to main: CI rebuilds and commits the bundle for you.**
+  `.github/workflows/build-mobile-bundle.yml` runs `build:mobile` on every push
+  to `main` and commits the fresh `mobile/www/` back (message
+  `chore(mobile): rebuild … [skip ci]`). So the box's `git pull` on main still
+  yields a ready-to-serve bundle — **deploy stays `git pull` + restart, no build
+  step on the box.** The workflow force-adds the ignored dir, no-ops when source
+  produces an identical bundle (the steady state + its own loop-guard follow-up
+  run), and serializes via a concurrency group so two quick merges don't race.
 
-Symptom if you skip this: you commit renderer/CSS changes, the desktop Electron
-app shows them (it runs Vite live), but the phone PWA looks unchanged — because
-the served bundle is stale. **No server restart is needed** — bui-server reads
-the static files per-request and sends `no-store` on `index.html` (so the next
-PWA launch / hard-refresh pulls the new content-hashed JS/CSS automatically).
-The service worker does NO asset caching (`mobile/www/sw.js`), so it isn't the
-culprit. To see changes on-device: force-quit + reopen the iOS PWA (or
-hard-refresh the browser). Desktop is unaffected by this — only the
-mobile/web client serves from `mobile/www/`.
+Symptom if the bundle is stale on a device: the desktop Electron app shows your
+changes (it runs Vite live), but the phone PWA looks unchanged. On main this
+means the bundle-build workflow hasn't finished (or failed) — check its run.
+**No server restart is needed** — bui-server reads the static files per-request
+and sends `no-store` on `index.html` (so the next PWA launch / hard-refresh
+pulls the new content-hashed JS/CSS automatically). The service worker does NO
+asset caching (`mobile/www/sw.js`), so it isn't the culprit. To see changes
+on-device: force-quit + reopen the iOS PWA (or hard-refresh the browser).
+Desktop is unaffected by this — only the mobile/web client serves from
+`mobile/www/`.
 
 Git-synced (since 2026-05-16). Single source of truth:
 `git@github.com:antoinedc/MantaUI.git` (private). Both the remote dev box
@@ -1645,6 +1657,82 @@ straight to bui-server `POST /api/upload?session=<name>` with the Bearer token;
 the server writes `~/.manta-uploads/<session>/<batch>/<filename>` and returns the
 absolute remote path. (Historical: the deleted desktop-SSH `pty.ts` version
 staged a Mac tmpfile + scp + remote `mv`; HTTP-only sends bytes directly.)
+
+## Subagent management — auto-register + activation toggle (BET-123)
+
+Settings → AI tab → `SubagentsCard` (mounts after `ProvidersCard`; **desktop
+only**, same as BET-121 — not in `MobileSettings.tsx`). opencode's `task` tool
+has no `model` argument; the only way to run a subagent on a chosen model is a
+NAMED agent in `opencode.jsonc`'s `agent` key, dispatched via
+`task(subagent_type: "<name>")`. opencode re-scans `agent` **only at
+startup**, so a config write does nothing until opencode restarts (see the
+restart button below).
+
+**Maximally permissive, not opt-in.** Every model in
+`window.api.opencodeModels()` gets an `agent` block automatically; the user
+DEACTIVATES the ones they don't want, rather than hand-picking which to add.
+One row per model, sourced from the model list — NOT from the configured
+agent blocks — so a not-yet-registered model still shows up.
+
+- **Naming**: `deriveSubagentName(providerID, modelID, taken)` in
+  `src/shared/subagentSync.mjs` (pure, tested). Prefers the `modelGuide.mjs`
+  catalog family key (`haiku`, `sonnet`, `gpt-4o`, ...) via the exported
+  `familyKey()`; falls back to a slugified modelID, then providerID, then
+  `"model"`. Collisions get a numeric suffix (`-2`, `-3`, ...), case-
+  insensitive against the taken set.
+- **Deactivation = the agent block is ABSENT from opencode.jsonc**, not a
+  flag inside it (an `agent` block can't safely carry arbitrary bui metadata
+  without risking opencode rejecting unknown keys). The set of deactivated
+  models is bui-side state: `AppConfig.deactivatedSubagents: string[]`
+  (`"providerID/modelID"` strings), persisted through the EXISTING
+  `configGet`/`configUpdate` channels — no dedicated IPC channel was added
+  for this; it's exactly a plain config field, same as `skillRegistryUrls`.
+  NOT in `sharedConfig.mjs`'s `SHARED_CONFIG_KEYS` (device-local for now,
+  matching that module's device-local-by-default stance for anything not
+  explicitly listed there).
+- **Reconciliation**: `reconcileSubagents({models, existingAgents,
+  deactivated})` in `src/shared/subagentSync.mjs` (pure, tested) diffs the
+  model list against the configured blocks + the deactivated set →
+  `{upsert, remove}`. A model already registered is left untouched (preserves
+  a user-renamed name/description); a block whose `model` doesn't match any
+  known model is NEVER touched (a user's hand-made agent survives). The I/O
+  wrapper `syncSubagents({models, deactivated})` in `src/server/providers.mjs`
+  reads `opencode.jsonc`, reconciles, and applies via the EXISTING
+  `setSubagents` writer (no second config writer). No-op diffs skip the write
+  entirely, so it's safe to call on every card open AND every activation
+  toggle (`opencode:sync-subagents` RPC channel — mirrors `get`/`set-subagents`
+  1:1). Idempotent: running it twice against its own output is a no-op.
+- **Restart**: `opencode:restart` (`src/server/opencodeAdmin.mjs`,
+  `restartOpencode()`) was a no-op stub through BET-121; now runs
+  `systemctl --user restart opencode-serve` via `execFile` with a fixed argv
+  array (never a shell string — no injection surface, and none is possible
+  since the function takes no external input). This is opencode's OWN systemd
+  service, **separate from bui-server** — restarting it does not restart
+  bui-server, but it DOES drop every in-flight opencode turn across every
+  chat-mode window. The card's restart button is gated behind an explicit
+  confirm ("STOPS all running opencode sessions...") — restart is never
+  triggered automatically as a side effect of a subagent edit.
+  **Pre-existing callers**: `ProvidersCard.tsx` / `ProvidersStep.tsx` already
+  called `window.api.opencodeRestart()` after adding a provider (so `/provider`
+  re-auths) — that call was always a no-op before this ticket; it is now a
+  REAL restart with the same drop-all-sessions side effect. That's intentional
+  (the provider flow was designed around a working restart from the start),
+  not new scope creep — but be aware if you're debugging "why did opencode
+  restart" reports.
+- Desktop reaches all of this the same way as every other opencode/data
+  channel post-pairing: `window.api` is swapped to `httpApi` in `main.tsx`
+  (`/rpc` to bui-server), so there is no separate Electron `ipcMain.handle`
+  wiring for subagent channels — the `preload/index.ts` methods exist only as
+  the `Api` type source + a residual pre-HTTP-mode implementation.
+- Context-size badge (`Nk`) is `formatModelContextSize()` in `chatUtils.ts`
+  (tested) — the single source for the `Math.round(context/1000)k`
+  expression; `ModelPicker.tsx` and `SubagentsCard.tsx` both import it rather
+  than re-deriving.
+- Tests: `src/shared/subagentSync.test.ts` (naming + reconcile, 18),
+  `src/server/providers.test.mjs` `syncSubagents` describe block (7),
+  `src/server/opencodeAdmin.test.mjs` (restart, 3), `formatModelContextSize`
+  in `chatUtils.test.ts` (2). All pure/injected-I/O — no real opencode.jsonc
+  or systemctl call in the suite.
 
 ## Testing
 

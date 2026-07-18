@@ -12,6 +12,7 @@ import {
 import { resolveWorkspace } from "./peers.mjs";
 import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
+import { restartOpencode } from "./opencodeAdmin.mjs";
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -262,7 +263,17 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair }) {
     "opencode:set-subagents": (input) =>
       providers.setSubagents(input ?? {}),
 
-    "opencode:restart": () => undefined,
+    // sync-subagents (BET-123): reconcile the full model list against the
+    // configured agent blocks + the caller's deactivated set, applying only
+    // the diff via setSubagents. Args: { models: OpencodeModel[], deactivated:
+    // string[] }. Returns the resulting SubagentDef[].
+    "opencode:sync-subagents": (input) =>
+      providers.syncSubagents(input ?? {}),
+
+    // restart: bounce the box's own opencode systemd --user service so a
+    // subagent/provider config write takes effect (opencode only re-reads the
+    // `agent`/`provider` blocks at startup). Was a no-op stub pre-BET-123.
+    "opencode:restart": () => restartOpencode(),
 
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args
     "opencode:default-model": () => oc.getDefaultModel(),

@@ -220,6 +220,12 @@ export interface Api {
     upsert?: SubagentInput[];
     remove?: string[];
   }): Promise<{ ok: boolean; error?: string }>;
+  // BET-123: reconcile configured agent blocks against the model list +
+  // deactivated set; returns the resulting SubagentDef[].
+  opencodeSyncSubagents(input: {
+    models: OpencodeModel[];
+    deactivated: string[];
+  }): Promise<SubagentDef[]>;
   opencodeRestart(): Promise<void>;
   opencodeVcsBranch(directory?: string): Promise<string | null>;
   opencodeRefreshCredentials(): Promise<{
