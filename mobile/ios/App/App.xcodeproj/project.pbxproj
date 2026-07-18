@@ -367,7 +367,6 @@
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = FSQ3HS4Z24;
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "MantaUI App Store";
 				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
