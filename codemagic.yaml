@@ -24,7 +24,7 @@ workflows:
     instance_type: mac_mini_m2      # 500 free M2 minutes/month
     max_build_duration: 60
     integrations:
-      app_store_connect: codemagic  # the ASC API key integration you add in the UI
+      app_store_connect: APS Key  # MUST match the ASC API key integration name in the Codemagic UI exactly (Team > Integrations > Developer Portal)
     environment:
       ios_signing:
         distribution_type: app_store
