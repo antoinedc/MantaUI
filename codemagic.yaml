@@ -1,0 +1,85 @@
+# Codemagic CI/CD — build the Capacitor iOS app and publish to TestFlight.
+#
+# WHY CODEMAGIC (not Xcode Cloud):
+#   Xcode Cloud built + signed fine but could NEVER authenticate to upload the
+#   binary to App Store Connect ("Session Proxy Provider Code=1" — a known
+#   Xcode Cloud auth bug). Codemagic uploads via the App Store Connect API key,
+#   which authenticates reliably. Codemagic also has first-class Capacitor
+#   support and automatic code signing driven by that same API key.
+#
+# ONE-TIME SETUP IN THE CODEMAGIC WEB UI (you do this once):
+#   1. Sign up at codemagic.io, connect the GitHub repo antoinedc/MantaUI.
+#   2. Team → Integrations → Developer Portal → add an App Store Connect API key:
+#        - Key ID, Issuer ID, and the .p8 file (the same ASC key already in the
+#          bui Secrets card). Name the integration "codemagic" (referenced below
+#          as app_store_connect: codemagic).
+#   3. That's it — this file drives everything else.
+#
+# TRIGGER: a git tag matching ios-v* (matches the auto-tag workflow the box
+#   already pushes). Also runnable manually from the Codemagic UI.
+
+workflows:
+  ios-testflight:
+    name: MantaUI iOS → TestFlight
+    instance_type: mac_mini_m2      # 500 free M2 minutes/month
+    max_build_duration: 60
+    integrations:
+      app_store_connect: codemagic  # the ASC API key integration you add in the UI
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.antoinedc.mantaui
+      vars:
+        BUNDLE_ID: "com.antoinedc.mantaui"
+        APP_STORE_APPLE_ID: 6792363427
+        XCODE_WORKSPACE: "mobile/ios/App/App.xcworkspace"
+        XCODE_SCHEME: "App"
+      node: 22
+      xcode: latest
+      cocoapods: default
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - pattern: "ios-v*"
+          include: true
+    scripts:
+      - name: Build web bundle (renderer → mobile/www)
+        script: |
+          npm ci
+          npm run build:mobile
+      - name: Install mobile deps + Capacitor sync
+        script: |
+          cd mobile
+          npm ci
+          npx cap sync ios
+      - name: Install CocoaPods
+        script: |
+          cd mobile/ios/App
+          pod install
+      - name: Set up code signing (App Store profile via ASC API key)
+        script: |
+          # Codemagic fetches/creates the distribution cert + App Store profile
+          # for the bundle id using the connected ASC API key, then wires them
+          # into the Xcode project. This is the step that replaces all the
+          # manual signing we fought with Xcode Cloud.
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+          keychain add-certificates
+          xcode-project use-profiles
+      - name: Build + archive .ipa
+        script: |
+          xcode-project build-ipa \
+            --workspace "$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration          # use the ASC API key integration
+        submit_to_testflight: true
+        # Internal testers get it automatically once processing completes.
+        # No App Store review needed for internal TestFlight.
