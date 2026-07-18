@@ -84,7 +84,7 @@ All traffic authenticated with `box_id` + HMAC signature (reuses `webhooks.mjs` 
 
 **User action:**
 ```bash
-curl -fsSL https://bui.useronda.com/install | bash
+curl -fsSL https://mantaui.com/install.sh | bash
 ```
 
 **What the script does:**
@@ -104,7 +104,7 @@ curl -fsSL https://bui.useronda.com/install | bash
    (Enter this in the desktop app to connect)
    ```
 
-**Script location:** `scripts/self-install.sh` (in repo), served at `https://bui.useronda.com/install`.
+**Script location:** `scripts/install.sh` (in repo), served at `https://mantaui.com/install.sh`.
 
 ### Step 2: Desktop Onboarding — Pair (Full-Screen)
 
@@ -136,7 +136,7 @@ curl -fsSL https://bui.useronda.com/install | bash
 {
   "relayToken": "<device_token>",
   "boxId": "<box_id>",
-  "serverUrl": "wss://relay.bui.useronda.com/box/<box_id>",
+  "serverUrl": "wss://relay.mantaui.com/box/<box_id>",
   "projects": []
 }
 ```
@@ -268,11 +268,11 @@ curl -fsSL https://bui.useronda.com/install | bash
 
 ### Mockups
 
-**Onboarding mockup (interactive):** https://onboarding.bui.antoinedc.com
+**Onboarding mockup (interactive):** _(retired — was onboarding.bui.antoinedc.com; the `*.bui.antoinedc.com` vhost is being decommissioned in BET-160 §7)_
 - 4 clickable steps: Pair → Providers → Model → Project
 - Full-screen layout for each step
 
-**Settings mockup (interactive):** https://settings-redesign.bui.antoinedc.com
+**Settings mockup (interactive):** _(retired — was settings-redesign.bui.antoinedc.com; same decommission)_
 - 5 tabs: Connection, AI, Voice, Files, General
 - Providers show model lists with checkboxes
 
