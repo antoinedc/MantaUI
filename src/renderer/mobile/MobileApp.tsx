@@ -4,8 +4,9 @@ import { SessionListScreen } from "./SessionListScreen";
 import { SessionScreen } from "./SessionScreen";
 import { MobileSettings } from "./MobileSettings";
 import { PairingScreen } from "./PairingScreen";
+import { SetupScreen } from "./SetupScreen";
 import { reportFocus } from "./push";
-import { AuthRequiredError } from "../api/httpApi";
+import { AuthRequiredError, ServerNotConfiguredError } from "../api/httpApi";
 
 type Nav =
   | { screen: "list" }
@@ -27,6 +28,12 @@ export function MobileApp() {
   // instead of the session list — this IS the re-pair path too, since a rotated
   // token 401s exactly like a fresh browser.
   const [authRequired, setAuthRequired] = useState(false);
+  // True on first-run when serverBase() threw ServerNotConfiguredError — no
+  // localStorage["manta_server"] AND no same-origin http(s) page (the iOS
+  // Capacitor shell's `capacitor://localhost` falls in this branch). Routes
+  // to SetupScreen so the user can supply the URL + pairing code, instead of
+  // hitting the dead-end Retry screen.
+  const [setupRequired, setSetupRequired] = useState(false);
 
   // The opencode session id of the on-screen chat (null on list/settings or a
   // terminal window). Drives push focus-suppression: the server skips the
@@ -44,6 +51,19 @@ export function MobileApp() {
   const doRefresh = () => {
     setBootError(null);
     refresh().catch((e: unknown) => {
+      // First-run: serverBase() couldn't resolve a URL (no localStorage
+      // override AND no same-origin http(s) page). Route to SetupScreen so
+      // the user can supply the URL + pairing code instead of hitting the
+      // dead-end Retry screen. Same defensive `instanceof || name ===` pattern
+      // we use for AuthRequiredError below — `name` covers cross-realm throws
+      // where instanceof can fail.
+      if (
+        e instanceof ServerNotConfiguredError ||
+        (e as { name?: string })?.name === "ServerNotConfiguredError"
+      ) {
+        setSetupRequired(true);
+        return;
+      }
       // A 401 from the box means we're unpaired (or the stored token was
       // revoked/rotated) — route to the pairing screen instead of the generic
       // "could not reach the server" error, which offers only a dead Retry.
@@ -53,6 +73,15 @@ export function MobileApp() {
       }
       setBootError(e instanceof Error ? e.message : "Could not reach the server.");
     });
+  };
+
+  // Called by SetupScreen after a successful claim (serverUrl persisted to
+  // localStorage["manta_server"], token persisted to localStorage["manta_token"]
+  // by claimAgainst). Drop the gate and re-run the bootstrap so the session
+  // list loads with the now-resolved serverBase() + now-valid Bearer credential.
+  const onConnected = () => {
+    setSetupRequired(false);
+    doRefresh();
   };
 
   // Called by PairingScreen after a successful claim (token already persisted).
@@ -287,6 +316,10 @@ export function MobileApp() {
     const t = e.changedTouches[0];
     if (t.clientX - s.x > 60 && Math.abs(t.clientY - s.y) < 50) goList();
   };
+
+  if (setupRequired) {
+    return <SetupScreen onConnected={onConnected} />;
+  }
 
   if (authRequired) {
     return <PairingScreen onPaired={onPaired} />;
