@@ -64,26 +64,28 @@ workflows:
         script: |
           # Codemagic fetches/creates the distribution cert + App Store profile
           # for the bundle id using the connected ASC API key, then wires them
-          # into the Xcode project. This is the step that replaces all the
-          # manual signing we fought with Xcode Cloud.
+          # into the Xcode project. This replaces the manual signing dance.
           keychain initialize
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --type IOS_APP_STORE \
             --create
           keychain add-certificates
-          xcode-project use-profiles
+          # use-profiles updates the Xcode project's signing settings AND writes
+          # an export options plist to a known path we pass to build-ipa below.
+          xcode-project use-profiles \
+            --export-options-plist "$CM_BUILD_DIR/export_options.plist"
       - name: Build + archive .ipa
         script: |
-          # Pass the signing info explicitly. `xcode-project use-profiles`
-          # (previous step) wrote /tmp/export_options.plist mapping the bundle
-          # id to the fetched App Store profile + team; feed it to the archive
-          # so Manual signing has a concrete profile (fixes "App requires a
-          # provisioning profile"). Also force the team + manual style.
+          # use-profiles (previous step) set the project to manual signing with
+          # the fetched App Store profile and wrote the export options plist to
+          # $CM_BUILD_DIR/export_options.plist. Feed it so the archive + export
+          # have a concrete profile (fixes "App requires a provisioning
+          # profile"). Force the team so manual signing resolves.
           xcode-project build-ipa \
             --workspace "$XCODE_WORKSPACE" \
             --scheme "$XCODE_SCHEME" \
-            --archive-xcargs "DEVELOPMENT_TEAM=FSQ3HS4Z24 CODE_SIGN_STYLE=Manual" \
-            --export-options-plist /tmp/export_options.plist
+            --archive-xcargs "DEVELOPMENT_TEAM=FSQ3HS4Z24" \
+            --export-options-plist "$CM_BUILD_DIR/export_options.plist"
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
