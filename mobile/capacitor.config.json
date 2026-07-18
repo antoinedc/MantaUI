@@ -1,6 +1,6 @@
 {
   "appId": "com.antoinedc.bui",
-  "appName": "Manta",
+  "appName": "MantaUI",
   "webDir": "www",
   "server": {
     "androidScheme": "http",
