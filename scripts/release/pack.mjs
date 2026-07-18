@@ -103,6 +103,7 @@ const INCLUDE = [
   "package.json",
   "package-lock.json",
   "README.md",
+  "llms-install.md",
 ];
 
 // Parse the nodejs.org SHASUMS256.txt into {filename: sha256}. Tolerates the

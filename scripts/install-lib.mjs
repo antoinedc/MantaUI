@@ -318,6 +318,43 @@ export function mergeOpencodeConfig(existingText) {
 }
 
 // ---------------------------------------------------------------------------
+// Relay-disabled merge — pure, used by install.sh when MANTA_RELAY=off (BET-174)
+// ---------------------------------------------------------------------------
+//
+// Sets `relayEnabled: false` in ~/.manta/config.json so the in-process relay
+// agent opts out (only `=== false` opts out — see shouldStartRelayAgent in
+// src/relay/agent/index.mjs). Plain JSON (NOT JSONC) — config.json doesn't
+// allow `//` line comments, so we JSON.parse the raw text directly.
+//
+// Behavior (mirrors mergeOpencodeConfig's safety contract):
+//   * missing/empty/whitespace text → returns {"relayEnabled":false} (pretty)
+//   * valid JSON object → sets relayEnabled:false, preserves ALL other keys,
+//     pretty-prints
+//   * unparseable text or non-object JSON → { ok:false, error }, NO text
+//     (never clobber a config we can't parse — same policy as
+//     mergeOpencodeConfig's `corrupt` path)
+//
+// Returns { ok: true, text } | { ok: false, error }.
+export function mergeRelayDisabled(existingText) {
+  const raw = typeof existingText === "string" ? existingText : "";
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return { ok: true, text: JSON.stringify({ relayEnabled: false }, null, 2) + "\n" };
+  }
+  let cfg;
+  try {
+    cfg = JSON.parse(trimmed);
+  } catch (e) {
+    return { ok: false, error: `config.json is not valid JSON: ${e?.message ?? e}` };
+  }
+  if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
+    return { ok: false, error: "config.json must be a JSON object (got non-object root)" };
+  }
+  const next = { ...cfg, relayEnabled: false };
+  return { ok: true, text: JSON.stringify(next, null, 2) + "\n" };
+}
+
+// ---------------------------------------------------------------------------
 // Systemd unit placeholder substitution — pure, used by install.sh steps E
 // and the existing manta-server step (BET-153).
 // ---------------------------------------------------------------------------
@@ -611,6 +648,43 @@ async function cliMain(argv) {
     process.stdout.write(text);
     return 0;
   }
+  if (cmd === "merge-relay-disabled") {
+    // node install-lib.mjs merge-relay-disabled --file <path>
+    // Reads the existing file (if any), calls mergeRelayDisabled, writes the
+    // merged text atomically (write <path>.tmp then rename). Exits non-zero
+    // with the error on ok:false. Ensures the parent dir exists so a fresh
+    // box that hasn't yet booted the server gets created as needed.
+    const filePath = flags.file;
+    if (!filePath) {
+      process.stderr.write("merge-relay-disabled: --file <path> required\n");
+      return 2;
+    }
+    const { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } = await import("node:fs");
+    const { dirname } = await import("node:path");
+    let existing = "";
+    if (existsSync(filePath)) {
+      try {
+        existing = readFileSync(filePath, "utf-8");
+      } catch (e) {
+        process.stderr.write(`merge-relay-disabled: read failed: ${e?.message ?? e}\n`);
+        return 1;
+      }
+    }
+    const res = mergeRelayDisabled(existing);
+    if (!res.ok) {
+      process.stderr.write(`merge-relay-disabled: ${res.error}\n`);
+      return 1;
+    }
+    try {
+      mkdirSync(dirname(filePath), { recursive: true });
+      writeFileSync(`${filePath}.tmp`, res.text);
+      renameSync(`${filePath}.tmp`, filePath);
+    } catch (e) {
+      process.stderr.write(`merge-relay-disabled: write failed: ${e?.message ?? e}\n`);
+      return 1;
+    }
+    return 0;
+  }
   if (cmd === "render-systemd-unit") {
     // node install-lib.mjs render-systemd-unit --template <path> --placeholder K=V [--placeholder K=V ...]
     // Replaces @@K@@ in the template file with V (verbatim, no quoting).
@@ -636,7 +710,7 @@ async function cliMain(argv) {
   }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|render-systemd-unit> [--version X]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-relay-disabled|render-systemd-unit> [--version X] [--file P] [--template P] [--placeholder K=V]\n",
   );
   return 2;
 }
@@ -648,6 +722,8 @@ function parseFlags(args) {
       out.version = args[++i];
     } else if (args[i] === "--template") {
       out.template = args[++i];
+    } else if (args[i] === "--file") {
+      out.file = args[++i];
     } else if (args[i] === "--placeholder") {
       // --placeholder KEY=VAL  (value may itself contain `=`; split on FIRST)
       const kv = args[++i] ?? "";

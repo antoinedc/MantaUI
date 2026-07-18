@@ -153,13 +153,24 @@ log "Deploying relay on ${PROD_HOST}…"
 ssh "${PROD_HOST}" 'git -C /opt/manta pull && systemctl restart manta-relay && systemctl is-active manta-relay'
 ok "relay deployed"
 
-# Caddy serves install.sh statically from the web root, NOT from the repo
-# checkout. The git pull above updates /opt/manta/scripts/install.sh but leaves
-# the served copy stale — sync it explicitly (BET-171). Caddy re-reads static
-# files per request, so no reload is needed.
-log "Syncing install.sh into web root (${WEBROOT_DIR}/install.sh)…"
-ssh "${PROD_HOST}" "cp -f /opt/manta/scripts/install.sh ${WEBROOT_DIR}/install.sh"
-ok "install.sh synced to web root"
+# Caddy serves both install.sh and llms-install.md statically from the web
+# root, NOT from the repo checkout. The git pull above updates /opt/manta
+# but leaves the served copies stale — sync them explicitly (BET-171 for
+# install.sh; BET-174 for llms-install.md). Caddy re-reads static files
+# per request, so no reload is needed.
+# Pair format: "<src-under-repo>:<dest-on-prod>". Keep the two files in sync
+# so a single cp + verify loop covers both legs (BET-174).
+WEBROOT_DOCS=(
+  "scripts/install.sh:${WEBROOT_DIR}/install.sh"
+  "llms-install.md:${WEBROOT_DIR}/llms-install.md"
+)
+log "Syncing static docs into web root…"
+for pair in "${WEBROOT_DOCS[@]}"; do
+  src="${pair%%:*}"
+  dest="${pair#*:}"
+  ssh "${PROD_HOST}" "cp -f /opt/manta/${src} ${dest}"
+  ok "${dest##*/} synced to web root"
+done
 
 # --- 5. verify --------------------------------------------------------------
 log "Verifying published URLs (${SITE})…"
@@ -173,7 +184,9 @@ check_200() {
 }
 
 check_200 "${SITE}/releases/manta-${VERSION}-linux-x64.tar.gz"
-check_200 "${SITE}/install.sh"
+for pair in "${WEBROOT_DOCS[@]}"; do
+  check_200 "${SITE}/${pair##*:}"
+done
 
 # Manifest + tarball drift check (BET-171 F4 class). The publish script just
 # pushed both files; we re-fetch the manifest over HTTPS and assert that the
@@ -197,16 +210,20 @@ if [ "$ACTUAL_SHA" != "$SERVED_SHA" ]; then
 fi
 ok "served manifest live (version=${VERSION}, sha=${ACTUAL_SHA})"
 
-# A 200 on install.sh is not enough — a stale file also 200s (BET-171). Verify
-# the served body byte-matches the repo's scripts/install.sh so we know the
-# deploy actually took.
-log "Verifying served install.sh matches repo…"
-LOCAL_INSTALL_SHA="$(sha256sum scripts/install.sh | awk '{print $1}')"
-SERVED_INSTALL_SHA="$(curl -fsSL "${SITE}/install.sh" | sha256sum | awk '{print $1}')"
-if [ "${LOCAL_INSTALL_SHA}" != "${SERVED_INSTALL_SHA}" ]; then
-  die "install.sh mismatch: served=${SERVED_INSTALL_SHA} repo=${LOCAL_INSTALL_SHA} — web-root sync did not take"
-fi
-ok "served install.sh matches repo (${LOCAL_INSTALL_SHA})"
+# A 200 is not enough — a stale file also 200s (BET-171). Verify each
+# web-root doc byte-matches the repo so we know the deploy actually took.
+# Same loop as the sync step above: one block, multiple files (BET-174).
+log "Verifying served docs match repo…"
+for pair in "${WEBROOT_DOCS[@]}"; do
+  src="${pair%%:*}"
+  dest="${pair#*:}"
+  LOCAL_SHA="$(sha256sum "${src}" | awk '{print $1}')"
+  SERVED_SHA="$(curl -fsSL "${SITE}/${dest##*/}" | sha256sum | awk '{print $1}')"
+  if [ "${LOCAL_SHA}" != "${SERVED_SHA}" ]; then
+    die "${dest##*/} mismatch: served=${SERVED_SHA} repo=${LOCAL_SHA} — web-root sync did not take"
+  fi
+  ok "served ${dest##*/} matches repo (${LOCAL_SHA})"
+done
 
 if [ "${#DMGS[@]}" -gt 0 ]; then
   check_200 "${SITE}/downloads/Manta-latest.dmg"

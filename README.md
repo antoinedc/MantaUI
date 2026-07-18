@@ -9,33 +9,13 @@ leaves your work running, reopening re-attaches.
 
 ## AI-assisted setup
 
-Setting up with an AI agent (claude code, opencode, …)? Paste this prompt into
-an agent **running on the Linux box** you want to drive:
+Setting up with an AI agent (claude code, opencode, cursor, …)? Paste this
+into an agent that can reach the box:
 
 ```
-Set up this box as a Manta UI box server. Steps:
-1. Run: curl -fsSL https://mantaui.com/install.sh | bash
-   It installs the manta box server (~/manta), a systemd --user unit
-   (manta-server, port 8787 loopback), enables linger, and prints a 6-digit
-   pairing code + the box id. Show me the pairing code and keep the box id.
-2. Verify health: systemctl --user status manta-server should be active;
-   curl -s http://127.0.0.1:8787/auth/pair mints a fresh code if the first
-   one expired (codes are one-time, 5-minute TTL).
-3. Chat mode needs opencode: check `opencode --version`; if missing run
-   curl -fsSL https://opencode.ai/install | bash. Ensure a systemd --user
-   unit runs `opencode serve --port 4096 --hostname 127.0.0.1` (template in
-   scripts/systemd/ of ~/manta), and that ~/.config/opencode/opencode.jsonc
-   lists the "opencode-claude-auth@latest" plugin (merge, don't clobber).
-   I already have claude authenticated on this box (~/.claude), which that
-   plugin reuses. Copy ~/manta/docs/opencode-tools/*.ts (real copies, NOT
-   symlinks) into ~/.config/opencode/tools/ and append
-   ~/manta/docs/opencode-tools/AGENTS.md to ~/.config/opencode/AGENTS.md
-   if not already present. Restart opencode-serve.
-4. Confirm tmux is installed (hard requirement) and tell me:
-   the pairing code, the box id, and whether relay connectivity to
-   wss://relay.mantaui.com is up (journalctl --user -u manta-server).
-Do not regenerate ~/.manta/auth.json if it exists — that would unpair
-every device.
+Set up a Linux box as a Manta UI box server.
+Fetch https://mantaui.com/llms-install.md and follow it exactly.
+Ask me its interview questions before running anything.
 ```
 
 Then install the desktop app from [mantaui.com](https://mantaui.com), enter
