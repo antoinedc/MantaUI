@@ -34,13 +34,26 @@ import type { ClaimOutcome } from "../../shared/claim.mjs";
 // addListener + getLaunchUrl. Documented here because @capacitor/app ships
 // its own .d.ts but we deliberately don't add it to the root package.json
 // (the bundle ships to desktop + PWA where it would be dead weight).
-export type CapacitorAppPlugin = {
-  addListener: (
+//
+// `appStateChange` is consumed by BET-177 §4 lifecycle hardening (MobileApp
+// focus reporting + resume reconnect). Typed here so the renderer side
+// stays typecheck-clean without taking a hard runtime dependency on
+// @capacitor/app's d.ts.
+//
+// Interface (not type alias) so `addListener` can be overloaded across the
+// two event-name signatures — same pattern as nativePush.ts's
+// PushNotificationsPlugin.
+export interface CapacitorAppPlugin {
+  addListener(
     eventName: "appUrlOpen",
     listener: (event: { url: string }) => void,
-  ) => Promise<{ remove: () => Promise<void> }> | { remove: () => Promise<void> };
-  getLaunchUrl: () => Promise<{ url?: string } | null | undefined>;
-};
+  ): Promise<{ remove: () => Promise<void> }> | { remove: () => Promise<void> };
+  addListener(
+    eventName: "appStateChange",
+    listener: (event: { isActive: boolean }) => void,
+  ): Promise<{ remove: () => Promise<void> }> | { remove: () => Promise<void> };
+  getLaunchUrl(): Promise<{ url?: string } | null | undefined>;
+}
 
 /**
  * Feature-detect the Capacitor App plugin on a window-like object. Returns
