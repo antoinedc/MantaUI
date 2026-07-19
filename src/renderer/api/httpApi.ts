@@ -28,8 +28,10 @@ import { shouldForceReconnect } from "../chatUtils";
 //      location.origin carries the page's own scheme, so no protocol skew.
 //   3. Otherwise (Capacitor http://localhost, file:) → no fallback. The
 //      mobile/web client is currently descoped from v1; fail fast with a
-//      clear error so a tester knows to set localStorage["manta_server"]
-//      rather than silently hitting some hardcoded box.
+//      typed ServerNotConfiguredError so MobileApp's first-run setup screen
+//      can render and collect serverUrl + pairing code from the user.
+//      (User-facing copy lives in SetupScreen.tsx — the UI owns it now, not
+//      the error itself.)
 // ---------------------------------------------------------------------------
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
@@ -41,10 +43,7 @@ export function serverBase(): string {
   if ((protocol === "https:" || protocol === "http:") && !LOCAL_HOSTS.has(hostname)) {
     return origin.replace(/\/+$/, "");
   }
-  throw new Error(
-    "bui mobile/web server not configured. Set localStorage['manta_server'] " +
-    "to your server URL (e.g. http://192.168.1.10:8787) and reload.",
-  );
+  throw new ServerNotConfiguredError("No server configured.");
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +81,23 @@ export class AuthRequiredError extends Error {
     this.name = "AuthRequiredError";
     // Restore prototype chain for `instanceof` under transpiled ES5 targets.
     Object.setPrototypeOf(this, AuthRequiredError.prototype);
+  }
+}
+
+/**
+ * Thrown by serverBase() when no server URL can be resolved: neither
+ * localStorage["manta_server"] nor a same-origin http(s) page. MobileApp
+ * catches this on first-run bootstrap and renders SetupScreen so the user
+ * can supply the URL + pairing code. Same shape as AuthRequiredError so the
+ * UI can use the same defensive `instanceof || name ===` pattern.
+ */
+export class ServerNotConfiguredError extends Error {
+  readonly status = 0 as const;
+  constructor(message = "server not configured") {
+    super(message);
+    this.name = "ServerNotConfiguredError";
+    // Restore prototype chain for `instanceof` under transpiled ES5 targets.
+    Object.setPrototypeOf(this, ServerNotConfiguredError.prototype);
   }
 }
 

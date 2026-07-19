@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   AuthRequiredError,
+  ServerNotConfiguredError,
   authHeaders,
   withTokenParam,
   TOKEN_KEY,
+  serverBase,
   httpApi,
 } from "./httpApi.js";
 
@@ -140,6 +142,106 @@ describe("AuthRequiredError", () => {
   it("accepts a custom message and defaults otherwise", () => {
     expect(new AuthRequiredError().message).toBe("authentication required");
     expect(new AuthRequiredError("stale token").message).toBe("stale token");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ServerNotConfiguredError — distinguishable typed "no server URL" thrown by
+// serverBase() on first-run (Capacitor iOS shell, no localStorage["manta_server"]
+// yet). Same shape as AuthRequiredError so MobileApp uses the same defensive
+// `instanceof || name ===` pattern.
+// ---------------------------------------------------------------------------
+
+describe("ServerNotConfiguredError", () => {
+  it("is an Error subclass identifiable via instanceof", () => {
+    const e = new ServerNotConfiguredError();
+    expect(e).toBeInstanceOf(Error);
+    expect(e).toBeInstanceOf(ServerNotConfiguredError);
+  });
+
+  it("carries a stable name for UI routing (cross-realm safe)", () => {
+    const e = new ServerNotConfiguredError();
+    expect(e.name).toBe("ServerNotConfiguredError");
+    expect(e.status).toBe(0);
+  });
+
+  it("accepts a custom message and defaults otherwise", () => {
+    expect(new ServerNotConfiguredError().message).toBe("server not configured");
+    expect(new ServerNotConfiguredError("No server configured.").message).toBe(
+      "No server configured.",
+    );
+  });
+
+  it("is distinguishable from AuthRequiredError", () => {
+    const a = new AuthRequiredError();
+    const s = new ServerNotConfiguredError();
+    expect(s).not.toBeInstanceOf(AuthRequiredError);
+    expect(a).not.toBeInstanceOf(ServerNotConfiguredError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// serverBase — resolves the base URL from localStorage / same-origin / throws
+// the typed error when nothing is configured (Capacitor first-run).
+// ---------------------------------------------------------------------------
+
+describe("serverBase", () => {
+  // serverBase() reads `window.location` (not the bare `location` global), so we
+  // re-stub `window` with a `.location` field for these tests. The default
+  // beforeEach mock has no location, which is fine for tests that never reach
+  // the same-origin fallback branch (subscription-only paths).
+  const stubWindowLocation = (loc: { protocol: string; hostname: string; origin: string }) => {
+    vi.stubGlobal("window", {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      location: loc,
+    });
+  };
+
+  it("prefers localStorage[\"manta_server\"] (mobile Settings override)", () => {
+    mockLocalStorage["manta_server"] = "http://my-box.local:8787";
+    expect(serverBase()).toBe("http://my-box.local:8787");
+  });
+
+  it("strips trailing slashes from the localStorage value", () => {
+    mockLocalStorage["manta_server"] = "http://my-box:8787///";
+    expect(serverBase()).toBe("http://my-box:8787");
+  });
+
+  it("falls back to same-origin for an https page on a non-local host", () => {
+    delete mockLocalStorage["manta_server"];
+    stubWindowLocation({
+      protocol: "https:",
+      hostname: "relay.example.com",
+      origin: "https://relay.example.com",
+    });
+    expect(serverBase()).toBe("https://relay.example.com");
+  });
+
+  it("throws ServerNotConfiguredError on Capacitor localhost (no override)", () => {
+    delete mockLocalStorage["manta_server"];
+    stubWindowLocation({
+      protocol: "http:",
+      hostname: "localhost",
+      origin: "http://localhost",
+    });
+    expect(() => serverBase()).toThrow(ServerNotConfiguredError);
+  });
+
+  it("ServerNotConfiguredError carries the default message", () => {
+    delete mockLocalStorage["manta_server"];
+    stubWindowLocation({
+      protocol: "http:",
+      hostname: "localhost",
+      origin: "http://localhost",
+    });
+    try {
+      serverBase();
+      throw new Error("expected throw");
+    } catch (e) {
+      expect((e as Error).message).toBe("No server configured.");
+      expect((e as Error).name).toBe("ServerNotConfiguredError");
+    }
   });
 });
 
