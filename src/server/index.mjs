@@ -26,6 +26,16 @@ import { startStatusPoller } from "./status.mjs";
 import { startOutboxPoller } from "./outbox.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
 import {
+  createCapJob,
+  getJob,
+  listJobs as listCapJobs,
+  startJob as startCapJob,
+  appendLog as appendCapLog,
+  completeJob as completeCapJob,
+  startCapSweeper,
+} from "./capabilities.mjs";
+import { notifyCapSession } from "./capNotifier.mjs";
+import {
   startFileServer,
   startCleanupPoller,
   registerPage,
@@ -136,6 +146,22 @@ const { stop: stopSchedulePoller } = startSchedulePoller(
   },
   { intervalMs: 30000 },
 );
+
+// Capability-job sweeper: same shape as startSchedulePoller — fails out stale
+// `running` jobs (30 min) and expired `queued` jobs (24h), then prunes terminal
+// jobs past retention/cap. Notifies the originating session on every
+// transition via the SAME oc.sendPrompt leg the scheduler uses, so the user
+// sees a fresh turn when a job times out. See src/server/capabilities.mjs +
+// docs/mantaui-plugins.md §Layer 1.
+// Capability-job completion → opencode session notification. Wired via
+// src/server/capNotifier.mjs (see that file for why the field translation
+// lives in one place). Shared by the sweeper and the /api/cap/:id/done REST
+// handler below — one definition, two callers.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopCapSweeper } = startCapSweeper({
+  publish: (evt) => bus.publish(evt),
+  notifySession: notifyCapSession,
+});
 
 // Inbound webhook engine: external actors POST to the public /hook/<token>
 // route (below) to wake a chat session with an event — the push counterpart to
@@ -812,6 +838,126 @@ const server = createServer(async (req, res) => {
       }
       if (req.method === "DELETE") {
         await handleApiDelete(req, url, res, deleteJob);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Capability jobs (MantaUI plugin system, Layer 1) ----------
+  // Generic queue for AI-invokable capabilities that run on the box OR on a
+  // connected Mac (the plugin system). The transport envelope is
+  // {capability, input, host} — no `iosBuild`-specific fields here. Created
+  // by the AI's plugin tool (docs/opencode-tools/<plugin>.ts); claimed by an
+  // executor (Stage 2: Mac, src/main/capExecutor.ts) via /start; streamed
+  // logs via /log; completed via /done. Completion is injected back into the
+  // originating opencode session via the SAME oc.sendPrompt leg the scheduler
+  // uses — see docs/mantaui-plugins.md §Layer 1. All routes below are behind
+  // the existing Bearer auth gate (/api/* is gated wholesale).
+  if (path === "/api/cap" || /^\/api\/cap\/([0-9a-f]{8})(?:\/(start|log|done))?$/.test(path)) {
+    // Detail routes: /api/cap/:id, /api/cap/:id/start, /api/cap/:id/log,
+    // /api/cap/:id/done. Matched BEFORE the generic create/list block so the
+    // regex captures the action verb. Id must be exactly 8 lowercase hex
+    // characters (genId()).
+    const detailRe = /^\/api\/cap\/([0-9a-f]{8})(?:\/(start|log|done))?$/;
+    const detailMatch = path.match(detailRe);
+    try {
+      if (detailMatch) {
+        const [, id, action] = detailMatch;
+        if (action === "start") {
+          if (req.method !== "POST") {
+            respondJson(res, 405, { error: "method not allowed" });
+            return;
+          }
+          const result = await startCapJob(id);
+          if (!result.ok) {
+            // Wrong status (already running, or terminal) → 409 conflict.
+            respondJson(res, 409, { error: result.error, status: result.status });
+            return;
+          }
+          respondJson(res, 200, { ok: true });
+          return;
+        }
+        if (action === "log") {
+          if (req.method !== "POST") {
+            respondJson(res, 405, { error: "method not allowed" });
+            return;
+          }
+          const body = await readJsonBody(req);
+          const result = await appendCapLog(id, body?.chunk ?? "");
+          if (!result.ok) {
+            // Job missing OR not running (e.g. timed out and already failed)
+            // → 409. The executor must NOT be allowed to resurrect a
+            // timed-out job by appending a late log chunk.
+            respondJson(res, 409, { error: result.error, status: result.status });
+            return;
+          }
+          respondJson(res, 200, { ok: true });
+          return;
+        }
+        if (action === "done") {
+          if (req.method !== "POST") {
+            respondJson(res, 405, { error: "method not allowed" });
+            return;
+          }
+          const body = await readJsonBody(req);
+          const result = await completeCapJob(
+            id,
+            { status: body?.status, result: body?.result, error: body?.error },
+            {
+              ...BUS_PUBLISH_DEPS,
+              notifySession: notifyCapSession,
+            },
+          );
+          if (!result.ok) {
+            respondJson(res, 400, { error: result.error, status: result.status });
+            return;
+          }
+          respondJson(res, 200, { ok: true, alreadyTerminal: !!result.alreadyTerminal });
+          return;
+        }
+        // No action verb → GET /api/cap/:id → status + log tail.
+        if (req.method !== "GET") {
+          respondJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const job = await getJob(id);
+        if (!job) {
+          respondJson(res, 404, { error: "not found" });
+          return;
+        }
+        respondJson(res, 200, job);
+        return;
+      }
+      // Collection routes (/api/cap): create + list.
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await createCapJob(
+          {
+            capability: body?.capability,
+            input: body?.input,
+            host: body?.host,
+            sessionID: body?.sessionID,
+            directory: body?.directory,
+          },
+          BUS_PUBLISH_DEPS,
+        );
+        if (!result.ok) {
+          respondJson(res, 400, { error: result.error });
+          return;
+        }
+        respondJson(res, 200, { id: result.job.id });
+        return;
+      }
+      if (req.method === "GET") {
+        const sessionID = url.searchParams.get("sessionID") || undefined;
+        const host = url.searchParams.get("host") || undefined;
+        const status = url.searchParams.get("status") || undefined;
+        const jobs = await listCapJobs({ sessionID, host, status });
+        respondJson(res, 200, { jobs });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

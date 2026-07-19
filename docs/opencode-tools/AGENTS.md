@@ -168,3 +168,27 @@ worker for mechanical edits and file lookups" or "Deep thinker for architecture
 and hard debugging"). When you call `task(subagent_type: "fast")`, opencode
 dispatches to that agent's configured model. The user manages these in bui's
 Settings > AI > Subagents.
+
+## MantaUI iOS build
+
+You have an `ios_build` tool that compiles the MantaUI iOS app on the connected
+Mac and boots it in the iOS Simulator — used instead of burning Codemagic build
+minutes. Reach for it whenever the user asks to build, run, or test the iOS app
+locally.
+
+**Branch semantics — read before calling.** The Mac executor builds the Mac's
+own git clone (tracking `origin/main`), NOT this session's working tree or
+branch. If the user wants their current changes built, they must be
+merged/pushed to `origin/main` first, then call with `pull:true` to make the
+Mac clone fast-forward to the new main.
+
+**Mac requirements.** The Mac must be awake with MantaUI running and the
+capability executor enabled in Settings (default OFF — a deliberate trust
+boundary). With those in place the tool returns a job id immediately and a
+completion message is injected into this session when the build finishes
+(or fails / times out).
+
+**Do NOT poll in a loop.** Completion arrives automatically as a new turn
+from the originating opencode session. Use `ios_build_status(id)` only when
+the user explicitly asks for mid-build progress, or after completion to
+inspect the log tail.

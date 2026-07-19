@@ -1,5 +1,5 @@
 // In-process pub/sub + the GET /events SSE endpoint.
-// Event envelope: { kind: "opencode"|"pty"|"status"|"screenshot", payload: any }
+// Event envelope: { kind: "opencode"|"pty"|"status"|"screenshot"|"capJob"|"cap.updated", payload: any }
 
 export function createBus() {
   const subs = new Set();
