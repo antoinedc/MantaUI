@@ -706,6 +706,27 @@ export async function fireNotify({ message, title, urgent, sessionID } = {}) {
 }
 
 async function sendPush(payload) {
+  // APNs is the PRIMARY (native iOS) leg and MUST NOT be gated on the Web Push
+  // (PWA) leg. Previously this function awaited webpush.sendNotification for
+  // every subscription BEFORE calling sendApnsFanout. A single stale Apple Web
+  // Push endpoint (web.push.apple.com) hangs its request, which starved/delayed
+  // the APNs fanout — so high-frequency automatic events (done/question/error)
+  // almost never reached the native device, while the occasional `notify` won
+  // the race. Fire APNs first and unconditionally; run Web Push independently
+  // so it can never block or drop the native push. Neither leg's failure
+  // affects the other.
+  const apnsLeg = sendApnsFanout(payload).catch((e) =>
+    console.warn("[push] apns fanout failed:", e?.message ?? e),
+  );
+  const webLeg = sendWebPush(payload).catch((e) =>
+    console.warn("[push] web push leg failed:", e?.message ?? e),
+  );
+  await Promise.allSettled([apnsLeg, webLeg]);
+}
+
+// Web Push (VAPID) delivery leg — kept for the frozen PWA build. Independent
+// of APNs: isolated here so a hung/stale endpoint can't block native pushes.
+async function sendWebPush(payload) {
   await ensureVapid();
   const subs = await loadSubs();
   if (subs.length === 0) return;
@@ -713,7 +734,10 @@ async function sendPush(payload) {
   await Promise.all(
     subs.map(async (s) => {
       try {
-        await webpush.sendNotification(s, body);
+        // Bound the send: a stale Apple Web Push endpoint can hang its request
+        // indefinitely. web-push accepts a per-call `timeout` (ms) — cap it so
+        // a dead PWA endpoint can't keep the caller's await pending forever.
+        await webpush.sendNotification(s, body, { timeout: 10_000 });
       } catch (e) {
         // 404/410 = subscription gone (PWA uninstalled / expired). Prune it.
         const code = e?.statusCode;
@@ -725,10 +749,6 @@ async function sendPush(payload) {
       }
     }),
   );
-  // Fan out to APNs alongside Web Push. Same routing decision has already
-  // been made by routeNotification — we just don't get to know whether APNs
-  // is configured/empty here, so an absent block short-circuits immediately.
-  await sendApnsFanout(payload);
 }
 
 // ---------------------------------------------------------------------------
