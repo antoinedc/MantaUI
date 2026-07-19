@@ -51,6 +51,7 @@ import {
 } from "./auth.mjs";
 import { createRelayAgent, shouldStartRelayAgent } from "../relay/agent/index.mjs";
 import * as push from "./push.mjs";
+import { readServerVersion, writeVersionResponse } from "./version.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -174,7 +175,23 @@ if (!authEnforced) {
 // Now that authEngine exists, wire the /rpc dispatch — the `auth:pair` channel
 // needs authEngine.pair() (GET /auth/pair is loopback-only, so the renderer can
 // only reach it through this in-process call, not as an HTTP round-trip).
-rpcHandlers = buildHandlers({ tmux, oc, pty, bus, local, authPair: () => authEngine.pair() });
+//
+// `serverVersion` is the SAME value `GET /api/version` returns — read once at
+// startup from package.json and threaded into both the REST route handler
+// below and the `server:version` RPC channel here, so the two surfaces can
+// never drift apart on a given box. The renderer goes through the RPC channel
+// (in-process, no HTTP round-trip); curl + future non-renderer clients use the
+// REST route.
+const SERVER_VERSION = await readServerVersion(PROJECT_ROOT);
+rpcHandlers = buildHandlers({
+  tmux,
+  oc,
+  pty,
+  bus,
+  local,
+  authPair: () => authEngine.pair(),
+  serverVersion: SERVER_VERSION,
+});
 
 // Relay-agent handle (BET-151 ADR-1). Populated below in the listen() callback
 // when shouldStartRelayAgent(config) returns true. Read by GET /relay/status
@@ -635,6 +652,21 @@ const server = createServer(async (req, res) => {
         enforced: authEngine.enforce,
       }),
     );
+    return;
+  }
+
+  // ---------- Server version (AUTHENTICATED) ----------
+  // GET /api/version → { version }
+  //
+  // Returns the repo's package.json version (read once at startup above, held
+  // in `SERVER_VERSION` so per-request IO never happens). The renderer hits
+  // the SAME value via the `server:version` RPC channel (in-process, no HTTP
+  // round-trip); this REST surface exists for curl / integration tests +
+  // future non-renderer clients. Display-only foundation — the BET-181
+  // gating / banner / force-update logic lives behind this once skew is
+  // visible.
+  if (req.method === "GET" && path === "/api/version") {
+    writeVersionResponse(res, { version: SERVER_VERSION });
     return;
   }
 

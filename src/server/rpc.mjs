@@ -20,16 +20,20 @@ export async function dispatch(handlers, channel, args) {
   return fn(...args);
 }
 
-// Build the full handler map. Accepts { tmux, oc, pty, bus, local, authPair } where:
-//   tmux     — src/server/tmux.mjs namespace
-//   oc       — src/server/opencode.mjs namespace
-//   pty      — src/server/pty.mjs namespace
-//   bus      — event bus created by createBus() in events.mjs
-//   local    — src/server/local.mjs namespace (git/fs/config/clipboard stubs)
-//   authPair — () => authEngine.pair(); the `auth:pair` channel wraps it.
+// Build the full handler map. Accepts { tmux, oc, pty, bus, local, authPair, serverVersion } where:
+//   tmux          — src/server/tmux.mjs namespace
+//   oc            — src/server/opencode.mjs namespace
+//   pty           — src/server/pty.mjs namespace
+//   bus           — event bus created by createBus() in events.mjs
+//   local         — src/server/local.mjs namespace (git/fs/config/clipboard stubs)
+//   authPair      — () => authEngine.pair(); the `auth:pair` channel wraps it.
+//   serverVersion — string, package.json `version` read once at startup (same
+//                   value `GET /api/version` returns). The `server:version`
+//                   channel returns it in-process so the renderer avoids an
+//                   HTTP round-trip on every Settings mount.
 // Channel key strings MUST match IPC.* values in src/shared/types.ts.
 // Arg shapes MUST match what src/preload/index.ts packs per channel.
-export function buildHandlers({ tmux, oc, pty, bus, local, authPair }) {
+export function buildHandlers({ tmux, oc, pty, bus, local, authPair, serverVersion }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
   // migration). Renderer-supplied cwd is preferred when it's a real path, but
@@ -419,6 +423,15 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair }) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
     },
+
+    // ---- server version (BET-180) ----
+    // Returns the cached package.json version (read once at startup, same
+    // value the GET /api/version REST route returns). The renderer hits this
+    // channel via window.api.getServerVersion() so it doesn't have to do an
+    // HTTP round-trip just to render "Server vX.Y.Z" under the URL field in
+    // MobileSettings. Returns the snake_case payload the renderer expects;
+    // the JSON-RPC envelope wraps it as { result: { version } }.
+    "server:version": () => ({ version: serverVersion }),
 
     // ---- pty channels (4 channels) ----
     //

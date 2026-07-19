@@ -902,6 +902,13 @@ export const httpApi: Api = {
   // -- auto-rename: throwaway-session title generation --
   opencodeGenerateTitle: (input) => rpc(IPC.opencodeGenerateTitle, input),
 
+  // -- server version (BET-180) --
+  // Returns the bui-server's package.json version. In-process via the
+  // `server:version` RPC channel (no HTTP round-trip; same value GET
+  // /api/version returns for non-renderer clients). MobileSettings renders
+  // "Server vX.Y.Z" under the URL field — display only, no gating.
+  getServerVersion: () => rpc<{ version: string }>(IPC.getServerVersion),
+
   // -- voice (Groq STT + classifier) --
   // The RPC body is JSON, so the ArrayBuffer can't ride along raw. Base64-
   // encode it here; rpc.mjs decodes back to a Buffer on the server side.

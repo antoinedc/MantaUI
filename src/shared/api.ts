@@ -306,4 +306,10 @@ export interface Api {
   // Auto-rename: generate a short title via a throwaway opencode session.
   // Returns the RAW model reply ("" on timeout/failure); caller sanitizes.
   opencodeGenerateTitle(input: { directory: string; instruction: string }): Promise<string>;
+
+  // Server version (BET-180): returns the bui-server's package.json version,
+  // served in-process via the `server:version` RPC channel (no HTTP round
+  // trip). Used by MobileSettings to render "Server vX.Y.Z" under the URL
+  // field. Display-only — gating / banner logic lands later.
+  getServerVersion(): Promise<{ version: string }>;
 }
