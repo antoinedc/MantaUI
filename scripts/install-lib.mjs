@@ -18,8 +18,16 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { STATE_DIRNAME } from "../src/shared/paths.mjs";
 import { loadAuth } from "../src/server/auth.mjs";
+
+// `qrcode-terminal` is CommonJS; we keep this module ESM. The local
+// `createRequire` shim is sync (no top-level await) and resolves the lib
+// lazily — only when `defaultQrRender` actually paints a QR (which is never
+// in the cold-install path that uses only the text-only formatPairingOutput
+// callers below).
+const _require = createRequire(import.meta.url);
 
 // ---------------------------------------------------------------------------
 // Constants (single source of truth, shared with the shell via `--print-config`)
@@ -535,8 +543,25 @@ export const readBoxIdentity = loadAuth;
  * `serverUrl` is the address the DESKTOP should point at (the box's public
  * ingress the user set up — tailscale/reverse-proxy/cloudflared). We can't know
  * it, so it's passed in (or omitted, in which case we print a hint line).
+ *
+ * BET-177 §2.4: the relay-pair link `manta://pair?box=<id>&code=<code>` is
+ * always included in the output (when a box_id + a valid 6-digit code are
+ * present) as BOTH a copy-paste line AND a terminal-rendered QR. The QR is
+ * for the user who wants to scan with the iOS Camera instead of pasting the
+ * link. The link string is the canonical box-form produced by
+ * `buildPairLink` (local helper) — single source of truth, shared with
+ * install.sh's heredoc via the test that asserts the round-trip.
+ *
+ * The QR generator is injected (`qrRender`) so tests can capture the output
+ * without pulling in `qrcode-terminal` at module-load. The default
+ * implementation lazy-imports `qrcode-terminal` (zero transitive deps), so
+ * the QR is only required when the output actually needs to render one
+ * (saves the cold-install path from a needless dep).
  */
-export function formatPairingOutput({ pairing_code, box_id, expiresAt, serverUrl } = {}) {
+export function formatPairingOutput(
+  { pairing_code, box_id, expiresAt, serverUrl } = {},
+  { qrRender = defaultQrRender, relayEnabled = true } = {},
+) {
   if (!/^[0-9]{6}$/.test(String(pairing_code ?? ""))) {
     throw new Error("formatPairingOutput: pairing_code must be 6 digits");
   }
@@ -562,9 +587,80 @@ export function formatPairingOutput({ pairing_code, box_id, expiresAt, serverUrl
     lines.push("    • cloudflared      → see docs (the operated relay replaces this later)");
     lines.push("");
   }
-  lines.push("  → Enter the pairing code in the Manta desktop app to connect.");
-  lines.push("");
+  // Render the canonical pair link + QR when we have both halves AND the
+  // relay is enabled. In MANTA_RELAY=off mode (BET-174) the link is relay-
+  // shaped and useless, so we suppress both the link AND the QR — install.sh
+  // separately gates the same text link in its trailing heredoc, so the two
+  // paths agree on disabled-mode = no pair-link content at all.
+  if (box_id && /^[0-9]{6}$/.test(pairing_code) && relayEnabled) {
+    const pairLink = buildPairLink(box_id, pairing_code);
+    lines.push("  Pair link:     " + pairLink);
+    lines.push("                 (paste into the desktop app, or scan as a QR)");
+    let qr;
+    try {
+      qr = qrRender(pairLink);
+    } catch {
+      // qrcode-terminal missing / broken (e.g. a dev's stripped node_modules) —
+      // degrade to text-only rather than crash the install. The QR is a
+      // nice-to-have, the text link is the source of truth.
+      qr = null;
+    }
+    if (qr) {
+      // Indent every QR row to match the surrounding two-space indent. The QR
+      // itself is rendered with no leading indent; we wrap each line
+      // individually so terminal width differences don't break alignment.
+      lines.push("");
+      for (const row of String(qr).split("\n")) lines.push("  " + row);
+      lines.push("");
+    }
+    lines.push("");
+  } else {
+    lines.push("  → Enter the pairing code in the Manta desktop app to connect.");
+    lines.push("");
+  }
   return lines.join("\n");
+}
+
+/**
+ * Build the canonical box-form pair link. Mirrors the renderer-side
+ * `buildPairPayload` (src/renderer/mobile/pairPayload.ts) but lives here as
+ * a tiny local helper because install-lib.mjs is plain Node — importing the
+ * TS helper would cross a transpile boundary for a one-liner. The shape
+ * MUST round-trip through `parsePairPayload` to a non-null payload, so the
+ * install heredoc + the desktop QR panel + the mobile deep-link handler all
+ * agree on the same wire string. The test in scripts/install.test.mjs
+ * round-trips this against the renderer's `parsePairPayload` via subprocess
+ * to enforce the contract.
+ *
+ * Cross-reference: keep in sync with src/renderer/mobile/pairPayload.ts
+ * `buildPairPayload` (box-form branch). If the canonical shape changes,
+ * BOTH helpers must change in lockstep — the test catches drift.
+ */
+export function buildPairLink(boxId, code) {
+  if (typeof boxId !== "string" || !/^[0-9a-f]{32}$/.test(boxId)) {
+    throw new Error("buildPairLink: boxId must be a 32-hex token");
+  }
+  if (!/^[0-9]{6}$/.test(String(code ?? ""))) {
+    throw new Error("buildPairLink: code must be 6 digits");
+  }
+  return `manta://pair?box=${encodeURIComponent(boxId)}&code=${code}`;
+}
+
+// Lazy-default QR renderer: requires `qrcode-terminal` at call time, not at
+// module-load. The install path only pays the cost when an output actually
+// needs a QR. Pure defaultRender returns the QR string the terminal prints
+// (with newlines); the wrapping loop in formatPairingOutput handles indent.
+function defaultQrRender(text) {
+  // qrcode-terminal's `generate(text, options, callback)` is sync internally;
+  // we capture the rendered QR via the callback. `small:true` matches the
+  // install's terminal width (40 cols → fits between the existing 2-space
+  // indent and a normal terminal line length).
+  const mod = _require("qrcode-terminal");
+  let captured = "";
+  mod.generate(text, { small: true }, (qr) => {
+    captured = qr;
+  });
+  return captured;
 }
 
 // Render an expiry as an ISO-ish local timestamp. Accepts an epoch-ms number

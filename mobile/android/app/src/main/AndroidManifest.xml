@@ -19,6 +19,19 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Custom URL scheme registration (BET-177 §2.1). The desktop
+                 Settings QR and `bui pair` terminal QR both emit
+                 `manta://pair?…` links; Android opens them in this activity
+                 (singleTask launchMode above so the existing instance is
+                 reused, not duplicated). Universal Links / App Links are
+                 explicitly OUT of scope — custom scheme only. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="manta" />
+            </intent-filter>
         </activity>
 
         <provider

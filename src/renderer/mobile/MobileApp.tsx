@@ -7,6 +7,7 @@ import { PairingScreen } from "./PairingScreen";
 import { SetupScreen } from "./SetupScreen";
 import { reportFocus } from "./push";
 import { AuthRequiredError, ServerNotConfiguredError } from "../api/httpApi";
+import { getCapacitorApp, handlePairUrl } from "./deepLink";
 
 type Nav =
   | { screen: "list" }
@@ -285,6 +286,70 @@ export function MobileApp() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects]);
+
+  // Capacitor `manta://pair?…` deep-link handler (BET-177 §2.2). On the iOS
+  // shell, the user scans a QR with the Camera → iOS opens the app via the
+  // `manta://` scheme (Info.plist CFBundleURLTypes). The Capacitor App
+  // plugin delivers the URL two ways:
+  //   • cold start → `getLaunchUrl()` resolves once with the launch URL
+  //   • warm start → `appUrlOpen` event fires with the new URL
+  // On the desktop / PWA bundle the Capacitor bridge is absent (feature
+  // detect via getCapacitorApp → null) and this effect is a clean no-op.
+  // On "paired" we clear the first-run setup gate AND any stale 401 re-pair
+  // gate (same triggers the SetupScreen / PairingScreen onConnected/onPaired
+  // handlers fire) and re-run doRefresh so the session list loads with the
+  // newly-resolved serverBase() + Bearer credential.
+  useEffect(() => {
+    const cap = getCapacitorApp(window);
+    if (!cap) return;
+    let cancelled = false;
+    const handle = (raw: string) => {
+      void handlePairUrl(raw, {
+        authClaim: window.api.authClaim,
+        persistServer: (serverUrl) => {
+          try {
+            localStorage.setItem("manta_server", serverUrl);
+          } catch {
+            /* localStorage unavailable — nothing to do */
+          }
+        },
+      }).then((outcome) => {
+        if (cancelled || outcome !== "paired") return;
+        setSetupRequired(false);
+        setAuthRequired(false);
+        doRefresh();
+      });
+    };
+    // Cold start: the URL the app was launched with (may be null on warm
+    // resumes). The promise resolves once the bridge has had a chance to
+    // observe the launch — we don't care if the URL is undefined (warm).
+    void cap
+      .getLaunchUrl()
+      .then((res) => {
+        if (cancelled) return;
+        const url = res?.url;
+        if (typeof url === "string" && url !== "") handle(url);
+      })
+      .catch(() => {
+        /* bridge refused — nothing to do */
+      });
+    // Warm start: subsequent URLs (the user scans a fresh QR while the app
+    // is already open). The returned handle exposes remove() which is the
+    // Capacitor convention; we call it on unmount.
+    const listenerPromise = cap.addListener("appUrlOpen", (event) => {
+      if (typeof event?.url === "string" && event.url !== "") handle(event.url);
+    });
+    return () => {
+      cancelled = true;
+      // Capacitor's addListener handle is a Promise<{remove}> in v6+;
+      // older versions return the handle directly. Normalize both shapes.
+      void Promise.resolve(listenerPromise).then((h) => {
+        const remove = (h as { remove?: () => Promise<void> } | null | undefined)?.remove;
+        if (typeof remove === "function") void remove();
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Android hardware back / browser back → pop to list. Both session and
   // settings screens collapse back to the list on back gesture.

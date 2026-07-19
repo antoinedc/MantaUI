@@ -50,6 +50,21 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<!-- Custom URL scheme registration (BET-177 §2.1). The desktop Settings QR
+	     and `bui pair` terminal QR both emit `manta://pair?…` links; iOS opens
+	     them in this app via the custom-scheme handler. Universal Links /
+	     AASA are explicitly OUT of scope — custom scheme only. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.antoinedc.bui</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>manta</string>
+			</array>
+		</dict>
+	</array>
 	<!-- Voice (Groq STT). iOS 10+ requires this string before
 	     getUserMedia({audio:true}) will resolve in WKWebView; without it
 	     the promise rejects with NotAllowedError before showing any

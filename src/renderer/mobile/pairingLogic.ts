@@ -24,6 +24,7 @@ export {
   normalizeCode,
   isSubmittableCode,
   classifyClaimResult,
+  classifyRelayClaimResult,
   networkFailure,
 } from "../../shared/claim.mjs";
 import { isSubmittableCode, normalizeCode } from "../../shared/claim.mjs";
