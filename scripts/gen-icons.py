@@ -17,6 +17,10 @@ def square(mark, size, pad_frac=0.14, bg=None):
     return canvas
 
 NAVY = (11,16,32,255)  # #0B1020
+# App-icon background (iOS + desktop tiles). Switched from NAVY 2026-07-19 —
+# the PWA's white/transparent look was preferred. Android mipmaps + splashes
+# intentionally stay navy until asked otherwise.
+ICON_BG = (255,255,255,255)
 
 # ---- transparent square master ----
 os.makedirs("docs/brand", exist_ok=True)
@@ -32,14 +36,14 @@ square(im, 512, pad_frac=0.18).save("src/renderer/public/icons/icon-512.png")
 square(im, 64).save("docs/brand/manta-favicon-64.png")
 square(im, 32).save("docs/brand/manta-favicon-32.png")
 
-# ---- iOS AppIcon 1024 (NAVY bg — iOS forbids alpha on the app icon) ----
+# ---- iOS AppIcon 1024 (solid bg — iOS forbids alpha on the app icon) ----
 p="mobile/ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png"
 if os.path.isdir(os.path.dirname(p)):
-    square(im, 1024, bg=NAVY).save(p)
+    square(im, 1024, bg=ICON_BG).save(p)
 
-# ---- Capacitor master (1024, navy so generated icons have no alpha) ----
+# ---- Capacitor master (1024, solid so generated icons have no alpha) ----
 if os.path.isdir("mobile/assets"):
-    square(im, 1024, bg=NAVY).save("mobile/assets/icon.png")
+    square(im, 1024, bg=ICON_BG).save("mobile/assets/icon.png")
 
 # ---- Android mipmaps ----
 dens = {"ldpi":36,"mdpi":48,"hdpi":72,"xhdpi":96,"xxhdpi":144,"xxxhdpi":192}
@@ -80,12 +84,12 @@ print("splashes regenerated")
 # ---- Desktop assets (assets/icon.icns, assets/icons/, renderer header mark) ----
 from PIL import ImageDraw
 def mac_tile(size):
-    """Big-Sur style: rounded navy tile inset 5% on transparent, mark ~62%."""
+    """Big-Sur style: rounded tile (ICON_BG) inset 5% on transparent, mark ~62%."""
     c = Image.new("RGBA", (size, size), (0,0,0,0))
     inset = round(size*0.05); tile = size - 2*inset
     mask = Image.new("L", (tile, tile), 0)
     ImageDraw.Draw(mask).rounded_rectangle([0,0,tile-1,tile-1], radius=round(tile*0.2237), fill=255)
-    c.paste(Image.new("RGBA",(tile,tile),NAVY), (inset,inset), mask)
+    c.paste(Image.new("RGBA",(tile,tile),ICON_BG), (inset,inset), mask)
     inner = round(tile*0.62); w,h = im.size; s = min(inner/w, inner/h)
     nw,nh = round(w*s), round(h*s)
     c.alpha_composite(im.resize((nw,nh), Image.LANCZOS), ((size-nw)//2,(size-nh)//2))
