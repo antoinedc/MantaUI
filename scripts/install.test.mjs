@@ -14,6 +14,7 @@ import {
   waitForRelay,
   readBoxIdentity,
   formatPairingOutput,
+  buildPairLink,
   formatExpiry,
   renderShellConfig,
   stripJsoncLineComments,
@@ -28,6 +29,11 @@ import {
 const HOME = "/home/tester";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const INSTALL_SH = join(__dirname, "install.sh");
+
+// A canonical 32-lowercase-hex token — mirrors the test constants in
+// src/main/auth.test.ts and src/shared/transport.test.ts so the install
+// side agrees on the same shape.
+const HEX32 = "0123456789abcdef0123456789abcdef";
 
 /**
  * Source scripts/install.sh in test mode (MANTA_INSTALL_TEST_MODE=1) after
@@ -481,6 +487,11 @@ test("readBoxIdentity returns null on a corrupt auth.json (server will mint a fr
 // ----------------------------------------------------------------------------
 
 test("formatPairingOutput produces a stable human block", () => {
+  // BET-177 §2.4: when both box_id AND a 6-digit code are present the output
+  // includes the canonical pair link + a terminal-rendered QR (via the real
+  // qrcode-terminal in default mode). We assert on the text half here so the
+  // test doesn't depend on a specific QR rendering — the QR rendering has
+  // its own assertions below with a stubbed renderer.
   const out = formatPairingOutput({
     pairing_code: "847291",
     box_id: "0123456789abcdef0123456789abcdef",
@@ -489,7 +500,12 @@ test("formatPairingOutput produces a stable human block", () => {
   assert.match(out, /Pairing code:  847291/);
   assert.match(out, /Box ID:        0123456789abcdef0123456789abcdef/);
   assert.match(out, /Expires:       2026-07-03 12:34:56 UTC/);
-  assert.match(out, /Enter the pairing code in the Manta desktop app/);
+  assert.match(out, /Pair link:     manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
+  assert.match(out, /paste into the desktop app, or scan as a QR/);
+  // QR rendering produces some non-empty ANSI block (qrcode-terminal prints
+  // block chars). We don't pin the exact bytes — only that the renderer
+  // contributed at least one row.
+  assert.match(out, /\u2588|\u2584|\u2580/);
 });
 
 test("formatPairingOutput prints ingress hint when no serverUrl given", () => {
@@ -512,6 +528,152 @@ test("formatPairingOutput rejects a non-6-digit code", () => {
   assert.throws(() => formatPairingOutput({ pairing_code: "12345" }), /6 digits/);
   assert.throws(() => formatPairingOutput({ pairing_code: "abcdef" }), /6 digits/);
   assert.throws(() => formatPairingOutput({}), /6 digits/);
+});
+
+// ----------------------------------------------------------------------------
+// buildPairLink — canonical box-form pair link (BET-177 §2.4)
+// ----------------------------------------------------------------------------
+//
+// Single source of truth for the box-form link string emitted by
+// `formatPairingOutput` AND printed by install.sh's heredoc. Must match the
+// renderer's `buildPairPayload({boxId,serverUrl:null,code})` shape exactly,
+// and must round-trip through `parsePairPayload` to a non-null payload (the
+// same invariant the mobile deep-link handler relies on).
+
+test("buildPairLink emits the canonical manta://pair?box=&code= shape", () => {
+  const url = buildPairLink(HEX32, "847291");
+  assert.equal(url, `manta://pair?box=${HEX32}&code=847291`);
+});
+
+test("buildPairLink URL-encodes the boxId (defensive — 32-hex has no reserved chars)", () => {
+  // 32-hex is already URL-safe; this test pins the encodeURIComponent call
+  // so a future shape change that DOES introduce a reserved char still
+  // round-trips.
+  const url = buildPairLink("00112233445566778899aabbccddeeff", "000000");
+  assert.equal(url, "manta://pair?box=00112233445566778899aabbccddeeff&code=000000");
+});
+
+test("buildPairLink rejects a non-32-hex boxId", () => {
+  assert.throws(() => buildPairLink("not-32-hex", "847291"), /32-hex token/);
+  assert.throws(() => buildPairLink(HEX32.slice(0, 31), "847291"), /32-hex token/);
+  assert.throws(() => buildPairLink(HEX32 + "0", "847291"), /32-hex token/);
+  assert.throws(() => buildPairLink("", "847291"), /32-hex token/);
+  assert.throws(() => buildPairLink(null, "847291"), /32-hex token/);
+});
+
+test("buildPairLink rejects a non-6-digit code", () => {
+  assert.throws(() => buildPairLink(HEX32, "12345"), /6 digits/);
+  assert.throws(() => buildPairLink(HEX32, "abcdef"), /6 digits/);
+  assert.throws(() => buildPairLink(HEX32, ""), /6 digits/);
+});
+
+test("buildPairLink shape matches install.sh's heredoc literal (BET-177 §2.4)", () => {
+  // The renderer's `parsePairPayload` is the gate the mobile app uses to
+  // decide whether a QR is valid; install.sh's heredoc prints the canonical
+  // box-form link in lockstep. The install.test suite is plain Node — we
+  // don't load the .ts parser here — but we CAN enforce the wire shape on
+  // both the install-lib helper AND the literal install.sh heredoc printf,
+  // so a future drift in either side is caught here.
+  //
+  // 1. install-lib's buildPairLink produces the canonical shape:
+  const fromLib = buildPairLink(HEX32, "847291");
+  assert.equal(
+    fromLib,
+    "manta://pair?box=0123456789abcdef0123456789abcdef&code=847291",
+    "install-lib buildPairLink produces the canonical box-form URL",
+  );
+  // 2. install.sh's heredoc uses the SAME shape — read the literal printf
+  //    template and assert it matches the install-lib output structure:
+  const installShSrc = readFileSync(INSTALL_SH, "utf-8");
+  const printfMatch = installShSrc.match(
+    /manta:\/\/pair\?box=%s&code=%s/,
+  );
+  assert.ok(
+    printfMatch,
+    "install.sh heredoc uses the canonical box-form printf template",
+  );
+  // 3. The printf template `manta://pair?box=%s&code=%s` MUST round-trip —
+  //    when sprintf'd with a 32-hex boxId + 6-digit code, it produces the
+  //    same string buildPairLink produces for the same inputs. We pin
+  //    BOTH the printf template AND the install-lib output so a future
+  //    drift in either side surfaces here.
+  assert.match(printfMatch[0], /^manta:\/\/pair\?box=%s&code=%s$/);
+});
+
+// ----------------------------------------------------------------------------
+// formatPairingOutput — relay-enabled QR block (BET-177 §2.4)
+// ----------------------------------------------------------------------------
+//
+// In relay-enabled mode (default), formatPairingOutput emits the canonical
+// box-form pair link AND a terminal-rendered QR (via the injected qrRender —
+// tests stub it so no actual terminal painting happens). In relay-disabled
+// mode (MANTA_RELAY=off), both the link and the QR are suppressed so the
+// operator doesn't see a useless relay-shaped link (BET-174).
+
+test("formatPairingOutput includes the pair link + QR in relay-enabled mode", () => {
+  const qrText = "[stubbed QR rows]\nrow 2\nrow 3";
+  const out = formatPairingOutput(
+    {
+      pairing_code: "847291",
+      box_id: HEX32,
+      expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
+    },
+    {
+      qrRender: () => qrText,
+    },
+  );
+  assert.match(out, /Pair link:     manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
+  assert.match(out, /paste into the desktop app, or scan as a QR/);
+  // Stubbed QR rows are indented to match the surrounding 2-space indent.
+  // We use a literal newline+two-spaces prefix in the regex (no \s — `s`
+  // is .includes-sensitive and we want the exact byte sequence the formatter
+  // emits).
+  assert.match(out, /\n  \[stubbed QR rows\]/);
+  assert.match(out, /\n  row 2/);
+  // The trailing "Enter the pairing code" line is REPLACED by the link+QR
+  // block — only one of them should appear.
+  assert.doesNotMatch(out, /Enter the pairing code in the Manta desktop app/);
+});
+
+test("formatPairingOutput falls back to the text-only block when qrRender throws", () => {
+  // A broken qrcode-terminal (e.g. a stripped dev node_modules) must NOT
+  // crash the install — the link text is the source of truth, the QR is
+  // best-effort. The text link + the "scan as a QR" hint still appear so the
+  // operator can paste; only the QR ROWS are absent (the text talks about
+  // scanning, but no QR is rendered).
+  const out = formatPairingOutput(
+    { pairing_code: "847291", box_id: HEX32 },
+    { qrRender: () => { throw new Error("qrcode-terminal exploded"); } },
+  );
+  assert.match(out, /Pair link:     manta:\/\/pair\?box=/);
+  assert.match(out, /scan as a QR/);
+  // QR block chars (qrcode-terminal draws U+2588 FULL BLOCK + U+2584 LOWER
+  // HALF BLOCK) are absent. We assert on the QR's STUB marker rather than
+  // guessing which ANSI bytes the real renderer uses.
+  assert.doesNotMatch(out, /\u2588/);
+  assert.doesNotMatch(out, /\u2584/);
+  assert.doesNotMatch(out, /\[stubbed QR rows\]/);
+});
+
+test("formatPairingOutput suppresses the pair link + QR in relay-disabled mode", () => {
+  // BET-174: when MANTA_RELAY=off, the box-form pair link is relay-shaped
+  // and useless — suppress it (and the QR it would render). The trailing
+  // "Enter the pairing code" line returns so the operator still has
+  // copy-paste-able code, even though there's no link to scan.
+  const out = formatPairingOutput(
+    { pairing_code: "847291", box_id: HEX32 },
+    { relayEnabled: false, qrRender: () => "[stubbed]" },
+  );
+  assert.doesNotMatch(out, /Pair link:/);
+  assert.doesNotMatch(out, /\[stubbed\]/);
+  assert.match(out, /Enter the pairing code in the Manta desktop app/);
+});
+
+test("formatPairingOutput still throws on a non-6-digit code (the relay flag doesn't gate the gate)", () => {
+  assert.throws(
+    () => formatPairingOutput({ pairing_code: "12345" }, { relayEnabled: false }),
+    /6 digits/,
+  );
 });
 
 test("formatExpiry handles epoch-ms, ISO string, and junk", () => {

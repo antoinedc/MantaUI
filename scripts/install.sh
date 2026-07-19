@@ -508,7 +508,12 @@ main() {
   # ready-to-paste `manta://pair?box=…&code=…` link — BET-156 §1. manta-pair.mjs
   # prints a stable "  Pairing code:  NNNNNN" line via formatPairingOutput, which
   # we sed-extract (no second JSON round-trip; the format is the contract).
-  PAIR_BLOCK="$("$NODE" "$MANTA_HOME/scripts/manta-pair.mjs" 2>/dev/null || true)"
+  #
+  # BET-177 §2.4 + BET-174: forward MANTA_RELAY=off into the subprocess so
+  # manta-pair.mjs's formatPairingOutput suppresses its pair-link + terminal-
+  # QR block in disabled mode — same gating the install heredoc below uses
+  # for its own printf. The two stay in lockstep.
+  PAIR_BLOCK="$(MANTA_RELAY="${MANTA_RELAY:-}" "$NODE" "$MANTA_HOME/scripts/manta-pair.mjs" 2>/dev/null || true)"
   # Echo the formatted block so the user still sees it on stdout (the heredoc
   # below ONLY surfaces the box id + ready-to-paste link, not the full block).
   printf '%s\n' "$PAIR_BLOCK"

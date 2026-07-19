@@ -1,14 +1,25 @@
 // PairingQR — renders a QR code image for mobile device pairing.
 //
-// The QR encodes `manta://pair?id=<boxId>&token=<pairingCode>`, which the mobile
-// app scans to auto-connect. We use the `qrcode` npm package to generate a
-// data URL, then render it as an <img> tag. The data URL is memoized so we
-// don't regenerate on every render (QR generation is CPU-bound).
+// The QR encodes the CANONICAL box-form `manta://pair?box=<boxId>&code=<6-digit>`
+// payload produced by the SHARED `buildPairPayload` helper
+// (src/renderer/mobile/pairPayload.ts). BET-177 §2.4: the previous
+// hand-rolled `manta://pair?id=<boxId>&token=<code>` form is REJECTED by
+// `parsePairPayload` — `id` is documented as a serverUrl-only alias in
+// pairPayload.ts, and boxId fails URL coercion → null payload → the mobile
+// app receives the QR, parses it, and the QR is silently ignored. The
+// canonical form uses `box` (which the parser routes to boxId) + `code` and
+// is the SAME shape `bui pair` prints + the install heredoc + the deep-link
+// handler in MobileApp.tsx parses.
+//
+// We use the `qrcode` npm package to generate a data URL, then render it as
+// an <img> tag. The data URL is memoized so we don't regenerate on every
+// render (QR generation is CPU-bound).
 //
 // This is a desktop-only feature (BET-80). The mobile app consumes the same
 // URL scheme but generates the QR on the desktop side.
 
 import { useEffect, useMemo, useState } from "react";
+import { buildPairPayload } from "./mobile/pairPayload";
 
 // Lazy-load qrcode so the renderer doesn't pay the bundle cost if this
 // component is never rendered (Settings is a modal, only open on demand).
@@ -28,10 +39,9 @@ export function PairingQR({
   const [error, setError] = useState<string | null>(null);
 
   const url = useMemo(() => {
-    // manta://pair?id=<boxId>&token=<pairingCode>
-    // The mobile app's deep link parser (src/renderer/mobile/pairPayload.ts)
-    // accepts both `server`/`code` and the M6 alias `id`/`token`.
-    return `manta://pair?id=${encodeURIComponent(boxId)}&token=${encodeURIComponent(pairingCode)}`;
+    // Canonical box-form payload — shared with the install heredoc, `bui pair`
+    // output, and the mobile deep-link parser. Single source: pairPayload.ts.
+    return buildPairPayload({ serverUrl: null, boxId, code: pairingCode });
   }, [boxId, pairingCode]);
 
   useEffect(() => {

@@ -62,11 +62,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [groqKey, setGroqKey] = useState(groqApiKey);
   const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
   const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
-  // Mobile pairing — one-time code minted on demand. The QR encodes
-  // `manta://pair?id=<boxId>&token=<pairingCode>`; the mobile app scans this to
-  // auto-connect. `pairing` is null until the user clicks "Generate code".
-  // `pairingExpiry` is a Date parsed from the server's expiresAt ISO string,
-  // used to compute the remaining seconds for the countdown UI.
+  // Mobile pairing — one-time code minted on demand. The QR encodes the
+  // CANONICAL box-form `manta://pair?box=<boxId>&code=<6-digit>` payload
+  // (BET-177 §2.4 — the old `?id=&token=` form was a parsePairPayload
+  // rejector; the mobile deep-link handler now matches the same canonical
+  // form produced by buildPairPayload). `pairing` is null until the user
+  // clicks "Generate code". `pairingExpiry` is a Date parsed from the
+  // server's expiresAt ISO string, used to compute the remaining seconds
+  // for the countdown UI.
   const [pairing, setPairing] = useState<AuthPairResult | null>(null);
   const [pairingExpiry, setPairingExpiry] = useState<Date | null>(null);
   const [pairingMinting, setPairingMinting] = useState(false);
@@ -230,9 +233,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {activeTab === "connection" && (
             <div className="max-w-2xl space-y-6">
               {/* Mobile pairing (BET-80): generate a QR code the mobile app can scan
-                  to auto-connect. The QR encodes `manta://pair?id=<boxId>&token=<code>`.
-                  The code is one-time, valid for ~5 minutes. A new code supersedes
-                  any prior code. */}
+                  to auto-connect. The QR encodes the canonical box-form
+                  `manta://pair?box=<boxId>&code=<code>` (BET-177 §2.4 — the old
+                  `?id=&token=` form was a parsePairPayload rejector). The code
+                  is one-time, valid for ~5 minutes. A new code supersedes any
+                  prior code. */}
               <div>
                 <h3 className="text-base font-semibold mb-4">Pair phone</h3>
                 <div className="text-sm text-text-faint mb-4">

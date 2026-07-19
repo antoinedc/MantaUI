@@ -18,6 +18,45 @@ export function isValidBoxToken(token) {
   return typeof token === "string" && /^[0-9a-f]{32}$/.test(token);
 }
 
+// ---------------------------------------------------------------------------
+// Relay base URL (BET-177 §2.3 — single source)
+// ---------------------------------------------------------------------------
+//
+// The single relay base URL every relay-mode client pairs through. Hardcoded
+// per BET-156 (ADR-3) so the user never needs to know or type the relay
+// hostname — they paste the pair link (manta://pair?box=…&code=…) which only
+// carries the box id, or scan a QR whose payload is built from this constant.
+//
+// `MANTA_RELAY_BASE` is an env override used by tests (and any future staging
+// ring) — not a user-facing knob. The process.env check is guarded so the
+// renderer's Vite bundle (no Node `process`) never throws on import; tests
+// that want the override inject it via process.env before importing.
+//
+// Previously lived in src/main/auth.ts; both desktop-main and renderer
+// (deep-link handler) now consume this so the two stay in lockstep.
+export const RELAY_BASE = "https://relay.mantaui.com";
+
+export function relayBase() {
+  if (typeof process !== "undefined" && process && process.env) {
+    const v = process.env.MANTA_RELAY_BASE;
+    if (typeof v === "string" && v !== "") return v;
+  }
+  return RELAY_BASE;
+}
+
+// Build the per-box relay proxy URL a desktop or mobile client points its
+// httpApi at AFTER a successful relay claim. Pure: takes the base URL +
+// boxId and returns the canonical shape every relay-mode caller persists to
+// its own server-URL slot (desktop config.serverUrl, mobile localStorage
+// "manta_server"). `base` is `relayBase()` in production; tests can pass a
+// different host.
+export function relayBoxUrl(boxId, base = relayBase()) {
+  if (!isValidBoxToken(boxId)) {
+    throw new Error("relayBoxUrl: boxId must be a 32-hex token");
+  }
+  return `${String(base).replace(/\/+$/, "")}/box/${boxId}`;
+}
+
 // Decide which transport a config should use. Post-BET-82 there is only one
 // transport path (httpApi) — this function exists to let App.tsx decide whether
 // to show the onboarding shell or the normal app shell:

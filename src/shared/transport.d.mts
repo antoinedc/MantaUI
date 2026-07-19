@@ -18,6 +18,19 @@ export type ClaimResult =
 // True iff `token` is a 32-lowercase-hex string (128-bit box_id / box_token).
 export function isValidBoxToken(token: unknown): token is string;
 
+// The single relay base URL every relay-mode client pairs through (BET-156
+// ADR-3, centralized in shared/transport per BET-177 §2.3).
+export const RELAY_BASE: "https://relay.mantaui.com";
+
+// Resolve the active relay base URL. Honors `MANTA_RELAY_BASE` env override
+// when present (test-only); falls back to `RELAY_BASE` in production.
+export function relayBase(): string;
+
+// Build the canonical `${base}/box/<boxId>` proxy URL a relay-mode client
+// persists as its server URL after a successful /pair claim. Throws on a
+// malformed boxId — the caller must have already shape-gated it.
+export function relayBoxUrl(boxId: string, base?: string): string;
+
 // Resolve which transport a config should use (see transport.mjs for the rule).
 export function resolveTransportMode(
   config: Partial<AppConfig> | null | undefined,

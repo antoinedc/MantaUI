@@ -33,16 +33,15 @@ import {
 import type { ClaimOutcome } from "../shared/claim.mjs";
 import type { AppConfig, AuthClaimInput } from "../shared/types.js";
 import { isValidToken } from "../server/webhooks.mjs";
+import { RELAY_BASE, relayBase as _sharedRelayBase, relayBoxUrl } from "../shared/transport.mjs";
 
-// The single relay base URL every relay-mode desktop pairs through. Hardcoded
-// per BET-156 (ADR-3) so a desktop user doesn't need to know or type the
-// relay hostname — they paste the pair link (manta://pair?box=…&code=…) which
-// only carries the box id. `MANTA_RELAY_BASE` is an env override used by tests
-// (and any future staging ring) — not a user-facing knob.
-export const RELAY_BASE = "https://relay.mantaui.com";
-
+// `RELAY_BASE` was moved to src/shared/transport.mjs in BET-177 §2.3 (single
+// source for the relay host). Re-exported here so existing main-process
+// callers (and the auth.test.ts that pins the constant) keep working
+// unchanged.
+export { RELAY_BASE };
 function relayBase() {
-  return process.env.MANTA_RELAY_BASE || RELAY_BASE;
+  return _sharedRelayBase();
 }
 
 /**
@@ -185,9 +184,11 @@ async function claimPairingRelay(
   if (outcome.ok) {
     // Persist the relay-shaped triple. serverUrl is the relay's per-box proxy
     // prefix so every downstream /rpc + /events + upload call naturally lands
-    // on `/box/<box_id>/*` — ADR-3, zero new data-path code.
+    // on `/box/<box_id>/*` — ADR-3, zero new data-path code. URL shape is
+    // built by the shared relayBoxUrl helper so the desktop and the mobile
+    // deep-link handler write the EXACT same string (BET-177 §2.3).
     persist({
-      serverUrl: `${base.replace(/\/+$/, "")}/box/${boxId}`,
+      serverUrl: relayBoxUrl(boxId, base),
       boxId,
       boxToken: outcome.boxToken,
     });
