@@ -1,0 +1,106 @@
+# Website deploy — publish the marketing site + install assets to the prod box
+# on a `web-v*` git tag.
+#
+# WHY THIS EXISTS
+# ---------------
+# The prod box (mantaui.com, Caddy web root /var/www/mantaui) serves STATIC files
+# that must be copied in — a `git pull` on the box's /opt/manta clone does NOT
+# update them (Caddy serves the webroot, not the clone). Before this workflow the
+# only way to update the site was running scripts/release/publish.sh by hand from
+# a laptop, which is why merged changes (e.g. BET-174's llms-install.md) silently
+# never went live. This makes deploy a one-step action: push a `web-v*` tag.
+#
+# WHAT IT DEPLOYS (all static web-root assets)
+#   website/*.html         → /var/www/mantaui/            (marketing site)
+#   website/*.png          → /var/www/mantaui/            (logo/assets)
+#   scripts/install.sh     → /var/www/mantaui/install.sh  (curl | bash installer)
+#   llms-install.md        → /var/www/mantaui/llms-install.md (AI install doc)
+# Then it VERIFIES each URL is 200 and byte-matches the repo — fails red if not,
+# so a stale/failed deploy can never masquerade as done.
+#
+# RUNNER + AUTH
+#   Runs on the self-hosted bui-dev-runner (this dev box), which reaches the prod
+#   box over SSH with the deploy key at ~/.manta-deploy/prod_key (public half is
+#   in the prod box's authorized_keys). No GitHub secret needed.
+#
+# TRIGGER: push a tag matching web-v* (e.g. web-v1, web-v2026-07-19). Also
+#   runnable manually via workflow_dispatch (deploys current main).
+
+name: Website deploy
+
+on:
+  push:
+    tags:
+      - "web-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: website-deploy
+  cancel-in-progress: false
+
+env:
+  PROD_HOST: root@91.107.196.2
+  WEBROOT: /var/www/mantaui
+  SSH_KEY: /home/dev/.manta-deploy/prod_key
+  SITE: https://mantaui.com
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Deploy static web assets to prod
+        run: |
+          set -euo pipefail
+          SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+          SCP="scp -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+          echo "▸ Ensuring webroot exists"
+          $SSH "$PROD_HOST" "mkdir -p $WEBROOT"
+
+          echo "▸ Copying marketing site (website/*.html, *.png)"
+          $SCP website/*.html "$PROD_HOST:$WEBROOT/"
+          # PNGs are optional — only copy if present.
+          if ls website/*.png >/dev/null 2>&1; then
+            $SCP website/*.png "$PROD_HOST:$WEBROOT/"
+          fi
+
+          echo "▸ Copying installer + AI install doc"
+          $SCP scripts/install.sh "$PROD_HOST:$WEBROOT/install.sh"
+          $SCP llms-install.md "$PROD_HOST:$WEBROOT/llms-install.md"
+
+          echo "▸ Keeping /opt/manta clone current (source-of-truth parity)"
+          $SSH "$PROD_HOST" "git -C /opt/manta fetch origin main -q && git -C /opt/manta reset --hard origin/main -q" || \
+            echo "⚠ /opt/manta pull skipped (non-fatal — webroot already updated)"
+
+      - name: Verify each asset is live + matches the repo
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            local url="$1" repo="$2"
+            local code live want
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$SITE/$url" || echo 000)
+            live=$(curl -s "$SITE/$url" | sha256sum | cut -d' ' -f1)
+            want=$(sha256sum "$repo" | cut -d' ' -f1)
+            if [ "$code" = "200" ] && [ "$live" = "$want" ]; then
+              echo "✓ $url (HTTP $code, matches repo)"
+            else
+              echo "✗ $url (HTTP $code, live=$live want=$want)"
+              fail=1
+            fi
+          }
+          check "" website/index.html
+          check "privacy.html" website/privacy.html
+          check "terms.html" website/terms.html
+          check "install.sh" scripts/install.sh
+          check "llms-install.md" llms-install.md
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more web assets are not live or are stale."
+            exit 1
+          fi
+          echo "All web assets deployed + verified."
