@@ -123,3 +123,109 @@ workflows:
         submit_to_testflight: true
         # Internal testers get it automatically once processing completes.
         # No App Store review needed for internal TestFlight.
+
+  # ---------------------------------------------------------------------------
+  # macOS desktop (Electron) → signed + notarized DMG → mantaui.com
+  # ---------------------------------------------------------------------------
+  # Distributes the desktop app OUTSIDE the App Store (beta). electron-builder
+  # signs with a "Developer ID Application" cert and notarizes via the ASC API
+  # key, then the DMG + latest-mac.yml auto-update feed are published to the
+  # prod box (mantaui.com/downloads + /updates).
+  #
+  # ONE-TIME SETUP IN THE CODEMAGIC WEB UI (see docs/mac-beta-distribution.md):
+  #   1. Create a "Developer ID Application" cert on a Mac (Xcode → Settings →
+  #      Accounts → Manage Certificates → + → Developer ID Application), export
+  #      it as a .p12 with a password.
+  #   2. Codemagic UI → this app → Environment variables, group "mac_signing":
+  #        - CSC_LINK               = the .p12, base64-encoded, marked "secure"
+  #                                   (base64 -i cert.p12 | pbcopy)
+  #        - CSC_KEY_PASSWORD       = the .p12 password, "secure"
+  #        - APPLE_ID               = your Apple ID email, "secure"
+  #        - APPLE_APP_SPECIFIC_PASSWORD = app-specific pw (appleid.apple.com), "secure"
+  #        - APPLE_TEAM_ID          = FSQ3HS4Z24
+  #   3. For publishing to the prod box, group "prod_deploy":
+  #        - PROD_SSH_KEY           = a base64 private key with access to
+  #                                   root@91.107.196.2, "secure"
+  #      (Or skip publishing and download the DMG from Codemagic artifacts.)
+  #
+  # TRIGGER: git tag matching mac-v* (kept separate from ios-v* so an iOS tag
+  #   doesn't fire a mac build and vice-versa). Also runnable from the UI.
+  mac-desktop:
+    name: MantaUI macOS → DMG (Developer ID, notarized)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: APS Key
+    environment:
+      groups:
+        - mac_signing            # CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
+        - prod_deploy            # PROD_SSH_KEY (optional — remove if not publishing)
+      node: 22
+      xcode: latest
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - pattern: "mac-v*"
+          include: true
+    scripts:
+      - name: Install deps
+        script: |
+          npm ci
+      - name: Decode Developer ID cert into the keychain
+        script: |
+          # electron-builder reads CSC_LINK as a FILE PATH or a base64 string.
+          # We stored the .p12 base64 in CSC_LINK; write it to a temp file and
+          # point CSC_LINK at it so electron-builder + codesign can use it.
+          set -e
+          KEYCHAIN_CERT="$CM_BUILD_DIR/dist_cert.p12"
+          echo "$CSC_LINK" | base64 --decode > "$KEYCHAIN_CERT"
+          # Re-export CSC_LINK as the file path for the build step.
+          echo "CSC_LINK=$KEYCHAIN_CERT" >> "$CM_ENV"
+      - name: Build + sign + notarize DMG
+        script: |
+          # electron-vite build → electron-builder --mac. electron-builder auto:
+          #   - signs with the Developer ID cert from CSC_LINK/CSC_KEY_PASSWORD
+          #   - notarizes via APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID
+          #     (mac.notarize.teamId is set in electron-builder.yml)
+          #   - staples the ticket into the .dmg
+          # --publish never: emit latest-mac.yml but don't use electron-builder's
+          # own uploader (we scp to the prod box in the next step).
+          npm run build
+          npx electron-builder --mac --publish never
+      - name: Verify notarization
+        script: |
+          set -e
+          for dmg in dist/desktop/*.dmg; do
+            echo "▸ $dmg"
+            spctl -a -vvv -t install "$dmg" 2>&1 | grep -i "notarized\|accepted" || true
+            xcrun stapler validate "$dmg" || echo "⚠ stapler validate failed for $dmg"
+          done
+      - name: Publish to mantaui.com (optional)
+        script: |
+          # Skips cleanly if no deploy key is configured, so the workflow still
+          # produces downloadable Codemagic artifacts without prod access.
+          if [ -z "${PROD_SSH_KEY:-}" ]; then
+            echo "No PROD_SSH_KEY — skipping publish. DMG is in Codemagic artifacts."
+            exit 0
+          fi
+          set -e
+          mkdir -p ~/.ssh
+          echo "$PROD_SSH_KEY" | base64 --decode > ~/.ssh/prod_key
+          chmod 600 ~/.ssh/prod_key
+          SSH="ssh -i ~/.ssh/prod_key -o StrictHostKeyChecking=accept-new"
+          HOST="root@91.107.196.2"
+          $SSH "$HOST" 'mkdir -p /var/www/mantaui/updates /var/www/mantaui/downloads'
+          # Upload feed + binaries to the update channel.
+          scp -i ~/.ssh/prod_key dist/desktop/latest-mac.yml "$HOST:/var/www/mantaui/updates/"
+          scp -i ~/.ssh/prod_key dist/desktop/*.dmg "$HOST:/var/www/mantaui/updates/"
+          # Human-facing downloads + refresh the canonical Manta-latest.dmg
+          # (arm64 preferred; falls back to whatever single dmg exists).
+          scp -i ~/.ssh/prod_key dist/desktop/*.dmg "$HOST:/var/www/mantaui/downloads/"
+          $SSH "$HOST" 'cd /var/www/mantaui/downloads && \
+            latest=$(ls -1 *arm64*.dmg 2>/dev/null | head -1); \
+            [ -z "$latest" ] && latest=$(ls -1 *.dmg | sort -V | tail -1); \
+            cp -f "$latest" Manta-latest.dmg && echo "Manta-latest.dmg -> $latest"'
+    artifacts:
+      - dist/desktop/*.dmg
+      - dist/desktop/latest-mac.yml

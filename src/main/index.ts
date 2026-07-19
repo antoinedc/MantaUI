@@ -169,7 +169,7 @@ app.setPath("userData", join(app.getPath("appData"), "better-ui"));
 // Web Notification API attributes them to the bundle, i.e. "Electron" in dev).
 // `appUserModelId` does the equivalent for Windows toast attribution.
 app.setName("Manta UI");
-app.setAppUserModelId("com.betterui.app");
+app.setAppUserModelId("com.antoinedc.mantaui");
 
 app.whenReady().then(() => {
   config = loadConfig();

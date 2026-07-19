@@ -4,9 +4,65 @@ Ship the desktop app as a **signed + notarized DMG** hosted on `mantaui.com`,
 with electron-updater auto-updates. No App Store review. Testers double-click,
 no Gatekeeper warnings.
 
-**The build MUST run on a Mac** — `codesign`, `notarytool`, and the `.dmg`
-target need macOS + Xcode command-line tools. This Linux box cannot produce a
-signed Mac build. Everything below runs on your Mac.
+Bundle id: **`com.antoinedc.mantaui`** (aligned with iOS; `electron-builder.yml`
+`appId` + `app.setAppUserModelId`).
+
+**Two ways to build.** Recommended: **Codemagic** (macOS runner, fully
+automated on a `mac-v*` tag — see below). Alternative: **locally on your Mac**
+(`codesign` + `notarytool` need macOS; the Linux box can't sign — see "Local
+build" at the bottom).
+
+## Codemagic build (recommended)
+
+The `mac-desktop` workflow in `codemagic.yaml` builds + signs + notarizes the
+DMG on a Codemagic M2 runner and publishes it to `mantaui.com`.
+
+### One-time setup
+
+1. **Create a "Developer ID Application" certificate** on any Mac (this cert
+   type is required for distribution OUTSIDE the App Store, and Apple restricts
+   creating it via API — so make it once in Xcode):
+   - Xcode → Settings → Accounts → (Apple ID) → Manage Certificates… → **+** →
+     **Developer ID Application**.
+   - In **Keychain Access**, find "Developer ID Application: … (FSQ3HS4Z24)",
+     right-click → **Export** → save a `.p12` with a password.
+
+2. **App-specific password** for notarization: https://appleid.apple.com →
+   Sign-In & Security → App-Specific Passwords → generate one.
+
+3. **Codemagic UI → the app → Environment variables**, add two groups:
+
+   Group **`mac_signing`** (all marked *Secure*):
+   | var | value |
+   |---|---|
+   | `CSC_LINK` | the `.p12`, base64-encoded (`base64 -i cert.p12 \| pbcopy`) |
+   | `CSC_KEY_PASSWORD` | the `.p12` password |
+   | `APPLE_ID` | your Apple ID email |
+   | `APPLE_APP_SPECIFIC_PASSWORD` | the app-specific password |
+   | `APPLE_TEAM_ID` | `FSQ3HS4Z24` |
+
+   Group **`prod_deploy`** (optional — only if you want Codemagic to publish to
+   the box; otherwise download the DMG from Codemagic artifacts and skip this):
+   | var | value |
+   |---|---|
+   | `PROD_SSH_KEY` | a base64-encoded SSH private key with access to `root@91.107.196.2` |
+
+### Trigger a build
+
+```
+git tag mac-v<version> && git push origin mac-v<version>
+```
+
+(or run the `mac-desktop` workflow from the Codemagic UI). It produces
+`dist/desktop/*.dmg` + `latest-mac.yml`, verifies notarization, and — if
+`PROD_SSH_KEY` is set — scp's them to `mantaui.com/updates` + `/downloads` and
+refreshes `Manta-latest.dmg`. If not set, grab the DMG from Codemagic artifacts.
+
+---
+
+## Local build (alternative — needs a Mac)
+
+Everything below runs on your Mac (`codesign`/`notarytool`/`.dmg` need macOS).
 
 ## One-time setup (on your Mac)
 

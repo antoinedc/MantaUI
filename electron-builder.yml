@@ -17,7 +17,7 @@
 #
 # These are NOT committed to the repo — set them in CI or locally.
 
-appId: com.betterui.app
+appId: com.antoinedc.mantaui
 productName: Manta UI
 
 directories:
