@@ -15,6 +15,8 @@ import {
   replyPermission,
   subscribeEvents,
   selectStreamsToEvict,
+  isStreamDeaf,
+  LIVENESS_TIMEOUT_MS,
   STREAM_IDLE_MS,
   STREAM_MAX,
   _resetSessionDirectoryCache,
@@ -1038,6 +1040,72 @@ test("selectStreamsToEvict: a throwing existsFn keeps the stream (not proof it's
     now,
   });
   assert.deepEqual(out, [], "existsFn error must not evict");
+});
+
+// ---------------------------------------------------------------------------
+// isStreamDeaf + liveness watchdog (scoped-SSE deafness fix)
+// ---------------------------------------------------------------------------
+
+test("isStreamDeaf: false within the timeout, true past it", () => {
+  const now = 1_000_000_000;
+  assert.equal(isStreamDeaf(now - 10_000, now, 45_000), false, "10s of silence is fine (heartbeat ~10s)");
+  assert.equal(isStreamDeaf(now - 44_000, now, 45_000), false, "just under the threshold");
+  assert.equal(isStreamDeaf(now - 46_000, now, 45_000), true, "past the threshold → deaf");
+  assert.equal(isStreamDeaf(now, now, 45_000), false, "a byte just arrived → alive");
+});
+
+test("openEventStream: a deaf (silent) scoped stream is aborted + reconnected", async () => {
+  // A stalled reader: the first connection's read() never resolves (no bytes,
+  // no done) — exactly the deafness signature (opencode stops publishing but
+  // keeps the TCP open). The liveness watchdog must abort it and the loop must
+  // reconnect (a SECOND fetch is issued), proving self-heal.
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+
+  let connectCount = 0;
+  let disconnects = 0;
+  const controllers = [];
+  _setEventStreamTransport(async (_url, init) => {
+    connectCount += 1;
+    const signal = init?.signal;
+    // Reader that only resolves when the fetch is aborted (mirrors how
+    // undici's reader rejects on AbortController.abort()).
+    const reader = {
+      read: () =>
+        new Promise((_resolve, reject) => {
+          if (signal) {
+            if (signal.aborted) return reject(new Error("aborted"));
+            signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          }
+          // else: never resolves (only the watchdog abort ends it)
+        }),
+      releaseLock() {},
+    };
+    controllers.push(signal);
+    return { ok: true, body: { getReader: () => reader } };
+  });
+
+  // Drive openEventStream indirectly via subscribeEvents' global stream, with a
+  // tiny liveness window so the test runs fast. subscribeEvents passes opts
+  // through to openEventStream for the global + scoped opens.
+  const stop = subscribeEvents(() => {}, {
+    sweepIntervalMs: 0,
+    // liveness knobs plumbed to openEventStream:
+    livenessTimeoutMs: 40,
+    livenessCheckMs: 10,
+  });
+  try {
+    // Wait long enough for: connect #1 → watchdog fires (~40ms deaf) → abort →
+    // reconnect #1 → connect #2. Poll for the second connect.
+    const deadline = Date.now() + 2000;
+    while (connectCount < 2 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(connectCount >= 2, `deaf stream must reconnect (connects=${connectCount})`);
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+  }
 });
 
 test("subscribeEvents _sweep evicts a dead/idle scoped stream but keeps global + live, and re-open works", () => {

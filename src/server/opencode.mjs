@@ -1139,6 +1139,33 @@ function eventFetch(url, init) {
   return (eventStreamTransport ?? fetch)(url, init);
 }
 
+// Liveness: opencode emits a `server.heartbeat` on BOTH the global and every
+// scoped /event stream roughly every 10s, even when idle (verified on the box:
+// ~6 heartbeats in 65s). So a healthy connection ALWAYS receives bytes within
+// ~10s. If we go longer than this with zero bytes the subscription has gone
+// DEAF — opencode stopped publishing to it (correlated with session
+// churn/prune in the same directory) WITHOUT closing the TCP, so reader.read()
+// blocks forever, the reconnect loop never runs, and the readiness gate stays
+// stuck "connected". This is the user's recurring "must leave + re-enter the
+// session to see updates" bug (every manta-server restart masked it until the
+// next deafness). 45s = 4+ missed heartbeats — long enough to never
+// false-positive on a GC pause / one dropped frame, short enough to self-heal
+// well within the time a user notices nothing streaming.
+export const LIVENESS_TIMEOUT_MS = 45_000;
+const LIVENESS_CHECK_MS = 15_000;
+
+/**
+ * Pure: has the stream gone deaf? True when no byte has arrived for longer than
+ * timeoutMs (given opencode's ~10s heartbeat, that means the subscription
+ * stopped delivering). Exported for unit tests.
+ * @param {number} lastByteAt  epoch ms of the last byte received
+ * @param {number} now         epoch ms
+ * @param {number} [timeoutMs=LIVENESS_TIMEOUT_MS]
+ */
+export function isStreamDeaf(lastByteAt, now, timeoutMs = LIVENESS_TIMEOUT_MS) {
+  return now - lastByteAt > timeoutMs;
+}
+
 // One long-lived SSE connection to opencode's /event endpoint, optionally
 // scoped to a project `?directory=`. Auto-reconnects on drop with 1.5 s
 // delay; returns stop() that flips stopped=true AND aborts the in-flight
@@ -1148,10 +1175,21 @@ function eventFetch(url, init) {
 // the parse loop starts — this is what resolves the readiness gate above.
 // `hooks.onDisconnect` fires whenever a (non-teardown) connection ends, so
 // the readiness gate can re-arm for the next connect.
-function openEventStream(onEvent, directory, hooks = {}) {
+//
+// A per-connection liveness watchdog aborts the controller when the stream
+// goes deaf (see LIVENESS_TIMEOUT_MS) — the abort unblocks reader.read(), which
+// falls through to onDisconnect + the 1.5s reconnect, re-establishing a live
+// subscription. `opts.livenessTimeoutMs` / `opts.livenessCheckMs` are injectable
+// for tests (0 check disables the watchdog).
+function openEventStream(onEvent, directory, hooks = {}, opts = {}) {
   const { onConnect, onDisconnect } = hooks;
+  const livenessTimeoutMs = opts.livenessTimeoutMs ?? LIVENESS_TIMEOUT_MS;
+  const livenessCheckMs =
+    opts.livenessCheckMs != null ? opts.livenessCheckMs : LIVENESS_CHECK_MS;
+  const key = directory || "(global)";
   let stopped = false;
   let currentController = null;
+
   const path = directory
     ? `/event?directory=${encodeURIComponent(directory)}`
     : "/event";
@@ -1160,6 +1198,9 @@ function openEventStream(onEvent, directory, hooks = {}) {
     while (!stopped) {
       const controller = new AbortController();
       currentController = controller;
+      let lastByteAt = Date.now();
+      let deaf = false;
+      let watchdog = null;
       try {
         const res = await eventFetch(apiUrl(path), {
           signal: controller.signal,
@@ -1169,6 +1210,24 @@ function openEventStream(onEvent, directory, hooks = {}) {
           throw new Error(`opencode SSE ${res.status}: ${res.statusText}`);
         }
         onConnect?.();
+        lastByteAt = Date.now();
+        // Liveness watchdog: abort the connection if it goes silent past the
+        // heartbeat window. The abort rejects the pending reader.read() below,
+        // dropping us into the reconnect path. unref'd so it never holds the
+        // process open.
+        if (livenessCheckMs > 0) {
+          watchdog = setInterval(() => {
+            if (stopped) return;
+            if (isStreamDeaf(lastByteAt, Date.now(), livenessTimeoutMs)) {
+              deaf = true;
+              console.log(
+                `[opencode-bus] stream ${key} deaf >${Math.round(livenessTimeoutMs / 1000)}s — reconnecting`,
+              );
+              try { controller.abort(); } catch { /* already aborted */ }
+            }
+          }, livenessCheckMs);
+          watchdog.unref?.();
+        }
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = "";
@@ -1176,6 +1235,7 @@ function openEventStream(onEvent, directory, hooks = {}) {
           while (!stopped) {
             const { value, done } = await reader.read();
             if (done) break;
+            lastByteAt = Date.now(); // any byte (heartbeat or real) = alive
             buf += dec.decode(value, { stream: true });
             let idx;
             // Events are separated by double-newline (SSE spec)
@@ -1202,16 +1262,20 @@ function openEventStream(onEvent, directory, hooks = {}) {
           controller.abort(); // always abort to release the connection
         }
       } catch {
-        /* reconnect on error or AbortError from stop() */
+        /* reconnect on error, deaf-abort, or AbortError from stop() */
+      } finally {
+        if (watchdog) { clearInterval(watchdog); watchdog = null; }
       }
-      // The connection just ended (cleanly or via error) and we're about to
-      // retry — a real drop, not an intentional stop(). Re-arm the readiness
-      // gate so a prompt sent during this reconnect window waits for the NEXT
-      // successful connect instead of resolving off a stale "was connected"
-      // promise.
+      // The connection just ended (cleanly, via error, or a deaf-abort) and
+      // we're about to retry — a real drop, not an intentional stop(). Re-arm
+      // the readiness gate so a prompt sent during this reconnect window waits
+      // for the NEXT successful connect instead of resolving off a stale "was
+      // connected" promise.
       if (!stopped) {
         onDisconnect?.();
-        await sleep(1500);
+        // A deaf reconnect is immediate — the subscription is already dead and
+        // every second of silence is dropped events. A normal error backs off.
+        await sleep(deaf ? 250 : 1500);
       }
     }
   })();
@@ -1254,6 +1318,12 @@ export function subscribeEvents(onEvent, opts = {}) {
   const maxStreams = opts.maxStreams ?? STREAM_MAX;
   const sweepIntervalMs =
     opts.sweepIntervalMs != null ? opts.sweepIntervalMs : STREAM_SWEEP_MS;
+  // Liveness-watchdog knobs (see openEventStream) — passed through, injectable
+  // for tests. Undefined → openEventStream's defaults (45s timeout / 15s check).
+  const streamOpts = {
+    livenessTimeoutMs: opts.livenessTimeoutMs,
+    livenessCheckMs: opts.livenessCheckMs,
+  };
   let stopped = false;
 
   const touch = (key) => { lastActivity.set(key, Date.now()); };
@@ -1270,6 +1340,7 @@ export function subscribeEvents(onEvent, opts = {}) {
           onConnect: () => markStreamConnected(key),
           onDisconnect: () => markStreamDisconnected(key),
         },
+        streamOpts,
       ),
     );
   };
