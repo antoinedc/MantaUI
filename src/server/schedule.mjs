@@ -14,12 +14,13 @@
 // (testable without timers or live opencode) + a startSchedulePoller() wrapper
 // with an inFlight guard and timer.unref().
 
-import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { readFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { atomicWrite } from "./storeUtils.mjs";
 
 const STORE_PATH = join(homedir(), STATE_DIRNAME, "schedule.json");
 
@@ -163,12 +164,6 @@ export function isJobFireable(job, { directoryExists } = {}) {
 // ---------------------------------------------------------------------------
 // Store (atomic, same pattern as local.mjs)
 // ---------------------------------------------------------------------------
-
-async function atomicWrite(path, data) {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
-}
 
 export async function loadJobs(path = STORE_PATH) {
   try {
