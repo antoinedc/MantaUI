@@ -44,6 +44,19 @@ mac:
   entitlementsInherit: "assets/entitlements.mac.plist"
   darkModeSupport: true
   artifactName: "${productName}-${version}-${arch}.dmg"
+  # Distribution OUTSIDE the App Store: sign with a "Developer ID Application"
+  # certificate. electron-builder auto-selects it from the login keychain when
+  # present (or set CSC_LINK/CSC_KEY_PASSWORD to a .p12). Explicit so an App
+  # Store cert in the keychain isn't picked by mistake.
+  identity: "Developer ID Application"
+  # Notarization (electron-builder 25 built-in). Enabled by exporting on the
+  # BUILD MAC before `electron-builder`:
+  #   APPLE_ID                      your Apple ID email
+  #   APPLE_APP_SPECIFIC_PASSWORD   app-specific password (appleid.apple.com)
+  #   APPLE_TEAM_ID                 FSQ3HS4Z24
+  # electron-builder staples the notarization ticket into the .dmg on success.
+  notarize:
+    teamId: "FSQ3HS4Z24"
 
 linux:
   icon: "assets/icons"
