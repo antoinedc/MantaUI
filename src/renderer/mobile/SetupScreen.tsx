@@ -53,7 +53,7 @@ type Props = {
  */
 export function SetupScreen({ onConnected, pairStatus }: Props) {
   const [manualOpen, setManualOpen] = useState(false);
-  const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL);
+  const [serverUrl, setServerUrl] = useState<string>(DEFAULT_SERVER_URL);
   const [boxId, setBoxId] = useState("");
   const [code, setCode] = useState("");
   const [submitting, setSubmitting] = useState(false);

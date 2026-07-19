@@ -12,6 +12,7 @@ import { registerApns, NATIVE_NOTIF_TAP_EVENT_NAME } from "./nativePush";
 import { AuthRequiredError, ServerNotConfiguredError, triggerResumeReconnect } from "../api/httpApi";
 import { shouldReconnectOnAppStateChange } from "../chatUtils";
 import { getCapacitorApp, handlePairUrl } from "./deepLink";
+import { dlog, dwarn } from "./debugLog";
 
 type Nav =
   | { screen: "list" }

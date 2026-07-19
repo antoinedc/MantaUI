@@ -22,8 +22,10 @@ import { normalizeServerUrl, isValidServerUrl } from "../pairStepLogic";
 import { isSubmittableCode } from "../../shared/claim.mjs";
 import { isValidBoxToken, RELAY_BASE } from "../../shared/transport.mjs";
 
-/** The Server URL the setup form pre-fills with (the official MantaUI relay). */
-export const DEFAULT_SERVER_URL = RELAY_BASE;
+/** The Server URL the setup form pre-fills with (the official MantaUI relay).
+ *  Typed as `string` (not the RELAY_BASE literal) so consumers like
+ *  useState<string> accept it without narrowing to the literal type. */
+export const DEFAULT_SERVER_URL: string = RELAY_BASE;
 
 /**
  * True when the current Server URL is (still) the official MantaUI relay. Used
