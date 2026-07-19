@@ -1,5 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { normalizeCode } from "../../shared/claim.mjs";
+import {
+  type DebugEntry,
+  getDebugLog,
+  subscribeDebugLog,
+  clearDebugLog,
+} from "./debugLog";
 import { isValidServerUrl } from "../pairStepLogic";
 import { isValidBoxToken } from "../../shared/transport.mjs";
 import {
@@ -153,6 +159,8 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
         >
           Manual setup
         </button>
+
+        <DebugLogPanel />
       </div>
 
       {manualOpen && (
@@ -299,6 +307,74 @@ function PairStatusBanner({
         <span className="inline-block mr-2 align-middle animate-pulse">●</span>
       )}
       {map.text}
+    </div>
+  );
+}
+
+// On-screen debug log — the Safari Web Inspector can't attach to the TestFlight
+// WKWebView (device not discovered), so this surfaces the [deeplink] trail on
+// the phone itself. Collapsed by default; tap to expand and read what happened
+// during a scan. Temporary diagnostic aid (BET-177 pairing debug).
+function DebugLogPanel() {
+  const [open, setOpen] = useState(false);
+  const [entries, setEntries] = useState<DebugEntry[]>(() => getDebugLog());
+
+  useEffect(() => subscribeDebugLog(setEntries), []);
+
+  return (
+    <div className="w-full max-w-xs mt-1">
+      <button
+        type="button"
+        className="mobile-tap text-text-faint text-[11px]"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? "▾" : "▸"} Debug log ({entries.length})
+      </button>
+      {open && (
+        <div className="mt-2 rounded-lg border border-border bg-bg-elev p-2 text-left">
+          <div
+            className="max-h-52 overflow-y-auto font-mono text-[10px] leading-snug text-text-muted"
+            style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}
+          >
+            {entries.length === 0 ? (
+              <div className="text-text-faint">
+                No log yet. Scan a QR code, then reopen this.
+              </div>
+            ) : (
+              entries.map((e, i) => (
+                <div key={i}>
+                  {new Date(e.t).toLocaleTimeString()} {e.msg}
+                </div>
+              ))
+            )}
+          </div>
+          <div className="flex gap-3 mt-2">
+            <button
+              type="button"
+              className="mobile-tap text-accent text-[11px]"
+              onClick={() => {
+                const text = getDebugLog()
+                  .map((e) => `${new Date(e.t).toLocaleTimeString()} ${e.msg}`)
+                  .join("\n");
+                try {
+                  void navigator.clipboard?.writeText(text);
+                } catch {
+                  /* clipboard unavailable */
+                }
+              }}
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              className="mobile-tap text-text-faint text-[11px]"
+              onClick={() => clearDebugLog()}
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

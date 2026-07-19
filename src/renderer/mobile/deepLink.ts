@@ -28,6 +28,7 @@
 import { parsePairPayload, type PairPayload } from "./pairPayload";
 import { relayBoxUrl, RELAY_BASE } from "../../shared/transport.mjs";
 import type { ClaimOutcome } from "../../shared/claim.mjs";
+import { dlog } from "./debugLog";
 
 // The shape the Capacitor App plugin exposes — feature-detected by reading
 // window.Capacitor?.Plugins?.App. Kept intentionally minimal: we only touch
@@ -116,18 +117,32 @@ export async function handlePairUrl(
   deps: DeepLinkDeps,
 ): Promise<DeepLinkOutcome> {
   const payload = parsePairPayload(raw);
-  if (!payload) return "ignored";
+  if (!payload) {
+    dlog("[deeplink] parse: not a valid pair payload (ignored)");
+    return "ignored";
+  }
+  dlog(
+    `[deeplink] parsed: ${payload.boxId ? `box=${payload.boxId.slice(0, 8)}… (relay)` : `server=${payload.serverUrl} (direct)`} code=${payload.code}`,
+  );
 
   const claimInput = buildClaimInput(payload);
   let outcome: ClaimOutcome;
   try {
     outcome = await deps.authClaim(claimInput);
-  } catch {
+  } catch (e) {
     // authClaim should never throw on the shared classifiers — they return
     // ClaimOutcome for every failure kind — but defend against a buggy impl.
+    dlog(`[deeplink] claim threw: ${String(e)}`);
     return "failed";
   }
-  if (!outcome.ok) return "failed";
+  if (!outcome.ok) {
+    // Surface the classified failure reason (wrong_code / rate_limited /
+    // network / server_error) — THIS is the line that tells us why pairing
+    // failed on-device.
+    dlog(`[deeplink] claim FAILED: ${(outcome as { kind?: string }).kind ?? "unknown"} — ${(outcome as { message?: string }).message ?? ""}`);
+    return "failed";
+  }
+  dlog("[deeplink] claim OK; persisting server URL");
 
   // Successful claim. Persist the resolved server URL to localStorage so the
   // next serverBase() call resolves correctly and doRefresh() finds the

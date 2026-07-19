@@ -40,6 +40,16 @@ function hostFromBase(base: string): string | undefined {
   }
 }
 
+// Deep-link de-dupe state at MODULE scope so it survives effect re-runs AND
+// component remounts. A cold-launched manta:// URL can be delivered by BOTH
+// getLaunchUrl() and the appUrlOpen event; if a remount happens between them
+// (boot re-render, gate flip), an effect-local guard resets and the one-time
+// pairing code gets claimed twice — the second claim fails with wrong_code
+// (code already consumed) and flips a SUCCESSFUL pair into a spurious "failed"
+// banner. Module scope is the only lifetime that outlives a remount.
+let g_lastHandledPairUrl: string | null = null;
+let g_pairedOnce = false;
+
 export function MobileApp() {
   const refresh = useStore((s) => s.refresh);
   const setActive = useStore((s) => s.setActive);
@@ -469,25 +479,26 @@ export function MobileApp() {
     // after a scan means the effect never ran / the URL never reached JS.
     const cap = getCapacitorApp(window);
     if (!cap) {
-      console.warn(
-        "[deeplink] Capacitor App plugin NOT detected — window.Capacitor.Plugins.App missing. Deep-link pairing disabled (desktop/PWA, or the native plugin failed to register).",
+      dwarn(
+        "[deeplink] Capacitor App plugin NOT detected. QR pairing disabled.",
       );
       return;
     }
-    console.log("[deeplink] Capacitor App plugin detected; wiring launch-url + appUrlOpen.");
+    dlog("[deeplink] plugin detected; wiring launch-url + appUrlOpen.");
     let cancelled = false;
-    // A cold-launched URL can arrive via BOTH getLaunchUrl() AND appUrlOpen —
-    // de-dupe so the pairing code isn't claimed twice (the second claim would
-    // fail with wrong_code since the one-time code was already consumed,
-    // flipping a successful pair into a spurious "failed" banner).
-    let handledUrl: string | null = null;
+    // De-dupe against the MODULE-scope guard so a remount between the two
+    // cold-launch deliveries can't re-claim the same one-time code.
     const handle = (raw: string) => {
-      if (raw === handledUrl) {
-        console.log("[deeplink] duplicate URL ignored:", raw);
+      if (g_pairedOnce) {
+        dlog("[deeplink] already paired; ignoring URL");
         return;
       }
-      handledUrl = raw;
-      console.log("[deeplink] handling pair URL:", raw);
+      if (raw === g_lastHandledPairUrl) {
+        dlog("[deeplink] duplicate URL ignored");
+        return;
+      }
+      g_lastHandledPairUrl = raw;
+      dlog(`[deeplink] handling: ${raw}`);
       // Show the user that a scan was received the moment a manta:// URL lands
       // — otherwise a claim that fails (or hangs) looks identical to "nothing
       // happened". parsePairPayload runs inside handlePairUrl; an "ignored"
@@ -504,13 +515,25 @@ export function MobileApp() {
           }
         },
       }).then((outcome) => {
-        console.log("[deeplink] pair outcome:", outcome);
+        dlog(`[deeplink] outcome: ${outcome}`);
+        if (outcome === "paired") {
+          // Latch success at module scope so a late second delivery (whose
+          // claim WILL fail — the code is now consumed) can't overwrite the
+          // paired state with a spurious "failed" banner.
+          g_pairedOnce = true;
+        }
         if (cancelled) return;
         if (outcome === "paired") {
           setPairStatus(null);
           setSetupRequired(false);
           setAuthRequired(false);
           doRefresh();
+          return;
+        }
+        // A late failure AFTER we already paired this launch is the consumed-
+        // code echo — ignore it so the banner doesn't regress to "failed".
+        if (g_pairedOnce) {
+          dlog("[deeplink] ignoring post-pair failure (consumed-code echo)");
           return;
         }
         // "failed" = claim rejected (wrong/expired code, box offline, network).
@@ -527,17 +550,17 @@ export function MobileApp() {
       .then((res) => {
         if (cancelled) return;
         const url = res?.url;
-        console.log("[deeplink] getLaunchUrl() ->", url ?? "(none)");
+        dlog(`[deeplink] getLaunchUrl -> ${url ?? "(none)"}`);
         if (typeof url === "string" && url !== "") handle(url);
       })
       .catch((e: unknown) => {
-        console.warn("[deeplink] getLaunchUrl() rejected:", e);
+        dwarn(`[deeplink] getLaunchUrl rejected: ${String(e)}`);
       });
     // Warm start: subsequent URLs (the user scans a fresh QR while the app
     // is already open). The returned handle exposes remove() which is the
     // Capacitor convention; we call it on unmount.
     const listenerPromise = cap.addListener("appUrlOpen", (event) => {
-      console.log("[deeplink] appUrlOpen event ->", event?.url ?? "(no url)");
+      dlog(`[deeplink] appUrlOpen -> ${event?.url ?? "(no url)"}`);
       if (typeof event?.url === "string" && event.url !== "") handle(event.url);
     });
     return () => {
