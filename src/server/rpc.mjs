@@ -13,6 +13,7 @@ import { resolveWorkspace } from "./peers.mjs";
 import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
 import { restartOpencode } from "./opencodeAdmin.mjs";
+import { addApnsToken } from "./push.mjs";
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -20,20 +21,21 @@ export async function dispatch(handlers, channel, args) {
   return fn(...args);
 }
 
-// Build the full handler map. Accepts { tmux, oc, pty, bus, local, authPair, serverVersion } where:
+// Build the full handler map. Accepts { tmux, oc, pty, bus, local, authPair, push, serverVersion } where:
 //   tmux          — src/server/tmux.mjs namespace
 //   oc            — src/server/opencode.mjs namespace
 //   pty           — src/server/pty.mjs namespace
 //   bus           — event bus created by createBus() in events.mjs
 //   local         — src/server/local.mjs namespace (git/fs/config/clipboard stubs)
 //   authPair      — () => authEngine.pair(); the `auth:pair` channel wraps it.
+//   push          — src/server/push.mjs namespace (BET-181: APNs token registration dispatch).
 //   serverVersion — string, package.json `version` read once at startup (same
 //                   value `GET /api/version` returns). The `server:version`
 //                   channel returns it in-process so the renderer avoids an
 //                   HTTP round-trip on every Settings mount.
 // Channel key strings MUST match IPC.* values in src/shared/types.ts.
 // Arg shapes MUST match what src/preload/index.ts packs per channel.
-export function buildHandlers({ tmux, oc, pty, bus, local, authPair, serverVersion }) {
+export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serverVersion }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
   // migration). Renderer-supplied cwd is preferred when it's a real path, but
@@ -408,6 +410,15 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, serverVersi
     // preload: ipcRenderer.invoke(IPC.webhookDelete, id) → args[0] = id
     "webhook:delete": (id) =>
       webhookDeleteHook(id, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- APNs native-push registration (BET-181) ----
+    // iOS Capacitor app registers its APNs device token via the renderer-side
+    // 6-site wiring (window.api.pushRegisterApns(token)). Same single
+    // source-of-truth as the bare /push/register-apns HTTP route — both call
+    // push.addApnsToken so the device-token registry doesn't diverge by
+    // transport. De-dupe is handled inside addApnsToken (upsert on token).
+    // preload: ipcRenderer.invoke(IPC.pushRegisterApns, token) → args[0] = token
+    "push:register-apns": (token) => push.addApnsToken(token),
 
     // ---- auth pairing code mint (BET-161) ----
     // Mint a one-time mobile pairing code. Runs in-process on the box, so it

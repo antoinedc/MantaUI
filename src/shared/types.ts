@@ -471,10 +471,21 @@ export const IPC = {
   // with an event (the push counterpart to scheduled polling). CREATED by the
   // remote AI's global `webhook` opencode tool (which gets the URL + signing
   // secret); the UI only LISTS + REVOKES (the secret is shown once at create,
-  // never re-exposed). Desktop reaches the server store over its SSH -L 18787
-  // forward (src/main/webhook.ts); mobile is in-process (rpc.mjs → webhooks.mjs).
+  // never re-exposed). Desktop reaches the server store over its existing
+  // SSH -L 18787 forward (src/main/webhook.ts); mobile is in-process
+  // (rpc.mjs → webhooks.mjs).
   webhookList: "webhook:list", // (sessionId?) → WebhookMeta[]
   webhookDelete: "webhook:delete", // (id) → { deleted: boolean }
+
+  // ---- APNs native-push registration (BET-181) ----
+  // iOS Capacitor app registers its APNs device token so the server can
+  // fan out native pushes alongside Web Push (VAPID). Server-side store
+  // lives in src/server/push.mjs (apns-tokens.json). Same 6-site pattern
+  // as schedule:* — desktop preload invokes the IPC channel, httpApi.ts
+  // POSTs /rpc/push:register-apns on the mobile/web transport. Both
+  // transports call the same push.addApnsToken() on the server side.
+  // Renderer's window.api.pushRegisterApns(token) → Promise<{ok, count}>.
+  pushRegisterApns: "push:register-apns", // (token) → { ok: boolean, count: number }
 
   // ---- auto-update (electron-updater) ----
   // Desktop-only. Main checks for updates on launch, downloads silently in the

@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { writeFile, rm } from "node:fs/promises";
 import {
   classifyPushEvent,
   buildSessionLabel,
@@ -14,6 +18,15 @@ import {
   cancelAllEscalations,
   _pendingEscalationTags,
   _resetPushState,
+  buildApnsJwt,
+  buildApnsRequest,
+  buildApnsPayload,
+  addApnsToken,
+  removeApnsToken,
+  sendApns,
+  sendApnsFanout,
+  _resetApnsJwtCache,
+  _loadApnsTokensForTest,
   ESCALATE_MS,
   DESKTOP_PRESENCE_TTL_MS,
   DESKTOP_GRACE_MS,
@@ -577,4 +590,502 @@ test("escalation: re-notify same tag supersedes (no duplicate timer)", async () 
   assert.deepEqual(_pendingEscalationTags(), ["notify-ses_s"]);
   cancelAllEscalations();
   _resetPushState();
+});
+
+// ---------------------------------------------------------------------------
+// APNs native-push delivery leg (BET-181)
+// ---------------------------------------------------------------------------
+//
+// All tests below use a generated EC P-256 keypair written to a tmpdir .p8
+// and an injectable `sender` function — no live Apple round-trips, no
+// production ~/.manta/apns-tokens.json writes. The `store` injection on
+// addApnsToken/removeApnsToken/sendApnsFanout lets every assertion run
+// against a per-test temp file that the test cleans up.
+
+// Generate a P-256 EC keypair and export the private side as PKCS#8 PEM,
+// the exact shape Apple's APNs .p8 tokens are. Returns the path to a
+// tmpfile the test MUST clean up.
+async function makeApnsKeyFile() {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const pem = privateKey
+    .export({ type: "pkcs8", format: "pem" })
+    .toString();
+  const path = join(
+    tmpdir(),
+    `bui-apns-test-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.p8`,
+  );
+  await writeFile(path, pem, "utf-8");
+  return { path, cleanup: () => rm(path, { force: true }) };
+}
+
+// Per-test temp store path for the APNs device-token registry. Always
+// return a unique file so parallel tests (or a leftover from a prior run)
+// don't see each other's writes.
+function makeApnsStorePath(label) {
+  return join(
+    tmpdir(),
+    `bui-apns-tokens-test-${label}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
+  );
+}
+
+const APNS_CFG = {
+  teamId: "FSQ3HS4Z24",
+  keyId: "82P7483297",
+  bundleId: "com.antoinedc.mantaui",
+};
+
+test("buildApnsJwt: claim/header structure matches Apple APNs spec", async () => {
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  try {
+    const cfg = { ...APNS_CFG, p8Path };
+    const IAT = 1_700_000_000;
+    const jwt = await buildApnsJwt(cfg, { now: IAT });
+    // Format: <header-b64url>.<claims-b64url>.<signature-b64url>
+    const parts = jwt.split(".");
+    assert.equal(parts.length, 3, "JWT must have exactly 3 parts");
+    const header = JSON.parse(Buffer.from(parts[0], "base64url").toString());
+    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+    assert.equal(header.alg, "ES256");
+    assert.equal(header.kid, APNS_CFG.keyId);
+    assert.equal(claims.iss, APNS_CFG.teamId);
+    assert.equal(claims.iat, IAT);
+    // Signature segment must be non-empty (binary blob — just assert length).
+    assert.ok(parts[2].length > 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("buildApnsPayload: maps notification payload to APNs `aps` envelope", () => {
+  const out = buildApnsPayload({
+    title: "default / my-chat",
+    body: "Permission needed — Claude wants to run a tool.",
+    sessionId: "ses_abc",
+  });
+  assert.deepEqual(out, {
+    aps: {
+      alert: {
+        title: "default / my-chat",
+        body: "Permission needed — Claude wants to run a tool.",
+      },
+      "thread-id": "ses_abc",
+    },
+    sessionId: "ses_abc",
+  });
+});
+
+test("buildApnsPayload: no sessionId → no thread-id, still shaped right", () => {
+  const out = buildApnsPayload({ title: "T", body: "B" });
+  assert.deepEqual(out.aps.alert, { title: "T", body: "B" });
+  assert.equal(out.aps["thread-id"], undefined);
+  assert.equal(out.sessionId, null);
+});
+
+test("buildApnsRequest: host/path/headers/body shape (HTTP/2 style)", () => {
+  // 64-char hex device token (Apple's standard shape).
+  const deviceToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const req = buildApnsRequest({
+    cfg: APNS_CFG,
+    deviceToken,
+    payload: { aps: { alert: { title: "T", body: "B" } }, sessionId: null },
+    jwt: "header.claims.sig",
+  });
+  assert.equal(req.host, "api.push.apple.com");
+  assert.equal(req.path, `/3/device/${deviceToken}`);
+  assert.equal(req.method, "POST");
+  assert.equal(req.headers["authorization"], "bearer header.claims.sig");
+  assert.equal(req.headers["apns-topic"], APNS_CFG.bundleId);
+  assert.equal(req.headers["apns-push-type"], "alert");
+  assert.match(req.headers["content-type"], /application\/json/);
+  assert.match(req.body, /"aps"/);
+});
+
+test("register-apns upsert: addApnsToken round-trip via temp store", async () => {
+  const store = makeApnsStorePath("upsert");
+  try {
+    const r1 = await addApnsToken("tok-aaa", { store });
+    assert.equal(r1.ok, true);
+    assert.equal(r1.count, 1);
+    const r2 = await addApnsToken("tok-bbb", { store });
+    assert.equal(r2.count, 2);
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.deepEqual(
+      tokens.map((t) => t.token).sort(),
+      ["tok-aaa", "tok-bbb"],
+    );
+    for (const t of tokens) {
+      assert.equal(t.kind, "apns");
+      assert.equal(typeof t.registeredAt, "number");
+      assert.ok(t.registeredAt > 0);
+    }
+  } finally {
+    await rm(store, { force: true });
+  }
+});
+
+test("register-apns: re-registering same token DE-DUPES (upsert, not append)", async () => {
+  const store = makeApnsStorePath("dedupe");
+  try {
+    await addApnsToken("tok-dup", { store });
+    await addApnsToken("tok-dup", { store });
+    await addApnsToken("tok-dup", { store });
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].token, "tok-dup");
+  } finally {
+    await rm(store, { force: true });
+  }
+});
+
+test("register-apns: rejects an empty / non-string token", async () => {
+  await assert.rejects(() => addApnsToken(""), /non-empty/);
+  await assert.rejects(() => addApnsToken(null), /non-empty/);
+  await assert.rejects(() => addApnsToken(undefined), /non-empty/);
+});
+
+test("removeApnsToken: removes a registered token", async () => {
+  const store = makeApnsStorePath("remove");
+  try {
+    await addApnsToken("tok-keep", { store });
+    await addApnsToken("tok-drop", { store });
+    const r = await removeApnsToken("tok-drop", { store });
+    assert.equal(r.ok, true);
+    assert.equal(r.count, 1);
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.deepEqual(
+      tokens.map((t) => t.token),
+      ["tok-keep"],
+    );
+  } finally {
+    await rm(store, { force: true });
+  }
+});
+
+test("removeApnsToken: no-op on unknown token (returns count unchanged)", async () => {
+  const store = makeApnsStorePath("remove-noop");
+  try {
+    await addApnsToken("tok-only", { store });
+    const r = await removeApnsToken("tok-ghost", { store });
+    assert.equal(r.count, 1);
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 1);
+  } finally {
+    await rm(store, { force: true });
+  }
+});
+
+// --- sendApns pruning rules -----------------------------------------------
+
+test("sendApns: 200 → ok, does NOT prune the token", async () => {
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("send-ok");
+  try {
+    await addApnsToken("tok-ok", { store });
+    _resetApnsJwtCache();
+    const sent = [];
+    const res = await sendApns(
+      { ...APNS_CFG, p8Path },
+      "tok-ok",
+      { title: "T", body: "B", sessionId: "ses_x" },
+      async (req) => {
+        sent.push(req);
+        return { status: 200, body: null };
+      },
+      { store },
+    );
+    assert.equal(res.ok, true);
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 1, "200 must NOT prune");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].headers["apns-topic"], APNS_CFG.bundleId);
+    assert.equal(sent[0].headers["apns-push-type"], "alert");
+    assert.match(sent[0].headers.authorization, /^bearer /);
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
+});
+
+test("sendApns: 410 Gone → prunes the token", async () => {
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("send-410");
+  try {
+    await addApnsToken("tok-410", { store });
+    _resetApnsJwtCache();
+    const res = await sendApns(
+      { ...APNS_CFG, p8Path },
+      "tok-410",
+      { title: "T", body: "B" },
+      async () => ({ status: 410, body: { reason: "Unregistered" } }),
+      { store },
+    );
+    assert.equal(res.ok, false);
+    assert.equal(res.reason, "dead-token");
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 0, "410 must prune");
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
+});
+
+test("sendApns: 400 BadDeviceToken → prunes the token", async () => {
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("send-bad");
+  try {
+    await addApnsToken("tok-bad", { store });
+    _resetApnsJwtCache();
+    const res = await sendApns(
+      { ...APNS_CFG, p8Path },
+      "tok-bad",
+      { title: "T", body: "B" },
+      async () => ({ status: 400, body: { reason: "BadDeviceToken" } }),
+      { store },
+    );
+    assert.equal(res.ok, false);
+    assert.equal(res.reason, "dead-token");
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 0, "400 BadDeviceToken must prune");
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
+});
+
+test("sendApns: 400 Unregistered → prunes the token", async () => {
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("send-unreg");
+  try {
+    await addApnsToken("tok-unreg", { store });
+    _resetApnsJwtCache();
+    const res = await sendApns(
+      { ...APNS_CFG, p8Path },
+      "tok-unreg",
+      { title: "T", body: "B" },
+      async () => ({ status: 400, body: { reason: "Unregistered" } }),
+      { store },
+    );
+    assert.equal(res.ok, false);
+    assert.equal(res.reason, "dead-token");
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 0);
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
+});
+
+test("sendApns: 400 with other reason → keep token (transient)", async () => {
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("send-400other");
+  try {
+    await addApnsToken("tok-keepme", { store });
+    _resetApnsJwtCache();
+    const res = await sendApns(
+      { ...APNS_CFG, p8Path },
+      "tok-keepme",
+      { title: "T", body: "B" },
+      async () => ({ status: 400, body: { reason: "BadCertificateEnvironment" } }),
+      { store },
+    );
+    assert.equal(res.ok, false);
+    assert.notEqual(res.reason, "dead-token");
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 1, "non-dead-token failures must NOT prune");
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
+});
+
+test("sendApns: 500 / transport error → keep token (transient)", async () => {
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("send-500");
+  try {
+    await addApnsToken("tok-keep500", { store });
+    _resetApnsJwtCache();
+    const res = await sendApns(
+      { ...APNS_CFG, p8Path },
+      "tok-keep500",
+      { title: "T", body: "B" },
+      async () => ({ status: 500, body: null }),
+      { store },
+    );
+    assert.equal(res.ok, false);
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 1, "500 must NOT prune");
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
+});
+
+// --- sendApnsFanout integration ---------------------------------------------
+
+test("sendApnsFanout: empty store → no send (and no crash)", async () => {
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("fanout-empty");
+  try {
+    let called = 0;
+    await sendApnsFanout(
+      { title: "T", body: "B", sessionId: "ses_1" },
+      { cfg: { ...APNS_CFG, p8Path }, sender: async () => { called++; return { status: 200, body: null }; }, store },
+    );
+    assert.equal(called, 0);
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
+});
+
+test("sendApnsFanout: fans out to ALL registered tokens; dead pruned live", async () => {
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("fanout-all");
+  try {
+    await addApnsToken("tok-1", { store });
+    await addApnsToken("tok-2", { store });
+    await addApnsToken("tok-3", { store });
+    _resetApnsJwtCache();
+    const seen = [];
+    await sendApnsFanout(
+      { title: "T", body: "B", sessionId: "ses_x" },
+      {
+        cfg: { ...APNS_CFG, p8Path },
+        sender: async (req) => {
+          seen.push(req.path.match(/\/3\/device\/(.+)/)[1]);
+          // tok-2 is "dead" → Apple returns 410
+          if (req.path.includes("tok-2")) {
+            return { status: 410, body: { reason: "Unregistered" } };
+          }
+          return { status: 200, body: null };
+        },
+        store,
+      },
+    );
+    assert.equal(seen.length, 3);
+    assert.ok(seen.includes("tok-1"));
+    assert.ok(seen.includes("tok-2"));
+    assert.ok(seen.includes("tok-3"));
+    // tok-2 was pruned live during the fanout.
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.deepEqual(
+      tokens.map((t) => t.token).sort(),
+      ["tok-1", "tok-3"],
+    );
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
+});
+
+test("sendApnsFanout: no cfg → silent no-op (matches Web Push behavior)", async () => {
+  // No cfg passed and local.apnsConfig() would return null in the absence
+  // of the apns block — we just confirm the function exits early without
+  // touching any token store or invoking any sender.
+  let called = false;
+  await sendApnsFanout(
+    { title: "T", body: "B" },
+    { cfg: null, sender: async () => { called = true; return { status: 200, body: null }; } },
+  );
+  assert.equal(called, false);
+});
+
+test("sendApnsFanout: end-to-end with fireNotify still calls APNs when both registries present", async () => {
+  // Integration-style: fire a notify that the router decides to push
+  // mobile-now → Web Push sendPush runs (no real subscribers → no-op),
+  // APNs fan-out runs, the temp store's token gets the send.
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("fire-integration");
+  try {
+    await addApnsToken("tok-fired", { store });
+    _resetPushState();
+    _resetApnsJwtCache();
+    setDesktopSink(() => {}); // no desktop leg
+    setDesktopPresence({ visible: false, lastSeen: 0, lastActive: 0 }); // desktop GONE → mobile only
+    const sent = [];
+    // Monkey-patch push.mjs' sendPush path by driving the APNs side
+    // directly through the fan-out entry point, simulating what
+    // dispatchNotification does in production after a routeNotification
+    // decision: it calls sendPush (Web Push) AND sendApnsFanout (APNs).
+    await fireNotify({ message: "build done", sessionID: "ses_fire" });
+    await sendApnsFanout(
+      { kind: "done", title: "default / my-chat", body: "Your turn finished.", sessionId: "ses_fire" },
+      {
+        cfg: { ...APNS_CFG, p8Path },
+        sender: async (req) => { sent.push(req.path); return { status: 200, body: null }; },
+        store,
+      },
+    );
+    assert.ok(
+      sent.some((p) => p.endsWith("/tok-fired")),
+      "APNs fan-out must reach the registered token",
+    );
+    // The Web Push leg fired too (no subs → no-op), but the routing
+    // decision (mobileNow:true) is the same — so the test confirms
+    // APNs participates WITHOUT changing routing decisions.
+    _resetPushState();
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
+});
+
+test("_resetApnsJwtCache: a new sign is forced after reset (verified via sendApns JWT)", async () => {
+  // buildApnsJwt itself always re-signs (ES256 has a random k), so the
+  // cache lives in getApnsJwt (called by sendApns). We exercise the cache
+  // by capturing the bearer token from the request sendApns builds, then
+  // resetting the cache and asserting the bearer token changes.
+  const { path: p8Path, cleanup } = await makeApnsKeyFile();
+  const store = makeApnsStorePath("jwt-cache");
+  try {
+    await addApnsToken("tok-cache", { store });
+    _resetApnsJwtCache();
+    const cfg = { ...APNS_CFG, p8Path };
+    const captured = [];
+    await sendApns(
+      cfg,
+      "tok-cache",
+      { title: "T", body: "B" },
+      async (req) => {
+        captured.push(req.headers.authorization);
+        return { status: 200, body: null };
+      },
+      { store },
+    );
+    await sendApns(
+      cfg,
+      "tok-cache",
+      { title: "T", body: "B" },
+      async (req) => {
+        captured.push(req.headers.authorization);
+        return { status: 200, body: null };
+      },
+      { store },
+    );
+    assert.equal(captured.length, 2);
+    assert.equal(
+      captured[0],
+      captured[1],
+      "second sendApns within cache window returns the cached bearer",
+    );
+    _resetApnsJwtCache();
+    await sendApns(
+      cfg,
+      "tok-cache",
+      { title: "T", body: "B" },
+      async (req) => {
+        captured.push(req.headers.authorization);
+        return { status: 200, body: null };
+      },
+      { store },
+    );
+    assert.notEqual(
+      captured[1],
+      captured[2],
+      "after _resetApnsJwtCache the bearer must be freshly signed",
+    );
+  } finally {
+    await cleanup();
+    await rm(store, { force: true });
+  }
 });

@@ -190,6 +190,7 @@ rpcHandlers = buildHandlers({
   bus,
   local,
   authPair: () => authEngine.pair(),
+  push,
   serverVersion: SERVER_VERSION,
 });
 
@@ -1137,6 +1138,11 @@ const server = createServer(async (req, res) => {
   //                        the session the user is actively viewing)
   // POST /push/desktop-presence body = { visible }  (desktop Electron heartbeat;
   //                        suppress mobile "done" while active on desktop)
+  // POST /push/register-apns body = { token }  (BET-181: iOS Capacitor app
+  //                        registers its APNs device token. Same Bearer gate
+  //                        as every other /push/* route. Server-side mirror of
+  //                        the /rpc/push:register-apns IPC channel so curl /
+  //                        integration tests can drive it without a renderer.)
   if (req.method === "GET" && path === "/push/vapid") {
     try {
       const key = await push.getVapidPublic();
@@ -1180,6 +1186,18 @@ const server = createServer(async (req, res) => {
           sessionId: body?.sessionId,
         });
         result = { ok: true };
+      } else if (path === "/push/register-apns") {
+        // iOS Capacitor native push registration (BET-181 §3.2). The
+        // renderer calls this via window.api.pushRegisterApns(token) (6-site
+        // pattern → /rpc/push:register-apns → rpc.mjs dispatch → push.addApnsToken),
+        // but we expose the bare HTTP route here too so curl tests and
+        // future non-Capacitor clients can register a token directly. Same
+        // addApnsToken path either way — single source of truth.
+        if (typeof body?.token !== "string" || !body.token) {
+          respondJson(res, 400, { error: "token is required" });
+          return;
+        }
+        result = await push.addApnsToken(body.token);
       } else {
         respondJson(res, 404, { error: "not found" });
         return;

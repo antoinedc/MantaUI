@@ -37,6 +37,7 @@ function makeDeps(projects, liveProjects = []) {
       pty: {},
       bus: {},
       local: { configGet: async () => ({ projects }) },
+      push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
     },
   };
 }

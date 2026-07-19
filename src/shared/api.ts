@@ -268,6 +268,14 @@ export interface Api {
   webhookList(sessionId?: string): Promise<WebhookMeta[]>;
   webhookDelete(id: string): Promise<{ deleted: boolean }>;
 
+  // APNs native-push registration (BET-181). The iOS Capacitor app calls this
+  // on startup (after permission grant) with the device token returned by
+  // @capacitor/push-notifications. The server upserts it into the apns-tokens
+  // registry (de-dupes on token value). Returns { ok, count }. No-op on
+  // non-iOS / pre-Capacitor environments — see src/renderer/mobile/nativePush.ts
+  // for the feature-detection guard.
+  pushRegisterApns(token: string): Promise<{ ok: boolean; count: number }>;
+
   // Auto-update (desktop-only). Main checks for updates on launch and pushes
   // updateAvailable / updateDownloaded events to the renderer. The renderer
   // calls autoUpdateDownload to trigger a manual download, or
