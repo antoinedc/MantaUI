@@ -32,6 +32,16 @@ workflows:
       # already exist. Instead the "Set up code signing" script below runs
       # `app-store-connect fetch-signing-files --create`, which CREATES the
       # distribution cert + App Store profile via the ASC API key if missing.
+      groups:
+        # ios_signing holds CERTIFICATE_PRIVATE_KEY — the PERSISTENT RSA key
+        # (secure app variable, uploaded via the Codemagic API; durable copy at
+        # ~/.manta/ios-dist-key.pem on the box). One stable key ⇒ one stable
+        # distribution cert reused across builds. Do NOT go back to generating
+        # a per-build throwaway key: each such build minted a NEW cert whose
+        # key died with the VM; after 2 builds the account's cert quota (max 2
+        # per type) was full of unusable certs and fetch-signing-files came up
+        # empty ("Provisioning Profiles: []") — the ios-v1.0.8 outage.
+        - ios_signing
       vars:
         BUNDLE_ID: "com.antoinedc.mantaui"
         APP_STORE_APPLE_ID: 6792363427
@@ -63,20 +73,23 @@ workflows:
       - name: Set up code signing (App Store profile via ASC API key)
         script: |
           # THE PRIVATE-KEY REQUIREMENT: a distribution certificate is only
-          # usable for signing by whoever holds its PRIVATE KEY. Earlier failures
-          # ("Cannot save Signing Certificates without certificate private key")
-          # happened because no private key existed on the build machine. So:
-          # generate a private key HERE, create a NEW cert FROM it, and use that
-          # key for every subsequent step.
+          # usable for signing by whoever holds its PRIVATE KEY. The key comes
+          # from the PERSISTENT secure variable CERTIFICATE_PRIVATE_KEY
+          # (ios_signing group) so every build reuses the SAME key and the SAME
+          # cert. A per-build throwaway key (the old ssh-keygen approach) minted
+          # a new cert every build until the 2-cert quota filled with certs
+          # whose keys were lost — then signing silently produced zero profiles.
           keychain initialize
 
-          # 1. Generate a fresh RSA private key on the build machine.
-          ssh-keygen -t rsa -b 2048 -m PEM -f /tmp/dist_key -q -N ""
+          # 1. Materialize the persistent private key.
+          printf '%s\n' "$CERTIFICATE_PRIVATE_KEY" > /tmp/dist_key
+          chmod 600 /tmp/dist_key
 
-          # 2. Create a distribution certificate FROM that key via the ASC API
-          #    key. --save stores the resulting cert next to the key so
-          #    fetch/keychain steps can find both. Ignore failure if a cert of
-          #    this type already exists (max 2 distribution certs per account).
+          # 2. Create the distribution certificate FROM that key via the ASC API
+          #    key — first run only; afterwards it 409s (cert exists) and the
+          #    fallback `list` finds the existing cert matching our key.
+          #    --save stores the resulting cert next to the key so
+          #    fetch/keychain steps can find both.
           app-store-connect certificates create \
             --type IOS_DISTRIBUTION \
             --certificate-key=@file:/tmp/dist_key \
@@ -182,57 +195,34 @@ workflows:
       - name: Install deps
         script: |
           npm ci
-      - name: Import Developer ID cert into a Codemagic keychain
+      - name: Decode Developer ID cert into the keychain
         script: |
-          # THE HANG FIX: letting electron-builder import the .p12 into its own
-          # temp keychain made `codesign` BLOCK forever waiting for a GUI
-          # keychain-unlock prompt that never comes on CI (the build stalled
-          # right after "signing … Manta UI.app", never reaching notarization).
-          # Instead use Codemagic's `keychain` CLI, which initializes an UNLOCKED
-          # keychain and sets the key partition list so codesign runs
-          # non-interactively — same mechanism the iOS workflow uses.
+          # electron-builder reads CSC_LINK as a FILE PATH or a base64 string.
+          # We stored the .p12 base64 in CSC_LINK; write it to a temp file and
+          # point CSC_LINK at it so electron-builder + codesign can use it.
           set -e
-          keychain initialize
-          P12="$CM_BUILD_DIR/dist_cert.p12"
-          echo "$CSC_LINK" | base64 --decode > "$P12"
-          keychain add-certificates \
-            --certificate "$P12" \
-            --certificate-password "$CSC_KEY_PASSWORD"
-          # electron-builder must NOT re-import into its own keychain now — unset
-          # CSC_LINK/CSC_KEY_PASSWORD so it discovers the "Developer ID
-          # Application" identity from the keychain we just prepared (mac.identity
-          # in electron-builder.yml selects it).
-          echo "CSC_LINK=" >> "$CM_ENV"
-          echo "CSC_KEY_PASSWORD=" >> "$CM_ENV"
-          # Belt-and-braces: never let electron-builder fall back to interactive
-          # keychain access.
-          echo "CSC_KEYCHAIN=$(security default-keychain -d user | tr -d ' \"')" >> "$CM_ENV" || true
+          KEYCHAIN_CERT="$CM_BUILD_DIR/dist_cert.p12"
+          echo "$CSC_LINK" | base64 --decode > "$KEYCHAIN_CERT"
+          # Re-export CSC_LINK as the file path for the build step.
+          echo "CSC_LINK=$KEYCHAIN_CERT" >> "$CM_ENV"
       - name: Build + sign + notarize DMG
         script: |
-          # electron-vite build → electron-builder --mac. electron-builder:
-          #   - signs with the Developer ID identity from the keychain prepared
-          #     above (mac.identity: "Developer ID Application")
-          #   - does NOT notarize (notarize:false in electron-builder.yml for the
-          #     beta — testers right-click → Open once; re-enable for public dist)
+          # electron-vite build → electron-builder --mac. electron-builder auto:
+          #   - signs with the Developer ID cert from CSC_LINK/CSC_KEY_PASSWORD
+          #   - notarizes via APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID
+          #     (mac.notarize.teamId is set in electron-builder.yml)
+          #   - staples the ticket into the .dmg
           # --publish never: emit latest-mac.yml but don't use electron-builder's
           # own uploader (we scp to the prod box in the next step).
-          # CSC_IDENTITY_AUTO_DISCOVERY=true lets it find the keychain identity.
-          set -e
-          export CSC_IDENTITY_AUTO_DISCOVERY=true
           npm run build
           npx electron-builder --mac --publish never
-      - name: Verify signature
+      - name: Verify notarization
         script: |
-          # Notarization is OFF for the beta (electron-builder.yml notarize:false),
-          # so we only confirm the DMG is Developer ID-SIGNED. codesign --verify
-          # on the .app inside; spctl will say "rejected (unnotarized)" which is
-          # EXPECTED — testers right-click → Open once. Non-fatal.
           set -e
-          codesign --verify --deep --strict --verbose=2 "dist/desktop/mac/Manta UI.app" \
-            || codesign --verify --verbose=2 dist/desktop/mac*/*.app || true
           for dmg in dist/desktop/*.dmg; do
             echo "▸ $dmg"
-            spctl -a -vvv -t install "$dmg" 2>&1 | grep -iE "developer id|signed|rejected|source" || true
+            spctl -a -vvv -t install "$dmg" 2>&1 | grep -i "notarized\|accepted" || true
+            xcrun stapler validate "$dmg" || echo "⚠ stapler validate failed for $dmg"
           done
       - name: Publish to mantaui.com (optional)
         script: |
