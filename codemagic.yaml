@@ -182,25 +182,44 @@ workflows:
       - name: Install deps
         script: |
           npm ci
-      - name: Decode Developer ID cert into the keychain
+      - name: Import Developer ID cert into a Codemagic keychain
         script: |
-          # electron-builder reads CSC_LINK as a FILE PATH or a base64 string.
-          # We stored the .p12 base64 in CSC_LINK; write it to a temp file and
-          # point CSC_LINK at it so electron-builder + codesign can use it.
+          # THE HANG FIX: letting electron-builder import the .p12 into its own
+          # temp keychain made `codesign` BLOCK forever waiting for a GUI
+          # keychain-unlock prompt that never comes on CI (the build stalled
+          # right after "signing … Manta UI.app", never reaching notarization).
+          # Instead use Codemagic's `keychain` CLI, which initializes an UNLOCKED
+          # keychain and sets the key partition list so codesign runs
+          # non-interactively — same mechanism the iOS workflow uses.
           set -e
-          KEYCHAIN_CERT="$CM_BUILD_DIR/dist_cert.p12"
-          echo "$CSC_LINK" | base64 --decode > "$KEYCHAIN_CERT"
-          # Re-export CSC_LINK as the file path for the build step.
-          echo "CSC_LINK=$KEYCHAIN_CERT" >> "$CM_ENV"
+          keychain initialize
+          P12="$CM_BUILD_DIR/dist_cert.p12"
+          echo "$CSC_LINK" | base64 --decode > "$P12"
+          keychain add-certificates \
+            --certificate "$P12" \
+            --certificate-password "$CSC_KEY_PASSWORD"
+          # electron-builder must NOT re-import into its own keychain now — unset
+          # CSC_LINK/CSC_KEY_PASSWORD so it discovers the "Developer ID
+          # Application" identity from the keychain we just prepared (mac.identity
+          # in electron-builder.yml selects it).
+          echo "CSC_LINK=" >> "$CM_ENV"
+          echo "CSC_KEY_PASSWORD=" >> "$CM_ENV"
+          # Belt-and-braces: never let electron-builder fall back to interactive
+          # keychain access.
+          echo "CSC_KEYCHAIN=$(security default-keychain -d user | tr -d ' \"')" >> "$CM_ENV" || true
       - name: Build + sign + notarize DMG
         script: |
-          # electron-vite build → electron-builder --mac. electron-builder auto:
-          #   - signs with the Developer ID cert from CSC_LINK/CSC_KEY_PASSWORD
+          # electron-vite build → electron-builder --mac. electron-builder:
+          #   - signs with the Developer ID identity from the keychain prepared
+          #     above (mac.identity: "Developer ID Application")
           #   - notarizes via APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID
-          #     (mac.notarize.teamId is set in electron-builder.yml)
+          #     (notarize: true in electron-builder.yml)
           #   - staples the ticket into the .dmg
           # --publish never: emit latest-mac.yml but don't use electron-builder's
           # own uploader (we scp to the prod box in the next step).
+          # CSC_IDENTITY_AUTO_DISCOVERY=true lets it find the keychain identity.
+          set -e
+          export CSC_IDENTITY_AUTO_DISCOVERY=true
           npm run build
           npx electron-builder --mac --publish never
       - name: Verify notarization
