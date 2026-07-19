@@ -852,7 +852,7 @@ const server = createServer(async (req, res) => {
   // originating opencode session via the SAME oc.sendPrompt leg the scheduler
   // uses — see docs/mantaui-plugins.md §Layer 1. All routes below are behind
   // the existing Bearer auth gate (/api/* is gated wholesale).
-  if (path === "/api/cap" || path.startsWith("/api/cap/")) {
+  if (path === "/api/cap" || /^\/api\/cap\/([0-9a-f]{8})(?:\/(start|log|done))?$/.test(path)) {
     // Detail routes: /api/cap/:id, /api/cap/:id/start, /api/cap/:id/log,
     // /api/cap/:id/done. Matched BEFORE the generic create/list block so the
     // regex captures the action verb. Id must be exactly 8 lowercase hex
