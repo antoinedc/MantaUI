@@ -49,14 +49,17 @@ mac:
   # present (or set CSC_LINK/CSC_KEY_PASSWORD to a .p12). Explicit so an App
   # Store cert in the keychain isn't picked by mistake.
   identity: "Developer ID Application"
-  # Notarization (electron-builder 25 built-in). Enabled by exporting on the
-  # BUILD MAC before `electron-builder`:
+  # Notarization (electron-builder 25 built-in). electron-builder 25 reads the
+  # team id ONLY from the APPLE_TEAM_ID env var — a `notarize.teamId` here makes
+  # it warn "Please specify notarization Team ID in the APPLE_TEAM_ID env var"
+  # and can stall the step. So notarization is driven ENTIRELY by env exported
+  # before `electron-builder` (set in the Codemagic "mantaui" group):
   #   APPLE_ID                      your Apple ID email
   #   APPLE_APP_SPECIFIC_PASSWORD   app-specific password (appleid.apple.com)
   #   APPLE_TEAM_ID                 FSQ3HS4Z24
-  # electron-builder staples the notarization ticket into the .dmg on success.
-  notarize:
-    teamId: "FSQ3HS4Z24"
+  # With all three present electron-builder notarizes + staples automatically;
+  # no `notarize:` block is needed (and adding one is what triggered the warning).
+  notarize: true
 
 linux:
   icon: "assets/icons"
