@@ -158,8 +158,10 @@ workflows:
       app_store_connect: APS Key
     environment:
       groups:
-        - mac_signing            # CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
-        - prod_deploy            # PROD_SSH_KEY (optional — remove if not publishing)
+        # All mac signing + deploy vars live in one Codemagic UI group named
+        # "mantaui": CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID,
+        # APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID, and (optional) PROD_SSH_KEY.
+        - mantaui
       node: 22
       xcode: latest
     triggering:
