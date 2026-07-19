@@ -1,11 +1,33 @@
 # macOS beta distribution (outside the App Store)
 
-Ship the desktop app as a **signed + notarized DMG** hosted on `mantaui.com`,
-with electron-updater auto-updates. No App Store review. Testers double-click,
-no Gatekeeper warnings.
+Ship the desktop app as a **Developer ID-signed DMG** hosted on `mantaui.com`,
+with electron-updater auto-updates. No App Store review.
 
 Bundle id: **`com.antoinedc.mantaui`** (aligned with iOS; `electron-builder.yml`
 `appId` + `app.setAppUserModelId`).
+
+## Notarization: OFF for the beta
+
+`electron-builder.yml` has `mac.notarize: false`. The DMG is still
+**Developer ID-signed**, but not notarized — this skips Apple's notarization
+round-trip, which was adding 20-40 min of unpredictable queue latency per build.
+
+**Tester first-launch (one time per machine):** a signed-but-not-notarized app
+triggers a milder Gatekeeper prompt. Give testers this note:
+
+> 1. Open the DMG, drag **Manta UI** to Applications.
+> 2. In Applications, **right-click Manta UI → Open**, then click **Open** in
+>    the dialog. (Double-clicking the first time is blocked; right-click → Open
+>    is the override.)
+> 3. It launches normally from then on.
+>
+> If macOS still refuses, run once in Terminal:
+> `xattr -dr com.apple.quarantine "/Applications/Manta UI.app"`
+
+**To re-enable notarization for public distribution:** set `mac.notarize: true`
+in `electron-builder.yml` and make sure `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
+and `APPLE_TEAM_ID` are in the Codemagic `mantaui` env group. Then testers get a
+frictionless double-click with no warning.
 
 **Two ways to build.** Recommended: **Codemagic** (macOS runner, fully
 automated on a `mac-v*` tag — see below). Alternative: **locally on your Mac**

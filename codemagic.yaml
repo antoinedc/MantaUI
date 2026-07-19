@@ -212,9 +212,8 @@ workflows:
           # electron-vite build → electron-builder --mac. electron-builder:
           #   - signs with the Developer ID identity from the keychain prepared
           #     above (mac.identity: "Developer ID Application")
-          #   - notarizes via APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID
-          #     (notarize: true in electron-builder.yml)
-          #   - staples the ticket into the .dmg
+          #   - does NOT notarize (notarize:false in electron-builder.yml for the
+          #     beta — testers right-click → Open once; re-enable for public dist)
           # --publish never: emit latest-mac.yml but don't use electron-builder's
           # own uploader (we scp to the prod box in the next step).
           # CSC_IDENTITY_AUTO_DISCOVERY=true lets it find the keychain identity.
@@ -222,13 +221,18 @@ workflows:
           export CSC_IDENTITY_AUTO_DISCOVERY=true
           npm run build
           npx electron-builder --mac --publish never
-      - name: Verify notarization
+      - name: Verify signature
         script: |
+          # Notarization is OFF for the beta (electron-builder.yml notarize:false),
+          # so we only confirm the DMG is Developer ID-SIGNED. codesign --verify
+          # on the .app inside; spctl will say "rejected (unnotarized)" which is
+          # EXPECTED — testers right-click → Open once. Non-fatal.
           set -e
+          codesign --verify --deep --strict --verbose=2 "dist/desktop/mac/Manta UI.app" \
+            || codesign --verify --verbose=2 dist/desktop/mac*/*.app || true
           for dmg in dist/desktop/*.dmg; do
             echo "▸ $dmg"
-            spctl -a -vvv -t install "$dmg" 2>&1 | grep -i "notarized\|accepted" || true
-            xcrun stapler validate "$dmg" || echo "⚠ stapler validate failed for $dmg"
+            spctl -a -vvv -t install "$dmg" 2>&1 | grep -iE "developer id|signed|rejected|source" || true
           done
       - name: Publish to mantaui.com (optional)
         script: |
