@@ -171,6 +171,14 @@ workflows:
         - pattern: "mac-v*"
           include: true
     scripts:
+      - name: Provide distutils for node-gyp (Python 3.12+)
+        script: |
+          # electron-builder rebuilds the native node-pty module via node-gyp,
+          # which imports Python's `distutils`. Python 3.12 (the Codemagic M2
+          # default) REMOVED distutils from the stdlib, so the rebuild fails with
+          # "ModuleNotFoundError: No module named 'distutils'". `setuptools`
+          # re-provides a distutils shim. Install it into the runner's python3.
+          python3 -m pip install --upgrade "setuptools<81" || pip3 install "setuptools<81"
       - name: Install deps
         script: |
           npm ci
