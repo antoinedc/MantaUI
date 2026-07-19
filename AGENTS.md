@@ -1912,6 +1912,130 @@ Beta App Review of the first build.
 version; the auto-tag workflow keys off it. `CURRENT_PROJECT_VERSION` (build
 number) — Codemagic/ASC handle uniqueness. First shipped version: `1.0.1`.
 
+## Capability plugins + Mac executor (BET-183)
+
+Plugin system that lets the AI invoke capabilities that run EITHER on the box
+(`host:"box"`) OR on the connected Mac (`host:"mac"`). v1 ships one plugin:
+`ios.build` — compile the MantaUI iOS app + launch it in the iOS Simulator on
+the user's Mac, instead of burning Codemagic minutes. The generic spine
+(`src/server/capabilities.mjs` + REST + bus envelopes + sweeper) is shaped so
+**adding capability #2 touches only**: a new tool file under
+`docs/opencode-tools/`, a new entry in the executor's `HANDLERS` map. NO
+changes to the queue, REST surface, SSE wiring, or auth.
+
+**Read the full design first:** `docs/mantuani-plugins.md` (v2 — Layer 3 +
+constants table + pinned mechanics). Constants live there and there only.
+
+### Generic invariant — `{capability, input, host}`
+
+The transport layer is capability-agnostic. Job shape, REST body, SSE event,
+and executor dispatch all speak `{capability: string, input: unknown, host:
+"mac"|"box"}`. The only iOS-specific file allowed is
+`src/main/handlers/iosBuild.ts` (plus the literal `"ios.build"` /
+`host:"mac"` in the tool file). If you find yourself special-casing
+`ios.build` anywhere else, you are doing it wrong — the point of the plugin
+shape is that handler #2 doesn't need any new plumbing.
+
+### The plugin seam — `HANDLERS` map
+
+`src/main/capExecutor.ts` exports one const:
+
+```ts
+const HANDLERS: Record<string, CapHandler> = {
+  "ios.build": iosBuildHandler,
+};
+```
+
+Adding capability #2 = `import` the new handler + add an entry. That's the
+entire diff in this file. No dispatch change, no queue change, no auth
+change.
+
+### Catch-up / serial / batched-log executor behaviors
+
+`startCapExecutor` (in `src/main/capExecutor.ts`) wraps everything in three
+behaviors you must NOT relax:
+
+- **Catch-up.** SSE has no replay. On start AND every reconnect
+  (`onConnect` from `busConsumer`), the executor `GET
+  /api/cap?host=mac&status=queued` and enqueues every returned job. Without
+  this, a job created while the Mac was offline/asleep sits `queued`
+  forever — the Mac never sees it. Cross-delivery dedup: the same job WILL
+  arrive via both SSE and catch-up; an in-memory `Set<string>` of
+  ever-enqueued ids drops the duplicate.
+- **Serial.** A single promise chain processes the FIFO queue. One job at a
+  time. Two parallel xcodebuilds would corrupt the shared
+  `~/Library/Caches/MantaUI/DerivedData` (pinned path — see iosBuild
+  section). The chain catches so a thrown handler doesn't poison the
+  stream.
+- **Batched logs.** `ctx.log` appends to a per-job string buffer. A
+  `setInterval(LOG_FLUSH_MS)` (unref'd) flushes the buffer as ONE
+  `POST /api/cap/:id/log {chunk}` when non-empty. Final flush runs BEFORE
+  the done POST. Never one POST per line — xcodebuild emits thousands. Failed
+  log POSTs are dropped (lost log chunk must not crash a running build);
+  failed `/done` POSTs retry once after 5s, then drop (the server sweep
+  will time out the job anyway).
+
+### Sweep guarantees
+
+The server sweep (`src/server/capabilities.mjs` `sweepCapJobs`) handles the
+edge cases the executor can't:
+
+- `running` > 30 min → failed (Mac executor lost?) + notify originating session.
+- `queued` > 24h → failed (no executor picked it up) + notify.
+- Terminal retention: drop jobs older than 7 days, cap at 50 (oldest first).
+  Silent (no publish).
+
+The shared `markTerminal` helper is the single terminal-transition code path
+— used by both `completeJob` and the sweep, so notify + publish +
+`finishedAt` stamping lives in exactly one place.
+
+### `secret()` is NOT in v1
+
+The v1 spec's `CapCtx.secret(key)` was unimplementable: the secrets store
+materializes values to 0600 files ON THE BOX, and a box file path is useless
+to a Mac process. v1 has no capability that needs a secret (simulator
+builds are unsigned), so `secret()` is deliberately absent — do not add a
+stub. Future design (when a capability needs it): an authed
+`POST /api/secrets/provide-value` returns the VALUE over HTTPS and the Mac
+writes its own 0600 tmpfile, returning that local path. Out of scope now.
+
+### macOS PATH gotcha (Electron GUI)
+
+GUI-launched Electron apps do NOT inherit the user's shell PATH.
+`Homebrew`/`nvm`-installed `npm`/`npx`/`pod` are invisible to a spawned
+child and `exec` fails ENOENT even though the same command works in
+Terminal. `capExecutor`'s `exec` builds its env as
+`{...process.env, PATH: "/opt/homebrew/bin:/usr/local/bin:" + (process.env.PATH ?? "")}`
+(Apple Silicon + Intel Homebrew). The ENOENT rejection message tells the
+user to install via Homebrew — never silently swallow it.
+
+### busConsumer consolidation (one SSE code path)
+
+`src/main/busConsumer.ts` is the ONLY SSE consumer in `src/main/`. Both
+`desktopNotify` (filter `kind === "desktopNotify"`) and `capExecutor`
+(filter `kind === "capJob"` + catch-up via `onConnect`) build on it. No
+module-level singletons — each `createBusConsumer` call owns its own
+state. `desktopNotify.ts` is now ~40 lines (was ~150); `capExecutor.ts`
+adds zero SSE plumbing of its own.
+
+### Settings toggle (BET-185)
+
+Desktop-only. Settings → Files → "Capability executor" → one toggle +
+`iOS build repo path` + `iOS simulator name` text fields. Default OFF.
+Toggling takes effect after restarting MantaUI (the executor gates itself
+at start time — see `startCapExecutor`'s top-of-function enabled check).
+The helper text carries the trust warning: "Allows the AI to run build
+commands on this Mac" — same spirit as `allowAgentPush`. `MobileSettings.tsx`
+is intentionally untouched.
+
+### Verified by inspection (re-check before shipping capability #2)
+
+- The ONLY iOS-specific file in `src/main/` is `handlers/iosBuild.ts`.
+- `HANDLERS` map is the only dispatch — capExecutor's queue / REST / SSE
+  code paths have zero `ios`-specific branches.
+- Adding capability #2 = one tool file + one `HANDLERS` entry. No changes
+  elsewhere.
+
 ## Testing
 
 Two separate test suites — both run via `npm test`:

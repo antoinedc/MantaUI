@@ -14,108 +14,14 @@
 // here — the renderer only adds the final "am I literally viewing this session
 // right now?" suppression (it knows its focused window + active session).
 //
-// We deliberately ignore every other bus `kind` (opencode firehose, status,
-// etc.) — the desktop already gets opencode events from its own :4096 stream;
-// re-consuming them here would double everything.
+// The SSE plumbing (connect / reconnect / frame-parse) lives in
+// src/main/busConsumer.ts — shared with capExecutor. This file is now just a
+// one-kind filter: deliver `desktopNotify` payloads, ignore everything else.
 
-import { request } from "node:http";
-import type { IncomingMessage } from "node:http";
+import { createBusConsumer, type BusConsumer } from "./busConsumer.js";
 import type { AppConfig, DesktopNotifyPayload } from "../shared/types.js";
 
-let getConfig: (() => AppConfig) | null = null;
-let deliver: ((payload: DesktopNotifyPayload) => void) | null = null;
-let started = false;
-let stopped = false;
-let current: IncomingMessage | null = null;
-let reconnectTimer: NodeJS.Timeout | null = null;
-
-const RECONNECT_MS = 3000;
-
-function scheduleReconnect(): void {
-  if (stopped || reconnectTimer) return;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connect();
-  }, RECONNECT_MS);
-  reconnectTimer.unref?.();
-}
-
-function handleFrame(raw: string): void {
-  // SSE frame: one or more `data: ...` lines per event (here always one).
-  const line = raw.split("\n").find((l) => l.startsWith("data:"));
-  if (!line) return;
-  const json = line.slice(5).trim();
-  if (!json) return;
-  let envelope: { kind?: string; payload?: DesktopNotifyPayload };
-  try {
-    envelope = JSON.parse(json);
-  } catch {
-    return;
-  }
-  if (envelope?.kind !== "desktopNotify" || !envelope.payload) return;
-  try {
-    deliver?.(envelope.payload);
-  } catch {
-    /* renderer gone / window closed — ignore */
-  }
-}
-
-function connect(): void {
-  if (stopped) return;
-  const cfg = getConfig?.();
-  if (!cfg || !cfg.serverUrl) {
-    scheduleReconnect();
-    return;
-  }
-  // Open the long-lived SSE stream directly to the server.
-  const serverUrl = cfg.serverUrl.replace(/\/+$/, "");
-  const url = new URL("/events", serverUrl);
-  const headers: Record<string, string> = {
-    accept: "text/event-stream",
-  };
-  if (cfg.boxToken) {
-    headers["authorization"] = `Bearer ${cfg.boxToken}`;
-  }
-  const req = request(
-    {
-      hostname: url.hostname,
-      port: url.port || (url.protocol === "https:" ? 443 : 80),
-      path: url.pathname + url.search,
-      method: "GET",
-      headers,
-    },
-    (res) => {
-      if (res.statusCode !== 200) {
-        res.resume();
-        scheduleReconnect();
-        return;
-      }
-      current = res;
-      res.setEncoding("utf-8");
-      let buf = "";
-      res.on("data", (chunk: string) => {
-        buf += chunk;
-        // SSE events are separated by a blank line.
-        let idx: number;
-        while ((idx = buf.indexOf("\n\n")) !== -1) {
-          const frame = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          handleFrame(frame);
-        }
-      });
-      res.on("end", () => {
-        current = null;
-        scheduleReconnect();
-      });
-      res.on("error", () => {
-        current = null;
-        scheduleReconnect();
-      });
-    },
-  );
-  req.on("error", () => scheduleReconnect());
-  req.end();
-}
+let consumer: BusConsumer | null = null;
 
 /**
  * Start relaying bui-server desktop-notification directives to the renderer.
@@ -127,23 +33,21 @@ export function startDesktopNotifications(
   configGetter: () => AppConfig,
   onPayload: (payload: DesktopNotifyPayload) => void,
 ): void {
-  if (started) return;
-  started = true;
-  stopped = false;
-  getConfig = configGetter;
-  deliver = onPayload;
-  connect();
+  if (consumer) return;
+  consumer = createBusConsumer(
+    configGetter,
+    (env) => {
+      if (env.kind !== "desktopNotify" || !env.payload) return;
+      try {
+        onPayload(env.payload as DesktopNotifyPayload);
+      } catch {
+        /* renderer gone / window closed — ignore */
+      }
+    },
+  );
 }
 
 export function stopDesktopNotifications(): void {
-  stopped = true;
-  started = false;
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  reconnectTimer = null;
-  try {
-    current?.destroy();
-  } catch {
-    /* already gone */
-  }
-  current = null;
+  consumer?.stop();
+  consumer = null;
 }
