@@ -117,6 +117,23 @@ export type AppConfig = {
   // classifier in chatUtils.ts can't match a command-mode utterance. Default
   // "llama-3.1-8b-instant" — JSON-mode capable, ~$0.0001/call, ~300ms.
   voiceCommandModel?: string;
+  // ----- Capability executor (BET-183 / BET-185) -----
+  // Master switch for the Mac-side capability executor (capExecutor.ts). When
+  // true, this Mac subscribes to bui-server's SSE bus and runs MantaUI plugin
+  // handlers (e.g. ios.build). Default false (OFF) — toggling takes effect on
+  // next app launch. Trust boundary: handlers run arbitrary shell commands
+  // scoped to the allowlist in capExecutor's HANDLERS map.
+  capExecutorEnabled?: boolean;
+  // Absolute path to the MantaUI git clone used by the ios.build handler.
+  // Default `~/projects/better-ui`. Leading `~` is expanded against
+  // os.homedir() in the handler. Must be a clone that tracks origin/main —
+  // the tool description carries the warning that ios.build builds the
+  // Mac's clone (tracking main), NOT this session's branch.
+  iosBuildRepoPath?: string;
+  // Exact simulator device name to target for ios.build (e.g. "iPhone 15").
+  // Absent/empty = auto-pick (highest iOS runtime + iPhone-prefixed name).
+  // See src/main/handlers/iosBuild.ts `pickSimulator` for the algorithm.
+  iosSimulatorName?: string;
 };
 
 // ----- Live tmux state -----

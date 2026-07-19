@@ -131,6 +131,14 @@ type State = {
   groqApiKey: string;
   voiceTranscriptionModel: string;
   voiceCommandModel: string;
+  // Capability executor (BET-183 / BET-185). When true, this Mac runs plugin
+  // handlers (e.g. ios.build) for jobs the AI queues. Mirrored from
+  // AppConfig.capExecutorEnabled / iosBuildRepoPath / iosSimulatorName.
+  // Mirroring is read-only here — toggling takes effect on next app launch
+  // (the executor gates itself at start time).
+  capExecutorEnabled: boolean;
+  iosBuildRepoPath: string;
+  iosSimulatorName: string;
   projects: Project[];
   activeProjectName: string | null;
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
@@ -273,6 +281,9 @@ export const useStore = create<State>((set, get) => ({
   groqApiKey: "",
   voiceTranscriptionModel: "",
   voiceCommandModel: "",
+  capExecutorEnabled: false,
+  iosBuildRepoPath: "",
+  iosSimulatorName: "",
   projects: [],
   activeProjectName: null,
   activeWindowByProject: {},
@@ -386,6 +397,9 @@ export const useStore = create<State>((set, get) => ({
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       voiceCommandModel: c.voiceCommandModel ?? "",
+      capExecutorEnabled: c.capExecutorEnabled ?? false,
+      iosBuildRepoPath: c.iosBuildRepoPath ?? "",
+      iosSimulatorName: c.iosSimulatorName ?? "",
     }),
 
   applyPairing: (p) =>

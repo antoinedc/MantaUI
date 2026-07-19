@@ -14,6 +14,10 @@ import {
   startDesktopNotifications,
   stopDesktopNotifications,
 } from "./desktopNotify.js";
+import {
+  startCapExecutor,
+  stopCapExecutor,
+} from "./capExecutor.js";
 import { checkForUpdates } from "./autoUpdate.js";
 import { IPC, type AppConfig, type AuthClaimInput } from "../shared/types.js";
 
@@ -191,6 +195,10 @@ app.whenReady().then(() => {
         }
       },
     );
+    // Capability executor (BET-183 / BET-185): when enabled in Settings, this
+    // Mac subscribes to bui-server's bus and runs plugin handlers (e.g.
+    // ios.build). startCapExecutor is a no-op when capExecutorEnabled is off.
+    startCapExecutor(() => config);
     // Defer update check until after the renderer is ready (avoids blocking startup).
     // electron-updater skips the check in dev mode (unpacked app).
     setTimeout(() => checkForUpdates(), 5000);
@@ -209,6 +217,7 @@ app.on("before-quit", () => {
   stopScreenshotDetector();
   stopDesktopPresence();
   stopDesktopNotifications();
+  stopCapExecutor();
 });
 
 function registerHandlers(): void {

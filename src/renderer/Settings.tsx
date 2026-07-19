@@ -32,6 +32,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
     groqApiKey,
     voiceTranscriptionModel,
     voiceCommandModel,
+    capExecutorEnabled,
+    iosBuildRepoPath,
+    iosSimulatorName,
     launcherFlags,
     refresh,
   } = useStore();
@@ -57,6 +60,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
   // General fields (General tab)
   const [autoRename, setAutoRename] = useState(autoRenameSessions);
+
+  // Capability executor fields (Files tab — co-located with allowAgentPush
+  // since both gate what the AI can do on this Mac).
+  const [capExecutorOn, setCapExecutorOn] = useState(capExecutorEnabled);
+  const [iosRepoPath, setIosRepoPath] = useState(iosBuildRepoPath);
+  const [iosSimName, setIosSimName] = useState(iosSimulatorName);
 
   // Voice fields (Voice tab)
   const [groqKey, setGroqKey] = useState(groqApiKey);
@@ -88,8 +97,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setGroqKey(groqApiKey);
     setVoiceTrModel(voiceTranscriptionModel);
     setVoiceCmdModel(voiceCommandModel);
+    setCapExecutorOn(capExecutorEnabled);
+    setIosRepoPath(iosBuildRepoPath);
+    setIosSimName(iosSimulatorName);
     setLauncherFlagValues(launcherFlags ?? {});
-  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags]);
+  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, capExecutorEnabled, iosBuildRepoPath, iosSimulatorName, launcherFlags]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -135,6 +147,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
         groqApiKey: groqKey.trim(),
         voiceTranscriptionModel: voiceTrModel.trim(),
         voiceCommandModel: voiceCmdModel.trim(),
+        capExecutorEnabled: capExecutorOn,
+        iosBuildRepoPath: iosRepoPath.trim(),
+        iosSimulatorName: iosSimName.trim(),
         launcherFlags: launcherFlagValues,
       });
     } catch (e) {
@@ -644,6 +659,70 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     />
                     <div className="text-xs text-text-faint">
                       Destination for AI-sent files. Absolute path; leave empty for your OS Downloads folder.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Capability executor (BET-183 / BET-185) — co-located with
+                  allowAgentPush because both gate what the AI can do on this
+                  Mac. The toggle is OFF by default; changing it takes effect
+                  after restarting MantaUI (the executor gates itself at start
+                  time — see src/main/capExecutor.ts). */}
+              <div className="border-t border-border pt-6">
+                <h3 className="text-base font-semibold mb-4">Capability executor</h3>
+                <div className="space-y-3">
+                  <label className="flex items-start gap-3 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={capExecutorOn}
+                      onChange={(e) => setCapExecutorOn(e.target.checked)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      Run plugin commands on this Mac
+                      <span className="block text-xs text-text-faint mt-1">
+                        Allows the AI to run build commands on this Mac (e.g.
+                        <code className="text-text-muted"> ios_build</code>) so you
+                        don&apos;t burn Codemagic minutes. Off by default — takes
+                        effect after restarting MantaUI.
+                      </span>
+                    </span>
+                  </label>
+                  <div className="space-y-1">
+                    <label className="block text-xs uppercase tracking-wider text-text-muted">
+                      iOS build repo path
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="~/projects/better-ui (default)"
+                      value={iosRepoPath}
+                      onChange={(e) => setIosRepoPath(e.target.value)}
+                      className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+                    />
+                    <div className="text-xs text-text-faint">
+                      Absolute path to the MantaUI clone used by{" "}
+                      <code className="text-text-muted">ios_build</code>. Must
+                      track <code className="text-text-muted">origin/main</code>{" "}
+                      — the tool builds the Mac clone on main, not your session
+                      branch.
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-xs uppercase tracking-wider text-text-muted">
+                      iOS simulator name
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="(auto-pick: highest iOS runtime + iPhone)"
+                      value={iosSimName}
+                      onChange={(e) => setIosSimName(e.target.value)}
+                      className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+                    />
+                    <div className="text-xs text-text-faint">
+                      Exact simulator device name to target (e.g.{" "}
+                      <code className="text-text-muted">iPhone 15</code>). Leave
+                      empty to auto-pick.
                     </div>
                   </div>
                 </div>
