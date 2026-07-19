@@ -292,7 +292,16 @@ function fakeBox(reply) {
       } catch {
         body = {};
       }
-      return reply(boxId, body.code);
+      // Mirror the REAL box's /auth/claim contract: the box reads
+      // `pairing_code` (src/server/index.mjs), coalescing `code` as the relay
+      // spelling. Reading only `body.code` here (the old test) hid a real
+      // field-name mismatch — the relay forwards `{ code }` but the box read
+      // only `pairing_code`, so every QR/relay pairing failed 401 in
+      // production while this test stayed green. Read the box's field so the
+      // test faithfully rejects a relay that forwards a spelling the box can't
+      // understand.
+      const forwardedCode = body.pairing_code ?? body.code;
+      return reply(boxId, forwardedCode);
     },
   };
 }

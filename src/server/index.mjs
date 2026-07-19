@@ -571,7 +571,14 @@ const server = createServer(async (req, res) => {
       }
       if (req.method === "POST" && path === "/auth/claim") {
         const body = await readJsonBody(req);
-        const result = authEngine.claim({ pairing_code: body?.pairing_code });
+        // Accept BOTH field spellings: direct-HTTPS clients POST
+        // { pairing_code } (claimAgainst), but the relay forwards a phone's
+        // QR/deep-link claim as { code } (src/relay/server.mjs routePair). The
+        // box read only `pairing_code`, so every relay-routed (QR) pairing was
+        // rejected with the box seeing `pairing_code: undefined` → the relay
+        // surfaced 401 claim_rejected. Coalesce so both paths work.
+        const pairing_code = body?.pairing_code ?? body?.code;
+        const result = authEngine.claim({ pairing_code });
         if (!result.ok) {
           respondJson(res, result.status ?? 400, { error: result.error });
           return;

@@ -181,18 +181,41 @@ export async function submitPairingCode(code: string): Promise<ClaimResult> {
  * `authClaim` channel (base = the caller-supplied serverUrl). Trailing slashes
  * on `base` are trimmed so "http://box/" and "http://box" behave identically.
  */
+/**
+ * fetch with a hard timeout via AbortController. A pairing claim must NEVER
+ * hang forever: on the iOS Capacitor WKWebView a stalled connection (slow
+ * relay, captive-portal Wi-Fi, DNS black-hole) otherwise leaves the promise
+ * pending and the UI stuck on "connecting…". On timeout the AbortController
+ * fires, `fetch` rejects, and the caller's catch maps it to a network failure
+ * the user can retry — instead of an infinite spinner. 15s is generous for a
+ * ~100ms relay round-trip while still bounding the worst case.
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 15000,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function claimAgainst(base: string, code: string): Promise<ClaimResult> {
   const url = `${base.replace(/\/+$/, "")}/auth/claim`;
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetchWithTimeout(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ pairing_code: code }),
     });
   } catch {
-    // fetch rejects (offline / DNS / TLS / bad URL) — no HTTP response reached
-    // us.
+    // fetch rejects (offline / DNS / TLS / bad URL / timeout) — no HTTP
+    // response reached us.
     return networkFailure();
   }
   let body: unknown = null;
@@ -222,18 +245,26 @@ async function claimAgainst(base: string, code: string): Promise<ClaimResult> {
  * sends a junk value to the relay, same shape-gate as the desktop branch.
  */
 async function claimRelay(boxId: string, code: string): Promise<ClaimResult> {
-  if (!isValidBoxToken(boxId)) return networkFailure();
+  if (!isValidBoxToken(boxId)) {
+    console.warn("[deeplink] claimRelay: invalid boxId shape:", boxId);
+    return networkFailure();
+  }
   const url = `https://relay.mantaui.com/pair`;
+  console.log("[deeplink] claimRelay POST", url, "box_id:", boxId);
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetchWithTimeout(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ box_id: boxId, code }),
     });
-  } catch {
+  } catch (e) {
+    // Includes the 15s timeout abort — a stalled relay connection resolves to
+    // a network failure (retryable) instead of an infinite "connecting…".
+    console.warn("[deeplink] claimRelay fetch failed/timed out:", e);
     return networkFailure();
   }
+  console.log("[deeplink] claimRelay response status:", res.status);
   let body: unknown = null;
   try {
     body = await res.json();
@@ -241,6 +272,7 @@ async function claimRelay(boxId: string, code: string): Promise<ClaimResult> {
     /* non-JSON body (proxy/HTML error page) — leave null; classify by status */
   }
   const result = classifyRelayClaimResult(res.status, body);
+  console.log("[deeplink] claimRelay classified:", result.ok ? "ok" : `fail(${(result as { kind?: string }).kind})`);
   if (result.ok) saveClientToken(result.boxToken);
   return result;
 }
