@@ -56,6 +56,29 @@ Run the `npm` commands below from `mobile/`.
 `Info.plist` already has `NSAllowsArbitraryLoads` so the app can reach
 HTTP (non-TLS) bui servers on a LAN.
 
+### Bumping the iOS build / version per release
+
+The Xcode project tracks **App Store Connect**-visible version numbers as
+build settings on the App target — `MARKETING_VERSION` (the
+`CFBundleShortVersionString` shown to users, e.g. `1.2.3`) and
+`CURRENT_PROJECT_VERSION` (the internal build number, e.g. `42`,
+monotonically increasing per upload). Xcode Cloud bumps these **by hand**
+per release — there is no CI automation for them in this phase.
+
+To bump before a release:
+
+1. Open `mobile/ios/App/App.xcodeproj` in Xcode.
+2. Select the `App` target → **Build Settings** → search for "version".
+3. Update `Marketing Version` (`MARKETING_VERSION`) for the user-visible
+   release, `Current Project Version` (`CURRENT_PROJECT_VERSION`) for the
+   build number. Xcode auto-increments the latter if you leave "Versioning
+   System" on "Apple Generic".
+4. Commit the resulting `project.pbxproj` change alongside the
+   `package.json` version bump — they should move together so a deployed
+   build's `MARKETING_VERSION` matches the bui-server version it ships
+   with. The mobile `MobileSettings` → `Server vX.Y.Z` line is the
+   foundation for surfacing skew between the two; gating lands later.
+
 App Store / TestFlight description:
 
 > bui connects to your own remote Linux server to display tmux terminal

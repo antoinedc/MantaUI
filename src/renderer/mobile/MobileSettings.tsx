@@ -87,6 +87,10 @@ export function MobileSettings({ onClose }: Props) {
   const [pushOn, setPushOn] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [pushErr, setPushErr] = useState<string | null>(null);
+  // Server version (BET-180) — fetched once on mount via the
+  // `server:version` RPC channel. Null until the call resolves; a failure
+  // stays null (display falls back to "?", non-fatal).
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
   useEffect(() => {
     hasActiveSubscription().then(setPushOn).catch(() => setPushOn(false));
   }, []);
@@ -171,6 +175,16 @@ export function MobileSettings({ onClose }: Props) {
     window.api
       .launchersList()
       .then((list) => setAvailableLaunchers(list))
+      .catch(() => {});
+  }, []);
+
+  // Server version (BET-180) — fetch once on mount so the URL section can
+  // render `Server vX.Y.Z` below its hint. In-process via the
+  // `server:version` RPC channel; failure stays null → "?" placeholder.
+  useEffect(() => {
+    window.api
+      .getServerVersion()
+      .then(({ version }) => setServerVersion(version))
       .catch(() => {});
   }, []);
 
@@ -269,6 +283,12 @@ export function MobileSettings({ onClose }: Props) {
             if your Manta server is on a different host (e.g.{" "}
             <code className="text-text-muted">https://bui.example.com</code>).
             Changes take effect after Save.
+          </div>
+          {/* Server version (BET-180) — display only. Lets a user confirm
+              the renderer is talking to the box version they think (no
+              skew enforcement yet). */}
+          <div className="text-xs text-text-faint">
+            Server v{serverVersion ?? "?"}
           </div>
         </section>
 

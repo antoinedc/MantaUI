@@ -486,6 +486,14 @@ export const IPC = {
   autoUpdateInstall: "autoUpdate:install",            // renderer → main: trigger restart+install
   autoUpdateAvailable: "autoUpdate:available",        // main → renderer: an update is available
   autoUpdateDownloaded: "autoUpdate:downloaded",      // main → renderer: update is ready to install
+
+  // ---- server version (BET-180) ----
+  // Returns the bui-server's package.json version (read once at server startup,
+  // served by GET /api/version for non-renderer clients AND by this in-process
+  // RPC channel for the renderer — single source of truth on the box, never
+  // drifts between surfaces). Display-only foundation for client/server skew
+  // detection; gating / banner / force-update logic lands in a later phase.
+  getServerVersion: "server:version",                 // () → { version: string }
 } as const;
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
