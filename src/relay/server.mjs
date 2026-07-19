@@ -65,6 +65,15 @@ const BOX_UPGRADE_PATH = "/box";
 // rather than silently misrouted.
 const DEVICE_PTY_UPGRADE_RE = /^\/box\/([^/]+)\/pty$/;
 
+// The device-facing live-events WS upgrade path — /box/:id/events. The mobile
+// client opens a WebSocket here for the live opencode/status event stream.
+// Before this existed the relay refused the upgrade (fell through to 404), so a
+// relay-connected phone received NO live events and only saw new messages after
+// a manual transcript refetch (navigating away and back). Bridged to the box's
+// own /events WS via the STREAM_* mux with stream="events" (see the box agent's
+// handleStreamOpenEvents). Narrow (no wildcards) like the /pty route.
+const DEVICE_EVENTS_UPGRADE_RE = /^\/box\/([^/]+)\/events$/;
+
 // Cap on an IAP/push + /pair request body so an unbounded POST can't exhaust
 // memory before the phone is even authenticated. 256 KiB is generous for a JWS
 // + token registration; larger bodies are refused with 413.
@@ -268,6 +277,21 @@ export function createRelayService(opts = {}) {
     if (ptyMatch) {
       const boxId = ptyMatch[1];
       handlePtyUpgrade(req, socket, head, {
+        boxId,
+        url,
+        authenticatePhone,
+        store,
+        hasActiveSubscription,
+        boxLeg,
+        ptyWss,
+      });
+      return;
+    }
+
+    const eventsMatch = DEVICE_EVENTS_UPGRADE_RE.exec(pathname);
+    if (eventsMatch) {
+      const boxId = eventsMatch[1];
+      handleEventsUpgrade(req, socket, head, {
         boxId,
         url,
         authenticatePhone,
@@ -803,6 +827,150 @@ export function bridgeDevicePty({ ws, boxId, subpath, boxLeg, warn = console.war
     }
   });
 
+  ws.on("close", () => {
+    deviceClosed = true;
+    if (!boxClosed) {
+      try { streamHandle?.abort("device closed"); } catch { /* ignore */ }
+      boxClosed = true;
+    }
+  });
+  ws.on("error", () => {
+    // ws fires 'error' then 'close'; cleanup runs in close.
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Device live-events WS — /box/:id/events upgrade
+//
+// The mobile client opens a WebSocket to /box/:id/events for the live
+// opencode/status event stream. The relay bridges it to the box's own /events
+// WS over the STREAM_* mux (stream="events"): the box agent's
+// handleStreamOpenEvents opens ws://127.0.0.1:8787/events locally and forwards
+// each JSON frame as STREAM_DATA. Unlike /pty this is server→device only —
+// there is no device→box data path (the client never sends on the events
+// socket), so we ignore any inbound device frames and just tear down on close.
+//
+// Auth/ownership/subscription reuse routePtyUpgrade (path-agnostic): /events is
+// a GATED subpath (src/relay/api.mjs GATED_PREFIXES) exactly like /pty, so the
+// same auth → ownership → subscription checks apply.
+// ---------------------------------------------------------------------------
+
+/**
+ * Drive the /box/:id/events upgrade: authenticate/authorize (reusing
+ * routePtyUpgrade), then either reject the socket or open the events bridge.
+ * `ptyWss` (the shared device-facing noServer WebSocketServer) is reused to
+ * accept the upgrade — it is not pty-specific, just the device WS acceptor.
+ */
+export function handleEventsUpgrade(
+  req,
+  socket,
+  head,
+  { boxId, url, authenticatePhone, store, hasActiveSubscription, boxLeg, ptyWss, warn = console.warn } = {},
+) {
+  if (!ptyWss || typeof ptyWss.handleUpgrade !== "function") {
+    socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+  const decision = routePtyUpgrade({
+    url,
+    boxId,
+    headers: req.headers || {},
+    authenticatePhone,
+    store,
+    hasActiveSubscription,
+  });
+  if (decision.kind === "reject") {
+    socket.write(`HTTP/1.1 ${decision.status} ${reasonText(decision.status)}\r\nConnection: close\r\n\r\n`);
+    socket.destroy();
+    return;
+  }
+
+  ptyWss.handleUpgrade(req, socket, head, (ws) => {
+    ptyWss.emit("connection", ws, req);
+    bridgeDeviceEvents({
+      ws,
+      boxId: decision.boxId,
+      subpath: decision.subpath,
+      boxLeg,
+      warn,
+    });
+  });
+}
+
+/**
+ * Server→device events bridge. Opens a tunnel stream to the box's /events WS
+ * (stream="events") and forwards each JSON text frame to the device WS. The
+ * device→box direction is intentionally dropped (the events socket is
+ * one-directional). Closing either side tears down the other so a gone client
+ * stops the box's stream and a box drop ends the device WS (its reconnect
+ * controller reopens).
+ */
+export function bridgeDeviceEvents({ ws, boxId, subpath, boxLeg, warn = console.warn }) {
+  let deviceClosed = false;
+  let boxClosed = false;
+  let streamHandle = null;
+
+  function closeBoth(reason) {
+    if (deviceClosed && boxClosed) return;
+    if (!deviceClosed) {
+      deviceClosed = true;
+      try { ws.close(1000, reason || "closed"); } catch { /* already closing */ }
+    }
+    if (!boxClosed) {
+      boxClosed = true;
+      try { streamHandle?.abort(reason); } catch { /* ignore */ }
+    }
+  }
+
+  const streamCallbacks = {
+    onHead: (_h) => {
+      // Device WS is its own head — nothing to write.
+    },
+    onData: (data, _frame) => {
+      if (deviceClosed) return;
+      try {
+        // box→device: JSON text frame ({kind,payload} / heartbeat) forwarded
+        // verbatim. The device client does JSON.parse(data) — identical demux
+        // to the direct /events WS path.
+        ws.send(typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
+      } catch (err) {
+        warn(`[relay-events] device send failed: ${String(err?.message || err)}`);
+        closeBoth("device send failed");
+      }
+    },
+    onEnd: () => {
+      boxClosed = true;
+      closeBoth("box ended");
+    },
+    onAbort: (reason) => {
+      boxClosed = true;
+      closeBoth(String(reason || "aborted"));
+    },
+  };
+
+  try {
+    streamHandle = boxLeg.streamRequest(
+      boxId,
+      { method: "GET", path: `/events${subpath}`, headers: {}, body: undefined },
+      streamCallbacks,
+      // "events" discriminator → the box agent routes STREAM_OPEN to
+      // handleStreamOpenEvents (local /events WS) rather than the SSE pump.
+      { streamId: "events" },
+    );
+    if (!streamHandle || streamHandle.streamId === -1) {
+      try { ws.close(1014, "box_offline"); } catch { /* ignore */ }
+      return;
+    }
+  } catch (err) {
+    warn(`[relay-events] streamRequest failed: ${String(err?.message || err)}`);
+    try { ws.close(1014, "stream_open_failed"); } catch { /* ignore */ }
+    return;
+  }
+
+  // Device → box: the events socket carries nothing device→box. Ignore any
+  // inbound frames (defensive — the client never sends here), but tear down on
+  // close so the box stops streaming to a disconnected phone.
   ws.on("close", () => {
     deviceClosed = true;
     if (!boxClosed) {

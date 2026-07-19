@@ -16,7 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
 
-import { createRelayService, routePtyUpgrade, handlePtyUpgrade, bridgeDevicePty } from "./server.mjs";
+import { createRelayService, routePtyUpgrade, handlePtyUpgrade, bridgeDevicePty, handleEventsUpgrade, bridgeDeviceEvents } from "./server.mjs";
 import { openStore, hashToken } from "./store.mjs";
 import { encodeFrame, decodeFrame, FRAME_TYPES } from "./protocol.mjs";
 import { createDefaultPhoneAuth, createDefaultSubscriptionCheck } from "./api.mjs";
@@ -884,6 +884,79 @@ test("bridge: device WS message → STREAM_DATA with numeric id lands on the box
 
   // Tear down cleanly.
   deviceWs.close();
+  boxWs.close();
+});
+
+// ---------------------------------------------------------------------------
+// /box/:id/events device upgrade (live event stream over the relay)
+// ---------------------------------------------------------------------------
+
+test("upgrade routing: /box/<id>/events with valid auth but no subscription → 402", async (t) => {
+  const { store, wsBase } = await makeService(t);
+  store.upsertBox(BOX_A);
+  store.bindBox(BOX_A, ACCT_1);
+  const ws = new WebSocket(`${wsBase}/box/${BOX_A}/events?token=${ACCT_1}`);
+  await expectUpgradeStatus(ws, 402, "events no subscription");
+  ws.terminate();
+});
+
+test("upgrade routing: /box/<id>/events without auth → 401 close", async (t) => {
+  const { store, wsBase } = await makeService(t);
+  store.upsertBox(BOX_A);
+  store.bindBox(BOX_A, ACCT_1);
+  const ws = new WebSocket(`${wsBase}/box/${BOX_A}/events`);
+  await expectUpgradeStatus(ws, 401, "events no auth");
+  ws.terminate();
+});
+
+test("bridge: /box/<id>/events opens STREAM_OPEN stream='events' and forwards a box→device JSON frame verbatim", async (t) => {
+  const { svc, store, wsBase } = await makeService(t);
+  store.upsertBox(BOX_A);
+  store.bindBox(BOX_A, ACCT_1);
+  bindReceipt(store, {
+    boxId: BOX_A,
+    transaction: { originalTransactionId: "test-1", productId: "sub.monthly", expiresAt: null },
+    raw: "jws",
+  }, { now: () => Date.now() });
+
+  const boxWs = new WebSocket(`${wsBase}/box?box_id=${BOX_A}&token=${TOKEN_A}`);
+  await once(boxWs, "open");
+  await waitFor(() => svc.boxLeg.routing.has(BOX_A));
+
+  // The box leg auto-answers the STREAM_OPEN request form (response-form
+  // STREAM_OPEN) so the device bridge's onHead fires, then pushes ONE
+  // STREAM_DATA carrying a JSON event frame — exactly what the box's
+  // attachEventsWs would emit. The relay must forward that verbatim to the
+  // device WS (no SSE wrapping, no base64) so the client's JSON.parse works.
+  const sentFrames = [];
+  const eventPayload = JSON.stringify({ kind: "opencode", payload: { type: "session.idle" } });
+  boxWs.on("message", (data) => {
+    const f = decodeFrame(data);
+    if (f) sentFrames.push(f);
+    if (f?.type === FRAME_TYPES.STREAM_OPEN && f.stream === "events") {
+      boxWs.send(encodeFrame({ type: FRAME_TYPES.STREAM_OPEN, id: f.id, stream: f.stream, status: 101, headers: {} }));
+      boxWs.send(encodeFrame({ type: FRAME_TYPES.STREAM_DATA, id: f.id, stream: f.stream, data: eventPayload }));
+    }
+  });
+
+  const deviceWs = new WebSocket(`${wsBase}/box/${BOX_A}/events?token=${ACCT_1}`);
+  await once(deviceWs, "open");
+
+  // The device must receive the JSON event frame verbatim (raw string the
+  // client will JSON.parse) — proves the events wire format survives the relay.
+  const [received] = await once(deviceWs, "message");
+  const receivedText = typeof received === "string" ? received : Buffer.from(received).toString("utf8");
+  assert.equal(receivedText, eventPayload, "box→device JSON event frame forwarded verbatim");
+
+  // Exactly one STREAM_OPEN went down the tunnel with stream="events" and the
+  // GET /events path (?token= stripped — there is no extra query here).
+  const open = sentFrames.find((f) => f.type === FRAME_TYPES.STREAM_OPEN);
+  assert.ok(open, "STREAM_OPEN was sent down the tunnel");
+  assert.equal(open.method, "GET", "method is GET");
+  assert.equal(open.stream, "events", "stream discriminator is 'events'");
+  assert.match(open.path, /^\/events$/, "path is /events with ?token= stripped");
+
+  deviceWs.terminate();
   boxWs.close();
 });
 
