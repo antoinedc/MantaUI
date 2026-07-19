@@ -46,4 +46,18 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return ApplicationDelegateProxy.shared.application(application, continue: userActivity, restorationHandler: restorationHandler)
     }
 
+    // APNs token forwarding (BET-181). @capacitor/push-notifications listens for
+    // these NotificationCenter posts — WITHOUT them the plugin's `registration`
+    // event NEVER fires, the JS side never gets the device token, and the box
+    // never learns where to send native pushes. This was the root cause of
+    // "no push notifications on the native app": the entitlement + server side
+    // were fine, but the token never left the OS layer.
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
+    }
+
 }
