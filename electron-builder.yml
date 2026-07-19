@@ -36,7 +36,9 @@ mac:
   target:
     - target: dmg
       arch:
-        - x64
+        # arm64 only — halves pack + notarization time/cost. Nearly all Mac
+        # testers are Apple Silicon; re-add `- x64` here if an Intel tester
+        # needs it (Rosetta can't run an arm64 build).
         - arm64
   hardenedRuntime: true
   gatekeeperAssess: false
