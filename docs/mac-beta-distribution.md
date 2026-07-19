@@ -30,9 +30,10 @@ DMG on a Codemagic M2 runner and publishes it to `mantaui.com`.
 2. **App-specific password** for notarization: https://appleid.apple.com →
    Sign-In & Security → App-Specific Passwords → generate one.
 
-3. **Codemagic UI → the app → Environment variables**, add two groups:
+3. **Codemagic UI → the app → Environment variables**, add ONE group named
+   exactly **`mantaui`** (the group name must match `codemagic.yaml`), all vars
+   marked *Secure*:
 
-   Group **`mac_signing`** (all marked *Secure*):
    | var | value |
    |---|---|
    | `CSC_LINK` | the `.p12`, base64-encoded (`base64 -i cert.p12 \| pbcopy`) |
@@ -40,12 +41,7 @@ DMG on a Codemagic M2 runner and publishes it to `mantaui.com`.
    | `APPLE_ID` | your Apple ID email |
    | `APPLE_APP_SPECIFIC_PASSWORD` | the app-specific password |
    | `APPLE_TEAM_ID` | `FSQ3HS4Z24` |
-
-   Group **`prod_deploy`** (optional — only if you want Codemagic to publish to
-   the box; otherwise download the DMG from Codemagic artifacts and skip this):
-   | var | value |
-   |---|---|
-   | `PROD_SSH_KEY` | a base64-encoded SSH private key with access to `root@91.107.196.2` |
+   | `PROD_SSH_KEY` | *(optional)* base64 SSH private key for `root@91.107.196.2` — only if you want Codemagic to publish to the box; otherwise download the DMG from Codemagic artifacts |
 
 ### Trigger a build
 
