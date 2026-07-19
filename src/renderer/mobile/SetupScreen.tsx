@@ -16,6 +16,10 @@ type Props = {
   // bootstrap refresh so the session list loads with the now-valid
   // Bearer credential AND the now-resolved serverBase().
   onConnected: () => void;
+  // QR-scan (deep-link) pairing status from MobileApp's deepLink effect.
+  // Surfaced as a banner so a scanned-but-failed pairing shows feedback
+  // instead of silence — the #1 "I scanned and nothing happened" symptom.
+  pairStatus?: null | "pairing" | "failed" | "invalid";
 };
 
 /**
@@ -41,7 +45,7 @@ type Props = {
  * setupLogic.ts + pairStepLogic.ts + ../../shared/claim.mjs. This file is the
  * wiring.
  */
-export function SetupScreen({ onConnected }: Props) {
+export function SetupScreen({ onConnected, pairStatus }: Props) {
   const [manualOpen, setManualOpen] = useState(false);
   const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL);
   const [boxId, setBoxId] = useState("");
@@ -129,16 +133,18 @@ export function SetupScreen({ onConnected }: Props) {
         <div className="w-full max-w-xs flex flex-col gap-4 rounded-2xl border border-border bg-bg-elev p-5 text-left">
           <Step n={1}>
             Open the <b className="text-text font-semibold">MantaUI desktop app</b>, then go to{" "}
-            <b className="text-text font-semibold">Settings &rsaquo; Pair phone</b>.
+            <b className="text-text font-semibold">Settings &rsaquo; Connection</b>.
           </Step>
           <Step n={2}>
-            Tap <b className="text-text font-semibold">Generate code</b> to show a QR code.
+            Tap <b className="text-text font-semibold">Generate Pairing Code</b> to show a QR code.
           </Step>
           <Step n={3}>
             Point your iPhone <b className="text-text font-semibold">Camera</b> at the QR code. This
             app opens and connects automatically.
           </Step>
         </div>
+
+        {pairStatus && <PairStatusBanner status={pairStatus} />}
 
         <button
           type="button"
@@ -174,8 +180,8 @@ export function SetupScreen({ onConnected }: Props) {
             <div className="flex flex-col gap-1 text-left mb-4">
               <div className="text-text text-lg font-semibold">Manual setup</div>
               <div className="text-text-muted text-xs leading-relaxed">
-                Enter the details shown by the desktop app under Pair phone. The server URL defaults
-                to the official MantaUI server; change it only if you self-host.
+                Enter the details shown under Settings &rsaquo; Connection in the desktop app. The
+                server URL defaults to the official MantaUI server; change it only if you self-host.
               </div>
             </div>
 
@@ -257,6 +263,42 @@ export function SetupScreen({ onConnected }: Props) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function PairStatusBanner({
+  status,
+}: {
+  status: "pairing" | "failed" | "invalid";
+}) {
+  const map = {
+    pairing: {
+      text: "QR scanned. Connecting…",
+      color: "#5A88FF",
+      bg: "rgba(90,136,255,.12)",
+    },
+    failed: {
+      text: "Pairing failed. The code may have expired. Generate a new one and scan again.",
+      color: "#FF7A88",
+      bg: "rgba(255,122,136,.10)",
+    },
+    invalid: {
+      text: "That QR code was not recognized. Make sure you scanned the pairing QR from the desktop app.",
+      color: "#FF7A88",
+      bg: "rgba(255,122,136,.10)",
+    },
+  }[status];
+  return (
+    <div
+      role="status"
+      className="w-full max-w-xs rounded-xl px-4 py-3 text-[13px] leading-relaxed text-left"
+      style={{ background: map.bg, color: map.color, border: `1px solid ${map.color}33` }}
+    >
+      {status === "pairing" && (
+        <span className="inline-block mr-2 align-middle animate-pulse">●</span>
+      )}
+      {map.text}
     </div>
   );
 }

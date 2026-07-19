@@ -37,6 +37,13 @@ export function MobileApp() {
   // to SetupScreen so the user can supply the URL + pairing code, instead of
   // hitting the dead-end Retry screen.
   const [setupRequired, setSetupRequired] = useState(false);
+  // Deep-link (QR scan) pairing status, surfaced on the SetupScreen so a
+  // scanned-but-failed pairing shows feedback instead of silence. null = idle,
+  // "pairing" = a manta:// URL was received and a claim is in flight, "failed"
+  // = the claim was rejected, "invalid" = the scanned URL wasn't a pair payload.
+  const [pairStatus, setPairStatus] = useState<
+    null | "pairing" | "failed" | "invalid"
+  >(null);
 
   // The opencode session id of the on-screen chat (null on list/settings or a
   // terminal window). Drives push focus-suppression: the server skips the
@@ -403,10 +410,38 @@ export function MobileApp() {
   // handlers fire) and re-run doRefresh so the session list loads with the
   // newly-resolved serverBase() + Bearer credential.
   useEffect(() => {
+    // [deeplink] logs are intentionally kept in the shipped build — they're the
+    // only window into the deep-link chain on-device (attach Safari Web
+    // Inspector to the WKWebView and watch the console). "plugin not detected"
+    // means @capacitor/app isn't registered; absence of ANY [deeplink] line
+    // after a scan means the effect never ran / the URL never reached JS.
     const cap = getCapacitorApp(window);
-    if (!cap) return;
+    if (!cap) {
+      console.warn(
+        "[deeplink] Capacitor App plugin NOT detected — window.Capacitor.Plugins.App missing. Deep-link pairing disabled (desktop/PWA, or the native plugin failed to register).",
+      );
+      return;
+    }
+    console.log("[deeplink] Capacitor App plugin detected; wiring launch-url + appUrlOpen.");
     let cancelled = false;
+    // A cold-launched URL can arrive via BOTH getLaunchUrl() AND appUrlOpen —
+    // de-dupe so the pairing code isn't claimed twice (the second claim would
+    // fail with wrong_code since the one-time code was already consumed,
+    // flipping a successful pair into a spurious "failed" banner).
+    let handledUrl: string | null = null;
     const handle = (raw: string) => {
+      if (raw === handledUrl) {
+        console.log("[deeplink] duplicate URL ignored:", raw);
+        return;
+      }
+      handledUrl = raw;
+      console.log("[deeplink] handling pair URL:", raw);
+      // Show the user that a scan was received the moment a manta:// URL lands
+      // — otherwise a claim that fails (or hangs) looks identical to "nothing
+      // happened". parsePairPayload runs inside handlePairUrl; an "ignored"
+      // outcome means the URL wasn't a valid pair payload (e.g. a foreign URL
+      // or an expired/garbled QR).
+      setPairStatus("pairing");
       void handlePairUrl(raw, {
         authClaim: window.api.authClaim,
         persistServer: (serverUrl) => {
@@ -417,10 +452,19 @@ export function MobileApp() {
           }
         },
       }).then((outcome) => {
-        if (cancelled || outcome !== "paired") return;
-        setSetupRequired(false);
-        setAuthRequired(false);
-        doRefresh();
+        console.log("[deeplink] pair outcome:", outcome);
+        if (cancelled) return;
+        if (outcome === "paired") {
+          setPairStatus(null);
+          setSetupRequired(false);
+          setAuthRequired(false);
+          doRefresh();
+          return;
+        }
+        // "failed" = claim rejected (wrong/expired code, box offline, network).
+        // "ignored" = the URL wasn't a valid pair payload. Surface both so the
+        // user knows the scan was seen but didn't pair, instead of silence.
+        setPairStatus(outcome === "ignored" ? "invalid" : "failed");
       });
     };
     // Cold start: the URL the app was launched with (may be null on warm
@@ -431,15 +475,17 @@ export function MobileApp() {
       .then((res) => {
         if (cancelled) return;
         const url = res?.url;
+        console.log("[deeplink] getLaunchUrl() ->", url ?? "(none)");
         if (typeof url === "string" && url !== "") handle(url);
       })
-      .catch(() => {
-        /* bridge refused — nothing to do */
+      .catch((e: unknown) => {
+        console.warn("[deeplink] getLaunchUrl() rejected:", e);
       });
     // Warm start: subsequent URLs (the user scans a fresh QR while the app
     // is already open). The returned handle exposes remove() which is the
     // Capacitor convention; we call it on unmount.
     const listenerPromise = cap.addListener("appUrlOpen", (event) => {
+      console.log("[deeplink] appUrlOpen event ->", event?.url ?? "(no url)");
       if (typeof event?.url === "string" && event.url !== "") handle(event.url);
     });
     return () => {
@@ -486,7 +532,7 @@ export function MobileApp() {
   };
 
   if (setupRequired) {
-    return <SetupScreen onConnected={onConnected} />;
+    return <SetupScreen onConnected={onConnected} pairStatus={pairStatus} />;
   }
 
   if (authRequired) {
