@@ -9,7 +9,7 @@
 
 import { spawn as cpSpawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import http from "node:http";
 import {
   CREDENTIALS_PATH,
@@ -276,6 +276,90 @@ function markStreamDisconnected(key) {
 /** Test-only: clear readiness state between scenarios. */
 export function _resetStreamReadyState() {
   streamReadyState.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Scoped-stream eviction (unbounded-stream-growth fix)
+//
+// opencode's `/event?directory=` streams open lazily (good) but the subscribe
+// registry never removed an entry, so every distinct directory ever touched
+// kept a permanent SSE connection to opencode. On a box that churns one-shot
+// workspaces (e.g. the Multica watchdog spawns a fresh throwaway
+// `multica_workspaces/.../workdir` every run), this grows without bound: a
+// dead workdir's stream lingers forever, and the matching per-directory state
+// inside opencode accumulates too — the slow-degradation the user sees.
+//
+// Eviction is SAFE because every stream is re-openable on demand:
+// `getSessionDirectoryQuery` calls `ensureStreamForDirectory(dir)` (idempotent)
+// and awaits the readiness gate before every prompt/message fetch, so closing
+// an idle stream cannot lose events for an active session — the next use
+// re-opens it. The global stream (key "") is NEVER evicted (it carries
+// unscoped events and has no directory to disappear).
+//
+// A stream is evicted when its directory:
+//   (a) no longer exists on disk (the one-shot workdir was deleted), OR
+//   (b) has seen no event/use for STREAM_IDLE_MS, OR
+//   (c) is over the STREAM_MAX hard cap — the least-recently-active scoped
+//       streams are dropped down to the cap (LRU).
+// ---------------------------------------------------------------------------
+
+export const STREAM_IDLE_MS = 2 * 60 * 60 * 1000; // 2h idle → evict
+export const STREAM_MAX = 32; // hard LRU cap on scoped streams (excl. global)
+export const STREAM_SWEEP_MS = 5 * 60 * 1000; // sweep cadence
+
+/**
+ * Pure: decide which scoped-stream keys to evict. The global key ("") is
+ * always retained. `existsFn(dir)` reports whether the directory still exists
+ * on disk (injected so the logic is testable without touching the FS).
+ *
+ * @param {object} args
+ * @param {Iterable<string>} args.keys        current stream keys (incl. "")
+ * @param {Map<string,number>} args.lastActivity  key -> last-active epoch ms
+ * @param {(dir:string)=>boolean} args.existsFn    directory-exists predicate
+ * @param {number} args.now                    epoch ms
+ * @param {number} [args.idleMs=STREAM_IDLE_MS]
+ * @param {number} [args.maxStreams=STREAM_MAX]
+ * @returns {string[]} keys to close (never includes "")
+ */
+export function selectStreamsToEvict({
+  keys,
+  lastActivity,
+  existsFn,
+  now,
+  idleMs = STREAM_IDLE_MS,
+  maxStreams = STREAM_MAX,
+}) {
+  const scoped = [...keys].filter((k) => k !== "");
+  const evict = new Set();
+
+  for (const key of scoped) {
+    // (a) directory gone from disk → evict.
+    let exists = true;
+    try {
+      exists = existsFn(key);
+    } catch {
+      exists = true; // an existsFn error is not proof the dir is gone; keep it.
+    }
+    if (!exists) {
+      evict.add(key);
+      continue;
+    }
+    // (b) idle past the threshold → evict.
+    const last = lastActivity.get(key) ?? 0;
+    if (now - last > idleMs) evict.add(key);
+  }
+
+  // (c) LRU hard cap over the survivors: keep the most-recently-active up to
+  // maxStreams, evict the rest (least-recently-active first).
+  const survivors = scoped.filter((k) => !evict.has(k));
+  if (survivors.length > maxStreams) {
+    survivors
+      .sort((a, b) => (lastActivity.get(b) ?? 0) - (lastActivity.get(a) ?? 0))
+      .slice(maxStreams)
+      .forEach((k) => evict.add(k));
+  }
+
+  return [...evict];
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1149,21 +1233,79 @@ function openEventStream(onEvent, directory, hooks = {}) {
  * stream opened.
  *
  * @param {(event: object) => void} onEvent
+ * @param {object} [opts]
+ * @param {(dir:string)=>boolean} [opts.existsFn]  directory-exists predicate
+ *   (injected for tests; defaults to fs.existsSync).
+ * @param {number} [opts.sweepIntervalMs]  eviction sweep cadence (default
+ *   STREAM_SWEEP_MS; set 0 to disable the timer — tests call the returned
+ *   `_sweep` directly).
+ * @param {number} [opts.idleMs]      idle-eviction threshold (default STREAM_IDLE_MS)
+ * @param {number} [opts.maxStreams]  LRU cap (default STREAM_MAX)
  * @returns {() => void} stop
  */
-export function subscribeEvents(onEvent) {
+export function subscribeEvents(onEvent, opts = {}) {
   const streams = new Map(); // key: "" (global) or directory string
+  // key -> last-active epoch ms. Bumped when a stream is opened AND every time
+  // the session that owns its directory is used (ensureStreamForDirectory), so
+  // an in-use directory never looks idle even between reconnects.
+  const lastActivity = new Map();
+  const existsFn = opts.existsFn ?? existsSync;
+  const idleMs = opts.idleMs ?? STREAM_IDLE_MS;
+  const maxStreams = opts.maxStreams ?? STREAM_MAX;
+  const sweepIntervalMs =
+    opts.sweepIntervalMs != null ? opts.sweepIntervalMs : STREAM_SWEEP_MS;
   let stopped = false;
 
+  const touch = (key) => { lastActivity.set(key, Date.now()); };
+
   const openFor = (key, dir) => {
+    touch(key); // opening or re-using a stream counts as activity
     if (streams.has(key)) return;
     streams.set(
       key,
-      openEventStream(onEvent, dir, {
-        onConnect: () => markStreamConnected(key),
-        onDisconnect: () => markStreamDisconnected(key),
-      }),
+      openEventStream(
+        (ev) => { touch(key); onEvent(ev); }, // an arriving event = activity
+        dir,
+        {
+          onConnect: () => markStreamConnected(key),
+          onDisconnect: () => markStreamDisconnected(key),
+        },
+      ),
     );
+  };
+
+  // Close + forget one scoped stream. The global stream ("") is never passed
+  // here. Readiness state is cleared so a later re-open re-arms the gate.
+  const closeStream = (key) => {
+    const stop = streams.get(key);
+    if (stop) { try { stop(); } catch { /* ignore */ } }
+    streams.delete(key);
+    lastActivity.delete(key);
+    streamReadyState.delete(key);
+  };
+
+  // One eviction pass. Pure decision in selectStreamsToEvict; this just applies
+  // it. Safe: every evicted directory re-opens on next use via
+  // ensureStreamForDirectory (idempotent) + the readiness gate.
+  const _sweep = () => {
+    if (stopped) return;
+    let toEvict;
+    try {
+      toEvict = selectStreamsToEvict({
+        keys: streams.keys(),
+        lastActivity,
+        existsFn,
+        now: Date.now(),
+        idleMs,
+        maxStreams,
+      });
+    } catch {
+      return; // never let a sweep error break the event pump
+    }
+    for (const key of toEvict) closeStream(key);
+    if (toEvict.length > 0) {
+      console.log(`[opencode-bus] evicted ${toEvict.length} idle/dead scoped stream(s); ${streams.size} remain`);
+    }
   };
 
   // Global stream catches non-scoped events (server.heartbeat, vcs.branch.updated,
@@ -1203,13 +1345,30 @@ export function subscribeEvents(onEvent) {
     } catch { /* non-fatal: bootstrap is best-effort */ }
   })();
 
-  return () => {
+  // Periodic eviction sweep. unref() so it never keeps the process alive on its
+  // own. Disabled when sweepIntervalMs is 0 (tests drive _sweep directly).
+  let sweepTimer = null;
+  if (sweepIntervalMs > 0) {
+    sweepTimer = setInterval(_sweep, sweepIntervalMs);
+    sweepTimer.unref?.();
+  }
+
+  const stop = () => {
     stopped = true;
+    if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
     directoryListeners.delete(listener);
     ensureStreamForDirectory = null;
-    for (const stop of streams.values()) {
-      try { stop(); } catch { /* ignore */ }
+    for (const s of streams.values()) {
+      try { s(); } catch { /* ignore */ }
     }
     streams.clear();
+    lastActivity.clear();
   };
+  // Test hooks: drive one sweep pass, open a scoped stream, and inspect live
+  // stream keys without a real timer / real opencode / real session.
+  stop._sweep = _sweep;
+  stop._streamKeys = () => [...streams.keys()];
+  stop._touch = touch;
+  stop._openFor = openFor;
+  return stop;
 }

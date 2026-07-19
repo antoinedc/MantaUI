@@ -14,6 +14,9 @@ import {
   listQuestions,
   replyPermission,
   subscribeEvents,
+  selectStreamsToEvict,
+  STREAM_IDLE_MS,
+  STREAM_MAX,
   _resetSessionDirectoryCache,
   _onSessionDirectoryAdded,
   _setOcTransport,
@@ -922,5 +925,163 @@ test("pooled ocFetch reuses one socket across sequential calls", async () => {
     );
   } finally {
     server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// selectStreamsToEvict — scoped-stream eviction (unbounded-growth fix)
+// ---------------------------------------------------------------------------
+
+test("selectStreamsToEvict never evicts the global stream ('')", () => {
+  const now = 1_000_000_000;
+  const out = selectStreamsToEvict({
+    keys: ["", "/a", "/b"],
+    lastActivity: new Map([["", 0], ["/a", now], ["/b", now]]),
+    existsFn: () => true,
+    now,
+  });
+  assert.equal(out.includes(""), false, "global key must never be evicted");
+});
+
+test("selectStreamsToEvict evicts a directory that no longer exists on disk", () => {
+  const now = 1_000_000_000;
+  const out = selectStreamsToEvict({
+    keys: ["", "/live", "/gone"],
+    // both recently active, so only the missing-dir rule can evict
+    lastActivity: new Map([["/live", now], ["/gone", now]]),
+    existsFn: (dir) => dir === "/live",
+    now,
+  });
+  assert.deepEqual(out, ["/gone"]);
+});
+
+test("selectStreamsToEvict evicts a directory idle past the threshold", () => {
+  const now = 10 * STREAM_IDLE_MS;
+  const out = selectStreamsToEvict({
+    keys: ["", "/fresh", "/stale"],
+    lastActivity: new Map([
+      ["/fresh", now - 1000], // just used
+      ["/stale", now - STREAM_IDLE_MS - 1], // idle past 2h
+    ]),
+    existsFn: () => true,
+    now,
+  });
+  assert.deepEqual(out, ["/stale"]);
+});
+
+test("selectStreamsToEvict keeps a busy dir even if its last event is old (activity bumps on use)", () => {
+  const now = 10 * STREAM_IDLE_MS;
+  const out = selectStreamsToEvict({
+    keys: ["", "/busy"],
+    lastActivity: new Map([["/busy", now]]), // touched now
+    existsFn: () => true,
+    now,
+  });
+  assert.deepEqual(out, []);
+});
+
+test("selectStreamsToEvict enforces the LRU cap, dropping least-recently-active first", () => {
+  const now = 1_000_000_000;
+  // 5 live+existing streams, cap of 2 → keep the 2 most-recently-active,
+  // evict the other 3.
+  const keys = ["", "/k1", "/k2", "/k3", "/k4", "/k5"];
+  const lastActivity = new Map([
+    ["/k1", now - 50],
+    ["/k2", now - 40],
+    ["/k3", now - 30],
+    ["/k4", now - 20],
+    ["/k5", now - 10], // most recent
+  ]);
+  const out = selectStreamsToEvict({
+    keys,
+    lastActivity,
+    existsFn: () => true,
+    now,
+    idleMs: STREAM_IDLE_MS, // none idle
+    maxStreams: 2,
+  });
+  // Keep /k5 (10) and /k4 (20); evict /k1,/k2,/k3.
+  assert.deepEqual(out.sort(), ["/k1", "/k2", "/k3"]);
+});
+
+test("selectStreamsToEvict: missing-dir + idle + LRU compose without double-listing", () => {
+  const now = 10 * STREAM_IDLE_MS;
+  const keys = ["", "/gone", "/stale", "/a", "/b", "/c"];
+  const lastActivity = new Map([
+    ["/gone", now], // exists=false → evicted regardless of recency
+    ["/stale", now - STREAM_IDLE_MS - 1], // idle → evicted
+    ["/a", now - 3],
+    ["/b", now - 2],
+    ["/c", now - 1],
+  ]);
+  const out = selectStreamsToEvict({
+    keys,
+    lastActivity,
+    existsFn: (d) => d !== "/gone",
+    now,
+    maxStreams: 2, // survivors /a,/b,/c → keep /c,/b, evict /a
+  });
+  const set = new Set(out);
+  assert.equal(set.has("/gone"), true);
+  assert.equal(set.has("/stale"), true);
+  assert.equal(set.has("/a"), true);
+  assert.equal(set.has("/c"), false, "most-recent survivor retained");
+  assert.equal(out.length, new Set(out).size, "no duplicate keys");
+});
+
+test("selectStreamsToEvict: a throwing existsFn keeps the stream (not proof it's gone)", () => {
+  const now = 1_000_000_000;
+  const out = selectStreamsToEvict({
+    keys: ["", "/x"],
+    lastActivity: new Map([["/x", now]]),
+    existsFn: () => { throw new Error("stat failed"); },
+    now,
+  });
+  assert.deepEqual(out, [], "existsFn error must not evict");
+});
+
+test("subscribeEvents _sweep evicts a dead/idle scoped stream but keeps global + live, and re-open works", () => {
+  // Drive the sweep directly (sweepIntervalMs:0 disables the real timer).
+  // Inject a fake event transport: a stream whose reader never resolves, so an
+  // "open" stays open and no real opencode connection is made.
+  _setEventStreamTransport(async () => ({
+    ok: true,
+    body: {
+      getReader: () => ({
+        read: () => new Promise(() => {}),
+        releaseLock() {},
+      }),
+    },
+  }));
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+  const existing = new Set(["/keep"]); // "/gone" will be reported missing
+  const stop = subscribeEvents(() => {}, {
+    existsFn: (d) => existing.has(d),
+    sweepIntervalMs: 0,
+    idleMs: STREAM_IDLE_MS,
+  });
+  try {
+    // Open two scoped streams via the exposed opener (what the query path uses).
+    stop._openFor("/keep", "/keep");
+    stop._openFor("/gone", "/gone");
+    let keys = stop._streamKeys();
+    assert.ok(keys.includes("") && keys.includes("/keep") && keys.includes("/gone"),
+      "global + both scoped streams open");
+
+    // Sweep: /gone's directory doesn't exist → evicted; /keep + global stay.
+    stop._sweep();
+    keys = stop._streamKeys();
+    assert.equal(keys.includes(""), true, "global survives");
+    assert.equal(keys.includes("/keep"), true, "live dir survives");
+    assert.equal(keys.includes("/gone"), false, "missing dir evicted");
+
+    // Re-open works after eviction (idempotent open, gate re-arms).
+    existing.add("/gone");
+    stop._openFor("/gone", "/gone");
+    assert.equal(stop._streamKeys().includes("/gone"), true, "re-open after eviction");
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
   }
 });
