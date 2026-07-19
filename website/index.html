@@ -90,6 +90,26 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 .copy-btn:active{transform:translateY(.5px)}
 @media(max-width:560px){.install-cmd code{font-size:12.5px}}
 
+/* install tabs — "Coding agent" / "Manual" */
+.install-tabs{display:inline-flex;gap:4px;margin-bottom:12px;padding:4px;border-radius:9px;
+  background:var(--fill-subtle);border:1px solid var(--border-default)}
+.install-tab{appearance:none;border:0;background:transparent;color:var(--text-secondary);
+  font-family:var(--font-sans);font-size:13px;font-weight:600;padding:7px 16px;border-radius:6px;cursor:pointer;
+  transition:all .12s var(--ease-out)}
+.install-tab:hover{color:var(--text-primary)}
+.install-tab[aria-selected="true"]{background:var(--surface-inset);color:var(--text-primary);
+  box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.install-panel{display:none}
+.install-panel.active{display:block}
+.agent-cmd{display:flex;align-items:flex-start;gap:12px;background:var(--surface-inset);border:1px solid var(--border-default);
+  border-radius:var(--radius-md);padding:14px 12px 14px 16px;box-shadow:var(--shadow-md);text-align:left;
+  transition:border-color .15s var(--ease-out),box-shadow .15s var(--ease-out)}
+.agent-cmd:hover{border-color:var(--blue-500);box-shadow:0 0 0 1px rgba(46,107,255,.35),0 0 22px rgba(46,107,255,.18)}
+.agent-cmd p{flex:1;margin:0;font-family:var(--font-mono);font-size:13px;line-height:1.55;color:var(--slate-200)}
+.agent-cmd .url{color:var(--cyan-300)}
+.install-hint{font-size:12px;color:var(--slate-500);margin-top:9px;text-align:center}
+@media(max-width:560px){.agent-cmd p{font-size:12px}}
+
 /* app screenshot mockup */
 .shot{position:relative;z-index:1;max-width:920px;margin:56px auto 0;border-radius:var(--radius-xl);overflow:hidden;
   border:1px solid var(--border-default);box-shadow:var(--shadow-xl);background:var(--surface-card)}
@@ -237,17 +257,30 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
     <h1>Drive Claude Code <span class="grad">from anywhere</span></h1>
     <p class="sub">A desktop and mobile client for your remote Claude Code sessions. No signup, one-command install — pair once and steer, approve, and ship from your laptop or your phone.</p>
     <div class="install">
-      <div class="install-label">Drop this on your box to install</div>
-      <div class="install-cmd">
-        <code><span class="prompt">$</span> curl -fsSL <span class="url">https://mantaui.com/install.sh</span> | bash</code>
-        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mantaui.com/install.sh | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
+      <div class="install-tabs" role="tablist">
+        <button class="install-tab" role="tab" aria-selected="true" aria-controls="panel-agent" onclick="mantaTab(this,'panel-agent')">Coding agent</button>
+        <button class="install-tab" role="tab" aria-selected="false" aria-controls="panel-manual" onclick="mantaTab(this,'panel-manual')">Manual</button>
+      </div>
+      <div class="install-panel active" id="panel-agent" role="tabpanel">
+        <div class="agent-cmd">
+          <p id="agent-prompt">Install MantaUI on this server — a desktop &amp; mobile client for remote Claude Code sessions. Follow the setup instructions at <span class="url">https://mantaui.com/llms-install.md</span></p>
+          <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('agent-prompt').textContent);this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
+        </div>
+        <div class="install-hint">Paste into Claude Code, Cursor, or any coding agent on your box.</div>
+      </div>
+      <div class="install-panel" id="panel-manual" role="tabpanel">
+        <div class="install-cmd">
+          <code><span class="prompt">$</span> curl -fsSL <span class="url">https://mantaui.com/install.sh</span> | bash</code>
+          <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mantaui.com/install.sh | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
+        </div>
+        <div class="install-hint">Run on your server (Linux/macOS). Pair a device once, then you're in.</div>
       </div>
     </div>
     <div class="cta">
       <a class="btn btn-primary" href="https://mantaui.com/downloads/Manta-latest.dmg">Download for macOS</a>
       <a class="btn btn-ghost" href="https://mantaui.com/downloads/Manta-latest.AppImage">Download for Linux</a>
     </div>
-    <div class="meta">macOS build is unsigned — first launch: right-click the .dmg → Open. Free &amp; <a href="https://github.com/antoinedc/MantaUI">open source</a>.</div>
+    <div class="meta">macOS build is signed — first launch: right-click the app → Open. Free &amp; <a href="https://github.com/antoinedc/MantaUI">open source</a>.</div>
 
     <div class="shot">
       <div class="shot-bar">
@@ -422,5 +455,13 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
   </div>
 </footer>
 
+  <script>
+    function mantaTab(btn, panelId){
+      var tabs = btn.parentNode.querySelectorAll('.install-tab');
+      for (var i=0;i<tabs.length;i++){ tabs[i].setAttribute('aria-selected', tabs[i]===btn ? 'true':'false'); }
+      var panels = document.querySelectorAll('.install-panel');
+      for (var j=0;j<panels.length;j++){ panels[j].classList.toggle('active', panels[j].id===panelId); }
+    }
+  </script>
 </body>
 </html>
