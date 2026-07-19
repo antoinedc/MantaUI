@@ -97,3 +97,22 @@ export function resolveSetupServerUrl(input: {
   }
   return normalizeServerUrl(input.serverUrl);
 }
+
+/**
+ * Whether the ACTIVE connection (the persisted `manta_server`) goes through the
+ * MantaUI relay or directly to a self-hosted box. The relay's persisted form is
+ * the per-box proxy URL `${RELAY_BASE}/box/<id>`, so we match by prefix (NOT the
+ * exact base, which is only the pre-claim form). Anything else — a typed box
+ * URL, or a same-origin PWA base — is "direct". An empty/unset base is treated
+ * as relay (the default), since that's what a fresh install pairs into.
+ *
+ * Drives the ConnectingScreen copy: "Connecting to relay…" (no host shown) vs
+ * "Connecting to remote box…" (+ the host, since a custom endpoint is worth
+ * surfacing).
+ */
+export function resolveConnectRoute(serverBase: string): "relay" | "direct" {
+  const base = normalizeServerUrl(serverBase);
+  if (base === "") return "relay";
+  const relay = normalizeServerUrl(DEFAULT_SERVER_URL);
+  return base === relay || base.startsWith(`${relay}/`) ? "relay" : "direct";
+}

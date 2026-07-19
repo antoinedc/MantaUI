@@ -5,6 +5,8 @@ import { SessionScreen } from "./SessionScreen";
 import { MobileSettings } from "./MobileSettings";
 import { PairingScreen } from "./PairingScreen";
 import { SetupScreen } from "./SetupScreen";
+import { ConnectingScreen } from "./ConnectingScreen";
+import { resolveConnectRoute } from "./setupLogic";
 import { reportFocus } from "./push";
 import { registerApns, NATIVE_NOTIF_TAP_EVENT_NAME } from "./nativePush";
 import { AuthRequiredError, ServerNotConfiguredError, triggerResumeReconnect } from "../api/httpApi";
@@ -15,6 +17,28 @@ type Nav =
   | { screen: "list" }
   | { screen: "session"; projectName: string; windowIndex: number }
   | { screen: "settings" };
+
+// Read the persisted server URL WITHOUT throwing (serverBase() throws when
+// unset). Empty string when unconfigured — resolveConnectRoute treats that as
+// the relay default. Used only for the ConnectingScreen route/host copy.
+function readServerBase(): string {
+  try {
+    return (localStorage.getItem("manta_server") ?? "").replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+// Extract just the host (no scheme/path) from a base URL for the direct-mode
+// connecting pill. Returns undefined if it can't be parsed.
+function hostFromBase(base: string): string | undefined {
+  if (!base) return undefined;
+  try {
+    return new URL(base).host || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function MobileApp() {
   const refresh = useStore((s) => s.refresh);
@@ -37,6 +61,15 @@ export function MobileApp() {
   // to SetupScreen so the user can supply the URL + pairing code, instead of
   // hitting the dead-end Retry screen.
   const [setupRequired, setSetupRequired] = useState(false);
+  // Connect lifecycle for the full-screen ConnectingScreen. `connecting` is
+  // true while the INITIAL bootstrap (or a post-pair refresh) is in flight and
+  // we have never yet loaded data — so the user sees a clear "Connecting to
+  // relay / remote box" instead of a blank session list. Once data lands
+  // (`hasLoaded`), later background refreshes do NOT re-show the full screen.
+  // `connectFailed` flips the ConnectingScreen to its error+retry state.
+  const [connecting, setConnecting] = useState(true);
+  const [connectFailed, setConnectFailed] = useState(false);
+  const hasLoaded = useRef(false);
   // Deep-link (QR scan) pairing status, surfaced on the SetupScreen so a
   // scanned-but-failed pairing shows feedback instead of silence. null = idle,
   // "pairing" = a manta:// URL was received and a claim is in flight, "failed"
@@ -60,29 +93,48 @@ export function MobileApp() {
   // no SSH layer; the box can simply be unreachable).
   const doRefresh = () => {
     setBootError(null);
-    refresh().catch((e: unknown) => {
-      // First-run: serverBase() couldn't resolve a URL (no localStorage
-      // override AND no same-origin http(s) page). Route to SetupScreen so
-      // the user can supply the URL + pairing code instead of hitting the
-      // dead-end Retry screen. Same defensive `instanceof || name ===` pattern
-      // we use for AuthRequiredError below — `name` covers cross-realm throws
-      // where instanceof can fail.
-      if (
-        e instanceof ServerNotConfiguredError ||
-        (e as { name?: string })?.name === "ServerNotConfiguredError"
-      ) {
-        setSetupRequired(true);
-        return;
-      }
-      // A 401 from the box means we're unpaired (or the stored token was
-      // revoked/rotated) — route to the pairing screen instead of the generic
-      // "could not reach the server" error, which offers only a dead Retry.
-      if (e instanceof AuthRequiredError || (e as { name?: string })?.name === "AuthRequiredError") {
-        setAuthRequired(true);
-        return;
-      }
-      setBootError(e instanceof Error ? e.message : "Could not reach the server.");
-    });
+    setConnectFailed(false);
+    // Only show the full-screen ConnectingScreen before the FIRST successful
+    // load. Later background refreshes keep the session list visible.
+    if (!hasLoaded.current) setConnecting(true);
+    refresh()
+      .then(() => {
+        hasLoaded.current = true;
+        setConnecting(false);
+      })
+      .catch((e: unknown) => {
+        // First-run: serverBase() couldn't resolve a URL (no localStorage
+        // override AND no same-origin http(s) page). Route to SetupScreen so
+        // the user can supply the URL + pairing code instead of hitting the
+        // dead-end Retry screen. Same defensive `instanceof || name ===` pattern
+        // we use for AuthRequiredError below — `name` covers cross-realm throws
+        // where instanceof can fail.
+        if (
+          e instanceof ServerNotConfiguredError ||
+          (e as { name?: string })?.name === "ServerNotConfiguredError"
+        ) {
+          setConnecting(false);
+          setSetupRequired(true);
+          return;
+        }
+        // A 401 from the box means we're unpaired (or the stored token was
+        // revoked/rotated) — route to the pairing screen instead of the generic
+        // "could not reach the server" error, which offers only a dead Retry.
+        if (e instanceof AuthRequiredError || (e as { name?: string })?.name === "AuthRequiredError") {
+          setConnecting(false);
+          setAuthRequired(true);
+          return;
+        }
+        // Network / server error. Before first load, keep the ConnectingScreen
+        // mounted and flip it to its failed+Retry state (route-aware copy).
+        // After first load, fall back to the inline bootError banner.
+        if (!hasLoaded.current) {
+          setConnectFailed(true);
+          return;
+        }
+        setConnecting(false);
+        setBootError(e instanceof Error ? e.message : "Could not reach the server.");
+      });
   };
 
   // Called by SetupScreen after a successful claim (serverUrl persisted to
@@ -537,6 +589,29 @@ export function MobileApp() {
 
   if (authRequired) {
     return <PairingScreen onPaired={onPaired} />;
+  }
+
+  // Initial connect (or post-pair refresh) in flight, or it failed before the
+  // first successful load. Route-aware copy + host for a custom/direct server.
+  if (connecting || connectFailed) {
+    const route = resolveConnectRoute(readServerBase());
+    const host = route === "direct" ? hostFromBase(readServerBase()) : undefined;
+    return (
+      <ConnectingScreen
+        route={route}
+        host={host}
+        failed={connectFailed}
+        onRetry={doRefresh}
+        onCancel={() => {
+          // Bail a slow connect back to the pairing entry point. If the box was
+          // never configured this returns to setup; otherwise re-pair.
+          setConnecting(false);
+          setConnectFailed(false);
+          if (readServerBase() === "") setSetupRequired(true);
+          else setAuthRequired(true);
+        }}
+      />
+    );
   }
 
   if (bootError) {

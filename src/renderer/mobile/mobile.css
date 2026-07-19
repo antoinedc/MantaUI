@@ -400,3 +400,12 @@ body,
 .mobile-sheet button.danger {
   color: #FF7A88;
 }
+
+/* Spinner rotation for ConnectingScreen. A @keyframes is global (not a
+   selector) so it's exempt from the "no unscoped selector" rule above — the
+   ring elements it animates are inside the .mobile tree. */
+@keyframes manta-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

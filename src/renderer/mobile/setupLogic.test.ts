@@ -5,6 +5,7 @@ import {
   canConnectSetup,
   buildSetupClaimInput,
   resolveSetupServerUrl,
+  resolveConnectRoute,
 } from "./setupLogic";
 
 const VALID_BOX = "7f3a9c1e0b8d4a62f1c9e5b7d0a4f8c2"; // 32 hex
@@ -78,6 +79,27 @@ describe("buildSetupClaimInput", () => {
     expect(
       buildSetupClaimInput({ serverUrl: "https://box.example.com/", boxId: "ignored", code: "123456" }),
     ).toEqual({ serverUrl: "https://box.example.com", code: "123456" });
+  });
+});
+
+describe("resolveConnectRoute", () => {
+  it("relay for the persisted per-box relay proxy URL", () => {
+    expect(resolveConnectRoute(`https://relay.mantaui.com/box/${VALID_BOX}`)).toBe("relay");
+  });
+  it("relay for the bare relay base", () => {
+    expect(resolveConnectRoute("https://relay.mantaui.com")).toBe("relay");
+  });
+  it("relay for empty/unset base (fresh install default)", () => {
+    expect(resolveConnectRoute("")).toBe("relay");
+  });
+  it("direct for a custom server URL", () => {
+    expect(resolveConnectRoute("https://box.example.com")).toBe("direct");
+  });
+  it("direct for a same-origin PWA base", () => {
+    expect(resolveConnectRoute("https://app.example.com:8787")).toBe("direct");
+  });
+  it("does NOT match a look-alike host as relay", () => {
+    expect(resolveConnectRoute("https://relay.mantaui.com.evil.com/box/x")).toBe("direct");
   });
 });
 
