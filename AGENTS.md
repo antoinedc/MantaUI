@@ -1912,6 +1912,171 @@ Beta App Review of the first build.
 version; the auto-tag workflow keys off it. `CURRENT_PROJECT_VERSION` (build
 number) — Codemagic/ASC handle uniqueness. First shipped version: `1.0.1`.
 
+## Release & CD pipeline — TAG-DRIVEN, one manual step
+
+**THE MODEL: agents merge to `main` → a human pushes ONE git tag → the matching
+release fires automatically.** Pushing the tag is the ONLY manual step. Every
+target verifies itself after deploying and fails RED if the result is stale /
+down, so "merged but never deployed" (the bug that left BET-174's
+`llms-install.md` 404 on prod for days) can't hide.
+
+**CRITICAL DISTINCTION: "done" in Multica ≠ deployed.** `multica-close-on-merge.yml`
+flips an issue to `done` the moment its PR merges to `main` — that says NOTHING
+about whether it reached prod. Merging is necessary but NOT sufficient; the
+deploy is the tag push. If someone reports "issue X is done but not live", the
+fix is almost always "it was merged but no release tag was pushed" — check the
+live URL / TestFlight against `main`, then push the right tag.
+
+### The four release targets (each its own tag prefix)
+
+| Tag prefix | Target | Runner | What fires | Config |
+|---|---|---|---|---|
+| `ios-v*` | iOS app → TestFlight | Codemagic `mac_mini_m2` | build + sign + notarize `.ipa` → TestFlight | `codemagic.yaml` `ios-testflight` |
+| `mac-v*` | macOS desktop → DMG | Codemagic `mac_mini_m2` | build + Developer ID sign → DMG → publish to `mantaui.com` | `codemagic.yaml` `mac-desktop` |
+| `web-v*` | marketing site + install assets | self-hosted (`bui-dev-runner`, this box) | scp `website/` + `install.sh` + `llms-install.md` → prod webroot, verify | `.github/workflows/website-deploy.yml` |
+| `relay-v*` | relay service | self-hosted (`bui-dev-runner`, this box) | `git pull /opt/manta` + restart `manta-relay`, health-check | `.github/workflows/relay-deploy.yml` |
+
+Tag-pattern filtering means only the matching workflow runs — an `ios-v*` tag
+never triggers a mac/web/relay deploy and vice-versa. All targets live in the
+ONE monorepo; the tag prefix is what routes.
+
+**How to cut a release (all targets):**
+```
+# iOS — bump MARKETING_VERSION in project.pbxproj first, merge, then:
+git tag ios-v1.0.8 && git push origin ios-v1.0.8
+# (the ios-release-tag.yml workflow also AUTO-tags ios-v<MARKETING_VERSION> on
+#  merge to main, so iOS often needs no manual tag — just the version bump.)
+
+# Desktop — bump package.json version if you want, then:
+git tag mac-v0.0.2 && git push origin mac-v0.0.2
+
+# Website / install.sh / llms-install.md:
+git tag web-v2 && git push origin web-v2
+
+# Relay (drops live phone WS briefly — only when relay code changed):
+git tag relay-v2 && git push origin relay-v2
+```
+`web-v1` / `relay-v1` are already used (bring-up tests) — real releases bump the
+number. Codemagic builds can ALSO be triggered by API without a tag (see the iOS
+section's "Triggering a release" for the `curl` + `CODEMAGIC_API_KEY` recipe) —
+useful for re-running a build without a version bump.
+
+### iOS (`ios-v*`) — Codemagic
+
+Full detail in "## iOS release / TestFlight". Summary: build+sign+notarize on a
+Codemagic M2 runner, upload to TestFlight via the ASC API key integration
+(`APS Key`). Signing gotcha: the account caps at 2 distribution certs per type;
+when maxed, the build's fresh-key `create` 409s and it can't find a usable cert
+→ archive fails "requires a provisioning profile". Fix: revoke stale certs via
+the ASC API (`/tmp/opencode/asc.mjs` on the box signs the JWT; a `DELETE
+/v1/certificates/<id>` frees a slot).
+
+### Desktop (`mac-v*`) — Codemagic + self-hosted publish
+
+`codemagic.yaml` `mac-desktop`. Runs `electron-vite build` → `electron-builder
+--mac`. Key facts, each a hard-won fix (do not regress):
+
+- **arm64 ONLY** (`electron-builder.yml` `mac.target.arch: [arm64]`) — halves
+  build + (if on) notarization time. Re-add `x64` only if an Intel tester needs it.
+- **node-gyp needs `distutils`** — the runner's Python 3.12 removed it from
+  stdlib; the "Provide distutils" step `pip install "setuptools<81"` before
+  `npm ci` (electron-builder rebuilds native `node-pty`, which the DESKTOP app
+  doesn't even use — it's a `src/server/` dep — but the rebuild still runs).
+- **Signing via Codemagic `keychain` CLI, NOT electron-builder's own import.**
+  The "Import Developer ID cert into a Codemagic keychain" step does `keychain
+  initialize` + `keychain add-certificates`. Letting electron-builder import the
+  `.p12` into its own temp keychain made `codesign` HANG forever waiting on a
+  GUI unlock that never comes on CI (build stalled right after "signing …
+  Manta UI.app"). After the keychain step, CSC_LINK/CSC_KEY_PASSWORD are
+  UNSET so electron-builder auto-discovers the "Developer ID Application"
+  identity (`mac.identity`) from that keychain.
+- **NOTARIZATION IS OFF for the beta** (`mac.notarize: false`). Apple's
+  notarization queue added 20-40 min of unpredictable latency (two builds
+  stalled 30+ min in it). The DMG is Developer ID-SIGNED but not notarized, so
+  testers open it ONCE via right-click → Open (or `xattr -dr
+  com.apple.quarantine "/Applications/Manta UI.app"`). To re-enable for public
+  distribution: `mac.notarize: true` (electron-builder 25 reads the team id from
+  the `APPLE_TEAM_ID` env var — do NOT use `notarize.teamId`, it warns + stalls)
+  with `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID` in the Codemagic
+  `mantaui` env group.
+- **Publish to prod** (`Publish to mantaui.com` step): scp's the DMG +
+  `latest-mac.yml` to `/var/www/mantaui/{updates,downloads}` and refreshes
+  `Manta-latest.dmg` (arm64 preferred). Gated on `PROD_SSH_KEY` (base64 SSH key
+  in the Codemagic `mantaui` group) — no key → step no-ops and the DMG is only
+  in Codemagic artifacts. Public download: **https://mantaui.com/downloads/Manta-latest.dmg**;
+  electron-updater feed: `https://mantaui.com/updates/latest-mac.yml`.
+- **Codemagic env group is named `mantaui`** (single group holds CSC_LINK,
+  CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID,
+  PROD_SSH_KEY). `codemagic.yaml` references it by that exact name — a mismatch
+  fails instantly with "unknown variable group(s)".
+- Desktop bundle id + icon: `appId: com.antoinedc.mantaui` (aligned with iOS,
+  `electron-builder.yml` + `app.setAppUserModelId`). Icon is the navy-square
+  manta mark (`assets/icon.icns` + `assets/icons/*.png`, regenerated from the
+  iOS AppIcon).
+
+### Website (`web-v*`) — self-hosted, static file sync
+
+`.github/workflows/website-deploy.yml`. **WHY IT EXISTS:** Caddy on the prod box
+serves `/var/www/mantaui` (the WEBROOT), NOT the `/opt/manta` git clone — so a
+`git pull` on the box does NOTHING for the site; files must be COPIED into the
+webroot. Before this workflow that copy was a hand-run `scripts/release/publish.sh`
+step, which is exactly why merged site/install changes silently never went live.
+The workflow scp's `website/*.{html,png}` + `scripts/install.sh` +
+`llms-install.md` into the webroot, then VERIFIES each URL is 200 AND
+byte-matches the repo (`sha256`), failing red on any mismatch. Runs on the
+self-hosted `bui-dev-runner` (this dev box) and SSHes to prod with the deploy
+key at `~/.manta-deploy/prod_key` — public half is in the prod box's
+`authorized_keys`; NO GitHub secret is used (the PAT can't write repo secrets
+anyway). Verified assets: `/` (index), `privacy.html`, `terms.html`,
+`install.sh`, `llms-install.md`.
+
+### Relay (`relay-v*`) — self-hosted, pull + restart + health-check
+
+`.github/workflows/relay-deploy.yml`. The relay runs
+`node /opt/manta/src/relay/server.mjs` as systemd `manta-relay` on the prod box
+(`/opt/manta` is a clone tracking `origin/main`). Deploy = `git -C /opt/manta
+reset --hard origin/main` + `systemctl restart manta-relay`, then health-poll
+`POST relay.mantaui.com/pair` with a dummy body: ANY HTTP response (it returns a
+fast `503 box_offline` for an unknown box) means "up"; a connection failure
+(`000`) after ~30s of retries FAILS the workflow. **Kept SEPARATE from `web-v*`
+on purpose:** restarting the relay drops live phone WebSocket connections
+(they reconnect), so a static website copy must never bounce it — only tag
+`relay-v*` when relay code the service runs actually changed. Same self-hosted
+runner + `~/.manta-deploy/prod_key`.
+
+### Prod box topology (why deploys are shaped this way)
+
+- **Prod box** `root@91.107.196.2` (Hetzner "manta"), zone `mantaui.com`.
+- **`/opt/manta`** = git clone tracking `origin/main`. The RELAY runs from here.
+  A `git pull` here updates relay code (needs a service restart to take effect)
+  but does NOT update the served website.
+- **`/var/www/mantaui`** = Caddy WEBROOT, served statically per-request. Only
+  files explicitly copied here go live: `index.html`/`privacy.html`/`terms.html`
+  (from `website/`), `install.sh` (from `scripts/`), `llms-install.md`,
+  `Manta-latest.dmg` + `latest-mac.yml` (desktop), `releases/*` (tarballs).
+- **Caddyfile is NOT in the repo** — it lives only on the box (`/etc/caddy/`),
+  unversioned. `*.pages.mantaui.com` (serve-page) and `relay.mantaui.com` have
+  their own Caddy blocks there.
+- **`scripts/release/publish.sh`** is the OLDER manual all-in-one deploy (tarball
+  + desktop + relay + install.sh, run from a laptop over `MANTA_PROD_HOST`). The
+  tag-driven workflows above supersede it for site/relay/desktop; publish.sh is
+  still the path for the self-contained Linux tarball release (`v<version>` tag).
+
+### Verifying a deploy actually landed
+
+Never trust "the workflow was green" alone for the FIRST run of a new pipeline —
+check the live artifact:
+```
+curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/llms-install.md   # web
+curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/downloads/Manta-latest.dmg  # desktop
+curl -s -X POST -H 'content-type: application/json' \
+  -d '{"box_id":"00000000000000000000000000000000","code":"000000"}' \
+  https://relay.mantaui.com/pair    # relay → fast {"error":"box_offline"} 503 = healthy
+node /tmp/opencode/asc.mjs   # (on the box) — ASC build state for iOS (VALID = really uploaded)
+```
+For byte-parity, `sha256sum` the live file vs the repo copy (the web workflow
+already does this and fails red on drift).
+
 ## Capability plugins + Mac executor (BET-183)
 
 Plugin system that lets the AI invoke capabilities that run EITHER on the box
