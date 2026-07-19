@@ -772,6 +772,123 @@ export function createRelayAgent(opts = {}) {
     });
   }
 
+  // --- events stream bridge (live SSE-over-WS) ----------------------------
+  //
+  // Handle a relay→box STREAM_OPEN with stream="events": open a local
+  // WebSocket to the box's /events endpoint and forward its JSON text frames
+  // to the device over STREAM_DATA. This is the RELAY path's equivalent of the
+  // direct-tunnel /events WebSocket — the relay only bridges /pty as a device
+  // WS, so without this the mobile client's /events WS is refused and NO live
+  // opencode events reach a relay-connected phone (it only sees new messages
+  // after a manual transcript refetch on navigation). See src/relay/server.mjs
+  // handleEventsUpgrade.
+  //
+  // Unidirectional by nature (the box's /events is server→client only):
+  //   • box → device: each `attachEventsWs` frame is already a JSON TEXT string
+  //     ({kind,payload} / {kind:"heartbeat"}). Forward verbatim as STREAM_DATA
+  //     with NO enc field (utf8) — the device client does JSON.parse(data), the
+  //     SAME demux as the direct WS path, so the wire format is identical.
+  //   • device → box: the events socket carries nothing device→box; any inbound
+  //     STREAM_DATA is ignored. A relay STREAM_END/ABORT (device disconnected)
+  //     closes the local /events WS so the box stops streaming to a gone client.
+  //
+  // Reuses localPtyConnect (a generic "open a WS to ws://127.0.0.1:8787<path>
+  // with the box token" opener) — /events is just a different path.
+  async function handleStreamOpenEvents(frame) {
+    const t = transport;
+    if (!t) return;
+
+    let evWs;
+    try {
+      evWs = await localPtyConnect({ path: frame.path });
+    } catch (err) {
+      if (transport !== t) return;
+      try {
+        t.send({
+          type: FRAME_TYPES.STREAM_ABORT,
+          id: frame.id,
+          stream: frame.stream,
+          reason: String(err?.message || err),
+        });
+      } catch {
+        /* socket closing; ignore */
+      }
+      return;
+    }
+
+    if (transport !== t) {
+      try { evWs.close(); } catch { /* ignore */ }
+      return;
+    }
+
+    // Confirm the open (response-side STREAM_OPEN) so the relay writes the
+    // device WS's head. The device WS is its own head — no status/headers.
+    try {
+      t.send({
+        type: FRAME_TYPES.STREAM_OPEN,
+        id: frame.id,
+        stream: frame.stream,
+        status: 101,
+        headers: {},
+      });
+    } catch {
+      try { evWs.close(); } catch { /* ignore */ }
+      return;
+    }
+
+    let localClosed = false;
+    const closeLocal = () => {
+      if (localClosed) return;
+      localClosed = true;
+      try { evWs.close(); } catch { /* already closed */ }
+    };
+    const closeTunnel = (kind, reason) => {
+      if (transport !== t) return;
+      try {
+        t.send({
+          type: kind,
+          id: frame.id,
+          stream: frame.stream,
+          ...(reason ? { reason: String(reason) } : {}),
+        });
+      } catch {
+        /* socket closing */
+      }
+    };
+
+    // Device disconnect (relay STREAM_END/ABORT) → close the local /events WS
+    // so the box stops streaming to a gone client. No device→box data path.
+    streams.open(frame.stream, {
+      onData: () => { /* /events is server→client only — ignore device data */ },
+      onEnd: () => { closeLocal(); },
+      onAbort: () => { closeLocal(); },
+    });
+
+    // box → device: JSON text frames forwarded verbatim (utf8, no enc).
+    evWs.onMessage((buf) => {
+      if (transport !== t) return;
+      try {
+        const text = Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf);
+        t.send({
+          type: FRAME_TYPES.STREAM_DATA,
+          id: frame.id,
+          stream: frame.stream,
+          data: text,
+        });
+      } catch (err) {
+        warn(`[relay-agent] events→tunnel send failed: ${String(err?.message || err)}`);
+        closeTunnel(FRAME_TYPES.STREAM_ABORT, err?.message || "send failed");
+      }
+    });
+
+    // box /events WS closed/errored → STREAM_END so the device reconnects.
+    evWs.onClose(() => {
+      if (localClosed) return;
+      closeLocal();
+      closeTunnel(FRAME_TYPES.STREAM_END);
+    });
+  }
+
   // Dispatch one decoded inbound frame.
   function onFrame(frame) {
     if (!frame) return; // decodeFrame dropped malformed/oversized/unknown input
@@ -798,6 +915,10 @@ export function createRelayAgent(opts = {}) {
         // the SSE-style utf8 stream fetch.
         if (frame.stream === "pty") {
           void handleStreamOpenPty(frame);
+        } else if (frame.stream === "events") {
+          // Live event stream bridged as a device WS (relay path equivalent of
+          // the direct /events WebSocket). JSON text frames forwarded verbatim.
+          void handleStreamOpenEvents(frame);
         } else {
           void handleStreamOpen(frame);
         }
