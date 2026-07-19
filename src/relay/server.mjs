@@ -217,6 +217,16 @@ export function createRelayService(opts = {}) {
 
   // --- The single http.Server ----------------------------------------------
   const server = http.createServer((req, res) => {
+    // CORS preflight: the WKWebView sends an OPTIONS before a cross-origin
+    // POST /pair. Answer it directly with 204 + the CORS headers so the real
+    // POST is allowed — otherwise the browser aborts and the pairing fetch
+    // hangs. (Previously this fell through to the API router's 405, which
+    // carried no CORS headers → preflight failed → POST never sent.)
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, corsHeaders());
+      res.end();
+      return;
+    }
     // /pair is unauthenticated (bootstrap) — try it first so a missing/wrong
     // body never reaches the authenticated IAP/push path. Then IAP/push, then
     // the phone API router.
@@ -1042,9 +1052,25 @@ function readBody(req, cb) {
   req.on("error", () => finish(Object.assign(new Error("read error"), { code: "read" })));
 }
 
+// CORS headers applied to EVERY relay response. The mobile app pairs by
+// fetch()ing https://relay.mantaui.com/pair from the WKWebView origin
+// (capacitor://localhost or https://localhost) — a cross-origin request. With
+// no Access-Control-Allow-Origin the WKWebView blocks the response before it
+// reaches JS, and on iOS this manifests as the pairing fetch HANGING (UI stuck
+// on "connecting…") rather than a clean rejection. bui-server already sends
+// these for the same reason (src/server/index.mjs); the relay must too.
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "content-type, authorization, x-box-id",
+    "Access-Control-Max-Age": "600",
+  };
+}
+
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(status, { "content-type": "application/json" });
+  res.writeHead(status, { "content-type": "application/json", ...corsHeaders() });
   res.end(body);
 }
 

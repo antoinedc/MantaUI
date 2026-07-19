@@ -312,6 +312,38 @@ const OK_BOX = () => ({
   body: JSON.stringify({ box_token: "BOX_TOKEN_LEAKED_FROM_BOX" }),
 });
 
+test("CORS: OPTIONS preflight to /pair returns 204 + allow-origin (WKWebView requires this or the fetch hangs)", async (t) => {
+  const box = fakeBox(OK_BOX);
+  const { base } = await makeService(t, { proxyRequest: box.proxyRequest });
+  const res = await fetch(`${base}/pair`, {
+    method: "OPTIONS",
+    headers: {
+      origin: "capacitor://localhost",
+      "access-control-request-method": "POST",
+      "access-control-request-headers": "content-type",
+    },
+  });
+  assert.equal(res.status, 204, "preflight answered 204, not 405");
+  assert.equal(res.headers.get("access-control-allow-origin"), "*");
+  assert.match(res.headers.get("access-control-allow-methods") ?? "", /POST/);
+});
+
+test("CORS: POST /pair response carries access-control-allow-origin", async (t) => {
+  const box = fakeBox(OK_BOX);
+  const { base } = await makeService(t, { proxyRequest: box.proxyRequest });
+  const res = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: { origin: "capacitor://localhost", "content-type": "application/json" },
+    body: JSON.stringify({ box_id: BOX_A, code: "123456" }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(
+    res.headers.get("access-control-allow-origin"),
+    "*",
+    "the real POST response must be CORS-readable by the WKWebView",
+  );
+});
+
 test("POST /pair: happy path mints a device token usable by the phone API", async (t) => {
   const box = fakeBox(OK_BOX);
   const { svc, store, base } = await makeService(t, { proxyRequest: box.proxyRequest });
