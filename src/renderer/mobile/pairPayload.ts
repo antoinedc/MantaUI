@@ -112,19 +112,29 @@ export function parsePairPayload(raw: string): PairPayload | null {
   }
 
   const q = url.searchParams;
-  // Primary spellings win; fall back to the id/token alias for the server form
-  // only (the alias was the M6 serverUrl shorthand — it is NOT a boxId alias).
-  const rawServer = q.get("server") ?? q.get("id") ?? "";
+  const rawServer = q.get("server") ?? "";
   const rawBox = q.get("box") ?? "";
   const rawCode = q.get("code") ?? q.get("token") ?? "";
+  // The legacy `id` param (pre-BET-177 desktop QR: `manta://pair?id=<X>&token=`)
+  // is AMBIGUOUS — early builds put a serverUrl there, but the relay-era desktop
+  // (still shipping in some installed apps) puts the 32-hex BOX ID there. Route
+  // by shape: a 32-hex value is a boxId (relay claim); anything else is a
+  // serverUrl (direct). WITHOUT this, a boxId under `id` gets http://-prefixed
+  // and mis-parsed as a bogus direct server URL → the claim network-fails
+  // against a non-existent host (the exact symptom on an old desktop QR).
+  const rawId = q.get("id") ?? "";
 
-  const serverUrl = coerceServerUrl(rawServer);
-  const boxId = coerceBoxId(rawBox);
+  let serverUrl = coerceServerUrl(rawServer);
+  let boxId = coerceBoxId(rawBox);
+
+  // Resolve the legacy `id` only if neither explicit spelling was given.
+  if (!serverUrl && !boxId && rawId) {
+    const idAsBox = coerceBoxId(rawId);
+    if (idAsBox) boxId = idAsBox;
+    else serverUrl = coerceServerUrl(rawId);
+  }
 
   // Exactly one of {server, box} must be present. Both or neither → reject.
-  // (An old QR with `id=<boxId>` will fail coerceServerUrl AND the id alias
-  // does not route to boxId — by design, since the alias predates relay and
-  // any boxId-looking value under `id` was always a server URL in the M6 spec.)
   if ((serverUrl ? 1 : 0) + (boxId ? 1 : 0) !== 1) return null;
 
   const code = normalizeCode(rawCode);

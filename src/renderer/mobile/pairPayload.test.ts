@@ -21,6 +21,22 @@ describe("parsePairPayload", () => {
       ).toEqual({ serverUrl: "http://box:8787", boxId: null, code: "123456" });
     });
 
+    it("routes a 32-hex legacy id to boxId (old desktop QR: id=<boxId>&token=)", () => {
+      // Regression: an old desktop build emits manta://pair?id=<32hex>&token=.
+      // The 32-hex value is a BOX ID, not a server URL — without shape-routing
+      // it was http://-prefixed and mis-claimed as a bogus direct host, which
+      // network-failed. Must resolve to the relay box form.
+      expect(
+        parsePairPayload(
+          "manta://pair?id=0d5784a7a43451f4ad70dd3d9ee5cf72&token=593337",
+        ),
+      ).toEqual({
+        serverUrl: null,
+        boxId: "0d5784a7a43451f4ad70dd3d9ee5cf72",
+        code: "593337",
+      });
+    });
+
     it("accepts the https://host/m/... deferred-deeplink form", () => {
       expect(
         parsePairPayload(
