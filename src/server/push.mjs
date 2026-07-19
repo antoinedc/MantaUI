@@ -1,4 +1,6 @@
-// push.mjs — Web Push (VAPID) for the mobile PWA.
+// push.mjs — Web Push (VAPID) for the mobile PWA + APNs native push for the
+// iOS Capacitor app (BET-181, supplementary delivery leg; the Web Push
+// VAPID leg stays for the frozen PWA build).
 //
 // Sends notifications to home-screen-installed PWAs for the events a user
 // can't otherwise see when the app is backgrounded/closed:
@@ -17,10 +19,19 @@
 // in the service worker. Focus-suppression for the "done" case relies on the
 // client POSTing /push/focus on visibility / session changes.
 //
+// APNs is the second delivery leg for native iOS Capacitor apps: when the
+// server's `apns` config block is present (~/.manta/config.json → apns:
+// {teamId, keyId, p8Path, bundleId}), push.mjs fans out to every registered
+// device token alongside the Web Push subscription send. Same routing
+// decisions, same suppression. 410 / BadDeviceToken / Unregistered prune
+// the token; a stale or rotated token never makes a successful delivery
+// without first being re-registered by the app.
+//
 // State persists under ~/.manta/ alongside config.json:
 //   vapid.json      — generated VAPID keypair (stable across restarts so
 //                     existing subscriptions keep working)
 //   push-subs.json  — array of PushSubscription JSON objects
+//   apns-tokens.json — array of { token, registeredAt } objects (kind:"apns")
 //
 // The pure classifier `classifyPushEvent` is exported for unit tests; the
 // stateful glue (busy-set tracking, focus, subscription IO, actual send)
@@ -29,14 +40,24 @@
 import webpush from "web-push";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { createSign } from "node:crypto";
+import http2 from "node:http2";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { STATE_DIRNAME } from "../shared/paths.mjs";
 import * as tmux from "./tmux.mjs";
+import * as local from "./local.mjs";
 
 const DIR = join(homedir(), STATE_DIRNAME);
 const VAPID_PATH = join(DIR, "vapid.json");
 const SUBS_PATH = join(DIR, "push-subs.json");
+const APNS_TOKENS_PATH = join(DIR, "apns-tokens.json");
+
+// Apple's apns-topic header = the bundleId. The APNs spec requires the JWT
+// to be cached for 20–60 minutes; we rotate at 45 min (mid-range) to balance
+// JWT sign cost against a clock skew with Apple's clock on the other end.
+const APNS_JWT_TTL_SEC = 45 * 60;
 
 // VAPID `subject` must be a mailto: or https: URI identifying the sender.
 const VAPID_SUBJECT = "mailto:app@mantaui.com";
@@ -118,6 +139,65 @@ export async function removeSubscription(endpoint) {
   const next = subs.filter((s) => s.endpoint !== endpoint);
   if (next.length !== subs.length) await saveSubs(next);
   return { ok: true, count: next.length };
+}
+
+// ---------------------------------------------------------------------------
+// APNs device-token store (BET-181)
+//
+// Same persistence shape as the Web Push subscription store, but the entries
+// are { kind:"apns", token, registeredAt } instead of PushSubscription JSON.
+// The `kind` discriminator lets us fold both registries into a single
+// unified-store migration later without a separate file; for now they live
+// side-by-side. De-dupe on the `token` value (a token rotated by APNs or
+// reinstalled by the user comes back as a new entry; old ones get pruned on
+// 410).
+// ---------------------------------------------------------------------------
+
+async function loadApnsTokens(path = APNS_TOKENS_PATH) {
+  try {
+    if (existsSync(path)) {
+      const arr = JSON.parse(await readFile(path, "utf-8"));
+      return Array.isArray(arr) ? arr : [];
+    }
+  } catch {
+    /* corrupt file → start empty */
+  }
+  return [];
+}
+
+async function saveApnsTokens(tokens, path = APNS_TOKENS_PATH) {
+  await atomicWrite(path, JSON.stringify(tokens, null, 2));
+}
+
+/** Upsert a device token. De-dupes by token value; updates registeredAt.
+ *  `store` injection (test-only) lets tests run against a tmpdir file
+ *  instead of the production path. */
+export async function addApnsToken(token, { store } = {}) {
+  if (typeof token !== "string" || !token) {
+    throw new Error("token must be a non-empty string");
+  }
+  const path = store ?? APNS_TOKENS_PATH;
+  const tokens = await loadApnsTokens(path);
+  const next = tokens.filter((t) => t.token !== token);
+  next.push({ kind: "apns", token, registeredAt: Date.now() });
+  await saveApnsTokens(next, path);
+  return { ok: true, count: next.length };
+}
+
+/** Remove a token by value (used on 410 / BadDeviceToken / Unregistered).
+ *  `store` injection (test-only) — see addApnsToken. */
+export async function removeApnsToken(token, { store } = {}) {
+  const path = store ?? APNS_TOKENS_PATH;
+  if (!token) return { ok: true, count: (await loadApnsTokens(path)).length };
+  const tokens = await loadApnsTokens(path);
+  const next = tokens.filter((t) => t.token !== token);
+  if (next.length !== tokens.length) await saveApnsTokens(next, path);
+  return { ok: true, count: next.length };
+}
+
+/** Test hook. */
+export async function _loadApnsTokensForTest(store) {
+  return loadApnsTokens(store ?? APNS_TOKENS_PATH);
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +725,257 @@ async function sendPush(payload) {
       }
     }),
   );
+  // Fan out to APNs alongside Web Push. Same routing decision has already
+  // been made by routeNotification — we just don't get to know whether APNs
+  // is configured/empty here, so an absent block short-circuits immediately.
+  await sendApnsFanout(payload);
+}
+
+// ---------------------------------------------------------------------------
+// APNs native-push delivery leg (BET-181)
+//
+// Activated when local.apnsConfig() returns a valid block. Pure building
+// blocks (buildApnsJwt, buildApnsRequest, buildApnsPayload) are exported for
+// unit tests; sendApns + sendApnsFanout are the stateful glue that reads the
+// device-token store + makes the HTTP/2 call. NO new npm dependency —
+// everything uses Node's built-in `crypto` (ES256 sign) and `http2`.
+//
+// Apple rotates the JWT at 20–60 min; we cache it for 45 min inside the
+// process. The token cache is per-cfg (teamId/keyId/p8Path), so rotating
+// any of those immediately invalidates the cache (see _apnsJwtCache).
+//
+// Errors that mean "this token is dead, stop sending to it":
+//   - 410 Gone (token expired; Apple requires it be unregistered)
+//   - 400 with reason BadDeviceToken
+//   - 400 with reason Unregistered
+// All other failures are logged but don't prune the token (transient —
+// network blip, Apple's 500s, rate-limit, etc).
+// ---------------------------------------------------------------------------
+
+let _apnsJwtCache = null; // { teamId, keyId, p8Path, jwt, exp }
+
+/**
+ * Pure: build the ES256 JWT used for APNs auth. Reads the .p8 PEM off disk
+ * and signs the JWT claims with Node's built-in crypto. Apple requires:
+ *   header: { alg:"ES256", kid:<keyId> }
+ *   claims: { iss:<teamId>, iat:<unix-seconds> }
+ * ES256 = ECDSA over the P-256 curve with SHA-256. Apple's .p8 is the
+ * PKCS#8 PEM of an EC private key, which Node's crypto accepts directly.
+ *
+ * @param {{teamId:string, keyId:string, p8Path:string}} cfg
+ * @param {{now?: number}} [opts] injectable clock for tests (iat claim)
+ * @returns {string} compact-serialized JWT (header.claims.signature)
+ */
+export async function buildApnsJwt(cfg, { now } = {}) {
+  if (!cfg?.teamId || !cfg?.keyId || !cfg?.p8Path) {
+    throw new Error("buildApnsJwt: missing teamId/keyId/p8Path");
+  }
+  const pem = readFileSync(cfg.p8Path, "utf-8");
+  const header = { alg: "ES256", kid: cfg.keyId };
+  const iat = now ?? Math.floor(Date.now() / 1000);
+  const claims = { iss: cfg.teamId, iat };
+  const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const signingInput = `${enc(header)}.${enc(claims)}`;
+  const signer = createSign("SHA256");
+  signer.update(signingInput);
+  signer.end();
+  const signature = signer
+    .sign({ key: pem, dsaEncoding: "ieee-p1363" })
+    .toString("base64url");
+  return `${signingInput}.${signature}`;
+}
+
+/**
+ * Cache-and-reuse the APNs JWT for APNS_JWT_TTL_SEC. Pure with respect to
+ * time (caller-injected `now`); mutates module-level `_apnsJwtCache`.
+ */
+async function getApnsJwt(cfg) {
+  const now = Math.floor(Date.now() / 1000);
+  const c = _apnsJwtCache;
+  if (
+    c &&
+    c.teamId === cfg.teamId &&
+    c.keyId === cfg.keyId &&
+    c.p8Path === cfg.p8Path &&
+    c.exp > now
+  ) {
+    return c.jwt;
+  }
+  const jwt = await buildApnsJwt(cfg, { now });
+  _apnsJwtCache = {
+    teamId: cfg.teamId,
+    keyId: cfg.keyId,
+    p8Path: cfg.p8Path,
+    jwt,
+    exp: now + APNS_JWT_TTL_SEC,
+  };
+  return jwt;
+}
+
+/** Test hook: drop the JWT cache so the next send rebuilds. */
+export function _resetApnsJwtCache() {
+  _apnsJwtCache = null;
+}
+
+/**
+ * Pure: build the HTTP/2 request shape for one APNs send. Used by sendApns
+ * (with Node's http2 client) AND by tests that want to assert the request
+ * without actually opening a connection.
+ *
+ * @param {{cfg: {bundleId:string}, deviceToken:string, payload: any, jwt:string}} args
+ * @returns {{ host:string, path:string, method:string, headers:object, body:string }}
+ */
+export function buildApnsRequest({ cfg, deviceToken, payload, jwt }) {
+  if (!cfg?.bundleId) throw new Error("buildApnsRequest: missing bundleId");
+  if (typeof deviceToken !== "string" || !deviceToken) {
+    throw new Error("buildApnsRequest: missing deviceToken");
+  }
+  return {
+    host: "api.push.apple.com",
+    path: `/3/device/${encodeURIComponent(deviceToken)}`,
+    method: "POST",
+    headers: {
+      authorization: `bearer ${jwt}`,
+      "apns-topic": cfg.bundleId,
+      "apns-push-type": "alert",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  };
+}
+
+/**
+ * Pure: map an internal notification payload to the APNs `aps` envelope.
+ * Apple requires the title/body under `aps.alert`. `thread-id` groups
+ * notifications from the same session into one stack on the lock screen;
+ * we hoist the sessionId up so iOS does the grouping for us.
+ *
+ * @param {{title:string, body:string, sessionId?:string|null}} payload
+ * @returns {{aps:{alert:{title:string, body:string}, "thread-id"?:string}, sessionId:string|null}}
+ */
+export function buildApnsPayload(payload) {
+  const title = typeof payload?.title === "string" ? payload.title : "";
+  const body = typeof payload?.body === "string" ? payload.body : "";
+  const sessionId =
+    typeof payload?.sessionId === "string" && payload.sessionId
+      ? payload.sessionId
+      : null;
+  const aps = { alert: { title, body } };
+  if (sessionId) aps["thread-id"] = sessionId;
+  return { aps, sessionId };
+}
+
+/**
+ * Default HTTP/2 sender for APNs. Uses Node's built-in http2 to POST one
+ * device-token notification to api.push.apple.com. Resolves with
+ * `{ status, body }` on response, or throws on socket/connect failure.
+ *
+ * Injected via sendApns's `sender` param so tests can stub it without a live
+ * Apple round-trip.
+ *
+ * @param {{host:string, path:string, method:string, headers:object, body:string}} req
+ * @returns {Promise<{status:number, body:any}>}
+ */
+async function defaultApnsSender(req) {
+  return new Promise((resolve, reject) => {
+    const session = http2.connect(`https://${req.host}`);
+    session.on("error", reject);
+    const r = session.request({
+      ":method": req.method,
+      ":path": req.path,
+      ...req.headers,
+    });
+    r.on("response", (headers) => {
+      const status = headers[":status"] ?? 0;
+      const chunks = [];
+      r.on("data", (c) => chunks.push(c));
+      r.on("end", () => {
+        session.close();
+        const raw = Buffer.concat(chunks).toString("utf-8");
+        let body = raw;
+        try {
+          body = raw ? JSON.parse(raw) : null;
+        } catch {
+          /* non-JSON body — leave as string */
+        }
+        resolve({ status, body });
+      });
+    });
+    r.on("error", (e) => {
+      session.close();
+      reject(e);
+    });
+    r.end(req.body);
+  });
+}
+
+/**
+ * Send ONE push to ONE APNs token. Pure w.r.t. the device-token registry
+ * (caller passes it in), so the same function can be unit-tested with a
+ * stub `sender`. Status mapping:
+ *   - 200 → log success
+ *   - 410 Gone, 400 BadDeviceToken, 400 Unregistered → removeApnsToken
+ *   - everything else → log, keep the token (transient)
+ *
+ * @param {{teamId:string,keyId:string,p8Path:string,bundleId:string}} cfg
+ * @param {string} deviceToken
+ * @param {{title:string,body:string,sessionId?:string|null}} payload
+ * @param {(req:any)=>Promise<{status:number,body:any}>} [sender] injected for tests
+ * @param {{store?:string}} [opts] `store` = override the device-token store path
+ *                                  (test-only; defaults to the production path)
+ */
+export async function sendApns(cfg, deviceToken, payload, sender, opts = {}) {
+  const useSender = sender ?? defaultApnsSender;
+  const jwt = await getApnsJwt(cfg);
+  const envelope = buildApnsPayload(payload);
+  const req = buildApnsRequest({ cfg, deviceToken, payload: envelope, jwt });
+  let res;
+  try {
+    res = await useSender(req);
+  } catch (e) {
+    console.warn("[push] apns send error:", e?.message ?? e);
+    return { ok: false, reason: "transport" };
+  }
+  const status = res?.status ?? 0;
+  const reason = res?.body?.reason ?? "";
+  if (status === 200) {
+    console.log(`[push] apns ok token=${deviceToken.slice(0, 8)}…`);
+    return { ok: true };
+  }
+  if (
+    status === 410 ||
+    (status === 400 && (reason === "BadDeviceToken" || reason === "Unregistered"))
+  ) {
+    console.log(
+      `[push] apns prune token=${deviceToken.slice(0, 8)}… status=${status} reason=${reason}`,
+    );
+    await removeApnsToken(deviceToken, { store: opts.store }).catch(() => {});
+    return { ok: false, reason: "dead-token" };
+  }
+  console.warn(
+    `[push] apns send failed status=${status} reason=${reason}`,
+  );
+  return { ok: false, reason: reason || "http-error" };
+}
+
+/**
+ * Stateful fan-out: read every APNs token + the current config block, and
+ * send to each in parallel. No-op when the config block is absent (the
+ * Web Push leg is the only delivery), or when no tokens are registered.
+ * Exported for tests (so the same fn can be driven through HTTP routing
+ * without a real APNs config).
+ */
+export async function sendApnsFanout(payload, opts = {}) {
+  const cfg = opts.cfg ?? (await local.apnsConfig());
+  if (!cfg) return; // APNs leg disabled — silent no-op (matches Web Push)
+  const sender = opts.sender;
+  const store = opts.store;
+  const path = store ?? APNS_TOKENS_PATH;
+  const tokens = await loadApnsTokens(path);
+  if (tokens.length === 0) return;
+  await Promise.all(
+    tokens.map((t) => sendApns(cfg, t.token, payload, sender, { store: path })),
+  );
 }
 
 /**
@@ -759,4 +1090,5 @@ export function _resetPushState() {
   _desktopSink = null;
   _focus = { sessionId: null, visible: false };
   _desktop = { visible: false, lastSeen: 0, lastActive: 0 };
+  _apnsJwtCache = null;
 }

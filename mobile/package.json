@@ -16,7 +16,8 @@
     "@capacitor/android": "^6.2.1",
     "@capacitor/app": "^6.0.3",
     "@capacitor/core": "^6.2.1",
-    "@capacitor/ios": "^6.2.1"
+    "@capacitor/ios": "^6.2.1",
+    "@capacitor/push-notifications": "^6.0.3"
   },
   "devDependencies": {
     "@capacitor/assets": "^3.0.5",

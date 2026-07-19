@@ -6,6 +6,7 @@ import { MobileSettings } from "./MobileSettings";
 import { PairingScreen } from "./PairingScreen";
 import { SetupScreen } from "./SetupScreen";
 import { reportFocus } from "./push";
+import { registerApns, NATIVE_NOTIF_TAP_EVENT_NAME } from "./nativePush";
 import { AuthRequiredError, ServerNotConfiguredError } from "../api/httpApi";
 import { getCapacitorApp, handlePairUrl } from "./deepLink";
 
@@ -272,6 +273,38 @@ export function MobileApp() {
     };
     navigator.serviceWorker.addEventListener("message", onMsg);
     return () => navigator.serviceWorker.removeEventListener("message", onMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Native APNs push registration (BET-181). Runs once after projects +
+  // auth are settled; the request-permission flow wants a fresh user
+  // gesture but on iOS the app launch is treated as one. No-op on the
+  // frozen PWA build (isNativePushAvailable returns false there).
+  useEffect(() => {
+    registerApns().catch((e: unknown) =>
+      console.warn("[nativePush] registerApns failed:", e),
+    );
+  }, []);
+
+  // Native APNs tap routing — Capacitor dispatches a CustomEvent with the
+  // sessionId in `detail` (no service worker involved). Reuse the same
+  // `pendingNotif` ref + resolveSessionOwner path the Web Push SW message
+  // uses (the single source of truth for "navigate from a notification").
+  useEffect(() => {
+    const onNativeTap = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId?: string }>).detail;
+      const sid = typeof detail?.sessionId === "string" ? detail.sessionId : null;
+      if (!sid) return;
+      pendingNotif.current = sid;
+      const owner = resolveSessionOwner(useStore.getState().projects, sid);
+      if (owner) {
+        pendingNotif.current = null;
+        openSessionForNotif(owner.tmuxSession, owner.windowIndex, sid);
+      }
+    };
+    window.addEventListener(NATIVE_NOTIF_TAP_EVENT_NAME, onNativeTap);
+    return () =>
+      window.removeEventListener(NATIVE_NOTIF_TAP_EVENT_NAME, onNativeTap);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

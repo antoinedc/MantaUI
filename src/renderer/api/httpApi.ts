@@ -882,6 +882,15 @@ export const httpApi: Api = {
   webhookList: (sessionId) => rpc(IPC.webhookList, sessionId),
   webhookDelete: (id) => rpc(IPC.webhookDelete, id),
 
+  // -- APNs native-push registration (BET-181) --
+  // iOS Capacitor app registers its APNs device token via the standard 6-site
+  // pattern; httpApi.ts is the desktop-in-http-mode + mobile/web leg. Server
+  // upserts into apns-tokens.json via push.addApnsToken (de-dupes on token).
+  // The /rpc/push:register-apns channel is a peer of the /push/register-apns
+  // HTTP route (curl-friendly); both call the same store function, so the
+  // registry stays single-source-of-truth regardless of transport.
+  pushRegisterApns: (token) => rpc(IPC.pushRegisterApns, token),
+
   // -- auto-update (desktop-only; no-op in http/mobile mode) --
   autoUpdateDownload: () => Promise.resolve(),
   autoUpdateInstall: () => Promise.resolve(),

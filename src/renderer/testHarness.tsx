@@ -75,6 +75,7 @@ function defaultApiImpl(): Record<string, unknown> {
     opencodeAbort: () => Promise.resolve(),
     scheduleList: () => Promise.resolve([]),
     scheduleDelete: () => Promise.resolve(),
+    pushRegisterApns: () => Promise.resolve({ ok: true, count: 0 }),
     secretsList: () => Promise.resolve([]),
     secretsSet: () => Promise.resolve({ ok: true }),
     secretsDelete: () => Promise.resolve(),
