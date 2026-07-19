@@ -34,6 +34,7 @@ import {
   completeJob as completeCapJob,
   startCapSweeper,
 } from "./capabilities.mjs";
+import { notifyCapSession } from "./capNotifier.mjs";
 import {
   startFileServer,
   startCleanupPoller,
@@ -152,10 +153,14 @@ const { stop: stopSchedulePoller } = startSchedulePoller(
 // transition via the SAME oc.sendPrompt leg the scheduler uses, so the user
 // sees a fresh turn when a job times out. See src/server/capabilities.mjs +
 // docs/mantaui-plugins.md §Layer 1.
+// Capability-job completion → opencode session notification. Wired via
+// src/server/capNotifier.mjs (see that file for why the field translation
+// lives in one place). Shared by the sweeper and the /api/cap/:id/done REST
+// handler below — one definition, two callers.
 // eslint-disable-next-line no-unused-vars
 const { stop: stopCapSweeper } = startCapSweeper({
   publish: (evt) => bus.publish(evt),
-  notifySession: (args) => oc.sendPrompt(args),
+  notifySession: notifyCapSession,
 });
 
 // Inbound webhook engine: external actors POST to the public /hook/<token>
@@ -904,7 +909,7 @@ const server = createServer(async (req, res) => {
             { status: body?.status, result: body?.result, error: body?.error },
             {
               ...BUS_PUBLISH_DEPS,
-              notifySession: (args) => oc.sendPrompt(args),
+              notifySession: notifyCapSession,
             },
           );
           if (!result.ok) {
