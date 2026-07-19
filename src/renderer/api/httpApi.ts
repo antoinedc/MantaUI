@@ -479,16 +479,25 @@ function installLivenessWatchdog() {
 // On return to foreground (visibilitychange→visible) or bfcache restore
 // (pageshow), if the socket isn't live, reopen it and force a resync of state
 // missed while backgrounded (markReconnectAndEnsure).
+//
+// Exported as `triggerResumeReconnect` so MobileApp.tsx can ALSO call it from
+// its Capacitor `appStateChange → isActive:true` listener (BET-177 §4.2).
+// One code path — the listener set differs by platform, the trigger does
+// not. The visibilityState guard is kept here because the visibilitychange
+// event fires on BOTH directions (visible AND hidden); the Capacitor path
+// pre-filters via `shouldReconnectOnAppStateChange` so the guard is
+// redundant for it but harmless (markReconnectAndEnsure is idempotent).
+export function triggerResumeReconnect(): void {
+  if (document.visibilityState !== "visible") return;
+  getController().markReconnectAndEnsure();
+}
+
 let _resumeWatchdogInstalled = false;
 function installResumeWatchdog() {
   if (_resumeWatchdogInstalled) return;
   _resumeWatchdogInstalled = true;
-  const recover = () => {
-    if (document.visibilityState !== "visible") return;
-    getController().markReconnectAndEnsure();
-  };
-  document.addEventListener("visibilitychange", recover);
-  window.addEventListener("pageshow", recover);
+  document.addEventListener("visibilitychange", triggerResumeReconnect);
+  window.addEventListener("pageshow", triggerResumeReconnect);
 }
 
 function ensureStream() {

@@ -7,7 +7,8 @@ import { PairingScreen } from "./PairingScreen";
 import { SetupScreen } from "./SetupScreen";
 import { reportFocus } from "./push";
 import { registerApns, NATIVE_NOTIF_TAP_EVENT_NAME } from "./nativePush";
-import { AuthRequiredError, ServerNotConfiguredError } from "../api/httpApi";
+import { AuthRequiredError, ServerNotConfiguredError, triggerResumeReconnect } from "../api/httpApi";
+import { shouldReconnectOnAppStateChange } from "../chatUtils";
 import { getCapacitorApp, handlePairUrl } from "./deepLink";
 
 type Nav =
@@ -225,22 +226,91 @@ export function MobileApp() {
   // only for the session the user is actively watching. Re-sent on session
   // change and on every visibility flip; pagehide marks not-visible so a
   // backgrounded/closed app gets all "done" pushes.
+  //
+  // On the iOS Capacitor shell (BET-177 §4.1) we ALSO subscribe to
+  // `appStateChange` and feed its `isActive` into the same `send()` closure
+  // — WKWebView's visibilitychange is unreliable during app backgrounding,
+  // but Capacitor's native event fires every transition. The native signal
+  // wins once it has arrived; document.visibilityState is the pre-first-
+  // event fallback (and the only signal on the frozen PWA / desktop).
+  // One code path: the listener set differs by platform, the reporting
+  // function does not.
+  const nativeActiveRef = useRef<boolean | null>(null);
   useEffect(() => {
-    const send = () =>
-      reportFocus(
-        activeSessionId,
-        document.visibilityState === "visible" && nav.screen === "session",
-      );
-    send();
-    const onVis = () => send();
+    const cap = getCapacitorApp(window);
+    const send = (visible: boolean) =>
+      reportFocus(activeSessionId, visible && nav.screen === "session");
+    const capActive = nativeActiveRef.current;
+    const docVisible = document.visibilityState === "visible";
+    // Prefer the native signal once it has arrived; otherwise fall back to
+    // document.visibilityState. (On the first render before any Capacitor
+    // event has fired, `capActive` is null and we use the document signal.)
+    send(capActive !== null ? capActive : docVisible);
+    const onVis = () =>
+      send(nativeActiveRef.current !== null
+        ? nativeActiveRef.current
+        : document.visibilityState === "visible");
+    // pagehide is the "going away" terminal event — always mark not-visible
+    // regardless of any prior signal. (Going through send() would also
+    // report false here, but the direct call documents the intent and
+    // matches the original behavior verbatim.)
     const onHide = () => reportFocus(activeSessionId, false);
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("pagehide", onHide);
+    let listenerPromise:
+      | Promise<{ remove: () => Promise<void> }>
+      | { remove: () => Promise<void> }
+      | undefined;
+    if (cap) {
+      listenerPromise = cap.addListener(
+        "appStateChange",
+        (event: { isActive: boolean }) => {
+          nativeActiveRef.current = event.isActive;
+          send(event.isActive);
+        },
+      );
+    }
     return () => {
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("pagehide", onHide);
+      if (listenerPromise) {
+        // Capacitor's addListener handle is a Promise<{remove}> in v6+;
+        // older versions return the handle directly. Normalize both shapes
+        // (same pattern as the appUrlOpen cleanup further down).
+        void Promise.resolve(listenerPromise).then((h) => {
+          const remove = (h as { remove?: () => Promise<void> } | null | undefined)?.remove;
+          if (typeof remove === "function") void remove();
+        });
+      }
     };
   }, [activeSessionId, nav.screen]);
+
+  // Resume reconnect (BET-177 §4.2). iOS suspends sockets while backgrounded,
+  // so on the inactive→active transition we force a reconnect + resync of
+  // state missed during the suspend. Goes through the SAME
+  // triggerResumeReconnect path the visibility-based resume watchdog uses
+  // in httpApi.ts (extended, not duplicated) — see shouldReconnectOnAppStateChange
+  // in chatUtils.ts for the pure predicate.
+  useEffect(() => {
+    const cap = getCapacitorApp(window);
+    if (!cap) return;
+    const handle = cap.addListener(
+      "appStateChange",
+      (event: { isActive: boolean }) => {
+        if (shouldReconnectOnAppStateChange(event.isActive === true)) {
+          triggerResumeReconnect();
+        }
+      },
+    );
+    return () => {
+      // Capacitor's addListener handle is a Promise<{remove}> in v6+;
+      // older versions return the handle directly. Normalize both shapes.
+      void Promise.resolve(handle).then((h) => {
+        const remove = (h as { remove?: () => Promise<void> } | null | undefined)?.remove;
+        if (typeof remove === "function") void remove();
+      });
+    };
+  }, []);
 
   // Notification deep-link — a tapped push opens the app with ?notif=<sid>
   // (cold start) or posts a message from the service worker (warm). Stash the

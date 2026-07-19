@@ -1988,6 +1988,25 @@ export function shouldForceReconnect(
   return now - lastFrameAt > thresholdMs;
 }
 
+/**
+ * Decide whether a Capacitor `appStateChange` event should trigger an SSE
+ * WebSocket reconnect (BET-177 §4.2 — native lifecycle hardening).
+ *
+ * iOS suspends sockets while the app is backgrounded. On resume (the
+ * inactive→active transition) the resume-watchdog needs to force a reconnect
+ * + resync so any state missed during the suspend gets recovered. The
+ * suspend transition (active→inactive) is a no-op — iOS is about to kill the
+ * socket anyway, and a redundant reconnect would just race the suspend.
+ *
+ * Pure: takes only the boolean iOS sends, returns whether to reconnect.
+ * Tested in chatUtils.test.ts. Wired into MobileApp.tsx (the only context
+ * with Capacitor present); desktop / PWA / frozen web client never call it
+ * because getCapacitorApp(window) returns null there.
+ */
+export function shouldReconnectOnAppStateChange(isActive: boolean): boolean {
+  return isActive === true;
+}
+
 // ---------------------------------------------------------------------------
 // Bounded-concurrency fan-out (BET-135)
 //

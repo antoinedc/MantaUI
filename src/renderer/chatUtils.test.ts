@@ -61,6 +61,7 @@ import {
   resolveToolOutput,
   reconcileOptimisticUser,
   shouldForceReconnect,
+  shouldReconnectOnAppStateChange,
   runWithConcurrency,
   credentialRefreshBannerText,
   lastUserMessageText,
@@ -2807,6 +2808,26 @@ describe("shouldForceReconnect", () => {
   it("respects a custom threshold", () => {
     expect(shouldForceReconnect("connected", 0, 100, 50)).toBe(true);
     expect(shouldForceReconnect("connected", 0, 40, 50)).toBe(false);
+  });
+});
+
+// ===== shouldReconnectOnAppStateChange =====
+
+describe("shouldReconnectOnAppStateChange", () => {
+  it("returns true on resume (isActive=true) so the resume-watchdog fires", () => {
+    expect(shouldReconnectOnAppStateChange(true)).toBe(true);
+  });
+
+  it("returns false on suspend (isActive=false) — OS is about to kill the socket", () => {
+    expect(shouldReconnectOnAppStateChange(false)).toBe(false);
+  });
+
+  it("treats truthy non-true values as not-resume (defensive)", () => {
+    // iOS always sends a real boolean, but defend against future API drift.
+    expect(shouldReconnectOnAppStateChange(1 as unknown as boolean)).toBe(false);
+    expect(shouldReconnectOnAppStateChange("yes" as unknown as boolean)).toBe(false);
+    expect(shouldReconnectOnAppStateChange(null as unknown as boolean)).toBe(false);
+    expect(shouldReconnectOnAppStateChange(undefined as unknown as boolean)).toBe(false);
   });
 });
 
