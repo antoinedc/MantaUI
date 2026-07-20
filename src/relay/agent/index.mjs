@@ -63,6 +63,19 @@ export const DEFAULT_LOCAL_BASE = "http://127.0.0.1:8787";
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 30000;
 
+// Liveness watchdog (BET: zombie-WS fix). The reconnect loop only fires on a
+// socket 'close'/'error' event. When the underlying TCP dies SILENTLY (relay
+// restart behind a load balancer, NAT/idle timeout, network blip) no close is
+// emitted and the agent holds a half-open "zombie" socket FOREVER — status()
+// reports "connected" while the relay has long since dropped the box, so the
+// phone sees `box_offline`. This is the exact 14h dead-socket outage observed
+// 2026-07-20. The fix mirrors the opencode SSE liveness watchdog (commit
+// 26319f9): periodically send a WS-level ping and, if no pong came back since
+// the previous tick, TERMINATE the socket — which synthesizes the 'close' event
+// the reconnect loop is waiting for. Interval 20s / two missed pongs ≈ 40s to
+// detection, well under the relay's own presence TTL.
+export const HEARTBEAT_INTERVAL_MS = 20000;
+
 // ---------------------------------------------------------------------------
 // Backoff — the .mjs mirror of src/shared/net/backoff.ts ExponentialBackoff
 // ---------------------------------------------------------------------------
@@ -104,40 +117,35 @@ export function createBackoff({
 }
 
 // ---------------------------------------------------------------------------
-// Real `ws` transport (default connect()). Adapts a dialed-out ws WebSocket to
-// the tiny transport contract (send / onMessage / onClose / close) the client
-// is written against — the box-side twin of the relay's wsTransport().
-// ---------------------------------------------------------------------------
-
-// Lazily import `ws` only when a real connection is actually dialed, so tests
-// (which inject a fake `connect`) never pull in the module and the client stays
-// importable in environments without it.
-async function defaultConnect(url, { headers } = {}) {
-  const { WebSocket } = await import("ws");
-  const ws = new WebSocket(url, { headers });
+// Shared ws→transport plumbing. Both real WS adapters below (the control-tunnel
+// `defaultConnect` and the raw PTY `makeDefaultLocalPtyConnect`) speak the same
+// tiny transport contract and wire the same message/close (and, for the control
+// tunnel, pong) callback fan-out + open-promise. This helper owns that common
+// shape so the two adapters keep ONLY their distinct `send` semantics — without
+// it the two blocks are near-identical clones (the duplication-gate flags them).
+// `withPong:true` additionally wires the WS-protocol pong event for the liveness
+// watchdog; the PTY adapter doesn't need it.
+function wsCallbackBridge(ws, { withPong = false } = {}) {
   const msgCbs = [];
   const closeCbs = [];
-  let openResolved = false;
+  const pongCbs = [];
+  ws.on("message", (data) => {
+    for (const cb of msgCbs.slice()) cb(data);
+  });
+  ws.on("close", () => {
+    for (const cb of closeCbs.slice()) cb();
+  });
+  if (withPong) {
+    ws.on("pong", () => {
+      for (const cb of pongCbs.slice()) cb();
+    });
+  }
+  // ws emits 'error' then 'close'; swallow 'error' so an errored socket doesn't
+  // crash the process — the 'close' handler drives teardown/reconnect.
+  ws.on("error", () => {});
 
-  const transport = {
+  const base = {
     ws,
-    send(frame) {
-      let raw;
-      if (typeof frame === "string") {
-        raw = frame;
-      } else {
-        try {
-          raw = encodeFrame(frame);
-        } catch {
-          return; // programmer-built frame failed validation; never crash send
-        }
-      }
-      try {
-        ws.send(raw);
-      } catch {
-        /* socket closing/closed — the close handler drives reconnect */
-      }
-    },
     onMessage(cb) {
       msgCbs.push(cb);
     },
@@ -152,20 +160,38 @@ async function defaultConnect(url, { headers } = {}) {
       }
     },
   };
+  if (withPong) {
+    // Liveness plumbing for the heartbeat watchdog. `ping()` sends a WS-PROTOCOL
+    // ping (not an app frame — the `ws` peer answers it automatically, no relay
+    // code needed); `onPong` registers the pong callback; `terminate()` hard-
+    // kills a half-open socket (ws.close() waits for a close handshake the dead
+    // peer will never send, so a zombie must be terminated, not closed).
+    base.ping = () => {
+      try {
+        ws.ping();
+      } catch {
+        /* socket closing/closed — watchdog will terminate on the next tick */
+      }
+    };
+    base.onPong = (cb) => {
+      pongCbs.push(cb);
+    };
+    base.terminate = () => {
+      try {
+        ws.terminate();
+      } catch {
+        /* already gone */
+      }
+    };
+  }
+  return base;
+}
 
-  ws.on("message", (data) => {
-    for (const cb of msgCbs.slice()) cb(data);
-  });
-  ws.on("close", () => {
-    for (const cb of closeCbs.slice()) cb();
-  });
-  // ws emits 'error' then 'close'; swallow 'error' so an errored socket doesn't
-  // crash the process — the 'close' handler drives the reconnect.
-  ws.on("error", () => {});
-
-  // Resolve once the socket is open so the reconnect loop can reset its backoff
-  // on a genuine connect. A socket that errors before opening rejects.
-  await new Promise((resolve, reject) => {
+// Await a ws 'open' (resolve) or a pre-open 'error' (reject), so the reconnect
+// loop can reset its backoff on a genuine connect. Shared by both adapters.
+function awaitWsOpen(ws) {
+  return new Promise((resolve, reject) => {
+    let openResolved = false;
     ws.once("open", () => {
       openResolved = true;
       resolve();
@@ -174,7 +200,44 @@ async function defaultConnect(url, { headers } = {}) {
       if (!openResolved) reject(err);
     });
   });
+}
 
+// ---------------------------------------------------------------------------
+// Real `ws` transport (default connect()). Adapts a dialed-out ws WebSocket to
+// the tiny transport contract (send / onMessage / onClose / close) the client
+// is written against — the box-side twin of the relay's wsTransport().
+// ---------------------------------------------------------------------------
+
+// Lazily import `ws` only when a real connection is actually dialed, so tests
+// (which inject a fake `connect`) never pull in the module and the client stays
+// importable in environments without it.
+async function defaultConnect(url, { headers } = {}) {
+  const { WebSocket } = await import("ws");
+  const ws = new WebSocket(url, { headers });
+  // Control tunnel needs the liveness (ping/onPong/terminate) surface.
+  const transport = wsCallbackBridge(ws, { withPong: true });
+  // Control-tunnel send: accept an already-encoded string OR a frame object to
+  // encode. (The PTY adapter's send is raw-bytes-only — the one real difference
+  // between the two adapters, which is why send stays per-adapter.)
+  transport.send = (frame) => {
+    let raw;
+    if (typeof frame === "string") {
+      raw = frame;
+    } else {
+      try {
+        raw = encodeFrame(frame);
+      } catch {
+        return; // programmer-built frame failed validation; never crash send
+      }
+    }
+    try {
+      ws.send(raw);
+    } catch {
+      /* socket closing/closed — the close handler drives reconnect */
+    }
+  };
+
+  await awaitWsOpen(ws);
   return transport;
 }
 
@@ -335,49 +398,21 @@ export function makeDefaultLocalPtyConnect(localBase, auth) {
     const base = localBase.replace(/^http/, "ws");
     const url = `${base}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(auth.box_token)}`;
     const ws = new WebSocket(url);
-
-    const msgCbs = [];
-    const closeCbs = [];
-    let openResolved = false;
-
-    const transport = {
-      ws,
-      send(payload) {
-        if (typeof payload === "string" || Buffer.isBuffer(payload)) {
-          try {
-            ws.send(payload);
-          } catch {
-            /* socket closing */
-          }
+    // PTY tunnel: no liveness surface needed (the control tunnel owns the
+    // watchdog); this is a short-lived per-terminal stream.
+    const transport = wsCallbackBridge(ws);
+    // PTY send is raw-bytes-only (terminal bytes are opaque; NEVER encodeFrame).
+    transport.send = (payload) => {
+      if (typeof payload === "string" || Buffer.isBuffer(payload)) {
+        try {
+          ws.send(payload);
+        } catch {
+          /* socket closing */
         }
-      },
-      onMessage(cb) {
-        msgCbs.push(cb);
-      },
-      onClose(cb) {
-        closeCbs.push(cb);
-      },
-      close() {
-        try { ws.close(); } catch { /* already closing */ }
-      },
+      }
     };
 
-    ws.on("message", (data) => {
-      // ws hands us Buffer; keep Buffer (terminal bytes are raw, NOT utf8).
-      for (const cb of msgCbs.slice()) cb(data);
-    });
-    ws.on("close", () => {
-      for (const cb of closeCbs.slice()) cb();
-    });
-    ws.on("error", () => {
-      // ws fires 'error' then 'close'; close handler drives teardown.
-    });
-
-    await new Promise((resolve, reject) => {
-      ws.once("open", () => { openResolved = true; resolve(); });
-      ws.once("error", (err) => { if (!openResolved) reject(err); });
-    });
-
+    await awaitWsOpen(ws);
     return transport;
   };
 }
@@ -432,6 +467,16 @@ export function createRelayAgent(opts = {}) {
     backoff = createBackoff(),
     setTimer = (fn, ms) => setTimeout(fn, ms),
     clearTimer = (h) => clearTimeout(h),
+    // Heartbeat watchdog (BET zombie-WS fix). Injectable interval primitives so
+    // tests can drive the tick deterministically without real timers. Default
+    // to unref'd setInterval so the watchdog never keeps the process alive.
+    heartbeatMs = HEARTBEAT_INTERVAL_MS,
+    setHeartbeat = (fn, ms) => {
+      const h = setInterval(fn, ms);
+      if (typeof h?.unref === "function") h.unref();
+      return h;
+    },
+    clearHeartbeat = (h) => clearInterval(h),
     log = console.log,
     warn = console.warn,
   } = opts;
@@ -459,6 +504,8 @@ export function createRelayAgent(opts = {}) {
   let stopped = false; // set by stop(); halts the reconnect loop permanently
   let started = false; // set by start(); the agent only counts as "live" once start() ran
   let connecting = false;
+  let heartbeatHandle = null; // liveness watchdog interval (BET zombie-WS fix)
+  let awaitingPong = false; // true once a ping is sent, cleared on pong receipt
 
   // Build the authenticated dial-out URL + headers. The relay's parseHandshake
   // accepts box_id/token via header OR query; we present BOTH the header form
@@ -984,8 +1031,18 @@ export function createRelayAgent(opts = {}) {
     t.onMessage((data) => {
       onFrame(decodeFrame(data));
     });
+    // A WS-protocol pong clears the "awaiting" flag — the peer is alive. Guard
+    // on `transport === t` so a LATE pong from an already-swapped old socket
+    // can't clear the flag on the current one and mask its dead-socket detection
+    // for a tick (mirrors the same stale-guard used in the tick + request proxy).
+    if (typeof t.onPong === "function") {
+      t.onPong(() => {
+        if (transport === t) awaitingPong = false;
+      });
+    }
     t.onClose(() => {
       if (transport === t) transport = null;
+      stopHeartbeat();
       // Every live stream must be torn down so nothing hangs half-open across a
       // reconnect (Stage-4 consumers get onAbort).
       streams.abortAll("relay tunnel closed");
@@ -993,6 +1050,43 @@ export function createRelayAgent(opts = {}) {
       log(`[relay-agent] tunnel closed; reconnecting`);
       scheduleReconnect();
     });
+
+    startHeartbeat(t);
+  }
+
+  // --- liveness watchdog (BET zombie-WS fix) ------------------------------
+
+  // Start the per-connection heartbeat. Each tick: if the PREVIOUS ping was
+  // never answered (awaitingPong still true), the peer is dead — terminate the
+  // socket, which fires the 'close' handler and drives a reconnect. Otherwise
+  // arm a fresh ping and mark awaiting. First tick sends a ping without
+  // terminating (nothing to time out yet). Terminates rather than close()s
+  // because a zombie peer never completes a close handshake.
+  function startHeartbeat(t) {
+    stopHeartbeat();
+    awaitingPong = false;
+    if (typeof t.ping !== "function") return; // transport without ping (test stub)
+    heartbeatHandle = setHeartbeat(() => {
+      if (transport !== t) return; // stale tick after a swap
+      if (awaitingPong) {
+        // No pong since last tick → dead socket. Terminate → onClose → reconnect.
+        warn("[relay-agent] heartbeat timeout; terminating dead socket");
+        awaitingPong = false;
+        if (typeof t.terminate === "function") t.terminate();
+        else t.close();
+        return;
+      }
+      awaitingPong = true;
+      t.ping();
+    }, heartbeatMs);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatHandle != null) {
+      clearHeartbeat(heartbeatHandle);
+      heartbeatHandle = null;
+    }
+    awaitingPong = false;
   }
 
   // Schedule the next reconnect after a backoff delay. Guards against stacking
@@ -1035,6 +1129,7 @@ export function createRelayAgent(opts = {}) {
       clearTimer(reconnectTimer);
       reconnectTimer = null;
     }
+    stopHeartbeat();
     streams.abortAll("relay-agent stopped");
     if (transport) {
       const t = transport;
@@ -1076,6 +1171,9 @@ export function createRelayAgent(opts = {}) {
     _onFrame: onFrame,
     _streams: streams,
     _handshake: handshake,
+    // introspection for the heartbeat watchdog tests
+    _isHeartbeatRunning: () => heartbeatHandle != null,
+    _isAwaitingPong: () => awaitingPong,
   };
 }
 
