@@ -19,13 +19,15 @@
 // in the service worker. Focus-suppression for the "done" case relies on the
 // client POSTing /push/focus on visibility / session changes.
 //
-// APNs is the second delivery leg for native iOS Capacitor apps: when the
-// server's `apns` config block is present (~/.manta/config.json → apns:
-// {teamId, keyId, p8Path, bundleId}), push.mjs fans out to every registered
-// device token alongside the Web Push subscription send. Same routing
-// decisions, same suppression. 410 / BadDeviceToken / Unregistered prune
-// the token; a stale or rotated token never makes a successful delivery
-// without first being re-registered by the app.
+// APNs is the second delivery leg for native iOS Capacitor apps. The box no
+// longer holds APNs credentials (the .p8 lives on the hosted gateway, see
+// src/gateway/apns.mjs, BET-199); this file owns the box-side device-token
+// store (APNS_TOKENS_PATH / addApnsToken / removeApnsToken) and fans every
+// registered token out to the gateway via POST ${GATEWAY_BASE}/push (BET-201).
+// Same routing decisions, same suppression. 410 / BadDeviceToken /
+// Unregistered prune the token (the gateway classifies and reports; this file
+// owns the prune side-effect). A stale or rotated token never makes a
+// successful delivery without first being re-registered by the app.
 //
 // State persists under ~/.manta/ alongside config.json:
 //   vapid.json      — generated VAPID keypair (stable across restarts so
@@ -50,11 +52,8 @@ const VAPID_PATH = join(DIR, "vapid.json");
 const SUBS_PATH = join(DIR, "push-subs.json");
 const APNS_TOKENS_PATH = join(DIR, "apns-tokens.json");
 
-// Apple's apns-topic header = the bundleId. The APNs spec requires the JWT
-// to be cached for 20–60 minutes; we rotate at 45 min (mid-range) to balance
-// JWT sign cost against a clock skew with Apple's clock on the other end.
-// (JWT TTL constant moved to src/gateway/apns.mjs in BET-199 — the gateway
-// is the sole APNs client now.)
+// (APNs signing + HTTP/2 lives in src/gateway/apns.mjs — BET-199. Boxes no
+// longer hold the .p8; this file only orchestrates via the gateway.)
 
 // VAPID `subject` must be a mailto: or https: URI identifying the sender.
 const VAPID_SUBJECT = "mailto:app@mantaui.com";
@@ -749,39 +748,154 @@ async function sendWebPush(payload) {
 }
 
 // ---------------------------------------------------------------------------
-// APNs native-push delivery leg (BET-181)
+// APNs native-push delivery leg (BET-181 → BET-199 → BET-201)
 //
-// APNs moved to src/gateway/apns.mjs in BET-199 (the gateway is the sole
-// APNs client now — boxes no longer hold the .p8). This file still owns
-// the box-side device-token store (APNS_TOKENS_PATH / addApnsToken /
-// removeApnsToken) and the fan-out entry point (sendApnsFanout). The fan-
-// out body is a no-op STUB for now; BET-200 replaces it with a POST to the
-// gateway (/push) that drives the moved sendApns. Keeping the stub
-// intentional: sendApnsFanout stays exported so existing tests / call
-// sites don't break, but it currently sends nothing.
+// APNs signing + HTTP/2 lives in src/gateway/apns.mjs (BET-199). Boxes no
+// longer hold the .p8. This file owns the box-side device-token store
+// (APNS_TOKENS_PATH / addApnsToken / removeApnsToken) and fans every
+// registered token out to the hosted gateway via POST ${GATEWAY_BASE}/push
+// (BET-201). The gateway is the SOLE APNs client; the box only orchestrates.
+// Pruning is box-side (we own the token registry) — on a 200 from the gateway
+// we walk the per-token results and call removeApnsToken for every
+// `prune:true` entry.
 // ---------------------------------------------------------------------------
 
+// Gateway base URL. Env override exists for tests only (no config key).
+const GATEWAY_BASE = process.env.MANTA_GATEWAY_BASE || "https://gateway.mantaui.com";
+
+// Box identity lives in ~/.manta/auth.json alongside box_token (see
+// auth.mjs). We don't import auth.mjs here — it would create a cycle once
+// BET-202 wires the registration module into index.mjs. Read just the two
+// fields we need directly.
+const AUTH_PATH = join(homedir(), STATE_DIRNAME, "auth.json");
+
+async function readBoxGatewayIdentity() {
+  try {
+    if (!existsSync(AUTH_PATH)) return null;
+    const raw = await readFile(AUTH_PATH, "utf-8");
+    const parsed = JSON.parse(raw);
+    const box_id = typeof parsed?.box_id === "string" ? parsed.box_id : null;
+    const gateway_token =
+      typeof parsed?.gateway_token === "string" ? parsed.gateway_token : null;
+    if (!box_id || !gateway_token) return null;
+    return { box_id, gateway_token };
+  } catch {
+    return null;
+  }
+}
+
+// Test hooks — let unit tests inject fakes without touching globals.
+let _fetchImpl = null;
+let _loadApnsTokensOverride = null;
+let _removeApnsTokenOverride = null;
+let _gatewayBaseOverride = null;
+let _readBoxGatewayIdentityOverride = null;
+
+export function _setFanoutFakesForTest({
+  fetchImpl,
+  loadApnsTokens,
+  removeApnsToken,
+  gatewayBase,
+  readBoxGatewayIdentity: readId,
+} = {}) {
+  if (fetchImpl !== undefined) _fetchImpl = fetchImpl;
+  if (loadApnsTokens !== undefined) _loadApnsTokensOverride = loadApnsTokens;
+  if (removeApnsToken !== undefined) _removeApnsTokenOverride = removeApnsToken;
+  if (gatewayBase !== undefined) _gatewayBaseOverride = gatewayBase;
+  if (readId !== undefined) _readBoxGatewayIdentityOverride = readId;
+}
+
+export function _resetFanoutFakesForTest() {
+  _fetchImpl = null;
+  _loadApnsTokensOverride = null;
+  _removeApnsTokenOverride = null;
+  _gatewayBaseOverride = null;
+  _readBoxGatewayIdentityOverride = null;
+}
+
 /**
-/**
- * Stateful fan-out entry point (BET-181). Exported so existing call sites
- * + tests keep working while the box-side push.mjs is being split across
- * BET-199 (this slice) and BET-200 (fan-out via the gateway).
- *
- * CURRENT BODY (BET-199): no-op. APNs signing + HTTP/2 lives in
- * src/gateway/apns.mjs; this module will be rewired in BET-200 to POST
- * the gateway. Until then, APNs deliveries are NOT made from the box.
- *
- * Web Push (sendWebPush) is still active and unaffected.
+ * Fan APNs out via the hosted gateway. Reads the box's device-token store,
+ * POSTs { box_id, tokens, payload } to ${GATEWAY_BASE}/push with a Bearer
+ * token read from ~/.manta/auth.json, and prunes every `prune:true` entry
+ * on a 200 response. Best-effort: any failure (network, non-2xx, missing
+ * auth) is logged and dropped — push must never crash the event bus.
  *
  * @param {object} payload
- * @param {object} [opts]  accepted for forward-compat with the BET-200 swap.
+ * @param {object} [opts] reserved for forward-compat; ignored today
  */
 export async function sendApnsFanout(payload, opts = {}) {
-  // Intentionally empty: APNs is now a hosted responsibility. See header.
-  // BET-200 will replace this body with:
-  //   1. POST <GATEWAY_BASE>/push with { box_id, tokens, payload }
-  //   2. iterate gateway results, call removeApnsToken for every prune:true
-  return;
+  // Read the device-token registry. If there are no tokens, nothing to do.
+  const tokens = await (_loadApnsTokensOverride
+    ? _loadApnsTokensOverride()
+    : loadApnsTokens());
+  if (!Array.isArray(tokens) || tokens.length === 0) return;
+  const tokenValues = tokens.map((t) => t?.token).filter((t) => typeof t === "string");
+  if (tokenValues.length === 0) return;
+
+  // Resolve the box identity + gateway_token from auth.json.
+  const ident = await (_readBoxGatewayIdentityOverride
+    ? _readBoxGatewayIdentityOverride()
+    : readBoxGatewayIdentity());
+  if (!ident) {
+    console.warn(
+      "[push] gateway send skipped: ~/.manta/auth.json missing box_id or gateway_token " +
+        "(box has not yet registered with the gateway; BET-202 will start that on boot)",
+    );
+    return;
+  }
+  const base = _gatewayBaseOverride ?? GATEWAY_BASE;
+  const url = `${base}/push`;
+  const doFetch = _fetchImpl ?? globalThis.fetch;
+
+  let resp;
+  try {
+    resp = await doFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${ident.gateway_token}`,
+      },
+      body: JSON.stringify({
+        box_id: ident.box_id,
+        tokens: tokenValues,
+        payload,
+      }),
+    });
+  } catch (e) {
+    console.warn(
+      `[push] gateway send failed: ${e?.message ?? e} (url=${url})`,
+    );
+    return;
+  }
+
+  if (!resp || !resp.ok) {
+    console.warn(
+      `[push] gateway send failed: status=${resp?.status ?? "?"} url=${url}`,
+    );
+    return;
+  }
+
+  // Walk per-token results; prune entries the gateway classified as dead.
+  let results;
+  try {
+    const body = await resp.json();
+    results = body?.results;
+  } catch (e) {
+    console.warn("[push] gateway send failed: malformed JSON:", e?.message ?? e);
+    return;
+  }
+  if (!Array.isArray(results)) return;
+  const remove = _removeApnsTokenOverride ?? removeApnsToken;
+  for (const r of results) {
+    if (r?.prune === true && typeof r.token === "string") {
+      await remove(r.token).catch(() => {});
+    }
+  }
+  console.log(
+    `[push] gateway ok count=${tokenValues.length} pruned=${
+      results.filter((r) => r?.prune === true).length
+    }`,
+  );
 }
 
 /**
