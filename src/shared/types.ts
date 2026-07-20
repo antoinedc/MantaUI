@@ -117,7 +117,7 @@ export type AppConfig = {
   // has no `~/.manta` directory on the prod box). Absent → entirely silent
   // no-op; no fetches to axiom.co are made.
   axiomToken?: string;
-  // Dataset name; defaults to "bui". Env var `MANTA_AXIOM_DATASET` wins when
+  // Dataset name; defaults to "manta". Env var `MANTA_AXIOM_DATASET` wins when
   // set.
   axiomDataset?: string;
   // Whisper-family transcription model. Default
