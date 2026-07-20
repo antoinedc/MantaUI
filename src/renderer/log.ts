@@ -31,6 +31,8 @@ let shipper: LogShipper | null = null;
 let flushOnHide: (() => void) | null = null;
 
 const DEVICE_KEY = "manta_log_device";
+const TOKEN_CACHE_KEY = "manta_axiom_token";
+const DATASET_CACHE_KEY = "manta_axiom_dataset";
 
 /**
  * Mint or restore an 8-hex-char device id from localStorage. Stable per
@@ -53,6 +55,31 @@ function getOrMintDevice(): string {
 }
 
 /**
+ * Read a localStorage key without throwing (private mode / quota /
+ * disabled storage). Returns null on any failure — callers must treat
+ * absence as "no cached value".
+ */
+function safeGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write a localStorage key without throwing (private mode / quota).
+ * Mirrors getOrMintDevice's swallow-on-failure pattern.
+ */
+function safeSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* swallow — private mode / quota */
+  }
+}
+
+/**
  * Initialize renderer logging. Reads AppConfig once (fire-and-forget — the
  * boot path must not block on Axiom). No-ops silently when no token is
  * configured. Safe to call multiple times; subsequent calls are idempotent.
@@ -64,9 +91,25 @@ export async function initRendererLogging(source: "mobile" | "desktop"): Promise
   let config: Parameters<typeof resolveAxiomConfig>[0]["config"] = null;
   try {
     config = await window.api.configGet();
+    const token = config?.axiomToken;
+    if (typeof token === "string" && token.length > 0) {
+      safeSet(TOKEN_CACHE_KEY, token);
+      safeSet(DATASET_CACHE_KEY, config?.axiomDataset ?? "manta");
+    }
   } catch {
-    // configGet failing is non-fatal — render in unconfigured state.
-    config = null;
+    // configGet fails when the box is unreachable — the exact scenario we
+    // need to debug. Fall back to the cached token from a prior successful
+    // boot so the renderer still ships events; if no cache exists yet, this
+    // is a never-connected install and config stays null (unchanged).
+    const cachedToken = safeGet(TOKEN_CACHE_KEY);
+    if (cachedToken) {
+      config = {
+        axiomToken: cachedToken,
+        axiomDataset: safeGet(DATASET_CACHE_KEY) ?? "manta",
+      };
+    } else {
+      config = null;
+    }
   }
   const axiomCfg = resolveAxiomConfig({ env: {}, config });
   if (!axiomCfg) return;
