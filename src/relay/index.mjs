@@ -41,6 +41,7 @@ import {
   FRAME_TYPES,
 } from "./protocol.mjs";
 import { openStore, BOX_STATUS, hashToken, hashEquals } from "./store.mjs";
+import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 
 export const DEFAULT_RELAY_PORT = 20787;
 
@@ -767,6 +768,17 @@ const isMain =
   process.argv[1]?.endsWith("src/relay/index.mjs");
 
 if (isMain) {
+  // BET-187: ship every console.* (incl. the [relay] listening banner)
+  // to Axiom when MANTA_AXIOM_TOKEN is set. Relay runs on the prod box
+  // with no `~/.manta` directory, so config is null — env-only. Silent
+  // no-op when the env var is unset.
+  {
+    const axiomCfg = resolveAxiomConfig({ env: process.env, config: null });
+    if (axiomCfg) {
+      captureConsole(createLogShipper({ ...axiomCfg, source: "relay", device: "relay" }));
+    }
+  }
+
   const relay = createRelayServer();
   relay
     .start()

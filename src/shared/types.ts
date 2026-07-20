@@ -108,6 +108,18 @@ export type AppConfig = {
   // bui credentials (ssh identity path, opencode auth). Settings UI shows
   // a masked password input. Absent → mic button is hidden in the UI.
   groqApiKey?: string;
+  // ----- Axiom log shipping (BET-187) -----
+  // Bearer token for `POST https://api.axiom.co/v1/datasets/<dataset>/ingest`.
+  // When set, every runtime (desktop renderer, mobile PWA, bui-server, relay)
+  // ships its console.* output + a handful of structured events to the dataset
+  // so an AI agent can correlate both sides of a phone↔box failure by
+  // timestamp. Env var `MANTA_AXIOM_TOKEN` overrides this for the relay (which
+  // has no `~/.manta` directory on the prod box). Absent → entirely silent
+  // no-op; no fetches to axiom.co are made.
+  axiomToken?: string;
+  // Dataset name; defaults to "bui". Env var `MANTA_AXIOM_DATASET` wins when
+  // set.
+  axiomDataset?: string;
   // Whisper-family transcription model. Default
   // "whisper-large-v3-turbo" balances latency (~200-500ms for short clips)
   // and accuracy. Override only if you have a reason (e.g. larger-v3 for

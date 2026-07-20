@@ -36,6 +36,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
     iosBuildRepoPath,
     iosSimulatorName,
     launcherFlags,
+    axiomToken,
+    axiomDataset,
     refresh,
   } = useStore();
 
@@ -71,6 +73,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [groqKey, setGroqKey] = useState(groqApiKey);
   const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
   const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
+  // Axiom log shipping (BET-187) — co-located with Voice per the spec
+  // (mirrors groqApiKey's row pattern). Empty token → silent no-op.
+  const [axiomTok, setAxiomTok] = useState(axiomToken);
+  const [axiomDs, setAxiomDs] = useState(axiomDataset);
   // Mobile pairing — one-time code minted on demand. The QR encodes the
   // CANONICAL box-form `manta://pair?box=<boxId>&code=<6-digit>` payload
   // (BET-177 §2.4 — the old `?id=&token=` form was a parsePairPayload
@@ -101,7 +107,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setIosRepoPath(iosBuildRepoPath);
     setIosSimName(iosSimulatorName);
     setLauncherFlagValues(launcherFlags ?? {});
-  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, capExecutorEnabled, iosBuildRepoPath, iosSimulatorName, launcherFlags]);
+    setAxiomTok(axiomToken);
+    setAxiomDs(axiomDataset);
+  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, capExecutorEnabled, iosBuildRepoPath, iosSimulatorName, launcherFlags, axiomToken, axiomDataset]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -147,6 +155,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
         groqApiKey: groqKey.trim(),
         voiceTranscriptionModel: voiceTrModel.trim(),
         voiceCommandModel: voiceCmdModel.trim(),
+        axiomToken: axiomTok.trim(),
+        axiomDataset: axiomDs.trim(),
         capExecutorEnabled: capExecutorOn,
         iosBuildRepoPath: iosRepoPath.trim(),
         iosSimulatorName: iosSimName.trim(),
@@ -618,6 +628,40 @@ export function Settings({ onClose }: { onClose: () => void }) {
                         className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
                       />
                     </div>
+                  </div>
+                </div>
+              </div>
+              <div className="border-t border-border pt-6">
+                <h3 className="text-base font-semibold mb-4">Remote log shipping (Axiom)</h3>
+                <div className="text-sm text-text-faint mb-4">
+                  Ships app + server logs to Axiom for remote debugging. Leave empty to disable.
+                </div>
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <label className="block text-xs uppercase tracking-wider text-text-muted">
+                      Axiom ingest token
+                    </label>
+                    <input
+                      type="password"
+                      placeholder="xaat-… (leave blank to disable)"
+                      value={axiomTok}
+                      onChange={(e) => setAxiomTok(e.target.value)}
+                      autoComplete="off"
+                      spellCheck={false}
+                      className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-[10px] uppercase tracking-wider text-text-faint">
+                      Axiom dataset
+                    </label>
+                    <input
+                      placeholder="bui"
+                      value={axiomDs}
+                      onChange={(e) => setAxiomDs(e.target.value)}
+                      spellCheck={false}
+                      className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+                    />
                   </div>
                 </div>
               </div>

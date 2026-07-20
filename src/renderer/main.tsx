@@ -5,6 +5,7 @@ import { MobileApp } from "./mobile/MobileApp";
 import "./index.css";
 import "./mobile/mobile.css";
 import { httpApi } from "./api/httpApi";
+import { initRendererLogging } from "./log";
 import type { Api } from "../shared/api";
 import {
   desktopHttpClientSeed,
@@ -95,9 +96,17 @@ async function boot(): Promise<void> {
     setWindowApi(preload);
     await chooseDesktopTransport(preload);
     // chooseDesktopTransport already assigned window.__buiPreload.
+    // Initialize renderer logging AFTER window.api is wired so configGet
+    // works — but BEFORE React mounts so early-render errors still ship.
+    // Fire-and-forget; initRendererLogging is no-op when no token is set.
+    void initRendererLogging("desktop");
   } else {
     // Mobile/web: install the shim (no preload to preserve).
     setWindowApi(httpApi);
+    // Mobile reads config (and thus axiomToken) via the same httpApi
+    // configGet; no MobileSettings UI per the spec — token is entered once
+    // on desktop.
+    void initRendererLogging("mobile");
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(

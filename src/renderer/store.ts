@@ -131,6 +131,14 @@ type State = {
   groqApiKey: string;
   voiceTranscriptionModel: string;
   voiceCommandModel: string;
+  // Axiom log shipping (BET-187). When axiomToken is set, every console.*
+  // call (and a small set of structured events in httpApi.ts) ships to
+  // Axiom so an AI agent can correlate both sides of a phone↔box failure.
+  // Empty string = silent no-op (no fetches to axiom.co, no console noise).
+  // Mirror only — the renderer reads it ONCE at init via window.api.configGet;
+  // changing the token requires an app relaunch.
+  axiomToken: string;
+  axiomDataset: string;
   // Capability executor (BET-183 / BET-185). When true, this Mac runs plugin
   // handlers (e.g. ios.build) for jobs the AI queues. Mirrored from
   // AppConfig.capExecutorEnabled / iosBuildRepoPath / iosSimulatorName.
@@ -281,6 +289,8 @@ export const useStore = create<State>((set, get) => ({
   groqApiKey: "",
   voiceTranscriptionModel: "",
   voiceCommandModel: "",
+  axiomToken: "",
+  axiomDataset: "",
   capExecutorEnabled: false,
   iosBuildRepoPath: "",
   iosSimulatorName: "",
@@ -397,6 +407,8 @@ export const useStore = create<State>((set, get) => ({
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       voiceCommandModel: c.voiceCommandModel ?? "",
+      axiomToken: c.axiomToken ?? "",
+      axiomDataset: c.axiomDataset ?? "",
       capExecutorEnabled: c.capExecutorEnabled ?? false,
       iosBuildRepoPath: c.iosBuildRepoPath ?? "",
       iosSimulatorName: c.iosSimulatorName ?? "",
