@@ -1,70 +1,90 @@
-# MantaUI plugins — design spec (v2, amended after review)
+# MantaUI plugins — design spec (v3, BET-189)
 
-Status: **SPEC / not yet built.** First plugin: `ios-build`.
+Status: **ACTIVE / shipped.** First plugin: any user-authored YAML manifest
+under `~/.manta/plugins/` on the connected Mac (typically `ios-<app>` —
+iOS build + Simulator launch). The plugin system is the production surface;
+the v1 TypeScript-handler model (BET-183/184/185) and its `ios_build` tool
+are deleted.
 
 This is the FINAL design. Every decision is made. The implementer makes NO
 design decisions: if something appears ambiguous, re-read this file — the
 answer is here. If it is genuinely absent, stop and ask on the issue.
 
-Changes from v1 (all incorporated below, marked ⟨v2⟩ where they alter v1):
-executor catch-up on connect (jobs survive an offline Mac), server-side stale-job
-sweep + retention, guarded `start` (no double-run), serialized executor, batched
-log streaming, `secret()` removed from v1 (was unimplementable cross-machine),
-completion routed back into the originating session (no busy-polling), pinned
-derived-data/.app path + simulator-UDID resolution + macOS PATH strategy,
-explicit branch semantics in the tool description.
+Changes from v2 (all incorporated below, marked ⟨v3⟩ where they alter v2):
+the TypeScript handler layer is GONE (no more `HANDLERS` map,
+`CapHandler`/`CapCtx`-consumer indirection, or per-capability
+`src/main/handlers/*.ts` files); a plugin is now one YAML file at
+`~/.manta/plugins/<name>.yaml` on the machine that runs it; the executor
+folder-scans + fs.watch-hot-reloads the dir, parses every `*.yaml` through
+the shared `src/shared/pluginManifest.mjs` module (single source of truth
+for parse + validate + if-eval + input→env + cwd substitution + timeout
+parse), and dispatches a matching capability by running its steps
+sequentially as `exec("/bin/sh", ["-c", step.run], …)`. The first
+hard-coded capability is the `plugin.write` built-in — it lets the AI
+author/edit manifests via `plugin_save`. Everything else is a manifest
+lookup. Server spine (`src/server/capabilities.mjs` + REST + bus envelopes
++ sweeper) is **byte-identical to v2**. `host` accepts ONLY `"mac"` —
+`box` is not implemented in v3.
 
 ## What this is
 
-A **plugin system** that lets MantaUI gain new capabilities the AI can invoke,
-where a plugin can execute EITHER on the box (the Linux server) OR on a
-connected device (the user's Mac, via the Electron app). The motivating case:
-run iOS compilation + simulator launch on the local Mac so we stop burning
-Codemagic build minutes — but shaped so `ios-build` is merely **plugin #1**, not
-a bespoke feature.
+A **plugin system** that lets MantaUI gain new capabilities the AI can invoke
+on the machine the user wants to drive (today: the connected Mac —
+`host:"mac"`). The motivating case: run iOS compilation + Simulator
+launch on the local Mac so we stop burning Codemagic minutes — but shaped so
+the iOS plugin is just **plugin #1**, not a bespoke feature.
 
-The critical requirement: **a plugin ships its own AI tool(s)**, exactly like
-the existing MantaUI-native tools (`serve_page`, `peers_*`, `schedule_*`,
-`notify`, `secret_*`). Installing a plugin makes new tools appear to every
-opencode session — the AI discovers and calls them the same way it calls
-`serve_page` today. A plugin is therefore a *bundle*, not just an executor:
+The critical requirement: **a plugin is data, not code.** Installing a plugin
+is dropping one YAML file in `~/.manta/plugins/` on the executor machine —
+the executor hot-reloads, no restart. The AI invokes a plugin via one of the
+six generic `plugin_*` tools (`plugin_list`, `plugin_get`, `plugin_save`,
+`plugin_run`, `plugin_status`, `plugin_docs`). The queue + REST + SSE spine
+is byte-identical to v2 — `{capability, input, host}` stays generic; the
+plugin-specific bits are the YAML, the validator, and the per-step runner.
 
 ```
-a plugin = manifest  +  AI tool(s)  +  handler
-           (what it is) (how the AI   (what actually
-                         invokes it)   runs, box or Mac)
+a plugin = one YAML manifest at ~/.manta/plugins/<name>.yaml on the executor
+           (what it is)         (where the AI calls it via plugin_*) (what
+                                 runs)
 ```
 
 This mirrors and generalizes the "MantaUI-native tools" pattern documented in
 `docs/bui-tools-scheduler.md` (§"The pattern"). Every existing native tool is,
-in effect, a hardcoded box-executor plugin. This spec makes that pattern
-first-class and adds a **Mac executor host** so a plugin's handler can run on
-the desktop.
+in effect, a hardcoded MantaUI-server plugin; v3 makes the YAML manifest
+first-class so the user (or the AI, on the user's request) can add new
+capabilities without touching MantaUI source.
 
 ---
 
 ## Terminology
 
-- **Capability** — a named unit of work, e.g. `ios.build`. Dotted namespace is
-  the capability id. Referenced everywhere at the transport layer as an opaque
-  string + an opaque `input` object.
-- **Plugin** — a bundle that provides one or more capabilities: a manifest, the
-  AI tool(s) that invoke them, and the handler(s) that execute them.
-- **Executor host** — the runtime that runs a capability's handler. Two kinds:
-  `box` (the Linux server, in-process) and `mac` (the Electron main process on
-  the user's desktop).
+- **Plugin** — a YAML manifest file at `~/.manta/plugins/<name>.yaml` on
+  the executor machine. One plugin = one manifest = one `capability` string
+  (= `name`).
+- **Manifest** — the YAML file itself. Schema reference lives in
+  `docs/plugins-authoring.md` §2.
+- **Executor machine** — the runtime that scans the plugin folder, runs
+  matching capabilities, and hot-reloads. v3: only the connected Mac.
+- **Capability** — the string a plugin's manifest exposes to the queue.
+  Always equal to the plugin's `name:` (which the executor enforces ==
+  filename stem). Dotted namespaces are impossible by the manifest name
+  regex.
 - **Job** — one invocation of a capability: `{ id, capability, input, host,
-  status, log[], result }`, tracked durably on the server through its lifecycle
-  (`queued → running → done | failed`).
+  status, log[], result }`, tracked durably on the server through its
+  lifecycle (`queued → running → done | failed`).
+- **`plugin.write`** — the one hard-coded capability in v3: a special
+  `capability:"plugin.write"` job validates its YAML payload, writes the
+  file to `~/.manta/plugins/<name>.yaml`, and rescans. The runner has no
+  other built-ins.
 
 ---
 
-## Architecture (three layers, one generic spine)
+## Architecture (three layers, one generic spine, v3)
 
 ```
   ┌──────────────────────────────────────────────────────────────┐
   │ Layer 1 — CAPABILITY JOB QUEUE  (MantaUI server)              │
-  │   src/server/capabilities.mjs                                 │
+  │   src/server/capabilities.mjs          (BYTE-IDENTICAL v3)    │
   │   store: ~/.manta/cap-jobs.json  (atomic write)              │
   │   REST:  POST /api/cap             create a job              │
   │          GET  /api/cap/:id         status + log tail         │
@@ -78,599 +98,314 @@ the desktop.
   └──────────────────────────────────────────────────────────────┘
         ▲ AI invokes                          ▲ Mac executes / reports
         │                                     │
-  ┌─────┴───────────────────┐        ┌────────┴────────────────────┐
-  │ Layer 2 — AI TOOL(S)     │        │ Layer 3 — EXECUTOR HOSTS    │
-  │ docs/opencode-tools/     │        │ box: future (sweep handles   │
-  │   <plugin>.ts            │        │      expiry meanwhile)      │
-  │ thin registrar → /api/cap│        │ mac: src/main/capExecutor.ts │
-  │ (same boxToken/auth      │        │      SSE + catch-up list,    │
-  │  helpers as schedule.ts) │        │      serialized handler runs,│
-  │                          │        │      batched log/done back   │
-  └──────────────────────────┘        └──────────────────────────────┘
+  ┌─────┴──────────┐                  ┌────────┴─────────────────┐
+  │ Layer 2 — AI   │  plugin_* tools  │ Layer 3 — MAC EXECUTOR   │
+  │ docs/opencode- │ → POST /api/cap  │ src/main/capExecutor.ts  │
+  │ tools/plugins. │                  │   • fs.watch ~/.manta/   │
+  │ ts (6 exports) │                  │     plugins/ (500ms deb) │
+  │                │                  │   • parse via shared     │
+  │                │                  │     pluginManifest.mjs   │
+  │                │                  │   • dispatch:            │
+  │                │                  │     plugin.write → write │
+  │                │                  │     else: run manifest   │
+  │                │                  │   • PUT registry on scan │
+  └────────────────┘                  └──────────────────────────┘
 ```
 
 ### The one decision that keeps it extraction-ready
 
-**Everything at the transport layer speaks `{ capability, input }` — never
-`iosBuild`-specific fields.** The store row, the SSE event, the REST body, and
-the executor dispatch are all generic. v1 has exactly one capability
-(`ios.build`) and one Mac handler, but the queue, the event `kind`, and the
-lifecycle are already generic. Adding capability #2 later touches only:
-
-1. a new tool file in `docs/opencode-tools/`,
-2. a new entry in the Mac executor's handler map (or a box handler),
-
-— NOT the queue, the REST surface, the SSE wiring, or the auth. That is the
-whole point of building it this way even while "hardcoding" ios-build.
+**Everything at the transport layer speaks `{ capability, input, host }` —
+never a plugin name or a step.** Job shape, REST body, SSE event, and
+executor dispatch are all generic. The plugin-specific bits are the YAML,
+the validator, and the per-step runner. Adding capability #N is writing
+one YAML file, not editing TypeScript — and the queue, REST, SSE, and auth
+stay unchanged.
 
 ### Constants (single source of truth — declare each ONCE, in the module noted)
 
 | Constant | Value | Module | Meaning |
 | --- | --- | --- | --- |
+| `NAME_RE` | `^[a-z0-9][a-z0-9-]{0,62}$` | `pluginManifest.mjs` | plugin name regex (also the filename stem) |
+| `INPUT_ID_RE` | `^[a-z][a-zA-Z0-9_]*$` | `pluginManifest.mjs` | input id regex (JS-identifier safe) |
+| `INPUT_TYPES` | `["string","number","boolean","enum"]` | `pluginManifest.mjs` | allowed `inputs.<id>.type` values |
+| `MAX_TIMEOUT_MS` | `30 * 60_000` | `pluginManifest.mjs` | hard cap on a plugin's `timeout:` (sweep alignment — see §Layer 1) |
 | `LOG_CAP_BYTES` | `256 * 1024` | `capabilities.mjs` | ring-buffer cap on a job's stored log |
 | `LOG_TAIL_BYTES` | `16 * 1024` | `capabilities.mjs` | max log bytes returned by `getJob` |
 | `SWEEP_INTERVAL_MS` | `60_000` | `capabilities.mjs` | stale-job sweep cadence |
-| `RUNNING_TIMEOUT_MS` | `30 * 60_000` | `capabilities.mjs` | `running` older than this → `failed` |
+| `RUNNING_TIMEOUT_MS` | `30 * 60_000` | `capabilities.mjs` | `running` older than this → `failed` (matches `MAX_TIMEOUT_MS` so manifest can't outrun the sweep) |
 | `QUEUED_EXPIRY_MS` | `24 * 60 * 60_000` | `capabilities.mjs` | `queued` older than this → `failed` |
 | `TERMINAL_RETENTION_MS` | `7 * 24 * 60 * 60_000` | `capabilities.mjs` | terminal jobs older than this → pruned |
 | `MAX_TERMINAL_JOBS` | `50` | `capabilities.mjs` | keep at most this many terminal jobs (drop oldest) |
 | `EXECUTOR_JOB_TIMEOUT_MS` | `25 * 60_000` | `capExecutor.ts` | Mac-side per-job abort (< server's 30 min so the Mac fails first and reports properly) |
 | `LOG_FLUSH_MS` | `1_000` | `capExecutor.ts` | executor log-batch flush cadence |
-| `EXEC_STDOUT_CAP_BYTES` | `2 * 1024 * 1024` | `capExecutor.ts` | cap on captured stdout returned by `ctx.exec` |
+| `EXEC_STDOUT_CAP_BYTES` | `2 * 1024 * 1024` | `capExecutor.ts` | cap on captured stdout returned by `exec` |
 | `KILL_GRACE_MS` | `5_000` | `capExecutor.ts` | SIGTERM → SIGKILL grace on abort |
+| `PLUGIN_HOST` | `"mac"` | `pluginManifest.mjs` | only accepted `host:` value in v3 |
+| `PLUGIN_WRITE` | `"plugin.write"` | `capExecutor.ts` | the one built-in capability name |
 
 ---
 
 ## Layer 1 — server: job queue (`src/server/capabilities.mjs`)
 
-Cloned in shape from `src/server/schedule.mjs`: dependency-injected,
-pure-logic-with-injected-I/O, unit-testable without live tmux/opencode/Electron.
-Reuse `schedule.mjs`'s exact store pattern: `loadJobs`/`saveJobs` with
-`existsSync` guard + corrupt-file-tolerant parse + `atomicWrite` (temp-rename)
-+ `mkdir recursive`, `genId()` = `randomBytes(4).toString("hex")`. The
-`atomicWrite` helper is currently module-private in `schedule.mjs`;
-**consolidate**: move it (and only it) to a tiny shared
-`src/server/storeUtils.mjs` exporting `atomicWrite(path, data)`, import it from
-BOTH `schedule.mjs` and `capabilities.mjs`, and delete the private copy in
-`schedule.mjs`. Do not move `loadJobs`/`saveJobs` (their defaults differ);
-mirror their ~10 lines.
+**Byte-identical to v2.** v3 touched only what runs inside the executor (a
+single `if (capability === "plugin.write")` branch + a manifest runner).
+The store, REST endpoints, SSE envelopes, sweeper, completion-routing, and
+auth are unchanged — `git diff src/server/capabilities.mjs` between v2 and
+v3 must show zero lines except comments.
 
-### Store
-
-`~/.manta/cap-jobs.json` (build the path exactly like `schedule.mjs` does:
-`join(homedir(), STATE_DIRNAME, "cap-jobs.json")` with `STATE_DIRNAME` from
-`../shared/paths.mjs`). File shape `{ "jobs": [...] }`. Job shape:
-
-```jsonc
-{
-  "id": "a1b2c3d4",             // 8-char hex, genId()
-  "capability": "ios.build",    // opaque capability id
-  "input": { /* opaque */ },    // capability-specific args (validated by tool, not queue)
-  "host": "mac",                // "mac" | "box" — which executor should pick it up
-  "sessionID": "ses_…",         // originating chat session (completion routed here)
-  "directory": "/…",            // originating cwd (context only)
-  "status": "queued",           // queued | running | done | failed
-  "createdAt": 1234567890,      // Date.now() ms
-  "startedAt": null,
-  "finishedAt": null,
-  "log": [],                    // appended stdout/stderr chunks (ring-buffered)
-  "result": null,               // capability-defined result object on done
-  "error": null                 // string on failed
-}
-```
-
-### Functions (all injected-I/O `{load, save, publish, notifySession}`, all unit-tested)
-
-Every function that can fail returns `{ok:false, error}` — never throws for
-expected conditions. Follow `schedule.mjs`'s return conventions.
-
-- `createCapJob({capability, input, host, sessionID, directory}, {load, save, publish})`
-  — validate: `capability` is a non-empty string; `host` is `"mac"` or `"box"`;
-  `sessionID` is a non-empty string. Do NOT validate `input` (the tool owns
-  input shape; keeps the queue capability-agnostic). `input` defaults to `{}`,
-  `directory` to `""`. Push, save, then
-  `publish({kind:"capJob", payload:{id, capability, input, host}})`.
-  Returns `{ok:true, job}`.
-- `getJob(id, {load})` — returns the job or `null`. ⟨v2⟩ Before returning,
-  replace `log` with its TAIL: join the chunks, keep only the last
-  `LOG_TAIL_BYTES` characters, return as `log: [tailString]`. Also add
-  `logBytes` (total joined length before tailing) so callers can tell it was
-  truncated. Never mutate the stored job — copy.
-- `listJobs({sessionID, host, status} = {}, {load})` — ⟨v2⟩ all three filters
-  optional, AND-combined. Returns jobs **without** the `log` field (replace
-  with `logBytes`). This one signature serves the AI, the executor catch-up,
-  and a future UI card — one code path.
-- `appendLog(id, chunk, {load, save})` — append `String(chunk)` to `log[]`,
-  then ring-buffer: while total joined length > `LOG_CAP_BYTES`, drop the
-  OLDEST chunk (`log.shift()`). ⟨v2⟩ Returns `{ok:false, error:"job not
-  running"}` without saving when the job is missing or not `running` (a late
-  flush from a timed-out job must not resurrect it).
-- `startJob(id, {load, save})` — ⟨v2⟩ GUARDED claim: only a `queued` job
-  transitions to `running` (stamp `startedAt`). Missing job →
-  `{ok:false, error:"not found"}`. Wrong status →
-  `{ok:false, error:"not queued", status}`. This is the executor's dedup: a
-  job delivered twice (SSE + catch-up list) is claimed once.
-- `completeJob(id, {status, result, error}, {load, save, publish, notifySession})`
-  — `status` must be `"done"` or `"failed"` (else `{ok:false,error}`). ⟨v2⟩
-  Idempotent: if the job is already terminal, return
-  `{ok:true, alreadyTerminal:true}` WITHOUT saving, publishing, or notifying.
-  Otherwise stamp `finishedAt`, set `result`/`error`, save,
-  `publish({kind:"cap.updated", payload:{id, status, sessionID}})`, and ⟨v2⟩
-  if `job.sessionID` is set call
-  `notifySession?.({sessionID: job.sessionID, text: completionText(job)})`
-  (await it, swallow+log failures like the scheduler's fire path — a dead
-  session must not fail the REST call).
-- `completionText(job)` — pure, exported, tested. Returns:
-  `[MantaUI capability job] ${job.capability} job ${job.id} finished with status "${job.status}".`
-  plus, when failed, ` Error: ${job.error}.` plus always
-  ` Check the job's status tool (e.g. ios_build_status("${job.id}")) for the log tail, then report the outcome to the user.`
-- `sweepCapJobs({load, save, publish, notifySession, now = Date.now})` — ⟨v2⟩
-  one pass, one save. For each job:
-  - `running` and `now() - startedAt > RUNNING_TIMEOUT_MS` → terminal
-    `failed`, error `"timed out after 30 minutes (Mac executor lost?)"` —
-    apply the SAME terminal transition as `completeJob` (factor a private
-    `markTerminal(job, {status, error, result}, nowMs)` used by both, so
-    there is exactly one place that stamps `finishedAt`; publish + notify per
-    transitioned job, same as `completeJob`).
-  - `queued` and `now() - createdAt > QUEUED_EXPIRY_MS` → terminal `failed`,
-    error `"expired: no executor picked this job up within 24h (is the Mac
-    app running with the capability executor enabled?)"` — publish + notify.
-  - Retention: after transitions, drop terminal jobs with
-    `finishedAt < now() - TERMINAL_RETENTION_MS`; then, if more than
-    `MAX_TERMINAL_JOBS` terminal jobs remain, drop the oldest (by
-    `finishedAt`) down to the cap. Dropped jobs are silent (no publish).
-  Save only if anything changed.
-- `startCapSweeper({publish, notifySession}, {intervalMs = SWEEP_INTERVAL_MS, storePath})`
-  — clone `startSchedulePoller`'s shape EXACTLY: build the deps with
-  path-bound `load`/`save`, run once immediately, `setInterval` +
-  `timer.unref()`, inFlight re-entrancy guard (put the guard inside
-  `sweepCapJobs`'s wrapper the same way `createScheduler().tick` does),
-  return `{stop}`.
-
-### REST endpoints (wired in `src/server/index.mjs`, behind the auth gate)
-
-All under the existing `Authorization: Bearer <box_token>` gate
-(`src/server/auth.mjs`) — `/api/*` is already gated wholesale; add NO
-exemption. Follow the exact routing style of the `/api/schedule` block in
-`index.mjs` (path check → method check → `readJsonBody` → `respondJson`; 400
-on `{ok:false}`, 500 in catch, 405 fallthrough). Route matching: exact
-`path === "/api/cap"` for create/list, and one regex
-`^\/api\/cap\/([0-9a-f]{8})(?:\/(start|log|done))?$` for the rest.
-
-| Method | Path                  | Body                            | Response | Who calls it |
-| ------ | --------------------- | ------------------------------- | -------- | ------------ |
-| POST   | `/api/cap`            | `{capability,input,host,sessionID,directory}` | `{id}` | AI tool |
-| GET    | `/api/cap/:id`        | —                               | job (log tailed) or 404 `{error:"not found"}` | AI status tool |
-| GET    | `/api/cap?sessionID=&host=&status=` | —                 | `{jobs:[…]}` (no logs) | executor catch-up, future UI |
-| POST   | `/api/cap/:id/start`  | —                               | `{ok:true}` or 409 `{error,status}` | Mac executor |
-| POST   | `/api/cap/:id/log`    | `{chunk}`                       | `{ok:true}` or 409 `{error}` | Mac executor (batched) |
-| POST   | `/api/cap/:id/done`   | `{status,result?,error?}`       | `{ok:true}` | Mac executor + AI-visible failures |
-
-Wiring in `index.mjs`:
-- Import next to the schedule imports; reuse `BUS_PUBLISH_DEPS` where only
-  `publish` is needed.
-- `notifySession` dep = `({sessionID, text}) => oc.sendPrompt({sessionId:
-  sessionID, text})` — the EXACT mechanism `startSchedulePoller` already uses
-  (see its wiring ~line 132). Note the injected turn streams into the user's
-  open ChatPanel as a fresh turn; if the session happens to be mid-turn,
-  opencode's implicit-abort behavior applies — identical to a firing schedule,
-  accepted.
-- Start `startCapSweeper({publish, notifySession})` right next to
-  `startSchedulePoller(...)`; capture and call its `stop` where the schedule
-  poller's `stop` is called.
-- Add `"capJob"` and `"cap.updated"` to the envelope-kind comment at the top
-  of `src/server/events.mjs` (comment only — the bus is generic; no code
-  change there).
-
-### Box executor (future, not v1)
-
-No box-executor plugins in v1 and NO stub code for them — the sweep's
-queued-expiry covers a `host:"box"` job someone creates by accident. When the
-first box plugin lands, a `startCapPoller` mirroring `startSchedulePoller`
-will claim `host:"box"` jobs via the same `startJob`/`appendLog`/`completeJob`
-— which is why those are host-agnostic.
-
-### Tests — `src/server/capabilities.test.mjs`
-
-node:test, in-memory `load`/`save` (an array in a closure), recorded
-`publish`/`notifySession` calls. Follow `src/server/schedule.test.mjs`'s
-assertion style. MUST cover:
-- create → start → appendLog×N → done lifecycle; timestamps stamped; bus
-  events `capJob` then `cap.updated` recorded; `notifySession` called once
-  with `completionText` output.
-- create validation: empty capability, bad host, missing sessionID all
-  `{ok:false}`.
-- `getJob` log tail: log > `LOG_TAIL_BYTES` returns only the tail +
-  `logBytes` = full size; stored job unchanged.
-- `appendLog` ring-buffer: total stays ≤ `LOG_CAP_BYTES`, oldest chunks
-  dropped first; append to a `queued` or terminal job → `{ok:false}`.
-- `startJob` guard: second start → `{ok:false, status:"running"}`; start on
-  terminal → `{ok:false}`.
-- `completeJob` idempotency: second call → `{ok:true, alreadyTerminal:true}`,
-  NO second publish/notify.
-- `listJobs` filters: by host, by status, by sessionID, combined; no `log`
-  field in results.
-- `sweepCapJobs`: stale `running` → failed + notify; ancient `queued` →
-  failed + notify; retention prunes old terminal jobs and enforces
-  `MAX_TERMINAL_JOBS`; a fresh `running` job is untouched; no-change pass
-  does not save.
-- `completionText` formatting (done + failed variants).
+See the v2 spec for the full design of this layer; the constants table
+above is the only surface that matters for v3. The shared `markTerminal`
+helper is still the single terminal-transition code path — used by both
+`completeJob` and the sweep, so notify + publish + `finishedAt` stamping
+lives in exactly one place.
 
 ---
 
-## Layer 2 — AI tools (`docs/opencode-tools/`)
+## Layer 2 — AI tools (`docs/opencode-tools/plugins.ts`)
 
-**This is the "plugins register their own tools" requirement.** Each plugin
-contributes a tool file, installed exactly like the existing native tools:
-COPIED (never symlinked — the `@opencode-ai/plugin` import-resolution gotcha in
-`docs/bui-tools-scheduler.md` §"DO NOT symlink") into
-`~/.config/opencode/tools/`, then `systemctl --user restart opencode-serve`.
+The "plugins register their own tools" requirement is satisfied by
+**shipping the six generic `plugin_*` tools**: a single `.ts` file at
+`docs/opencode-tools/plugins.ts` (COPIED, never symlinked — the
+`@opencode-ai/plugin` import-resolution gotcha — into
+`~/.config/opencode/tools/plugins.ts`, then `systemctl --user restart
+opencode-serve`). One file, six exports → six global opencode tools,
+auto-loaded for every project/session/model.
 
-### v1 — `docs/opencode-tools/ios-build.ts`
+### Tool list (copy these descriptions verbatim)
 
-Clone `docs/opencode-tools/schedule.ts`. Copy the `MANTA_SERVER` const and the
-`boxToken()` / `authHeaders()` / `call()` helpers **VERBATIM** — the
-auth-header plumbing is mandatory; a native tool without it 401s against the M1
-gate. Two named exports → tools `ios_build` and `ios_build_status`.
+| Tool | Args | Behavior |
+| --- | --- | --- |
+| `plugin_list()` | — | `GET /api/plugins/registry`. Returns a bullet list: name, description, input summary, `valid` / `INVALID: <error>`. Empty registry → explain the machine may be offline or have no plugins, point to `plugin_docs`. |
+| `plugin_get(name)` | `name: string` | Lookup in the cached (or freshly-fetched) registry → the manifest's current YAML source. Unknown name → error listing known names. |
+| `plugin_save(name, yaml)` | `name: string, yaml: string` | `POST /api/cap {capability:"plugin.write", host:"mac", input:{name, yaml}, sessionID, directory}` then poll `GET /api/cap/<id>` every 500ms for ≤15s. Done → "saved and valid". Failed → the validation errors verbatim. Still queued after 15s → "queued; the machine appears offline — it will apply when it reconnects". |
+| `plugin_run(name, inputs?)` | `name: string, inputs?: Record<string,unknown>` | First `GET /api/plugins/registry`: unknown name → error listing known names (fast client-side fail — the queue stays generic and is NOT taught about plugins); invalid manifest → error with its validation message. Else `POST /api/cap {capability:<name>, host:"mac", input:<inputs>, sessionID, directory}` → return job id + "completion turn will arrive automatically, do not poll". |
+| `plugin_status(id)` | `id: string` | Identical to today's `ios_build_status` semantics (rename + generic copy). |
+| `plugin_docs()` | — | `GET /api/plugins/docs` → the full authoring guide (`docs/plugins-authoring.md` served verbatim). |
 
-```ts
-export const ios_build = tool({
-  description: [
-    "Compile the MantaUI iOS app on the connected Mac and boot it in the iOS",
-    "Simulator. Use when the user asks to build/run/test the iOS app locally",
-    "instead of on Codemagic. IMPORTANT — what gets built: the Mac's own git",
-    "clone (tracking origin/main), NOT this session's working tree or branch.",
-    "If the user wants their current changes built, they must be merged/pushed",
-    "to origin/main first, then call with pull:true. The Mac must be awake",
-    "with the MantaUI app running and the capability executor enabled in",
-    "Settings. Returns a job id immediately. Do NOT poll in a loop: when the",
-    "job finishes (or fails/times out), a completion message is injected into",
-    "this session automatically as a new turn. Use ios_build_status only if",
-    "the user asks for progress mid-build.",
-  ].join(" "),
-  args: {
-    action: z.enum(["build-and-launch", "test", "compile-only"]).optional()
-      .describe("build-and-launch (default): compile + boot simulator + launch app; test: run xcodebuild test; compile-only: just compile, no simulator."),
-    pull: z.boolean().optional()
-      .describe("Run `git pull --ff-only origin main` in the Mac clone before building (default false)."),
-  },
-  async execute(args, context) {
-    const r = await call("POST", "/api/cap", {
-      capability: "ios.build",
-      host: "mac",
-      input: { action: args.action ?? "build-and-launch", pull: !!args.pull },
-      sessionID: context.sessionID,
-      directory: context.directory,
-    });
-    return `iOS build queued on the Mac (job ${r.id}). You will be notified in this session when it finishes — do not poll.`;
-  },
-});
+Tool descriptions are cost-aware, generic, and use **"machine"** wording
+(never "Mac" — MantaUI branding). Each one keeps the "do NOT poll in a
+loop — completion arrives automatically" framing. If you regenerate
+descriptions, keep those warnings.
 
-export const ios_build_status = tool({
-  description:
-    "Check an iOS build job: status (queued/running/done/failed) + the tail of " +
-    "the build log. Use the job id returned by ios_build. Prefer waiting for " +
-    "the automatic completion message; use this only for mid-build progress " +
-    "or after completion to inspect the log.",
-  args: { id: z.string().describe("The job id from ios_build.") },
-  async execute(args) {
-    const j = await call("GET", `/api/cap/${encodeURIComponent(args.id)}`);
-    const tail = (j.log?.join("") ?? "").split("\n").slice(-50).join("\n");
-    const head = `Job ${j.id} (${j.capability}) — ${j.status}` +
-      (j.error ? ` — ${j.error}` : "");
-    return tail ? `${head}\n\n--- log tail ---\n${tail}` : head;
-  },
-});
+### Install
+
+`docs/opencode-tools/AGENTS.md` contains a `## MantaUI plugins` section
+(replacing the v2 `## MantaUI iOS build`) covering the six tools and when
+to reach for each; users author plugins by just asking. Copy the file:
+
+```bash
+mkdir -p ~/.config/opencode/tools
+cp <repo>/docs/opencode-tools/plugins.ts ~/.config/opencode/tools/
+rm ~/.config/opencode/tools/ios-build.ts   # v1/v2 deletion (idempotent)
+# Append the new "MantaUI plugins" section to ~/.config/opencode/AGENTS.md
+# (replacing the v2 "MantaUI iOS build" section).
+systemctl --user restart opencode-serve
 ```
-
-Note: the tool is **capability-agnostic underneath** — it POSTs the generic
-`{capability, input, host}` envelope. The `ios.build` string and `host:"mac"`
-are the only ios-specific bits, which is exactly what a future generic
-`cap_invoke(capability, input)` tool would take as arguments.
-
-### Guidance blurb
-
-Append a `## MantaUI iOS build` section to `docs/opencode-tools/AGENTS.md`
-(mirror the tone/length of the existing sections). It must state:
-- reach for `ios_build` when the user asks to build/run/test the iOS app
-  locally or to avoid Codemagic minutes;
-- it builds the **Mac clone tracking origin/main** — push/merge first if the
-  user wants their current changes, then `pull:true`;
-- requires the Mac awake with MantaUI running and the executor enabled;
-- do NOT poll in a loop — completion arrives automatically as a new turn;
-  `ios_build_status(id)` is for user-requested progress checks only.
-
-Install step (same as every tool): copy the `.ts` to
-`~/.config/opencode/tools/`, append the blurb to `~/.config/opencode/AGENTS.md`,
-`systemctl --user restart opencode-serve`.
-
-### How this generalizes to "plugins ship tools"
-
-The registry-driven end state (post-v1): a plugin directory carries its tool
-file, and installing the plugin copies that `.ts` into
-`~/.config/opencode/tools/` + appends its AGENTS.md fragment + registers its
-manifest. A generic `cap_list` tool then reports live-available capabilities so
-the model always sees what is installed AND online. v1 skips `cap_list` (only
-one capability) but the tool→`/api/cap`→queue path is already the generic
-spine that `cap_list`/`cap_invoke` will reuse unchanged.
 
 ---
 
-## Layer 3 — Mac executor
+## Layer 3 — Mac executor (`src/main/capExecutor.ts`)
 
-### Shared SSE consumer — consolidation FIRST ⟨v2⟩
+The runner is replaced with a manifest runner. There is NO `HANDLERS` map,
+NO `CapHandler`/`CapCtx`-consumer indirection, and NO per-plugin
+`src/main/handlers/*.ts` files (the v1 `iosBuild.ts` + the empty
+`handlers/` dir are deleted). The executor's job, per arrived `capJob`:
 
-`src/main/desktopNotify.ts` already contains the exact SSE plumbing the
-executor needs (Bearer-authed long-lived `GET /events`, 3s auto-reconnect,
-`\n\n` frame splitting, `data:` line parse). Do NOT copy it a second time —
-**extract it**:
-
-1. NEW `src/main/busConsumer.ts` exporting:
-   ```ts
-   export function createBusConsumer(
-     configGetter: () => AppConfig,
-     onEnvelope: (env: { kind?: string; payload?: unknown }) => void,
-   ): { stop(): void }
-   ```
-   Move the `connect`/`scheduleReconnect`/frame-buffer/`handleFrame` logic
-   from `desktopNotify.ts` verbatim, minus the `kind === "desktopNotify"`
-   filter — `handleFrame` parses the envelope and calls `onEnvelope` with
-   EVERY well-formed envelope. Instance state (no module-level singletons):
-   the returned `stop()` destroys the current response + cancels the timer.
-2. REWRITE `desktopNotify.ts` as a thin consumer: `startDesktopNotifications`
-   calls `createBusConsumer(configGetter, (env) => { if (env.kind ===
-   "desktopNotify" && env.payload) deliver(env.payload) })`. Its public API
-   (`startDesktopNotifications`/`stopDesktopNotifications`) is unchanged —
-   callers in `src/main/index.ts` untouched. Net: `desktopNotify.ts` shrinks
-   from ~150 to ~40 lines.
-3. `capExecutor.ts` uses the same `createBusConsumer`. One SSE code path,
-   two one-kind filters.
-
-### `src/main/capExecutor.ts`
-
-```ts
-export function startCapExecutor(configGetter: () => AppConfig): { stop(): void }
-```
-
-- **Gate**: if `configGetter().capExecutorEnabled` is not `true` at start,
-  return a no-op `{stop(){}}` immediately. Toggling the setting takes effect
-  on next app launch (the Settings UI says so) — no live start/stop plumbing.
-- **Subscribe**: `createBusConsumer(configGetter, onEnvelope)`. In
-  `onEnvelope`, act ONLY on `kind === "capJob"` with `payload.host === "mac"`;
-  ignore everything else. Enqueue `{id, capability}` from the payload.
-- **Catch-up ⟨v2⟩ — jobs must survive an offline Mac.** SSE has no replay, so
-  on start AND after every reconnect, fetch
-  `GET /api/cap?host=mac&status=queued` (Bearer-authed, same
-  serverUrl/boxToken as the consumer) and enqueue every returned job.
-  Detecting reconnect: `createBusConsumer` gains an optional third argument
-  `onConnect?: () => void`, invoked whenever a stream reaches status 200
-  (desktopNotify simply doesn't pass one). Run catch-up from `onConnect`.
-- **Serial queue + dedup ⟨v2⟩.** In-memory FIFO of job ids; a `Set<string>`
-  of every id ever enqueued (skip duplicates — the same job WILL arrive via
-  both SSE and catch-up). Process strictly one job at a time (a single
-  promise chain; never two handlers concurrently — two parallel xcodebuilds
-  corrupt shared derived data).
-- **Per job:**
-  1. `POST /api/cap/:id/start`. On non-2xx (409 = already claimed/stale):
-     log one line, skip the job. This is the cross-delivery dedup.
-  2. Look up `HANDLERS[capability]`. Unknown →
-     `POST /api/cap/:id/done {status:"failed", error:`unknown capability "${capability}"`}`
+1. **Folder scan + hot reload.** The executor `mkdir -p`s
+   `~/.manta/plugins/` at start, then synchronously scans it at boot,
+   parses every `*.yaml` (skip `*.yaml.bak`, dotfiles) through
+   `src/shared/pluginManifest.mjs`, and stores the result in an
+   in-memory `Map<string, RegistryRow>`. `fs.watch` (debounced 500ms)
+   rescans on change. On every SSE (re)connect the executor also
+   rescans + republishes (see §Hot reload + registry publish).
+2. **Claim** the job. `POST /api/cap/:id/start`. On non-2xx (409 =
+   already claimed/stale) log one line, skip. Cross-delivery dedup.
+3. **Dispatch.**
+   - `capability === "plugin.write"` → built-in handler. Validate the
+     YAML payload via the shared module, write
+     `~/.manta/plugins/<name>.yaml`, rescan, return `{name, valid: true}`
+     (or the validator errors verbatim — the executor surfaces them as
+     the job's `error`).
+   - Anything else → look up the capability name in the in-memory
+     `manifests` map; not found OR `valid:false` →
+     `POST done {status:"failed", error:'unknown plugin "<name>"; installed: …'}`
      and continue. **Never** shell out for an unlisted capability.
-  3. Build the `CapCtx` (below) with an `AbortController`; arm a
-     `setTimeout(EXECUTOR_JOB_TIMEOUT_MS)` (unref'd) that calls `abort()`.
-  4. `await handler(ctx)` → `POST done {status:"done", result}`. Throw (or
-     abort) → `POST done {status:"failed", error: String(e?.message ?? e)}`.
-  5. Always: clear the timeout, final log flush BEFORE the done POST.
-- **Batched log streaming ⟨v2⟩.** `ctx.log(line)` appends to an in-memory
-  string buffer. A `setInterval(LOG_FLUSH_MS)` (unref'd, per job) flushes the
-  buffer as ONE `POST /api/cap/:id/log {chunk}` when non-empty. Final flush
-  before done. Never one POST per line — xcodebuild emits thousands.
-- All HTTP uses `fetch` with `Authorization: Bearer <boxToken>` from config,
-  mirroring `desktopNotify`'s header construction. Failed log POSTs are
-  logged and dropped (never crash a running build over a lost log chunk);
-  a failed `done` POST is retried once after 5s, then logged and dropped
-  (the server sweep will time the job out).
+   - Found + valid → build the per-step env via the shared module's
+     `buildEnv(manifest, suppliedInputs, {jobId})` (the executor patches
+     in PATH via `exec`'s existing helper), arm an
+     `AbortController` with `EXECUTOR_JOB_TIMEOUT_MS`, run each step
+     sequentially as `exec("/bin/sh", ["-c", step.run], {cwd, quiet})`
+     (with `cwd` resolved via `resolveCwd(step.cwd, env)`), honoring
+     `continue_on_error` and `if:` via `evalIf`, and streaming each
+     step's stdout/stderr to `ctx.log`. Step exit ≠ 0 → job fails at
+     that step.
+4. **Pre-step input validation.** Before step 1, the executor calls
+   `validateSuppliedInputs(manifest, suppliedInputs)` from the shared
+   module and aborts with a clear error if it fails. No steps run.
+5. **Done.** Success → `POST done {status:"done", result: {steps:[…]}}`.
+   Throw or abort → `POST done {status:"failed", error: ...}`. Always
+   clear the timeout + do the final log flush BEFORE the done POST.
+6. **Batched logs.** `ctx.log` appends to a per-job string buffer; a
+   `setInterval(LOG_FLUSH_MS)` (unref'd) flushes as ONE
+   `POST /api/cap/:id/log {chunk}` when non-empty. Failed log POSTs are
+   dropped; failed `done` POSTs retry once after 5s, then drop (the
+   server sweep times the job out anyway).
 
-```ts
-// THE PLUGIN SEAM. v1 = one entry. Later = built from a plugin registry.
-const HANDLERS: Record<string, CapHandler> = {
-  "ios.build": iosBuildHandler,
-};
-```
+### Shared SSE consumer (still true)
 
-### The handler context ⟨v2 — `secret()` removed⟩
+`src/main/busConsumer.ts` is the ONLY SSE consumer in `src/main/`. Both
+`desktopNotify` (filter `kind === "desktopNotify"`) and `capExecutor`
+(filter `kind === "capJob"` + catch-up via `onConnect`) build on it. No
+module-level singletons — each `createBusConsumer` call owns its own
+state.
 
-```ts
-interface CapCtx {
-  input: unknown;                         // the job's opaque input
-  config: AppConfig;                      // snapshot at job start (repo path, sim name)
-  log(line: string): void;                // buffered → POST /api/cap/:id/log
-  exec(cmd: string, args: string[],
-       opts?: { cwd?: string; quiet?: boolean }): Promise<{ code: number; stdout: string }>;
-  signal: AbortSignal;                    // job timeout (armed by the executor)
-}
-type CapHandler = (ctx: CapCtx) => Promise<{ result?: unknown }>; // throw → failed
-```
+### The shared manifest module (`src/shared/pluginManifest.mjs`)
 
-- `exec` spawns via `child_process.spawn(cmd, args, {cwd, env})` — argv
-  array, NEVER a shell string. It:
-  - streams every stdout+stderr line to `ctx.log` (skipped when
-    `opts.quiet === true` — used for machine-readable output like
-    `simctl list --json` that would pollute the job log);
-  - accumulates stdout into a string capped at `EXEC_STDOUT_CAP_BYTES`
-    (keep the most recent bytes) and returns it as `stdout`;
-  - resolves `{code, stdout}` on close — it does NOT throw on non-zero exit
-    (handlers decide); it rejects only on spawn failure (`error` event, e.g.
-    ENOENT) with a message that includes the command name and the PATH hint
-    below;
-  - on `ctx.signal` abort: `child.kill("SIGTERM")`, then `SIGKILL` after
-    `KILL_GRACE_MS` if still alive, and rejects with `"job timed out"`.
-- **macOS PATH ⟨v2⟩ — a GUI-launched Electron app does NOT inherit the user's
-  shell PATH**, so `npm`/`npx`/`pod` from Homebrew/nvm are invisible and
-  `spawn` fails ENOENT even though the same command works in Terminal. `exec`
-  builds its env as
-  `{...process.env, PATH: "/opt/homebrew/bin:/usr/local/bin:" + (process.env.PATH ?? "")}`
-  (covers Homebrew on Apple Silicon + Intel). The ENOENT rejection message
-  must say: `"<cmd> not found on PATH — install it via Homebrew (nvm-only
-  node installs are not visible to GUI apps)"`.
-- **`secret()` is NOT in v1.** The v1 spec's `secret(key)` was unimplementable
-  as written: the secrets store materializes values to files ON THE BOX, and a
-  box file path is useless to a handler running on the Mac. No v1 capability
-  needs a secret (simulator builds are unsigned). Do not add a stub method.
-  Future design (v2, when a capability needs it): an authed
-  `POST /api/secrets/provide-value` endpoint returns the VALUE over HTTPS and
-  the Mac writes its own 0600 tmpfile, returning that local path — value
-  transits TLS once, never the transcript. Out of scope now.
+Single source of truth for what a valid manifest looks like. Imported by
+BOTH the executor (TS) and the server (mjs). Pure functions everywhere,
+no `electron`/`node:fs` deps beyond YAML parsing + `resolveCwd`'s
+existence check. Adding a new validation rule here is reflected in every
+consumer and every test. Exports:
 
-Wire `startCapExecutor(getConfig)` in `src/main/index.ts` right next to
-`startDesktopNotifications(...)`, mirroring its start/stop lifecycle exactly.
+- `parseManifest(yamlText): { manifest, errors[] }` — returns a manifest
+  OR keyed errors (`steps[2].run: required` style). Unknown keys →
+  `unknown key "<key>"`.
+- `validateManifest(parsed): { errors[] }` — all schema rules from
+  BET-189 §"Validation rules" plus the v3 grammar limits.
+- `evalIf(expr, inputs): boolean | { error }` — exactly three forms,
+  nothing else.
+- `buildEnv(manifest, suppliedInputs, opts: { jobId }): Record<string,string>`
+  — produces `process.env` keys (minus PATH — `exec` owns that), the
+  manifest `env:` map (leading `~` expanded), `MANTA_INPUT_<ID>` per
+  supplied input, `MANTA_PLUGIN`, `MANTA_JOB_ID`.
+- `resolveCwd(cwd, env): string | { error }` — `$KEY`/`${KEY}` from
+  `env:` only, then leading `~` expansion; non-existent dir → error.
+- `validateSuppliedInputs(manifest, supplied): { errors[] }` — unknown
+  id, type mismatch, enum value not in `values`, missing required input
+  with no default.
+- `parseTimeout(s): number | { error }` — `^\d+(s|m)$`; cap
+  `MAX_TIMEOUT_MS`.
 
-### `ios.build` handler (`src/main/handlers/iosBuild.ts`) — the ONLY ios-specific file
+Tests: `src/shared/pluginManifest.test.ts` (vitest) covers every
+validator path, evalIf truthy/falsey, buildEnv ordering + bool
+stringification + tilde expansion, resolveCwd `$VAR`/`~`/missing-dir,
+validateSuppliedInputs each error mode, parseTimeout each unit + cap.
 
-Every step streams to `ctx.log` and throws `new Error("<step>: exit <code>")`
-on a non-zero exit (except where noted). Steps:
+### macOS PATH gotcha (Electron GUI)
 
-0. **Precheck.** `exec("xcodebuild", ["-version"])` and
-   `exec("npm", ["--version"])`. Failure/ENOENT → the error propagates with
-   the PATH hint; this fails fast before any long work.
-1. **Repo path.** `repo = ctx.config.iosBuildRepoPath?.trim() ||
-   "~/projects/better-ui"`, then expand a leading `~` against `os.homedir()`
-   (one local `expandTilde`; do not import server code into main).
-2. **Pull (optional).** If `ctx.input.pull` is truthy:
-   `exec("git", ["-C", repo, "pull", "--ff-only", "origin", "main"])`.
-3. **Web bundle.** `exec("npm", ["run", "build:mobile"], {cwd: repo})`, then
-   `exec("npx", ["cap", "sync", "ios"], {cwd: repo})` — the web bundle must
-   exist before the Capacitor build (AGENTS.md §"MOBILE CHANGES REACH
-   DEVICES…"). `cap sync` runs `pod install`; CocoaPods must be installed on
-   the Mac (its failure output streams to the log — no special handling).
-4. **Simulator resolution ⟨v2⟩.**
-   `exec("xcrun", ["simctl", "list", "devices", "available", "--json"], {quiet:true})`,
-   `JSON.parse(stdout)`, then `pickSimulator(parsed, ctx.config.iosSimulatorName)`:
-   - **`pickSimulator(devicesJson, preferredName)` is a pure exported
-     function in this file, unit-tested** (`src/main/handlers/iosBuild.test.ts`,
-     vitest — `src/main/**` is collected; only `src/server/**` is excluded).
-   - Flatten `devicesJson.devices` entries whose runtime key contains
-     `"SimRuntime.iOS"`; keep devices with `isAvailable !== false`.
-   - If `preferredName` is set: candidates = exact `name` matches; empty →
-     return `{error}` listing all available names (the handler throws it —
-     the user sees actionable output).
-   - Else candidates = all flattened devices.
-   - Pick: first with `state === "Booted"`; else sort by iOS runtime version
-     descending (parse `iOS-17-5` → `[17,5]` from the runtime key) and take
-     the first whose `name` starts with `"iPhone"`; else the first candidate;
-     none at all → `{error:"no iOS simulators available — install one in
-     Xcode"}`.
-   - Returns `{udid, name}` on success.
-5. **Build.** Compute
-   `derivedData = join(os.homedir(), "Library", "Caches", "MantaUI", "DerivedData")`.
-   `exec("xcodebuild", ["-workspace", join(repo, "mobile/ios/App/App.xcworkspace"),
-   "-scheme", "App", "-sdk", "iphonesimulator", "-configuration", "Debug",
-   "-destination", `platform=iOS Simulator,id=${udid}`,
-   "-derivedDataPath", derivedData, "build"], {cwd: repo})`.
-   Simulator SDK = **no signing** (the distribution-cert saga is Codemagic's
-   problem, not ours). The `.app` lands at the PINNED path
-   `appPath = join(derivedData, "Build", "Products", "Debug-iphonesimulator", "App.app")`
-   — verify with `fs.existsSync(appPath)` after the build; missing → throw
-   `"build succeeded but App.app not found at <path>"`.
-   - `action === "test"`: replace `"build"` with `"test"` in the argv, skip
-     steps 6, return `{result: {tested: true, simUdid: udid}}`.
-   - `action === "compile-only"`: same argv as build, skip step 6, return
-     `{result: {appPath, launched: false}}`.
-6. **Boot + launch** (default `build-and-launch` only).
-   - `exec("xcrun", ["simctl", "boot", udid])` — IGNORE the exit code
-     ("already booted" exits non-zero; that is fine).
-   - `exec("open", ["-a", "Simulator"])` — non-zero → throw (needs a GUI
-     session; error surfaces that).
-   - `exec("xcrun", ["simctl", "install", udid, appPath])` — non-zero → throw.
-   - `exec("xcrun", ["simctl", "launch", udid, "com.antoinedc.mantaui"])`
-     (bundle id per AGENTS.md §"App Store Connect facts") — non-zero → throw.
-   - Return `{result: {appPath, simUdid: udid, launched: true}}`.
+GUI-launched Electron apps do NOT inherit the user's shell PATH.
+`Homebrew`/`nvm`-installed `npm`/`npx`/`pod` are invisible to a spawned
+child and `exec` fails ENOENT even though the same command works in
+Terminal. `capExecutor`'s `exec` builds its env as
+`{...process.env, PATH: "/opt/homebrew/bin:/usr/local/bin:" + (process.env.PATH ?? "")}`
+(Apple Silicon + Intel Homebrew). The ENOENT rejection message tells the
+user to install via Homebrew — never silently swallow it.
 
-Keep the `action` branches inside this one file — do NOT leak action handling
-into `capExecutor.ts`. Use only node builtins (`child_process`, `fs`, `os`,
-`path`). No new dependencies.
+### Hot reload + registry publish
 
-Out of scope, deliberately (do not build): building arbitrary refs/branches
-(`pull` is main-only; the tool description carries the warning), cancel from
-the UI/AI, device (non-simulator) builds, `secret()`.
+- The executor `fs.watch`es `~/.manta/plugins/` (debounced 500ms) and
+  rescans on change, at startup, and on every SSE (re)connect.
+- After every scan, the executor PUTs `/api/plugins/registry` to
+  manta-server (Bearer auth, same header helper) with
+  `[{name, description, inputs, valid, error?, yaml, stepCount,
+  timeoutMs}]` — including INVALID manifests with their error so
+  Settings and `plugin_list` can show parse failures.
+- Server keeps the registry in-memory only (`src/server/plugins.mjs`);
+  the executor republishes on every reconnect, covering server
+  restarts. No durable store.
+- Adding/editing a YAML does NOT require restarting MantaUI or the
+  executor.
 
----
+### Settings toggle (v3)
 
-## New config fields
+Desktop-only. Settings → Plugins → "Run plugins on this machine" toggle
++ Installed plugins list (read from `plugins:registry` window.api
+channel) + "Open plugins folder" button (reuses `revealInFolder`).
+Default OFF. The helper text carries the trust warning: "Lets the AI
+trigger the plugins below — each is a YAML file on this machine; the AI
+can also create and edit them when this is on. Takes effect after
+restarting MantaUI." `MobileSettings.tsx` is intentionally untouched.
 
-`AppConfig` (`src/shared/types.ts`) additions, persisted via the EXISTING
-`configGet`/`configUpdate` channels (NO new IPC/RPC channel), defaults handled
-where existing optional fields are defaulted in `src/main/config.ts`:
-
-- `iosBuildRepoPath?: string` — absolute path to the Mac's MantaUI clone
-  (default `~/projects/better-ui`).
-- `iosSimulatorName?: string` — exact simulator device name (e.g.
-  `"iPhone 15"`); empty/absent = auto-pick per `pickSimulator`.
-- `capExecutorEnabled?: boolean` — master switch for the Mac executor.
-  Default `false` (OFF).
-
-Device-local (NOT in `sharedConfig.mjs` `SHARED_CONFIG_KEYS`) — these describe
-THIS Mac and must not sync to other devices.
-
-Settings UI (`Settings.tsx`, desktop only — NOT `MobileSettings.tsx`): one
-toggle + two text fields in the existing card/row style. The toggle's helper
-text MUST include: a trust warning ("Allows the AI to run build commands on
-this Mac" — same spirit as `allowAgentPush`) and "takes effect after
-restarting MantaUI".
+Config: `pluginsEnabled?: boolean` (replaces v2's `capExecutorEnabled`,
+`iosBuildRepoPath`, `iosSimulatorName` — all three legacy keys are
+dropped on load, NO auto-generation of a manifest from the legacy repo
+fields; the user re-authors once via the AI). Migration is a pure
+function in `src/shared/configMigration.mjs` (electron-free,
+unit-tested).
 
 ---
 
 ## Trust & security
 
-- **`capExecutorEnabled` gate.** The Mac executor runs commands the AI queued —
-  a bigger trust boundary than `allowAgentPush`'s "write to Downloads".
-  Default OFF; explicit opt-in in Settings with the warning above.
-- **Handler allowlist.** The Mac only runs capabilities in its static
-  `HANDLERS` map — an unknown `capability` string is reported `failed`, never
-  shelled out. There is no "run arbitrary command" capability; each capability
-  is a vetted handler in the repo. `exec` takes argv arrays only — no shell
-  strings anywhere.
-- **No secret values.** v1 has no `secret()` (see above). Nothing in the
-  executor or handlers reads or logs credential values.
-- **Auth.** Every `/api/cap*` route is behind the M1 Bearer gate. The AI tool
-  and the Mac executor both authenticate with the box token they already hold.
+- **`pluginsEnabled` gate.** The Mac executor runs whatever the manifests
+  under `~/.manta/plugins/` say — bigger trust boundary than
+  `allowAgentPush`'s "write to Downloads". Default OFF; explicit opt-in
+  in Settings with the warning above.
+- **Manifest allowlist by folder membership.** The Mac only runs
+  capabilities whose manifests parse cleanly AND are physically under
+  `~/.manta/plugins/` (the executor is the source of truth — a job
+  with an unknown capability name is reported `failed`, never shelled
+  out). There is no "run arbitrary command" capability; each plugin is
+  the user's YAML.
+- **Grammar limits are deliberate.** `if:` is exactly three forms (see
+  shared manifest module §) — no `${{ }}`, no operators, no
+  functions. Unknown top-level or per-step keys fail validation with
+  `unknown key "<key>"`. Refuses expression creep on principle.
+- **Inputs flow through env vars, never shell.** Manifest commands
+  MUST reference input values via `$MANTA_INPUT_<ID>` (uppercased id),
+  not via string-interpolated `run:`. The validator does not block
+  interpolation in `run:`, but the runner guarantees no user input
+  crosses a shell boundary except via the env-var route (the user's
+  manifest is user-controlled, not job-input-controlled).
+- **Auth.** Every `/api/cap*` route and `/api/plugins/*` is behind the
+  M1 Bearer gate. The AI tools and the Mac executor both authenticate
+  with the box token they already hold.
 - **Log capping.** `appendLog` ring-buffers to `LOG_CAP_BYTES`; `getJob`
-  returns at most `LOG_TAIL_BYTES` — a runaway build can neither fill the
-  disk nor blow the AI's context.
-- **No zombie jobs.** Server sweep fails out stale `running` (30 min) and
-  never-claimed `queued` (24h) jobs and notifies the originating session, so
-  a crashed Mac can't leave the AI waiting forever.
+  returns at most `LOG_TAIL_BYTES` — a runaway build can neither fill
+  the disk nor blow the AI's context.
+- **No zombie jobs.** Server sweep fails out stale `running` (30 min)
+  and never-claimed `queued` (24h) jobs and notifies the originating
+  session, so a crashed Mac can't leave the AI waiting forever.
 
 ---
 
-## Staging (delivery)
+## Deletion list (a deliverable — verify all gone at the end)
 
-- **Stage 1 (box-only, fully testable now):** `capabilities.mjs` + tests +
-  `storeUtils.mjs` extraction + `/api/cap*` REST + sweeper wiring +
-  `ios-build.ts` tool + AGENTS.md blurb + tool INSTALLED on the box and
-  verified registered. No Mac needed — a created job sits `queued` (and the
-  24h sweep would eventually expire it).
-- **Stage 2 (needs the Mac):** `busConsumer.ts` extraction +
-  `capExecutor.ts` + `handlers/iosBuild.ts` (+ its vitest) + config fields +
-  Settings toggle + repo `AGENTS.md` section. Verified live on the Mac.
+- `src/main/handlers/iosBuild.ts` (309 lines) and
+  `src/main/handlers/iosBuild.test.ts`; the empty `handlers/` dir if
+  empty after.
+- The `HANDLERS` map + `CapHandler` type consumers in `capExecutor.ts`
+  (replaced by `plugin.write` built-in + manifest lookup).
+- `docs/opencode-tools/ios-build.ts` (and its installed copy on the
+  box).
+- Config keys `capExecutorEnabled`, `iosBuildRepoPath`,
+  `iosSimulatorName` across types/store/Settings/config.
+- The Settings Files-tab "Capability executor" block (replaced by
+  Settings → Plugins tab from Phase 1).
+- Stale `AGENTS.md` / `mantaui-plugins.md` content describing the v1/v2
+  TS-handler model.
 
-Each stage is independently reviewable. Stage 1 lands the generic spine;
-Stage 2 proves the Mac executor + the first real plugin.
+Verify with `grep -ri
+"capExecutorEnabled\|iosBuildRepoPath\|iosSimulatorName\|ios_build\|handlers/iosBuild"
+src/ docs/opencode-tools/ docs/mantaui-plugins.md AGENTS.md` returns
+nothing.
 
 ---
 
 ## Why this is a plugin system, not a one-off
 
-| Concern                     | v1 (ios-build)                    | Generic end state (mechanical delta) |
-| --------------------------- | -------------------------------- | ------------------------------------ |
-| Job transport               | `{capability,input,host}` generic| unchanged                            |
-| AI tool                     | `ios_build` (hardcodes `ios.build`)| `cap_invoke(capability,input)` + `cap_list` |
-| Tool discovery              | static (1 tool file)             | plugin dir copies its tool + AGENTS fragment |
-| Mac dispatch                | static `HANDLERS` map (1 entry)  | map built from installed plugin manifests |
-| Availability to the model   | implicit                         | `cap_list` reflects announced+online capabilities |
-| Executor location           | `host:"mac"` field               | unchanged (box/mac already both modeled) |
-| Result routing              | completion turn into session     | unchanged                            |
+| Concern                     | v2 (ios-build)                    | v3 (YAML plugins) |
+| --------------------------- | --------------------------------- | ----------------- |
+| Plugin shape                | TypeScript handler (one file)     | YAML manifest (one file) |
+| Plugin add path             | `cp *.ts` + `HANDLERS[cap]=…`      | write YAML to `~/.manta/plugins/` |
+| AI tool surface             | one `ios_build` tool              | six generic `plugin_*` tools |
+| Hot reload                  | restart required                  | `fs.watch` + no restart |
+| Trust gate                  | `capExecutorEnabled` toggle       | `pluginsEnabled` toggle (same intent) |
+| Executor location           | `host:"mac"` field                | `host:"mac"` field (only accepted value in v3) |
+| Result routing              | completion turn into session      | unchanged            |
+| Spine (`capabilities.mjs`)  | generic                          | byte-identical       |
 
-Adding capability #2 = drop a tool file + add a handler entry. No core changes.
-That is the decoupling the plugin system buys, delivered while shipping a
-working iOS build bridge as plugin #1.
+Adding capability #N is writing one YAML file. The spine, REST, SSE,
+auth, queue, sweep, and the runner stay unchanged. That is the
+decoupling the plugin system buys, delivered while shipping a working
+iOS build bridge as plugin #1.

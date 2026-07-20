@@ -169,26 +169,51 @@ and hard debugging"). When you call `task(subagent_type: "fast")`, opencode
 dispatches to that agent's configured model. The user manages these in bui's
 Settings > AI > Subagents.
 
-## MantaUI iOS build
+## MantaUI plugins
 
-You have an `ios_build` tool that compiles the MantaUI iOS app on the connected
-Mac and boots it in the iOS Simulator — used instead of burning Codemagic build
-minutes. Reach for it whenever the user asks to build, run, or test the iOS app
-locally.
+You have six `plugin_*` tools for working with YAML-defined plugins on the
+connected machine. A plugin is one file at `~/.manta/plugins/<name>.yaml` on
+the Mac — authored by the user or by you (the AI). The first plugin is
+typically `ios-<app>` (iOS build + Simulator launch), but the system is
+generic; any short sequence of shell commands can be a plugin. Reach for
+`plugin_docs()` whenever you are authoring or editing a manifest, especially
+the first time — the full authoring guide (schema, `if:` grammar, worked
+examples, error catalogue) is there.
 
-**Branch semantics — read before calling.** The Mac executor builds the Mac's
-own git clone (tracking `origin/main`), NOT this session's working tree or
-branch. If the user wants their current changes built, they must be
-merged/pushed to `origin/main` first, then call with `pull:true` to make the
-Mac clone fast-forward to the new main.
+- `plugin_list()` — show every installed plugin (name, description, inputs,
+  validity). Empty registry → the machine is offline or has no plugins;
+  point the user at `plugin_docs()`.
+- `plugin_get(name)` — return the current YAML source for one plugin.
+  Unknown name → error listing every known name.
+- `plugin_save(name, yaml)` — write a manifest to
+  `~/.manta/plugins/<name>.yaml`. Validates via the executor; returns the
+  validator errors verbatim on failure, "saved and valid" on success, or
+  "queued; the machine appears offline — it will apply when it reconnects"
+  if the executor never answers within 15s. The executor hot-reloads — no
+  restart.
+- `plugin_run(name, inputs?)` — run an installed plugin. Inputs are
+  validated against the manifest's `inputs:` schema before any step runs;
+  unknown name OR invalid manifest → fast client-side fail listing known
+  names (the queue stays generic). Returns a job id; the completion turn
+  arrives automatically — do NOT poll.
+- `plugin_status(id)` — job status (queued/running/done/failed) + the
+  log tail. Use only for mid-run progress or after completion; prefer the
+  automatic completion turn.
+- `plugin_docs()` — the full authoring guide (8 sections, including three
+  worked examples and the validator error catalogue).
+
+**Users can author a plugin by just asking.** When a user asks for something
+the plugin system can express (a build script, an environment setup, a
+maintenance task), author the manifest inline in your reply and call
+`plugin_save` — the user does not need to hand-write YAML.
 
 **Mac requirements.** The Mac must be awake with MantaUI running and the
-capability executor enabled in Settings (default OFF — a deliberate trust
-boundary). With those in place the tool returns a job id immediately and a
-completion message is injected into this session when the build finishes
-(or fails / times out).
+"Run plugins on this machine" toggle ON in Settings → Plugins (default
+OFF — a deliberate trust boundary). With those in place every `plugin_run`
+returns a job id immediately and a completion turn is injected into this
+session when the run finishes (or fails / times out at 30 min).
 
 **Do NOT poll in a loop.** Completion arrives automatically as a new turn
-from the originating opencode session. Use `ios_build_status(id)` only when
-the user explicitly asks for mid-build progress, or after completion to
+from the originating opencode session. Use `plugin_status(id)` only when
+the user explicitly asks for mid-run progress, or after completion to
 inspect the log tail.

@@ -2077,94 +2077,113 @@ node /tmp/opencode/asc.mjs   # (on the box) — ASC build state for iOS (VALID =
 For byte-parity, `sha256sum` the live file vs the repo copy (the web workflow
 already does this and fails red on drift).
 
-## Capability plugins + Mac executor (BET-183)
+## Plugins — YAML manifests (v2, BET-189)
 
-Plugin system that lets the AI invoke capabilities that run EITHER on the box
-(`host:"box"`) OR on the connected Mac (`host:"mac"`). v1 ships one plugin:
-`ios.build` — compile the MantaUI iOS app + launch it in the iOS Simulator on
-the user's Mac, instead of burning Codemagic minutes. The generic spine
-(`src/server/capabilities.mjs` + REST + bus envelopes + sweeper) is shaped so
-**adding capability #2 touches only**: a new tool file under
-`docs/opencode-tools/`, a new entry in the executor's `HANDLERS` map. NO
-changes to the queue, REST surface, SSE wiring, or auth.
+User/AI-authored YAML manifests at `~/.manta/plugins/<name>.yaml` on the
+**machine the user wants to drive** (today: only the connected Mac —
+`host:"mac"` is the only accepted value). Replaces the v1 TypeScript handler
+model (BET-183/184/185): `src/main/handlers/iosBuild.ts` and the `HANDLERS`
+map are gone. A plugin is now one YAML file; the executor reads every
+`*.yaml` in the folder on startup + on every `fs.watch` burst and dispatches
+matching capabilities. The generic job spine (`src/server/capabilities.mjs`,
+`/api/cap*`, SSE envelopes, sweep, completion-notify) is **byte-identical**
+to v1 — v2 only changed what runs inside the executor.
 
-**Read the full design first:** `docs/mantuani-plugins.md` (v2 — Layer 3 +
-constants table + pinned mechanics). Constants live there and there only.
+**Read first**: `docs/mantaui-plugins.md` (spec v3 — constants + the
+shared-manifest module + execution semantics) and
+`docs/plugins-authoring.md` (author-facing schema reference). Constants live
+in `mantaui-plugins.md` and there only.
 
-### Generic invariant — `{capability, input, host}`
+### Manifest schema + grammar limits
 
-The transport layer is capability-agnostic. Job shape, REST body, SSE event,
-and executor dispatch all speak `{capability: string, input: unknown, host:
-"mac"|"box"}`. The only iOS-specific file allowed is
-`src/main/handlers/iosBuild.ts` (plus the literal `"ios.build"` /
-`host:"mac"` in the tool file). If you find yourself special-casing
-`ios.build` anywhere else, you are doing it wrong — the point of the plugin
-shape is that handler #2 doesn't need any new plumbing.
+- **One YAML file, validated by a shared module.**
+  `src/shared/pluginManifest.mjs` is the single source of truth — imported
+  by BOTH `src/main/capExecutor.ts` (the executor that reads manifests off
+  disk and runs them) and `src/server/plugins.mjs` (the in-memory registry
+  the renderer reads). Pure functions only, no `electron`/`node:fs` deps
+  beyond YAML parsing + `resolveCwd`'s existence check. Every public
+  function is unit-tested in `src/shared/pluginManifest.test.ts`.
+- **Grammar limits are deliberate — extensions are refused on principle.**
+  The `if:` expression has EXACTLY three forms (`inputs.<id>`,
+  `inputs.<id> == <token>`, `inputs.<id> != <token>`). No `${{ }}`, no
+  operators, no functions, no function-call forms. Unknown top-level or
+  per-step keys fail validation with `unknown key "<key>"` — typo
+  protection. If a use case seems to demand a new grammar form, that's a
+  MantaUI change, not a plugin change.
+- **`host` accepts ONLY `"mac"` in v2.** Anything else fails with
+  `host: only "mac" is supported`. Other hosts are not implemented;
+  adding them is a design decision.
 
-### The plugin seam — `HANDLERS` map
+### Shared-module rule
 
-`src/main/capExecutor.ts` exports one const:
+`src/shared/pluginManifest.mjs` is the only place that parses + validates
+manifests and computes `buildEnv`/`resolveCwd`/`evalIf`. **Never copy
+manifest logic into the executor or the server.** Adding a new validation
+rule there is reflected in every consumer and every test. The single
+exception is `host`-routing in the executor — `plugin.write` is a
+built-in that runs the same validator, writes the YAML to
+`~/.manta/plugins/<name>.yaml`, and rescans.
 
-```ts
-const HANDLERS: Record<string, CapHandler> = {
-  "ios.build": iosBuildHandler,
-};
-```
+### Hot reload + registry publish
 
-Adding capability #2 = `import` the new handler + add an entry. That's the
-entire diff in this file. No dispatch change, no queue change, no auth
-change.
+- The executor `fs.watch`es `~/.manta/plugins/` (500ms debounce) and
+  rescans on change, at startup, and on every SSE (re)connect.
+- After every scan, the executor PUTs `/api/plugins/registry` to
+  manta-server (Bearer auth, same header helper) with the current rows
+  — including INVALID manifests with their `error` so Settings and
+  `plugin_list` can show parse failures. Server keeps it in-memory only
+  (`src/server/plugins.mjs`); the executor republishes on every reconnect,
+  covering server restarts.
+- Adding/editing a YAML does NOT require restarting MantaUI or the
+  executor.
 
-### Catch-up / serial / batched-log executor behaviors
+### `plugin.write` built-in
 
-`startCapExecutor` (in `src/main/capExecutor.ts`) wraps everything in three
-behaviors you must NOT relax:
+The only hard-coded capability in v2 is `plugin.write`: a `capability:"plugin.write"`
+job validates its YAML payload, writes `~/.manta/plugins/<name>.yaml`,
+rescans, and returns `{name, valid: true}` — or the validator errors
+verbatim. Everything else is a manifest lookup. The runner has NO
+`HANDLERS` map and NO `CapHandler`/`CapCtx` indirection — only a
+`plugin.write` branch and the manifest runner. Adding capability #N is
+writing one YAML file, not editing TypeScript.
 
-- **Catch-up.** SSE has no replay. On start AND every reconnect
-  (`onConnect` from `busConsumer`), the executor `GET
-  /api/cap?host=mac&status=queued` and enqueues every returned job. Without
-  this, a job created while the Mac was offline/asleep sits `queued`
-  forever — the Mac never sees it. Cross-delivery dedup: the same job WILL
-  arrive via both SSE and catch-up; an in-memory `Set<string>` of
-  ever-enqueued ids drops the duplicate.
-- **Serial.** A single promise chain processes the FIFO queue. One job at a
-  time. Two parallel xcodebuilds would corrupt the shared
-  `~/Library/Caches/MantaUI/DerivedData` (pinned path — see iosBuild
-  section). The chain catches so a thrown handler doesn't poison the
-  stream.
-- **Batched logs.** `ctx.log` appends to a per-job string buffer. A
-  `setInterval(LOG_FLUSH_MS)` (unref'd) flushes the buffer as ONE
-  `POST /api/cap/:id/log {chunk}` when non-empty. Final flush runs BEFORE
-  the done POST. Never one POST per line — xcodebuild emits thousands. Failed
-  log POSTs are dropped (lost log chunk must not crash a running build);
-  failed `/done` POSTs retry once after 5s, then drop (the server sweep
-  will time out the job anyway).
+### Trust model (toggle only)
 
-### Sweep guarantees
+The "Run plugins on this machine" toggle in **Settings → Plugins** (desktop
+only, `MobileSettings.tsx` untouched) is the ONLY gate. Default OFF. The
+executor gates itself at startup on `pluginsEnabled`. With the toggle
+OFF, the plugin system is dormant: no scan, no registry publish, no job
+dispatch. There is no per-plugin confirmation — every plugin under
+`~/.manta/plugins/` runs whatever commands it says. The folder is treated
+like `~/.ssh/authorized_keys`: only the user (or the AI on their explicit
+request) puts files there.
 
-The server sweep (`src/server/capabilities.mjs` `sweepCapJobs`) handles the
-edge cases the executor can't:
+The config rename `capExecutorEnabled` → `pluginsEnabled` is a one-time
+migration in `src/main/config.ts` (`src/shared/configMigration.mjs` is the
+electron-free, unit-tested core). The v1 fields `iosBuildRepoPath` /
+`iosSimulatorName` were DROPPED — there is no auto-generation of a
+manifest from the legacy fields; the user re-authors once via the AI.
 
-- `running` > 30 min → failed (Mac executor lost?) + notify originating session.
-- `queued` > 24h → failed (no executor picked it up) + notify.
-- Terminal retention: drop jobs older than 7 days, cap at 50 (oldest first).
-  Silent (no publish).
+### Deletion of the TS handler layer (BET-189's hard rule)
 
-The shared `markTerminal` helper is the single terminal-transition code path
-— used by both `completeJob` and the sweep, so notify + publish +
-`finishedAt` stamping lives in exactly one place.
+The deletion list at the bottom of BET-189 is a deliverable, not a
+suggestion. v1's `HANDLERS` map + `CapHandler` type consumers in
+`capExecutor.ts`, the per-plugin TypeScript handlers, and the v1 AI tool
+`ios_build` are gone. Re-adding ANY of them is the wrong fix — extend the
+shared manifest module instead. Adding a new executor host is a v3
+decision.
 
-### `secret()` is NOT in v1
+### Sweep-alignment timeout cap (30 min)
 
-The v1 spec's `CapCtx.secret(key)` was unimplementable: the secrets store
-materializes values to 0600 files ON THE BOX, and a box file path is useless
-to a Mac process. v1 has no capability that needs a secret (simulator
-builds are unsigned), so `secret()` is deliberately absent — do not add a
-stub. Future design (when a capability needs it): an authed
-`POST /api/secrets/provide-value` returns the VALUE over HTTPS and the Mac
-writes its own 0600 tmpfile, returning that local path. Out of scope now.
+`parseTimeout` in `src/shared/pluginManifest.mjs` caps manifest timeouts
+at 30 minutes. The reason: the server sweep
+(`src/server/capabilities.mjs` `sweepCapJobs`) fails any `running` job at
+30 min; a longer manifest timeout would be killed by the sweep anyway, so
+raising the cap is impossible without raising the sweep (out of scope).
+The executor's own per-job abort is 25 min — below the cap on purpose so
+the Mac fails first and reports properly.
 
-### macOS PATH gotcha (Electron GUI)
+### macOS PATH gotcha (still true)
 
 GUI-launched Electron apps do NOT inherit the user's shell PATH.
 `Homebrew`/`nvm`-installed `npm`/`npx`/`pod` are invisible to a spawned
@@ -2174,32 +2193,14 @@ Terminal. `capExecutor`'s `exec` builds its env as
 (Apple Silicon + Intel Homebrew). The ENOENT rejection message tells the
 user to install via Homebrew — never silently swallow it.
 
-### busConsumer consolidation (one SSE code path)
+### busConsumer (one SSE code path, still true)
 
 `src/main/busConsumer.ts` is the ONLY SSE consumer in `src/main/`. Both
 `desktopNotify` (filter `kind === "desktopNotify"`) and `capExecutor`
 (filter `kind === "capJob"` + catch-up via `onConnect`) build on it. No
 module-level singletons — each `createBusConsumer` call owns its own
-state. `desktopNotify.ts` is now ~40 lines (was ~150); `capExecutor.ts`
-adds zero SSE plumbing of its own.
-
-### Settings toggle (BET-185)
-
-Desktop-only. Settings → Files → "Capability executor" → one toggle +
-`iOS build repo path` + `iOS simulator name` text fields. Default OFF.
-Toggling takes effect after restarting MantaUI (the executor gates itself
-at start time — see `startCapExecutor`'s top-of-function enabled check).
-The helper text carries the trust warning: "Allows the AI to run build
-commands on this Mac" — same spirit as `allowAgentPush`. `MobileSettings.tsx`
-is intentionally untouched.
-
-### Verified by inspection (re-check before shipping capability #2)
-
-- The ONLY iOS-specific file in `src/main/` is `handlers/iosBuild.ts`.
-- `HANDLERS` map is the only dispatch — capExecutor's queue / REST / SSE
-  code paths have zero `ios`-specific branches.
-- Adding capability #2 = one tool file + one `HANDLERS` entry. No changes
-  elsewhere.
+state. `desktopNotify.ts` is ~40 lines; `capExecutor.ts` adds zero SSE
+plumbing of its own.
 
 ## Testing
 
