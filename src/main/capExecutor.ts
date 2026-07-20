@@ -197,8 +197,15 @@ export function startCapExecutor(
   async function catchUpJobs(): Promise<void> {
     const c = cfgOrNull(configGetter);
     if (!c) return;
+    // BET-207: every failure branch now logs — without these, a stranded
+    // queued job was indistinguishable from "nothing to claim" and was
+    // undiagnosable from logs. SSE has no replay, so this on-connect
+    // GET is the ONLY path that can recover jobs the AI queued while
+    // the Mac was offline/asleep. Reusing the dedup Set keeps double-
+    // delivery (SSE envelope + this list) safe.
+    let res: Response;
     try {
-      const res = await fetch(
+      res = await fetch(
         `${c.serverUrl.replace(/\/+$/, "")}/api/cap?host=mac&status=queued`,
         {
           headers: c.boxToken
@@ -206,15 +213,21 @@ export function startCapExecutor(
             : undefined,
         },
       );
-      if (!res.ok) return;
-      const body = (await res.json()) as { jobs?: Array<{ id: string; capability: string }> };
-      for (const j of body.jobs ?? []) {
-        enqueue(j.id, j.capability);
-      }
-    } catch {
-      // Catch-up is best-effort; the SSE path will deliver what catch-up
-      // misses (modulo the dedup Set) once the stream is live.
+    } catch (err) {
+      console.warn("[cap] catch-up threw", err);
+      return;
     }
+    if (!res.ok) {
+      console.warn("[cap] catch-up GET failed", res.status);
+      return;
+    }
+    const body = (await res.json()) as { jobs?: Array<{ id: string; capability: string }> };
+    const ids: string[] = [];
+    for (const j of body.jobs ?? []) {
+      ids.push(j.id);
+      enqueue(j.id, j.capability);
+    }
+    console.log(`[cap] catch-up: ${ids.length} queued jobs`, ids);
   }
 
   function onConnect(): void {

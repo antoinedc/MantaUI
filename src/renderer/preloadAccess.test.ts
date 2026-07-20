@@ -27,6 +27,8 @@ function makeFakePreload(): BuiPreload {
       return vi.fn();
     }),
     peekRemoteFile: vi.fn(async () => {}),
+    pluginsGetEnabled: vi.fn(async () => false),
+    pluginsSetEnabled: vi.fn(async () => {}),
   };
 }
 

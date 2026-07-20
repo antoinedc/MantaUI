@@ -43,6 +43,13 @@ export interface BuiPreload {
   // (httpApi.ts peekRemoteFile) actually finds the method instead of always
   // silently falling through to the (also-stubbed) server RPC no-op.
   peekRemoteFile(remotePath: string): Promise<void>;
+  // BET-207: `pluginsEnabled` is a Mac-machine-local toggle — the toggle
+  // MUST persist to the Mac-local config (the one capExecutor reads at
+  // start time), NOT the box config httpApi.configUpdate writes. Seed the
+  // toggle's initial state via pluginsGetEnabled and persist via
+  // pluginsSetEnabled; both are no-ops on mobile/web (no preload).
+  pluginsGetEnabled(): Promise<boolean>;
+  pluginsSetEnabled(value: boolean): Promise<void>;
 }
 
 /**

@@ -139,11 +139,6 @@ type State = {
   // changing the token requires an app relaunch.
   axiomToken: string;
   axiomDataset: string;
-  // Capability executor (BET-183 / BET-185 / BET-190). When true, this Mac
-  // runs YAML plugins from ~/.manta/plugins/ for jobs the AI queues. Mirrored
-  // from AppConfig.pluginsEnabled. Mirroring is read-only here — toggling
-  // takes effect on next app launch (the executor gates itself at start time).
-  pluginsEnabled: boolean;
   projects: Project[];
   activeProjectName: string | null;
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
@@ -288,7 +283,6 @@ export const useStore = create<State>((set, get) => ({
   voiceCommandModel: "",
   axiomToken: "",
   axiomDataset: "",
-  pluginsEnabled: false,
   projects: [],
   activeProjectName: null,
   activeWindowByProject: {},
@@ -404,7 +398,6 @@ export const useStore = create<State>((set, get) => ({
       voiceCommandModel: c.voiceCommandModel ?? "",
       axiomToken: c.axiomToken ?? "",
       axiomDataset: c.axiomDataset ?? "",
-      pluginsEnabled: c.pluginsEnabled ?? false,
     }),
 
   applyPairing: (p) =>
