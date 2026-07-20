@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, resolve, basename } from "node:path";
 import { homedir, hostname } from "node:os";
 import { pipeline } from "node:stream/promises";
-import { UPLOAD_DIRNAME, OUTBOX_DIRNAME } from "../shared/paths.mjs";
+import { UPLOAD_DIRNAME, OUTBOX_DIRNAME, STATE_DIRNAME } from "../shared/paths.mjs";
 import { WebSocketServer } from "ws";
 import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
@@ -75,7 +75,7 @@ import {
   AUTH_RL_CAPACITY,
   AUTH_RL_REFILL_PER_SEC,
 } from "./auth.mjs";
-import { createRelayAgent, shouldStartRelayAgent } from "../relay/agent/index.mjs";
+import { registerWithGateway } from "./gatewayRegister.mjs";
 import * as push from "./push.mjs";
 import { readServerVersion, writeVersionResponse } from "./version.mjs";
 
@@ -235,14 +235,6 @@ rpcHandlers = buildHandlers({
   push,
   serverVersion: SERVER_VERSION,
 });
-
-// Relay-agent handle (BET-151 ADR-1). Populated below in the listen() callback
-// when shouldStartRelayAgent(config) returns true. Read by GET /relay/status
-// (loopback-only) so install.sh can poll for the handshake without standing up
-// its own websocket. Null = agent never started (config opted out, or the
-// listener never got that far — in either case /relay/status returns
-// `connected: false`).
-let relayAgent = null;
 
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
 // serves HTML pages from ~/.manta/pages/<subdomain>/index.html. Caddy
@@ -429,19 +421,18 @@ const readRawBody = (req, limit) => readBody(req, { parse: false, limit });
 //
 // respondJson — write a JSON response (the most common response shape in this
 // file). Pulling it out eliminates a verbatim writeHead+end boilerplate that
-// the duplication-gate flagged between /auth/pair and /relay/status
-// (10-27 line clones) — every JSON-shaped handler in this file now goes
+// the duplication-gate flagged between /auth/pair and other JSON-shaped
+// routes (10-27 line clones) — every JSON handler in this file now goes
 // through here. Status code + body shape stay identical to the inline
 // versions they replace.
 //
 // requireLoopback — gate a handler on the loopback-direct check used by
-// /auth/pair and /relay/status. Returns true (proceed) when the request is
-// loopback-direct; on a non-loopback caller it writes the standard 403 and
-// returns false, so the caller MUST `return` immediately. The error message
-// is passed in so each endpoint can phrase the rejection for its own
-// surface (a pairing-code mint vs. a relay-status read need different hints).
-// The check itself is unchanged (isLocalDirectRequest in auth.mjs) — this
-// is a pure refactor, the loopback gate's semantics are preserved bit-for-bit.
+// /auth/pair. Returns true (proceed) when the request is loopback-direct;
+// on a non-loopback caller it writes the standard 403 and returns false,
+// so the caller MUST `return` immediately. The error message is passed in
+// so each endpoint can phrase the rejection for its own surface. The check
+// itself is unchanged (isLocalDirectRequest in auth.mjs) — this is a pure
+// refactor, the loopback gate's semantics are preserved bit-for-bit.
 function respondJson(res, status, obj) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(obj));
@@ -632,34 +623,6 @@ const server = createServer(async (req, res) => {
     } catch (e) {
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
-    return;
-  }
-
-  // ---------- Relay status (LOOPBACK-ONLY) ----------
-  // GET /relay/status → { enabled, connected }
-  //
-  // Loopback-gated (same check /auth/pair uses) because the answer leaks
-  // whether this box has reached the relay — useful intel for an attacker
-  // probing the box's outbound posture, and not needed by any remote client.
-  // The renderer never calls this; it's consumed by `install.sh` (and any
-  // future ops tooling on the box itself).
-  //
-  //   enabled   — true iff `shouldStartRelayAgent(config)` (config-derived;
-  //                absent key → true, see agent/index.mjs)
-  //   connected — true iff the agent's `status()` is "connected" right now
-  //                (the live WS handshake to relay.mantaui.com succeeded).
-  //                "connecting" / "stopped" both collapse to false — install.sh
-  //                treats anything-but-connected as "not yet" and re-polls.
-  if (req.method === "GET" && path === "/relay/status") {
-    if (
-      !requireLoopback(req, res, "relay status is loopback-only (run this from the box)")
-    ) {
-      return;
-    }
-    const cfg = await local.configGet();
-    const enabled = shouldStartRelayAgent(cfg);
-    const connected = relayAgent ? relayAgent.status() === "connected" : false;
-    respondJson(res, 200, { enabled, connected });
     return;
   }
 
@@ -1523,52 +1486,22 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(PORT, HOST, () => {
   console.log(`manta listening on http://${HOST}:${PORT}`);
 
-  // Start the box-side relay agent (BET-151 ADR-1 / BET-155). The agent dials
-  // OUT to relay.mantaui.com from this box and authenticates with boxAuth, so
-  // it MUST be created after ensureAuth() has run (which it has — see above)
-  // and AFTER the box server is listening (so the agent's first request proxy
-  // can land). Fire-and-forget: the agent's reconnect/backoff loop runs on its
-  // own timers and never blocks this path — a slow relay handshake must NOT
-  // hold up the HTTP server, and a relay outage must NOT crash the box server.
+  // Register this box with the hosted push gateway (BET-201, BET-198 §WP2).
+  // Replaces the old outbound dial to the relay: instead of opening a
+  // long-lived tunnel WS, the box POSTs to https://gateway.mantaui.com/register
+  // to (re)create its DNS A record and mint / refresh a gateway_token that
+  // lives in ~/.manta/auth.json alongside box_token. Direct connections
+  // (phone / desktop / PWA → https://<box_id>.boxes.mantaui.com) are then
+  // the only transport; this one-time startup call is the only outbound.
   //
-  // Opt-out: write `"relayEnabled": false` to ~/.manta/config.json
-  // (shouldStartRelayAgent() handles the default-on case). No env override —
-  // configGet() is the single switch, mirroring how chatAutoAllow is gated.
-  //
-  // The agent owns its own reconnect/backoff — do NOT add another retry loop.
-  // The agent already logs `[relay-agent] connected …` / `tunnel closed;
-  // reconnecting`; we only log the one-shot boot decision here.
-  local
-    .configGet()
-    .then((cfg) => {
-      if (!shouldStartRelayAgent(cfg)) {
-        console.log(
-          "[relay-agent] disabled via config (relayEnabled=false); box reachable only via direct ingress.",
-        );
-        return;
-      }
-      let agent;
-      try {
-        agent = createRelayAgent({ localBase: `http://127.0.0.1:${PORT}` });
-      } catch (err) {
-        console.warn(
-          `[relay-agent] could not construct (auth missing?): ${String(err?.message ?? err)}`,
-        );
-        return;
-      }
-      relayAgent = agent;
-      agent.start().catch((err) => {
-        console.warn(
-          `[relay-agent] first connect rejected: ${String(err?.message ?? err)}`,
-        );
-      });
-      console.log(
-        `[relay-agent] dialing ${agent.boxId.slice(0, 8)}… (relay.mantaui.com)`,
-      );
-    })
-    .catch((err) => {
-      console.warn(
-        `[relay-agent] could not start (config read failed): ${String(err?.message ?? err)}`,
-      );
-    });
+  // Fire-and-forget. registerWithGateway is non-fatal — a network blip or a
+  // DNS hiccup logs a warning and returns; the next boot retries. Never
+  // blocks the HTTP server (slow gateway must NOT delay listen()), never
+  // throws into this callback.
+  registerWithGateway({
+    authPath: join(homedir(), STATE_DIRNAME, "auth.json"),
+    gatewayBase: process.env.MANTA_GATEWAY_BASE,
+  }).catch((err) => {
+    console.warn(`[gateway-register] unexpected: ${String(err?.message ?? err)}`);
+  });
 });

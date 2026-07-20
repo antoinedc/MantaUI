@@ -339,24 +339,6 @@ export function makeDefaultLocalFetchStream(localBase, auth) {
   };
 }
 
-// ADR-1 (BET-151) — pure config decision: should the box server start the relay
-// agent at boot? The product default is YES (relay-first is the path to a paid
-// mobile app — BET-151). The owner's box can opt out by writing
-// `"relayEnabled": false` into `~/.manta/config.json` (e.g. self-hosted with
-// direct-HTTPS only). No env override here on purpose — configGet() is the
-// single switch, mirroring how `chatAutoAllow` is gated.
-//
-// Truth table (tested):
-//   undefined / null config   → true (relay-first default)
-//   { relayEnabled: true }    → true
-//   { relayEnabled: false }   → false
-//   { relayEnabled: "no" }    → true (only `=== false` opts out — same shape
-//                                 as a JS truthy check; do NOT over-engineer)
-export function shouldStartRelayAgent(config) {
-  if (config == null) return true;
-  return config.relayEnabled !== false;
-}
-
 // ---------------------------------------------------------------------------
 // Local PTY-connect leg (BET-158). Opens a WebSocket to the box server's own
 // /pty endpoint (ws://127.0.0.1:8787/pty?<query>) so the relay can bridge a

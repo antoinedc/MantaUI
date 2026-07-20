@@ -6,7 +6,6 @@ import {
   makeDefaultLocalFetch,
   makeDefaultLocalFetchStream,
   makeDefaultLocalPtyConnect,
-  shouldStartRelayAgent,
   DEFAULT_RELAY_URL,
   RECONNECT_BASE_MS,
   RECONNECT_MAX_MS,
@@ -636,35 +635,6 @@ test("stop() during an in-flight dial does not connect afterwards", async () => 
   assert.equal(agent.isConnected(), false, "never adopts a socket opened after stop");
   assert.equal(closed, true, "the raced-open socket is closed");
   assert.equal(clock.pendingCount(), 0);
-});
-
-// ---------------------------------------------------------------------------
-// shouldStartRelayAgent — ADR-1 config decision (BET-155)
-// ---------------------------------------------------------------------------
-
-test("shouldStartRelayAgent defaults to true (relay-first product default)", () => {
-  assert.equal(shouldStartRelayAgent(undefined), true);
-  assert.equal(shouldStartRelayAgent(null), true);
-  assert.equal(shouldStartRelayAgent({}), true);
-  assert.equal(shouldStartRelayAgent({ relayEnabled: undefined }), true);
-});
-
-test("shouldStartRelayAgent returns true for relayEnabled=true", () => {
-  assert.equal(shouldStartRelayAgent({ relayEnabled: true }), true);
-});
-
-test("shouldStartRelayAgent returns false ONLY for relayEnabled=false (opt-out)", () => {
-  assert.equal(shouldStartRelayAgent({ relayEnabled: false }), false);
-});
-
-test("shouldStartRelayAgent treats truthy non-booleans as enabled (no over-engineering)", () => {
-  // The only way to opt out is the literal boolean `false`. Anything else
-  // (a stray "no", 0 wrapped in JSON's quirks, a stale schema) keeps the
-  // relay on — re-enabling is one config flip away, and a silent "no" would
-  // be invisible to the operator.
-  assert.equal(shouldStartRelayAgent({ relayEnabled: "no" }), true);
-  assert.equal(shouldStartRelayAgent({ relayEnabled: 0 }), true);
-  assert.equal(shouldStartRelayAgent({ relayEnabled: "" }), true);
 });
 
 // ---------------------------------------------------------------------------
