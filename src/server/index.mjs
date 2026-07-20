@@ -29,7 +29,7 @@ import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/
 // any subsequent `console.log` so the existing `[push]` / `[opencode-pump]`
 // / `[relay-agent]` / `[auth]` call sites ship transparently.
 {
-  const axiomCfg = resolveAxiomConfig({ env: process.env, config: local.configGet() });
+  const axiomCfg = resolveAxiomConfig({ env: process.env, config: await local.configGet() });
   if (axiomCfg) {
     captureConsole(createLogShipper({ ...axiomCfg, source: "server", device: hostname() }));
   }
