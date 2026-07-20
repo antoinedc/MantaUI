@@ -26,7 +26,7 @@
 // Capacitor bridge — see deepLink.test.ts beside this file.
 
 import { parsePairPayload, type PairPayload } from "./pairPayload";
-import { relayBoxUrl, RELAY_BASE } from "../../shared/transport.mjs";
+import { boxDirectUrl } from "../../shared/transport.mjs";
 import type { ClaimOutcome } from "../../shared/claim.mjs";
 import { dlog } from "./debugLog";
 
@@ -88,11 +88,13 @@ export type DeepLinkDeps = {
     code: string;
   }) => Promise<ClaimOutcome>;
   /** Persist the resolved server URL to localStorage["manta_server"]. Called
-   *  AFTER a successful claim. Box form writes the shared
-   *  `${RELAY_BASE}/box/<boxId>`; direct form writes the payload's serverUrl.
-   *  The deep-link handler is the only caller that needs this — direct
-   *  pairing flows (PairingScreen / SetupScreen) persist serverUrl directly
-   *  because the user already typed it. */
+   *  AFTER a successful claim. Box form writes the shared direct hostname
+   *  `https://<boxId>.boxes.mantaui.com` (built by `boxDirectUrl`); direct
+   *  form writes the payload's serverUrl. The deep-link handler is the only
+   *  caller that needs this — direct pairing flows (PairingScreen /
+   *  SetupScreen) persist serverUrl directly because the user already typed
+   *  it. (BET-198 — relay dropped, the previous `${RELAY_BASE}/box/<boxId>`
+   *  shape is gone.) */
   persistServer: (serverUrl: string) => void;
 };
 
@@ -108,9 +110,10 @@ export type DeepLinkDeps = {
  * - A direct-form pair URL → claimAgainst with the payload's serverUrl, then
  *   persistServer(payload.serverUrl) on success.
  * - A box-form pair URL → claimAgainst with the payload's boxId, then
- *   persistServer(`${RELAY_BASE}/box/<boxId>`) on success. The URL shape is
- *   produced by the SHARED `relayBoxUrl` helper so the desktop (PairStep.tsx)
- *   and the mobile deep-link handler write the EXACT same string.
+ *   persistServer(`https://<boxId>.boxes.mantaui.com`) on success. The URL
+ *   shape is produced by the SHARED `boxDirectUrl` helper so the desktop
+ *   (PairStep.tsx) and the mobile deep-link handler write the EXACT same
+ *   string (BET-198 — relay dropped).
  */
 export async function handlePairUrl(
   raw: string,
@@ -155,10 +158,11 @@ export async function handlePairUrl(
 
 /**
  * Build the AuthClaimInput from a parsed payload. Mirrors PairStep.tsx's
- * box-form contract: serverUrl="" + boxId=<id> for the relay branch so
- * httpApi.authClaim routes through claimRelay (and NOT claimAgainst with a
- * blank base, which would POST to /auth/claim literally at "" + /auth/claim
- * — broken).
+ * box-form contract: serverUrl="" + boxId=<id> for the box form so
+ * httpApi.authClaim routes through the box-direct branch (BET-198 — relay
+ * dropped). An empty serverUrl on the box form is intentional: the URL
+ * itself is built by `boxDirectUrl(boxId)` AFTER a successful claim and
+ * persisted by `persistServer`, not pre-resolved here.
  */
 function buildClaimInput(payload: PairPayload): {
   serverUrl: string;
@@ -173,14 +177,14 @@ function buildClaimInput(payload: PairPayload): {
 
 /**
  * Resolve the server URL to persist after a successful claim. The shared
- * `relayBoxUrl` helper is the single source of truth for the box-form URL
- * shape — it strips trailing slashes from the base and validates the boxId
- * (callers MUST have shape-gated by parsePairPayload already, but the helper
- * is defensive).
+ * `boxDirectUrl` helper is the single source of truth for the box-form URL
+ * shape — it builds `https://<boxId>.boxes.mantaui.com` and validates the
+ * boxId (callers MUST have shape-gated by parsePairPayload already, but the
+ * helper is defensive).
  */
 function resolveServerUrl(payload: PairPayload): string {
   if (payload.boxId) {
-    return relayBoxUrl(payload.boxId, RELAY_BASE);
+    return boxDirectUrl(payload.boxId);
   }
   return payload.serverUrl ?? "";
 }

@@ -14,17 +14,19 @@
 //   • pairingReducer                   — the form state machine (idle →
 //                                        submitting → error, and back)
 //
-// The input contract + HTTP-outcome classification now live in the shared,
+// The input contract + HTTP-outcome classification live in the shared,
 // process-boundary-safe src/shared/claim.mjs (so the desktop main process can
 // classify the same way without importing renderer code). This module
-// re-exports them for the mobile client's existing call sites + tests, and adds
-// the mobile-only form state machine (pairingReducer) on top.
+// re-exports them for the mobile client's existing call sites + tests, and
+// adds the mobile-only form state machine (pairingReducer) on top.
+//
+// BET-198 SCOPE NOTE: `classifyRelayClaimResult` was removed (the relay is
+// gone); pairingLogic now only re-exports the direct-claim helpers.
 
 export {
   normalizeCode,
   isSubmittableCode,
   classifyClaimResult,
-  classifyRelayClaimResult,
   networkFailure,
 } from "../../shared/claim.mjs";
 import { isSubmittableCode, normalizeCode } from "../../shared/claim.mjs";

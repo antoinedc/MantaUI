@@ -3,7 +3,6 @@ import {
   normalizeCode,
   isSubmittableCode,
   classifyClaimResult,
-  classifyRelayClaimResult,
   networkFailure,
 } from "./claim.mjs";
 
@@ -98,56 +97,6 @@ describe("networkFailure", () => {
     if (!r.ok) {
       expect(r.kind).toBe("network");
       expect(r.message.length).toBeGreaterThan(0);
-    }
-  });
-});
-
-describe("classifyRelayClaimResult (BET-156, relay /pair)", () => {
-  // Wire shape: { box_id, account_id, account_token }. The desktop stores
-  // `account_token` in the SAME `boxToken` slot the direct /auth/claim shape
-  // populates — the renderer's auth code path is unaware of the difference.
-  it("200 with a valid body → ok + (account_token → boxToken, box_id)", () => {
-    const r = classifyRelayClaimResult(200, {
-      box_id: HEX32B,
-      account_id: HEX32,
-      account_token: HEX32B, // a different 32-hex value
-    });
-    expect(r).toEqual({ ok: true, boxToken: HEX32B, boxId: HEX32B });
-  });
-
-  it("200 with malformed account_token → invalid_response", () => {
-    const r = classifyRelayClaimResult(200, {
-      box_id: HEX32B,
-      account_id: HEX32,
-      account_token: "nope",
-    });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.kind).toBe("invalid_response");
-  });
-
-  it("200 with missing account_token → invalid_response", () => {
-    const r = classifyRelayClaimResult(200, { box_id: HEX32B, account_id: HEX32 });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.kind).toBe("invalid_response");
-  });
-
-  it("200 with null body → invalid_response", () => {
-    const r = classifyRelayClaimResult(200, null);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.kind).toBe("invalid_response");
-  });
-
-  it("status mapping matches classifyClaimResult exactly (one error-handling path on the renderer)", () => {
-    for (const [status, kind] of [
-      [403, "wrong_code"],
-      [400, "wrong_code"],
-      [429, "rate_limited"],
-      [500, "server_error"],
-      [503, "server_error"],
-    ] as const) {
-      const r = classifyRelayClaimResult(status, { error: "x" });
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.kind).toBe(kind);
     }
   });
 });

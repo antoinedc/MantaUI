@@ -25,17 +25,5 @@ export function isSubmittableCode(code: string): boolean;
 // Map an /auth/claim HTTP outcome (status + parsed body) to a ClaimOutcome.
 export function classifyClaimResult(status: number, body: unknown): ClaimOutcome;
 
-// Map a relay /pair HTTP outcome (status + parsed body) to a ClaimOutcome.
-// Wire shape per BET-156: { box_id, account_id, account_token }. The same
-// ClaimOutcome envelope is returned (with `account_token` carried as the
-// `boxToken` slot — the renderer's auth code path is unaware of the rename).
-export function classifyRelayClaimResult(status: number, body: unknown): ClaimOutcome;
-
-// Parse a relay /pair 200 body into { boxId, accountToken } — shared so the
-// renderer/mobile entry points can validate the same shape before persisting.
-export function parseRelayClaimResponse(json: unknown):
-  | { ok: true; boxId: string; accountToken: string }
-  | { ok: false; error: string };
-
 // The ClaimOutcome for a fetch that never produced an HTTP response.
 export function networkFailure(): ClaimOutcome;

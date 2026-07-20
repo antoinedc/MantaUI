@@ -11,7 +11,6 @@ import {
 import type { Api } from "../../shared/api.js";
 import {
   classifyClaimResult,
-  classifyRelayClaimResult,
   networkFailure,
   type ClaimResult,
 } from "../mobile/pairingLogic.js";
@@ -19,7 +18,6 @@ import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
 import { getBuiPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
 import { shouldForceReconnect } from "../chatUtils";
-import { isValidBoxToken } from "../../shared/transport.mjs";
 import { ship } from "../log";
 
 // ---------------------------------------------------------------------------
@@ -227,54 +225,6 @@ async function claimAgainst(base: string, code: string): Promise<ClaimResult> {
     /* non-JSON body (proxy/HTML error page) — leave null; classify by status */
   }
   const result = classifyClaimResult(res.status, body);
-  if (result.ok) saveClientToken(result.boxToken);
-  return result;
-}
-
-/**
- * POST a pairing `code` to the relay's `/pair` endpoint with
- * `{ box_id, code }`, classify the outcome via the shared relay classifier,
- * and persist the returned account_token (mobile token store) on success.
- *
- * Mirrors claimPairingRelay in src/main/auth.ts EXACTLY: same endpoint, same
- * request body shape, same response classifier. The desktop persists
- * config.json via its injected `persist` callback; here the persistence shape
- * is fixed (saveClientToken is the single write-site for the Bearer token),
- * and `manta_server` is the caller's job — see `handlePairUrl` in
- * src/renderer/mobile/deepLink.ts (built from the shared relayBoxUrl helper).
- *
- * A malformed boxId is a network failure (UI prompts to re-paste) — never
- * sends a junk value to the relay, same shape-gate as the desktop branch.
- */
-async function claimRelay(boxId: string, code: string): Promise<ClaimResult> {
-  if (!isValidBoxToken(boxId)) {
-    console.warn("[deeplink] claimRelay: invalid boxId shape:", boxId);
-    return networkFailure();
-  }
-  const url = `https://relay.mantaui.com/pair`;
-  console.log("[deeplink] claimRelay POST", url, "box_id:", boxId);
-  let res: Response;
-  try {
-    res = await fetchWithTimeout(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ box_id: boxId, code }),
-    });
-  } catch (e) {
-    // Includes the 15s timeout abort — a stalled relay connection resolves to
-    // a network failure (retryable) instead of an infinite "connecting…".
-    console.warn("[deeplink] claimRelay fetch failed/timed out:", e);
-    return networkFailure();
-  }
-  console.log("[deeplink] claimRelay response status:", res.status);
-  let body: unknown = null;
-  try {
-    body = await res.json();
-  } catch {
-    /* non-JSON body (proxy/HTML error page) — leave null; classify by status */
-  }
-  const result = classifyRelayClaimResult(res.status, body);
-  console.log("[deeplink] claimRelay classified:", result.ok ? "ok" : `fail(${(result as { kind?: string }).kind})`);
   if (result.ok) saveClientToken(result.boxToken);
   return result;
 }
@@ -643,26 +593,16 @@ export const httpApi: Api = {
   tmuxRestoreConfig: () => rpc(IPC.tmuxRestoreConfig),
 
   // -- onboarding pairing --
-  // Two addressing shapes (typed AuthClaimInput, src/shared/types.ts):
-  //   • serverUrl — direct-HTTPS pairing (BET-49): POST <serverUrl>/auth/claim
-  //     { pairing_code } → { box_token, box_id }. Persists the token via
-  //     saveClientToken (single write-site).
-  //   • boxId     — relay-paired pairing (BET-156, BET-177 §2.3):
-  //     POST https://relay.mantaui.com/pair { box_id, code } →
-  //     { box_id, account_id, account_token }. The account_token is the
-  //     "boxToken" slot from the renderer's POV — saveClientToken persists it
-  //     identically to the direct branch. serverUrl is NOT auto-persisted
-  //     here: that's the caller's job (the mobile deep-link handler builds
-  //     `${RELAY_BASE}/box/<boxId>` from the shared helper — desktop and
-  //     mobile write the EXACT same string). Mirrors claimPairingRelay in
-  //     src/main/auth.ts: same endpoint, same request body shape, same
-  //     classifyRelayClaimResult. Branch is keyed by which input field is
-  //     populated; a non-empty boxId always wins.
-  authClaim: (input) => {
-    const boxId = (input.boxId ?? "").trim();
-    if (boxId !== "") return claimRelay(boxId, input.code);
-    return claimAgainst(input.serverUrl, input.code);
-  },
+  // Direct-HTTPS pairing (BET-49, BET-198 — relay dropped): POST
+  // <serverUrl>/auth/claim { pairing_code } → { box_token, box_id }. Persists
+  // the token via saveClientToken (single write-site).
+  //
+  // serverUrl is built by the caller from the shared `boxDirectUrl(boxId)`
+  // helper (src/shared/transport.mjs) — desktop and mobile write the EXACT
+  // same `https://<boxId>.boxes.mantaui.com` string. Mirrors the direct
+  // pairing path in src/main/auth.ts (same endpoint, same request body shape,
+  // same classifyClaimResult).
+  authClaim: (input) => claimAgainst(input.serverUrl, input.code),
 
   // Mobile pairing code mint (BET-161): POST /rpc/auth:pair. Both desktop and
   // mobile go through the same /rpc channel — GET /auth/pair is loopback-only

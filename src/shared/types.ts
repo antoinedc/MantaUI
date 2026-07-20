@@ -624,21 +624,20 @@ export type AgentFileReady = {
   localPath?: string;
 };
 
-// ----- Onboarding pairing (BET-49) -----
+// ----- Onboarding pairing (BET-49, BET-198 — relay dropped) -----
 
 // Input for the desktop auth:claim channel. The mobile/web client always
 // supplies a non-empty `serverUrl` (direct-HTTPS pairing, BET-49). The desktop
-// onboarding shell (BET-156) accepts EITHER `serverUrl` OR `boxId` (the
-// relay-paired form); when `boxId` is set, `serverUrl` MUST be an empty
-// string (the same field stays required so httpApi — which is mobile-only —
-// sees an unchanged type signature, per BET-156's "do not modify httpApi"
-// rule):
+// onboarding shell accepts EITHER `serverUrl` OR `boxId` (the box-form pair
+// URL shape; BET-198 dropped the relay proxy and replaced it with the direct
+// hostname `https://<boxId>.boxes.mantaui.com`). When `boxId` is set,
+// `serverUrl` is left empty so httpApi (mobile-only) sees an unchanged type
+// signature; the deep-link / setup screen then resolves the boxId to a direct
+// hostname AFTER a successful claim via `boxDirectUrl(boxId)` in
+// src/shared/transport.mjs.
 //   • serverUrl non-empty → POST <serverUrl>/auth/claim { code } (BET-49).
-//   • boxId set, serverUrl "" → POST https://relay.mantaui.com/pair
-//     { box_id, code } (BET-156). Persists
-//     { serverUrl: "<RELAY_BASE>/box/<box_id>", boxId, boxToken } so every
-//     downstream /rpc + /events + upload hits the relay's /box/:box_id/*
-//     proxy with zero new data-path code (ADR-3).
+//   • boxId set, serverUrl "" → claims against the box's own /auth/claim,
+//     then persists serverUrl = `boxDirectUrl(boxId)` (BET-198).
 // `code` is the 6-digit pairing code (either flow). The typed OUTCOME lives in
 // src/shared/claim.mjs (ClaimOutcome) — imported by preload/main directly so
 // types.ts stays dependency-free.

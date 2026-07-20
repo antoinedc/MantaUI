@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   isValidBoxToken,
+  BOXES_DOMAIN,
+  boxDirectUrl,
   resolveTransportMode,
   parseClaimResponse,
   selectDesktopTransport,
@@ -32,6 +34,40 @@ describe("isValidBoxToken", () => {
     expect(isValidBoxToken(undefined as never)).toBe(false);
     expect(isValidBoxToken(123 as never)).toBe(false);
     expect(isValidBoxToken({} as never)).toBe(false);
+  });
+});
+
+describe("BOXES_DOMAIN (BET-198)", () => {
+  it("is the literal boxes.mantaui.com suffix", () => {
+    expect(BOXES_DOMAIN).toBe("boxes.mantaui.com");
+  });
+});
+
+describe("boxDirectUrl (BET-198)", () => {
+  it("builds the canonical https://<boxId>.boxes.mantaui.com URL", () => {
+    expect(boxDirectUrl(HEX32)).toBe(`https://${HEX32}.boxes.mantaui.com`);
+    expect(boxDirectUrl(HEX32_B)).toBe(`https://${HEX32_B}.boxes.mantaui.com`);
+  });
+  it("embeds the boxId as a subdomain (no /box/<id> suffix)", () => {
+    const url = boxDirectUrl(HEX32);
+    expect(url.startsWith(`https://${HEX32}.`)).toBe(true);
+    expect(url).not.toContain("/box/");
+  });
+  it("throws on a wrong-length boxId", () => {
+    expect(() => boxDirectUrl("abcdef")).toThrow(/32-hex/);
+    expect(() => boxDirectUrl(HEX32 + "a")).toThrow(/32-hex/);
+    expect(() => boxDirectUrl(HEX32.slice(0, 31))).toThrow(/32-hex/);
+    expect(() => boxDirectUrl("")).toThrow(/32-hex/);
+  });
+  it("throws on uppercase or non-hex chars (lowercase-only — mirrors isValidBoxToken)", () => {
+    expect(() => boxDirectUrl(HEX32.toUpperCase())).toThrow(/32-hex/);
+    expect(() => boxDirectUrl("g123456789abcdef0123456789abcdef")).toThrow(/32-hex/);
+    expect(() => boxDirectUrl("0123456789abcdef0123456789abcde ")).toThrow(/32-hex/);
+  });
+  it("throws on non-string input", () => {
+    expect(() => boxDirectUrl(null as never)).toThrow(/32-hex/);
+    expect(() => boxDirectUrl(undefined as never)).toThrow(/32-hex/);
+    expect(() => boxDirectUrl(123 as never)).toThrow(/32-hex/);
   });
 });
 
