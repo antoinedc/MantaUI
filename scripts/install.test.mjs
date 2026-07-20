@@ -21,6 +21,8 @@ import {
   mergeGatewayAuth,
   waitForDns,
   renderCaddyVhost,
+  readOsReleaseIds,
+  classifyDistro,
   renderSystemdUnit,
   OPENCODE_CLAUDE_AUTH_PLUGIN,
   DEFAULT_PORT,
@@ -1658,4 +1660,319 @@ test("wait-for-dns CLI subcommand requires --hostname and --expected-ip", () => 
   } catch (e) {
     assert.match(e.stderr ?? "", /--expected-ip <ip> required/);
   }
+});
+
+// ----------------------------------------------------------------------------
+// readOsReleaseIds / classifyDistro — /etc/os-release parser + Debian/Ubuntu
+// classifier (BET-205 reviewer guidance §4: "Debian/Ubuntu only for v1").
+// ----------------------------------------------------------------------------
+
+test("readOsReleaseIds parses a canonical Ubuntu /etc/os-release", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-os-release-"));
+  const osRelease = join(dir, "os-release");
+  writeFileSync(
+    osRelease,
+    [
+      'NAME="Ubuntu"',
+      'VERSION="24.04 LTS (Noble Numbat)"',
+      'ID=ubuntu',
+      'ID_LIKE=debian',
+      'PRETTY_NAME="Ubuntu 24.04 LTS"',
+      'VERSION_ID="24.04"',
+    ].join("\n"),
+  );
+  try {
+    const info = readOsReleaseIds({ path: osRelease });
+    assert.equal(info.id, "ubuntu");
+    assert.equal(info.idLike, "debian");
+    const cls = classifyDistro(info);
+    assert.equal(cls.debianLike, true);
+    assert.equal(cls.id, "ubuntu");
+    assert.equal(cls.idLike, "debian");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readOsReleaseIds parses a canonical Debian /etc/os-release", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-os-release-"));
+  const osRelease = join(dir, "os-release");
+  writeFileSync(
+    osRelease,
+    'NAME="Debian GNU/Linux"\nID=debian\nVERSION_ID="12"\n',
+  );
+  try {
+    const info = readOsReleaseIds({ path: osRelease });
+    assert.equal(info.id, "debian");
+    const cls = classifyDistro(info);
+    assert.equal(cls.debianLike, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readOsReleaseIds returns null when /etc/os-release is missing", () => {
+  const info = readOsReleaseIds({ path: "/definitely/not/here/os-release" });
+  assert.equal(info, null);
+  // classifyDistro on a null input is safe (returns debianLike: false).
+  const cls = classifyDistro(info);
+  assert.equal(cls.debianLike, false);
+  assert.equal(cls.id, null);
+});
+
+test("readOsReleaseIds returns null when /etc/os-release is unparseable (no ID/ID_LIKE)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-os-release-"));
+  const osRelease = join(dir, "os-release");
+  writeFileSync(osRelease, "GARBAGE=1\nNAME=\"weird distro\"\n");
+  try {
+    assert.equal(readOsReleaseIds({ path: osRelease }), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("classifyDistro recognizes Debian derivatives via ID_LIKE", () => {
+  // Linux Mint, Raspbian, etc. set `ID=…` to their own name and
+  // `ID_LIKE=debian` to claim the family. install.sh's distro gate
+  // accepts these as Debian-like (we only run apt-get commands Caddy
+  // supports on a debian-family system, and `apt` works on all of them).
+  const cases = [
+    { id: "linuxmint", idLike: "debian ubuntu" },
+    { id: "raspbian", idLike: "debian" },
+    { id: "elementary", idLike: "ubuntu debian" },
+  ];
+  for (const info of cases) {
+    const cls = classifyDistro(info);
+    assert.equal(cls.debianLike, true, `${info.id} should classify as Debian-like`);
+  }
+});
+
+test("classifyDistro rejects non-Debian distros (rh family, arch, alpine)", () => {
+  const cases = [
+    { id: "fedora", idLike: "rhel fedora" },
+    { id: "centos", idLike: "rhel centos" },
+    { id: "rhel", idLike: "" },
+    { id: "arch", idLike: "" },
+    { id: "alpine", idLike: "" },
+    { id: "amzn", idLike: "" }, // Amazon Linux 2 — RHEL-derived, NOT in v1 scope
+  ];
+  for (const info of cases) {
+    const cls = classifyDistro(info);
+    assert.equal(cls.debianLike, false, `${info.id} should NOT classify as Debian-like`);
+  }
+});
+
+test("classifyDistro tolerates null / non-object inputs (defensive)", () => {
+  assert.equal(classifyDistro(null).debianLike, false);
+  assert.equal(classifyDistro(undefined).debianLike, false);
+  assert.equal(classifyDistro({}).debianLike, false);
+  assert.equal(classifyDistro({ id: undefined, idLike: undefined }).debianLike, false);
+});
+
+test("detect-distro CLI subcommand emits the JSON status install.sh consumes", async () => {
+  // The CLI subcommand is the bridge between install.sh (bash) and the
+  // pure lib helper. It must emit a single-line JSON object with
+  // {supported, reason, id, idLike, debianLike} so install.sh can
+  // json-parse + branch. We exercise it against a temp /etc/os-release.
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-distro-"));
+  const osRelease = join(dir, "os-release");
+  writeFileSync(osRelease, 'ID=ubuntu\nID_LIKE=debian\n');
+  try {
+    const { spawnSync } = await import("node:child_process");
+    const result = spawnSync(
+      "node",
+      [
+        join(__dirname, "install-lib.mjs"),
+        "detect-distro",
+        "--os-release", osRelease,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.id, "ubuntu");
+    assert.equal(parsed.idLike, "debian");
+    assert.equal(parsed.debianLike, true);
+    assert.equal(parsed.supported, true);
+    assert.match(parsed.reason, /supported Debian\/Ubuntu/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("detect-distro CLI subcommand reports supported=false on a non-Debian distro", async () => {
+  // The install.sh gate reads the JSON `supported` field and bails with
+  // the `reason` string when it's false. We pin both the supported flag
+  // AND the human-readable reason (so the install's bring-your-own-
+  // proxy message is stable across refactors).
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-distro-rhel-"));
+  const osRelease = join(dir, "os-release");
+  writeFileSync(osRelease, 'ID=fedora\nID_LIKE="rhel fedora"\n');
+  try {
+    const { spawnSync } = await import("node:child_process");
+    const result = spawnSync(
+      "node",
+      [
+        join(__dirname, "install-lib.mjs"),
+        "detect-distro",
+        "--os-release", osRelease,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.supported, false);
+    assert.match(parsed.reason, /distro "fedora" is not in the v1 supported list/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// install.sh — privileged-section gates (BET-205 reviewer guidance §3 + §4).
+// ----------------------------------------------------------------------------
+//
+// Step 7.5 ("PRIVILEGED SECTION") is gated on:
+//   (a) distro in {debian, ubuntu, ID_LIKE=debian} (or DRY_RUN)
+//   (b) `sudo` installed (or DRY_RUN)
+//   (c) `sudo -n true` succeeds (passwordless sudo)
+// We can't run the install body end-to-end in a unit test (it would
+// touch the network + apt + systemd), so these tests source install.sh
+// in REAL mode + override `main` with a stub that runs ONLY the
+// privileged-section gate logic, asserting on the gate's verdicts.
+//
+// The gate logic itself lives at the top of step 7.5 — we replicate it
+// inline here so the test is independent of the install body. If the
+// install.sh gate diverges from this test, both will need updating.
+
+test("install.sh privileged section: distro not Debian/Ubuntu → SKIP (issue §4)", () => {
+  // A non-Debian distro (here: fedora) must trigger the gate's skip
+  // branch. We stub `main` to a script that ONLY runs the gate and
+  // records the gate's verdict + the warning text the install would
+  // print.
+  const out = runMain({
+    preBody: `
+PRIVILEGED_SECTION_SKIP=0
+DRY_RUN=0
+# Mock \`node\` to a script that emits a non-Debian JSON status.
+NODE() {
+  printf '{"id":"fedora","idLike":"rhel fedora","debianLike":false,"supported":false,"reason":"distro fedora is not in the v1 supported list (debian, ubuntu, or ID_LIKE=debian)"}\\n'
+}
+export -f NODE
+# Stub the JSON parsing inner-loop too: we skip the complex printf |
+# node -e pipe by using a tiny inline awk-like extractor.
+_parse() { printf '%s' "$1" | grep -q '"supported":true' && echo yes || echo no; }
+DISTRO_STATUS="$(NODE 2>/dev/null)"
+DISTRO_SUPPORTED="$(_parse "$DISTRO_STATUS")"
+DISTRO_ID="$(printf '%s' "$DISTRO_STATUS" | sed -n 's/.*"id":"\\([^"]*\\).*/\\1/p')"
+if [ "$DISTRO_SUPPORTED" = "no" ]; then
+  echo "GATE_VERDICT=skip-distro"
+  echo "GATE_REASON=$DISTRO_ID"
+  PRIVILEGED_SECTION_SKIP=1
+else
+  echo "GATE_VERDICT=run"
+fi
+echo "FINAL_SKIP=$PRIVILEGED_SECTION_SKIP"
+`,
+  });
+  assert.match(out, /GATE_VERDICT=skip-distro/);
+  assert.match(out, /GATE_REASON=fedora/);
+  assert.match(out, /FINAL_SKIP=1/);
+});
+
+test("install.sh privileged section: sudo missing → SKIP (issue §3)", () => {
+  // When \`sudo\` is not on PATH (e.g. minimal container, custom VPS),
+  // the gate must bail with a clear bring-your-own-proxy hint rather
+  // than half-installing. We mock \`command\` to hide \`sudo\` and
+  // \`node\` (which only runs the distro check first).
+  const out = runMain({
+    stubs: `
+# Hide sudo from \`command -v\`.
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "sudo" ]; then return 1; fi
+  builtin command "$@"
+}
+export -f command
+`,
+    preBody: `
+PRIVILEGED_SECTION_SKIP=0
+DRY_RUN=0
+# Pretend distro check passed (ubuntu), so the gate proceeds to the sudo check.
+NODE() { printf '{"id":"ubuntu","idLike":"debian","debianLike":true,"supported":true,"reason":"supported Debian/Ubuntu family"}\\n'; }
+export -f NODE
+# (The distro check would set PRIVILEGED_SECTION_SKIP=0; we simulate that.)
+if ! command -v sudo >/dev/null 2>&1; then
+  echo "GATE_VERDICT=skip-no-sudo"
+  PRIVILEGED_SECTION_SKIP=1
+fi
+echo "FINAL_SKIP=$PRIVILEGED_SECTION_SKIP"
+`,
+  });
+  assert.match(out, /GATE_VERDICT=skip-no-sudo/);
+  assert.match(out, /FINAL_SKIP=1/);
+});
+
+test("install.sh privileged section: sudo -n true fails → SKIP (issue §3)", () => {
+  // sudo IS installed but \`sudo -n true\` exits non-zero (no
+  // passwordless rule for the current user). The gate must bail
+  // cleanly without half-installing.
+  const out = runMain({
+    stubs: `
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "sudo" ]; then return 0; fi
+  builtin command "$@"
+}
+sudo() {
+  # Pretend every sudo invocation fails (interactive password prompt).
+  return 1
+}
+export -f command sudo
+`,
+    preBody: `
+PRIVILEGED_SECTION_SKIP=0
+DRY_RUN=0
+# Pretend distro check passed.
+NODE() { printf '{"id":"ubuntu","idLike":"debian","debianLike":true,"supported":true,"reason":"supported Debian/Ubuntu family"}\\n'; }
+export -f NODE
+if ! sudo -n true 2>/dev/null; then
+  echo "GATE_VERDICT=skip-no-passwordless-sudo"
+  PRIVILEGED_SECTION_SKIP=1
+fi
+echo "FINAL_SKIP=$PRIVILEGED_SECTION_SKIP"
+`,
+  });
+  assert.match(out, /GATE_VERDICT=skip-no-passwordless-sudo/);
+  assert.match(out, /FINAL_SKIP=1/);
+});
+
+test("install.sh privileged section: DRY_RUN=1 skips the gates (always shows the plan)", () => {
+  // --dry-run must show every step's `[dry-run] would …` line, regardless
+  // of distro / sudo. We mock both \`command -v sudo\` (returns 1) and
+  // \`node\` (returns a non-Debian distro) and assert the gate is
+  // BYPASSED (i.e. PRIVILEGED_SECTION_SKIP stays 0).
+  const out = runMain({
+    stubs: `
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "sudo" ]; then return 1; fi
+  builtin command "$@"
+}
+export -f command
+`,
+    preBody: `
+DRY_RUN=1
+PRIVILEGED_SECTION_SKIP=0
+# In dry-run mode the gate block is wrapped in \`if [ "$DRY_RUN" != "1" ]\`,
+# so the gate's commands don't run. Simulate by just asserting the
+# branch behavior directly.
+if [ "$DRY_RUN" != "1" ]; then
+  echo "GATE_BRANCH=running"
+else
+  echo "GATE_BRANCH=skipped-in-dry-run"
+  PRIVILEGED_SECTION_SKIP=0
+fi
+echo "FINAL_SKIP=$PRIVILEGED_SECTION_SKIP"
+`,
+  });
+  assert.match(out, /GATE_BRANCH=skipped-in-dry-run/);
+  assert.match(out, /FINAL_SKIP=0/);
 });

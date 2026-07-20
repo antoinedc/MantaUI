@@ -14,7 +14,7 @@
 //   * Overrides come from the environment: MANTA_TARBALL_URL and MANTA_HOME.
 //     Defaults are applied when unset/empty.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -521,6 +521,71 @@ export function renderCaddyVhost(
 }
 
 // ---------------------------------------------------------------------------
+// /etc/os-release parser + Debian/Ubuntu classifier — pure, used by
+// install.sh's privileged-section gate (BET-205 reviewer guidance §4).
+//
+// /etc/os-release is a shell-source-style file (KEY="VALUE" or KEY=VALUE
+// lines, optionally quoted). We extract just the two fields install.sh
+// needs: `ID` (the canonical distro id, e.g. "ubuntu" / "debian") and
+// `ID_LIKE` (a space-separated list of "this distro is derived from X"
+// hints — Debian derivatives like Linux Mint or Raspbian put `debian`
+// here). Everything else is ignored.
+//
+// Why not just `source /etc/os-release` in bash? The parser is small,
+// pure, and unit-testable in isolation; install.sh stays a thin
+// orchestrator that just consumes the result.
+//
+// Path injectable for tests; default `/etc/os-release` matches the
+// systemd convention. Returns `null` if the file is missing or
+// unparseable (caller decides what to do — install.sh warns + skips
+// the privileged section).
+export function readOsReleaseIds({ path = "/etc/os-release" } = {}) {
+  let content;
+  try {
+    if (!existsSync(path)) return null;
+    content = readFileSync(path, "utf-8");
+  } catch {
+    return null;
+  }
+  // Match `ID=VALUE` or `ID="VALUE"` (same for ID_LIKE). os-release
+  // values never contain newlines; quotes are allowed around any value.
+  const result = { id: null, idLike: null };
+  for (const line of content.split("\n")) {
+    const m = line.match(/^(ID|ID_LIKE)=("?)([^"\n]+)\2$/);
+    if (!m) continue;
+    if (m[1] === "ID") result.id = m[3];
+    else result.idLike = m[3]; // space-separated when quoted
+  }
+  if (result.id === null && result.idLike === null) return null;
+  return result;
+}
+
+/**
+ * Is this /etc/os-release info a Debian/Ubuntu-family distro? The
+ * privileged Caddy + gateway + DNS section of install.sh is v1-
+ * scoped to Debian/Ubuntu because the apt-repo install path is the
+ * only one we test against. On other distros we bail with a clear
+ * message + bring-your-own-proxy hint instead of half-installing.
+ *
+ * Truth table:
+ *   info?.id  in {debian, ubuntu} → true
+ *   info?.idLike contains "debian" → true (catches Linux Mint, Raspbian, etc.)
+ *   otherwise → false (incl. null / non-object / empty)
+ *
+ * Return shape: { debianLike: boolean, id: string|null, idLike: string|null }
+ * — the booleans + raw ids so install.sh can log "detected: <id>"
+ * alongside "supported: debian/ubuntu" without re-parsing.
+ */
+export function classifyDistro(info) {
+  const id = info?.id ?? null;
+  const idLike = info?.idLike ?? null;
+  let debianLike = false;
+  if (id === "debian" || id === "ubuntu") debianLike = true;
+  else if (typeof idLike === "string" && /\bdebian\b/.test(idLike)) debianLike = true;
+  return { debianLike, id, idLike };
+}
+
+// ---------------------------------------------------------------------------
 // Systemd unit placeholder substitution — pure, used by install.sh steps E
 // and the existing manta-server step (BET-153).
 // ---------------------------------------------------------------------------
@@ -923,9 +988,36 @@ async function cliMain(argv) {
     }
     return 0;
   }
+  if (cmd === "detect-distro") {
+    // node install-lib.mjs detect-distro [--os-release <path>]
+    // Parses /etc/os-release and emits a one-line JSON status object
+    // install.sh can `eval` or json-parse. The status object:
+    //   { debianLike: boolean, id: string|null, idLike: string|null,
+    //     supported: boolean, reason: string }
+    // install.sh gates the privileged Caddy section on
+    // `supported === true`; the `reason` string is logged for the
+    // operator when it's false (distro not supported + bring-your-
+    // own-proxy hint).
+    const path = flags["os-release"] ?? "/etc/os-release";
+    const info = readOsReleaseIds({ path });
+    const cls = classifyDistro(info);
+    const status = {
+      debianLike: cls.debianLike,
+      id: cls.id,
+      idLike: cls.idLike,
+      supported: cls.debianLike,
+      reason: cls.debianLike
+        ? "supported Debian/Ubuntu family"
+        : cls.id
+          ? `distro "${cls.id}" is not in the v1 supported list (debian, ubuntu, or ID_LIKE=debian)`
+          : "could not parse /etc/os-release (missing or unparseable)",
+    };
+    process.stdout.write(JSON.stringify(status) + "\n");
+    return 0;
+  }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-gateway|wait-for-dns|render-caddy-vhost|render-systemd-unit> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--placeholder K=V]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-gateway|wait-for-dns|render-caddy-vhost|detect-distro|render-systemd-unit> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--placeholder K=V]\n",
   );
   return 2;
 }
@@ -948,6 +1040,7 @@ function parseFlags(args) {
     "box-id",
     "port",
     "mode",
+    "os-release",
   ]);
   for (let i = 0; i < args.length; i++) {
     const tok = args[i];

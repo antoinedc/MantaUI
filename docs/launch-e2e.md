@@ -877,3 +877,99 @@ for this issue). The F1 / F2 / F3 / F4 chain is closed; BET-172's
 remaining scope is folded into this section. The next BET-160 §2
 work is whatever the owner decides for steps 4 + 5; the
 agent-reachable surface is done.
+
+---
+
+# SUDO EXCEPTION (BET-205) — recorded deviation from the BET-173 no-sudo rule
+
+BET-205 ("Stage 7 — installer: Caddy + DNS automation + gateway
+registration") deliberately breaks the "100% user-space, no sudo"
+invariant that BET-173 established. The break is contained, scoped,
+and documented here so the next agent reading the BET-173 record does
+NOT "fix" it back.
+
+## Why an exception is needed
+
+BET-198 ("Drop the relay") changed requirements: the box now serves
+`https://<box_id>.boxes.mantaui.com` directly to the public internet,
+which means:
+
+- A process must bind TCP :80 and :443 for Let's Encrypt HTTP-01.
+  These are privileged ports (<1024); only root can bind them.
+- A TLS certificate must be installed in `/etc/caddy/`.
+- Caddy itself is a system service (not `--user`) so it survives
+  logout / reboot.
+
+This is a root-level concern; no amount of clever bash makes the
+box serve public TLS without privilege. Industry norm for this
+category is sudo + distro package manager for exactly this step
+(Tailscale, get.docker.com, Caddy's own installer all do it).
+
+## What's privileged in the installer
+
+`scripts/install.sh` step **7.5 ("PRIVILEGED SECTION")** is the only
+section that uses sudo. Every other section (tarball fetch + verify,
+identity mint via `ensureAuth`, systemd --user units, opencode
+install, pairing-code mint) remains 100% user-space — the BET-173
+invariant is intact everywhere except step 7.5.
+
+Step 7.5 runs (in this exact order):
+
+| Sub-step | What | Sudo? |
+|----------|------|-------|
+| A | Install Caddy via the official apt repo + Cloudsmith GPG key | `sudo -n apt-get` + `sudo -n tee` |
+| B | POST `https://gateway.mantaui.com/register {box_id}` | none (outbound HTTPS) |
+| C | Persist `gateway_token` + `gateway_host` into `~/.manta/auth.json` | none (file is owned by the install user; atomic temp-rename + 0600 via the `merge-gateway` lib subcommand) |
+| D | Poll DNS until `<box_id>.boxes.mantaui.com` resolves to the box's public IP | none (node:dns lookup) |
+| E | Write `/etc/caddy/Caddyfile.d/manta.caddy` + `systemctl reload caddy` | `sudo -n tee` + `sudo -n systemctl reload caddy` |
+
+Every privileged call uses `sudo -n` (non-interactive), so the install
+never hangs on a password prompt — it fails fast with a clear hint.
+
+## Graceful degradation
+
+Step 7.5 is gated three ways so the rest of the install still works
+when the privileged section is skipped (bring-your-own-proxy path):
+
+1. **Distro** must be `debian`, `ubuntu`, or `ID_LIKE=debian` (v1
+   scope). On anything else we print a clear bring-your-own-proxy
+   message and skip the whole section. Tested by
+   `install.sh privileged section: distro not Debian/Ubuntu → SKIP`.
+2. **`sudo` installed.** If absent, we print the exact apt + gpg +
+   tee commands the user can run by hand, then skip.
+3. **`sudo -n true` succeeds** (passwordless sudo). If the user has
+   sudo but it requires a password, we print the NOPASSWD line they
+   need in `/etc/sudoers.d/`, then skip.
+
+When any of those gates fail, the install continues with the rest of
+the install (the loopback server + pairing code are unaffected — the
+user just brings their own reverse proxy or installs Caddy manually
+and re-runs).
+
+The dry-run mode (`--dry-run`) bypasses all three gates and prints the
+full plan as `[dry-run] would …` — it never touches the system.
+
+## Tests pinning the gates
+
+- `install.sh privileged section: distro not Debian/Ubuntu → SKIP` —
+  verifies the distro-gate branch fires on a non-Debian `/etc/os-release`.
+- `install.sh privileged section: sudo missing → SKIP` — verifies the
+  no-sudo gate fires when `command -v sudo` returns 1.
+- `install.sh privileged section: sudo -n true fails → SKIP` — verifies
+  the non-passwordless-sudo gate fires when `sudo -n true` exits non-zero.
+- `install.sh privileged section: DRY_RUN=1 skips the gates` — verifies
+  dry-run bypasses the gates and shows the plan regardless.
+- `readOsReleaseIds` / `classifyDistro` / `detect-distro CLI` — 8 unit
+  tests pin the pure parser + the CLI bridge; if a future change
+  expands the supported-distro list, these tests surface immediately.
+
+## Why the exception is on record
+
+Without the docs above + the matching header comment in
+`scripts/install.sh`, the next agent reading BET-173's "no sudo, no
+package manager, check-prereqs-never-install-them" record will see
+the new `sudo -n apt-get install -y caddy` in step 7.5 and "fix" it as
+a regression. Both `scripts/install.sh` (header) and this file point
+back to BET-198 (the requirement change) and BET-205 (the scoped
+exception) so the rationale is discoverable.
+

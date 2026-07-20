@@ -16,11 +16,25 @@
 #
 # Everything else (Node runtime, npm, node_modules with node-pty's native
 # binding already compiled) ships in the tarball. The installer is user-
-# space throughout — except for the single privileged step of installing
-# Caddy (which must run as root to bind :80/:443 for Let's Encrypt HTTP-01).
-# That step uses `sudo -n` (non-interactive) so it fails fast with a clear
-# hint instead of hanging on a password prompt; if sudo is missing or
-# non-passwordless, the installer warns and continues without Caddy.
+# space throughout — EXCEPT for the single privileged section of installing
+# + configuring Caddy (which must run as root to bind :80/:443 for Let's
+# Encrypt HTTP-01) and registering the box with the hosted push gateway
+# (gateway.mantaui.com) so the gateway can mint a TLS cert for
+# https://<box_id>.boxes.mantaui.com. This is the BET-205 documented
+# exception to the BET-173 no-sudo rule — see step 7.5 below + the
+# "SUDO EXCEPTION (BET-205)" section in docs/launch-e2e.md for the
+# rationale (BET-198 changed requirements: direct-connection needs
+# public TLS, which is inherently a root concern; industry norm is sudo
+# + distro package manager for this step). The privileged section is
+# gated three ways so the install degrades cleanly without sudo:
+#   (a) Distro must be Debian/Ubuntu (v1 scope).
+#   (b) `sudo` must be installed.
+#   (c) `sudo -n true` must succeed (passwordless sudo).
+# If any of those fail we print the exact bring-your-own-proxy commands
+# and continue with the rest of the install — the loopback server +
+# pairing code are unaffected. Every privileged call uses `sudo -n`
+# (non-interactive) so it fails fast with a clear hint instead of
+# hanging on a password prompt.
 #
 # Release resolution:
 #   1. Fetch `${MANTA_RELEASE_HOST:-https://mantaui.com}/releases/manta-${MANTA_VERSION:-latest}.txt`
@@ -460,66 +474,137 @@ main() {
       || warn "systemctl --user restart manta-server failed — run it manually"
   fi
 
-  # ---------------------------------------------------------------------------
-  # 7.5. Caddy + DNS + gateway registration (BET-205 WP5).
+  # ===========================================================================
+  # 7.5. PRIVILEGED SECTION — Caddy + DNS + gateway registration (BET-205 WP5).
   #
-  #     The server above, on its first start, mints ~/.manta/auth.json with a
-  #     fresh box_id (ensureAuth in src/server/auth.mjs). Once that file
-  #     exists, this step makes the box reachable at
-  #     https://<box_id>.boxes.mantaui.com by:
+  #     EXCEPTION TO THE BET-173 NO-SUDO RULE. The installer is otherwise
+  #     100% user-space (tarball, identity, systemd --user, opencode) — the
+  #     BET-198 direct-connection design changed requirements: the box must
+  #     terminate public TLS on :80/:443 (Let's Encrypt HTTP-01), which is
+  #     inherently a root concern. Industry norm (Tailscale, get.docker.com,
+  #     Caddy's own installer) uses sudo + distro package manager for
+  #     exactly this step. We isolate it here and document it in:
+  #       - scripts/install.sh header (the SUDO POLICY note at the top)
+  #       - docs/launch-e2e.md ("SUDO EXCEPTION (BET-205)" section)
+  #     so the next agent reading the BET-173 record doesn't "fix" this
+  #     work as a regression.
   #
-  #       A. Installing Caddy if absent (the only apt-get the installer
-  #          ever runs — Caddy must run as root to bind :80/:443 for the
-  #          Let's Encrypt HTTP-01 challenge).
-  #       B. Asking the hosted gateway (https://gateway.mantaui.com) to
-  #          publish a per-box A record and mint us a `gateway_token`
-  #          (used for all subsequent POST /push calls).
-  #       C. Persisting the gateway_token + gateway_host into auth.json
-  #          via the `merge-gateway` lib subcommand (atomic temp-rename +
-  #          0600 — preserves box_id / box_token).
-  #       D. Polling until <box_id>.boxes.mantaui.com resolves to this
+  #     This section runs the gateway registration + DNS wait + Caddy
+  #     install + Caddyfile write + caddy reload. Every privileged call
+  #     below uses `sudo -n` (non-interactive) and the whole section
+  #     bails cleanly (warn + skip) on:
+  #       a. Distro not in {debian, ubuntu, ID_LIKE=debian} (v1 scope)
+  #       b. `sudo` missing
+  #       c. `sudo -n true` failing (non-passwordless sudo)
+  #     In any of those cases we print the exact commands the user
+  #     should run to bring their own proxy (or install Caddy manually)
+  #     and continue with the rest of the install — the loopback
+  #     server + pairing code are unaffected.
+  #
+  #     Sub-steps:
+  #       A. Install Caddy if absent (the only apt-get the installer
+  #          ever runs — Caddy must run as root to bind :80/:443).
+  #       B. Ask the hosted gateway (https://gateway.mantaui.com) to
+  #          publish a per-box A record and mint a `gateway_token`.
+  #       C. Persist the gateway_token + gateway_host into auth.json
+  #          via the `merge-gateway` lib subcommand (atomic temp-rename
+  #          + 0600 — preserves box_id / box_token).
+  #       D. Poll until <box_id>.boxes.mantaui.com resolves to this
   #          box's public IP (OVH publication is eventually-consistent
   #          and can take up to ~30s after the gateway POST).
-  #       E. Writing /etc/caddy/Caddyfile.d/manta.caddy with a single
-  #          reverse_proxy vhost, then `systemctl reload caddy` so it
-  #          picks up the new site + requests a Let's Encrypt cert.
+  #       E. Write /etc/caddy/Caddyfile.d/manta.caddy with a single
+  #          reverse_proxy vhost, then `systemctl reload caddy`.
   #
   #     IDEMPOTENT: every step no-ops cleanly on re-run. Registration
   #     refreshes the A record if the box's IP changed; the Caddy block
   #     is overwritten in place; the DNS poll is skipped if it already
-  #     resolves to our IP (re-runs cost zero wall time).
+  #     resolves to our IP.
   #
   #     Dry-run mode (--dry-run): each step prints `[dry-run] would …`
-  #     and skips the actual side-effect. Used by install.test.mjs to
-  #     exercise the bash control flow without apt / curl / systemctl.
-  # ---------------------------------------------------------------------------
+  #     and skips the actual side-effect regardless of distro / sudo
+  #     (the gates only fire when we're actually about to do real work).
+  # ===========================================================================
 
-  # --- A. Install Caddy if absent ------------------------------------------
-  if command -v caddy >/dev/null 2>&1; then
-    ok "caddy already installed ($(caddy version 2>/dev/null || echo unknown))."
-  elif [ "$DRY_RUN" = "1" ]; then
-    dry_log "would install caddy via the official apt repo (skipped: --dry-run)"
+  # Gate the section. In dry-run mode we always show what we would do
+  # (the dry_log lines are below). In real mode we bail with a clear
+  # bring-your-own-proxy hint when distro isn't Debian/Ubuntu or sudo
+  # isn't usable.
+  PRIVILEGED_SECTION_SKIP=0
+  if [ "$DRY_RUN" != "1" ]; then
+    # Distro check (Debian/Ubuntu only for v1 — see reviewer guidance §4).
+    DISTRO_STATUS="$("$NODE" "$LIB" detect-distro 2>/dev/null || echo "")"
+    DISTRO_SUPPORTED="$(printf '%s' "$DISTRO_STATUS" | "$NODE" -e '
+      let s = "";
+      process.stdin.on("data", (c) => { s += c; });
+      process.stdin.on("end", () => {
+        try { process.stdout.write(JSON.parse(s).supported ? "yes" : "no"); }
+        catch { process.stdout.write("unknown"); }
+      });
+    ' 2>/dev/null || echo unknown)"
+    DISTRO_ID="$(printf '%s' "$DISTRO_STATUS" | "$NODE" -e '
+      let s = "";
+      process.stdin.on("data", (c) => { s += c; });
+      process.stdin.on("end", () => {
+        try { process.stdout.write(JSON.parse(s).id ?? ""); }
+        catch { process.stdout.write(""); }
+      });
+    ' 2>/dev/null || true)"
+    case "$DISTRO_SUPPORTED" in
+      yes)
+        # supported; continue
+        ;;
+      no|unknown|"")
+        warn "Caddy/gateway section skipped: distro ${DISTRO_ID:-unknown} is not in the v1 supported list (debian / ubuntu / ID_LIKE=debian)."
+        warn "  this installer only manages Caddy + the gateway registration on Debian/Ubuntu."
+        warn "  bring-your-own-proxy: point any reverse proxy at 127.0.0.1:$MANTA_PORT and serve your own TLS."
+        warn "  once Caddy (or another reverse proxy) is serving the box, re-run the installer to finish gateway registration."
+        PRIVILEGED_SECTION_SKIP=1
+        ;;
+    esac
+
+    # Sudo check — bail cleanly if sudo is missing or non-interactive.
+    # We use `sudo -n true` as the gate (non-interactive; never prompts).
+    # Passwordless sudo is required because the install runs unattended
+    # from `curl | bash`.
+    if [ "$PRIVILEGED_SECTION_SKIP" = "0" ]; then
+      if ! command -v sudo >/dev/null 2>&1; then
+        warn "Caddy/gateway section skipped: \`sudo\` is not installed."
+        warn "  install sudo + grant $USER passwordless sudo, or run the
+  install with sudo available. To finish this section by hand:"
+        warn "    sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl"
+        warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+        warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/deb.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
+        warn "    sudo apt update && sudo apt install caddy"
+        warn "  then re-run the installer (the gateway + DNS + Caddyfile steps re-run cleanly)."
+        PRIVILEGED_SECTION_SKIP=1
+      elif ! sudo -n true 2>/dev/null; then
+        warn "Caddy/gateway section skipped: passwordless sudo is not configured for $USER."
+        warn "  either configure \`$USER ALL=(ALL) NOPASSWD:ALL\` in /etc/sudoers.d/ and re-run,"
+        warn "  or install Caddy by hand (commands in the previous message) and re-run the installer."
+        PRIVILEGED_SECTION_SKIP=1
+      fi
+    fi
+  fi
+
+  if [ "$PRIVILEGED_SECTION_SKIP" = "1" ]; then
+    log "Skipping public-TLS step (bring-your-own-proxy keeps the rest of the install working)."
   else
-    log "Installing Caddy (official apt repo)…"
-    # The Caddy project's official Debian/Ubuntu install path: add the
-    # Cloudsmith-hosted stable repo + apt key, then apt install caddy.
-    # We use sudo because Caddy must run as a system service (binds
-    # :80/:443 for Let's Encrypt HTTP-01). The installer is otherwise
-    # 100% user-space — this is the only privileged step.
-    #
-    # sudo -n fails fast if passwordless sudo isn't configured; we surface
-    # that as a clear hint instead of letting `apt-get` prompt and hang.
-    if ! command -v sudo >/dev/null 2>&1; then
-      warn "sudo not found. Install caddy manually (https://caddyserver.com/docs/install) and re-run."
-      warn "  the rest of the install will proceed, but the box's public hostname will not serve until Caddy is in place."
-    elif ! sudo -n true 2>/dev/null; then
-      warn "passwordless sudo is not configured — install caddy manually and re-run:"
-      warn "  sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl"
-      warn "  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
-      warn "  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/deb.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
-      warn "  sudo apt update && sudo apt install caddy"
-      warn "  the rest of the install will proceed; once Caddy is in place, re-run the installer."
+    log "Configuring public TLS via Caddy + gateway registration (privileged)…"
+
+    # --- A. Install Caddy if absent ------------------------------------------
+    if command -v caddy >/dev/null 2>&1; then
+      ok "caddy already installed ($(caddy version 2>/dev/null || echo unknown))."
+    elif [ "$DRY_RUN" = "1" ]; then
+      dry_log "would install caddy via the official apt repo (skipped: --dry-run)"
     else
+      log "Installing Caddy (official apt repo)…"
+      # The Caddy project's official Debian/Ubuntu install path: add the
+      # Cloudsmith-hosted stable repo + apt key, then apt install caddy.
+      # We use sudo because Caddy must run as a system service (binds
+      # :80/:443 for Let's Encrypt HTTP-01). The installer is otherwise
+      # 100% user-space — this is the only privileged step (and it has
+      # already been gated at the top of step 7.5: distro is
+      # Debian/Ubuntu and `sudo -n true` has been verified to succeed).
       sudo -n apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
         || die "apt-get install prerequisites for Caddy failed"
       curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
@@ -534,9 +619,8 @@ main() {
         || die "apt-get install caddy failed"
       ok "caddy installed ($(caddy version 2>/dev/null || echo unknown))."
     fi
-  fi
 
-  # --- B/C. Register with the gateway + persist gateway_token -------------
+    # --- B/C. Register with the gateway + persist gateway_token -------------
   # Read box_id from auth.json (the server's first start minted it). Skip
   # the registration block entirely if we can't find one — a re-run before
   # the server has booted at least once has no box_id to register.
@@ -711,6 +795,7 @@ CADDY_EOF
       fi
     fi
   fi
+  fi # close: if [ "$PRIVILEGED_SECTION_SKIP" = "1" ] (step 7.5 wrapper)
 
   # ---------------------------------------------------------------------------
   # 8. Wait for health, then mint + print a pairing code. Devices connect
