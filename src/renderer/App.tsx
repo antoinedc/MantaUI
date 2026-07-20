@@ -542,16 +542,9 @@ export function App() {
         )}
         <div className="titlebar-drag h-10 border-b border-border flex items-center px-3 gap-2 min-w-0">
           <div className="text-xs text-text-muted flex items-center gap-2 min-w-0">
-            <span className="shrink-0">
-              {serverUrl
-                ? (() => { try { return new URL(serverUrl).hostname; } catch { return serverUrl; } })()
-                : boxId
-                  ? boxId.slice(0, 8) + "…"
-                  : "Not configured"}
-            </span>
             {activeProjectName && (
               <span className="text-text-faint shrink-0">
-                · {activeProjectName}
+                {activeProjectName}
                 {activeWinName && ` / ${activeWinName}`}
               </span>
             )}
