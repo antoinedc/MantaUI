@@ -15,8 +15,12 @@
 #   * tmux, git             — the manta server needs them at runtime
 #
 # Everything else (Node runtime, npm, node_modules with node-pty's native
-# binding already compiled) ships in the tarball. The installer never uses
-# sudo, never invokes a package manager, never compiles anything on the box.
+# binding already compiled) ships in the tarball. The installer is user-
+# space throughout — except for the single privileged step of installing
+# Caddy (which must run as root to bind :80/:443 for Let's Encrypt HTTP-01).
+# That step uses `sudo -n` (non-interactive) so it fails fast with a clear
+# hint instead of hanging on a password prompt; if sudo is missing or
+# non-passwordless, the installer warns and continues without Caddy.
 #
 # Release resolution:
 #   1. Fetch `${MANTA_RELEASE_HOST:-https://mantaui.com}/releases/manta-${MANTA_VERSION:-latest}.txt`
@@ -34,9 +38,16 @@
 #   MANTA_HOME          where code is unpacked (default ~/manta)
 #   MANTA_MOBILE_PORT   server port (default 8787)
 #   MANTA_VERSION       version to fetch when MANTA_TARBALL_URL is unset (default: latest)
+#   MANTA_GATEWAY_BASE  push-gateway base URL (default https://gateway.mantaui.com)
+#   MANTA_RESTART       restart manta-server after config changes (1 = yes, 0 = no)
 #
-# The pure logic (URL/home resolution, health-wait, pairing format, idempotency)
-# lives in scripts/install-lib.mjs and is unit-tested (scripts/install.test.mjs).
+# Flags (positional args):
+#   --dry-run           print the steps without touching the system (used by tests)
+#   --help              show this help and exit
+#
+# The pure logic (URL/home resolution, health-wait, pairing format, idempotency,
+# gateway-auth merge, DNS-wait poller, Caddy vhost renderer) lives in
+# scripts/install-lib.mjs and is unit-tested (scripts/install.test.mjs).
 # This shell stays a thin orchestrator.
 
 # === Always-defined helpers (test-safe: defined even in test mode) ===========
@@ -90,6 +101,40 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 main() {
   require_arch
+
+  # ---------------------------------------------------------------------------
+  # 0. Argument parsing. `--dry-run` walks the install path with every external
+  #    side-effect short-circuited: no Caddy install, no curl to the gateway,
+  #    no real DNS wait, no Caddyfile write, no systemctl reload. Each step
+  #    prints `[dry-run] would …` so tests + humans can see the plan without
+  #    actually running it. Used by `install.test.mjs` (bash sourced + mocked
+  #    helpers) and by anyone previewing what a fresh install will do.
+  # ---------------------------------------------------------------------------
+  DRY_RUN=0
+  for arg in "$@"; do
+    case "$arg" in
+      --dry-run)
+        DRY_RUN=1
+        ;;
+      --help|-h)
+        printf 'install.sh — manta box self-install (curl -fsSL … | bash)\n'
+        printf '  --dry-run   print the steps without touching the system\n'
+        printf '  --help      this help\n'
+        return 0 2>/dev/null || exit 0
+        ;;
+      *)
+        die "unknown argument: $arg (try --help)"
+        ;;
+    esac
+  done
+
+  # dry_log prints a "would do X" line in dry-run mode; in real mode it's a
+  # no-op so the real log() call below carries the user-facing message.
+  dry_log() {
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '\033[36m▸\033[0m [dry-run] %s\n' "$*"
+    fi
+  }
 
   # ---------------------------------------------------------------------------
   # 1. Prerequisites. We ASSUME these are present; we never install them.
@@ -413,6 +458,258 @@ main() {
   if [ "${SERVER_MANAGED:-}" = "systemd" ] && [ "${MANTA_RESTART:-1}" = "1" ]; then
     systemctl --user restart manta-server.service \
       || warn "systemctl --user restart manta-server failed — run it manually"
+  fi
+
+  # ---------------------------------------------------------------------------
+  # 7.5. Caddy + DNS + gateway registration (BET-205 WP5).
+  #
+  #     The server above, on its first start, mints ~/.manta/auth.json with a
+  #     fresh box_id (ensureAuth in src/server/auth.mjs). Once that file
+  #     exists, this step makes the box reachable at
+  #     https://<box_id>.boxes.mantaui.com by:
+  #
+  #       A. Installing Caddy if absent (the only apt-get the installer
+  #          ever runs — Caddy must run as root to bind :80/:443 for the
+  #          Let's Encrypt HTTP-01 challenge).
+  #       B. Asking the hosted gateway (https://gateway.mantaui.com) to
+  #          publish a per-box A record and mint us a `gateway_token`
+  #          (used for all subsequent POST /push calls).
+  #       C. Persisting the gateway_token + gateway_host into auth.json
+  #          via the `merge-gateway` lib subcommand (atomic temp-rename +
+  #          0600 — preserves box_id / box_token).
+  #       D. Polling until <box_id>.boxes.mantaui.com resolves to this
+  #          box's public IP (OVH publication is eventually-consistent
+  #          and can take up to ~30s after the gateway POST).
+  #       E. Writing /etc/caddy/Caddyfile.d/manta.caddy with a single
+  #          reverse_proxy vhost, then `systemctl reload caddy` so it
+  #          picks up the new site + requests a Let's Encrypt cert.
+  #
+  #     IDEMPOTENT: every step no-ops cleanly on re-run. Registration
+  #     refreshes the A record if the box's IP changed; the Caddy block
+  #     is overwritten in place; the DNS poll is skipped if it already
+  #     resolves to our IP (re-runs cost zero wall time).
+  #
+  #     Dry-run mode (--dry-run): each step prints `[dry-run] would …`
+  #     and skips the actual side-effect. Used by install.test.mjs to
+  #     exercise the bash control flow without apt / curl / systemctl.
+  # ---------------------------------------------------------------------------
+
+  # --- A. Install Caddy if absent ------------------------------------------
+  if command -v caddy >/dev/null 2>&1; then
+    ok "caddy already installed ($(caddy version 2>/dev/null || echo unknown))."
+  elif [ "$DRY_RUN" = "1" ]; then
+    dry_log "would install caddy via the official apt repo (skipped: --dry-run)"
+  else
+    log "Installing Caddy (official apt repo)…"
+    # The Caddy project's official Debian/Ubuntu install path: add the
+    # Cloudsmith-hosted stable repo + apt key, then apt install caddy.
+    # We use sudo because Caddy must run as a system service (binds
+    # :80/:443 for Let's Encrypt HTTP-01). The installer is otherwise
+    # 100% user-space — this is the only privileged step.
+    #
+    # sudo -n fails fast if passwordless sudo isn't configured; we surface
+    # that as a clear hint instead of letting `apt-get` prompt and hang.
+    if ! command -v sudo >/dev/null 2>&1; then
+      warn "sudo not found. Install caddy manually (https://caddyserver.com/docs/install) and re-run."
+      warn "  the rest of the install will proceed, but the box's public hostname will not serve until Caddy is in place."
+    elif ! sudo -n true 2>/dev/null; then
+      warn "passwordless sudo is not configured — install caddy manually and re-run:"
+      warn "  sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl"
+      warn "  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+      warn "  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/deb.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
+      warn "  sudo apt update && sudo apt install caddy"
+      warn "  the rest of the install will proceed; once Caddy is in place, re-run the installer."
+    else
+      sudo -n apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
+        || die "apt-get install prerequisites for Caddy failed"
+      curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+        | sudo -n gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+        || die "failed to download Caddy GPG key"
+      curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/deb.deb.txt \
+        | sudo -n tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null \
+        || die "failed to add Caddy apt repo"
+      sudo -n apt-get update \
+        || die "apt-get update failed"
+      sudo -n apt-get install -y caddy \
+        || die "apt-get install caddy failed"
+      ok "caddy installed ($(caddy version 2>/dev/null || echo unknown))."
+    fi
+  fi
+
+  # --- B/C. Register with the gateway + persist gateway_token -------------
+  # Read box_id from auth.json (the server's first start minted it). Skip
+  # the registration block entirely if we can't find one — a re-run before
+  # the server has booted at least once has no box_id to register.
+  BOX_ID_FOR_GATEWAY="$("$NODE" -e '
+    import("'"$LIB"'").then((m) => {
+      const id = m.readBoxIdentity(process.env.MANTA_AUTH_FILE);
+      process.stdout.write(id?.box_id ?? "");
+    }).catch(() => process.stdout.write(""));
+  ' 2>/dev/null || true)"
+
+  if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
+    warn "no box_id in $MANTA_AUTH_FILE yet — skipping gateway registration + Caddy setup."
+    warn "  start the manta-server at least once (systemctl --user restart manta-server) and re-run."
+  else
+    GATEWAY_BASE="${MANTA_GATEWAY_BASE:-https://gateway.mantaui.com}"
+    # Use the existing gateway_token if present so re-registration is an
+    # idempotent IP refresh; otherwise POST /register with no auth and the
+    # gateway returns a fresh token + host. The gateway response always
+    # carries {host}; the token is only present on first registration.
+    PRIOR_TOKEN="$("$NODE" -e '
+      const fs = require("node:fs");
+      try {
+        const a = JSON.parse(fs.readFileSync(process.env.MANTA_AUTH_FILE, "utf-8"));
+        process.stdout.write(typeof a?.gateway_token === "string" ? a.gateway_token : "");
+      } catch { process.stdout.write(""); }
+    ' 2>/dev/null || true)"
+
+    if [ "$DRY_RUN" = "1" ]; then
+      dry_log "would POST $GATEWAY_BASE/register with box_id=$BOX_ID_FOR_GATEWAY (prior_token=${PRIOR_TOKEN:+set})"
+      dry_log "would persist gateway response into $MANTA_AUTH_FILE via merge-gateway"
+    else
+      log "Registering with gateway $GATEWAY_BASE/register…"
+      REGISTER_ARGS=(-fsSL -X POST -H "content-type: application/json" --data "$(printf '{"box_id":"%s"}' "$BOX_ID_FOR_GATEWAY")")
+      if [ -n "$PRIOR_TOKEN" ]; then
+        REGISTER_ARGS+=(-H "authorization: Bearer $PRIOR_TOKEN")
+      fi
+      GW_RESP="$(curl "${REGISTER_ARGS[@]}" "$GATEWAY_BASE/register")" \
+        || { warn "gateway registration POST failed — the box will retry on every server restart.
+          Pair the device via SSH port-forward or use a non-gateway ingress until this works."; GW_RESP=""; }
+      if [ -n "$GW_RESP" ]; then
+        # Pipe the JSON to merge-gateway via stdin (lib subcommand) so the
+        # auth.json write is atomic temp-rename + 0600, preserving
+        # box_id / box_token / created_at.
+        printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err \
+          || warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
+        ok "gateway registration complete."
+      fi
+    fi
+
+    # --- D. Poll DNS until <box_id>.boxes.mantaui.com resolves to us -------
+    # Re-read gateway_host (or default to the canonical pattern if the
+    # gateway didn't return one yet) for the polling target.
+    GATEWAY_HOST="$("$NODE" -e '
+      const fs = require("node:fs");
+      try {
+        const a = JSON.parse(fs.readFileSync(process.env.MANTA_AUTH_FILE, "utf-8"));
+        process.stdout.write(typeof a?.gateway_host === "string" ? a.gateway_host : "");
+      } catch { process.stdout.write(""); }
+    ' 2>/dev/null || true)"
+    if [ -z "$GATEWAY_HOST" ]; then
+      GATEWAY_HOST="$BOX_ID_FOR_GATEWAY.boxes.mantaui.com"
+    fi
+
+    # Detect this box's public IP via the gateway's source-IP report —
+    # fall back to `hostname -I` if the gateway response didn't include it
+    # (or in dry-run mode). We MUST use the public IP, not loopback —
+    # otherwise the DNS check trivially passes on every box.
+    BOX_PUBLIC_IP="$("$NODE" -e '
+      const https = require("node:https");
+      const opts = { hostname: "api.ipify.org", path: "/", method: "GET", timeout: 5000 };
+      const req = https.request(opts, (res) => {
+        let body = "";
+        res.on("data", (c) => body += c);
+        res.on("end", () => process.stdout.write(body.trim()));
+      });
+      req.on("error", () => process.stdout.write(""));
+      req.end();
+    ' 2>/dev/null || true)"
+    if [ -z "$BOX_PUBLIC_IP" ]; then
+      BOX_PUBLIC_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    fi
+
+    if [ -z "$BOX_PUBLIC_IP" ]; then
+      warn "could not determine the box's public IP — skipping DNS wait + Caddy setup."
+      warn "  the box will retry on every server restart."
+    else
+      if [ "$DRY_RUN" = "1" ]; then
+        dry_log "would poll DNS for $GATEWAY_HOST (expecting $BOX_PUBLIC_IP) for up to 5 minutes"
+      else
+        log "Waiting for $GATEWAY_HOST to resolve to $BOX_PUBLIC_IP (up to 5 minutes)…"
+        if ! "$NODE" "$LIB" wait-for-dns \
+            --hostname "$GATEWAY_HOST" \
+            --expected-ip "$BOX_PUBLIC_IP" \
+            --max-attempts 30 \
+            --interval-ms 10000; then
+          die "$GATEWAY_HOST did not resolve to $BOX_PUBLIC_IP — gateway registration may have failed.
+            Check: curl -fsS $GATEWAY_BASE/healthz
+            And:   journalctl --user -u manta-server -n 50 (for the gateway-register lines)"
+        fi
+        ok "DNS resolved."
+      fi
+
+      # --- E. Write the Caddy vhost and reload ----------------------------
+      # /etc/caddy/Caddyfile.d/ is the convention used by the official
+      # Caddy apt repo's stock /etc/caddy/Caddyfile (which imports
+      # /etc/caddy/Caddyfile.d/*.caddy). Falling back to /etc/caddy/Caddyfile
+      # with marked-block append is for distros that install Caddy without
+      # the conf.d import (we test for the directory's existence).
+      CADDY_DIR_D="/etc/caddy/Caddyfile.d"
+      if [ "$DRY_RUN" = "1" ]; then
+        dry_log "would render Caddy vhost (box_id=$BOX_ID_FOR_GATEWAY, port=$MANTA_PORT)"
+        dry_log "would write the snippet to $CADDY_DIR_D/manta.caddy"
+        dry_log "would run: systemctl reload caddy"
+      else
+        if [ -d "$CADDY_DIR_D" ]; then
+          "$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode snippet \
+            | sudo -n tee "$CADDY_DIR_D/manta.caddy" >/dev/null \
+            || die "failed to write $CADDY_DIR_D/manta.caddy (sudo tee failed)"
+        else
+          # conf.d missing → append a marker-bracketed block to the main
+          # Caddyfile. A re-run overwrites the same block (between the
+          # markers), so we never accumulate duplicate vhosts.
+          SNIPPET="$("$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode inline)"
+          CADDYFILE="/etc/caddy/Caddyfile"
+          if [ -f "$CADDYFILE" ]; then
+            if grep -q '^# >>> manta >>>' "$CADDYFILE"; then
+              # Replace the existing block (between the markers) with the
+              # freshly-rendered one. sed -i is intentionally GNU-only —
+              # the install targets x86_64 Debian/Ubuntu, which ship GNU sed.
+              tmp="$(mktemp)"
+              awk '/^# >>> manta >>>$/{skip=1; print; next} /^# <<< manta <<<$/{skip=0; print "REPLACE_HERE"; next} skip{next} {print}' "$CADDYFILE" \
+                | awk -v snippet="$SNIPPET" '/REPLACE_HERE/{print snippet; next} {print}' \
+                > "$tmp"
+              sudo -n mv "$tmp" "$CADDYFILE" || die "could not update $CADDYFILE"
+            else
+              sudo -n bash -c "printf '\n%s\n' \"\$1\" >> \"\$2\"" -- "$SNIPPET" "$CADDYFILE" \
+                || die "could not append to $CADDYFILE"
+            fi
+          else
+            # No Caddyfile exists — create a minimal one with the marker
+            # block (and an empty `import` so it parses on its own).
+            sudo -n tee "$CADDYFILE" >/dev/null <<CADDY_EOF || die "could not create $CADDYFILE"
+# minimal Caddyfile — generated by install.sh (BET-205)
+
+$SNIPPET
+CADDY_EOF
+          fi
+        fi
+
+        # Let's Encrypt HTTP-01 needs :80 + :443 open. If something else
+        # is bound (Apache, nginx, …) warn loudly so the operator knows
+        # why cert issuance will fail.
+        if command -v ss >/dev/null 2>&1; then
+          for port in 80 443; do
+            if ss -tlnH "sport = :$port" 2>/dev/null | grep -q LISTEN \
+              && ! ss -tlnH "sport = :$port" 2>/dev/null | grep -q caddy; then
+              warn "port $port is bound by something other than Caddy — Let's Encrypt HTTP-01 will fail.
+                Check: ss -tlnp 'sport = :$port'
+                Fix: stop the conflicting service, or move Caddy to a non-standard port + your own reverse proxy."
+            fi
+          done
+        fi
+
+        if command -v systemctl >/dev/null 2>&1; then
+          sudo -n systemctl reload caddy 2>/dev/null \
+            || warn "systemctl reload caddy failed — run: sudo systemctl reload caddy
+              (Caddy's daemon may not be running yet; it normally starts after `apt install caddy`.)"
+          ok "caddy reloaded."
+        else
+          warn "systemctl not found — reload caddy manually with: sudo caddy reload --config /etc/caddy/Caddyfile"
+        fi
+      fi
+    fi
   fi
 
   # ---------------------------------------------------------------------------

@@ -326,6 +326,201 @@ export function mergeOpencodeConfig(existingText) {
 }
 
 // ---------------------------------------------------------------------------
+// Gateway-auth merge — pure, used by install.sh's gateway-registration step
+// (BET-205 WP5). The gateway returns { gateway_token, gateway_host } (first
+// registration) or just { gateway_host } (subsequent registration when the
+// IP refreshed). We MERGE both into the existing ~/.manta/auth.json —
+// preserving box_id, box_token, created_at — so auth.mjs's loadAuth()
+// still validates the file shape, and so the gateway identity is
+// atomic with the box identity (one file, one 0600 permission).
+//
+// Behavior (mirrors mergeOpencodeConfig's safety contract):
+//   * missing/empty text → seeds {gateway_token, gateway_host} alongside a
+//     freshly-created box. In practice the server's ensureAuth() runs first
+//     (the install waits for health after enabling the server unit), so
+//     this branch is the fresh-install safety net.
+//   * valid JSON object → MERGES in gateway_token + gateway_host (preserving
+//     box_id/box_token/created_at/any other keys), pretty-prints.
+//   * unparseable text or non-object JSON → { ok:false, error }, NO text.
+//     Same policy as mergeRelayDisabled: never silently overwrite a file
+//     we couldn't parse. The CLI subcommand that calls this returns the
+//     error so install.sh can warn + skip (we never block the install on
+//     a corrupt auth.json — that's the server's problem to surface).
+//
+// Returns { ok: true, text, changed } | { ok: false, error }.
+//   changed=true iff any of gateway_token / gateway_host actually differed
+//   from what's already on disk (so a re-registration with the same values
+//   is byte-identical → no needless atomic write).
+export function mergeGatewayAuth(
+  existingText,
+  { gateway_token = null, gateway_host = null } = {},
+) {
+  const hasToken = typeof gateway_token === "string";
+  const hasHost = typeof gateway_host === "string";
+  if (!hasToken && !hasHost) {
+    // Caller provided neither — refuse the write so we don't waste an
+    // atomic temp-rename round-trip on a no-op. (The CLI handler also
+    // short-circuits, but defending in the pure function means the
+    // `mergeGatewayAuth` invariant is testable on its own.)
+    return {
+      ok: false,
+      error: "mergeGatewayAuth: at least one of gateway_token / gateway_host must be a non-empty string",
+    };
+  }
+  const raw = typeof existingText === "string" ? existingText : "";
+  const trimmed = raw.trim();
+  let cfg;
+  if (trimmed.length === 0) {
+    // Fresh box with no auth.json yet — seed with ONLY the gateway fields.
+    // The server's ensureAuth() will fill box_id/box_token/created_at on
+    // its first health check; we don't try to guess those here.
+    cfg = {};
+  } else {
+    try {
+      cfg = JSON.parse(trimmed);
+    } catch (e) {
+      return { ok: false, error: `auth.json is not valid JSON: ${e?.message ?? e}` };
+    }
+    if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
+      return { ok: false, error: "auth.json must be a JSON object (got non-object root)" };
+    }
+  }
+  let changed = false;
+  const next = { ...cfg };
+  if (typeof gateway_token === "string" && next.gateway_token !== gateway_token) {
+    next.gateway_token = gateway_token;
+    changed = true;
+  }
+  if (typeof gateway_host === "string" && next.gateway_host !== gateway_host) {
+    next.gateway_host = gateway_host;
+    changed = true;
+  }
+  return { ok: true, text: JSON.stringify(next, null, 2) + "\n", changed };
+}
+
+// ---------------------------------------------------------------------------
+// DNS-resolution poller — pure, used by install.sh after gateway registration
+// (BET-205 WP5). Once the box has registered with the gateway, OVH needs a
+// few seconds to publish the new A record (<box_id>.boxes.mantaui.com). We
+// poll until the box's hostname resolves to its own public IP, or give up
+// after `maxAttempts` × `intervalMs`.
+//
+// The default `lookup` uses node:dns so we don't depend on `dig` being
+// installed on the VPS (some minimal images skip it). The function is fully
+// injectable — tests pass a fake lookupFn to exercise the
+// "resolves immediately" and "never resolves" cases without real DNS.
+//
+// @param {string} hostname       e.g. "0123...cdef.boxes.mantaui.com"
+// @param {string} expectedIp     the box's public IP (no CIDR, no port)
+// @returns { ok: true, attempts, address } on success
+//        | { ok: false, attempts, error }   on give-up
+export async function waitForDns(
+  hostname,
+  expectedIp,
+  {
+    maxAttempts = 30,
+    intervalMs = 10_000,
+    lookup = defaultLookup,
+    sleep = defaultSleep,
+  } = {},
+) {
+  if (typeof hostname !== "string" || hostname === "") {
+    throw new Error("waitForDns: hostname required");
+  }
+  if (typeof expectedIp !== "string" || expectedIp === "") {
+    throw new Error("waitForDns: expectedIp required");
+  }
+  if (typeof lookup !== "function") {
+    throw new Error("waitForDns: lookup must be a function");
+  }
+  let lastError = null;
+  let lastResolved = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const addresses = await lookup(hostname);
+      // node:dns.lookup returns either a string (single) or an array of
+      // strings; normalize so callers can pass either.
+      const list = Array.isArray(addresses) ? addresses : [addresses];
+      lastResolved = list;
+      if (list.includes(expectedIp)) {
+        return { ok: true, attempts: attempt, address: expectedIp };
+      }
+      lastError = new Error(
+        `resolved to ${list.join(", ")} (expected ${expectedIp})`,
+      );
+    } catch (e) {
+      lastError = e;
+    }
+    if (attempt < maxAttempts) await sleep(intervalMs);
+  }
+  const detail =
+    lastError?.message ?? (lastResolved ? `resolved to ${lastResolved.join(", ")}` : "no answer");
+  return {
+    ok: false,
+    attempts: maxAttempts,
+    error: `${hostname} did not resolve to ${expectedIp} after ${maxAttempts} attempts (${Math.round((maxAttempts * intervalMs) / 1000)}s): ${detail}`,
+  };
+}
+
+async function defaultLookup(hostname) {
+  const dns = await import("node:dns/promises");
+  return dns.lookup(hostname, { all: true, family: 4 }).then((records) =>
+    records.map((r) => r.address),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Caddy vhost renderer — pure, used by install.sh after DNS resolves
+// (BET-205 WP5). Two output shapes:
+//
+//   * "snippet" — the Caddyfile fragment to write to /etc/caddy/Caddyfile.d/
+//     (Debian/Ubuntu's official caddy apt repo ships /etc/caddy/Caddyfile
+//     which `import /etc/caddy/Caddyfile.d/*.caddy` — see #snippet-mode).
+//
+//   * "inline"  — the full vhost block to append to a Caddyfile when the
+//     distro Caddy has no conf.d (e.g. custom installs). Wrapped in a
+//     `# >>> manta >>>` / `# <<< manta <<<` marker pair so re-runs can find
+//     and replace the block atomically.
+//
+// Idempotency: both shapes serialize the box_id + port verbatim; a re-run
+// with the same inputs produces byte-identical output (the install.sh
+// overwrite pattern + marker detection rely on this).
+export function renderCaddyVhost(
+  boxId,
+  port,
+  { mode = "snippet" } = {},
+) {
+  if (typeof boxId !== "string" || !/^[0-9a-f]{32}$/.test(boxId)) {
+    throw new Error("renderCaddyVhost: boxId must be 32 lowercase hex");
+  }
+  const n = Number(port);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new Error("renderCaddyVhost: port must be a valid TCP port (1-65535)");
+  }
+  if (mode !== "snippet" && mode !== "inline") {
+    throw new Error(`renderCaddyVhost: mode must be "snippet" or "inline" (got ${JSON.stringify(mode)})`);
+  }
+  if (mode === "snippet") {
+    return [
+      `${boxId}.boxes.mantaui.com {`,
+      `    reverse_proxy 127.0.0.1:${n}`,
+      `}`,
+      ``,
+    ].join("\n");
+  }
+  // inline mode — same body, bracketed by markers so a re-run can find + replace
+  // the block atomically instead of appending duplicate vhosts.
+  return [
+    `# >>> manta >>>`,
+    `${boxId}.boxes.mantaui.com {`,
+    `    reverse_proxy 127.0.0.1:${n}`,
+    `}`,
+    `# <<< manta <<<`,
+    ``,
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Systemd unit placeholder substitution — pure, used by install.sh steps E
 // and the existing manta-server step (BET-153).
 // ---------------------------------------------------------------------------
@@ -610,23 +805,165 @@ async function cliMain(argv) {
     process.stdout.write(renderSystemdUnit(tpl, placeholders));
     return 0;
   }
+  if (cmd === "merge-gateway") {
+    // node install-lib.mjs merge-gateway --file <path>
+    // Reads {gateway_token, gateway_host} from stdin (JSON object), merges
+    // them into the existing auth.json (preserving box_id/box_token), and
+    // writes the result atomically (write <path>.tmp then rename).
+    //   exit 0  → merged successfully; may be byte-identical (changed=false)
+    //            or rewritten (changed=true). install.sh can grep stderr
+    //            for `changed=0` vs `changed=1` if it needs to log diffs.
+    //   exit 1  → merge refused (auth.json was unparseable). install.sh
+    //            warns + skips; the server's gatewayRegister.mjs will
+    //            re-persist the values on its next boot.
+    const filePath = flags.file;
+    if (!filePath) {
+      process.stderr.write("merge-gateway: --file <path> required\n");
+      return 2;
+    }
+    const stdinChunks = [];
+    for await (const c of process.stdin) stdinChunks.push(c);
+    let payload = {};
+    const raw = Buffer.concat(stdinChunks).toString("utf-8").trim();
+    if (raw.length > 0) {
+      try {
+        payload = JSON.parse(raw);
+      } catch (e) {
+        process.stderr.write(`merge-gateway: stdin is not valid JSON: ${e?.message ?? e}\n`);
+        return 1;
+      }
+    }
+    const { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } = await import("node:fs");
+    const { dirname } = await import("node:path");
+    let existing = "";
+    if (existsSync(filePath)) {
+      try {
+        existing = readFileSync(filePath, "utf-8");
+      } catch (e) {
+        process.stderr.write(`merge-gateway: read failed: ${e?.message ?? e}\n`);
+        return 1;
+      }
+    }
+    const res = mergeGatewayAuth(existing, {
+      gateway_token: typeof payload?.gateway_token === "string" ? payload.gateway_token : null,
+      gateway_host: typeof payload?.gateway_host === "string" ? payload.gateway_host : null,
+    });
+    if (!res.ok) {
+      process.stderr.write(`merge-gateway: ${res.error}\n`);
+      return 1;
+    }
+    try {
+      mkdirSync(dirname(filePath), { recursive: true });
+      writeFileSync(`${filePath}.tmp`, res.text);
+      renameSync(`${filePath}.tmp`, filePath);
+    } catch (e) {
+      process.stderr.write(`merge-gateway: write failed: ${e?.message ?? e}\n`);
+      return 1;
+    }
+    process.stderr.write(`changed=${res.changed ? "1" : "0"}\n`);
+    return 0;
+  }
+  if (cmd === "wait-for-dns") {
+    // node install-lib.mjs wait-for-dns --hostname <host> --expected-ip <ip>
+    //                            [--max-attempts N] [--interval-ms MS]
+    // Polls node:dns.lookup(hostname, {family:4}) until it returns expectedIp
+    // or `maxAttempts` × `intervalMs` elapses. Idempotent for tests via
+    // injected lookup; the CLI uses the real node:dns.
+    const hostname = flags.hostname;
+    const expectedIp = flags["expected-ip"];
+    if (!hostname) {
+      process.stderr.write("wait-for-dns: --hostname <host> required\n");
+      return 2;
+    }
+    if (!expectedIp) {
+      process.stderr.write("wait-for-dns: --expected-ip <ip> required\n");
+      return 2;
+    }
+    const maxAttempts = flags["max-attempts"] ? Number(flags["max-attempts"]) : 30;
+    const intervalMs = flags["interval-ms"] ? Number(flags["interval-ms"]) : 10_000;
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+      process.stderr.write("wait-for-dns: --max-attempts must be a positive integer\n");
+      return 2;
+    }
+    if (!Number.isInteger(intervalMs) || intervalMs < 0) {
+      process.stderr.write("wait-for-dns: --interval-ms must be a non-negative integer\n");
+      return 2;
+    }
+    const r = await waitForDns(hostname, expectedIp, { maxAttempts, intervalMs });
+    if (!r.ok) {
+      process.stderr.write(`wait-for-dns: ${r.error}\n`);
+      return 1;
+    }
+    process.stderr.write(`resolved after ${r.attempts} attempt(s) (${r.address})\n`);
+    return 0;
+  }
+  if (cmd === "render-caddy-vhost") {
+    // node install-lib.mjs render-caddy-vhost --box-id <32hex> --port <N>
+    //                                [--mode snippet|inline]
+    // Writes the Caddyfile fragment to stdout. install.sh tees it into
+    // /etc/caddy/Caddyfile.d/manta.caddy (or appends to the Caddyfile in
+    // inline mode — bracketed by # >>> manta >>> / # <<< manta <<< markers
+    // so a re-run finds and replaces the block).
+    const boxId = flags["box-id"];
+    const port = flags.port ? Number(flags.port) : undefined;
+    const mode = flags.mode ?? "snippet";
+    if (!boxId) {
+      process.stderr.write("render-caddy-vhost: --box-id <32hex> required\n");
+      return 2;
+    }
+    if (!port) {
+      process.stderr.write("render-caddy-vhost: --port <N> required\n");
+      return 2;
+    }
+    try {
+      process.stdout.write(renderCaddyVhost(boxId, port, { mode }));
+    } catch (e) {
+      process.stderr.write(`render-caddy-vhost: ${e?.message ?? e}\n`);
+      return 1;
+    }
+    return 0;
+  }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|render-systemd-unit> [--version X] [--file P] [--template P] [--placeholder K=V]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-gateway|wait-for-dns|render-caddy-vhost|render-systemd-unit> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--placeholder K=V]\n",
   );
   return 2;
 }
 
 function parseFlags(args) {
   const out = {};
+  // Each recognized flag is a string-to-value pair: the key is the flag
+  // name (without the leading `--`), the value type is one of "string"
+  // (next arg becomes the value) or "boolean" (presence = true).
+  // Unknown flags are silently ignored — the per-command handler decides
+  // whether to die (most do, with a clear "required" message).
+  const STRING_FLAGS = new Set([
+    "version",
+    "template",
+    "file",
+    "hostname",
+    "expected-ip",
+    "max-attempts",
+    "interval-ms",
+    "box-id",
+    "port",
+    "mode",
+  ]);
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--version") {
-      out.version = args[++i];
-    } else if (args[i] === "--template") {
-      out.template = args[++i];
-    } else if (args[i] === "--file") {
-      out.file = args[++i];
-    } else if (args[i] === "--placeholder") {
+    const tok = args[i];
+    if (typeof tok !== "string" || !tok.startsWith("--")) continue;
+    const key = tok.slice(2);
+    if (STRING_FLAGS.has(key)) {
+      const val = args[i + 1];
+      if (val === undefined || val.startsWith("--")) {
+        process.stderr.write(`install-lib: --${key} requires a value\n`);
+        process.exit(2);
+      }
+      out[key] = val;
+      i += 1;
+      continue;
+    }
+    if (key === "placeholder") {
       // --placeholder KEY=VAL  (value may itself contain `=`; split on FIRST)
       const kv = args[++i] ?? "";
       const eq = kv.indexOf("=");
@@ -635,7 +972,10 @@ function parseFlags(args) {
         process.exit(2);
       }
       out[kv.slice(0, eq)] = kv.slice(eq + 1);
+      continue;
     }
+    // Unknown flag — silently skip so a future flag addition doesn't
+    // break older callers; the per-command handler is the strict gate.
   }
   return out;
 }
