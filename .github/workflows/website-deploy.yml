@@ -15,6 +15,8 @@
 #   website/*.png          → /var/www/mantaui/            (logo/assets)
 #   scripts/install.sh     → /var/www/mantaui/install.sh  (curl | bash installer)
 #   llms-install.md        → /var/www/mantaui/llms-install.md (AI install doc)
+#   docs/plugins-authoring.md
+#                          → /var/www/mantaui/llms-plugins.md (AI plugin authoring doc)
 # Then it VERIFIES each URL is 200 and byte-matches the repo — fails red if not,
 # so a stale/failed deploy can never masquerade as done.
 #
@@ -72,6 +74,7 @@ jobs:
           echo "▸ Copying installer + AI install doc"
           $SCP scripts/install.sh "$PROD_HOST:$WEBROOT/install.sh"
           $SCP llms-install.md "$PROD_HOST:$WEBROOT/llms-install.md"
+          $SCP docs/plugins-authoring.md "$PROD_HOST:$WEBROOT/llms-plugins.md"
 
           echo "▸ Keeping /opt/manta clone current (source-of-truth parity)"
           $SSH "$PROD_HOST" "git -C /opt/manta fetch origin main -q && git -C /opt/manta reset --hard origin/main -q" || \
@@ -99,6 +102,7 @@ jobs:
           check "terms.html" website/terms.html
           check "install.sh" scripts/install.sh
           check "llms-install.md" llms-install.md
+          check "llms-plugins.md" docs/plugins-authoring.md
           if [ "$fail" -ne 0 ]; then
             echo "::error::One or more web assets are not live or are stale."
             exit 1

@@ -1014,6 +1014,35 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ---------- Plugin authoring docs (BET-189 / BET-191) ----------
+  // GET /api/plugins/docs → 200 {docs:"<markdown>"} from docs/plugins-authoring.md
+  //
+  // Surfaced to the AI through plugin_docs() (docs/opencode-tools/plugins.ts)
+  // so the authoring guide is always reachable from inside a chat session.
+  // The file is resolved RELATIVE TO THE SERVER MODULE'S DIR (PROJECT_ROOT
+  // — derived from `__dirname`), NEVER `process.cwd()`. The server may be
+  // launched from anywhere; cwd is untrustworthy. If the file is missing
+  // the route 500s with a clear error — a silent 404 would let the AI think
+  // the docs are empty.
+  if (path === "/api/plugins/docs") {
+    try {
+      if (req.method !== "GET") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      const docsPath = join(PROJECT_ROOT, "docs", "plugins-authoring.md");
+      const text = await readFile(docsPath, "utf-8");
+      respondJson(res, 200, { docs: text });
+    } catch (e) {
+      respondJson(
+        res,
+        500,
+        { error: `failed to read docs/plugins-authoring.md: ${String(e?.message ?? e)}` },
+      );
+    }
+    return;
+  }
+
   // ---------- Inbound webhooks (management) ----------
   // POST   /api/webhook        body {label, instructions, sessionID, directory,
   //                            unsigned?} → {id, url, secret} (secret returned ONCE)
