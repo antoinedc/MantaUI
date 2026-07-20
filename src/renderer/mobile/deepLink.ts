@@ -84,7 +84,6 @@ export type DeepLinkDeps = {
    *  mobile pairing screen feeds in. */
   authClaim: (input: {
     serverUrl: string;
-    boxId?: string;
     code: string;
   }) => Promise<ClaimOutcome>;
   /** Persist the resolved server URL to localStorage["manta_server"]. Called
@@ -93,8 +92,7 @@ export type DeepLinkDeps = {
    *  form writes the payload's serverUrl. The deep-link handler is the only
    *  caller that needs this — direct pairing flows (PairingScreen /
    *  SetupScreen) persist serverUrl directly because the user already typed
-   *  it. (BET-198 — relay dropped, the previous `${RELAY_BASE}/box/<boxId>`
-   *  shape is gone.) */
+   *  it. */
   persistServer: (serverUrl: string) => void;
 };
 
@@ -109,11 +107,11 @@ export type DeepLinkDeps = {
  *   write happens.
  * - A direct-form pair URL → claimAgainst with the payload's serverUrl, then
  *   persistServer(payload.serverUrl) on success.
- * - A box-form pair URL → claimAgainst with the payload's boxId, then
- *   persistServer(`https://<boxId>.boxes.mantaui.com`) on success. The URL
- *   shape is produced by the SHARED `boxDirectUrl` helper so the desktop
+ * - A box-form pair URL → claimAgainst with `https://<boxId>.boxes.mantaui.com`,
+ *   then persistServer with the SAME string on success. The URL shape is
+ *   produced by the SHARED `boxDirectUrl` helper so the desktop
  *   (PairStep.tsx) and the mobile deep-link handler write the EXACT same
- *   string (BET-198 — relay dropped).
+ *   string.
  */
 export async function handlePairUrl(
   raw: string,
@@ -125,7 +123,7 @@ export async function handlePairUrl(
     return "ignored";
   }
   dlog(
-    `[deeplink] parsed: ${payload.boxId ? `box=${payload.boxId.slice(0, 8)}… (relay)` : `server=${payload.serverUrl} (direct)`} code=${payload.code}`,
+    `[deeplink] parsed: ${payload.boxId ? `box=${payload.boxId.slice(0, 8)}… (direct)` : `server=${payload.serverUrl} (direct)`} code=${payload.code}`,
   );
 
   const claimInput = buildClaimInput(payload);
@@ -157,20 +155,18 @@ export async function handlePairUrl(
 }
 
 /**
- * Build the AuthClaimInput from a parsed payload. Mirrors PairStep.tsx's
- * box-form contract: serverUrl="" + boxId=<id> for the box form so
- * httpApi.authClaim routes through the box-direct branch (BET-198 — relay
- * dropped). An empty serverUrl on the box form is intentional: the URL
- * itself is built by `boxDirectUrl(boxId)` AFTER a successful claim and
- * persisted by `persistServer`, not pre-resolved here.
+ * Build the {serverUrl, code} input for httpApi.authClaim. The box-form URL
+ * is built by the shared `boxDirectUrl` helper so the claim POSTs
+ * `{pairing_code}` to the box's own /auth/claim against its public hostname
+ * (`https://<boxId>.boxes.mantaui.com`). The same string is persisted by
+ * `persistServer` below — single source of truth for the URL shape.
  */
 function buildClaimInput(payload: PairPayload): {
   serverUrl: string;
-  boxId?: string;
   code: string;
 } {
   if (payload.boxId) {
-    return { serverUrl: "", boxId: payload.boxId, code: payload.code };
+    return { serverUrl: boxDirectUrl(payload.boxId), code: payload.code };
   }
   return { serverUrl: payload.serverUrl ?? "", code: payload.code };
 }

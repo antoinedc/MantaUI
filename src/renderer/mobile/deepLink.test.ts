@@ -4,6 +4,7 @@ import {
   handlePairUrl,
   type DeepLinkDeps,
 } from "./deepLink";
+import { boxDirectUrl } from "../../shared/transport.mjs";
 import type { ClaimOutcome } from "../../shared/claim.mjs";
 
 // A canonical box-form URL the desktop Settings QR + `bui pair` terminal QR
@@ -28,10 +29,10 @@ function failOutcome(): ClaimOutcome {
 // or persistServer per case. Default impl: claim succeeds, persist writes
 // the resolved URL.
 function makeDeps(overrides: Partial<DeepLinkDeps> = {}): DeepLinkDeps & {
-  authClaimCalls: Array<{ serverUrl: string; boxId?: string; code: string }>;
+  authClaimCalls: Array<{ serverUrl: string; code: string }>;
   persistCalls: string[];
 } {
-  const authClaimCalls: Array<{ serverUrl: string; boxId?: string; code: string }> = [];
+  const authClaimCalls: Array<{ serverUrl: string; code: string }> = [];
   const persistCalls: string[] = [];
   return {
     authClaimCalls,
@@ -114,17 +115,18 @@ describe("handlePairUrl — ignored / foreign / malformed", () => {
 });
 
 describe("handlePairUrl — box form (direct hostname, BET-198)", () => {
-  it("claims via authClaim with boxId + empty serverUrl, then persists <boxId>.boxes.mantaui.com", async () => {
+  it("claims via authClaim with boxDirectUrl(boxId), then persists the same URL", async () => {
     const deps = makeDeps();
     const out = await handlePairUrl(BOX_URL, deps);
     expect(out).toBe("paired");
+    // The claim URL is exactly boxDirectUrl(boxId) — single source of truth
+    // shared with the desktop PairStep and the manual setup screen. The
+    // body sent by httpApi.claimAgainst is `{pairing_code}` (sanity-checked
+    // by the httpApi suite; this test pins the URL here).
     expect(deps.authClaimCalls).toEqual([
-      { serverUrl: "", boxId: BOX, code: "847291" },
+      { serverUrl: boxDirectUrl(BOX), code: "847291" },
     ]);
-    // Shared boxDirectUrl is the canonical source — must match exactly.
-    expect(deps.persistCalls).toEqual([
-      `https://${BOX}.boxes.mantaui.com`,
-    ]);
+    expect(deps.persistCalls).toEqual([boxDirectUrl(BOX)]);
   });
 
   it("returns 'failed' when authClaim rejects with a classified failure (no persist)", async () => {
@@ -171,9 +173,10 @@ describe("handlePairUrl — direct form (serverUrl)", () => {
 });
 
 describe("handlePairUrl — claim wiring sanity", () => {
-  it("never calls authClaim for ignored/foreign URLs (defends the rate limit)", async () => {
-    // A foreign URL must NEVER reach the relay — relay-mint is rate-limited
-    // and we don't want spam pairs to count against the user's quota.
+  it("never calls authClaim for ignored/foreign URLs (defends the box's rate limit)", async () => {
+    // A foreign URL must NEVER reach the box's /auth/claim — the endpoint is
+    // rate-limited (src/server/auth.mjs) and we don't want spam pairs to count
+    // against the user's quota.
     const authClaim = vi.fn(async () => okOutcome());
     const deps = makeDeps({ authClaim });
     await handlePairUrl("https://google.com/", deps);

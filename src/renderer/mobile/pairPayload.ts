@@ -1,7 +1,7 @@
 // pairPayload.ts — pure parser + builder for the pairing deeplink/QR payload
-// (BET-73, M3.1; extended BET-156 for relay-paired flows). No DOM, no fetch,
+// (BET-73, M3.1; extended BET-156 for box-paired flows). No DOM, no fetch,
 // no camera: this is the pure-before-wired foundation that stage 2 (camera →
-// auto-connect) imports, and that the desktop's relay-paired onboarding reuses
+// auto-connect) imports, and that the desktop's box-paired onboarding reuses
 // for a single-paste "pair link" input.
 //
 // A desktop "Pair phone" panel encodes a payload into a QR; the mobile app
@@ -9,7 +9,7 @@
 // payload carries ONE of two addressing shapes, both keyed by a 6-digit pairing
 // code:
 //   • serverUrl (direct-HTTPS):  manta://pair?server=<url>&code=<6-digit>
-//   • boxId     (relay-paired):  manta://pair?box=<box_id>&code=<6-digit>
+//   • boxId     (direct box):    manta://pair?box=<box_id>&code=<6-digit>
 // This module normalizes either into a single { serverUrl, boxId, code } and
 // provides the inverse builders used as round-trip oracles in tests (and by
 // the desktop QR panel + the install.sh heredoc).
@@ -79,7 +79,7 @@ function coerceBoxId(raw: string): string | null {
  * code not exactly 6 digits, or an unparseable URL. Whitespace is trimmed.
  *
  * Accepts either query spelling — `server`/`code` (primary), the M6 alias
- * `id`/`token`, or the relay form `box`/`code` — and both URL shapes (custom
+ * `id`/`token`, or the box form `box`/`code` — and both URL shapes (custom
  * `manta://pair` scheme and the `https://host/m/...` deferred-deeplink form).
  *
  * Exactly ONE of server / box must be present. Both or neither → null.
@@ -116,12 +116,13 @@ export function parsePairPayload(raw: string): PairPayload | null {
   const rawBox = q.get("box") ?? "";
   const rawCode = q.get("code") ?? q.get("token") ?? "";
   // The legacy `id` param (pre-BET-177 desktop QR: `manta://pair?id=<X>&token=`)
-  // is AMBIGUOUS — early builds put a serverUrl there, but the relay-era desktop
+  // is AMBIGUOUS — early builds put a serverUrl there, but the box-era desktop
   // (still shipping in some installed apps) puts the 32-hex BOX ID there. Route
-  // by shape: a 32-hex value is a boxId (relay claim); anything else is a
-  // serverUrl (direct). WITHOUT this, a boxId under `id` gets http://-prefixed
-  // and mis-parsed as a bogus direct server URL → the claim network-fails
-  // against a non-existent host (the exact symptom on an old desktop QR).
+  // by shape: a 32-hex value is a boxId (direct claim against the box's own
+  // hostname); anything else is a serverUrl (direct). WITHOUT this, a boxId
+  // under `id` gets http://-prefixed and mis-parsed as a bogus direct server URL
+  // → the claim network-fails against a non-existent host (the exact symptom on
+  // an old desktop QR).
   const rawId = q.get("id") ?? "";
 
   let serverUrl = coerceServerUrl(rawServer);

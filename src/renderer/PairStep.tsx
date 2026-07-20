@@ -2,10 +2,11 @@ import { useRef, useState } from "react";
 import { normalizeCode } from "../shared/claim.mjs";
 import { normalizeServerUrl, isValidServerUrl, canConnect } from "./pairStepLogic";
 import { parsePairPayload } from "./mobile/pairPayload";
+import { boxDirectUrl } from "../shared/transport.mjs";
 import { useStore } from "./store";
 
 // PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2;
-// extended BET-156 for relay-paired flows).
+// extended BET-156 for box-paired flows).
 //
 // Mounts into Onboarding.tsx's step-1 slot. Owns the pairing form:
 //   • a server-URL input (prefilled from config if the user has paired before)
@@ -18,11 +19,12 @@ import { useStore } from "./store";
 //   • its own Connect button (gated by canConnect) + a "Skip setup" link
 //
 // The claim itself runs in the MAIN process over the `auth:claim` IPC channel
-// (window.api.authClaim), which POSTs either <serverUrl>/auth/claim (direct
-// HTTPS) or https://relay.mantaui.com/pair (relay-paired; ADR-2/3) and, on
-// success, persists { serverUrl, boxId, boxToken } to config.json. We mirror
-// those into the store (applyPairing) so resolveTransportMode reads "http"
-// immediately, then call onPaired() to let the shell advance to Step 2.
+// (window.api.authClaim), which POSTs <serverUrl>/auth/claim (BET-49 direct
+// HTTPS) for the manual form, and <boxDirectUrl(boxId)>/auth/claim (BET-198 —
+// every box now serves its own public hostname) for the box-form pair link.
+// On success, main persists { serverUrl, boxId, boxToken } to config.json. We
+// mirror those into the store (applyPairing) so resolveTransportMode reads
+// "http" immediately, then call onPaired() to let the shell advance to Step 2.
 //
 // All non-React logic (URL normalization, the submit gate, the 6-digit
 // contract, HTTP-outcome classification) is pure + unit-tested in
@@ -74,16 +76,22 @@ export function PairStep({
       }
       setSubmitting(true);
       setError(null);
-      // Relay form sends serverUrl:"" (see AuthClaimInput) so the same input
-      // shape works for both the desktop IPC and httpApi's mobile authClaim.
+      // Box form (BET-156, BET-198): serverUrl is empty + boxId is set, so main
+      // resolves the box's public hostname via boxDirectUrl(boxId) before
+      // POSTing /auth/claim. Direct form: serverUrl is set, boxId is undefined.
       const result = await window.api.authClaim({
         serverUrl: payload.serverUrl ?? "",
         boxId: payload.boxId ?? undefined,
         code: payload.code,
       });
       if (result.ok) {
+        // Mirror the persisted serverUrl: the direct form uses the typed URL;
+        // the box form uses the canonical `https://<boxId>.boxes.mantaui.com`
+        // hostname (single source of truth — shared/transport.mjs).
+        const persistedServerUrl =
+          payload.serverUrl ?? (payload.boxId ? boxDirectUrl(payload.boxId) : "");
         useStore.getState().applyPairing({
-          serverUrl: payload.serverUrl ?? `https://relay.mantaui.com/box/${payload.boxId}`,
+          serverUrl: persistedServerUrl,
           boxId: result.boxId,
           boxToken: result.boxToken,
         });

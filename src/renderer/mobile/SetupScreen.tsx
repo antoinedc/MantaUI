@@ -6,11 +6,8 @@ import {
   subscribeDebugLog,
   clearDebugLog,
 } from "./debugLog";
-import { isValidServerUrl } from "../pairStepLogic";
 import { isValidBoxToken } from "../../shared/transport.mjs";
 import {
-  DEFAULT_SERVER_URL,
-  isRelayServer,
   canConnectSetup,
   buildSetupClaimInput,
   resolveSetupServerUrl,
@@ -39,55 +36,39 @@ type Props = {
  * requires no interaction here). A "Manual setup" link opens a bottom sheet
  * for typed pairing.
  *
- * The manual sheet has two modes (see setupLogic.ts):
- *   • relay (default): Server URL is pre-filled with the official MantaUI
- *     relay. The relay routes to a box by Box ID, so a Box ID + code are
- *     required. authClaim routes on the boxId.
- *   • custom: the user edits the Server URL to their own box. A direct claim
- *     needs only URL + code, so the Box ID field is disabled.
+ * The manual sheet asks for a Box ID + pairing code; the box's public
+ * hostname (`https://<boxId>.boxes.mantaui.com`) is derived from the Box ID
+ * via the shared `boxDirectUrl` helper, so no server-URL field is needed.
+ * Every box serves its own public hostname directly.
  *
- * All non-React logic (URL/box-id/code validation, the submit gate, claim-input
- * construction, HTTP-outcome classification) is pure + unit-tested in
- * setupLogic.ts + pairStepLogic.ts + ../../shared/claim.mjs. This file is the
- * wiring.
+ * All non-React logic (URL/box-id/code validation, the submit gate,
+ * claim-input construction, HTTP-outcome classification) is pure +
+ * unit-tested in setupLogic.ts + pairStepLogic.ts + ../../shared/claim.mjs.
+ * This file is the wiring.
  */
 export function SetupScreen({ onConnected, pairStatus }: Props) {
   const [manualOpen, setManualOpen] = useState(false);
-  const [serverUrl, setServerUrl] = useState<string>(DEFAULT_SERVER_URL);
   const [boxId, setBoxId] = useState("");
   const [code, setCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
 
-  const relayMode = isRelayServer(serverUrl);
-
   const submit = async () => {
-    // Mirror the pure gate so an Enter keypress can't fire from a non-ready
-    // state (the button is also disabled, but Enter bypasses that).
-    if (!canConnectSetup({ serverUrl, boxId, code, submitting })) return;
+    if (!canConnectSetup({ boxId, code, submitting })) return;
     setSubmitting(true);
     setError(null);
-    // authClaim POSTs the direct box or relay claim depending on which of
-    // {serverUrl, boxId} is populated, classifies the outcome via the shared
-    // classifier, and persists the returned token to localStorage on success.
     const result = await window.api.authClaim(
-      buildSetupClaimInput({ serverUrl, boxId, code }),
+      buildSetupClaimInput({ boxId, code }),
     );
     if (result.ok) {
       // Token is already persisted by authClaim. Persist the resolved server
-      // URL so serverBase() resolves on the next refresh (relay mode writes the
-      // per-box relay proxy URL; custom mode writes the typed URL).
-      localStorage.setItem(
-        "manta_server",
-        resolveSetupServerUrl({ serverUrl, boxId }),
-      );
+      // URL (boxDirectUrl(boxId)) so serverBase() resolves on the next refresh.
+      localStorage.setItem("manta_server", resolveSetupServerUrl({ boxId }));
       setSubmitting(false);
       onConnected();
       return;
     }
-    // Failure: show the classified message, keep the fields so the user can
-    // fix them, and re-focus the code input.
     setSubmitting(false);
     setError(result.message);
     codeRef.current?.focus();
@@ -188,50 +169,29 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
             <div className="flex flex-col gap-1 text-left mb-4">
               <div className="text-text text-lg font-semibold">Manual setup</div>
               <div className="text-text-muted text-xs leading-relaxed">
-                Enter the details shown under Settings &rsaquo; Connection in the desktop app. The
-                server URL defaults to the official MantaUI server; change it only if you self-host.
+                Enter the details shown under Settings &rsaquo; Connection in the desktop app.
+                Your phone will connect directly to your box.
               </div>
             </div>
 
             <form onSubmit={onSubmitForm} className="flex flex-col gap-3.5">
-              <Field label="Server URL">
-                <input
-                  type="text"
-                  inputMode="url"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="https://relay.mantaui.com"
-                  disabled={submitting}
-                  value={serverUrl}
-                  onChange={(e) => {
-                    setServerUrl(e.target.value);
-                    setError(null);
-                  }}
-                  aria-invalid={serverUrl.trim() !== "" && !isValidServerUrl(serverUrl)}
-                  className="w-full rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 text-sm font-mono outline-none focus:border-accent disabled:opacity-60"
-                />
-              </Field>
-
               <Field label="Box ID">
                 <input
                   type="text"
                   autoComplete="off"
                   spellCheck={false}
                   placeholder="a1b2c3d4e5f6…"
-                  disabled={submitting || !relayMode}
+                  disabled={submitting}
                   value={boxId}
                   onChange={(e) => {
                     setBoxId(e.target.value.trim());
                     setError(null);
                   }}
                   aria-invalid={
-                    relayMode && boxId.trim() !== "" && !isValidBoxToken(boxId.trim())
+                    boxId.trim() !== "" && !isValidBoxToken(boxId.trim())
                   }
-                  className="w-full rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 text-sm font-mono outline-none focus:border-accent disabled:opacity-40"
+                  className="w-full rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 text-sm font-mono outline-none focus:border-accent disabled:opacity-60"
                 />
-                <div className="text-text-faint text-[11px] mt-1">
-                  Not needed if you are not using the official relay.
-                </div>
               </Field>
 
               <Field label="Pairing code">
@@ -262,7 +222,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
 
               <button
                 type="submit"
-                disabled={!canConnectSetup({ serverUrl, boxId, code, submitting })}
+                disabled={!canConnectSetup({ boxId, code, submitting })}
                 className="mobile-tap w-full px-5 py-3.5 rounded-xl bg-accent-soft text-white font-semibold disabled:opacity-40"
               >
                 {submitting ? "Connecting…" : "Connect"}
@@ -311,10 +271,6 @@ function PairStatusBanner({
   );
 }
 
-// On-screen debug log — the Safari Web Inspector can't attach to the TestFlight
-// WKWebView (device not discovered), so this surfaces the [deeplink] trail on
-// the phone itself. Collapsed by default; tap to expand and read what happened
-// during a scan. Temporary diagnostic aid (BET-177 pairing debug).
 function DebugLogPanel() {
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<DebugEntry[]>(() => getDebugLog());

@@ -212,10 +212,10 @@ describe("serverBase", () => {
     delete mockLocalStorage["manta_server"];
     stubWindowLocation({
       protocol: "https:",
-      hostname: "relay.example.com",
-      origin: "https://relay.example.com",
+      hostname: "box-direct.example.com",
+      origin: "https://box-direct.example.com",
     });
-    expect(serverBase()).toBe("https://relay.example.com");
+    expect(serverBase()).toBe("https://box-direct.example.com");
   });
 
   it("throws ServerNotConfiguredError on Capacitor localhost (no override)", () => {
@@ -259,12 +259,12 @@ describe("TOKEN_KEY", () => {
 // onDesktopNotify — must subscribe to the desktopNotify kind (not be a no-op)
 // ---------------------------------------------------------------------------
 //
-// In HTTP mode the renderer's httpApi owns the /events WS; desktopNotify
-// envelopes arrive on that WS and are dispatched to listeners registered via
-// onDesktopNotify. In SSH mode the main process relays via IPC (preload's
-// onDesktopNotify), so this channel is a no-op there. Either way, the method
-// must be a real subscription (returns an unsubscribe thunk) — a no-op
-// `() => () => {}` would silently drop desktop notifications in HTTP mode.
+// The renderer's httpApi owns the /events WS; desktopNotify envelopes arrive
+// on that WS and are dispatched to listeners registered via onDesktopNotify.
+// The main process forwards them to the renderer via IPC (preload's
+// onDesktopNotify). Either way, the method must be a real subscription
+// (returns an unsubscribe thunk) — a no-op `() => () => {}` would silently
+// drop desktop notifications.
 
 describe("onDesktopNotify", () => {
   it("is a function (not a no-op stub)", () => {

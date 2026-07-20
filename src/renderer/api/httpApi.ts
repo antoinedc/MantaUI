@@ -184,11 +184,12 @@ export async function submitPairingCode(code: string): Promise<ClaimResult> {
 /**
  * fetch with a hard timeout via AbortController. A pairing claim must NEVER
  * hang forever: on the iOS Capacitor WKWebView a stalled connection (slow
- * relay, captive-portal Wi-Fi, DNS black-hole) otherwise leaves the promise
- * pending and the UI stuck on "connecting…". On timeout the AbortController
- * fires, `fetch` rejects, and the caller's catch maps it to a network failure
- * the user can retry — instead of an infinite spinner. 15s is generous for a
- * ~100ms relay round-trip while still bounding the worst case.
+ * TLS handshake, captive-portal Wi-Fi, DNS black-hole) otherwise leaves the
+ * promise pending and the UI stuck on "connecting…". On timeout the
+ * AbortController fires, `fetch` rejects, and the caller's catch maps it to
+ * a network failure the user can retry — instead of an infinite spinner. 15s
+ * is generous for a ~100ms direct round-trip while still bounding the worst
+ * case.
  */
 async function fetchWithTimeout(
   url: string,
@@ -593,9 +594,9 @@ export const httpApi: Api = {
   tmuxRestoreConfig: () => rpc(IPC.tmuxRestoreConfig),
 
   // -- onboarding pairing --
-  // Direct-HTTPS pairing (BET-49, BET-198 — relay dropped): POST
-  // <serverUrl>/auth/claim { pairing_code } → { box_token, box_id }. Persists
-  // the token via saveClientToken (single write-site).
+  // Direct-HTTPS pairing (BET-49, BET-198): POST <serverUrl>/auth/claim
+  // { pairing_code } → { box_token, box_id }. Persists the token via
+  // saveClientToken (single write-site).
   //
   // serverUrl is built by the caller from the shared `boxDirectUrl(boxId)`
   // helper (src/shared/transport.mjs) — desktop and mobile write the EXACT
@@ -620,9 +621,9 @@ export const httpApi: Api = {
     on<{ source: "clipboard" | "file"; path?: string }>("screenshot", cb),
 
   // Desktop OS-notification directives from bui-server's notification router.
-  // In HTTP mode the /events WS delivers `desktopNotify` envelopes; in SSH
-  // mode the main process relays via IPC (preload's onDesktopNotify). Either
-  // way, subscribing here wires the renderer to the live stream.
+  // The /events WS delivers `desktopNotify` envelopes; subscribing here wires
+  // the renderer to the live stream (busConsumer in src/main/desktopNotify.ts
+  // forwards them to the renderer via IPC).
   onDesktopNotify: (cb) => on<DesktopNotifyPayload>("desktopNotify", cb),
 
   // -- file uploads --

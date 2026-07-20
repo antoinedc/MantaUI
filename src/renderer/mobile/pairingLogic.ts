@@ -20,8 +20,8 @@
 // re-exports them for the mobile client's existing call sites + tests, and
 // adds the mobile-only form state machine (pairingReducer) on top.
 //
-// BET-198 SCOPE NOTE: `classifyRelayClaimResult` was removed (the relay is
-// gone); pairingLogic now only re-exports the direct-claim helpers.
+// `classifyRelayClaimResult` was removed in BET-198; pairingLogic only
+// re-exports the direct-claim helpers.
 
 export {
   normalizeCode,
