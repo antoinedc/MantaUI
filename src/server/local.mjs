@@ -289,32 +289,6 @@ function escapeRegex(s) {
 }
 
 // ============================================================
-// APNs config (read from ~/.manta/config.json under the `apns` key)
-// ============================================================
-//
-// Shape: { teamId, keyId, p8Path, bundleId }. When present, push.mjs enables
-// the APNs native-push delivery leg (iOS-only, supplementary to the Web Push
-// VAPID leg). Absent or malformed block = APNs disabled; push.mjs fans out
-// to Web Push only — no errors, no behavior change for non-iOS installs.
-//
-// The block is already present on the production box (human-installed at
-// setup time, see BET-181 §3.1). Async — reads the same JSON file as
-// getConfig() but bypasses the cached snapshot so a runtime config write
-// (rare; human-only) is picked up on the next push without a server restart.
-
-export async function apnsConfig() {
-  const cfg = await getConfig();
-  const a = cfg?.apns;
-  if (!a || typeof a !== "object") return null;
-  const { teamId, keyId, p8Path, bundleId } = a;
-  if (typeof teamId !== "string" || !teamId) return null;
-  if (typeof keyId !== "string" || !keyId) return null;
-  if (typeof p8Path !== "string" || !p8Path) return null;
-  if (typeof bundleId !== "string" || !bundleId) return null;
-  return { teamId, keyId, p8Path, bundleId };
-}
-
-// ============================================================
 // STUBS — desktop-only concepts with no server-side equivalent
 // ============================================================
 
