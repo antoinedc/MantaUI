@@ -474,6 +474,23 @@ main() {
       || warn "systemctl --user restart manta-server failed — run it manually"
   fi
 
+  # Single source of truth for the inline `node -e readBoxIdentity`
+  # read. Used by step 7.5 (gateway register needs box_id) and step 8
+  # (the trailing-pairing heredoc prints box_id + pair-link). Without
+  # this helper the two reads drifted in subtle ways — see install.test's
+  # strict duplication-gate catching the 6-line clone (BET-205).
+  # Reads MANTA_AUTH_FILE; returns the 32-hex box_id or empty on a
+  # missing/corrupt auth.json. Errors go to stderr; the empty fallback
+  # lets the caller branch (e.g. warn + skip on no box_id).
+  read_box_id_for_gateway() {
+    "$NODE" -e '
+      import("'"$LIB"'").then((m) => {
+        const id = m.readBoxIdentity(process.env.MANTA_AUTH_FILE);
+        process.stdout.write(id?.box_id ?? "");
+      }).catch(() => process.stdout.write(""));
+    ' 2>/dev/null || true
+  }
+
   # ===========================================================================
   # 7.5. PRIVILEGED SECTION — Caddy + DNS + gateway registration (BET-205 WP5).
   #
@@ -624,12 +641,7 @@ main() {
   # Read box_id from auth.json (the server's first start minted it). Skip
   # the registration block entirely if we can't find one — a re-run before
   # the server has booted at least once has no box_id to register.
-  BOX_ID_FOR_GATEWAY="$("$NODE" -e '
-    import("'"$LIB"'").then((m) => {
-      const id = m.readBoxIdentity(process.env.MANTA_AUTH_FILE);
-      process.stdout.write(id?.box_id ?? "");
-    }).catch(() => process.stdout.write(""));
-  ' 2>/dev/null || true)"
+  BOX_ID_FOR_GATEWAY="$(read_box_id_for_gateway)"
 
   if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
     warn "no box_id in $MANTA_AUTH_FILE yet — skipping gateway registration + Caddy setup."
@@ -867,12 +879,7 @@ main() {
 
   # Read the box_id from ~/.manta/auth.json via the tested install-lib loader
   # (NEVER re-parse the JSON in bash — auth.json's shape belongs to the server).
-  BOX_ID_DISPLAY="$("$NODE" -e '
-    import("'"$LIB"'").then((m) => {
-      const id = m.readBoxIdentity(process.env.MANTA_AUTH_FILE);
-      process.stdout.write(id?.box_id ?? "");
-    }).catch(() => process.stdout.write(""));
-  ' 2>/dev/null || true)"
+  BOX_ID_DISPLAY="$(read_box_id_for_gateway)"
   export BOX_ID_DISPLAY
 
   cat <<EOF

@@ -72,25 +72,7 @@ exit $rc
 `,
     { mode: 0o755 },
   );
-  try {
-    try {
-      return execSync(`bash ${script}`, {
-        env: { ...process.env, PATH: process.env.PATH },
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (e) {
-      // execSync throws when the child exits non-zero (helpers' `die`
-      // → `exit 1` for the failure paths). The stderr/stdout is on the
-      // error object — concatenate and return so callers can assert on
-      // the message AND the BOOTSTRAP_EXIT=N marker.
-      const out = (e.stdout ?? "") + (e.stderr ?? "");
-      // execSync's stdout/stderr are string when encoding is set.
-      return out;
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  return runAndCapture(script);
 }
 
 // Source install.sh in REAL mode (so `main` is defined and the argument
@@ -180,15 +162,34 @@ exit $rc
 `,
     { mode: 0o755 },
   );
+  return runAndCapture(script);
+}
+
+// Shared execSync wrapper used by runBootstrap + runMain (and any
+// future caller that runs a generated bash script in a temp dir).
+// - Captures stdout+stderr into a single string on success.
+// - Swallows non-zero exits (helpers' `die` calls `exit 1` for the
+//   failure paths) and returns the captured output instead.
+// - Cleans up the temp dir in `finally`, even on throw.
+// Extracted as a helper so the two callers don't drift — the
+// install.test.mjs file's strict duplication-gate caught a 23-line
+// clone here (BET-205 cycle 2 review).
+function runAndCapture(scriptPath) {
+  const dir = dirname(scriptPath);
   try {
     try {
-      return execSync(`bash ${script}`, {
+      return execSync(`bash ${scriptPath}`, {
         env: { ...process.env, PATH: process.env.PATH },
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (e) {
+      // execSync throws when the child exits non-zero (helpers' `die`
+      // → `exit 1` for the failure paths). The stderr/stdout is on the
+      // error object — concatenate and return so callers can assert on
+      // the message AND the BOOTSTRAP_EXIT / MAIN_EXIT=N marker.
       const out = (e.stdout ?? "") + (e.stderr ?? "");
+      // execSync's stdout/stderr are string when encoding is set.
       return out;
     }
   } finally {
@@ -1774,30 +1775,14 @@ test("detect-distro CLI subcommand emits the JSON status install.sh consumes", a
   // pure lib helper. It must emit a single-line JSON object with
   // {supported, reason, id, idLike, debianLike} so install.sh can
   // json-parse + branch. We exercise it against a temp /etc/os-release.
-  const dir = mkdtempSync(join(tmpdir(), "manta-detect-distro-"));
-  const osRelease = join(dir, "os-release");
-  writeFileSync(osRelease, 'ID=ubuntu\nID_LIKE=debian\n');
-  try {
-    const { spawnSync } = await import("node:child_process");
-    const result = spawnSync(
-      "node",
-      [
-        join(__dirname, "install-lib.mjs"),
-        "detect-distro",
-        "--os-release", osRelease,
-      ],
-      { encoding: "utf8" },
-    );
-    assert.equal(result.status, 0);
-    const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.id, "ubuntu");
-    assert.equal(parsed.idLike, "debian");
-    assert.equal(parsed.debianLike, true);
-    assert.equal(parsed.supported, true);
-    assert.match(parsed.reason, /supported Debian\/Ubuntu/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const result = await runDetectDistro('ID=ubuntu\nID_LIKE=debian\n');
+  assert.equal(result.status, 0);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.id, "ubuntu");
+  assert.equal(parsed.idLike, "debian");
+  assert.equal(parsed.debianLike, true);
+  assert.equal(parsed.supported, true);
+  assert.match(parsed.reason, /supported Debian\/Ubuntu/);
 });
 
 test("detect-distro CLI subcommand reports supported=false on a non-Debian distro", async () => {
@@ -1805,12 +1790,26 @@ test("detect-distro CLI subcommand reports supported=false on a non-Debian distr
   // the `reason` string when it's false. We pin both the supported flag
   // AND the human-readable reason (so the install's bring-your-own-
   // proxy message is stable across refactors).
-  const dir = mkdtempSync(join(tmpdir(), "manta-detect-distro-rhel-"));
+  const result = await runDetectDistro('ID=fedora\nID_LIKE="rhel fedora"\n');
+  assert.equal(result.status, 0);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.supported, false);
+  assert.match(parsed.reason, /distro "fedora" is not in the v1 supported list/);
+});
+
+// Shared runner for the two `detect-distro` CLI subcommand tests.
+// Writes the supplied content to a temp /etc/os-release, shells out
+// to `node install-lib.mjs detect-distro --os-release <path>`, and
+// cleans up the temp dir. Extracted as a helper so the two callers
+// don't drift — the install.test.mjs file's strict duplication-gate
+// caught a 15-line clone here (BET-205 cycle 2 review).
+async function runDetectDistro(osReleaseContent) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-distro-"));
   const osRelease = join(dir, "os-release");
-  writeFileSync(osRelease, 'ID=fedora\nID_LIKE="rhel fedora"\n');
+  writeFileSync(osRelease, osReleaseContent);
   try {
     const { spawnSync } = await import("node:child_process");
-    const result = spawnSync(
+    return spawnSync(
       "node",
       [
         join(__dirname, "install-lib.mjs"),
@@ -1819,14 +1818,10 @@ test("detect-distro CLI subcommand reports supported=false on a non-Debian distr
       ],
       { encoding: "utf8" },
     );
-    assert.equal(result.status, 0);
-    const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.supported, false);
-    assert.match(parsed.reason, /distro "fedora" is not in the v1 supported list/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
+}
 
 // ----------------------------------------------------------------------------
 // install.sh — privileged-section gates (BET-205 reviewer guidance §3 + §4).
