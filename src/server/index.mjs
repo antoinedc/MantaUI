@@ -27,7 +27,7 @@ import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/
 // block is a silent no-op — the server behaves EXACTLY as before, no
 // fetches to axiom.co, no console noise. Must run BEFORE createBus() /
 // any subsequent `console.log` so the existing `[push]` / `[opencode-pump]`
-// / `[relay-agent]` / `[auth]` call sites ship transparently.
+// / `[push]` / `[opencode-pump]` / `[auth]` call sites ship transparently.
 {
   const axiomCfg = resolveAxiomConfig({ env: process.env, config: await local.configGet() });
   if (axiomCfg) {
@@ -75,8 +75,8 @@ import {
   AUTH_RL_CAPACITY,
   AUTH_RL_REFILL_PER_SEC,
 } from "./auth.mjs";
-import { createRelayAgent, shouldStartRelayAgent } from "../relay/agent/index.mjs";
 import * as push from "./push.mjs";
+import { registerWithGateway } from "./gatewayRegister.mjs";
 import { readServerVersion, writeVersionResponse } from "./version.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -235,14 +235,6 @@ rpcHandlers = buildHandlers({
   push,
   serverVersion: SERVER_VERSION,
 });
-
-// Relay-agent handle (BET-151 ADR-1). Populated below in the listen() callback
-// when shouldStartRelayAgent(config) returns true. Read by GET /relay/status
-// (loopback-only) so install.sh can poll for the handshake without standing up
-// its own websocket. Null = agent never started (config opted out, or the
-// listener never got that far — in either case /relay/status returns
-// `connected: false`).
-let relayAgent = null;
 
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
 // serves HTML pages from ~/.manta/pages/<subdomain>/index.html. Caddy
@@ -429,19 +421,19 @@ const readRawBody = (req, limit) => readBody(req, { parse: false, limit });
 //
 // respondJson — write a JSON response (the most common response shape in this
 // file). Pulling it out eliminates a verbatim writeHead+end boilerplate that
-// the duplication-gate flagged between /auth/pair and /relay/status
-// (10-27 line clones) — every JSON-shaped handler in this file now goes
-// through here. Status code + body shape stay identical to the inline
-// versions they replace.
+// the duplication-gate flagged between /auth/pair and the now-removed
+// /relay/status handler (10-27 line clones) — every JSON-shaped handler in
+// this file now goes through here. Status code + body shape stay identical
+// to the inline versions they replace.
 //
-// requireLoopback — gate a handler on the loopback-direct check used by
-// /auth/pair and /relay/status. Returns true (proceed) when the request is
+// requireLoopback — gate a handler on the loopback-direct check (currently
+// used by /auth/pair). Returns true (proceed) when the request is
 // loopback-direct; on a non-loopback caller it writes the standard 403 and
 // returns false, so the caller MUST `return` immediately. The error message
 // is passed in so each endpoint can phrase the rejection for its own
-// surface (a pairing-code mint vs. a relay-status read need different hints).
-// The check itself is unchanged (isLocalDirectRequest in auth.mjs) — this
-// is a pure refactor, the loopback gate's semantics are preserved bit-for-bit.
+// surface. The check itself is unchanged (isLocalDirectRequest in auth.mjs)
+// — this is a pure refactor, the loopback gate's semantics are preserved
+// bit-for-bit.
 function respondJson(res, status, obj) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(obj));
@@ -632,34 +624,6 @@ const server = createServer(async (req, res) => {
     } catch (e) {
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
-    return;
-  }
-
-  // ---------- Relay status (LOOPBACK-ONLY) ----------
-  // GET /relay/status → { enabled, connected }
-  //
-  // Loopback-gated (same check /auth/pair uses) because the answer leaks
-  // whether this box has reached the relay — useful intel for an attacker
-  // probing the box's outbound posture, and not needed by any remote client.
-  // The renderer never calls this; it's consumed by `install.sh` (and any
-  // future ops tooling on the box itself).
-  //
-  //   enabled   — true iff `shouldStartRelayAgent(config)` (config-derived;
-  //                absent key → true, see agent/index.mjs)
-  //   connected — true iff the agent's `status()` is "connected" right now
-  //                (the live WS handshake to relay.mantaui.com succeeded).
-  //                "connecting" / "stopped" both collapse to false — install.sh
-  //                treats anything-but-connected as "not yet" and re-polls.
-  if (req.method === "GET" && path === "/relay/status") {
-    if (
-      !requireLoopback(req, res, "relay status is loopback-only (run this from the box)")
-    ) {
-      return;
-    }
-    const cfg = await local.configGet();
-    const enabled = shouldStartRelayAgent(cfg);
-    const connected = relayAgent ? relayAgent.status() === "connected" : false;
-    respondJson(res, 200, { enabled, connected });
     return;
   }
 
@@ -1469,11 +1433,12 @@ const server = createServer(async (req, res) => {
 //
 // /pty (BET-158) — binary-safe terminal WS. Bridges to the ephemeral
 // pty module (src/server/pty.mjs) the same way Terminal.tsx uses pty:* RPC
-// channels, but over a single low-latency WS so the relay can forward raw
-// bytes frame-by-frame through STREAM_* mux frames with enc:"b64". Client→
-// server is JSON control strings (typed messages: data/resize); server→
-// client is raw terminal bytes. The endpoint is gated like the rest of the
-// surface; browsers without an Authorization header use ?token=<box_token>.
+// channels. Client→server is JSON control strings (typed messages:
+// data/resize); server→client is raw terminal bytes. The endpoint is gated
+// like the rest of the surface; browsers without an Authorization header
+// use ?token=<box_token>. (Formerly the relay's agent dials this WS to
+// forward bytes frame-by-frame through STREAM_* mux frames — BET-198 removed
+// the relay; direct clients use this endpoint.)
 
 const wss = new WebSocketServer({ noServer: true });
 
@@ -1509,11 +1474,10 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
   if (url.pathname === "/pty") {
-    // Binary-safe terminal bridge (BET-158). Driven by the relay's agent
-    // (ws://127.0.0.1:8787/pty?<query>&token=<box_token>) so devices on the
-    // other side of the relay get a single muxed WS to their box. Direct
-    // clients (no relay) can connect here with either a header bearer or
-    // ?token=<box_token>.
+    // Binary-safe terminal bridge (BET-158). Direct clients (header bearer
+    // or ?token=<box_token>) connect here for a low-latency raw-byte
+    // terminal stream. The relay that previously proxied this for phones
+    // was removed in BET-198; the endpoint itself stays.
     wss.handleUpgrade(req, socket, head, (ws) => attachPtyWs(ws, url));
     return;
   }
@@ -1523,52 +1487,12 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(PORT, HOST, () => {
   console.log(`manta listening on http://${HOST}:${PORT}`);
 
-  // Start the box-side relay agent (BET-151 ADR-1 / BET-155). The agent dials
-  // OUT to relay.mantaui.com from this box and authenticates with boxAuth, so
-  // it MUST be created after ensureAuth() has run (which it has — see above)
-  // and AFTER the box server is listening (so the agent's first request proxy
-  // can land). Fire-and-forget: the agent's reconnect/backoff loop runs on its
-  // own timers and never blocks this path — a slow relay handshake must NOT
-  // hold up the HTTP server, and a relay outage must NOT crash the box server.
-  //
-  // Opt-out: write `"relayEnabled": false` to ~/.manta/config.json
-  // (shouldStartRelayAgent() handles the default-on case). No env override —
-  // configGet() is the single switch, mirroring how chatAutoAllow is gated.
-  //
-  // The agent owns its own reconnect/backoff — do NOT add another retry loop.
-  // The agent already logs `[relay-agent] connected …` / `tunnel closed;
-  // reconnecting`; we only log the one-shot boot decision here.
-  local
-    .configGet()
-    .then((cfg) => {
-      if (!shouldStartRelayAgent(cfg)) {
-        console.log(
-          "[relay-agent] disabled via config (relayEnabled=false); box reachable only via direct ingress.",
-        );
-        return;
-      }
-      let agent;
-      try {
-        agent = createRelayAgent({ localBase: `http://127.0.0.1:${PORT}` });
-      } catch (err) {
-        console.warn(
-          `[relay-agent] could not construct (auth missing?): ${String(err?.message ?? err)}`,
-        );
-        return;
-      }
-      relayAgent = agent;
-      agent.start().catch((err) => {
-        console.warn(
-          `[relay-agent] first connect rejected: ${String(err?.message ?? err)}`,
-        );
-      });
-      console.log(
-        `[relay-agent] dialing ${agent.boxId.slice(0, 8)}… (relay.mantaui.com)`,
-      );
-    })
-    .catch((err) => {
-      console.warn(
-        `[relay-agent] could not start (config read failed): ${String(err?.message ?? err)}`,
-      );
-    });
+  // Register this box with the hosted gateway so push (APNs) works and so the
+  // gateway can publish the per-box DNS A record (BET-198 / BET-199).
+  // Fire-and-forget: the call is best-effort (it never throws) and a slow /
+  // failing gateway must NOT hold up the HTTP server. Retried on next boot.
+  // The box must have run ensureAuth() first so box_id is on disk.
+  registerWithGateway().catch((err) => {
+    console.warn(`[gateway-register] unexpected: ${String(err?.message ?? err)}`);
+  });
 });
