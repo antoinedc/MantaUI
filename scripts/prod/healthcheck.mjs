@@ -35,7 +35,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 export const DEFAULT_TARGETS = [
   { url: "https://mantaui.com",                      kind: "body", expect: { status: 200 } },
-  { url: "https://relay.mantaui.com",                kind: "body", expect: { status: 401 } },
+  { url: "https://gateway.mantaui.com",              kind: "body", expect: { status: 200 } },
   { url: "https://app.mantaui.com",                  kind: "body", expect: { status: 200 } },
   { url: "https://mantaui.com/install.sh",           kind: "body", expect: { status: 200, bodyStartsWith: "#!/" } },
   { url: "https://mantaui.com/releases/manta-latest.tar.gz", kind: "head", expect: { status: 200 } },

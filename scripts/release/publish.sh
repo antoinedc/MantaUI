@@ -23,13 +23,13 @@
 #                  (e.g. mac build runs on a Mac): print the exact one-line
 #                  command the owner runs there and continue — desktop is a
 #                  separate leg, not a release blocker.
-#   4. relay       ssh <host> 'git -C /opt/manta pull && systemctl restart
-#                  manta-relay && systemctl is-active manta-relay', then sync
-#                  the freshly-pulled scripts/install.sh into the Caddy web
-#                  root (/var/www/mantaui/install.sh) — the pull updates the
-#                  repo checkout, but Caddy serves install.sh statically from
-#                  the web root, so without this copy the advertised one-liner
-#                  keeps serving the stale installer (BET-171).
+#   4. server      ssh <host> 'git -C /opt/manta pull && systemctl restart
+#                  manta-server && systemctl is-active manta-server', then
+#                  sync the freshly-pulled scripts/install.sh into the Caddy
+#                  web root (/var/www/mantaui/install.sh) — the pull updates
+#                  the repo checkout, but Caddy serves install.sh statically
+#                  from the web root, so without this copy the advertised
+#                  one-liner keeps serving the stale installer (BET-171).
 #   5. verify      HEAD each published URL — tarball 200, manifest live with
 #                  matching version + tarball sha, install.sh 200, install.sh
 #                  body byte-matches the repo. Fail loudly on any non-200,
@@ -148,10 +148,10 @@ else
   ok "desktop published"
 fi
 
-# --- 4. relay + install.sh sync ---------------------------------------------
-log "Deploying relay on ${PROD_HOST}…"
-ssh "${PROD_HOST}" 'git -C /opt/manta pull && systemctl restart manta-relay && systemctl is-active manta-relay'
-ok "relay deployed"
+# --- 4. server + install.sh sync ---------------------------------------------
+log "Deploying manta-server on ${PROD_HOST}…"
+ssh "${PROD_HOST}" 'git -C /opt/manta pull && systemctl restart manta-server && systemctl is-active manta-server'
+ok "manta-server deployed"
 
 # Caddy serves both install.sh and llms-install.md statically from the web
 # root, NOT from the repo checkout. The git pull above updates /opt/manta

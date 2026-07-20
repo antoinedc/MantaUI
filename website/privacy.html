@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy — Manta UI</title>
-<meta name="description" content="What Manta UI stores on your box and on the relay, who sees it, and how to delete it.">
+<meta name="description" content="What Manta UI stores on your box and on the push gateway, who sees it, and how to delete it.">
 <meta name="theme-color" content="#0B1020">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -96,43 +96,40 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
   <div class="wrap">
     <h1>Privacy</h1>
     <p class="meta">Last updated 17 July 2026 · Plain-language summary of what Manta UI stores where, who can read it, and how to delete it.</p>
-    <p class="lede">Manta UI is a thin client. The interesting data lives on <em>your</em> Linux box; the relay only sees the parts that have to cross the public internet to reach your phone.</p>
+    <p class="lede">Manta UI is a thin client. The interesting data lives on <em>your</em> Linux box; the push gateway only sees the parts that have to cross our infrastructure to deliver a native APNs push.</p>
 
     <h2>What runs where</h2>
-    <p>Manta UI is two surfaces over the same protocol:</p>
+    <p>Manta UI is three surfaces:</p>
     <ul>
       <li><b>The desktop app</b> (Electron) and <b>the phone client</b> (PWA today, native apps in flight) are thin clients — chat, terminal, and file browser over HTTPS.</li>
       <li><b>The server</b> runs on your own Linux box. It owns your <code>tmux</code> sessions, your <code>opencode</code> chat sessions, your file uploads, your schedules, your secrets, your webhooks, and your notifications. Everything lives under <code>~/.manta/</code> on that box.</li>
-      <li><b>The relay</b> (<code>relay.mantaui.com</code>) is the operated backend that routes phone traffic to your box. Your box dials <em>out</em> to the relay over a WebSocket; nothing on the box needs an inbound port.</li>
+      <li><b>The push gateway</b> (<code>gateway.mantaui.com</code>) is the ONLY thing we still operate. It holds the Apple APNs key (which structurally cannot live on your box) and fans out native pushes on your box's behalf. Devices connect directly to your box at <code>https://&lt;box_id&gt;.boxes.mantaui.com</code> — there is no relay in the path for chat, terminal, or file traffic.</li>
     </ul>
 
     <h2>What's on your box</h2>
     <ul>
-      <li><b>Box identity</b> — a random <code>box_id</code> (32 hex chars) and a <code>box_token</code> (HMAC key) under <code>~/.manta/auth.json</code> (<code>0600</code>). The token never leaves the box.</li>
+      <li><b>Box identity</b> — a random <code>box_id</code> (32 hex chars), a <code>box_token</code> (HMAC key), and a <code>gateway_token</code> (bearer credential for the push gateway) under <code>~/.manta/auth.json</code> (<code>0600</code>). The token never leaves the box.</li>
       <li><b>Pairing codes</b> — short-lived (5 min), loopback-only, one-time. Mints when you run <code>npm run pair</code> or hit <code>GET /auth/pair</code> from the box itself.</li>
       <li><b>Device tokens</b> — issued to each paired desktop / phone. Stored locally in each app's <code>config.json</code>; the box keeps no per-device record beyond "is this token currently valid."</li>
       <li><b>Your work</b> — every <code>tmux</code> session, every opencode chat, every uploaded file (<code>~/.manta-uploads/</code>, hourly auto-clean), every scheduled prompt, every webhook, every secret, every published page.</li>
     </ul>
     <p>Delete any of this by deleting the file. The installer's only hard rule is: <b>never regenerate <code>~/.manta/auth.json</code></b> — that would unpair every device.</p>
 
-    <h2>What's on the relay</h2>
-    <p>The relay holds the minimum it needs to route traffic and (when subscription lands) gate paid endpoints. It does not proxy your terminal bytes through anything except the encrypted box↔relay WebSocket.</p>
+    <h2>What's on the push gateway</h2>
+    <p>The push gateway holds the minimum it needs to deliver native APNs notifications. It does not see your chat, terminal, or file traffic at all — that flows directly between device and box over HTTPS.</p>
     <ul>
-      <li><b>Box row</b> — <code>box_id</code>, first-seen, last-seen, online/offline status.</li>
-      <li><b>Account binding</b> — which account owns which box (one account ↔ many boxes; a box belongs to exactly one account).</li>
-      <li><b>Device tokens</b> — phone tokens stored as <code>sha256(token)</code>; the plaintext is handed to the phone once at <code>/pair</code> time and never persisted server-side.</li>
-      <li><b>Box handshake credential</b> — <code>sha256(box_token)</code>, trust-on-first-use (a second box claiming the same <code>box_id</code> is rejected).</li>
-      <li><b>Native push tokens</b> — APNs or FCM device tokens, so the relay can deliver a push when the box is on a different network than the phone. (Stage 5; not yet wired for production.)</li>
-      <li><b>IAP receipts</b> — Apple in-app-purchase receipts bound to a <code>box_id</code>. (Stage 5; in place, awaiting production deployment.)</li>
-      <li><b>Byte-usage counters</b> — per-box ingress and egress totals, the COGS signal the subscription meter reads.</li>
+      <li><b>Box row</b> — <code>box_id</code>, <code>gateway_token</code> (HMAC-bearer), first-seen IP, last-seen IP, registered public hostname (<code>&lt;box_id&gt;.boxes.mantaui.com</code>), first/last-registered timestamps.</li>
+      <li><b>OVH DNS record id</b> — so we can update the per-box A record on re-registration (IP changed) without searching.</li>
+      <li><b>APNs device tokens</b> — stored on the <em>box</em>, not the gateway. The gateway is stateless about which devices exist — the box owns its token store and the gateway just fans out the pushes the box asks for, reporting back which tokens to prune.</li>
+      <li><b>The Apple APNs key</b> (<code>.p8</code>) — the single piece of state that structurally cannot live on your box. Stays in <code>/etc/manta-gateway/</code> on the prod box.</li>
     </ul>
-    <p>Retention is until you unbind the box (the relay drops the binding row + cascades the dependents) or delete the box. The relay has no concept of a "marketing profile" — it stores nothing about you beyond what's needed to route your traffic.</p>
+    <p>Retention: the box row stays until your box unregisters (it can't — the gateway doesn't expose unregister). To wipe: SSH into the prod gateway host and remove the row from <code>/var/lib/manta-gateway/boxes.json</code>. We never store anything about you beyond what's needed to fan out APNs deliveries.</p>
 
     <h2>What crosses the wire</h2>
     <ul>
-      <li><b>Phone → box</b>: chat prompts, terminal keystrokes, file uploads. Authenticated with your device token; the box checks HMAC + expiry on every request.</li>
-      <li><b>Box → relay</b>: a single outbound WebSocket to <code>wss://relay.mantaui.com/box/&lt;box_id&gt;</code>, authenticated with your <code>box_token</code>. The relay cannot read the contents (it just forwards frames).</li>
-      <li><b>Relay → phone</b>: chat responses, terminal output, file download responses, push notifications. Web Push today (VAPID, PWA); native APNs/FCM in flight for the iOS / Android apps.</li>
+      <li><b>Device → box</b>: chat prompts, terminal keystrokes, file uploads. Direct HTTPS to <code>https://&lt;box_id&gt;.boxes.mantaui.com</code>. Authenticated with your device token; the box checks HMAC + expiry on every request.</li>
+      <li><b>Box → push gateway</b>: native push payloads, sent over HTTPS to <code>https://gateway.mantaui.com/push</code> with a <code>Bearer &lt;gateway_token&gt;</code> header. The gateway signs the APNs JWT and forwards; the payload body (title, body, deep link) is opaque to the gateway.</li>
+      <li><b>Push gateway → APNs</b>: standard HTTPS to <code>api.push.apple.com</code>, signed with the gateway's APNs key. Apple sees the push envelope.</li>
     </ul>
 
     <h2>Push notifications</h2>
@@ -144,18 +141,18 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
     <h2>Third parties we use</h2>
     <ul>
       <li><b>Google Fonts</b> — typography CSS, loaded from <code>fonts.googleapis.com</code>. Google sees your IP. If you want to avoid that, the page degrades gracefully to system fonts.</li>
-      <li><b>Apple Push Notification service (APNs)</b> / <b>Firebase Cloud Messaging (FCM)</b> — for native push on the iOS / Android apps. Apple and Google see the push envelope and your IP.</li>
-      <li><b>Stripe / Apple IAP</b> — when the subscription ships, payment is handled by the app store; we never see your card number.</li>
+      <li><b>Apple Push Notification service (APNs)</b> — for native push on the iOS app. Apple sees the push envelope and your IP.</li>
+      <li><b>OVH DNS API</b> — the gateway uses our OVH account to manage the <code>boxes.mantaui.com</code> A records. OVH sees the box's public IP at registration time.</li>
     </ul>
 
     <h2>Open source</h2>
-    <p>Manta UI is open source. The server, relay, mobile web client, and desktop app are all on <a href="https://github.com/antoinedc/MantaUI">GitHub</a>. The only closed-source piece is the published iOS / Android app (which exists only because the stores require it).</p>
+    <p>Manta UI is open source. The server, push gateway, mobile web client, and desktop app are all on <a href="https://github.com/antoinedc/MantaUI">GitHub</a>. The only closed-source piece is the published iOS / Android app (which exists only because the stores require it).</p>
 
     <h2>Your choices</h2>
     <ul>
-      <li><b>Run the server yourself.</b> Every user runs their own server on their own hardware. You can point a phone at your own box directly, skip the relay entirely, and not share any data with us.</li>
-      <li><b>Use the relay.</b> If you go through <code>relay.mantaui.com</code>, you accept the relay's storage of the fields above. Unpair any time from your box: delete the device from the desktop app, or wipe <code>~/.manta/</code>.</li>
-      <li><b>Delete your data.</b> Uninstalling the desktop or phone app removes its local config. Wiping <code>~/.manta/</code> on the box removes identity + work. Asking us to forget a box drops the relay row + cascades.</li>
+      <li><b>Run the server yourself.</b> Every user runs their own server on their own hardware. Chat, terminal, and file traffic never crosses our infrastructure — only native APNs pushes do, and only because Apple's key model makes that structurally necessary.</li>
+      <li><b>Use the push gateway.</b> When the iOS / Android apps are open in the background, native pushes fan out through <code>gateway.mantaui.com</code>. Web Push (VAPID, for the PWA) stays box-local and does NOT touch the gateway.</li>
+      <li><b>Delete your data.</b> Uninstalling the desktop or phone app removes its local config. Wiping <code>~/.manta/</code> on the box removes identity + work. Asking us to forget a box drops the gateway row.</li>
     </ul>
 
     <hr>

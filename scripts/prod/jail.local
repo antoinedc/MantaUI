@@ -6,9 +6,9 @@
 #   systemctl enable --now fail2ban
 #   fail2ban-client status sshd
 #
-# SSH only on purpose. Do NOT add an HTTP jail — Caddy/relay have their own
-# rate limits (src/relay/api.mjs PHONE_RL, PAIR_RL) and a naive HTTP jail
-# would ban legitimate NATed users behind a shared egress.
+# SSH only on purpose. Do NOT add an HTTP jail — Caddy/the box server have
+# their own rate limits and a naive HTTP jail would ban legitimate NATed
+# users behind a shared egress.
 
 [DEFAULT]
 # Honour the distributor's defaults (sshd already ships in jail.conf); this

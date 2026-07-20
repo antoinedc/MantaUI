@@ -1934,11 +1934,12 @@ live URL / TestFlight against `main`, then push the right tag.
 | `ios-v*` | iOS app → TestFlight | Codemagic `mac_mini_m2` | build + sign + notarize `.ipa` → TestFlight | `codemagic.yaml` `ios-testflight` |
 | `mac-v*` | macOS desktop → DMG | Codemagic `mac_mini_m2` | build + Developer ID sign → DMG → publish to `mantaui.com` | `codemagic.yaml` `mac-desktop` |
 | `web-v*` | marketing site + install assets | self-hosted (`bui-dev-runner`, this box) | scp `website/` + `install.sh` + `llms-install.md` → prod webroot, verify | `.github/workflows/website-deploy.yml` |
-| `relay-v*` | relay service | self-hosted (`bui-dev-runner`, this box) | `git pull /opt/manta` + restart `manta-relay`, health-check | `.github/workflows/relay-deploy.yml` |
+| `relay-v*` | ~~relay service~~ (deprecated 2026-07; replaced by direct mode) | n/a | n/a | `.github/workflows/relay-deploy.yml` (deleted in BET-204) |
+| `gateway-v*` | push gateway service (APNs + DNS automation) | self-hosted (`bui-dev-runner`, this box) | `git pull /opt/manta` + restart `manta-gateway`, health-poll `/healthz` | `.github/workflows/gateway-deploy.yml` |
 
 Tag-pattern filtering means only the matching workflow runs — an `ios-v*` tag
-never triggers a mac/web/relay deploy and vice-versa. All targets live in the
-ONE monorepo; the tag prefix is what routes.
+never triggers a mac/web/gateway deploy and vice-versa. All targets live in
+the ONE monorepo; the tag prefix is what routes.
 
 **How to cut a release (all targets):**
 ```
@@ -1953,13 +1954,14 @@ git tag mac-v0.0.2 && git push origin mac-v0.0.2
 # Website / install.sh / llms-install.md:
 git tag web-v2 && git push origin web-v2
 
-# Relay (drops live phone WS briefly — only when relay code changed):
-git tag relay-v2 && git push origin relay-v2
+# Push gateway (only when the gateway service code changed — APNs, DNS, store):
+git tag gateway-v2 && git push origin gateway-v2
 ```
-`web-v1` / `relay-v1` are already used (bring-up tests) — real releases bump the
-number. Codemagic builds can ALSO be triggered by API without a tag (see the iOS
-section's "Triggering a release" for the `curl` + `CODEMAGIC_API_KEY` recipe) —
-useful for re-running a build without a version bump.
+`web-v1` / `relay-v1` are already used (bring-up tests for the now-deprecated
+relay) — real releases bump the number. Codemagic builds can ALSO be triggered
+by API without a tag (see the iOS section's "Triggering a release" for the
+`curl` + `CODEMAGIC_API_KEY` recipe) — useful for re-running a build without a
+version bump.
 
 ### iOS (`ios-v*`) — Codemagic
 
@@ -2030,37 +2032,45 @@ key at `~/.manta-deploy/prod_key` — public half is in the prod box's
 anyway). Verified assets: `/` (index), `privacy.html`, `terms.html`,
 `install.sh`, `llms-install.md`.
 
-### Relay (`relay-v*`) — self-hosted, pull + restart + health-check
+### Push gateway (`gateway-v*`) — self-hosted, pull + restart + health-check
 
-`.github/workflows/relay-deploy.yml`. The relay runs
-`node /opt/manta/src/relay/server.mjs` as systemd `manta-relay` on the prod box
-(`/opt/manta` is a clone tracking `origin/main`). Deploy = `git -C /opt/manta
-reset --hard origin/main` + `systemctl restart manta-relay`, then health-poll
-`POST relay.mantaui.com/pair` with a dummy body: ANY HTTP response (it returns a
-fast `503 box_offline` for an unknown box) means "up"; a connection failure
-(`000`) after ~30s of retries FAILS the workflow. **Kept SEPARATE from `web-v*`
-on purpose:** restarting the relay drops live phone WebSocket connections
-(they reconnect), so a static website copy must never bounce it — only tag
-`relay-v*` when relay code the service runs actually changed. Same self-hosted
-runner + `~/.manta-deploy/prod_key`.
+`.github/workflows/gateway-deploy.yml`. The gateway runs
+`node /opt/manta/src/gateway/index.mjs` as systemd `manta-gateway` on the prod
+box (`/opt/manta` is a clone tracking `origin/main`). Deploy = `git -C
+/opt/manta reset --hard origin/main` + `systemctl restart manta-gateway`, then
+health-poll `GET gateway.mantaui.com/healthz`: any 200 means "up"; a connection
+failure after ~30s of retries FAILS the workflow. **Kept SEPARATE from `web-v*`
+on purpose:** restarting the gateway only interrupts in-flight APNs deliveries
+(brief — APNs retries for the window), so a static website copy must never
+bounce it — only tag `gateway-v*` when gateway code the service runs actually
+changed. Same self-hosted runner + `~/.manta-deploy/prod_key`.
+
+The gateway is the ONLY thing the operated backend still does post-BET-198
+("drop the relay"): phones connect directly to `https://<box_id>.boxes.mantaui.com`
+(Caddy on the box reverse-proxies 127.0.0.1:8787), and the box fans out
+APNs via `POST gateway.mantaui.com/push` with a `gateway_token` it got back
+from `POST /register` at install time. Web Push (VAPID, for the PWA) stays
+box-local and unchanged — it doesn't touch the gateway.
 
 ### Prod box topology (why deploys are shaped this way)
 
 - **Prod box** `root@91.107.196.2` (Hetzner "manta"), zone `mantaui.com`.
-- **`/opt/manta`** = git clone tracking `origin/main`. The RELAY runs from here.
-  A `git pull` here updates relay code (needs a service restart to take effect)
-  but does NOT update the served website.
+- **`/opt/manta`** = git clone tracking `origin/main`. The GATEWAY runs from
+  here. A `git pull` here updates gateway code (needs a service restart to take
+  effect) but does NOT update the served website.
 - **`/var/www/mantaui`** = Caddy WEBROOT, served statically per-request. Only
   files explicitly copied here go live: `index.html`/`privacy.html`/`terms.html`
   (from `website/`), `install.sh` (from `scripts/`), `llms-install.md`,
   `Manta-latest.dmg` + `latest-mac.yml` (desktop), `releases/*` (tarballs).
 - **Caddyfile is NOT in the repo** — it lives only on the box (`/etc/caddy/`),
-  unversioned. `*.pages.mantaui.com` (serve-page) and `relay.mantaui.com` have
+  unversioned. `*.pages.mantaui.com` (serve-page), `gateway.mantaui.com`
+  (gateway), and one `<box_id>.boxes.mantaui.com` per registered box have
   their own Caddy blocks there.
-- **`scripts/release/publish.sh`** is the OLDER manual all-in-one deploy (tarball
-  + desktop + relay + install.sh, run from a laptop over `MANTA_PROD_HOST`). The
-  tag-driven workflows above supersede it for site/relay/desktop; publish.sh is
-  still the path for the self-contained Linux tarball release (`v<version>` tag).
+- **`scripts/release/publish.sh`** is the OLDER manual all-in-one deploy
+  (tarball + desktop + server + install.sh, run from a laptop over
+  `MANTA_PROD_HOST`). The tag-driven workflows above supersede it for
+  site/gateway/desktop; publish.sh is still the path for the self-contained
+  Linux tarball release (`v<version>` tag).
 
 ### Verifying a deploy actually landed
 
@@ -2069,9 +2079,7 @@ check the live artifact:
 ```
 curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/llms-install.md   # web
 curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/downloads/Manta-latest.dmg  # desktop
-curl -s -X POST -H 'content-type: application/json' \
-  -d '{"box_id":"00000000000000000000000000000000","code":"000000"}' \
-  https://relay.mantaui.com/pair    # relay → fast {"error":"box_offline"} 503 = healthy
+curl -fsS https://gateway.mantaui.com/healthz    # gateway → {"ok":true}
 node /tmp/opencode/asc.mjs   # (on the box) — ASC build state for iOS (VALID = really uploaded)
 ```
 For byte-parity, `sha256sum` the live file vs the repo copy (the web workflow

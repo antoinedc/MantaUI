@@ -25,18 +25,24 @@ the pairing code, and get to work.
 
 ```
  Desktop app (Electron)         Phone (PWA / app)
-        │                              │
-        └──────────── HTTPS ───────────┘
-                       │
-        ┌──────────────┴────────────────┐
-        │ direct: https://<your-host>   │   ← you bring ingress (tunnel/VPN)
-        │ relay:  relay.mantaui.com     │   ← zero inbound setup (box dials out)
-        └──────────────┬────────────────┘
-                       │
-               YOUR LINUX BOX
+         │                              │
+         └──────────── HTTPS ───────────┘
+                        │
+         ┌──────────────┴────────────────┐
+         │ https://<box_id>.boxes.mantaui.com   │   ← the box serves its
+         │ (Caddy fronts the box's loopback     │      own public hostname
+         │  127.0.0.1:8787, no relay)           │      via DNS + LE cert
+         └──────────────┬────────────────┘
+                        │
+                YOUR LINUX BOX
       manta-server (:8787, loopback)  ── owns tmux, files, config,
         ├── tmux ── your sessions        schedules, secrets, webhooks, push
         └── opencode-serve (:4096) ───── chat mode + AI tools
+                       │
+                       └── HTTPS POST ──▶ gateway.mantaui.com
+                                              (hosted push gateway —
+                                               signs Apple JWT and
+                                               delivers APNs)
 ```
 
 - **The server IS the box.** Everything — sessions, transcripts, uploads,
@@ -50,18 +56,19 @@ the pairing code, and get to work.
 - **Two window types** per tmux window: a raw **terminal** (xterm.js attached
   over a WebSocket PTY) or a **chat panel** (opencode session; recognized by
   the `@manta-session-id` tmux user-option). They coexist freely.
-- **Connectivity**: the **relay** (`relay.mantaui.com`) is the default: the box
-  dials OUT a WebSocket tunnel, devices connect to
-  `relay.mantaui.com/box/<box_id>`, and no inbound networking is needed on
-  the box at all. Usage metering and the subscription gate live at the
-  relay. (Self-hosting without the relay still works — point a phone at any
-  HTTPS ingress you bring, e.g. cloudflared, Tailscale, reverse proxy —
-  but the desktop pairing UI ships the relay path first.)
+- **Connectivity**: direct HTTPS is the only mode. The installer writes
+  `<box_id>.boxes.mantaui.com` into the DNS zone, provisions a Let's
+  Encrypt cert through Caddy on the box, and registers the box with the
+  hosted push gateway (`gateway.mantaui.com`) — which is the ONLY thing
+  still operated by us (APNs structurally needs our Apple key, which
+  cannot live on customer boxes). Native APNs delivery goes
+  box → gateway → APNs. Web Push (VAPID, for the PWA) stays box-local.
 
 ## Quick start (human version)
 
 **On your Linux box** (needs `tmux`; chat mode also needs a working claude
-login):
+login; needs outbound HTTPS to `gateway.mantaui.com:443` and inbound TCP
+80+443 for the installer's Caddy + Let's Encrypt):
 
 ```bash
 curl -fsSL https://mantaui.com/install.sh | bash
@@ -73,19 +80,20 @@ Prints a pairing code. Re-running upgrades in place and preserves identity.
 (or run from source: `npm install && npm run dev`), enter the pairing code in
 onboarding, pick providers, create your first project (a tmux session).
 
-**On your phone**: open your box's URL (or the relay), add to home screen,
-pair with a fresh code. Web Push notifications for permissions/questions/
-errors/done work from the PWA.
+**On your phone**: open `https://<box_id>.boxes.mantaui.com`, add to home
+screen, pair with a fresh code. Native push (APNs) lands via the gateway for
+permissions/questions/errors/done.
 
 ## Components & where they run
 
 | Component | Where | What |
 |---|---|---|
-| `manta-server` (`src/server/`) | your box, `127.0.0.1:8787`, systemd --user | THE server: tmux CRUD, PTY WS, opencode proxy, config, schedules, secrets, webhooks, serve-page, Web Push, auth |
+| `manta-server` (`src/server/`) | your box, `127.0.0.1:8787`, systemd --user | THE server: tmux CRUD, PTY WS, opencode proxy, config, schedules, secrets, webhooks, serve-page, Web Push, APNs fanout via gateway, auth |
 | `opencode-serve` | your box, `127.0.0.1:4096`, systemd --user | chat-mode backend (opencode + claude auth plugin) |
+| Caddy | your box, systemd | TLS termination + reverse proxy on `<box_id>.boxes.mantaui.com` → 127.0.0.1:8787 |
 | desktop app (`src/main`, `src/preload`, `src/renderer`) | your Mac | thin client + OS bridges; pairing flow |
 | mobile client (`mobile/www`, built from `src/renderer`) | served by manta-server | PWA / Capacitor wrapper (same React code as desktop) |
-| relay (`src/relay/`) | our infra, `relay.mantaui.com` | box WS dial-out + device HTTP proxy + metering + subscription gate |
+| `manta-gateway` (`src/gateway/`) | our infra, `gateway.mantaui.com` | hosted push fanout (APNs JWT + send) + DNS automation for `<box_id>.boxes.mantaui.com` |
 | marketing + releases (`website/`, `scripts/install.sh`) | our infra, `mantaui.com` | static site, `install.sh`, release tarballs, desktop binaries |
 
 ### State on the box
@@ -105,7 +113,7 @@ errors/done work from the PWA.
 | 8787 | manta-server (HTTP + WS + SSE) |
 | 4096 | opencode-serve |
 | 20080 | serve-page file server (behind `*.pages.<domain>` vhost) |
-| 20787 | relay (on the relay host only) |
+| 20081 | (gateway only — not on customer boxes) |
 
 ## Installer reference
 
@@ -119,8 +127,10 @@ seam entirely.)
 
 What the installer does: fetch a key=value manifest over HTTPS → read
 `file_linux_x64` + `sha256_linux_x64` from it → download the tarball →
-sha256-verify → extract → atomic swap into `~/manta` → write systemd units
-pointing at the vendored node → start → print a pairing code.
+sha256-verify → extract → atomic swap into `~/manta` → install + configure
+Caddy → register the box with the push gateway → write systemd units
+pointing at the vendored node → start → poll DNS until
+`<box_id>.boxes.mantaui.com` resolves → print a pairing code.
 
 Overrides (env):
 
@@ -131,6 +141,7 @@ Overrides (env):
 | `MANTA_HOME` | `~/manta` | where the code is unpacked |
 | `MANTA_VERSION` | `latest` | manifest version to fetch (e.g. `0.0.1`) |
 | `MANTA_MOBILE_PORT` | `8787` | server port |
+| `MANTA_GATEWAY_BASE` | `https://gateway.mantaui.com` | push gateway base (override ONLY for tests / dev boxes) |
 
 Manage: `systemctl --user {status,restart} manta-server`, logs
 `journalctl --user -u manta-server -f`. Fresh pairing code: `npm run pair`
@@ -166,14 +177,14 @@ Run from source:
 ```bash
 npm install
 npm run typecheck
-npm test              # vitest (renderer) + node:test (server/relay/scripts)
+npm test              # vitest (renderer) + node:test (server/gateway/scripts)
 npm run dev           # main-process/preload changes need full restart, not HMR
 ```
 
-Onboarding accepts a relay pair link (`manta://pair?box=<box_id>&code=<code>`)
-or a direct box URL + code. The relay path is the default — the desktop
-app pastes the link from `scripts/install.sh` output and routes through
-`relay.mantaui.com`.
+Onboarding accepts a pair link (`manta://pair?box=<box_id>&code=<code>`)
+or the box's direct URL + code. The desktop app pastes the link from
+`scripts/install.sh` output and resolves it to
+`https://<box_id>.boxes.mantaui.com`.
 
 ## Keybindings
 
@@ -212,32 +223,35 @@ In order. No decisions, no extra steps:
    `dist/desktop/*.dmg` and the `latest-*.yml` updater feeds. Linux
    builds run on any host.
 4. `bash scripts/release/publish.sh` — uploads the tarball + desktop
-   artifacts, deploys the relay, HEAD-checks every URL, tags
-   `v<version>`. Idempotent: re-publishing the same version is a safe
+   artifacts, restarts `manta-server` on prod, HEAD-checks every URL,
+   tags `v<version>`. Idempotent: re-publishing the same version is a safe
    no-op. Override the target with `MANTA_PROD_HOST=...` for staging.
 
 Done.
 
 **Rollback:** point `manta-latest.tar.gz` at the previous tarball on the
-prod box and roll the relay back:
+prod box and restart the server:
 
 ```
 ssh $MANTA_PROD_HOST 'cd /var/www/mantaui/releases \\
     && cp -f manta-<prev-version>.tar.gz manta-latest.tar.gz \\
     && git -C /opt/manta checkout v<prev-version> \\
-    && systemctl restart manta-relay'
+    && systemctl restart manta-server'
 ```
 
 ## Production infra (ours)
 
 - **mantaui.com** (Hetzner "manta" box): Caddy → static site + `/install.sh`
-  + `/releases/*`; `manta-relay` systemd service behind
-  `relay.mantaui.com` (loopback 20787). Deploy = `git -C /opt/manta pull` +
-  `systemctl restart manta-relay`; static files re-read per request.
+  + `/releases/*`. Deploy = scp static files into `/var/www/mantaui/`.
+- **gateway.mantaui.com** (same Hetzner box, separate Caddy vhost →
+  loopback `:20081`): the hosted push gateway. `systemd manta-gateway`.
+  Deploy = `git -C /opt/manta pull` + `systemctl restart manta-gateway`;
+  static files re-read per request.
 - **app.mantaui.com**: the maintainer box's own tunnel (each user brings
-  their own host or uses the relay).
-- DNS on Cloudflare (apex/www/relay DNS-only → Caddy does TLS; wildcard
-  `*.pages.<domain>` via DNS-01).
+  their own host).
+- DNS on Cloudflare (apex/www/gateway DNS-only → Caddy does TLS; per-box
+  `<box_id>.boxes.mantaui.com` A records managed by the gateway via OVH's
+  API; wildcard `*.pages.<domain>` via DNS-01).
 
 ### Prod box ops
 
@@ -246,24 +260,13 @@ rebuildable from git. None of these touch application code; the install
 steps in each file's header are human-only (agent Hard Rule #4 forbids
 `ssh root@...`).
 
-- **Backups** (`scripts/prod/backup-relay.sh`, cron `manta-backup` at
-  03:17 UTC): the relay SQLite store is captured with `sqlite3 .backup`
-  (online, no torn writes) and the whole `~/.manta/` dir is tarballed
-  alongside; both ship to `dev@157.90.224.92:~/backups/manta-prod/` via
-  `scp`, with 7-day retention on both ends.
-- **Restore** (one-off, on a fresh box): `scp` the most recent
-  `relay-YYYY-MM-DD.{sqlite,tar.gz}` pair from `~/backups/manta-prod/`,
-  then `sqlite3 ~/.manta/relay.sqlite ".restore" <sqlite-file>` and untar
-  the tarball over `~/.manta/`. Verify with
-  `sqlite3 ~/.manta/relay.sqlite ".tables"`.
 - **Monitoring** (`scripts/prod/healthcheck.mjs`, scheduled every 10 min
   on the dev box via `schedule_create`): off-site probes of `mantaui.com`,
-  `relay.mantaui.com` (expects 401 — the auth gate IS the healthy
-  answer), `app.mantaui.com`, `/install.sh`, `/releases/manta-latest.tar.gz`
-  (and the live `manta-latest.txt` manifest's `sha256_linux_x64` must match
-  the served tarball).
-  On failure the opencode turn calls `notify` urgent:true naming the
-  failing URL.
+  `gateway.mantaui.com/healthz` (200 = healthy), `app.mantaui.com`,
+  `/install.sh`, `/releases/manta-latest.tar.gz` (and the live
+  `manta-latest.txt` manifest's `sha256_linux_x64` must match the served
+  tarball). On failure the opencode turn calls `notify` urgent:true naming
+  the failing URL.
 - **Log caps** (`scripts/prod/systemd-journald.conf`,
   `scripts/prod/caddy-logrotate`): journald capped at 500M; Caddy access
   logs (only if they exist on the box — check first) rotated daily with
@@ -271,15 +274,11 @@ steps in each file's header are human-only (agent Hard Rule #4 forbids
 - **Patches** (`scripts/prod/50unattended-upgrades`): security origin
   only; updates left to a human reboot window.
 - **Brute-force** (`scripts/prod/jail.local`): sshd jail only — no HTTP
-  jail (Caddy/relay have their own rate limits).
+  jail (Caddy/the box server have their own rate limits).
 
 ## Known gaps
 
 - macOS-first; Linux/Windows desktop builds untested.
-- The iOS / Android native apps are not yet in the App Store / Play Store
-  — the PWA is the only phone client shipping today. Native apps + operated
-  APNs / FCM land when the subscription ships (BET-166 publishes the
-  binaries; the subscription itself is gated on app-store review).
 - `npm run dev` requires full restart for main-process/preload changes.
 
 ## Reporting issues

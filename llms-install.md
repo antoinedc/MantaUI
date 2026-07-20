@@ -22,23 +22,12 @@ it with the right knobs, verifying, and reporting.
 
 ## Step 1 — interview (ask BEFORE running anything)
 
-Ask the user exactly these two questions:
+Ask the user exactly this question:
 
 1. **"Am I running on the Linux box you want to install Manta on, or should I
    install on a remote box over SSH?"** If remote: ask for `user@host` (and
    key/port if needed), then run every command below through
    `ssh user@host '…'`. Verify SSH works with `ssh user@host 'echo ok'` first.
-2. **"How should your devices reach this box?**
-   - **Relay (default, recommended):** zero network setup. The box dials out
-     to relay.mantaui.com; your desktop and phone connect through it.
-   - **Self-hosted / direct:** no Manta infrastructure in the path. You bring
-     your own HTTPS ingress (Cloudflare tunnel, Tailscale, reverse proxy)
-     pointing at the box; devices connect straight to your URL."**
-
-If the user picks self-hosted, also ask what ingress they already have. You
-may help them set one up afterwards if they ask, but it is not part of this
-install: the minimum requirement is an HTTPS URL that reverse-proxies to
-`127.0.0.1:8787` on the box.
 
 Do NOT ask about chat mode (always installed), model providers, or projects —
 the desktop app's onboarding handles those.
@@ -54,6 +43,11 @@ Run on the target box:
   missing one, give the user the exact command for their distro
   (`sudo apt-get install -y tmux git` / `sudo dnf install -y tmux git`;
   `sha256sum` is in coreutils) and wait for them to run or approve it.
+- The installer installs Caddy (apt repo) if absent, then registers the box
+  with the hosted push gateway (`https://gateway.mantaui.com`) so the public
+  hostname `<box_id>.boxes.mantaui.com` resolves and serves HTTPS. The box
+  needs outbound HTTPS to the gateway AND inbound TCP 80/443 (Let's Encrypt
+  HTTP-01). Tell the user to open these ports if a firewall blocks them.
 - `test -f ~/.claude/.credentials.json && echo present || echo missing` —
   chat mode reuses the box's claude login. If missing, tell the user: chat
   will 401 until they run `claude` once on this box and log in. Offer to
@@ -63,31 +57,29 @@ Run on the target box:
 
 ## Step 3 — install
 
-Relay mode (default):
-
     curl -fsSL https://mantaui.com/install.sh | bash
-
-Self-hosted / direct mode:
-
-    curl -fsSL https://mantaui.com/install.sh | MANTA_RELAY=off bash
 
 Watch the output. The installer is idempotent and prints its own diagnostics.
 It downloads a self-contained release (app + Node runtime), verifies its
-checksum, installs to `~/manta`, sets up `manta-server` and `opencode-serve`
+checksum, installs to `~/manta`, installs + configures Caddy, registers the
+box with the push gateway, sets up `manta-server` and `opencode-serve`
 systemd --user units, enables linger, and ends by printing a 6-digit pairing
-code, the box id, and (relay mode) a `manta://pair` link. Capture all of
-those for your final report.
+code, the box id, and a `manta://pair` link. Capture all of those for your
+final report.
 
 ## Step 4 — verify
 
 - `systemctl --user is-active manta-server` → `active`
 - `systemctl --user is-active opencode-serve` → `active`
+- `systemctl is-active caddy` → `active`
 - `curl -s http://127.0.0.1:8787/auth/status` → responds (any JSON)
-- Relay mode only: `curl -s http://127.0.0.1:8787/relay/status` → should show
-  connected. If not: `journalctl --user -u manta-server -n 50` and report the
-  error lines to the user.
-- Direct mode only: confirm with the user their ingress URL responds:
-  `curl -sI https://<their-url>/auth/status` from anywhere.
+- `curl -fsS https://<box_id>.boxes.mantaui.com/auth/status` → responds
+  (any JSON — proves Caddy TLS + the gateway registration both landed)
+- If the public hostname doesn't resolve: `dig +short <box_id>.boxes.mantaui.com`
+  should return the box's public IP within ~5 minutes. If it doesn't, the
+  gateway registration failed — check
+  `journalctl --user -u manta-server -n 50` for the `[push] gateway send failed`
+  / `register` lines.
 
 Pairing codes are one-time with a ~5 minute TTL. If the printed code expires
 before the user enters it, mint a fresh one:
@@ -106,9 +98,12 @@ before the user enters it, mint a fresh one:
   SSH'd in without a session bus; run
   `export XDG_RUNTIME_DIR=/run/user/$(id -u)` and retry, and make sure
   `loginctl enable-linger $USER` succeeded (may need sudo).
-- **Relay shows degraded** → box has no outbound access to
-  relay.mantaui.com:443; check firewall/proxy, then
-  `systemctl --user restart manta-server`.
+- **`<box_id>.boxes.mantaui.com` never resolves** → box could not reach the
+  gateway at registration time (firewall, captive portal, DNS). Re-run the
+  installer once the user fixes outbound HTTPS to `gateway.mantaui.com:443`.
+- **Caddy reload fails on a non-standard port 80/443 binding** → another
+  service (Apache, nginx, Traefik) is already bound. Stop it, or edit the
+  Caddy vhost on the box to a non-standard port + your own reverse proxy.
 - **Chat 401s** → `~/.claude/.credentials.json` missing (see preflight); after
   the user logs in, `systemctl --user restart opencode-serve`.
 - Anything else: re-run the installer first (idempotent), then read the
@@ -120,10 +115,9 @@ Tell the user, in this order:
 
 1. The **pairing code** (and that it expires in ~5 minutes — you can mint a
    fresh one any time) and the **box id**.
-2. Relay mode: paste the `manta://pair` link into the desktop app, or enter
-   the code. Phone: install the app / open the relay URL and pair the same way.
-   Direct mode: on the desktop enter `https://<their-url>` + the code; on the
-   phone open `https://<their-url>`, add to home screen, pair with a fresh code.
+2. Devices connect directly to `https://<box_id>.boxes.mantaui.com` —
+   desktop: paste the `manta://pair` link or enter the code; phone: install
+   the app / open the URL and pair the same way.
 3. Everything else (providers, first project) happens in the desktop app's
    onboarding.
 4. If claude login was missing: remind them to run `claude` on the box, then

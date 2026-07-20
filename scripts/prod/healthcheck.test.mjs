@@ -26,22 +26,22 @@ test("DEFAULT_TARGETS covers every surface in the issue body", () => {
   const urls = DEFAULT_TARGETS.map((t) => t.url);
   for (const required of [
     "https://mantaui.com",
-    "https://relay.mantaui.com",
+    "https://gateway.mantaui.com",
     "https://app.mantaui.com",
     "https://mantaui.com/install.sh",
     "https://mantaui.com/releases/manta-latest.tar.gz",
   ]) {
     assert.ok(urls.includes(required), `default targets missing ${required}`);
   }
-  // relay.mantaui.com specifically expects 401 — that IS the auth gate being healthy.
-  const relay = DEFAULT_TARGETS.find((t) => t.url === "https://relay.mantaui.com");
-  assert.equal(relay.expect.status, 401, "relay.mantaui.com must expect 401");
+  // gateway.mantaui.com must expect 200 — that IS the healthz route being healthy.
+  const gateway = DEFAULT_TARGETS.find((t) => t.url === "https://gateway.mantaui.com");
+  assert.equal(gateway.expect.status, 200, "gateway.mantaui.com must expect 200");
 });
 
 test("runHealthcheck returns ok:true when every target matches", async () => {
   const fetchFn = fakeFetch({
     "https://mantaui.com": () => makeRes({ status: 200 }),
-    "https://relay.mantaui.com": () => makeRes({ status: 401 }),
+    "https://gateway.mantaui.com": () => makeRes({ status: 200 }),
     "https://app.mantaui.com": () => makeRes({ status: 200 }),
     "https://mantaui.com/install.sh": () => makeRes({ status: 200, body: "#!/usr/bin/env bash\n" }),
     "https://mantaui.com/releases/manta-latest.tar.gz": () => makeRes({ status: 200 }),
@@ -54,7 +54,7 @@ test("runHealthcheck returns ok:true when every target matches", async () => {
 test("runHealthcheck flags a status mismatch", async () => {
   const fetchFn = fakeFetch({
     "https://mantaui.com": () => makeRes({ status: 500 }),
-    "https://relay.mantaui.com": () => makeRes({ status: 401 }),
+    "https://gateway.mantaui.com": () => makeRes({ status: 200 }),
     "https://app.mantaui.com": () => makeRes({ status: 200 }),
     "https://mantaui.com/install.sh": () => makeRes({ status: 200, body: "#!/usr/bin/env bash\n" }),
     "https://mantaui.com/releases/manta-latest.tar.gz": () => makeRes({ status: 200 }),
@@ -69,7 +69,7 @@ test("runHealthcheck flags a status mismatch", async () => {
 test("runHealthcheck flags a body-prefix mismatch (e.g. Caddy serves the homepage for a missing asset)", async () => {
   const fetchFn = fakeFetch({
     "https://mantaui.com": () => makeRes({ status: 200 }),
-    "https://relay.mantaui.com": () => makeRes({ status: 401 }),
+    "https://gateway.mantaui.com": () => makeRes({ status: 200 }),
     "https://app.mantaui.com": () => makeRes({ status: 200 }),
     "https://mantaui.com/install.sh": () => makeRes({ status: 200, body: "<!doctype html>\n<html>..." }),
     "https://mantaui.com/releases/manta-latest.tar.gz": () => makeRes({ status: 200 }),
@@ -83,14 +83,14 @@ test("runHealthcheck flags a body-prefix mismatch (e.g. Caddy serves the homepag
 test("runHealthcheck flags a fetch error (DNS / network)", async () => {
   const fetchFn = fakeFetch({
     "https://mantaui.com": () => makeRes({ status: 200 }),
-    "https://relay.mantaui.com": async () => { throw new Error("ENOTFOUND"); },
+    "https://gateway.mantaui.com": async () => { throw new Error("ENOTFOUND"); },
     "https://app.mantaui.com": () => makeRes({ status: 200 }),
     "https://mantaui.com/install.sh": () => makeRes({ status: 200, body: "#!/usr/bin/env bash\n" }),
     "https://mantaui.com/releases/manta-latest.tar.gz": () => makeRes({ status: 200 }),
   });
   const result = await runHealthcheck({ fetchFn, log: () => {} });
   assert.equal(result.ok, false);
-  assert.equal(result.failures[0].url, "https://relay.mantaui.com");
+  assert.equal(result.failures[0].url, "https://gateway.mantaui.com");
   assert.match(result.failures[0].reason, /fetch error: ENOTFOUND/);
 });
 
