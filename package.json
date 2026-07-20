@@ -16,8 +16,8 @@
     "pair": "node scripts/manta-pair.mjs",
     "pack": "node scripts/release/pack.mjs",
     "pack:desktop": "electron-vite build && electron-builder --config electron-builder.yml",
-    "test": "vitest run && node --test src/server/*.test.mjs src/relay/*.test.mjs src/relay/agent/*.test.mjs scripts/*.test.mjs",
-    "test:server": "node --test src/server/*.test.mjs src/relay/*.test.mjs src/relay/agent/*.test.mjs",
+    "test": "vitest run && node --test src/server/*.test.mjs src/relay/*.test.mjs src/relay/agent/*.test.mjs src/gateway/*.test.mjs scripts/*.test.mjs",
+    "test:server": "node --test src/server/*.test.mjs src/relay/*.test.mjs src/relay/agent/*.test.mjs src/gateway/*.test.mjs",
     "test:watch": "vitest",
     "build:mobile": "vite build --config electron.vite.config.mobile.ts"
   },
