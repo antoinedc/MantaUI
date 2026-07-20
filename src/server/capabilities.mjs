@@ -288,14 +288,14 @@ export async function completeJob(
 
 /**
  * Pure: the text injected into the originating opencode session when a job
- * finishes. Tells the AI what happened and points it at ios_build_status (the
+ * finishes. Tells the AI what happened and points it at plugin_status (the
  * example) to inspect the log without busy-polling. Exported so tests can pin
  * the wording — the AI relies on this format to act on completions.
  */
 export function completionText(job) {
   const base = `[MantaUI capability job] ${job.capability} job ${job.id} finished with status "${job.status}".`;
   const errSuffix = job.status === "failed" && job.error ? ` Error: ${job.error}.` : "";
-  const tail = ` Check the job's status tool (e.g. ios_build_status("${job.id}")) for the log tail, then report the outcome to the user.`;
+  const tail = ` Check the job's status tool (e.g. plugin_status("${job.id}")) for the log tail, then report the outcome to the user.`;
   return base + errSuffix + tail;
 }
 

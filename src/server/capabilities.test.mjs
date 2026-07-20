@@ -563,18 +563,18 @@ test("sweep no-change pass does not save", async () => {
 // ----------------------------------------------------------------------------
 
 test("completionText for a done job", () => {
-  const j = { id: "abc12345", capability: "ios.build", status: "done" };
+  const j = { id: "abc12345", capability: "ios-myapp", status: "done" };
   const txt = completionText(j);
-  assert.match(txt, /^\[MantaUI capability job\] ios\.build job abc12345 finished with status "done"\./);
-  assert.match(txt, /ios_build_status\("abc12345"\)/);
+  assert.match(txt, /^\[MantaUI capability job\] ios-myapp job abc12345 finished with status "done"\./);
+  assert.match(txt, /plugin_status\("abc12345"\)/);
   // No "Error:" suffix on success.
   assert.equal(txt.includes("Error:"), false);
 });
 
 test("completionText for a failed job includes the error", () => {
-  const j = { id: "abc12345", capability: "ios.build", status: "failed", error: "exit 1" };
+  const j = { id: "abc12345", capability: "ios-myapp", status: "failed", error: "exit 1" };
   const txt = completionText(j);
   assert.match(txt, /status "failed"\./);
   assert.match(txt, /Error: exit 1\./);
-  assert.match(txt, /ios_build_status\("abc12345"\)/);
+  assert.match(txt, /plugin_status\("abc12345"\)/);
 });
