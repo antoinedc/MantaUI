@@ -74,9 +74,9 @@ describe("resolveAxiomConfig", () => {
     expect(r?.token).toBe("envtok");
     expect(r?.endpoint).toBe("https://api.axiom.co/v1/datasets/envds/ingest");
   });
-  it("dataset defaults to 'bui'", () => {
+  it("dataset defaults to 'manta'", () => {
     const r = resolveAxiomConfig({ env: {}, config: { axiomToken: "x" } });
-    expect(r?.endpoint).toBe("https://api.axiom.co/v1/datasets/bui/ingest");
+    expect(r?.endpoint).toBe("https://api.axiom.co/v1/datasets/manta/ingest");
   });
 });
 

@@ -656,7 +656,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       Axiom dataset
                     </label>
                     <input
-                      placeholder="bui"
+                      placeholder="manta"
                       value={axiomDs}
                       onChange={(e) => setAxiomDs(e.target.value)}
                       spellCheck={false}

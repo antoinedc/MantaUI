@@ -1,5 +1,5 @@
 // logShip.mjs — shared log shipping module (mobile PWA, desktop renderer,
-// bui-server, relay). One implementation; all four runtimes wrap their
+// manta-server, relay). One implementation; all four runtimes wrap their
 // console once and let every existing `console.log/warn/error` call site
 // ship transparently — no per-call-site edits.
 //
@@ -29,7 +29,7 @@ const MAX_MSG_LEN = 4000;
 /**
  * Resolve the Axiom ingest endpoint + token. Env vars win over AppConfig
  * fields (env lets the relay — which has no `~/.manta` directory — be
- * configured without touching code). Dataset defaults to "bui" so a user
+ * configured without touching code). Dataset defaults to "manta" so a user
  * only needs to provide the token to start shipping.
  *
  * @param {object} args
@@ -40,7 +40,7 @@ const MAX_MSG_LEN = 4000;
 export function resolveAxiomConfig({ env, config }) {
   const token = env?.MANTA_AXIOM_TOKEN || config?.axiomToken;
   if (!token) return null;
-  const dataset = env?.MANTA_AXIOM_DATASET || config?.axiomDataset || "bui";
+  const dataset = env?.MANTA_AXIOM_DATASET || config?.axiomDataset || "manta";
   return {
     endpoint: `https://api.axiom.co/v1/datasets/${dataset}/ingest`,
     token,
@@ -232,7 +232,7 @@ export function createLogShipper({
 /**
  * Wrap `console.log`, `console.warn`, `console.error` so each call also
  * gets pushed into the shipper. Other console methods (`info`, `debug`,
- * `table`, etc.) are untouched — they aren't used by bui's existing call
+ * `table`, etc.) are untouched — they aren't used by manta's existing call
  * sites and wrapping them would risk surprising the host environment.
  *
  * Idempotent: if console.log already carries a `__logshipWrapped` marker
