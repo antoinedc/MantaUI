@@ -1,10 +1,11 @@
 // Capability job queue for the MantaUI server — the generic spine that lets any
 // MantaUI plugin register an AI-invokable capability and have a connected
-// device (the Mac, or the box itself) execute it. First plugin: `ios.build`
-// (compiled on the Mac to avoid burning Codemagic minutes), but the queue /
-// REST surface / SSE envelopes here speak the GENERIC `{capability, input,
-// host}` envelope — adding capability #2 is a new tool file + a new HANDLERS
-// entry, NOT a queue change. See docs/mantaui-plugins.md for the full design.
+// device (the Mac, or the box itself) execute it. Plugins are YAML manifests at
+// ~/.manta/plugins/<name>.yaml on the executor machine (BET-189 Plugins v2);
+// the queue / REST surface / SSE envelopes here speak the GENERIC
+// `{capability, input, host}` envelope and are byte-identical to v1, so adding a
+// capability is authoring a manifest — never a queue change. See
+// docs/mantaui-plugins.md (v3) for the full design.
 //
 // Shape mirrors src/server/schedule.mjs: dependency-injected
 // ({load, save, publish, notifySession}) pure-logic-with-injected-I/O, plus a
