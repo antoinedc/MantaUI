@@ -489,6 +489,15 @@ curl -fsSL https://mantaui.com/install.sh | bash
 
 # Live re-run after BET-173 — v2 self-contained installer live
 
+> **HISTORICAL record.** This section captures the state of
+> `scripts/install.sh` after BET-173 (the v2 installer). It is
+> **NOT** the current installer — BET-205 added a documented, scoped
+> sudo exception for the Caddy + gateway-registration step (the
+> next section, "SUDO EXCEPTION (BET-205) — recorded deviation from
+> the BET-173 no-sudo rule", describes it). The "sudo — none" claim
+> in this section is true **for v2**; BET-205 added the documented
+> exception on top.
+
 The BET-171 first re-run (in this same file, "Live re-run after
 BET-171 deploy — installer pulled to prod", archived on
 `agent/better-ui-dev/94897c07` @ `2f4b17e`) closed F1 (node bootstrap)
@@ -651,10 +660,11 @@ preserve `~/.manta/`).
   `require_cmd` *hint* strings, which are printed-only).
 - `NodeSource` repo / curl `https://deb.nodesource.com/setup_*.sh` —
   none.
-- `sudo` — none (everything runs as the `manta` user; `require_cmd`'s
+- `sudo` — none in v2 (everything ran as the `manta` user; `require_cmd`'s
   hint recommends `sudo apt-get install …` ONLY if a prereq is
   actually missing, which on a stock Ubuntu 24.04 cloud image it is
-  not).
+  not). **BET-205 added a documented sudo exception** for the Caddy
+  + gateway-registration step (see the next section).
 - `bootstrap_node` / `bootstrap_build_essential` (PR #127) — the
   BET-173 deletion swept them; the live install has 0 hits for
   `bootstrap_node`.
@@ -778,11 +788,13 @@ The BET-160 §2 acceptance criterion ("a stranger with a fresh VPS +
 the website can reach a working terminal+chat session without any
 manual help from us") is met for everything the agent can verify:
 the one-liner completes in **12 s** with zero package installs and
-zero sudo, both services are healthy, the relay tunnel is
+zero sudo in v2, both services are healthy, the relay tunnel is
 established, a fresh pairing code is printed, the REST surface
 works end-to-end, and a reboot brings everything back without
 re-pairing. The two human-required steps (4 + 5) are explicitly
-called out for the owner's sign-off.
+called out for the owner's sign-off. **NB:** "zero sudo" is the v2
+state; BET-205 added a documented, scoped sudo exception for the
+Caddy + gateway-registration step (see the next section).
 
 ## F1 / F2 / F3 / F4 closure (BET-172 fold-in confirmation)
 
