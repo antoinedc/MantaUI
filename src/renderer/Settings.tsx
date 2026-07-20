@@ -42,7 +42,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
     groqApiKey,
     voiceTranscriptionModel,
     voiceCommandModel,
-    pluginsEnabled,
     launcherFlags,
     axiomToken,
     axiomDataset,
@@ -75,7 +74,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // block on the Files tab). The toggle is OFF by default; toggling takes
   // effect on the next app launch (the executor gates itself at start
   // time — see src/main/capExecutor.ts).
-  const [pluginsOn, setPluginsOn] = useState(pluginsEnabled);
+  //
+  // BET-207: `pluginsEnabled` is a Mac-machine-local toggle. It is NOT
+  // mirrored through the store (the store mirrors the box config via
+  // configGet, and the toggle must persist to the Mac-local file the
+  // executor reads). Seed the toggle from the Mac-local value via the
+  // preload getter, and persist via the preload setter — never via
+  // configUpdate (which writes the box config).
+  const [pluginsOn, setPluginsOn] = useState(false);
   const [plugins, setPlugins] = useState<PluginRegistryRow[] | null>(null);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
 
@@ -113,11 +119,21 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setGroqKey(groqApiKey);
     setVoiceTrModel(voiceTranscriptionModel);
     setVoiceCmdModel(voiceCommandModel);
-    setPluginsOn(pluginsEnabled);
     setLauncherFlagValues(launcherFlags ?? {});
     setAxiomTok(axiomToken);
     setAxiomDs(axiomDataset);
-  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, pluginsEnabled, launcherFlags, axiomToken, axiomDataset]);
+  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, axiomToken, axiomDataset]);
+
+  // Seed the Mac-local `pluginsEnabled` toggle from the desktop's config
+  // (BET-207). The store mirrors the BOX config (via httpApi.configGet),
+  // so seeding from the store would show the wrong value after a reload.
+  // Read once on mount — the toggle only changes via Save in this same
+  // panel, so a live listener isn't needed.
+  useEffect(() => {
+    const preload = getBuiPreload();
+    if (!preload?.pluginsGetEnabled) return; // mobile/web has no preload
+    preload.pluginsGetEnabled().then(setPluginsOn).catch(() => {});
+  }, []);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -193,9 +209,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
         voiceCommandModel: voiceCmdModel.trim(),
         axiomToken: axiomTok.trim(),
         axiomDataset: axiomDs.trim(),
-        pluginsEnabled: pluginsOn,
         launcherFlags: launcherFlagValues,
       });
+      // BET-207: persist `pluginsEnabled` to the Mac-local config via the
+      // preload bridge — NOT via window.api.configUpdate (which writes the
+      // box config the executor never reads). No-op on mobile/web where
+      // the plugins tab is not rendered.
+      const preload = getBuiPreload();
+      if (preload?.pluginsSetEnabled) {
+        await preload.pluginsSetEnabled(pluginsOn);
+      }
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
       setSaving(false);

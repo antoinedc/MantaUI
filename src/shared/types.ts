@@ -534,6 +534,16 @@ export const IPC = {
   // (types → shared/api → httpApi → rpc.mjs → server/plugins.mjs).
   // → PluginRegistryRow[]
   pluginsRegistry: "plugins:registry",
+  // `pluginsEnabled` is a Mac-machine-local toggle (BET-207): it controls
+  // whether THIS Mac runs plugins, so it persists to the Mac-local config
+  // (read by capExecutor at start time) — NOT the box config that
+  // `configGet`/`configUpdate` round-trip through httpApi. Routed via the
+  // preload bridge (window.__buiPreload.pluginsSetEnabled / pluginsGetEnabled)
+  // exactly like configGet, which is also handled locally in main on
+  // HTTP mode so the renderer can read Mac-local state without an httpApi
+  // round-trip to the box.
+  pluginsSetEnabled: "plugins:set-enabled",  // (value: boolean) → void
+  pluginsGetEnabled: "plugins:get-enabled",  // () → boolean
 } as const;
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the

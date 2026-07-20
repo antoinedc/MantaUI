@@ -230,6 +230,18 @@ function registerHandlers(): void {
   // /rpc/config:get instead). See src/preload/index.ts and src/renderer/main.tsx.
   ipcMain.handle(IPC.configGet, () => config);
 
+  // BET-207: `pluginsEnabled` is a Mac-machine-local toggle (controls
+  // whether THIS Mac runs plugins). It MUST persist to the Mac-local
+  // config the executor reads — NOT the box config that httpApi's
+  // configUpdate writes. Handled here locally via commit() (same one-shot
+  // pattern as configGet) so it works regardless of whether window.api is
+  // the httpApi client. Renderer reaches these via the preload bridge,
+  // not window.api.
+  ipcMain.handle(IPC.pluginsGetEnabled, () => config.pluginsEnabled === true);
+  ipcMain.handle(IPC.pluginsSetEnabled, (_e, value: boolean) => {
+    commit({ pluginsEnabled: value === true });
+  });
+
   // Clipboard write via Electron main — bypasses renderer permission restrictions
   // that silently block navigator.clipboard.writeText for non-user-gesture writes.
   ipcMain.handle(IPC.clipboardWriteText, (_e, text: string) => {

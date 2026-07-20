@@ -69,6 +69,17 @@ const api = {
 
   revealInFolder: (localPath: string): Promise<void> =>
     ipcRenderer.invoke(IPC.revealInFolder, localPath),
+
+  // BET-207: `pluginsEnabled` is a Mac-machine-local toggle — read/write
+  // goes through main's local handlers (commit() → Mac-local config) so
+  // it doesn't round-trip through httpApi/the box. Renderer reads the
+  // current value on Settings mount to seed the toggle, and writes the
+  // new value on Save. Same pattern as configGet (a local-only channel
+  // that's never part of window.api).
+  pluginsGetEnabled: (): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.pluginsGetEnabled),
+  pluginsSetEnabled: (value: boolean): Promise<void> =>
+    ipcRenderer.invoke(IPC.pluginsSetEnabled, value),
 };
 
 // Expose the real preload bridge under a STABLE, dedicated name — NOT "api".
