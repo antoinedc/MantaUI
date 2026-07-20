@@ -47,10 +47,10 @@ sent.
 
 > **M5 dependency (human-blocked on the APNs `.p8`):** live native APNs/FCM
 > delivery is deliberately **not** wired here. To turn it on, set
-> `PushConfig.endpoint` (in `src/api/push.ts`) to the operated relay's
-> registration URL and wire the delivery leg on the box/relay. That step needs
-> the operator's Apple artifacts (already tracked on BET-75). The registration
-> flow proven in this slice does not change when M5 lands.
+> `PushConfig.endpoint` (in `src/api/push.ts`) to the push gateway's
+> registration URL and wire the delivery leg on the box/gateway. That step
+> needs the operator's Apple artifacts (already tracked on BET-75). The
+> registration flow proven in this slice does not change when M5 lands.
 
 ## Run it (Expo Go / simulator)
 

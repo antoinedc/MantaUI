@@ -66,19 +66,11 @@ async function main() {
   }
 
   try {
-    // BET-177 §2.4 + BET-174: when the relay is disabled, the box-form pair
-    // link is relay-shaped and useless, so we suppress the link AND its
-    // terminal-rendered QR. `MANTA_RELAY=off` is the only opt-in value (per
-    // install.sh's gating); unset/anything else means relay is enabled.
-    const relayEnabled = process.env.MANTA_RELAY !== "off";
-    const block = formatPairingOutput(
-      {
-        pairing_code: data?.pairing_code,
-        box_id: data?.box_id,
-        expiresAt: data?.expiresAt,
-      },
-      { relayEnabled },
-    );
+    const block = formatPairingOutput({
+      pairing_code: data?.pairing_code,
+      box_id: data?.box_id,
+      expiresAt: data?.expiresAt,
+    });
     process.stdout.write(block + "\n");
   } catch (e) {
     fail(`unexpected pairing response from manta-server (${e?.message ?? e})`);

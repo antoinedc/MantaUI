@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Terms — Manta UI</title>
-<meta name="description" content="Terms of use for the Manta UI desktop client, mobile client, and operated relay.">
+<meta name="description" content="Terms of use for the Manta UI desktop client, mobile client, and operated push gateway.">
 <meta name="theme-color" content="#0B1020">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -96,27 +96,27 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
   <div class="wrap">
     <h1>Terms</h1>
     <p class="meta">Last updated 17 July 2026 · The short version. Manta UI is open source, your box is yours, and we don't warranty anything — but we'll do our best.</p>
-    <p class="lede">These terms cover the desktop app, the phone client (PWA today, native apps in flight), and the operated relay at <code>relay.mantaui.com</code>. They do <em>not</em> cover anything your AI agent does inside your <code>tmux</code> session — that's between you and your model provider.</p>
+    <p class="lede">These terms cover the desktop app, the phone client (PWA today, native apps in flight), and the operated push gateway at <code>gateway.mantaui.com</code>. They do <em>not</em> cover anything your AI agent does inside your <code>tmux</code> session — that's between you and your model provider.</p>
 
     <h2>Your box is yours</h2>
     <p>Manta UI is software you run on hardware you own. The server runs under your user account on your Linux box; the desktop app runs on your Mac; the phone client runs on your phone. You are responsible for what runs on those machines and what your agents do with that access.</p>
     <p>We do not host your code, your sessions, your files, or your transcripts. Everything you produce lives in <code>~/.manta/</code> on your box.</p>
 
-    <h2>The relay is our service</h2>
-    <p>If you choose to reach your box through the operated relay (<code>relay.mantaui.com</code>), you are using a service we run. The relay routes traffic between your phone and your box, and stores the minimum needed to do that — see the <a href="/privacy">Privacy</a> page.</p>
+    <h2>The push gateway is our service</h2>
+    <p>Devices connect directly to your box at <code>https://&lt;box_id&gt;.boxes.mantaui.com</code> — Caddy on your box terminates TLS and reverse-proxies to the loopback server. The ONLY thing we still operate is the push gateway at <code>gateway.mantaui.com</code>, which holds the Apple APNs key (which structurally cannot live on your box) and fans out native pushes on your box's behalf. See the <a href="/privacy">Privacy</a> page for what we store there.</p>
     <ul>
-      <li>The relay accepts inbound HTTPS from your phone and proxies it to your box over the box's outbound WebSocket.</li>
+      <li>The push gateway accepts authenticated <code>POST /push</code> from your box and delivers APNs notifications for the device tokens it has stored.</li>
       <li>It does not inspect, log, or index the contents of your traffic.</li>
-      <li>It does enforce rate limits and a per-box byte meter (when subscription lands) — abuse will get a box rate-limited or dropped.</li>
+      <li>It does enforce a per-box rate limit on <code>/register</code> calls — abuse will get a box rate-limited or dropped.</li>
     </ul>
 
     <h2>Acceptable use</h2>
     <p>Don't use Manta UI to:</p>
     <ul>
-      <li>Abuse the relay — no scanning, fuzzing, or volumetric traffic; we rate-limit per box.</li>
-      <li>Impersonate another box — the box↔relay handshake is trust-on-first-use; a box presenting a forged <code>box_id</code> loses its slot.</li>
-      <li>Reverse-engineer the relay to extract other users' traffic. (You can read the relay source — it's open source — but you cannot MITM another user's session.)</li>
-      <li>Use the relay as a general-purpose VPN, CDN, or proxy for non-Manta traffic.</li>
+      <li>Abuse the push gateway — no scanning, fuzzing, or volumetric traffic; we rate-limit per box.</li>
+      <li>Impersonate another box — registration is by 32-hex box_id; a box presenting a forged id loses its slot.</li>
+      <li>Reverse-engineer the gateway to extract other users' traffic. (You can read the gateway source — it's open source — but you cannot MITM another user's APNs delivery.)</li>
+      <li>Use the push gateway as a general-purpose notification proxy for non-Manta traffic.</li>
       <li>Violate the law in any jurisdiction you operate from.</li>
     </ul>
 
@@ -125,16 +125,16 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
     <p>The desktop app is unsigned in beta — first launch will be blocked by macOS Gatekeeper. Right-click the <code>.dmg</code> in Finder → <b>Open</b> to bypass, or strip the quarantine attribute after install. We are working on signing for the first App Store release.</p>
 
     <h2>Subscription</h2>
-    <p><b>Free during beta.</b> The desktop app, the mobile web client, and the relay are free to use during the public beta. When the App Store release ships, the iOS / Android apps will require an in-app subscription to cover operated-push and metering costs; the server you self-host will remain free and source-available forever. Subscription terms and pricing will be published here and in the app stores before any paid tier activates.</p>
+    <p><b>Free during beta.</b> The desktop app, the mobile web client, and the push gateway are free to use during the public beta. When the App Store release ships, the iOS / Android apps will require an in-app subscription to cover operated-push and metering costs; the server you self-host will remain free and source-available forever. Subscription terms and pricing will be published here and in the app stores before any paid tier activates.</p>
 
     <h2>Changes to the service</h2>
-    <p>We may change, suspend, or discontinue any part of the operated relay with reasonable notice (a release note on the GitHub repo and an in-app banner). Self-hosted servers are unaffected — they don't depend on the relay at all.</p>
+    <p>We may change, suspend, or discontinue the push gateway with reasonable notice (a release note on the GitHub repo and an in-app banner). Self-hosted servers are unaffected — they don't depend on the gateway for the desktop or PWA paths (only for native APNs push).</p>
 
     <h2>Data</h2>
     <p>What we store, what crosses the wire, and how to delete it: see the <a href="/privacy">Privacy</a> page.</p>
 
     <h2>Governing law</h2>
-    <p>These terms are governed by the laws of the United States of America, without regard to conflict-of-law provisions. Any dispute arising from these terms or your use of the operated relay will be resolved in the courts of the United States.</p>
+    <p>These terms are governed by the laws of the United States of America, without regard to conflict-of-law provisions. Any dispute arising from these terms or your use of the push gateway will be resolved in the courts of the United States.</p>
 
     <h2>Contact</h2>
     <p>Questions, takedown requests, abuse reports: <a href="mailto:antoine@mantaui.com">antoine@mantaui.com</a>.</p>

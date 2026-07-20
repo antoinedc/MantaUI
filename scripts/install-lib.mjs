@@ -326,43 +326,6 @@ export function mergeOpencodeConfig(existingText) {
 }
 
 // ---------------------------------------------------------------------------
-// Relay-disabled merge — pure, used by install.sh when MANTA_RELAY=off (BET-174)
-// ---------------------------------------------------------------------------
-//
-// Sets `relayEnabled: false` in ~/.manta/config.json so the in-process relay
-// agent opts out (only `=== false` opts out — see shouldStartRelayAgent in
-// src/relay/agent/index.mjs). Plain JSON (NOT JSONC) — config.json doesn't
-// allow `//` line comments, so we JSON.parse the raw text directly.
-//
-// Behavior (mirrors mergeOpencodeConfig's safety contract):
-//   * missing/empty/whitespace text → returns {"relayEnabled":false} (pretty)
-//   * valid JSON object → sets relayEnabled:false, preserves ALL other keys,
-//     pretty-prints
-//   * unparseable text or non-object JSON → { ok:false, error }, NO text
-//     (never clobber a config we can't parse — same policy as
-//     mergeOpencodeConfig's `corrupt` path)
-//
-// Returns { ok: true, text } | { ok: false, error }.
-export function mergeRelayDisabled(existingText) {
-  const raw = typeof existingText === "string" ? existingText : "";
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) {
-    return { ok: true, text: JSON.stringify({ relayEnabled: false }, null, 2) + "\n" };
-  }
-  let cfg;
-  try {
-    cfg = JSON.parse(trimmed);
-  } catch (e) {
-    return { ok: false, error: `config.json is not valid JSON: ${e?.message ?? e}` };
-  }
-  if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
-    return { ok: false, error: "config.json must be a JSON object (got non-object root)" };
-  }
-  const next = { ...cfg, relayEnabled: false };
-  return { ok: true, text: JSON.stringify(next, null, 2) + "\n" };
-}
-
-// ---------------------------------------------------------------------------
 // Systemd unit placeholder substitution — pure, used by install.sh steps E
 // and the existing manta-server step (BET-153).
 // ---------------------------------------------------------------------------
@@ -398,124 +361,6 @@ export function renderSystemdUnit(template, placeholders) {
 }
 
 // ---------------------------------------------------------------------------
-// Relay-handshake poller (BET-151 / BET-155)
-// ---------------------------------------------------------------------------
-//
-// Poll the box-server's loopback-only GET /relay/status until the in-process
-// relay agent reports `connected: true` (the dial-out to relay.mantaui.com
-// succeeded and the WS handshake completed). The shape mirrors `waitForHealth`
-// — same injectable fetchFn/sleep, same `{ ok, attempts, ... }` return — so
-// install.sh can use one mental model for both waits.
-//
-// Unlike `waitForHealth` (which dies the install on failure), this one MUST
-// NOT fail the install: a relay outage or a network hiccup on the VPS still
-// leaves the box working locally. install.sh treats `ok=false` or
-// `connected=false` as a `warn` (with the journalctl hint), not a `die`.
-//
-// `healthUrlBase` is the server's loopback base WITHOUT any path
-// (e.g. `http://127.0.0.1:8787`). The endpoint `/relay/status` is appended
-// here so the install script doesn't have to know the route — same shape as
-// MANTA_HEALTH_URL minus the path component.
-//
-// Return shape:
-//   { ok: true,  enabled, connected, attempts, status }   — got a 2xx
-//   { ok: false, enabled: null, connected: false, attempts, error } — gave up
-export async function waitForRelay(
-  healthUrlBase,
-  {
-    maxAttempts = 30,
-    intervalMs = 1000,
-    fetchFn = globalThis.fetch,
-    sleep = defaultSleep,
-  } = {},
-) {
-  if (typeof healthUrlBase !== "string" || healthUrlBase === "") {
-    throw new Error("waitForRelay: healthUrlBase required");
-  }
-  if (typeof fetchFn !== "function") {
-    throw new Error("waitForRelay: no fetch available (pass fetchFn)");
-  }
-  const base = stripTrailingSlash(healthUrlBase);
-  const url = `${base}/relay/status`;
-
-  let lastError = null;
-  // Track the last settled state across attempts so the final return carries
-  // the most recent truthful answer even if we exit via the maxAttempts cap
-  // (e.g. the server is up but the agent is mid-handshake and never finishes).
-  let lastEnabled = null;
-  let lastConnected = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const res = await fetchFn(url);
-      if (res && typeof res.status === "number") {
-        // 2xx = server is up AND answered the relay status route. The body
-        // tells us whether the agent is enabled and (if so) whether it's
-        // connected. Tolerate a missing/non-JSON body — we already know the
-        // server is alive, which is all this loop needs to settle.
-        let body = {};
-        try {
-          body = await res.json();
-        } catch {
-          /* non-JSON body; treat as no info beyond the status code */
-        }
-        if (res.status >= 200 && res.status < 300) {
-          const enabled = body.enabled === true;
-          const connected = body.connected === true;
-          lastEnabled = enabled;
-          lastConnected = connected;
-          // Short-circuit ONLY when the answer is final. Two terminal states:
-          //   connected=true  → the handshake succeeded, install.sh can ok()
-          //   enabled=false   → config opted out, no point polling further
-          // Anything else means "the agent is enabled but hasn't connected
-          // yet" — keep polling until the handshake resolves or we exhaust.
-          if (connected || !enabled) {
-            return {
-              ok: true,
-              enabled,
-              connected,
-              attempts: attempt,
-              status: res.status,
-            };
-          }
-        } else {
-          // 403 from /relay/status means the install ran from somewhere that
-          // isn't loopback (rare — would only happen via a port-forward mistake).
-          // We treat any non-2xx as "not yet" and retry, same as waitForHealth.
-          lastError = new Error(`server returned HTTP ${res.status}`);
-        }
-      } else {
-        lastError = new Error("fetch returned no status");
-      }
-    } catch (e) {
-      lastError = e;
-    }
-    if (attempt < maxAttempts) await sleep(intervalMs);
-  }
-  // Out of attempts. We MAY have a known state from a recent 2xx (the server
-  // answered but the handshake never landed) — return that, with ok=true so
-  // install.sh doesn't treat a server-up-but-handshake-degraded case as a
-  // server-down failure. ok=false is reserved for "we never reached the
-  // server at all" (everything below the loop was ECONNREFUSED).
-  if (lastEnabled !== null) {
-    return {
-      ok: true,
-      enabled: lastEnabled,
-      connected: lastConnected === true,
-      attempts: maxAttempts,
-    };
-  }
-  return {
-    ok: false,
-    enabled: null,
-    connected: false,
-    attempts: maxAttempts,
-    error: `relay did not connect at ${url} after ${maxAttempts} attempts: ${
-      lastError?.message ?? lastError ?? "unknown"
-    }`,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Box-identity loader (BET-151 / BET-155)
 // ---------------------------------------------------------------------------
 //
@@ -544,7 +389,7 @@ export const readBoxIdentity = loadAuth;
  * ingress the user set up — tailscale/reverse-proxy/cloudflared). We can't know
  * it, so it's passed in (or omitted, in which case we print a hint line).
  *
- * BET-177 §2.4: the relay-pair link `manta://pair?box=<id>&code=<code>` is
+ * BET-177 §2.4: the pair link `manta://pair?box=<id>&code=<code>` is
  * always included in the output (when a box_id + a valid 6-digit code are
  * present) as BOTH a copy-paste line AND a terminal-rendered QR. The QR is
  * for the user who wants to scan with the iOS Camera instead of pasting the
@@ -560,7 +405,7 @@ export const readBoxIdentity = loadAuth;
  */
 export function formatPairingOutput(
   { pairing_code, box_id, expiresAt, serverUrl } = {},
-  { qrRender = defaultQrRender, relayEnabled = true } = {},
+  { qrRender = defaultQrRender } = {},
 ) {
   if (!/^[0-9]{6}$/.test(String(pairing_code ?? ""))) {
     throw new Error("formatPairingOutput: pairing_code must be 6 digits");
@@ -584,15 +429,13 @@ export function formatPairingOutput(
     lines.push("  Expose this box to your phone/desktop (pick one):");
     lines.push("    • Tailscale / VPN  → use the box's tailnet address");
     lines.push("    • Reverse proxy    → point it at 127.0.0.1:8787");
-    lines.push("    • cloudflared      → see docs (the operated relay replaces this later)");
     lines.push("");
   }
-  // Render the canonical pair link + QR when we have both halves AND the
-  // relay is enabled. In MANTA_RELAY=off mode (BET-174) the link is relay-
-  // shaped and useless, so we suppress both the link AND the QR — install.sh
-  // separately gates the same text link in its trailing heredoc, so the two
-  // paths agree on disabled-mode = no pair-link content at all.
-  if (box_id && /^[0-9]{6}$/.test(pairing_code) && relayEnabled) {
+  // Render the canonical pair link + QR when we have both halves. The link is
+  // the direct-mode shape (manta://pair?box=<id>&code=<code>) — the desktop /
+  // phone resolve it to https://<box_id>.boxes.mantaui.com and claim against
+  // the box's own /auth/claim.
+  if (box_id && /^[0-9]{6}$/.test(pairing_code)) {
     const pairLink = buildPairLink(box_id, pairing_code);
     lines.push("  Pair link:     " + pairLink);
     lines.push("                 (paste into the desktop app, or scan as a QR)");
@@ -744,43 +587,6 @@ async function cliMain(argv) {
     process.stdout.write(text);
     return 0;
   }
-  if (cmd === "merge-relay-disabled") {
-    // node install-lib.mjs merge-relay-disabled --file <path>
-    // Reads the existing file (if any), calls mergeRelayDisabled, writes the
-    // merged text atomically (write <path>.tmp then rename). Exits non-zero
-    // with the error on ok:false. Ensures the parent dir exists so a fresh
-    // box that hasn't yet booted the server gets created as needed.
-    const filePath = flags.file;
-    if (!filePath) {
-      process.stderr.write("merge-relay-disabled: --file <path> required\n");
-      return 2;
-    }
-    const { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } = await import("node:fs");
-    const { dirname } = await import("node:path");
-    let existing = "";
-    if (existsSync(filePath)) {
-      try {
-        existing = readFileSync(filePath, "utf-8");
-      } catch (e) {
-        process.stderr.write(`merge-relay-disabled: read failed: ${e?.message ?? e}\n`);
-        return 1;
-      }
-    }
-    const res = mergeRelayDisabled(existing);
-    if (!res.ok) {
-      process.stderr.write(`merge-relay-disabled: ${res.error}\n`);
-      return 1;
-    }
-    try {
-      mkdirSync(dirname(filePath), { recursive: true });
-      writeFileSync(`${filePath}.tmp`, res.text);
-      renameSync(`${filePath}.tmp`, filePath);
-    } catch (e) {
-      process.stderr.write(`merge-relay-disabled: write failed: ${e?.message ?? e}\n`);
-      return 1;
-    }
-    return 0;
-  }
   if (cmd === "render-systemd-unit") {
     // node install-lib.mjs render-systemd-unit --template <path> --placeholder K=V [--placeholder K=V ...]
     // Replaces @@K@@ in the template file with V (verbatim, no quoting).
@@ -806,7 +612,7 @@ async function cliMain(argv) {
   }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-relay-disabled|render-systemd-unit> [--version X] [--file P] [--template P] [--placeholder K=V]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|render-systemd-unit> [--version X] [--file P] [--template P] [--placeholder K=V]\n",
   );
   return 2;
 }

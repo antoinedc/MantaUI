@@ -116,10 +116,11 @@ To publish, run:
 
   bash scripts/release/publish.sh
 
-(That script uploads the tarball + desktop binaries, deploys the relay, and
-verifies every URL. It picks up the latest dmg/AppImage from ${OUTPUT_DIR}/ —
-this script's only job was to BUILD them. Re-run \`publish.sh\` from any host
-that has the artifacts; pass MANTA_PROD_HOST=... for a non-prod target.)
+(That script uploads the tarball + desktop binaries, restarts manta-server
+on prod, and verifies every URL. It picks up the latest dmg/AppImage from
+${OUTPUT_DIR}/ — this script's only job was to BUILD them. Re-run
+\`publish.sh\` from any host that has the artifacts; pass MANTA_PROD_HOST=...
+for a non-prod target.)
 
 Latest dmg       : ${LATEST_DMG:-"(none — mac skipped)"}
 Latest AppImage  : ${LATEST_APPIMAGE:-"(none — linux skipped)"}

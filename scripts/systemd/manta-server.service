@@ -9,13 +9,14 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now manta-server
 #
-# Bind is 127.0.0.1 on purpose: the server is NOT exposed directly. The user
-# fronts it with their own ingress (tailscale / reverse proxy / cloudflared) —
-# the operated relay (M2) replaces that later. Pairing codes are loopback-gated
-# so `bui pair` must run on the box.
+# Bind is 127.0.0.1 on purpose: the server is NOT exposed directly. The
+# installer (scripts/install.sh) fronts it with Caddy on
+# https://<box_id>.boxes.mantaui.com, which reverse-proxies loopback to
+# 127.0.0.1:8787. Pairing codes are loopback-gated so `bui pair` must run
+# on the box.
 
 [Unit]
-Description=manta box server (mobile/web + relay proxy)
+Description=manta box server (mobile/web + push fanout via gateway)
 Documentation=https://github.com/antoinedc/MantaUI
 After=network-online.target
 Wants=network-online.target

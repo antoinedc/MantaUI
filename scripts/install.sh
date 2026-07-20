@@ -34,9 +34,6 @@
 #   MANTA_HOME          where code is unpacked (default ~/manta)
 #   MANTA_MOBILE_PORT   server port (default 8787)
 #   MANTA_VERSION       version to fetch when MANTA_TARBALL_URL is unset (default: latest)
-#   MANTA_RELAY=off     disables the relay agent — devices connect directly to the box.
-#                       Only the exact value `off` opts in; unset/anything else = relay
-#                       (default). Read directly in bash, not via resolveConfig.
 #
 # The pure logic (URL/home resolution, health-wait, pairing format, idempotency)
 # lives in scripts/install-lib.mjs and is unit-tested (scripts/install.test.mjs).
@@ -209,7 +206,7 @@ main() {
   pkg_version="$("$NODE" -p 'require("./package.json").version' 2>/dev/null || echo "${MANTA_VERSION:-unknown}")"
   eval "$(MANTA_HOME="$MANTA_HOME" "$NODE" "$LIB" print-config --version "$pkg_version")"
   # Export the values the install body passes into the node subprocess via
-  # process.env (waitForHealth / waitForRelay).
+  # process.env (waitForHealth).
   export MANTA_HOME MANTA_AUTH_DIR MANTA_AUTH_FILE MANTA_TARBALL_URL MANTA_PORT MANTA_HEALTH_URL
 
   # ---------------------------------------------------------------------------
@@ -224,9 +221,9 @@ main() {
 
   # ---------------------------------------------------------------------------
   # 6. Chat stack provisioning (opencode + bui-native tools + tmux presence).
-  #    Independent of the relay work — a fresh VPS just needs claude code
-  #    installed (~/.claude/.credentials.json exists). Re-running is a no-op
-  #    except for version upgrades; every step is safe to run twice.
+  #    A fresh VPS just needs claude code installed (~/.claude/.credentials.json
+  #    exists). Re-running is a no-op except for version upgrades; every step
+  #    is safe to run twice.
   # ---------------------------------------------------------------------------
 
   # UNIT_DIR is referenced by step 6E (opencode-serve) AND step 7
@@ -385,26 +382,6 @@ main() {
   # ---------------------------------------------------------------------------
   # 7. manta-server systemd --user unit: substitute placeholders and enable.
   # ---------------------------------------------------------------------------
-  # MANTA_RELAY=off opt-out (BET-174): seed ~/.manta/config.json with
-  # {"relayEnabled":false} BEFORE the server first reads it. The merge CLI
-  # preserves any other keys the user may have set (projects, chatAutoAllow,
-  # …) and refuses to clobber an unparseable config (operator can fix by
-  # hand and re-run). WARN, not die — a bad config is not a blocking error
-  # for the install itself.
-  if [ "${MANTA_RELAY:-}" = "off" ]; then
-    log "MANTA_RELAY=off — seeding relayEnabled:false into $MANTA_AUTH_DIR/config.json"
-    if [ ! -d "$MANTA_AUTH_DIR" ]; then
-      mkdir -p "$MANTA_AUTH_DIR" || warn "could not create $MANTA_AUTH_DIR — merge-relay-disabled will try itself"
-    fi
-    if ! "$NODE" "$LIB" merge-relay-disabled --file "$MANTA_AUTH_DIR/config.json" 2>/tmp/manta-relay-merge.err; then
-      warn "could not update $MANTA_AUTH_DIR/config.json (see /tmp/manta-relay-merge.err)"
-      warn "  to finish opting out of the relay, set \"relayEnabled\": false in that file"
-      warn "  and run: systemctl --user restart manta-server"
-    else
-      ok "relay disabled in config (relayEnabled:false)."
-    fi
-  fi
-
   UNIT_SRC="$MANTA_HOME/scripts/systemd/manta-server.service"
   [ -f "$UNIT_SRC" ] || die "missing systemd template: $UNIT_SRC"
 
@@ -432,23 +409,18 @@ main() {
     SERVER_MANAGED=nohup
   fi
 
-  # On a re-run with MANTA_RELAY=off, the server is already up with the old
-  # config — `enable --now` won't restart it. One unconditional restart in
-  # the off-branch picks up the freshly-written relayEnabled:false. Fresh
-  # installs pay one cheap restart.
-  if [ "${MANTA_RELAY:-}" = "off" ] && [ "${SERVER_MANAGED:-}" = "systemd" ]; then
-    log "Restarting manta-server to pick up relayEnabled:false…"
+  # On a fresh config change, the server may need a restart to pick it up.
+  if [ "${SERVER_MANAGED:-}" = "systemd" ] && [ "${MANTA_RESTART:-1}" = "1" ]; then
     systemctl --user restart manta-server.service \
       || warn "systemctl --user restart manta-server failed — run it manually"
   fi
 
   # ---------------------------------------------------------------------------
-  # 8. Wait for health, then verify the relay handshake, then mint + print a
-  #    pairing code. Devices pair THROUGH the relay (relay.mantaui.com) — the
-  #    install must confirm the box agent actually reached the relay before
-  #    handing the pairing code back. If the handshake never completes we warn
-  #    (the box still works locally) and continue — operators can read the
-  #    journalctl hint and diagnose later.
+  # 8. Wait for health, then mint + print a pairing code. Devices connect
+  #    DIRECTLY to the box's public hostname (<box_id>.boxes.mantaui.com,
+  #    fronted by Caddy) — no relay, no dial-out, no separate handshake to
+  #    wait for. The install just confirms the loopback server is healthy
+  #    and prints the pair link.
   # ---------------------------------------------------------------------------
   log "Waiting for the server to become healthy at $MANTA_HEALTH_URL…"
   "$NODE" -e '
@@ -462,58 +434,13 @@ main() {
 
   ok "Server is healthy."
 
-  # Derive the loopback base (drop the /auth/status path) — waitForRelay takes a
-  # base URL and appends /relay/status itself.
-  MANTA_RELAY_BASE="$(printf '%s\n' "$MANTA_HEALTH_URL" | sed 's#/auth/status$##')"
-  log "Waiting for the relay handshake at $MANTA_RELAY_BASE/relay/status…"
-  # waitForRelay is best-effort — relay outage never fails the install. We log
-  # the state on stderr and emit exactly one of "connected|disabled|degraded" on
-  # stdout so the bash below can branch on it without re-fetching.
-  RELAY_CHECK="$(MANTA_RELAY_BASE="$MANTA_RELAY_BASE" "$NODE" -e '
-    import("'"$LIB"'").then(async (m) => {
-      const r = await m.waitForRelay(process.env.MANTA_RELAY_BASE, { maxAttempts: 30, intervalMs: 1000 });
-      if (r.ok && r.connected) {
-        console.error("connected after " + r.attempts + " attempt(s)");
-        process.stdout.write("connected");
-      } else if (r.ok && !r.enabled) {
-        console.error("relay disabled by config");
-        process.stdout.write("disabled");
-      } else if (r.ok && !r.connected) {
-        console.error("not connected after " + r.attempts + " attempt(s)");
-        process.stdout.write("degraded");
-      } else {
-        console.error(r.error || "unknown failure");
-        process.stdout.write("degraded");
-      }
-    }).catch((e) => {
-      console.error(String(e));
-      process.stdout.write("degraded");
-    });
-  ' 2>/dev/null || echo degraded)"
-  export MANTA_RELAY_BASE
-
-  case "$RELAY_CHECK" in
-    connected) ok "Relay link established (relay.mantaui.com).";;
-    disabled)
-      log "Relay disabled by config (relayEnabled=false) — devices will pair via direct ingress only.";;
-    *)
-      warn "Relay handshake did not complete — the box is reachable locally; journalctl --user -u manta-server -n 50 will show why."
-      warn "  Re-run later: systemctl --user restart manta-server"
-      ;;
-  esac
-
   log "Minting pairing code…"
   # Delegate to the same `manta pair` CLI the user runs later (loopback GET /auth/pair).
   # We CAPTURE stdout this time so the install-sh heredoc below can quote the
   # ready-to-paste `manta://pair?box=…&code=…` link — BET-156 §1. manta-pair.mjs
   # prints a stable "  Pairing code:  NNNNNN" line via formatPairingOutput, which
   # we sed-extract (no second JSON round-trip; the format is the contract).
-  #
-  # BET-177 §2.4 + BET-174: forward MANTA_RELAY=off into the subprocess so
-  # manta-pair.mjs's formatPairingOutput suppresses its pair-link + terminal-
-  # QR block in disabled mode — same gating the install heredoc below uses
-  # for its own printf. The two stay in lockstep.
-  PAIR_BLOCK="$(MANTA_RELAY="${MANTA_RELAY:-}" "$NODE" "$MANTA_HOME/scripts/manta-pair.mjs" 2>/dev/null || true)"
+  PAIR_BLOCK="$("$NODE" "$MANTA_HOME/scripts/manta-pair.mjs" 2>/dev/null || true)"
   # Echo the formatted block so the user still sees it on stdout (the heredoc
   # below ONLY surfaces the box id + ready-to-paste link, not the full block).
   printf '%s\n' "$PAIR_BLOCK"
@@ -546,38 +473,23 @@ Chat backend (opencode-serve) on http://127.0.0.1:4096:
   journalctl --user -u opencode-serve -f
 EOF
 
-  # Trailing-pairing block is gated on RELAY_CHECK so the disabled mode
-  # doesn't surface a relay-shaped pair link (BET-174). The Box ID line and
-  # the footer are transport-independent and always printed.
-  case "$RELAY_CHECK" in
-    disabled)
-      cat <<EOF
+  # Trailing-pairing block — direct mode only. The Box ID line and the footer
+  # are always printed.
+  cat <<EOF
 
-Relay is disabled — devices connect DIRECTLY to this box.
-manta-server listens on 127.0.0.1:8787 (loopback). Expose it over HTTPS
-with your own ingress (cloudflared, Tailscale, reverse proxy), then:
-  Desktop: enter your https URL + the pairing code above.
-  Phone:   open your https URL in the browser, add to home screen, pair.
+Your box serves its own public hostname — https://<box_id>.boxes.mantaui.com
+(Caddy on this box terminates TLS and reverse-proxies 127.0.0.1:8787). The
+desktop / mobile app discovers it directly via the box_id below; no relay,
+no tunnel, no dial-out.
 EOF
-      ;;
-    *)
-      cat <<EOF
-
-Your box pairs with devices THROUGH the relay (relay.mantaui.com) — no public
-port on this box, no tunnel, no reverse proxy to set up. The desktop / mobile
-app discovers it via the relay using the box_id below.
-EOF
-      ;;
-  esac
 
   if [ -n "$BOX_ID_DISPLAY" ]; then
     printf '\n  Box ID:        %s\n' "$BOX_ID_DISPLAY"
   fi
 
   # Ready-to-paste pair link (BET-156 §1) — the desktop app parses this directly
-  # via parsePairPayload and routes through the relay's /pair endpoint. SKIPPED
-  # in disabled mode (the link is relay-shaped and useless without the relay).
-  if [ "$RELAY_CHECK" != "disabled" ] && [ -n "${BOX_ID_DISPLAY:-}" ] && [ -n "${PAIR_CODE:-}" ]; then
+  # via parsePairPayload and pairs against https://<box_id>.boxes.mantaui.com.
+  if [ -n "${BOX_ID_DISPLAY:-}" ] && [ -n "${PAIR_CODE:-}" ]; then
     printf '\n  Pair link:     manta://pair?box=%s&code=%s\n' "$BOX_ID_DISPLAY" "$PAIR_CODE"
     printf '                 (paste into the desktop app, or scan as a QR)\n'
   fi
