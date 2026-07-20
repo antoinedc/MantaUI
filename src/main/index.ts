@@ -1,4 +1,11 @@
-import { app, BrowserWindow, clipboard, ipcMain, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  ipcMain,
+  nativeImage,
+  shell,
+} from "electron";
 import { join, basename } from "node:path";
 import { existsSync, watch as fsWatch } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -178,6 +185,17 @@ app.setAppUserModelId("com.antoinedc.mantaui");
 app.whenReady().then(() => {
   config = loadConfig();
   registerHandlers();
+  // Dev-only: packaged builds get their dock icon from electron-builder
+  // (assets/icon.icns). In dev the Electron binary has no icon, so the dock
+  // shows the generic Electron icon + "Electron" tooltip. Set it at runtime
+  // from the PNG so the dev dock matches the packaged app. app.isPackaged is
+  // false in dev; app.dock only exists on macOS.
+  if (!app.isPackaged && process.platform === "darwin" && app.dock) {
+    const icon = nativeImage.createFromPath(
+      join(__dirname, "../../assets/icons/512x512.png"),
+    );
+    if (!icon.isEmpty()) app.dock.setIcon(icon);
+  }
   createWindow();
   // Defer poller start until renderer is ready to receive events.
   mainWindow?.webContents.once("did-finish-load", () => {
