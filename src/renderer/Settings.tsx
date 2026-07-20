@@ -859,10 +859,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   onClick={() => {
                     const preload = getBuiPreload();
                     if (preload?.revealInFolder) {
-                      // Reuse the existing OS-bridge: resolves to the user's
-                      // home dir on the Mac; pass a `~`-prefixed path the
-                      // shell resolves. Preload's revealInFolder shells out
-                      // to the OS file manager.
+                      // Pass the `~`-prefixed plugins path; main's
+                      // revealInFolder handler expands it against homedir()
+                      // before shell.showItemInFolder (BET-211 — Electron
+                      // does not expand `~` itself).
                       void preload.revealInFolder("~/.manta/plugins");
                     }
                   }}

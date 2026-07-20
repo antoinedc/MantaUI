@@ -316,9 +316,20 @@ export function App() {
   useEffect(() => {
     if (!window.api.onDesktopNotify) return;
     const off = window.api.onDesktopNotify((payload) => {
+      // Diagnostic log (BET-211): record every directive we receive along
+      // with the live Notification.permission value, so the next "no
+      // notification" report is a one-Axiom-query lookup by `source=desktop`
+      // tag rather than guess-and-check. Mirrors BET-207/210 observability.
+      console.log(
+        "[desktop-notify] received",
+        payload.tag,
+        "perm=",
+        Notification.permission,
+      );
       const sid = payload.sessionId;
       if (document.hasFocus() && sid && activeChatRef.current === sid) return;
       if (typeof Notification === "undefined") return;
+      if (Notification.permission !== "granted") return;
       const show = () => {
         try {
           const n = new Notification(payload.title || "Manta UI", {
@@ -344,14 +355,21 @@ export function App() {
           /* Notification construction can throw if permission was revoked */
         }
       };
-      if (Notification.permission === "granted") show();
-      else if (Notification.permission !== "denied")
-        void Notification.requestPermission().then((perm) => {
-          if (perm === "granted") show();
-        });
+      show();
     });
     return off;
   }, [setActive]);
+
+  // BET-211: request Notification permission ONCE at startup, not lazily on
+  // first event. The lazy request raced with the first directive arriving —
+  // macOS would pop the OS prompt AFTER the renderer had already dropped the
+  // notify, so the user never saw it. Settling permission at mount means the
+  // first event always has a known `granted` / `denied` / `default` answer.
+  useEffect(() => {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission !== "default") return;
+    void Notification.requestPermission();
+  }, []);
 
   // Without this, dropping a file anywhere outside the terminal area causes
   // Chromium to navigate the renderer to the file:// URL.
