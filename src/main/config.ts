@@ -2,6 +2,7 @@ import { app } from "electron";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { AppConfig } from "../shared/types.js";
+import { migrateLegacyCapConfig } from "../shared/configMigration.mjs";
 
 const DEFAULT_CONFIG: AppConfig = {
   projects: [],
@@ -37,6 +38,12 @@ export function loadConfig(): AppConfig {
     delete parsed.identityFile;
     delete parsed.transport;
     delete parsed.uploadCleanupHours;
+    // Migration: v1 capability executor (capExecutorEnabled /
+    // iosBuildRepoPath / iosSimulatorName) → v2 plugins
+    // (pluginsEnabled). Pure function in shared/configMigration.mjs so the
+    // rules are unit-tested. The repo path + simulator name are deliberately
+    // dropped — the user recreates the plugin via the AI (BET-190 §"Config").
+    Object.assign(parsed, migrateLegacyCapConfig(parsed));
     // Migration: old project shape used { id, name, defaultCwd }. Coerce to
     // { tmuxSession, defaultCwd } using the old name as the tmux session name.
     if (parsed.projects) {

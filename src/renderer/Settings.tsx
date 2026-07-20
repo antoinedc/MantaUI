@@ -10,6 +10,7 @@ import type {
   AuthPairResult,
   AvailableLauncher,
   OpencodeModel,
+  PluginRegistryRow,
 } from "../shared/types";
 
 const TABS = [
@@ -17,9 +18,18 @@ const TABS = [
   { id: "ai", label: "AI" },
   { id: "voice", label: "Voice" },
   { id: "files", label: "Files" },
+  { id: "plugins", label: "Plugins" },
   { id: "general", label: "General" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
+
+// Render a millisecond timeout as "5s" or "30m" — matches the manifest's
+// `timeout:` field shape so the UI stays in sync with what the user types.
+function formatTimeout(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  return `${Math.round(ms / 60_000)}m`;
+}
 
 export function Settings({ onClose }: { onClose: () => void }) {
   const {
@@ -32,9 +42,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     groqApiKey,
     voiceTranscriptionModel,
     voiceCommandModel,
-    capExecutorEnabled,
-    iosBuildRepoPath,
-    iosSimulatorName,
+    pluginsEnabled,
     launcherFlags,
     axiomToken,
     axiomDataset,
@@ -63,11 +71,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // General fields (General tab)
   const [autoRename, setAutoRename] = useState(autoRenameSessions);
 
-  // Capability executor fields (Files tab — co-located with allowAgentPush
-  // since both gate what the AI can do on this Mac).
-  const [capExecutorOn, setCapExecutorOn] = useState(capExecutorEnabled);
-  const [iosRepoPath, setIosRepoPath] = useState(iosBuildRepoPath);
-  const [iosSimName, setIosSimName] = useState(iosSimulatorName);
+  // Plugins fields (Plugins tab — replaces the v1 Capability executor
+  // block on the Files tab). The toggle is OFF by default; toggling takes
+  // effect on the next app launch (the executor gates itself at start
+  // time — see src/main/capExecutor.ts).
+  const [pluginsOn, setPluginsOn] = useState(pluginsEnabled);
+  const [plugins, setPlugins] = useState<PluginRegistryRow[] | null>(null);
+  const [pluginsError, setPluginsError] = useState<string | null>(null);
 
   // Voice fields (Voice tab)
   const [groqKey, setGroqKey] = useState(groqApiKey);
@@ -103,13 +113,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setGroqKey(groqApiKey);
     setVoiceTrModel(voiceTranscriptionModel);
     setVoiceCmdModel(voiceCommandModel);
-    setCapExecutorOn(capExecutorEnabled);
-    setIosRepoPath(iosBuildRepoPath);
-    setIosSimName(iosSimulatorName);
+    setPluginsOn(pluginsEnabled);
     setLauncherFlagValues(launcherFlags ?? {});
     setAxiomTok(axiomToken);
     setAxiomDs(axiomDataset);
-  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, capExecutorEnabled, iosBuildRepoPath, iosSimulatorName, launcherFlags, axiomToken, axiomDataset]);
+  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, pluginsEnabled, launcherFlags, axiomToken, axiomDataset]);
 
   // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
   useEffect(() => {
@@ -127,6 +135,34 @@ export function Settings({ onClose }: { onClose: () => void }) {
       .then((list) => setAvailableLaunchers(list))
       .catch(() => {});
   }, []);
+
+  // Fetch the installed-plugins list when the Plugins tab is open, and
+  // re-fetch every 10s while it stays open (the ScheduledTasksCard poll
+  // pattern — no bus event because the Mac executor publishes via PUT,
+  // not a fire-and-forget envelope).
+  useEffect(() => {
+    if (activeTab !== "plugins") return;
+    let cancelled = false;
+    const fetchOnce = () => {
+      window.api
+        .pluginsRegistry()
+        .then((rows) => {
+          if (cancelled) return;
+          setPlugins(rows);
+          setPluginsError(null);
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setPluginsError(e instanceof Error ? e.message : String(e));
+        });
+    };
+    fetchOnce();
+    const timer = setInterval(fetchOnce, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeTab]);
 
   const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
     const l = availableLaunchers.find((x) => x.id === launcherId);
@@ -157,9 +193,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         voiceCommandModel: voiceCmdModel.trim(),
         axiomToken: axiomTok.trim(),
         axiomDataset: axiomDs.trim(),
-        capExecutorEnabled: capExecutorOn,
-        iosBuildRepoPath: iosRepoPath.trim(),
-        iosSimulatorName: iosSimName.trim(),
+        pluginsEnabled: pluginsOn,
         launcherFlags: launcherFlagValues,
       });
     } catch (e) {
@@ -707,69 +741,112 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   </div>
                 </div>
               </div>
+            </div>
+          )}
 
-              {/* Capability executor (BET-183 / BET-185) — co-located with
-                  allowAgentPush because both gate what the AI can do on this
-                  Mac. The toggle is OFF by default; changing it takes effect
-                  after restarting MantaUI (the executor gates itself at start
-                  time — see src/main/capExecutor.ts). */}
+          {/* Plugins Tab (BET-189 / BET-190) */}
+          {activeTab === "plugins" && (
+            <div className="max-w-2xl space-y-6">
+              <div>
+                <h3 className="text-base font-semibold mb-4">Run plugins on this machine</h3>
+                <label className="flex items-start gap-3 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={pluginsOn}
+                    onChange={(e) => setPluginsOn(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Lets the AI trigger the plugins below — each is a YAML file on
+                    this machine; the AI can also create and edit them when this is on.
+                    Takes effect after restarting MantaUI.
+                  </span>
+                </label>
+              </div>
+
               <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">Capability executor</h3>
-                <div className="space-y-3">
-                  <label className="flex items-start gap-3 text-sm cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={capExecutorOn}
-                      onChange={(e) => setCapExecutorOn(e.target.checked)}
-                      className="mt-0.5"
-                    />
-                    <span>
-                      Run plugin commands on this Mac
-                      <span className="block text-xs text-text-faint mt-1">
-                        Allows the AI to run build commands on this Mac (e.g.
-                        <code className="text-text-muted"> ios_build</code>) so you
-                        don&apos;t burn Codemagic minutes. Off by default — takes
-                        effect after restarting MantaUI.
-                      </span>
-                    </span>
-                  </label>
-                  <div className="space-y-1">
-                    <label className="block text-xs uppercase tracking-wider text-text-muted">
-                      iOS build repo path
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="~/projects/better-ui (default)"
-                      value={iosRepoPath}
-                      onChange={(e) => setIosRepoPath(e.target.value)}
-                      className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
-                    />
-                    <div className="text-xs text-text-faint">
-                      Absolute path to the MantaUI clone used by{" "}
-                      <code className="text-text-muted">ios_build</code>. Must
-                      track <code className="text-text-muted">origin/main</code>{" "}
-                      — the tool builds the Mac clone on main, not your session
-                      branch.
-                    </div>
+                <h3 className="text-base font-semibold mb-4">Installed plugins</h3>
+                {pluginsError ? (
+                  <div className="text-sm text-red-400 break-words">
+                    Failed to load: {pluginsError}
                   </div>
-                  <div className="space-y-1">
-                    <label className="block text-xs uppercase tracking-wider text-text-muted">
-                      iOS simulator name
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="(auto-pick: highest iOS runtime + iPhone)"
-                      value={iosSimName}
-                      onChange={(e) => setIosSimName(e.target.value)}
-                      className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
-                    />
-                    <div className="text-xs text-text-faint">
-                      Exact simulator device name to target (e.g.{" "}
-                      <code className="text-text-muted">iPhone 15</code>). Leave
-                      empty to auto-pick.
-                    </div>
+                ) : plugins === null ? (
+                  <div className="text-sm text-text-faint">Loading…</div>
+                ) : plugins.length === 0 ? (
+                  <div className="text-sm text-text-faint">
+                    No plugins installed yet. The AI can author them with{" "}
+                    <code className="text-text-muted">plugin.write</code> when
+                    this toggle is on.
                   </div>
-                </div>
+                ) : (
+                  <div className="space-y-2">
+                    {plugins.map((p) => (
+                      <div
+                        key={p.name}
+                        className="border border-border rounded p-3 bg-bg-soft space-y-1"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-text">
+                            {p.name}
+                          </span>
+                          {p.valid ? (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-900/20 text-green-400">
+                              valid
+                            </span>
+                          ) : (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900/20 text-red-400 break-all">
+                              parse error: {p.error}
+                            </span>
+                          )}
+                          <span className="ml-auto text-[10px] text-text-faint">
+                            {p.stepCount} step{p.stepCount === 1 ? "" : "s"}
+                            {p.timeoutMs != null
+                              ? ` · ${formatTimeout(p.timeoutMs)}`
+                              : ""}
+                          </span>
+                        </div>
+                        {p.description && (
+                          <div className="text-xs text-text-muted">
+                            {p.description}
+                          </div>
+                        )}
+                        {p.inputs.length > 0 && (
+                          <div className="text-[10px] text-text-faint">
+                            Inputs:{" "}
+                            {p.inputs
+                              .map(
+                                (i) =>
+                                  `${i.id}${
+                                    i.default !== undefined
+                                      ? `=${JSON.stringify(i.default)}`
+                                      : ""
+                                  }`,
+                              )
+                              .join(", ")}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t border-border pt-6">
+                <button
+                  onClick={() => {
+                    const preload = getBuiPreload();
+                    if (preload?.revealInFolder) {
+                      // Reuse the existing OS-bridge: resolves to the user's
+                      // home dir on the Mac; pass a `~`-prefixed path the
+                      // shell resolves. Preload's revealInFolder shells out
+                      // to the OS file manager.
+                      void preload.revealInFolder("~/.manta/plugins");
+                    }
+                  }}
+                  className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text"
+                >
+                  Open plugins folder
+                </button>
               </div>
             </div>
           )}
