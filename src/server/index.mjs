@@ -11,7 +11,7 @@ import { readFile, stat, mkdir, rm } from "node:fs/promises";
 import { createWriteStream, createReadStream } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, resolve, basename } from "node:path";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { pipeline } from "node:stream/promises";
 import { UPLOAD_DIRNAME, OUTBOX_DIRNAME } from "../shared/paths.mjs";
 import { WebSocketServer } from "ws";
@@ -19,6 +19,21 @@ import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
+import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
+
+// BET-187: ship every console.* (and any startup banner / poller log) to
+// Axiom when MANTA_AXIOM_TOKEN is set in env OR `axiomToken` lives in
+// AppConfig. Without a token, resolveAxiomConfig returns null and this
+// block is a silent no-op — the server behaves EXACTLY as before, no
+// fetches to axiom.co, no console noise. Must run BEFORE createBus() /
+// any subsequent `console.log` so the existing `[push]` / `[opencode-pump]`
+// / `[relay-agent]` / `[auth]` call sites ship transparently.
+{
+  const axiomCfg = resolveAxiomConfig({ env: process.env, config: local.configGet() });
+  if (axiomCfg) {
+    captureConsole(createLogShipper({ ...axiomCfg, source: "server", device: hostname() }));
+  }
+}
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";

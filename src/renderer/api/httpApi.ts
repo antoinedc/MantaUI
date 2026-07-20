@@ -19,6 +19,7 @@ import { getBuiPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
 import { shouldForceReconnect } from "../chatUtils";
 import { isValidBoxToken } from "../../shared/transport.mjs";
+import { ship } from "../log";
 
 // ---------------------------------------------------------------------------
 // Server base URL resolution (3 deployment contexts):
@@ -282,21 +283,38 @@ async function claimRelay(boxId: string, code: string): Promise<ClaimResult> {
 // ---------------------------------------------------------------------------
 
 async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
-  const res = await fetch(
-    `${serverBase()}/rpc/${encodeURIComponent(channel)}`,
-    {
-      method: "POST",
-      headers: authHeaders(clientToken(), { "content-type": "application/json" }),
-      body: JSON.stringify({ args }),
-    },
-  );
+  // BET-187: track timing so we can ship one structured warn event when an
+  // RPC call exceeds the 1s slow-call threshold. The instrumentation lives
+  // here (single dispatch path — rpcOptional delegates) so every call site
+  // is covered without per-call edits. Failures rethrow as before so the
+  // existing UI auth/network error handling is untouched.
+  const t0 = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(
+      `${serverBase()}/rpc/${encodeURIComponent(channel)}`,
+      {
+        method: "POST",
+        headers: authHeaders(clientToken(), { "content-type": "application/json" }),
+        body: JSON.stringify({ args }),
+      },
+    );
+  } catch (err) {
+    ship("error", "rpc failed", { channel, ms: Date.now() - t0, error: String(err) });
+    throw err;
+  }
+  const ms = Date.now() - t0;
   // 401 → unpaired / stale token. Surface a distinguishable error so the UI
   // layer (M1-T2) can route to the pairing screen instead of showing a raw
   // "HTTP 401" toast.
   if (res.status === 401) throw new AuthRequiredError();
   let json: { result?: unknown; error?: string } = {};
   try { json = await res.json(); } catch { /* non-JSON body (proxy/HTML error) */ }
-  if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+  if (!res.ok || json.error) {
+    ship("error", "rpc failed", { channel, ms, error: json.error ?? `HTTP ${res.status}` });
+    throw new Error(json.error ?? `HTTP ${res.status}`);
+  }
+  if (ms > 1000) ship("warn", "rpc slow", { channel, ms });
   return json.result as T;
 }
 
@@ -399,6 +417,7 @@ function fireResync() {
     const ev: OpencodeEvent = { type: "server.connected", properties: {} };
     for (const fn of set) { try { fn(ev); } catch { /* listener error — ignore, see onmessage */ } }
   }, 0);
+  ship("info", "ws resync");
 }
 
 // WS URL: same origin as serverBase(), http→ws / https→wss. Same-origin so
@@ -473,6 +492,7 @@ function getController(): WsReconnectController {
     onReconnect: fireResync,
     onState: (s) => {
       useStore.getState().setConnectionState(s);
+      ship("info", "ws state", { state: s.state });
       // Fresh connect (initial or reconnect, including a forced one): reset
       // the liveness clock so the watchdog doesn't immediately re-fire while
       // the new socket is still warming up (its first heartbeat is up to 15s
@@ -500,6 +520,7 @@ function installLivenessWatchdog() {
   setInterval(() => {
     const state = getController().getState().state;
     if (shouldForceReconnect(state, lastFrameAt, Date.now(), HEARTBEAT_STALE_MS)) {
+      ship("warn", "ws heartbeat stale", { ageMs: Date.now() - lastFrameAt });
       getController().forceReconnect();
     }
   }, WATCHDOG_INTERVAL_MS);
@@ -521,6 +542,7 @@ function installLivenessWatchdog() {
 // redundant for it but harmless (markReconnectAndEnsure is idempotent).
 export function triggerResumeReconnect(): void {
   if (document.visibilityState !== "visible") return;
+  ship("info", "ws resume reconnect");
   getController().markReconnectAndEnsure();
 }
 
