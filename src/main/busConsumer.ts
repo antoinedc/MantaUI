@@ -15,7 +15,8 @@
 // connect AND every reconnect — so the executor can run its SSE-replay
 // catch-up list. desktopNotify doesn't need it.
 
-import { request } from "node:http";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import type { IncomingMessage } from "node:http";
 import type { AppConfig } from "../shared/types.js";
 
@@ -79,7 +80,7 @@ export function createBusConsumer(
     if (cfg.boxToken) {
       headers["authorization"] = `Bearer ${cfg.boxToken}`;
     }
-    const req = request(
+    const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(
       {
         hostname: url.hostname,
         port: url.port || (url.protocol === "https:" ? 443 : 80),
