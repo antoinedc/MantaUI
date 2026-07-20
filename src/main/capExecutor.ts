@@ -97,10 +97,15 @@ export type CapCtx = {
   log(line: string): void;
   // Spawn helper — argv array, never a shell string. PATH is pre-patched by
   // capExecutor so Homebrew/nvm binaries are visible to this GUI app.
+  // Optional `env` is layered ON TOP of the executor's PATH patch — callers
+  // (the manifest runner) pass `buildEnv()`'s result so manifest `env:` and
+  // `MANTA_INPUT_*` variables reach the spawned shell. The PATH patch is
+  // reapplied to the supplied env (its PATH is prepended with PATH_PREFIX)
+  // so Homebrew visibility survives.
   exec(
     cmd: string,
     args: string[],
-    opts?: { cwd?: string; quiet?: boolean },
+    opts?: { cwd?: string; quiet?: boolean; env?: NodeJS.ProcessEnv },
   ): Promise<ExecResult>;
   signal: AbortSignal;
 };
@@ -619,6 +624,7 @@ function makeManifestHandler(manifest: PluginManifest) {
         const res = await ctx.exec("/bin/sh", ["-c", step.run], {
           cwd: cwdResolved,
           quiet: false,
+          env,
         });
         if (res.code !== 0 && !step.continue_on_error) {
           throw new Error(`step ${i + 1} (${label}) exited with code ${res.code}`);
@@ -759,7 +765,10 @@ async function postDone(
 // ctx.exec — argv spawn with PATH patch + capture + abort handling.
 // ---------------------------------------------------------------------------
 
-function makeExec(
+// Exported for tests — `src/main/capExecutor.test.ts` spawns a real /bin/sh
+// through makeExec to assert that opts.env reaches the child (BET-210).
+// Not part of the renderer/IPC surface; main-process-only.
+export function makeExec(
   signal: AbortSignal,
   logLine: (line: string) => void,
 ): CapCtx["exec"] {
@@ -772,11 +781,18 @@ function makeExec(
 
       let child: ReturnType<typeof spawn>;
       try {
+        // Use the caller-supplied env (manifest + inputs) when provided; fall
+        // back to process.env. Either way, the PATH patch is re-applied so
+        // Homebrew/nvm binaries stay visible to this GUI-launched process.
+        // `buildEnv` already includes process.env + manifest env + inputs
+        // + MANTA_PLUGIN/MANTA_JOB_ID, so passing it here is what makes the
+        // shell see $MANTA_INPUT_* / $WORKSPACE / etc. in `run:` scripts.
+        const baseEnv = opts?.env ?? process.env;
         child = spawn(cmd, args, {
           cwd,
           env: {
-            ...process.env,
-            PATH: PATH_PREFIX + (process.env.PATH ?? ""),
+            ...baseEnv,
+            PATH: PATH_PREFIX + (baseEnv.PATH ?? process.env.PATH ?? ""),
           },
           signal,
         });
