@@ -88,6 +88,17 @@ export type AppConfig = {
   // other AppConfig field — no dedicated IPC channel needed. Absent/empty =
   // every known model is registered.
   deactivatedSubagents?: string[];
+  // BET-215: models the user has explicitly hidden from the chat main-agent
+  // picker. Same shape and opt-out semantics as `deactivatedSubagents` — a
+  // model whose "providerID/modelID" key is in this set is filtered out of
+  // `ModelPicker`'s groups chokepoint. Unlike subagents, main-availability
+  // is purely renderer-side state (there is no opencode.jsonc write) — no
+  // reconcile flow. The Default radio in the Settings → AI → Models table
+  // disables itself for any row whose Main toggle is off, and turning Main
+  // off on the current defaultModel clears defaultModel in the same save
+  // (a default must be Main-available). Absent/empty = every known model
+  // is selectable as the chat main agent.
+  deactivatedMainModels?: string[];
   // Anthropic prompt cache TTL used by opencode. Used ONLY to predict when
   // a chat session has gone stale (cache expired → the next user turn
   // would re-bill the entire cached prefix as cache_creation_input_tokens

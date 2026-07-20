@@ -1,15 +1,13 @@
 import { useEffect, useState } from "react";
 import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
-import { SubagentsCard } from "./SubagentsCard";
+import { ModelsCard } from "./ModelsCard";
 import { PairingQR, PairingCountdown } from "./PairingQR";
 import { getBuiPreload } from "./preloadAccess";
-import { describeModel } from "../shared/modelGuide.mjs";
 import { resolveLauncherFlags } from "./chatShared";
 import type {
   AuthPairResult,
   AvailableLauncher,
-  OpencodeModel,
   PluginRegistryRow,
 } from "../shared/types";
 
@@ -36,7 +34,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
     allowAgentPush,
     autoRenameSessions,
     downloadsDir,
-    defaultModel,
     skillRegistryUrls,
     cacheTtl,
     groqApiKey,
@@ -48,14 +45,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
   } = useStore();
 
   // AI fields (AI tab)
-  const [models, setModels] = useState<OpencodeModel[] | null>(null);
-  const [selectedModel, setSelectedModel] = useState<{ providerID: string; modelID: string } | null>(
-    defaultModel ?? null,
-  );
+  // Note: the model list, default model, and toggles for Main/Sub all live
+  // inside `ModelsCard` now (BET-215) — Settings no longer owns that state.
   const [registryUrls, setRegistryUrls] = useState<string[]>(skillRegistryUrls ?? []);
   const [newRegistryUrl, setNewRegistryUrl] = useState("");
   const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
-  const [modelSearchQuery, setModelSearchQuery] = useState("");
   // AI CLI TUI launch options (BET-138 refinement) — flags for launchers
   // detected on this box (e.g. Claude Code's --dangerously-skip-permissions).
   const [availableLaunchers, setAvailableLaunchers] = useState<AvailableLauncher[]>([]);
@@ -106,7 +100,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
   // Sync local state when store values change
   useEffect(() => {
-    setSelectedModel(defaultModel ?? null);
     setRegistryUrls(skillRegistryUrls ?? []);
     setTtl(cacheTtl);
     setAgentPush(allowAgentPush);
@@ -117,7 +110,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setVoiceCmdModel(voiceCommandModel);
     setLauncherFlagValues(launcherFlags ?? {});
     setAnalytics(shareAnalytics);
-  }, [defaultModel, skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, shareAnalytics]);
+  }, [skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, shareAnalytics]);
 
   // Seed the Mac-local `pluginsEnabled` toggle from the desktop's config
   // (BET-207). The store mirrors the BOX config (via httpApi.configGet),
@@ -128,14 +121,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
     const preload = getBuiPreload();
     if (!preload?.pluginsGetEnabled) return; // mobile/web has no preload
     preload.pluginsGetEnabled().then(setPluginsOn).catch(() => {});
-  }, []);
-
-  // Fetch available models once (non-fatal — Settings works even if opencode is unreachable).
-  useEffect(() => {
-    window.api
-      .opencodeModels()
-      .then((list) => setModels(list))
-      .catch(() => {});
   }, []);
 
   // Fetch which AI CLI TUIs are set up on this box (non-fatal — an empty list
@@ -196,7 +181,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
         allowAgentPush: agentPush,
         autoRenameSessions: autoRename,
         downloadsDir: dlDir.trim(),
-        defaultModel: selectedModel ?? undefined,
+        // defaultModel is owned by ModelsCard now (BET-215) — it persists on
+        // its own radio change, so Settings' Save does not touch it.
         skillRegistryUrls: registryUrls,
         cacheTtl: ttl,
         groqApiKey: groqKey.trim(),
@@ -392,100 +378,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {/* AI Tab */}
           {activeTab === "ai" && (
             <div className="max-w-2xl space-y-6">
-              <div>
-                <h3 className="text-base font-semibold mb-4">Default model</h3>
-                <select
-                  value={selectedModel ? `${selectedModel.providerID}::${selectedModel.modelID}` : ""}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (!val) {
-                      setSelectedModel(null);
-                    } else {
-                      const [providerID, modelID] = val.split("::");
-                      setSelectedModel({ providerID, modelID });
-                    }
-                  }}
-                  className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
-                >
-                  <option value="">opencode default</option>
-                  {models && models.map((m) => (
-                    <option key={`${m.providerID}::${m.id}`} value={`${m.providerID}::${m.id}`}>
-                      {m.name} ({m.providerID})
-                    </option>
-                  ))}
-                </select>
-                <div className="text-xs text-text-faint mt-2">
-                  Applied to every new and cleared chat session. Can still be overridden per-session
-                  with the model picker. "opencode default" lets the server decide.
-                </div>
-              </div>
-
-              <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">Model reference</h3>
-                <div className="text-xs text-text-faint mb-3">
-                  Quick reference for available models. Search by name, provider, or capability.
-                </div>
-                <input
-                  type="text"
-                  placeholder="Search models..."
-                  value={modelSearchQuery}
-                  onChange={(e) => setModelSearchQuery(e.target.value)}
-                  className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent mb-3"
-                />
-                <div className="space-y-2 max-h-80 overflow-y-auto border border-border rounded p-2 bg-bg-soft">
-                  {(() => {
-                    if (!models) return null;
-                    const filtered = models.filter((m) => {
-                      if (!modelSearchQuery) return true;
-                      const q = modelSearchQuery.toLowerCase();
-                      const info = describeModel(m.providerID, m.id);
-                      return (
-                        m.name.toLowerCase().includes(q) ||
-                        m.providerID.toLowerCase().includes(q) ||
-                        m.id.toLowerCase().includes(q) ||
-                        (info?.blurb.toLowerCase().includes(q)) ||
-                        (info?.goodFor.some((g: string) => g.toLowerCase().includes(q)))
-                      );
-                    });
-                    if (filtered.length === 0) {
-                      return <div className="text-xs text-text-faint text-center py-4">No models found</div>;
-                    }
-                    return filtered.map((m) => {
-                      const info = describeModel(m.providerID, m.id);
-                      return (
-                        <div key={`${m.providerID}::${m.id}`} className="border border-border rounded p-2 bg-bg space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm text-text font-medium">{m.name}</span>
-                            <div className="flex items-center gap-2 text-[10px]">
-                              <span className="text-text-faint">{m.providerID}</span>
-                              {m.limit?.context && (
-                                <span className="text-text-faint">{Math.round(m.limit.context / 1000)}k</span>
-                              )}
-                              {info && (
-                                <span className={`px-1.5 py-0.5 rounded ${
-                                  info.tier === "fast" ? "bg-green-900/20 text-green-400" :
-                                  info.tier === "balanced" ? "bg-blue-900/20 text-blue-400" :
-                                  "bg-purple-900/20 text-purple-400"
-                                }`}>
-                                  {info.tier}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          {info && (
-                            <>
-                              <div className="text-xs text-text-muted">{info.blurb}</div>
-                              <div className="text-[10px] text-text-faint">
-                                Good for: {info.goodFor.join(" · ")}
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      );
-                    });
-                  })()}
-                </div>
-              </div>
+              {/* Consolidated model table (BET-215). Replaces the previous
+                  "Default model" <select>, the read-only "Model reference"
+                  catalog, and `SubagentsCard`. The table owns its own
+                  load + save (per-model toggles persist on change, the
+                  Default radio persists on change); Settings' bottom Save
+                  does not touch model state. */}
+              <ModelsCard />
 
               <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">Prompt cache TTL</h3>
@@ -527,10 +426,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
               <div className="border-t border-border pt-6">
                 <ProvidersCard />
-              </div>
-
-              <div className="border-t border-border pt-6">
-                <SubagentsCard />
               </div>
 
               {/* AI CLI launch options (BET-138 refinement) — flags used when
