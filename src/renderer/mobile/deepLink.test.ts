@@ -113,17 +113,17 @@ describe("handlePairUrl — ignored / foreign / malformed", () => {
   });
 });
 
-describe("handlePairUrl — box form (relay)", () => {
-  it("claims via authClaim with boxId + empty serverUrl, then persists RELAY_BASE/box/<id>", async () => {
+describe("handlePairUrl — box form (direct hostname, BET-198)", () => {
+  it("claims via authClaim with boxId + empty serverUrl, then persists <boxId>.boxes.mantaui.com", async () => {
     const deps = makeDeps();
     const out = await handlePairUrl(BOX_URL, deps);
     expect(out).toBe("paired");
     expect(deps.authClaimCalls).toEqual([
       { serverUrl: "", boxId: BOX, code: "847291" },
     ]);
-    // Shared relayBoxUrl is the canonical source — must match exactly.
+    // Shared boxDirectUrl is the canonical source — must match exactly.
     expect(deps.persistCalls).toEqual([
-      `https://relay.mantaui.com/box/${BOX}`,
+      `https://${BOX}.boxes.mantaui.com`,
     ]);
   });
 

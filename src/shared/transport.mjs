@@ -1,9 +1,13 @@
-// transport.mjs — pure transport-mode detection + pairing-response parsing.
+// transport.mjs — pure transport-mode detection + per-box URL helpers +
+// pairing-response parsing.
 //
-// BET-82 (M6 desktop HTTP-only) removed the SSH main path. The desktop now
-// only ever uses httpApi (Bearer token, /rpc, /events WS) against bui-server.
-// `resolveTransportMode` collapses to two states: "http" (paired, valid
-// boxToken) or "onboarding" (fresh install → full-screen onboarding flow).
+// BET-82 (M6 desktop HTTP-only) removed the SSH main path. BET-198 dropped the
+// relay — every box now serves its own public hostname directly. The desktop
+// (and mobile) only ever use httpApi (Bearer token, /rpc, /events WS) against
+// bui-server, pointed at `https://<boxId>.boxes.mantaui.com` (see
+// `boxDirectUrl` below). `resolveTransportMode` collapses to two states:
+// "http" (paired, valid boxToken) or "onboarding" (fresh install → full-screen
+// onboarding flow).
 //
 // Pure + framework-free (no Electron, no Node built-ins beyond nothing) so both
 // the `.ts` sides (renderer entry, main config) and any `.mjs` server code can
@@ -19,42 +23,30 @@ export function isValidBoxToken(token) {
 }
 
 // ---------------------------------------------------------------------------
-// Relay base URL (BET-177 §2.3 — single source)
+// Per-box direct hostname (BET-198 — relay dropped)
 // ---------------------------------------------------------------------------
 //
-// The single relay base URL every relay-mode client pairs through. Hardcoded
-// per BET-156 (ADR-3) so the user never needs to know or type the relay
-// hostname — they paste the pair link (manta://pair?box=…&code=…) which only
-// carries the box id, or scan a QR whose payload is built from this constant.
+// Post-BET-198 the relay is gone: every box now serves its own public hostname
+// (`<boxId>.boxes.mantaui.com`) which terminates TLS at the gateway and
+// proxies to the box's local bui-server. The desktop + mobile clients point
+// httpApi at this URL directly — there is no intermediary relay hop.
 //
-// `MANTA_RELAY_BASE` is an env override used by tests (and any future staging
-// ring) — not a user-facing knob. The process.env check is guarded so the
-// renderer's Vite bundle (no Node `process`) never throws on import; tests
-// that want the override inject it via process.env before importing.
+// `BOXES_DOMAIN` is the single source for the suffix; `boxDirectUrl` builds
+// the canonical `https://<boxId>.<BOXES_DOMAIN>` shape that every direct-mode
+// caller persists (desktop config.serverUrl, mobile localStorage "manta_server").
+// Throws on a malformed boxId so a junk value can never smuggle a
+// path-traversal / host-injection payload into a fetch URL.
 //
-// Previously lived in src/main/auth.ts; both desktop-main and renderer
-// (deep-link handler) now consume this so the two stay in lockstep.
-export const RELAY_BASE = "https://relay.mantaui.com";
+// Mirrors the BOXES_DOMAIN constant in src/gateway/index.mjs (server-side,
+// non-exported) — the two are intentionally kept as plain string literals so
+// neither side has to import the other.
+export const BOXES_DOMAIN = "boxes.mantaui.com";
 
-export function relayBase() {
-  if (typeof process !== "undefined" && process && process.env) {
-    const v = process.env.MANTA_RELAY_BASE;
-    if (typeof v === "string" && v !== "") return v;
-  }
-  return RELAY_BASE;
-}
-
-// Build the per-box relay proxy URL a desktop or mobile client points its
-// httpApi at AFTER a successful relay claim. Pure: takes the base URL +
-// boxId and returns the canonical shape every relay-mode caller persists to
-// its own server-URL slot (desktop config.serverUrl, mobile localStorage
-// "manta_server"). `base` is `relayBase()` in production; tests can pass a
-// different host.
-export function relayBoxUrl(boxId, base = relayBase()) {
+export function boxDirectUrl(boxId) {
   if (!isValidBoxToken(boxId)) {
-    throw new Error("relayBoxUrl: boxId must be a 32-hex token");
+    throw new Error("boxDirectUrl: boxId must be a 32-hex token");
   }
-  return `${String(base).replace(/\/+$/, "")}/box/${boxId}`;
+  return `https://${boxId}.${BOXES_DOMAIN}`;
 }
 
 // Decide which transport a config should use. Post-BET-82 there is only one

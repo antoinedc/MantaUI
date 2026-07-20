@@ -17,14 +17,25 @@
 // The shared contracts (URL shape, 6-digit code, 32-hex box id) are reused
 // from pairStepLogic / ../../shared/claim.mjs / ../../shared/transport.mjs so
 // there is a single source of truth for each.
+//
+// BET-198 SCOPE NOTE: the relay itself is gone (src/shared/transport.mjs no
+// longer exports RELAY_BASE / relayBase / relayBoxUrl). The setup screen's
+// "relay mode" is now semantically a legacy UI affordance — BET-205 will gut
+// the relay concept from the UI. For now we keep the in-file literal so
+// typecheck and tests stay green; the relay URL is still hardcoded here.
 
 import { normalizeServerUrl, isValidServerUrl } from "../pairStepLogic";
 import { isSubmittableCode } from "../../shared/claim.mjs";
-import { isValidBoxToken, RELAY_BASE } from "../../shared/transport.mjs";
+import { isValidBoxToken } from "../../shared/transport.mjs";
+
+/** Legacy relay host — kept as an in-file literal so setupLogic still
+ *  compiles after BET-198 removed RELAY_BASE from shared/transport. Will be
+ *  replaced by direct-hostname pairing in BET-205. */
+const RELAY_BASE = "https://relay.mantaui.com";
 
 /** The Server URL the setup form pre-fills with (the official MantaUI relay).
- *  Typed as `string` (not the RELAY_BASE literal) so consumers like
- *  useState<string> accept it without narrowing to the literal type. */
+ *  Typed as `string` so consumers like useState<string> accept it without
+ *  narrowing to the literal type. */
 export const DEFAULT_SERVER_URL: string = RELAY_BASE;
 
 /**
