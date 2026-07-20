@@ -1,19 +1,19 @@
 # AGENTS.md — context for future sessions
 
-bui is an Electron desktop client for `claude`/opencode sessions running on a
+MantaUI is an Electron desktop client for `claude`/opencode sessions running on a
 remote Linux box, reached **over HTTPS** (no SSH). Pipeline:
-**xterm.js (renderer)** ↔ **HTTP/WS** ↔ **bui-server (`src/server/`, on the box)**
+**xterm.js (renderer)** ↔ **HTTP/WS** ↔ **manta-server (`src/server/`, on the box)**
 ↔ **tmux + opencode** ↔ **claude**.
 
 **HTTP-only is the sole transport.** The desktop reaches the box via direct
-HTTPS to bui-server, authenticated with a `boxToken` obtained during pairing.
+HTTPS to manta-server, authenticated with a `boxToken` obtained during pairing.
 No SSH, no mosh, no tunnels, no `-L` forwards, no ControlMaster — **the server
 IS the box**. The old SSH/PTY main-process transport (`src/main/pty.ts`,
 `src/main/opencode.ts`, the event tunnel, forward-heal) was deleted; only two
 transport modes remain (`src/shared/transport.mjs`): `http` (paired) and
 `onboarding` (pre-pairing). See "Desktop transport (HTTP-only)" below.
 
-The SAME bui-server serves the mobile/web front-end. Desktop and mobile are both
+The SAME manta-server serves the mobile/web front-end. Desktop and mobile are both
 thin clients over the identical `/rpc` + `/events` HTTP surface; the desktop adds
 only OS-integration bridges (clipboard, screenshot, file peek, notifications) via
 its Electron preload. See "Mobile / web client" below.
@@ -118,7 +118,7 @@ is `src/renderer/` + `src/renderer/public/`.
 Symptom if the bundle is stale on a device: the desktop Electron app shows your
 changes (it runs Vite live), but the phone PWA looks unchanged. On main this
 means the bundle-build workflow hasn't finished (or failed) — check its run.
-**No server restart is needed** — bui-server reads the static files per-request
+**No server restart is needed** — manta-server reads the static files per-request
 and sends `no-store` on `index.html` (so the next PWA launch / hard-refresh
 pulls the new content-hashed JS/CSS automatically). The service worker does NO
 asset caching (`mobile/www/sw.js`), so it isn't the culprit. To see changes
@@ -152,7 +152,7 @@ checking the keybind handler.
 
 ## File transfer
 
-All file transfer is over HTTP to bui-server — no SSH, no scp, no ControlMaster.
+All file transfer is over HTTP to manta-server — no SSH, no scp, no ControlMaster.
 The server IS the box, so every operation is a direct `POST`/`GET` to
 `<serverUrl>/api/*` with `Authorization: Bearer <boxToken>`.
 
@@ -181,7 +181,7 @@ staleness ≈ `uploadCleanupHours + 1h`.
 
 **Agent → laptop push (outbox / download).** The reverse of drag-in: the remote
 AI drops a file into `~/.manta-outbox/` (optionally `~/.manta-outbox/<session>/`)
-and bui pulls it to the Mac's Downloads folder via `GET
+and MantaUI pulls it to the Mac's Downloads folder via `GET
 <serverUrl>/api/download?path=<relative>&session=<name>`. Detection is a 3s
 **outbox poller** in `src/main/index.ts` (`pollOutboxOnce` → `GET
 /api/outbox?session=<name>` → JSON listing); it mirrors the screenshot Desktop
@@ -228,7 +228,7 @@ re-offered every 3s.
 
 Node HTTP+WS server that runs **on the Linux box** (no SSH hop). The client
 is the full React renderer (`src/renderer/`) built into `mobile/www/` via
-`npm run build:mobile` and served statically. Use case: full bui chat+terminal
+`npm run build:mobile` and served statically. Use case: full MantaUI chat+terminal
 from a phone or browser with nothing installed on the device.
 
 **Server modules:**
@@ -257,7 +257,7 @@ from a phone or browser with nothing installed on the device.
 enabled — mirrors `src/main/index.ts` opencodeBusLoop. Config file is
 `~/.manta/config.json`; atomic writes (temp-rename pattern).
 
-**Auth (M1, live since 2026-07-02).** bui-server enforces
+**Auth (M1, live since 2026-07-02).** manta-server enforces
 `Authorization: Bearer <box_token>` on EVERY data route (`/rpc`, `/events`,
 `/pty`, `/api/*`, `/push/*`) — `src/server/auth.mjs`, gate wired in
 `index.mjs`. Only `/auth/pair` (loopback-only mint), `/auth/claim`, and
@@ -266,10 +266,10 @@ Devices pair via a 6-digit one-time code (`curl -s
 http://127.0.0.1:8787/auth/pair` ON the box, then enter the code in the
 device's pairing screen); rollout runbook in `docs/auth-enforcement-rollout.md`.
 Escape hatch: `MANTA_AUTH_DISABLED=1` (temporary only). **GOTCHA — the
-bui-native opencode tools (`docs/opencode-tools/*.ts`) must send this Bearer
+MantaUI-native opencode tools (`docs/opencode-tools/*.ts`) must send this Bearer
 header too**: each tool's `boxToken()` reads `~/.manta/auth.json` directly
 (same box, same user) per call. When the gate first shipped the tools had no
-auth plumbing and EVERY tool call failed "unauthorized" — if you add a new bui
+auth plumbing and EVERY tool call failed "unauthorized" — if you add a new MantaUI
 tool, copy the `boxToken()`/`authHeaders()` helpers, or it will 401.
 Browsers can't set headers on WS/EventSource, so `/events` + `/pty` (ONLY)
 also accept `?token=`. Default bind `127.0.0.1:8787`. Internet access is a
@@ -278,13 +278,13 @@ also accept `?token=`. Default bind `127.0.0.1:8787`. Internet access is a
 
 - `~/.config/systemd/user/manta-server.service` → `node src/server/index.mjs`
   (`MANTA_MOBILE_HOST=127.0.0.1`, port 8787).
-- `~/.config/systemd/user/bui-tunnel.service` (`Requires=bui-server`) →
+- `~/.config/systemd/user/manta-tunnel.service` (`Requires=manta-server`) →
   `cloudflared tunnel --config ~/.cloudflared/config.yml run bui`.
 - Permanent URL: **https://app.mantaui.com** (named tunnel
   `6cdca2ea-…`, zone `mantaui.com`). Stable across restarts — the iOS
   PWA install stays valid.
-- Manage: `systemctl --user {status,restart} bui-tunnel bui-server`;
-  logs `journalctl --user -u bui-tunnel`.
+- Manage: `systemctl --user {status,restart} manta-tunnel manta-server`;
+  logs `journalctl --user -u manta-tunnel`.
 
 **QUIC, not http2.** The old `--protocol http2` quick-tunnel buffered SSE
 (`/events` connected but streamed zero bytes → UI never updated). The
@@ -334,12 +334,12 @@ apk`, `adb install -r`, screenshot the composer.
 ## Desktop transport (HTTP-only)
 
 The desktop Electron app no longer uses SSH to reach the box. Everything goes
-over direct HTTPS to bui-server, authenticated with a `boxToken` obtained during
+over direct HTTPS to manta-server, authenticated with a `boxToken` obtained during
 the pairing flow. No tunnels, no ControlMaster, no mosh.
 
 **Pairing → credentials:**
-1. User installs bui on Mac, opens the app → full-screen onboarding modal.
-2. Enters the 6-digit pairing code (from `bui pair` on the box or the
+1. User installs MantaUI on Mac, opens the app → full-screen onboarding modal.
+2. Enters the 6-digit pairing code (from `manta-pair` on the box or the
    self-install script output).
 3. Desktop POSTs `<serverUrl>/auth/claim { code }` → server validates, returns
    `{ boxId, boxToken }`. Desktop persists `{ serverUrl, boxId, boxToken }` to
@@ -399,13 +399,13 @@ lives in `classifyPushEvent` / `firePush`, not the service worker
   the BODY (e.g. `Permission needed — …`, `Error — <msg>`, `<header> — <q>`),
   and each kind falls back to its old descriptive title (`Claude is done`,
   `Claude hit an error`, …) when the session isn't found in tmux. `classify
-  PushEvent`'s `titleOr(fallback)` helper centralizes this. The "from bui"
+  PushEvent`'s `titleOr(fallback)` helper centralizes this. The "from MantaUI"
   subtitle under the notification is **iOS injecting the PWA name** — not in
   our payload, not removable via the Push API.
 
 - **Multi-device suppression (Discord rule: active on desktop ⇒ no mobile
   push).** The desktop Electron app POSTs `/push/desktop-presence {visible}`
-  direct HTTPS to bui-server (`<serverUrl>/push/desktop-presence` with
+  direct HTTPS to manta-server (`<serverUrl>/push/desktop-presence` with
   `Authorization: Bearer <boxToken>`). No SSH forward — the server IS the box.
   Implementation in `src/main/desktopPresence.ts` (`startDesktopPresence`,
   `sendHeartbeatHttp`).
@@ -433,7 +433,7 @@ lives in `classifyPushEvent` / `firePush`, not the service worker
     `session.error` branch reads `properties.error.name` and returns `null`
     for `MessageAbortedError`. An abort is intentional, not a failure: it
     fires on both an explicit user abort AND the mid-flight queued-message
-    DRAIN (user submits while running → bui aborts the in-flight turn and
+    DRAIN (user submits while running → MantaUI aborts the in-flight turn and
     resubmits the queued prompt transparently; see the "Queued message drain"
     pattern). The renderer already swallows this error's banner via
     `isDrainAbortError`, but that suppression is **renderer-only** — the push
@@ -445,17 +445,17 @@ lives in `classifyPushEvent` / `firePush`, not the service worker
     `src/server/push.test.mjs`.
   - Observability: the server logs `[push] desktop-presence visible=…` on each
     heartbeat and `[push] done sid=… suppressForDesktop=… desktop={…}` on every
-    "done" decision (`journalctl --user -u bui-server`). Without these the
+    "done" decision (`journalctl --user -u manta-server`). Without these the
     suppression decision is undiagnosable — keep them.
 
-## Scheduled prompts — bui-native AI tool (`src/server/schedule.mjs`)
+## Scheduled prompts — MantaUI-native AI tool (`src/server/schedule.mjs`)
 
-The first **bui-native opencode tool**: the remote AI can schedule a prompt to
+The first **MantaUI-native opencode tool**: the remote AI can schedule a prompt to
 run later (once or on a recurring cron) in the SAME chat session. Full design +
-the reusable "bui tools" pattern (for future tools like `ping`) is in
+the reusable "MantaUI tools" pattern (for future tools like `ping`) is in
 `docs/bui-tools-scheduler.md`. Key facts:
 
-- **The AI's awareness comes from a GLOBAL opencode custom tool**, not bui code.
+- **The AI's awareness comes from a GLOBAL opencode custom tool**, not MantaUI code.
   `docs/opencode-tools/schedule.ts` is **COPIED** (not symlinked) into
   `~/.config/opencode/tools/schedule.ts` on the box; opencode auto-loads it for
   EVERY project/session/model. Multiple named exports → tools `schedule_create`,
@@ -469,7 +469,7 @@ the reusable "bui tools" pattern (for future tools like `ping`) is in
   `systemctl --user restart opencode-serve`** (opencode runs as that systemd
   service, NOT a `bui-opencode` tmux session — that reference is stale) so it
   re-scans `tools/`.
-- **The tool is a thin registrar** — it `fetch`es bui-server
+- **The tool is a thin registrar** — it `fetch`es manta-server
   (`127.0.0.1:8787/api/schedule`, same box, no SSH hop) and returns immediately.
   `execute` must NOT sleep; the durable store + firing loop live server-side.
 - **Server-owned + durable.** Jobs in `~/.manta/schedule.json` (atomic
@@ -493,11 +493,11 @@ the reusable "bui tools" pattern (for future tools like `ping`) is in
   mirrors the `manta-scroll-to-question` bridge). **Freshness is refetch-driven**
   (open + 10s open-poll), NOT a bus event: desktop's renderer isn't wired to the
   server's in-process bus, so a `schedule.updated` event would only reach
-  mobile. bui-server still publishes `schedule.updated` (cheap) for a future
+  mobile. manta-server still publishes `schedule.updated` (cheap) for a future
   mobile optimization, but the UI does not depend on it. `describeCron` in
   `chatUtils.ts` (pure, tested) renders human-readable cadence.
 - **Transport: `schedule:*` channels, NOT `opencode:*`** — schedules are a
-  bui-SERVER concept. Desktop reaches the server store over direct HTTPS
+  MantaUI-SERVER concept. Desktop reaches the server store over direct HTTPS
   (`<serverUrl>/api/schedule`, `src/main/schedule.ts`, mirrors
   `sharedConfigSync`); mobile is in-process (`src/server/rpc.mjs` →
   `schedule.mjs`). If the server is down, list/delete shows an error toast
@@ -507,12 +507,12 @@ the reusable "bui tools" pattern (for future tools like `ping`) is in
 - Tests: `src/server/schedule.test.mjs` (cron + tick, 20) and `describeCron` in
   `chatUtils.test.ts` (10). Pure logic only.
 
-## Serve page — bui-native AI tool (`src/server/servePage.mjs`)
+## Serve page — MantaUI-native AI tool (`src/server/servePage.mjs`)
 
-The second **bui-native opencode tool**: the remote AI can publish a standalone
+The second **MantaUI-native opencode tool**: the remote AI can publish a standalone
 HTML page to a public URL so it's reachable from anywhere (esp. the machine
-running the bui UI). Built for design previews / demos / mockups that opencode
-generates on the box. Follows the same "bui tools" pattern as the scheduler
+running the MantaUI UI). Built for design previews / demos / mockups that opencode
+generates on the box. Follows the same "MantaUI tools" pattern as the scheduler
 (`docs/bui-tools-scheduler.md`). Key facts:
 
 - **Global opencode tool**, `docs/opencode-tools/serve-page.ts`, **COPIED** (not
@@ -521,7 +521,7 @@ generates on the box. Follows the same "bui tools" pattern as the scheduler
   `serve_page`, `stop_page`, `list_pages`. Guidance appended to
   `~/.config/opencode/AGENTS.md` from `docs/opencode-tools/AGENTS.md`.
   **Install/update = `systemctl --user restart opencode-serve`.**
-- **Thin registrar** — `fetch`es bui-server `127.0.0.1:8787/api/serve-page`
+- **Thin registrar** — `fetch`es manta-server `127.0.0.1:8787/api/serve-page`
   (same box, no SSH hop), returns the public URL immediately. No long-running
   work in `execute`.
 - **Server-owned + durable.** Registry in `~/.manta/serve-page.json`
@@ -540,7 +540,7 @@ generates on the box. Follows the same "bui tools" pattern as the scheduler
   immediately. A request for a subdomain whose dir was deleted externally
   prunes the stale registry entry.
 - **Public path is the system Caddy, NOT the Cloudflare tunnel.** Distinct from
-  bui's own `app.mantaui.com` tunnel. `/etc/caddy/Caddyfile` has a
+  MantaUI's own `app.mantaui.com` tunnel. `/etc/caddy/Caddyfile` has a
   `*.pages.mantaui.com` block → `reverse_proxy 127.0.0.1:20080` with an **OVH
   DNS-01 wildcard cert** (3-level subdomain, needs its own `tls { dns ovh … }`
   block — not covered by the `*.dev` single-level wildcard). DNS: `*.pages`
@@ -549,20 +549,20 @@ generates on the box. Follows the same "bui tools" pattern as the scheduler
   sudo were used to add the record). Caddy reload: `sudo systemctl reload caddy`.
 - **No UI card (v1).** Unlike the scheduler there's no ChatPanel management
   card yet — the AI lists/stops via the tools. Port 20080 claimed in
-  `shared/ports/registry.md` (bui `20xxx` block).
+  `shared/ports/registry.md` (MantaUI `20xxx` block).
 - Tests: `src/server/servePage.test.mjs` (`isValidSubdomain`, `extractSubdomain`,
   cleanup-sweep expiry, 10). Pure logic only.
 
-## Peer awareness — bui-native AI tool (`src/server/peers.mjs`)
+## Peer awareness — MantaUI-native AI tool (`src/server/peers.mjs`)
 
-The third **bui-native opencode tool**: an opencode session can see what OTHER
+The third **MantaUI-native opencode tool**: an opencode session can see what OTHER
 sessions in the SAME workspace are doing AND send them messages. Use case: an
 agent notices files / `git status` changing under it and wants to know which
 other agent is working alongside it (so they don't collide), or wants to
-coordinate / hand off work to a peer. Same "bui tools" pattern as
+coordinate / hand off work to a peer. Same "MantaUI tools" pattern as
 schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
 
-- **Workspace = tmux session (bui project); peers = sibling windows.** The crux
+- **Workspace = tmux session (MantaUI project); peers = sibling windows.** The crux
   is the `@manta-session-id` tmux user-option, surfaced by `tmux.listProjects()`
   as `window.opencodeSessionId`. `resolveWorkspace(projects, sessionID,
   directory)` (pure) finds the caller's window — by sessionID first, falling
@@ -574,7 +574,7 @@ schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
   `peers_inspect`, `peers_message`. Guidance appended to
   `~/.config/opencode/AGENTS.md`.
   **Install/update = `systemctl --user restart opencode-serve`.**
-- **Thin registrar** — `fetch`es bui-server (no SSH hop). `peers_list` /
+- **Thin registrar** — `fetch`es manta-server (no SSH hop). `peers_list` /
   `peers_inspect` GET `/api/peers?sessionID=&directory=[&target=]` (`target`
   present → inspect one; absent → list all). `peers_message` POSTs
   `/api/peers {sessionID, directory, target, message}`. No durable state: peer
@@ -629,11 +629,11 @@ schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
 
 ## Notifications + the `notify` tool (`src/server/push.mjs`)
 
-The fourth **bui-native opencode tool** and the first with a **desktop OS
+The fourth **MantaUI-native opencode tool** and the first with a **desktop OS
 notification leg** alongside the existing mobile Web Push. Full design +
 routing matrix + scenarios in `docs/bui-tools-notify.md`. Key facts:
 
-- **bui-server is the SINGLE notification router.** Every notification —
+- **manta-server is the SINGLE notification router.** Every notification —
   automatic opencode event (`firePush`) OR an AI `notify` call (`fireNotify`) —
   runs through the pure `routeNotification(payload, presence, now)` in
   `push.mjs`, which decides desktop / mobile / both / escalation knowing BOTH
@@ -643,7 +643,7 @@ routing matrix + scenarios in `docs/bui-tools-notify.md`. Key facts:
 - **Two transports, one router.** Mobile leg = Web Push (unchanged). Desktop leg
   = `setDesktopSink(fn)` (injected by `index.mjs`) publishes a `desktopNotify`
   bus envelope; the Electron app (`src/main/desktopNotify.ts`) consumes
-  bui-server's `GET /events` SSE **over direct HTTPS to bui-server**,
+  manta-server's `GET /events` SSE **over direct HTTPS to manta-server**,
   relays the payload via `IPC.desktopNotify` → the renderer (`App.tsx`
   `onDesktopNotify`) shows it with the `Notification` API. The desktop ignores
   every other bus `kind` (it already gets opencode events from its own :4096
@@ -676,11 +676,11 @@ routing matrix + scenarios in `docs/bui-tools-notify.md`. Key facts:
   idle / gone × blocking / informational), `notifTier`, and escalation
   schedule/cancel/supersede (11 new, 41 total). Pure logic only.
 
-## Secrets — bui-native AI tool (`src/server/secrets.mjs`)
+## Secrets — MantaUI-native AI tool (`src/server/secrets.mjs`)
 
-The fifth **bui-native opencode tool**: a secure key→value store so the user can
+The fifth **MantaUI-native opencode tool**: a secure key→value store so the user can
 hand a secret (a GitHub PAT, an API key…) to a working agent WITHOUT the value
-ever entering the AI transcript. Same "bui tools" pattern as schedule/serve-page/
+ever entering the AI transcript. Same "MantaUI tools" pattern as schedule/serve-page/
 peers/notify. Key facts:
 
 - **THE INVARIANT: the store NEVER returns a value to the agent.** A secret
@@ -700,9 +700,9 @@ peers/notify. Key facts:
   symlinked — same `@opencode-ai/plugin` gotcha) to
   `~/.config/opencode/tools/secrets.ts`. Two exports → `secret_list`,
   `secret_provide`. Guidance appended to `~/.config/opencode/AGENTS.md` from
-  `docs/opencode-tools/AGENTS.md` (## bui secrets). **Install/update =
+  `docs/opencode-tools/AGENTS.md` (## MantaUI secrets). **Install/update =
   `systemctl --user restart opencode-serve`.**
-- **Thin registrar** — `fetch`es bui-server (no SSH hop). `secret_list` GETs
+- **Thin registrar** — `fetch`es manta-server (no SSH hop). `secret_list` GETs
   `/api/secrets?sessionID=`; `secret_provide` POSTs `/api/secrets/provide
   {key, sessionID}` → `{path, key, hint}`.
 - **Server-owned + durable.** Store `~/.manta/secrets.json` (atomic write,
@@ -726,7 +726,7 @@ peers/notify. Key facts:
 - **Migration**: `scripts/migrate-secrets.mjs` consolidates secrets scattered in
   credential files (gh `hosts.yml`, `~/.aws/credentials`, `~/.netrc`,
   `~/.modal.toml`) into the store. LEAK-SAFE: it runs on the box, reads each
-  source locally, and POSTs the value straight to bui-server — values NEVER pass
+  source locally, and POSTs the value straight to manta-server — values NEVER pass
   through the AI transcript (the script prints only key names + sources). Dry-run
   by default; `--apply` to import. Canonical credential files are left untouched.
 - Tests: `src/server/secrets.test.mjs` (isValidKey, visibleSecrets shadowing,
@@ -755,15 +755,15 @@ If a user reports drag-select "snapping to bottom" while *in shell scrollback*
 (not the claude TUI), the culprit is usually a tmux `copy-pipe-and-cancel`
 binding on `MouseDragEnd1Pane`. `-and-cancel` exits copy mode, which snaps
 the viewport. That's a tmux-side rebinding (e.g. `copy-pipe-no-clear` plus
-`set-clipboard external`), not a bui-side override. The claude TUI itself
+`set-clipboard external`), not a MantaUI-side override. The claude TUI itself
 does not enter tmux copy mode for drags — claude has its own mouse tracking
 and tmux passes through.
 
 ## Tmux config approach — drop-in, no surprises
 
-bui does NOT modify `~/.tmux.conf` automatically. Settings shows config
+MantaUI does NOT modify `~/.tmux.conf` automatically. Settings shows config
 status read-only; `tmuxSetupConfig` exists but is opt-in via UI only.
-Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
+Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
 
 ## State
 
@@ -809,7 +809,7 @@ Backup at `~/.tmux.conf.pre-bui` on the remote if it was ever modified.
     caller — the chokepoint is what makes the corruption unreachable.
 - **Queued message drain — abort at the next step boundary, then submit on
   idle.** When the user submits while `running` is true, the text gets pushed
-  to `messageQueue` and the input clears. bui does NOT wait for the whole
+  to `messageQueue` and the input clears. MantaUI does NOT wait for the whole
   (possibly many-step) turn to finish: the moment a prompt is queued, the
   next mid-turn **step boundary** triggers a **drain-abort**
   (`maybeDrainQueuedPrompt` in ChatPanel, gated by `shouldAbortForQueuedDrain`
@@ -1054,19 +1054,19 @@ mode.
 ## Chat-mode windows
 
 A second window type alongside the claude-TUI window. A tmux window running
-`sleep infinity` (holder pane) with bui's own React `ChatPanel` overlaid on
-top, talking to an opencode session over HTTP (via bui-server).
+`sleep infinity` (holder pane) with MantaUI's own React `ChatPanel` overlaid on
+top, talking to an opencode session over HTTP (via manta-server).
 
 **Recognition**: presence of `@manta-session-id` tmux user-option on the window
 is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 
 **Architecture** (HTTP-only — opencode session mgmt + SSE live server-side):
 - opencode runs as a `systemd --user` service (`opencode-serve`) on the Linux
-  box, port 4096, bound to 127.0.0.1. bui-server proxies it over HTTP
+  box, port 4096, bound to 127.0.0.1. manta-server proxies it over HTTP
   (`src/server/opencode.mjs`) — no SSH tunnel, no `-L` forward.
 - Renderer never talks to opencode directly — only via `window.api.*`, which is
   `httpApi` (`/rpc` + `/events`) on both desktop and mobile.
-- **bui-server** owns the opencode SSE streams (`src/server/opencode.mjs`
+- **manta-server** owns the opencode SSE streams (`src/server/opencode.mjs`
   `subscribeEvents` — global + one scoped `/event?directory=` stream per known
   session directory) and republishes on its in-process bus; the renderer
   consumes them via `GET /events`. ChatPanel filters by sessionID. (Historical:
@@ -1082,7 +1082,7 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 | `src/server/opencode.mjs` | opencode HTTP proxy, session mgmt, per-directory SSE streams (server-side, the sole owner) |
 | `src/server/tmux.mjs` | tmux CRUD, `restampSessionId` (`@manta-session-id`), chat-holder pane, `maybeCreateChatSession` |
 | `src/server/rpc.mjs` | `/rpc` channel dispatch — the `window.api` contract, server side; `resolveProjectCwd` |
-| `src/server/index.mjs` | bui-server entry: `/rpc`, `/events` SSE, REST `/api/*`, WS `/pty`, auth gate |
+| `src/server/index.mjs` | manta-server entry: `/rpc`, `/events` SSE, REST `/api/*`, WS `/pty`, auth gate |
 | `src/renderer/api/httpApi.ts` | the live `window.api` on desktop + mobile (`/rpc` + `/events`) |
 | `src/renderer/ChatPanel.tsx` | entire chat UI (~4150 LoC), intentionally monolithic |
 | `src/renderer/App.tsx` | mounts ChatPanels keyed by session id; owns the `onOpencodeEvent` fan-out |
@@ -1095,7 +1095,7 @@ for all new and cleared sessions; settable in Settings; `null`/absent = opencode
 picks its own default. `skillRegistryUrls: string[]` — extra opencode skill
 registry URLs (Settings UI). On save, the `configUpdate` handler reads remote
 `~/.config/opencode/opencode.jsonc`, deep-merges only the `skills.urls` key,
-and writes it back via an HTTP call to bui-server (`src/server/local.mjs`).
+and writes it back via an HTTP call to manta-server (`src/server/local.mjs`).
 **Merge is JSONC-comment-stripped** (`//`
 single-line only) before `JSON.parse`; if it's unparseable we start from `{}`
 rather than corrupting other keys. The default registry
@@ -1103,7 +1103,7 @@ rather than corrupting other keys. The default registry
 the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
 `cacheTtl: "5m" | "1h"` — Anthropic prompt cache TTL (default `"1h"`).
 Display-only: drives the stale-cache pill threshold in ChatPanel's
-footer. bui does NOT set the real `cache_control.ttl` on Anthropic
+footer. MantaUI does NOT set the real `cache_control.ttl` on Anthropic
 requests — opencode does — so this setting must match what opencode is
 configured to send.
 
@@ -1113,7 +1113,7 @@ configured to send.
   option labels per question)
 - `POST /question/{id}/reject` — dismiss without answering
 - `GET /vcs?directory=<cwd>` — `{branch?, default_branch?}` for the session
-  cwd. **bui does NOT use this.** opencode caches the branch per-worker and
+  cwd. **MantaUI does NOT use this.** opencode caches the branch per-worker and
   its internal watcher misses terminal-side `git checkout`s, so `/vcs`
   returns stale data forever ("main" even when HEAD is on `feature/x`) and
   the `vcs.branch.updated` SSE below never fires for those switches. The
@@ -1230,8 +1230,8 @@ next user message re-bills the entire cached prefix as
 `cache_creation_input_tokens` (full rate + 25% for 5m, 2× for 1h). The
 pill surfaces this in the ContextBar component (`ChatPanel.tsx`) when:
 `!running && idleMs >= ttlMs && cachedTokens >= STALE_CACHE_MIN_TOKENS`
-(5k). The TTL is **NOT set by bui** — opencode picks the
-`cache_control.ttl` value when it builds each Anthropic request. bui only
+(5k). The TTL is **NOT set by MantaUI** — opencode picks the
+`cache_control.ttl` value when it builds each Anthropic request. MantaUI only
 predicts staleness based on `AppConfig.cacheTtl` ("5m" | "1h", default
 "1h", configurable in Settings). If staleness fires at the wrong time,
 the config doesn't match opencode's setting — the tooltip says so. The
@@ -1339,9 +1339,9 @@ whole output dumped at once on completion):
 The renderer's render path (`resolveToolOutput` → `BashBody` →
 `ConnectorOutput` pin-to-bottom, memoized on the `part` reference) was already
 correct; the bug was purely event-routing + debounce, not rendering. The full
-pipeline (opencode → bui-server `/events` → RPC `opencode:message`) delivers
+pipeline (opencode → manta-server `/events` → RPC `opencode:message`) delivers
 `metadata.output` intact both mid-run and at completion — verified by
-streaming the box's opencode `/event` and bui-server `/events` during a slow
+streaming the box's opencode `/event` and manta-server `/events` during a slow
 `for i…; do echo; sleep 1; done`.
 
 **Per-project SSE scope** — every session-mutating POST
@@ -1352,7 +1352,7 @@ from a scoped POST land only on the matching scoped subscription, NOT on
 the global stream. The event bus therefore opens **one `/event` stream per
 directory** in addition to the global stream.
 
-**Location (HTTP-only):** this machinery now lives entirely in bui-server —
+**Location (HTTP-only):** this machinery now lives entirely in manta-server —
 `src/server/opencode.mjs` (`subscribeEvents`, `sessionDirectoryCache`,
 `rememberSessionDirectory`) + `src/server/index.mjs` (the bus that spawns
 per-directory streams and republishes on `/events`). References below to
@@ -1573,7 +1573,7 @@ audio bytes and the final `VoiceAction`.
 **Settings:** `groqApiKey` (gates the mic button — empty = hidden),
 `voiceTranscriptionModel`, `voiceCommandModel`. All three live in
 AppConfig and the store; UI in `Settings.tsx` and `MobileSettings.tsx`.
-Stored plaintext, same as other bui credentials.
+Stored plaintext, same as other MantaUI credentials.
 
 **Mobile permissions:** `RECORD_AUDIO` + `MODIFY_AUDIO_SETTINGS` in
 `mobile/android/.../AndroidManifest.xml`; `NSMicrophoneUsageDescription`
@@ -1649,11 +1649,11 @@ Three upload paths all land in `~/.manta-uploads/<session>/<ts>/` on the remote:
      delay before pushing.
    ChatPanel shows a toast: "Screenshot in clipboard" / "Screenshot: <name>"
    with "Add to chat" (uploads + chip) and "×" dismiss.
-   **Do NOT add `document.hidden` check** — bui loses focus during the screenshot
+   **Do NOT add `document.hidden` check** — MantaUI loses focus during the screenshot
    gesture so the event would always be dropped.
 
 `uploadBuffer` (`src/renderer/api/httpApi.ts`): POSTs the `ArrayBuffer` bytes
-straight to bui-server `POST /api/upload?session=<name>` with the Bearer token;
+straight to manta-server `POST /api/upload?session=<name>` with the Bearer token;
 the server writes `~/.manta-uploads/<session>/<batch>/<filename>` and returns the
 absolute remote path. (Historical: the deleted desktop-SSH `pty.ts` version
 staged a Mac tmpfile + scp + remote `mv`; HTTP-only sends bytes directly.)
@@ -1681,9 +1681,9 @@ agent blocks — so a not-yet-registered model still shows up.
   `"model"`. Collisions get a numeric suffix (`-2`, `-3`, ...), case-
   insensitive against the taken set.
 - **Deactivation = the agent block is ABSENT from opencode.jsonc**, not a
-  flag inside it (an `agent` block can't safely carry arbitrary bui metadata
+  flag inside it (an `agent` block can't safely carry arbitrary MantaUI metadata
   without risking opencode rejecting unknown keys). The set of deactivated
-  models is bui-side state: `AppConfig.deactivatedSubagents: string[]`
+  models is MantaUI-side state: `AppConfig.deactivatedSubagents: string[]`
   (`"providerID/modelID"` strings), persisted through the EXISTING
   `configGet`/`configUpdate` channels — no dedicated IPC channel was added
   for this; it's exactly a plain config field, same as `skillRegistryUrls`.
@@ -1707,8 +1707,8 @@ agent blocks — so a not-yet-registered model still shows up.
   `systemctl --user restart opencode-serve` via `execFile` with a fixed argv
   array (never a shell string — no injection surface, and none is possible
   since the function takes no external input). This is opencode's OWN systemd
-  service, **separate from bui-server** — restarting it does not restart
-  bui-server, but it DOES drop every in-flight opencode turn across every
+  service, **separate from manta-server** — restarting it does not restart
+  manta-server, but it DOES drop every in-flight opencode turn across every
   chat-mode window. The card's restart button is gated behind an explicit
   confirm ("STOPS all running opencode sessions...") — restart is never
   triggered automatically as a side effect of a subagent edit.
@@ -1721,7 +1721,7 @@ agent blocks — so a not-yet-registered model still shows up.
   restart" reports.
 - Desktop reaches all of this the same way as every other opencode/data
   channel post-pairing: `window.api` is swapped to `httpApi` in `main.tsx`
-  (`/rpc` to bui-server), so there is no separate Electron `ipcMain.handle`
+  (`/rpc` to manta-server), so there is no separate Electron `ipcMain.handle`
   wiring for subagent channels — the `preload/index.ts` methods exist only as
   the `Api` type source + a residual pre-HTTP-mode implementation.
 - Context-size badge (`Nk`) is `formatModelContextSize()` in `chatUtils.ts`
@@ -1778,7 +1778,7 @@ Xcode-Cloud-only and unused by Codemagic (safe to delete).
 ### App Store Connect facts (constants used everywhere)
 
 - **App name**: MantaUI. **ASC app Apple ID**: `6792363427`.
-- **Bundle id**: `com.antoinedc.mantaui` (was `com.antoinedc.bui` originally —
+- **Bundle id**: `com.antoinedc.mantaui` (was `com.antoinedc.MantaUI` originally —
   renamed before anything shipped; the id is permanent post-release). Set in
   `capacitor.config.json` `appId`, the iOS `PRODUCT_BUNDLE_IDENTIFIER` (both
   Debug+Release configs), and the Android `applicationId`/`namespace`/
@@ -1848,7 +1848,7 @@ In the Codemagic web UI (codemagic.io):
    live integration is named **`APS Key`** — the YAML must match it exactly
    (spaces + case). If you rename it in the UI, update the YAML.
 
-The ASC API key also lives in the bui Secrets card (`ASC_API_KEY_P8`,
+The ASC API key also lives in the MantaUI Secrets card (`ASC_API_KEY_P8`,
 `ASC_KEY_ID`, `ASC_ISSUER_ID`, scope `project:manta`) so the box can drive the
 ASC API directly. A `CODEMAGIC_API_KEY` secret (same scope) lets the box drive
 Codemagic's API.
@@ -2225,7 +2225,7 @@ then restart `opencode-serve` for opencode to reload.
 
 ## Work tracking (Multica)
 
-bui has a Multica workspace for structured issue dispatch to AI agents.
+MantaUI has a Multica workspace for structured issue dispatch to AI agents.
 
 - **Workspace**: https://multica.ai/better-ui (ID: `264c89bb-4659-4570-af7b-5f8daaf87985`)
 - **Agent**: `better-ui-dev` (ID: `87bf6d8f-5fd0-4fb6-8dd8-a5e7c36b0747`) — OpenCode runtime, covers the full codebase
@@ -2273,7 +2273,7 @@ Full CLI cheat sheet: `/home/dev/projects/shared/multica/setup.md`
   (`src/server/opencode.mjs`) runs so the per-directory SSE stream opens
   before the renderer mounts the panel.
 - **Global model preference** — `AppConfig.defaultModel` (Settings UI, persisted to `config.json`). New sessions and `/clear` fall back to this when no per-session localStorage entry exists. `/clear` also carries the current per-session override forward to the new session id before refresh.
-- **Live refresh polling** — sidebar updates only on bui's own actions.
+- **Live refresh polling** — sidebar updates only on MantaUI's own actions.
 - **Command palette (⌘K)** — fuzzy switch + actions (~150 lines).
 - **Reconnect-on-drop UI** — HTTPS has no reconnect banner today.
 - **Mobile create flow** — `+` on the mobile session list currently only
