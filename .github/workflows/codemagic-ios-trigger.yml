@@ -1,0 +1,76 @@
+# Reliably trigger the Codemagic iOS build on ANY ios-v* tag push.
+#
+# WHY THIS EXISTS
+# ---------------
+# codemagic.yaml has a `triggering: { events: [tag], tag_patterns: [ios-v*] }`
+# block, but that path depends on GitHub delivering a webhook to Codemagic for
+# the tag-push event. That delivery is NOT reliable:
+#   - Tags pushed with a workflow's GITHUB_TOKEN are withheld from webhooks by
+#     GitHub entirely (verified 2026-07-19: ios-v1.0.8 bot-push never fired).
+#   - Even human-pushed tags occasionally miss (ios-v1.0.10, 2026-07-20: the
+#     tag existed on the remote but Codemagic created no build).
+# When the webhook silently drops, the build never starts and there is no
+# signal — you only notice by the ABSENCE of a TestFlight build.
+#
+# This workflow removes the webhook from the critical path: on every ios-v*
+# tag push it POSTs to the Codemagic REST API to start the build explicitly,
+# and produces a red/green Action run confirming the request. It covers BOTH
+# manual `git push ios-v*` AND the bot tag pushed by ios-release-tag.yml, so
+# there is exactly ONE dependable trigger path regardless of who pushed the tag.
+#
+# DE-DUP NOTE
+# -----------
+# ios-release-tag.yml ALSO calls the Codemagic API for tags IT pushes (its
+# final step). To avoid two builds for one bot-push, that step's explicit
+# trigger has been removed in favour of this single workflow — see the PR that
+# added this file. Codemagic additionally de-dups: a second POST for the same
+# tag+commit while a build is queued/running is rejected, so even a double
+# trigger is harmless.
+#
+# TOKEN
+# -----
+# Uses the CODEMAGIC_API_KEY repo secret (added 2026-07-20). This makes the
+# trigger independent of where the runner lives (no box-local secret file).
+
+name: Codemagic iOS trigger
+
+on:
+  push:
+    tags:
+      - "ios-v*"
+
+concurrency:
+  # One in-flight trigger per tag; never cancel (we want the POST to complete).
+  group: codemagic-ios-trigger-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start Codemagic ios-testflight build for this tag
+        env:
+          CODEMAGIC_API_KEY: ${{ secrets.CODEMAGIC_API_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CODEMAGIC_API_KEY:-}" ]; then
+            echo "::error::CODEMAGIC_API_KEY repo secret is not set — cannot trigger Codemagic."
+            exit 1
+          fi
+          echo "Triggering Codemagic ios-testflight build for tag ${TAG}…"
+          # -f makes curl exit non-zero on an HTTP error so this Action fails RED
+          # (a silent 4xx/5xx must not read as success).
+          RESP="$(curl -sf -X POST \
+            -H "x-auth-token: ${CODEMAGIC_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"appId\":\"6a5bfe08d7050a29d2f33802\",\"workflowId\":\"ios-testflight\",\"tag\":\"${TAG}\"}" \
+            https://api.codemagic.io/builds)"
+          echo "Codemagic response: ${RESP}"
+          # Confirm the API returned a buildId; anything else is a failure.
+          echo "${RESP}" | grep -q '"buildId"' || {
+            echo "::error::Codemagic did not return a buildId for ${TAG}: ${RESP}"
+            exit 1
+          }
+          echo "Codemagic build started for ${TAG}."
