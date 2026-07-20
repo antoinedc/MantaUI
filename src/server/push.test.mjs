@@ -979,13 +979,18 @@ test("sendApnsFanout: fans out to ALL registered tokens; dead pruned live", asyn
 });
 
 test("sendApnsFanout: no cfg → silent no-op (matches Web Push behavior)", async () => {
-  // No cfg passed and local.apnsConfig() would return null in the absence
-  // of the apns block — we just confirm the function exits early without
-  // touching any token store or invoking any sender.
+  // When `cfg: null` is passed, sendApnsFanout falls back to
+  // local.apnsConfig() — which reads the real ~/.manta/config.json. To
+  // keep this test hermetic (independent of the dev box / CI environment
+  // having an apns block + token store populated), pass an explicit empty
+  // `store` path. With no tokens, sendApnsFanout short-circuits at the
+  // `if (tokens.length === 0) return;` guard and never invokes `sender`,
+  // matching the Web Push silent-no-op behavior the test name promises.
+  const store = makeApnsStorePath("no-cfg");
   let called = false;
   await sendApnsFanout(
     { title: "T", body: "B" },
-    { cfg: null, sender: async () => { called = true; return { status: 200, body: null }; } },
+    { cfg: null, store, sender: async () => { called = true; return { status: 200, body: null }; } },
   );
   assert.equal(called, false);
 });
