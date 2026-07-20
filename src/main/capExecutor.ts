@@ -89,6 +89,11 @@ export type ExecResult = { code: number; stdout: string };
 export type CapCtx = {
   input: unknown;
   config: AppConfig;
+  // The cap-job's id (8-char hex from the server). Threaded to buildEnv
+  // so plugins see `MANTA_JOB_ID=<id>` — same env var name the executor
+  // itself uses for logging / dedup, so a plugin can correlate its
+  // own output with the job envelope on the server.
+  jobId: string;
   log(line: string): void;
   // Spawn helper — argv array, never a shell string. PATH is pre-patched by
   // capExecutor so Homebrew/nvm binaries are visible to this GUI app.
@@ -449,6 +454,7 @@ async function runOne(
   const ctx: CapCtx = {
     input: null, // set after we fetch the job below
     config: c.config,
+    jobId: id,
     log(line: string) {
       logBuffer += line;
       if (!line.endsWith("\n")) logBuffer += "\n";
@@ -578,7 +584,11 @@ function makeManifestHandler(manifest: PluginManifest) {
       // per step (the step's own `env:` overlay isn't applied today — the
       // manifest-level env is the only source per spec — but the runner
       // still works for plugins that don't override per-step).
-      const env = buildEnv(manifest, supplied, { jobId: ctx.input ? "" : "" });
+      // `ctx.jobId` is the cap-job id from the server (populated in
+      // runOne when constructing the ctx) — surfaces as MANTA_JOB_ID in
+      // the plugin's env so it can correlate its own output with the
+      // server's job envelope.
+      const env = buildEnv(manifest, supplied, { jobId: ctx.jobId });
       // Resolve cwd (optional). The user may pass `$KEY` substitution via
       // the supplied inputs — we feed the buildEnv result so any
       // MANTA_INPUT_<ID> is available as a substitution source.
