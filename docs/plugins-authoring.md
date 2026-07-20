@@ -79,7 +79,7 @@ unknown top-level key is a validation error — typos fail loudly.
 | `description` | string | yes | Non-empty. One sentence: what the plugin does and when to reach for it. Shown in `plugin_list` and surfaced to the model when picking a tool to call. |
 | `host` | string | yes | Must be `"mac"`. v2 accepts ONLY `mac`; any other value produces `host: only "mac" is supported`. |
 | `timeout` | string | no | `^\d+(s|m)$` (e.g. `30s`, `5m`, `30m`). Parsed value must be ≤ 30 minutes. Missing → no per-step cap. Why the cap: the server sweep fails any `running` job at 30 minutes; a longer manifest timeout would be killed anyway. |
-| `inputs` | map of input objects | no | Each key is an input id (`^[a-z][a-zA-Z0-9_]*$`). Inputs become the tool argument schema verbatim — model-side prompt construction sees them. Optional map; missing → plugin takes no inputs. See "Input object" below. |
+| `inputs` | array of input objects | no | Each object carries an `id:` field (`^[a-z][a-zA-Z0-9_]*$`). Order is preserved and surfaced to the tool schema verbatim — model-side prompt construction sees them. Optional; missing → plugin takes no inputs. See "Input object" below. |
 | `env` | map of `string → string` | no | Plugin-scoped environment variables injected into every step. Reserved names: `MANTA_PLUGIN`, `MANTA_JOB_ID` (the runner injects these itself — user-supplied values are silently ignored). Values with a leading `~` are expanded against `os.homedir()`. |
 | `steps` | list of step objects | yes | Required, min 1. Run sequentially in `/bin/sh -c`. See "Step object" below. |
 
@@ -87,7 +87,7 @@ unknown top-level key is a validation error — typos fail loudly.
 
 | Key | Type | Required | Description / validation |
 | --- | --- | --- | --- |
-| `id` | string | (the map key) | `^[a-z][a-zA-Z0-9_]*$` — must be a JS-safe identifier. |
+| `id` | string | yes | `^[a-z][a-zA-Z0-9_]*$` — must be a JS-safe identifier. |
 | `type` | string | yes | One of `"string"`, `"number"`, `"boolean"`, `"enum"`. |
 | `description` | string | yes | One sentence explaining what the input does. Shown to the model in the tool schema. |
 | `default` | same as `type` | no | Used when the caller omits the input. Must type-match the declared type; for `enum`, must be one of `values`. |
@@ -118,7 +118,7 @@ that way:
 
 ```yaml
 inputs:
-  repo:
+  - id: repo
     type: string
     description: git repository URL to clone
 steps:
@@ -198,11 +198,11 @@ host: mac
 timeout: 30m
 
 inputs:
-  pull:
+  - id: pull
     type: boolean
     default: false
     description: Run `git pull --ff-only origin main` in the Mac clone before building.
-  action:
+  - id: action
     type: enum
     values: [launch, compile, test]
     default: launch
@@ -256,11 +256,11 @@ host: mac
 timeout: 20m
 
 inputs:
-  pull:
+  - id: pull
     type: boolean
     default: false
     description: git pull --ff-only origin main before building.
-  scheme:
+  - id: scheme
     type: string
     default: HelloWorld
     description: Xcode scheme name (must match a scheme in the workspace).
@@ -302,11 +302,11 @@ host: mac
 timeout: 10m
 
 inputs:
-  prune:
+  - id: prune
     type: boolean
     default: true
     description: Also delete local branches already merged into main.
-  dry_run:
+  - id: dry_run
     type: boolean
     default: true
     description: Print the actions without actually performing them.
