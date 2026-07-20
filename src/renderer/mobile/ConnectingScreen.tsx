@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 
 type Props = {
-  // "relay" → connecting through the MantaUI relay (no host shown, it's the
-  // default). "direct" → a self-hosted box; the host is surfaced in a pill.
-  route: "relay" | "direct";
-  // The host to show in the direct-mode pill (e.g. "box.example.com"). Ignored
-  // for relay. Optional — omitted → no host text.
+  // Always "direct" post-BET-198: every box serves its own public hostname
+  // (`<boxId>.boxes.mantaui.com`). Kept as a typed prop for API compatibility
+  // with the renderer's MobileApp call site (resolveConnectRoute returns the
+  // same single value for every configured base).
+  route: "direct";
+  // The host to show in the direct-mode pill (e.g. "0123456789abcdef…boxes.mantaui.com").
   host?: string;
   // Whether the connect attempt has failed (bootstrap threw a non-gate error).
   // Flips the screen to the error state with a Retry button.
@@ -24,16 +25,15 @@ const SLOW_MS = 8000;
 /**
  * Full-screen connecting state for the mobile client. Shown while the initial
  * bootstrap (or a post-pair refresh) is in flight, so the user sees a clear
- * "Connecting to relay… / Connecting to remote box…" instead of a blank/empty
- * session list. Route (relay vs direct) comes from resolveConnectRoute over the
- * persisted server URL (setupLogic.ts).
+ * "Connecting to your box" instead of a blank/empty session list. Every
+ * connection is direct HTTPS to the box's own public hostname.
  *
  * States:
- *   • connecting  → dual-ring spinner + route label (+ host pill for direct).
+ *   • connecting  → dual-ring spinner + label (+ host pill).
  *   • slow (8s+)  → adds a hint + Cancel.
  *   • failed      → error icon + plain-language cause + Retry.
  */
-export function ConnectingScreen({ route, host, failed, onRetry, onCancel }: Props) {
+export function ConnectingScreen({ host, failed, onRetry, onCancel }: Props) {
   const [slow, setSlow] = useState(false);
 
   useEffect(() => {
@@ -62,9 +62,7 @@ export function ConnectingScreen({ route, host, failed, onRetry, onCancel }: Pro
           <div className="flex flex-col gap-2">
             <div className="text-text text-lg font-semibold">Couldn't reach your box</div>
             <div className="text-text-muted text-[13px] leading-relaxed max-w-[280px]">
-              {route === "relay"
-                ? "Your box didn't answer. It may be offline. Check it's running and try again."
-                : "Couldn't open a direct connection. Check the server is reachable and try again."}
+              Your box didn't answer. Check it's running and try again.
             </div>
           </div>
           <button
@@ -106,19 +104,15 @@ export function ConnectingScreen({ route, host, failed, onRetry, onCancel }: Pro
 
         <div className="flex flex-col gap-2">
           <div className="text-text text-lg font-semibold">
-            {route === "relay" ? "Connecting to relay" : "Connecting to remote box"}
+            Connecting to your box
             <AnimatedDots />
           </div>
           <div className="text-text-muted text-[13px] leading-relaxed">
-            {route === "relay"
-              ? "Reaching your box through MantaUI."
-              : "Opening a direct connection to your server."}
+            Opening a direct connection to your server.
           </div>
         </div>
 
-        {/* Host pill only for a custom/direct server — the relay is the default
-            and needs no endpoint disclosure. */}
-        {route === "direct" && host && (
+        {host && (
           <div className="inline-flex items-center gap-2 rounded-full bg-bg-soft border border-border px-3.5 py-1.5 text-xs text-text-muted">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
               <rect x="4" y="4" width="16" height="7" rx="1.5" stroke="#A7B1C4" strokeWidth="1.6" />

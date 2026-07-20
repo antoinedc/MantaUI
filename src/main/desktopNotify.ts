@@ -4,9 +4,9 @@
 // decides the DESKTOP should be notified (user at the desk, or away-but-app-open
 // before mobile escalation), it publishes a `{kind:"desktopNotify", payload}`
 // envelope on its in-process bus. This module subscribes to bui-server's
-// `GET /events` SSE stream **over direct HTTPS** (Bearer-authed) and relays each
-// `desktopNotify` payload to the renderer via IPC, where it's shown with the
-// Notification API.
+// `GET /events` SSE stream **over direct HTTPS** (Bearer-authed) and forwards
+// each `desktopNotify` payload to the renderer via IPC, where it's shown with
+// the Notification API.
 //
 // Why consume bui-server's bus instead of deciding desktop notifications
 // locally from the opencode stream: the router must see BOTH device presences
@@ -24,7 +24,7 @@ import type { AppConfig, DesktopNotifyPayload } from "../shared/types.js";
 let consumer: BusConsumer | null = null;
 
 /**
- * Start relaying bui-server desktop-notification directives to the renderer.
+ * Start forwarding bui-server desktop-notification directives to the renderer.
  * `configGetter` returns the live AppConfig (serverUrl + boxToken for HTTPS
  * Bearer auth); `onPayload` delivers a directive to the renderer (typically a
  * webContents.send). Idempotent.

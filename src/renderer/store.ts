@@ -86,7 +86,7 @@ export type ScreenshotToast = {
 
 type State = {
   loaded: boolean;
-  // ----- HTTP/relay transport + onboarding (M6, BET-49) -----
+  // ----- HTTP transport + onboarding (M6, BET-49) -----
   // Mirrored from AppConfig so App.tsx can resolve the transport mode
   // (resolveTransportMode) and the onboarding shell can resume. `boxToken`
   // presence flips transport to HTTP; `onboardingSkipped` suppresses the

@@ -6,7 +6,6 @@ import { MobileSettings } from "./MobileSettings";
 import { PairingScreen } from "./PairingScreen";
 import { SetupScreen } from "./SetupScreen";
 import { ConnectingScreen } from "./ConnectingScreen";
-import { resolveConnectRoute } from "./setupLogic";
 import { reportFocus } from "./push";
 import { registerApns, NATIVE_NOTIF_TAP_EVENT_NAME } from "./nativePush";
 import { AuthRequiredError, ServerNotConfiguredError, triggerResumeReconnect } from "../api/httpApi";
@@ -20,8 +19,8 @@ type Nav =
   | { screen: "settings" };
 
 // Read the persisted server URL WITHOUT throwing (serverBase() throws when
-// unset). Empty string when unconfigured — resolveConnectRoute treats that as
-// the relay default. Used only for the ConnectingScreen route/host copy.
+// unset). Empty string when unconfigured — the bootstrap will route to the
+// setup screen. Used only for the ConnectingScreen host pill copy.
 function readServerBase(): string {
   try {
     return (localStorage.getItem("manta_server") ?? "").replace(/\/+$/, "");
@@ -75,7 +74,7 @@ export function MobileApp() {
   // Connect lifecycle for the full-screen ConnectingScreen. `connecting` is
   // true while the INITIAL bootstrap (or a post-pair refresh) is in flight and
   // we have never yet loaded data — so the user sees a clear "Connecting to
-  // relay / remote box" instead of a blank session list. Once data lands
+  // your box" instead of a blank session list. Once data lands
   // (`hasLoaded`), later background refreshes do NOT re-show the full screen.
   // `connectFailed` flips the ConnectingScreen to its error+retry state.
   const [connecting, setConnecting] = useState(true);
@@ -616,13 +615,14 @@ export function MobileApp() {
   }
 
   // Initial connect (or post-pair refresh) in flight, or it failed before the
-  // first successful load. Route-aware copy + host for a custom/direct server.
+  // first successful load. Post-BET-198 every connection is direct, so the
+  // route is always "direct" and the host pill is shown whenever a base is set.
   if (connecting || connectFailed) {
-    const route = resolveConnectRoute(readServerBase());
-    const host = route === "direct" ? hostFromBase(readServerBase()) : undefined;
+    const base = readServerBase();
+    const host = base === "" ? undefined : hostFromBase(base);
     return (
       <ConnectingScreen
-        route={route}
+        route="direct"
         host={host}
         failed={connectFailed}
         onRetry={doRefresh}

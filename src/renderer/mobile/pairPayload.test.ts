@@ -25,7 +25,7 @@ describe("parsePairPayload", () => {
       // Regression: an old desktop build emits manta://pair?id=<32hex>&token=.
       // The 32-hex value is a BOX ID, not a server URL — without shape-routing
       // it was http://-prefixed and mis-claimed as a bogus direct host, which
-      // network-failed. Must resolve to the relay box form.
+      // network-failed. Must resolve to the box form.
       expect(
         parsePairPayload(
           "manta://pair?id=0d5784a7a43451f4ad70dd3d9ee5cf72&token=593337",
@@ -77,7 +77,7 @@ describe("parsePairPayload", () => {
     });
   });
 
-  describe("boxId form (relay-paired, BET-156)", () => {
+  describe("boxId form (direct claim against the box's own hostname, BET-156)", () => {
     it("accepts the primary manta://pair?box=&code= form", () => {
       expect(
         parsePairPayload(`manta://pair?box=${BOX}&code=847291`),
@@ -204,7 +204,7 @@ describe("round-trip", () => {
     const cases: PairPayload[] = [
       { serverUrl: "http://box:8787", boxId: null, code: "123456" },
       { serverUrl: "http://192.168.1.10:8787", boxId: null, code: "000000" },
-      { serverUrl: "https://relay.example.com", boxId: null, code: "987654" },
+      { serverUrl: "https://box-direct.example.com", boxId: null, code: "987654" },
       { serverUrl: null, boxId: BOX, code: "111111" },
     ];
     for (const p of cases) {

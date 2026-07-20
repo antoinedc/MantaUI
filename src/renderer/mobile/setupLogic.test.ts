@@ -1,117 +1,78 @@
 import { describe, it, expect } from "vitest";
 import {
-  DEFAULT_SERVER_URL,
-  isRelayServer,
   canConnectSetup,
   buildSetupClaimInput,
   resolveSetupServerUrl,
   resolveConnectRoute,
 } from "./setupLogic";
+import { boxDirectUrl } from "../../shared/transport.mjs";
 
 const VALID_BOX = "7f3a9c1e0b8d4a62f1c9e5b7d0a4f8c2"; // 32 hex
 const BAD_BOX = "not-a-box";
 
-describe("isRelayServer", () => {
-  it("true for the default relay URL", () => {
-    expect(isRelayServer(DEFAULT_SERVER_URL)).toBe(true);
-  });
-  it("ignores trailing slash / whitespace", () => {
-    expect(isRelayServer(" https://relay.mantaui.com/ ")).toBe(true);
-  });
-  it("false for a custom server URL", () => {
-    expect(isRelayServer("https://box.example.com")).toBe(false);
-  });
-});
+describe("canConnectSetup", () => {
+  const base = { submitting: false };
 
-describe("canConnectSetup — relay mode", () => {
-  const base = { serverUrl: DEFAULT_SERVER_URL, submitting: false };
   it("requires a valid box id AND 6-digit code", () => {
     expect(canConnectSetup({ ...base, boxId: VALID_BOX, code: "123456" })).toBe(true);
   });
+
   it("rejects a bad box id", () => {
     expect(canConnectSetup({ ...base, boxId: BAD_BOX, code: "123456" })).toBe(false);
   });
+
   it("rejects a short code", () => {
     expect(canConnectSetup({ ...base, boxId: VALID_BOX, code: "123" })).toBe(false);
   });
+
   it("never while submitting", () => {
     expect(
-      canConnectSetup({ ...base, boxId: VALID_BOX, code: "123456", submitting: true }),
+      canConnectSetup({ boxId: VALID_BOX, code: "123456", submitting: true }),
     ).toBe(false);
   });
-});
 
-describe("canConnectSetup — custom mode", () => {
-  it("requires only a valid URL + code (box id irrelevant)", () => {
+  it("trims the box id before validating", () => {
     expect(
-      canConnectSetup({
-        serverUrl: "https://box.example.com",
-        boxId: "",
-        code: "123456",
-        submitting: false,
-      }),
+      canConnectSetup({ ...base, boxId: `  ${VALID_BOX}  `, code: "123456" }),
     ).toBe(true);
-  });
-  it("rejects an invalid URL", () => {
-    expect(
-      canConnectSetup({
-        serverUrl: "box.example.com",
-        boxId: "",
-        code: "123456",
-        submitting: false,
-      }),
-    ).toBe(false);
   });
 });
 
 describe("buildSetupClaimInput", () => {
-  it("relay mode → empty serverUrl + boxId", () => {
-    expect(
-      buildSetupClaimInput({ serverUrl: DEFAULT_SERVER_URL, boxId: VALID_BOX, code: "123456" }),
-    ).toEqual({ serverUrl: "", boxId: VALID_BOX, code: "123456" });
+  it("emits boxDirectUrl(boxId) as the serverUrl + the raw code", () => {
+    expect(buildSetupClaimInput({ boxId: VALID_BOX, code: "123456" })).toEqual({
+      serverUrl: boxDirectUrl(VALID_BOX),
+      code: "123456",
+    });
   });
-  it("relay mode trims the box id", () => {
-    expect(
-      buildSetupClaimInput({ serverUrl: DEFAULT_SERVER_URL, boxId: `  ${VALID_BOX}  `, code: "123456" }),
-    ).toEqual({ serverUrl: "", boxId: VALID_BOX, code: "123456" });
-  });
-  it("custom mode → normalized serverUrl, no boxId", () => {
-    expect(
-      buildSetupClaimInput({ serverUrl: "https://box.example.com/", boxId: "ignored", code: "123456" }),
-    ).toEqual({ serverUrl: "https://box.example.com", code: "123456" });
-  });
-});
 
-describe("resolveConnectRoute", () => {
-  it("relay for the persisted per-box relay proxy URL", () => {
-    expect(resolveConnectRoute(`https://relay.mantaui.com/box/${VALID_BOX}`)).toBe("relay");
-  });
-  it("relay for the bare relay base", () => {
-    expect(resolveConnectRoute("https://relay.mantaui.com")).toBe("relay");
-  });
-  it("relay for empty/unset base (fresh install default)", () => {
-    expect(resolveConnectRoute("")).toBe("relay");
-  });
-  it("direct for a custom server URL", () => {
-    expect(resolveConnectRoute("https://box.example.com")).toBe("direct");
-  });
-  it("direct for a same-origin PWA base", () => {
-    expect(resolveConnectRoute("https://app.example.com:8787")).toBe("direct");
-  });
-  it("does NOT match a look-alike host as relay", () => {
-    expect(resolveConnectRoute("https://relay.mantaui.com.evil.com/box/x")).toBe("direct");
+  it("trims the box id before building the URL", () => {
+    expect(buildSetupClaimInput({ boxId: `  ${VALID_BOX}  `, code: "123456" })).toEqual({
+      serverUrl: boxDirectUrl(VALID_BOX),
+      code: "123456",
+    });
   });
 });
 
 describe("resolveSetupServerUrl", () => {
-  it("relay mode → per-box relay proxy URL", () => {
-    expect(resolveSetupServerUrl({ serverUrl: DEFAULT_SERVER_URL, boxId: VALID_BOX })).toBe(
-      `https://relay.mantaui.com/box/${VALID_BOX}`,
+  it("returns boxDirectUrl(boxId) (single source of truth)", () => {
+    expect(resolveSetupServerUrl({ boxId: VALID_BOX })).toBe(boxDirectUrl(VALID_BOX));
+  });
+
+  it("trims the box id before building the URL", () => {
+    expect(resolveSetupServerUrl({ boxId: `  ${VALID_BOX}  ` })).toBe(
+      boxDirectUrl(VALID_BOX),
     );
   });
-  it("custom mode → normalized typed URL", () => {
-    expect(resolveSetupServerUrl({ serverUrl: "https://box.example.com/", boxId: "" })).toBe(
-      "https://box.example.com",
-    );
+});
+
+describe("resolveConnectRoute", () => {
+  it("always returns 'direct' for a configured base", () => {
+    expect(resolveConnectRoute(boxDirectUrl(VALID_BOX))).toBe("direct");
+    expect(resolveConnectRoute("https://box.example.com")).toBe("direct");
+  });
+
+  it("returns 'direct' for empty/unset base (fresh install)", () => {
+    expect(resolveConnectRoute("")).toBe("direct");
   });
 });

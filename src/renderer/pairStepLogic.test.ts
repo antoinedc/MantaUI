@@ -23,7 +23,7 @@ describe("normalizeServerUrl", () => {
 describe("isValidServerUrl", () => {
   it("accepts http(s) URLs with a host", () => {
     expect(isValidServerUrl("http://box:8787")).toBe(true);
-    expect(isValidServerUrl("https://relay.example.com")).toBe(true);
+    expect(isValidServerUrl("https://box-direct.example.com")).toBe(true);
     expect(isValidServerUrl("  http://192.168.1.10:8787/ ")).toBe(true);
   });
 

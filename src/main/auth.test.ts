@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { claimPairing } from "./auth.js";
+import { boxDirectUrl } from "../shared/transport.mjs";
 import type { AppConfig, AuthClaimInput } from "../shared/types.js";
 
 const HEX32 = "0123456789abcdef0123456789abcdef";
@@ -55,7 +56,7 @@ async function expectClaimFailure(
   return { urls };
 }
 
-describe("claimPairing — direct-HTTPS branch (BET-49, BET-198 — relay dropped)", () => {
+describe("claimPairing — direct-HTTPS branch (BET-49, BET-198)", () => {
   it("valid code → ok outcome + persists { serverUrl, boxId, boxToken }", async () => {
     const { fetch, urls, bodies } = stubFetch(
       fakeResponse(200, { ok: true, box_token: HEX32, box_id: HEX32B }),
@@ -146,6 +147,53 @@ describe("claimPairing — direct-HTTPS branch (BET-49, BET-198 — relay droppe
       "network",
     );
     // No fetch should have happened for a blank server URL.
+    expect(urls).toEqual([]);
+  });
+});
+
+describe("claimPairing — box-form pair link (BET-156, BET-198)", () => {
+  it("boxId + empty serverUrl → claims against boxDirectUrl(boxId), persists the canonical URL", async () => {
+    const { fetch, urls, bodies } = stubFetch(
+      fakeResponse(200, { ok: true, box_token: HEX32, box_id: HEX32B }),
+    );
+    const persist = vi.fn((_patch: Partial<AppConfig>) => {});
+
+    const out = await claimPairing(
+      { serverUrl: "", boxId: HEX32, code: "847291" },
+      persist,
+      fetch,
+    );
+
+    expect(out).toEqual({ ok: true, boxToken: HEX32, boxId: HEX32B });
+    // Single source of truth: claim hits the same URL boxDirectUrl returns,
+    // so desktop paste-link and mobile deep-link produce the IDENTICAL wire
+    // request (and the IDENTICAL persisted serverUrl).
+    const expectedUrl = boxDirectUrl(HEX32);
+    expect(urls).toEqual([`${expectedUrl}/auth/claim`]);
+    expect(JSON.parse(bodies[0])).toEqual({ pairing_code: "847291" });
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenCalledWith({
+      serverUrl: expectedUrl,
+      boxId: HEX32B,
+      boxToken: HEX32,
+    });
+  });
+
+  it("malformed boxId → network outcome without ever fetching", async () => {
+    const { urls } = await expectClaimFailure(
+      fakeResponse(200, { ok: true, box_token: HEX32, box_id: HEX32B }),
+      { serverUrl: "", boxId: "not-a-box", code: "847291" },
+      "network",
+    );
+    expect(urls).toEqual([]);
+  });
+
+  it("empty boxId AND empty serverUrl → network outcome without ever fetching", async () => {
+    const { urls } = await expectClaimFailure(
+      fakeResponse(200, { ok: true, box_token: HEX32, box_id: HEX32B }),
+      { serverUrl: "", boxId: "", code: "847291" },
+      "network",
+    );
     expect(urls).toEqual([]);
   });
 });

@@ -204,7 +204,7 @@ app.whenReady().then(() => {
     // mobile "done" pushes while the user is active on desktop.
     startDesktopPresence(() => config);
     // Receive desktop OS-notification directives from bui-server's router
-    // (over direct HTTPS) and relay them to the renderer.
+    // (over direct HTTPS) and forward them to the renderer.
     startDesktopNotifications(
       () => config,
       (payload) => {
