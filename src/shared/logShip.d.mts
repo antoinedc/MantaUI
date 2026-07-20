@@ -10,7 +10,7 @@ export interface AxiomConfig {
 
 export interface ResolveAxiomConfigArgs {
   env: Record<string, string | undefined>;
-  config: { axiomToken?: string; axiomDataset?: string } | null;
+  config: { axiomToken?: string; axiomDataset?: string; shareAnalytics?: boolean } | null;
 }
 
 export function resolveAxiomConfig(args: ResolveAxiomConfigArgs): AxiomConfig | null;

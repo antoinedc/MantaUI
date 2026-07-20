@@ -56,11 +56,11 @@ describe("migrateLegacyCapConfig", () => {
     const r = migrateLegacyCapConfig({
       capExecutorEnabled: true,
       autoRenameSessions: true,
-      axiomToken: "xaat-foo",
+      shareAnalytics: false,
     });
     expect(r.pluginsEnabled).toBe(true);
     expect(r.autoRenameSessions).toBe(true);
-    expect(r.axiomToken).toBe("xaat-foo");
+    expect(r.shareAnalytics).toBe(false);
     expect("capExecutorEnabled" in r).toBe(false);
   });
 

@@ -131,14 +131,10 @@ type State = {
   groqApiKey: string;
   voiceTranscriptionModel: string;
   voiceCommandModel: string;
-  // Axiom log shipping (BET-187). When axiomToken is set, every console.*
-  // call (and a small set of structured events in httpApi.ts) ships to
-  // Axiom so an AI agent can correlate both sides of a phone↔box failure.
-  // Empty string = silent no-op (no fetches to axiom.co, no console noise).
-  // Mirror only — the renderer reads it ONCE at init via window.api.configGet;
-  // changing the token requires an app relaunch.
-  axiomToken: string;
-  axiomDataset: string;
+  // Analytics opt-out (BET-217). Default true; false = this instance ships
+  // nothing to Axiom (desktop renderer + server). Mobile always ships
+  // regardless. Mirror of AppConfig.shareAnalytics.
+  shareAnalytics: boolean;
   projects: Project[];
   activeProjectName: string | null;
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
@@ -281,8 +277,7 @@ export const useStore = create<State>((set, get) => ({
   groqApiKey: "",
   voiceTranscriptionModel: "",
   voiceCommandModel: "",
-  axiomToken: "",
-  axiomDataset: "",
+  shareAnalytics: true,
   projects: [],
   activeProjectName: null,
   activeWindowByProject: {},
@@ -396,8 +391,7 @@ export const useStore = create<State>((set, get) => ({
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       voiceCommandModel: c.voiceCommandModel ?? "",
-      axiomToken: c.axiomToken ?? "",
-      axiomDataset: c.axiomDataset ?? "",
+      shareAnalytics: c.shareAnalytics ?? true,
     }),
 
   applyPairing: (p) =>

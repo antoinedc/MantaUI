@@ -78,6 +78,39 @@ describe("resolveAxiomConfig", () => {
     const r = resolveAxiomConfig({ env: {}, config: { axiomToken: "x" } });
     expect(r?.endpoint).toBe("https://api.axiom.co/v1/datasets/manta/ingest");
   });
+  it("shareAnalytics: false opts out (env token ignored)", () => {
+    expect(
+      resolveAxiomConfig({
+        env: { MANTA_AXIOM_TOKEN: "envtok" },
+        config: { shareAnalytics: false },
+      }),
+    ).toBeNull();
+  });
+  it("shareAnalytics: false opts out (config token ignored)", () => {
+    expect(
+      resolveAxiomConfig({
+        env: {},
+        config: { axiomToken: "abc", shareAnalytics: false },
+      }),
+    ).toBeNull();
+  });
+  it("shareAnalytics: true with a valid token returns the config", () => {
+    const r = resolveAxiomConfig({
+      env: {},
+      config: { axiomToken: "abc", shareAnalytics: true },
+    });
+    expect(r).toEqual({
+      endpoint: "https://api.axiom.co/v1/datasets/manta/ingest",
+      token: "abc",
+    });
+  });
+  it("shareAnalytics absent with a valid token returns the config (default ON)", () => {
+    const r = resolveAxiomConfig({
+      env: {},
+      config: { axiomToken: "abc" },
+    });
+    expect(r?.token).toBe("abc");
+  });
 });
 
 describe("formatConsoleArgs", () => {

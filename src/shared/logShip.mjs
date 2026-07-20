@@ -30,14 +30,17 @@ const MAX_MSG_LEN = 4000;
  * Resolve the Axiom ingest endpoint + token. Env vars win over AppConfig
  * fields (env lets the relay — which has no `~/.manta` directory — be
  * configured without touching code). Dataset defaults to "manta" so a user
- * only needs to provide the token to start shipping.
+ * only needs to provide the token to start shipping. `shareAnalytics ===
+ * false` opts this instance OUT entirely (desktop renderer + server; mobile
+ * always ships). Absent/undefined → opt-in (default ON).
  *
  * @param {object} args
  * @param {Record<string, string | undefined>} args.env    process.env-shaped
- * @param {{ axiomToken?: string; axiomDataset?: string } | null} args.config
+ * @param {{ axiomToken?: string; axiomDataset?: string; shareAnalytics?: boolean } | null} args.config
  * @returns {{ endpoint: string; token: string } | null}
  */
 export function resolveAxiomConfig({ env, config }) {
+  if (config?.shareAnalytics === false) return null; // instance opted out
   const token = env?.MANTA_AXIOM_TOKEN || config?.axiomToken;
   if (!token) return null;
   const dataset = env?.MANTA_AXIOM_DATASET || config?.axiomDataset || "manta";

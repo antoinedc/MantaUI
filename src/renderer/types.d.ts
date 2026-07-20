@@ -6,6 +6,12 @@ declare global {
     api: Api;
     __buiPreload: BuiPreload | null;
   }
+  // Build-time injected Axiom credentials (electron.vite.config.ts +
+  // electron.vite.config.mobile.ts `define`). Empty string → shipping is
+  // silently disabled by resolveAxiomConfig. Mobile always ships when a
+  // token is present; desktop additionally honors AppConfig.shareAnalytics.
+  const __MANTA_AXIOM_TOKEN__: string;
+  const __MANTA_AXIOM_DATASET__: string;
 }
 
 export {};

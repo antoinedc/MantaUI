@@ -1,17 +1,20 @@
-// Renderer-side log shipping (BET-187). The shared `logShip.mjs` module
-// owns the buffering / ingest / format — this file is the thin renderer
-// wrapper: it reads AppConfig.axiomToken via `window.api.configGet()` at
-// init, mints a stable per-device id in localStorage, installs the
-// console-capture wrap, and registers the standard browser event hooks
-// (`error`, `unhandledrejection`, `online`, `offline`, `visibilitychange`,
-// `pagehide`).
+// Renderer-side log shipping (BET-187, BET-217). The shared `logShip.mjs`
+// module owns the buffering / ingest / format — this file is the thin
+// renderer wrapper: it reads AppConfig.shareAnalytics via
+// `window.api.configGet()` at init (desktop only; mobile always ships),
+// mints a stable per-device id in localStorage, installs the console-
+// capture wrap, and registers the standard browser event hooks.
+//
+// Token/dataset come from build-time constants `__MANTA_AXIOM_TOKEN__` /
+// `__MANTA_AXIOM_DATASET__` (Vite `define`, sourced from env at build).
+// There is no user-typed token anywhere — desktop Settings exposes a
+// single boolean opt-out in the General tab.
 //
 // Mobile PWA and desktop renderer both call `initRendererLogging("mobile"
-// | "desktop")` from main.tsx after `setWindowApi(httpApi)` lands. The
-// token is entered once in desktop Settings (mobile reads server config
-// via configGet — no MobileSettings UI per the spec). Without a token,
-// `ship()` is a safe no-op and `initRendererLogging` returns without
-// installing anything: NO fetches to axiom.co, NO console noise.
+// | "desktop")` from main.tsx after `setWindowApi(httpApi)` lands. Without
+// a build-time token, `ship()` is a safe no-op and `initRendererLogging`
+// returns without installing anything: NO fetches to axiom.co, NO console
+// noise.
 //
 // SPEC GUARD: the renderer ships DIRECTLY to Axiom (not through bui-
 // server). When the phone↔box path is broken — the exact bug being
@@ -31,8 +34,7 @@ let shipper: LogShipper | null = null;
 let flushOnHide: (() => void) | null = null;
 
 const DEVICE_KEY = "manta_log_device";
-const TOKEN_CACHE_KEY = "manta_axiom_token";
-const DATASET_CACHE_KEY = "manta_axiom_dataset";
+const ANALYTICS_CACHE_KEY = "manta_share_analytics";
 
 /**
  * Mint or restore an 8-hex-char device id from localStorage. Stable per
@@ -88,30 +90,29 @@ function safeSet(key: string, value: string): void {
  */
 export async function initRendererLogging(source: "mobile" | "desktop"): Promise<void> {
   if (shipper) return; // already initialized
-  let config: Parameters<typeof resolveAxiomConfig>[0]["config"] = null;
-  try {
-    config = await window.api.configGet();
-    const token = config?.axiomToken;
-    if (typeof token === "string" && token.length > 0) {
-      safeSet(TOKEN_CACHE_KEY, token);
-      safeSet(DATASET_CACHE_KEY, config?.axiomDataset ?? "manta");
-    }
-  } catch {
-    // configGet fails when the box is unreachable — the exact scenario we
-    // need to debug. Fall back to the cached token from a prior successful
-    // boot so the renderer still ships events; if no cache exists yet, this
-    // is a never-connected install and config stays null (unchanged).
-    const cachedToken = safeGet(TOKEN_CACHE_KEY);
-    if (cachedToken) {
-      config = {
-        axiomToken: cachedToken,
-        axiomDataset: safeGet(DATASET_CACHE_KEY) ?? "manta",
-      };
-    } else {
-      config = null;
+
+  // Mobile always ships; desktop honors the user's Share-analytics toggle.
+  let shareAnalytics = true;
+  if (source === "desktop") {
+    try {
+      const config = await window.api.configGet();
+      shareAnalytics = config?.shareAnalytics ?? true;
+      safeSet(ANALYTICS_CACHE_KEY, shareAnalytics ? "1" : "0");
+    } catch {
+      // Box unreachable — honor the last-known choice so an offline boot of a
+      // user who opted OUT does not silently start shipping again.
+      shareAnalytics = safeGet(ANALYTICS_CACHE_KEY) !== "0";
     }
   }
-  const axiomCfg = resolveAxiomConfig({ env: {}, config });
+
+  const axiomCfg = resolveAxiomConfig({
+    env: {},
+    config: {
+      axiomToken: __MANTA_AXIOM_TOKEN__,
+      axiomDataset: __MANTA_AXIOM_DATASET__,
+      shareAnalytics,
+    },
+  });
   if (!axiomCfg) return;
 
   const device = getOrMintDevice();

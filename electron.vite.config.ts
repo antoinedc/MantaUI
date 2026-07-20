@@ -22,6 +22,10 @@ export default defineConfig({
   renderer: {
     root: resolve(__dirname, "src/renderer"),
     plugins: [react()],
+    define: {
+      __MANTA_AXIOM_TOKEN__: JSON.stringify(process.env.MANTA_AXIOM_TOKEN ?? ""),
+      __MANTA_AXIOM_DATASET__: JSON.stringify(process.env.MANTA_AXIOM_DATASET ?? "manta"),
+    },
     build: {
       rollupOptions: {
         input: { index: resolve(__dirname, "src/renderer/index.html") },
