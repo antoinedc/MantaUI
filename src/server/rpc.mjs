@@ -14,6 +14,7 @@ import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
 import { restartOpencode } from "./opencodeAdmin.mjs";
 import { addApnsToken } from "./push.mjs";
+import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -443,6 +444,14 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // MobileSettings. Returns the snake_case payload the renderer expects;
     // the JSON-RPC envelope wraps it as { result: { version } }.
     "server:version": () => ({ version: serverVersion }),
+
+    // ---- plugins (BET-189 / BET-190) ----
+    // Read the current plugin registry the Mac executor has published.
+    // Mirrors the GET /api/plugins/registry REST route — both call the
+    // same plugins.getRegistry() so the in-memory registry stays single-
+    // source-of-truth regardless of transport. Settings → Plugins tab
+    // polls every 10s while open.
+    "plugins:registry": () => pluginsGetRegistry(),
 
     // ---- pty channels (4 channels) ----
     //

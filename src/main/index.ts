@@ -195,9 +195,10 @@ app.whenReady().then(() => {
         }
       },
     );
-    // Capability executor (BET-183 / BET-185): when enabled in Settings, this
-    // Mac subscribes to bui-server's bus and runs plugin handlers (e.g.
-    // ios.build). startCapExecutor is a no-op when capExecutorEnabled is off.
+    // Capability executor (BET-183 / BET-185 / BET-190): when enabled in
+    // Settings, this Mac subscribes to bui-server's bus and runs the YAML
+    // plugins it finds under ~/.manta/plugins/. startCapExecutor is a
+    // no-op when pluginsEnabled is off.
     startCapExecutor(() => config);
     // Defer update check until after the renderer is ready (avoids blocking startup).
     // electron-updater skips the check in dev mode (unpacked app).

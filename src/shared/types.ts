@@ -129,23 +129,14 @@ export type AppConfig = {
   // classifier in chatUtils.ts can't match a command-mode utterance. Default
   // "llama-3.1-8b-instant" — JSON-mode capable, ~$0.0001/call, ~300ms.
   voiceCommandModel?: string;
-  // ----- Capability executor (BET-183 / BET-185) -----
-  // Master switch for the Mac-side capability executor (capExecutor.ts). When
-  // true, this Mac subscribes to bui-server's SSE bus and runs MantaUI plugin
-  // handlers (e.g. ios.build). Default false (OFF) — toggling takes effect on
-  // next app launch. Trust boundary: handlers run arbitrary shell commands
-  // scoped to the allowlist in capExecutor's HANDLERS map.
-  capExecutorEnabled?: boolean;
-  // Absolute path to the MantaUI git clone used by the ios.build handler.
-  // Default `~/projects/better-ui`. Leading `~` is expanded against
-  // os.homedir() in the handler. Must be a clone that tracks origin/main —
-  // the tool description carries the warning that ios.build builds the
-  // Mac's clone (tracking main), NOT this session's branch.
-  iosBuildRepoPath?: string;
-  // Exact simulator device name to target for ios.build (e.g. "iPhone 15").
-  // Absent/empty = auto-pick (highest iOS runtime + iPhone-prefixed name).
-  // See src/main/handlers/iosBuild.ts `pickSimulator` for the algorithm.
-  iosSimulatorName?: string;
+  // ----- Plugins (BET-183 / BET-185 / BET-190) -----
+  // Master switch for the Mac-side plugin executor (capExecutor.ts). When
+  // true, this Mac subscribes to bui-server's SSE bus and runs the YAML
+  // plugins it finds under ~/.manta/plugins/. Default false (OFF) — toggling
+  // takes effect on next app launch. Trust boundary: plugins are user-
+  // authored YAML files; each step runs an arbitrary shell command with the
+  // user's UID, so the user MUST vet every plugin they install.
+  pluginsEnabled?: boolean;
 };
 
 // ----- Live tmux state -----
@@ -534,6 +525,15 @@ export const IPC = {
   // drifts between surfaces). Display-only foundation for client/server skew
   // detection; gating / banner / force-update logic lands in a later phase.
   getServerVersion: "server:version",                 // () → { version: string }
+
+  // ---- plugins (BET-189 / BET-190) ----
+  // The renderer reads the plugin registry via this channel (the Settings →
+  // Plugins tab polls every 10s while open). Backed by
+  // GET /api/plugins/registry on the server side; the Mac executor's PUT
+  // publishes the entries. Same 6-site wiring as schedule:*
+  // (types → shared/api → httpApi → rpc.mjs → server/plugins.mjs).
+  // → PluginRegistryRow[]
+  pluginsRegistry: "plugins:registry",
 } as const;
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
@@ -646,6 +646,40 @@ export type AuthClaimInput = {
 export type AuthPairResult =
   | { ok: true; pairingCode: string; boxId: string; expiresAt: string }
   | { ok: false; error: string };
+
+// One row of the plugin registry (BET-189 / BET-190). The Mac executor
+// PUTs these to the server on (re)connect + on every fs.watch burst; the
+// renderer reads the same shape via the `plugins:registry` channel to
+// render the installed-plugins list in Settings → Plugins. `valid:false`
+// rows are intentionally surfaced so the user can SEE why their YAML
+// didn't load — there's no other place this info appears.
+export type PluginRegistryInputRow = {
+  id: string;
+  description: string;
+  type: "string" | "number" | "boolean" | "enum";
+  default?: unknown;
+  values?: string[];
+};
+export type PluginRegistryRow =
+  | {
+      name: string;
+      description: string;
+      inputs: PluginRegistryInputRow[];
+      valid: true;
+      yaml: string;
+      stepCount: number;
+      timeoutMs: number | null;
+    }
+  | {
+      name: string;
+      description: string;
+      inputs: PluginRegistryInputRow[];
+      valid: false;
+      error: string;
+      yaml: string;
+      stepCount: number;
+      timeoutMs: number | null;
+    };
 
 // ----- opencode message + part types (subset for Phase 1) -----
 //

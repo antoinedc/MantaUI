@@ -4,6 +4,7 @@ import {
   type AuthPairResult,
   type DesktopNotifyPayload,
   type OpencodeEvent,
+  type PluginRegistryRow,
   type PtyEvent,
   type WindowStatus,
 } from "../../shared/types.js";
@@ -980,6 +981,15 @@ export const httpApi: Api = {
   // /api/version returns for non-renderer clients). MobileSettings renders
   // "Server vX.Y.Z" under the URL field — display only, no gating.
   getServerVersion: () => rpc<{ version: string }>(IPC.getServerVersion),
+
+  // -- plugins (BET-189 / BET-190) --
+  // Read the current plugin registry the Mac executor has published. The
+  // Settings → Plugins tab polls every 10s while open (ScheduledTasksCard
+  // pattern). Backed by GET /api/plugins/registry → in-process
+  // plugins.getRegistry() via the `plugins:registry` RPC channel.
+  // Returns the rows verbatim; invalid manifests come back with
+  // `valid: false` + an `error` string so the UI can surface parse failures.
+  pluginsRegistry: () => rpc<PluginRegistryRow[]>(IPC.pluginsRegistry),
 
   // -- voice (Groq STT + classifier) --
   // The RPC body is JSON, so the ArrayBuffer can't ride along raw. Base64-

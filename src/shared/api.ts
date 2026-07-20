@@ -33,6 +33,7 @@ import type {
   ProviderInput,
   SubagentDef,
   SubagentInput,
+  PluginRegistryRow,
 } from "./types.js";
 import type { ClaimOutcome } from "./claim.mjs";
 
@@ -320,4 +321,11 @@ export interface Api {
   // trip). Used by MobileSettings to render "Server vX.Y.Z" under the URL
   // field. Display-only — gating / banner logic lands later.
   getServerVersion(): Promise<{ version: string }>;
+
+  // Plugins (BET-189 / BET-190): read the current plugin registry the Mac
+  // executor has published. Backed by GET /api/plugins/registry via the
+  // `plugins:registry` RPC channel. Returns the rows verbatim — invalid
+  // manifests come back with `valid: false` + an `error` string so the UI
+  // can show the user why their YAML didn't load.
+  pluginsRegistry(): Promise<PluginRegistryRow[]>;
 }

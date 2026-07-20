@@ -66,6 +66,7 @@ import {
   deleteHook,
   createRateLimiter,
 } from "./webhooks.mjs";
+import { putRegistry as pluginsPutRegistry, getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import {
   ensureAuth,
   createAuthEngine,
@@ -973,6 +974,37 @@ const server = createServer(async (req, res) => {
         const status = url.searchParams.get("status") || undefined;
         const jobs = await listCapJobs({ sessionID, host, status });
         respondJson(res, 200, { jobs });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Plugin registry (BET-189 / BET-190) ----------
+  // PUT  /api/plugins/registry  body: PluginRegistryRow[]  → 200 {count}
+  // GET  /api/plugins/registry                          → 200 {rows:[...]}
+  //
+  // Published by the Mac executor (src/main/capExecutor.ts) on every SSE
+  // (re)connect + on every fs.watch burst over ~/.manta/plugins/. The
+  // renderer reads the same registry via GET to render the installed-
+  // plugins list in Settings → Plugins. Invalid manifests are accepted
+  // and surfaced in the response (`valid: false` rows with an `error`
+  // string) so the user can SEE why their YAML didn't load — a 500 here
+  // would just leave the UI silently empty.
+  if (path === "/api/plugins/registry") {
+    try {
+      if (req.method === "PUT") {
+        const body = await readJsonBody(req);
+        const size = pluginsPutRegistry(body);
+        respondJson(res, 200, { count: size });
+        return;
+      }
+      if (req.method === "GET") {
+        const rows = pluginsGetRegistry();
+        respondJson(res, 200, { rows });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });
