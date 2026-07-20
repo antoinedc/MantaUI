@@ -523,7 +523,47 @@ test("a missed pong terminates the zombie socket and drives a reconnect", async 
   await Promise.resolve();
   assert.equal(agent.isConnected(), true, "reconnected after the zombie was killed");
   assert.equal(agent._isHeartbeatRunning(), true, "heartbeat re-armed on the new socket");
+  assert.equal(
+    heartbeat.running(),
+    1,
+    "EXACTLY one heartbeat interval after reconnect (no leaked double-interval)",
+  );
 
+  agent.stop();
+});
+
+test("a stale pong from an old socket does not mask the new socket's watchdog", async () => {
+  // Review note #1: awaitingPong is agent-scoped; guard against a late pong from
+  // an already-swapped socket clearing the flag on the current one.
+  const { relay, clock, heartbeat, agent } = makeStubAgent();
+  await agent.start();
+  const oldLink = relay.lastLink();
+
+  // Force a reconnect (drop → reschedule → redial) so a NEW link is current.
+  relay.dropLink();
+  await Promise.resolve();
+  clock.flush();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.notEqual(relay.lastLink(), oldLink, "a new link is current");
+
+  heartbeat.tick(); // new socket: ping sent, awaitingPong = true
+  assert.equal(agent._isAwaitingPong(), true);
+  oldLink.deliverPong(); // LATE pong from the dead old socket
+  assert.equal(
+    agent._isAwaitingPong(),
+    true,
+    "stale pong ignored — new socket still awaiting its own pong",
+  );
+
+  agent.stop();
+});
+
+test("double start() does not arm a second heartbeat interval", async () => {
+  const { heartbeat, agent } = makeStubAgent();
+  await agent.start();
+  await agent.start(); // idempotent — openOnce() no-ops while connected
+  assert.equal(heartbeat.running(), 1, "still exactly one heartbeat interval");
   agent.stop();
 });
 
