@@ -100,7 +100,7 @@ export type CapCtx = {
   exec(
     cmd: string,
     args: string[],
-    opts?: { cwd?: string; quiet?: boolean },
+    opts?: { cwd?: string; quiet?: boolean; env?: NodeJS.ProcessEnv },
   ): Promise<ExecResult>;
   signal: AbortSignal;
 };
@@ -619,6 +619,7 @@ function makeManifestHandler(manifest: PluginManifest) {
         const res = await ctx.exec("/bin/sh", ["-c", step.run], {
           cwd: cwdResolved,
           quiet: false,
+          env,
         });
         if (res.code !== 0 && !step.continue_on_error) {
           throw new Error(`step ${i + 1} (${label}) exited with code ${res.code}`);
@@ -759,7 +760,9 @@ async function postDone(
 // ctx.exec — argv spawn with PATH patch + capture + abort handling.
 // ---------------------------------------------------------------------------
 
-function makeExec(
+// Exported for tests (capExecutor.test.ts) — keeps the env plumbing
+// coverable without mocking spawn. Not part of the public API.
+export function makeExec(
   signal: AbortSignal,
   logLine: (line: string) => void,
 ): CapCtx["exec"] {
@@ -767,6 +770,7 @@ function makeExec(
     new Promise((resolve, reject) => {
       const cwd = opts?.cwd;
       const quiet = opts?.quiet === true;
+      const baseEnv = opts?.env ?? process.env;
       let stdout = "";
       let stdoutTruncated = false;
 
@@ -775,8 +779,8 @@ function makeExec(
         child = spawn(cmd, args, {
           cwd,
           env: {
-            ...process.env,
-            PATH: PATH_PREFIX + (process.env.PATH ?? ""),
+            ...baseEnv,
+            PATH: PATH_PREFIX + (baseEnv.PATH ?? process.env.PATH ?? ""),
           },
           signal,
         });
