@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, ipcMain, shell } from "electron";
 import { join, basename } from "node:path";
-import { watch as fsWatch } from "node:fs";
+import { existsSync, watch as fsWatch } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -264,9 +264,19 @@ function registerHandlers(): void {
     return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
   });
 
-  // Reveal a local file in Finder / the OS file manager.
+  // Reveal a local file in Finder / the OS file manager. Expands a leading
+  // `~/` against the user's home dir so callers can pass "shell-style" paths
+  // (e.g. the Settings "Open plugins folder" button passes `~/.manta/plugins`)
+  // — Electron's `shell.showItemInFolder` does NOT expand `~` itself, so
+  // passing the literal string is a silent no-op. The folder's existence is
+  // guarded so a stale/missing path no-ops instead of erroring to the renderer.
   ipcMain.handle(IPC.revealInFolder, (_e, localPath: string) => {
-    if (localPath) shell.showItemInFolder(localPath);
+    if (!localPath) return;
+    const abs = localPath.startsWith("~/")
+      ? join(homedir(), localPath.slice(2))
+      : localPath;
+    if (!existsSync(abs)) return;
+    shell.showItemInFolder(abs);
   });
 
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));
