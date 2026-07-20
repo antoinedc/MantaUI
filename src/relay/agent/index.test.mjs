@@ -76,6 +76,7 @@ function makeFakeRelay({ failFirst = 0 } = {}) {
     // is: send() accepts an already-encoded string OR a frame object it encodes.
     // The raw fake endpoint only forwards bytes, so wrap it to honor the same
     // contract the real ws adapter provides.
+    const pongCbs = [];
     const boxTransport = {
       send(frame) {
         boxSide.send(typeof frame === "string" ? frame : encodeFrame(frame));
@@ -86,11 +87,34 @@ function makeFakeRelay({ failFirst = 0 } = {}) {
       onClose(cb) {
         boxSide.onClose(cb);
       },
+      // WS-level liveness plumbing (BET zombie-WS watchdog). ping() records a
+      // call; the test decides whether to answer via link.deliverPong().
+      ping() {
+        link.pings += 1;
+      },
+      onPong(cb) {
+        pongCbs.push(cb);
+      },
+      terminate() {
+        link.terminated = true;
+        boxSide.close(); // synthesize the 'close' the real ws.terminate() causes
+      },
       close() {
         boxSide.close();
       },
     };
-    const link = { relaySide, boxSide, sent: [], recv: [] };
+    const link = {
+      relaySide,
+      boxSide,
+      sent: [],
+      recv: [],
+      pings: 0,
+      terminated: false,
+      // Simulate the peer answering a WS ping with a pong.
+      deliverPong() {
+        for (const cb of pongCbs.slice()) cb();
+      },
+    };
     // Record everything the client (boxTransport) sends to the relay (relaySide).
     relaySide.onMessage((raw) => link.recv.push(decodeFrame(raw)));
     links.push(link);
@@ -166,22 +190,49 @@ function makeClock() {
 // real fetch in a `finally` so a thrown assertion can't leak the stub to
 // sibling tests. The two makeDefaultLocalFetch tests use it; the 8-line
 // stub/restore preamble was an intra-file clone of itself.
+// A manual heartbeat clock so the liveness watchdog interval fires on demand
+// (no real setInterval). Mirrors makeClock but models a single repeating timer.
+function makeHeartbeatClock() {
+  let seq = 1;
+  const timers = new Map(); // handle -> fn
+  return {
+    setHeartbeat(fn) {
+      const h = seq++;
+      timers.set(h, fn);
+      return h;
+    },
+    clearHeartbeat(h) {
+      timers.delete(h);
+    },
+    // Fire every pending heartbeat once (a single connection has exactly one).
+    tick() {
+      for (const fn of [...timers.values()]) fn();
+    },
+    running() {
+      return timers.size;
+    },
+  };
+}
+
 function makeStubAgent(opts = {}) {
   const { failFirst, ...agentOpts } = opts;
   const relay = makeFakeRelay(
     failFirst != null ? { failFirst } : undefined,
   );
   const clock = makeClock();
+  const heartbeat = makeHeartbeatClock();
   const agent = createRelayAgent({
     auth: AUTH,
     connect: relay.connect,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
+    setHeartbeat: heartbeat.setHeartbeat,
+    clearHeartbeat: heartbeat.clearHeartbeat,
     log: silent,
     warn: silent,
     ...agentOpts,
   });
-  return { relay, clock, agent };
+  return { relay, clock, heartbeat, agent };
 }
 
 async function captureFetchHeaders(body) {
@@ -408,6 +459,92 @@ test("answers a relay PING with a correlated PONG", async () => {
   const pong = relay.clientSent().find((f) => f && f.type === FRAME_TYPES.PONG);
   assert.ok(pong, "a PONG was sent");
   assert.equal(pong.id, 99, "pong echoes the ping id");
+
+  agent.stop();
+});
+
+// ---------------------------------------------------------------------------
+// liveness watchdog (BET zombie-WS fix)
+// ---------------------------------------------------------------------------
+
+test("heartbeat starts on connect and pings the socket each tick", async () => {
+  const { relay, heartbeat, agent } = makeStubAgent();
+  await agent.start();
+
+  assert.equal(agent._isHeartbeatRunning(), true, "watchdog armed on connect");
+  assert.equal(relay.lastLink().pings, 0, "no ping before the first tick");
+
+  heartbeat.tick();
+  assert.equal(relay.lastLink().pings, 1, "first tick sends a ping");
+  assert.equal(agent._isAwaitingPong(), true, "awaiting a pong after ping");
+
+  agent.stop();
+});
+
+test("a pong keeps the socket alive across ticks (no terminate)", async () => {
+  const { relay, heartbeat, agent } = makeStubAgent();
+  await agent.start();
+
+  heartbeat.tick(); // ping #1
+  relay.lastLink().deliverPong(); // peer answers → alive
+  assert.equal(agent._isAwaitingPong(), false, "pong cleared the awaiting flag");
+
+  heartbeat.tick(); // ping #2 — allowed because previous was answered
+  assert.equal(relay.lastLink().pings, 2, "second ping sent");
+  assert.equal(relay.lastLink().terminated, false, "socket NOT terminated");
+  assert.equal(agent.isConnected(), true, "still connected");
+
+  agent.stop();
+});
+
+test("a missed pong terminates the zombie socket and drives a reconnect", async () => {
+  // THE REGRESSION: a silently-dead socket (no close event) must be detected
+  // by the watchdog and terminated so the reconnect loop fires. This is the
+  // 14h box_offline outage of 2026-07-20.
+  const { relay, clock, heartbeat, agent } = makeStubAgent();
+  await agent.start();
+
+  heartbeat.tick(); // ping #1 sent, awaitingPong = true
+  assert.equal(agent._isAwaitingPong(), true);
+  // No pong delivered — peer is dead.
+  heartbeat.tick(); // still awaiting → terminate
+
+  assert.equal(relay.lastLink().terminated, true, "dead socket terminated");
+  assert.equal(agent.isConnected(), false, "transport released after terminate");
+  assert.equal(
+    clock.pendingCount(),
+    1,
+    "a reconnect was scheduled (terminate synthesized the close → reconnect)",
+  );
+
+  // Firing the reconnect timer re-dials and re-arms a fresh heartbeat.
+  clock.flush();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(agent.isConnected(), true, "reconnected after the zombie was killed");
+  assert.equal(agent._isHeartbeatRunning(), true, "heartbeat re-armed on the new socket");
+
+  agent.stop();
+});
+
+test("stop() cancels the heartbeat (no lingering interval)", async () => {
+  const { heartbeat, agent } = makeStubAgent();
+  await agent.start();
+  assert.equal(heartbeat.running(), 1, "heartbeat running while connected");
+
+  agent.stop();
+  assert.equal(heartbeat.running(), 0, "heartbeat cleared on stop");
+  assert.equal(agent._isHeartbeatRunning(), false);
+});
+
+test("a normal tunnel close also stops the heartbeat", async () => {
+  const { relay, heartbeat, agent } = makeStubAgent();
+  await agent.start();
+  assert.equal(heartbeat.running(), 1);
+
+  relay.dropLink(); // relay closes the tunnel normally
+  await Promise.resolve();
+  assert.equal(agent._isHeartbeatRunning(), false, "heartbeat stopped on close");
 
   agent.stop();
 });

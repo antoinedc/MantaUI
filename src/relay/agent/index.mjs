@@ -63,6 +63,19 @@ export const DEFAULT_LOCAL_BASE = "http://127.0.0.1:8787";
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 30000;
 
+// Liveness watchdog (BET: zombie-WS fix). The reconnect loop only fires on a
+// socket 'close'/'error' event. When the underlying TCP dies SILENTLY (relay
+// restart behind a load balancer, NAT/idle timeout, network blip) no close is
+// emitted and the agent holds a half-open "zombie" socket FOREVER — status()
+// reports "connected" while the relay has long since dropped the box, so the
+// phone sees `box_offline`. This is the exact 14h dead-socket outage observed
+// 2026-07-20. The fix mirrors the opencode SSE liveness watchdog (commit
+// 26319f9): periodically send a WS-level ping and, if no pong came back since
+// the previous tick, TERMINATE the socket — which synthesizes the 'close' event
+// the reconnect loop is waiting for. Interval 20s / two missed pongs ≈ 40s to
+// detection, well under the relay's own presence TTL.
+export const HEARTBEAT_INTERVAL_MS = 20000;
+
 // ---------------------------------------------------------------------------
 // Backoff — the .mjs mirror of src/shared/net/backoff.ts ExponentialBackoff
 // ---------------------------------------------------------------------------
@@ -117,6 +130,7 @@ async function defaultConnect(url, { headers } = {}) {
   const ws = new WebSocket(url, { headers });
   const msgCbs = [];
   const closeCbs = [];
+  const pongCbs = [];
   let openResolved = false;
 
   const transport = {
@@ -144,6 +158,28 @@ async function defaultConnect(url, { headers } = {}) {
     onClose(cb) {
       closeCbs.push(cb);
     },
+    // Liveness plumbing for the heartbeat watchdog. `ping()` sends a WS-PROTOCOL
+    // ping (not an app frame — the `ws` peer answers it automatically, no relay
+    // code needed); `onPong` registers the pong callback; `terminate()` hard-
+    // kills a half-open socket (ws.close() waits for a close handshake the dead
+    // peer will never send, so a zombie must be terminated, not closed).
+    ping() {
+      try {
+        ws.ping();
+      } catch {
+        /* socket closing/closed — watchdog will terminate on the next tick */
+      }
+    },
+    onPong(cb) {
+      pongCbs.push(cb);
+    },
+    terminate() {
+      try {
+        ws.terminate();
+      } catch {
+        /* already gone */
+      }
+    },
     close() {
       try {
         ws.close();
@@ -155,6 +191,9 @@ async function defaultConnect(url, { headers } = {}) {
 
   ws.on("message", (data) => {
     for (const cb of msgCbs.slice()) cb(data);
+  });
+  ws.on("pong", () => {
+    for (const cb of pongCbs.slice()) cb();
   });
   ws.on("close", () => {
     for (const cb of closeCbs.slice()) cb();
@@ -432,6 +471,16 @@ export function createRelayAgent(opts = {}) {
     backoff = createBackoff(),
     setTimer = (fn, ms) => setTimeout(fn, ms),
     clearTimer = (h) => clearTimeout(h),
+    // Heartbeat watchdog (BET zombie-WS fix). Injectable interval primitives so
+    // tests can drive the tick deterministically without real timers. Default
+    // to unref'd setInterval so the watchdog never keeps the process alive.
+    heartbeatMs = HEARTBEAT_INTERVAL_MS,
+    setHeartbeat = (fn, ms) => {
+      const h = setInterval(fn, ms);
+      if (typeof h?.unref === "function") h.unref();
+      return h;
+    },
+    clearHeartbeat = (h) => clearInterval(h),
     log = console.log,
     warn = console.warn,
   } = opts;
@@ -459,6 +508,8 @@ export function createRelayAgent(opts = {}) {
   let stopped = false; // set by stop(); halts the reconnect loop permanently
   let started = false; // set by start(); the agent only counts as "live" once start() ran
   let connecting = false;
+  let heartbeatHandle = null; // liveness watchdog interval (BET zombie-WS fix)
+  let awaitingPong = false; // true once a ping is sent, cleared on pong receipt
 
   // Build the authenticated dial-out URL + headers. The relay's parseHandshake
   // accepts box_id/token via header OR query; we present BOTH the header form
@@ -984,8 +1035,15 @@ export function createRelayAgent(opts = {}) {
     t.onMessage((data) => {
       onFrame(decodeFrame(data));
     });
+    // A WS-protocol pong clears the "awaiting" flag — the peer is alive.
+    if (typeof t.onPong === "function") {
+      t.onPong(() => {
+        awaitingPong = false;
+      });
+    }
     t.onClose(() => {
       if (transport === t) transport = null;
+      stopHeartbeat();
       // Every live stream must be torn down so nothing hangs half-open across a
       // reconnect (Stage-4 consumers get onAbort).
       streams.abortAll("relay tunnel closed");
@@ -993,6 +1051,43 @@ export function createRelayAgent(opts = {}) {
       log(`[relay-agent] tunnel closed; reconnecting`);
       scheduleReconnect();
     });
+
+    startHeartbeat(t);
+  }
+
+  // --- liveness watchdog (BET zombie-WS fix) ------------------------------
+
+  // Start the per-connection heartbeat. Each tick: if the PREVIOUS ping was
+  // never answered (awaitingPong still true), the peer is dead — terminate the
+  // socket, which fires the 'close' handler and drives a reconnect. Otherwise
+  // arm a fresh ping and mark awaiting. First tick sends a ping without
+  // terminating (nothing to time out yet). Terminates rather than close()s
+  // because a zombie peer never completes a close handshake.
+  function startHeartbeat(t) {
+    stopHeartbeat();
+    awaitingPong = false;
+    if (typeof t.ping !== "function") return; // transport without ping (test stub)
+    heartbeatHandle = setHeartbeat(() => {
+      if (transport !== t) return; // stale tick after a swap
+      if (awaitingPong) {
+        // No pong since last tick → dead socket. Terminate → onClose → reconnect.
+        warn("[relay-agent] heartbeat timeout; terminating dead socket");
+        awaitingPong = false;
+        if (typeof t.terminate === "function") t.terminate();
+        else t.close();
+        return;
+      }
+      awaitingPong = true;
+      t.ping();
+    }, heartbeatMs);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatHandle != null) {
+      clearHeartbeat(heartbeatHandle);
+      heartbeatHandle = null;
+    }
+    awaitingPong = false;
   }
 
   // Schedule the next reconnect after a backoff delay. Guards against stacking
@@ -1035,6 +1130,7 @@ export function createRelayAgent(opts = {}) {
       clearTimer(reconnectTimer);
       reconnectTimer = null;
     }
+    stopHeartbeat();
     streams.abortAll("relay-agent stopped");
     if (transport) {
       const t = transport;
@@ -1076,6 +1172,9 @@ export function createRelayAgent(opts = {}) {
     _onFrame: onFrame,
     _streams: streams,
     _handshake: handshake,
+    // introspection for the heartbeat watchdog tests
+    _isHeartbeatRunning: () => heartbeatHandle != null,
+    _isAwaitingPong: () => awaitingPong,
   };
 }
 
