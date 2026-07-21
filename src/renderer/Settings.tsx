@@ -249,6 +249,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
     <div className="fixed inset-0 bg-bg z-50 flex">
       {/* Left sidebar navigation */}
       <div className="w-48 bg-bg-soft border-r border-border flex flex-col shrink-0">
+        {/* Reserve room for the macOS traffic lights (titleBarStyle hiddenInset).
+            Same 40px draggable spacer used at the top of Sidebar.tsx. */}
+        <div className="titlebar-drag h-10 shrink-0" />
         <div className="p-4 border-b border-border">
           <h2 className="text-lg font-semibold">Settings</h2>
         </div>

@@ -83,13 +83,13 @@ print("splashes regenerated")
 
 # ---- Desktop assets (assets/icon.icns, assets/icons/, renderer header mark) ----
 from PIL import ImageDraw
-def mac_tile(size):
-    """Big-Sur style: rounded tile (ICON_BG) inset 5% on transparent, mark ~62%."""
+def mac_tile(size, bg=NAVY):
+    """Big-Sur style: rounded tile (bg) inset 5% on transparent, mark ~62%."""
     c = Image.new("RGBA", (size, size), (0,0,0,0))
     inset = round(size*0.05); tile = size - 2*inset
     mask = Image.new("L", (tile, tile), 0)
     ImageDraw.Draw(mask).rounded_rectangle([0,0,tile-1,tile-1], radius=round(tile*0.2237), fill=255)
-    c.paste(Image.new("RGBA",(tile,tile),ICON_BG), (inset,inset), mask)
+    c.paste(Image.new("RGBA",(tile,tile),bg), (inset,inset), mask)
     inner = round(tile*0.62); w,h = im.size; s = min(inner/w, inner/h)
     nw,nh = round(w*s), round(h*s)
     c.alpha_composite(im.resize((nw,nh), Image.LANCZOS), ((size-nw)//2,(size-nh)//2))
@@ -97,7 +97,7 @@ def mac_tile(size):
 
 os.makedirs("assets/icons", exist_ok=True)
 for s in (16,32,48,64,128,256,512):
-    square(im, s).save(f"assets/icons/{s}x{s}.png")
+    mac_tile(s).save(f"assets/icons/{s}x{s}.png")
 
 # renderer header mark (bundled via Vite import in Onboarding.tsx)
 h = 128; w = round(im.size[0]*h/im.size[1])
