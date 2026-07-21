@@ -17,6 +17,7 @@ import type {
   ScheduledJob,
   SecretMeta,
   SecretInput,
+  ServerUpdateAvailablePayload,
   WebhookMeta,
   SpawnOptions,
   PtyEvent,
@@ -320,7 +321,48 @@ export interface Api {
   // served in-process via the `server:version` RPC channel (no HTTP round
   // trip). Used by MobileSettings to render "Server vX.Y.Z" under the URL
   // field. Display-only — gating / banner logic lands later.
-  getServerVersion(): Promise<{ version: string }>;
+  //
+  // Response also carries `minClient` (BET-225 stage 2 server side): the
+  // oldest desktop/mobile client version the current server RPC contract
+  // still supports, exported as `MIN_CLIENT` from src/server/version.mjs.
+  // The renderer's version-skew guard (BET-225 stage 3 Part C) reads both
+  // fields off this single response to decide whether to render the
+  // non-dismissible "outdated" banner — no parallel endpoint, no second
+  // poll. The interface keeps `version` as the primary field for the
+  // BET-180 callers (MobileSettings); new consumers should destructure
+  // both.
+  getServerVersion(): Promise<{ version: string; minClient: string }>;
+
+  // Client version (BET-225 stage 3): returns the desktop app's own version
+  // via Electron's `app.getVersion()`. Combined with the server's
+  // `minClient` (also from getServerVersion → the response carries both
+  // `version` and `minClient` after BET-225 stage 2) by isClientTooOld() to
+  // decide whether to render the non-dismissible skew banner. On mobile/web
+  // (no Electron preload) httpApi returns a baked-in fallback so the call
+  // never rejects — a missing client version means no skew check, never a
+  // crash.
+  getClientVersion(): Promise<{ version: string }>;
+
+  // Server-update apply (BET-225 stage 3): triggers the box's
+  // `scripts/self-update.sh` (git fetch + reset --hard origin/main + npm ci
+  // --omit=dev + systemctl --user restart manta-server). The server returns
+  // immediately (fire-and-forget); the restart will kill the process mid-
+  // run so a caller awaiting past the RPC send may never see a response.
+  // Mirror of the desktop `opencode:restart` action — fixed-argv execFile,
+  // no injection surface, no caller-supplied input.
+  serverUpdateApply(): Promise<void>;
+
+  // Server-update available subscription (BET-225 stage 3): fires when the
+  // box's server-update poller sees a newer manifest version. Mirrors the
+  // desktopNotify pattern — main subscribes to bui-server's /events SSE,
+  // filters on kind === "serverUpdateAvailable", and forwards via IPC. The
+  // renderer's UpdateBar component renders a "Server update available:
+  // {version}" bar with an "Update & restart" button that calls
+  // serverUpdateApply(). Desktop-only wiring (mobile has no IPC); the httpApi
+  // shim returns a no-op unsubscribe on mobile.
+  onServerUpdateAvailable(
+    cb: (payload: ServerUpdateAvailablePayload) => void,
+  ): () => void;
 
   // Plugins (BET-189 / BET-190): read the current plugin registry the Mac
   // executor has published. Backed by GET /api/plugins/registry via the

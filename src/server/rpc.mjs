@@ -1,6 +1,8 @@
 // Channel -> handler dispatch. Handlers are async (...args) => result.
 // Mirrors Electron ipcMain.handle semantics.
 
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
@@ -12,10 +14,18 @@ import {
 import { resolveWorkspace } from "./peers.mjs";
 import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
-import { restartOpencode } from "./opencodeAdmin.mjs";
+import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { MIN_CLIENT } from "./version.mjs";
+
+// Same dirname derivation as src/server/index.mjs (line 83) so the script
+// path resolves identically. The script lives at <repoRoot>/scripts/
+// self-update.sh — `restartOpencode` invokes an absolute binary on PATH;
+// this one is repo-local so we resolve it explicitly. Mirrors how the
+// server already passes an absolute cwd to tmux/opencode spawning.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SELF_UPDATE_SCRIPT = join(__dirname, "..", "..", "scripts", "self-update.sh");
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -282,6 +292,17 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // subagent/provider config write takes effect (opencode only re-reads the
     // `agent`/`provider` blocks at startup). Was a no-op stub pre-BET-123.
     "opencode:restart": () => restartOpencode(),
+
+    // server-update apply (BET-225 stage 3 Part A): kick off the box's
+    // self-update script (scripts/self-update.sh — git fetch + reset --hard
+    // origin/main + npm ci --omit=dev + systemctl --user restart
+    // manta-server). The script's final step kills this bui-server process
+    // mid-run, so the child is detached via `runServerSelfUpdate` rather
+    // than awaited here — the caller (renderer UpdateBar) just sees the
+    // RPC promise resolve as soon as execFile returns. No caller-supplied
+    // input (no injection surface); script path is resolved once at module
+    // load from `import.meta.url` so cwd never enters the calculation.
+    "server:update-apply": () => runServerSelfUpdate(SELF_UPDATE_SCRIPT),
 
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args
     "opencode:default-model": () => oc.getDefaultModel(),

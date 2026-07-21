@@ -1,4 +1,4 @@
-import type { DesktopNotifyPayload } from "../shared/types.js";
+import type { DesktopNotifyPayload, ServerUpdateAvailablePayload } from "../shared/types.js";
 
 /**
  * OS-integration affordances exposed by the Electron preload bridge.
@@ -50,6 +50,23 @@ export interface BuiPreload {
   // pluginsSetEnabled; both are no-ops on mobile/web (no preload).
   pluginsGetEnabled(): Promise<boolean>;
   pluginsSetEnabled(value: boolean): Promise<void>;
+  // Client version (BET-225 stage 3): returns the running desktop app's own
+  // version via main → `app.getVersion()`. Combined with the server's
+  // `minClient` (from getServerVersion) by the renderer's isClientTooOld
+  // check to decide whether to render the non-dismissible skew banner.
+  // httpApi calls this as the desktop-side leg of `getClientVersion()`;
+  // mobile/web have no preload and fall back to a build-time `__APP_VERSION__`
+  // define in the renderer bundle.
+  clientVersion(): Promise<{ version: string }>;
+  // Server-update available subscription (BET-225 stage 3): fires when the
+  // box's server-update poller (src/server/serverUpdate.mjs) sees a newer
+  // manifest version. Mirrors the desktopNotify pattern — main subscribes
+  // to bui-server's /events SSE, filters by kind, and forwards the payload
+  // via IPC. The renderer's UpdateBar component renders a "Server update
+  // available: {version}" bar with a button that calls serverUpdateApply().
+  onServerUpdateAvailable(
+    cb: (payload: ServerUpdateAvailablePayload) => void,
+  ): () => void;
 }
 
 /**

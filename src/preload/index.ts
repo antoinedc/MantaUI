@@ -4,6 +4,7 @@ import {
   type AppConfig,
   type AuthClaimInput,
   type DesktopNotifyPayload,
+  type ServerUpdateAvailablePayload,
 } from "../shared/types.js";
 import type { ClaimOutcome } from "../shared/claim.mjs";
 
@@ -80,6 +81,26 @@ const api = {
     ipcRenderer.invoke(IPC.pluginsGetEnabled),
   pluginsSetEnabled: (value: boolean): Promise<void> =>
     ipcRenderer.invoke(IPC.pluginsSetEnabled, value),
+
+  // Client version (BET-225 stage 3): returns the running desktop app's own
+  // version via main → `app.getVersion()` (the authoritative live source —
+  // reads the same package.json the server uses for `server:version`).
+  // httpApi calls this as the desktop-side leg of `getClientVersion()`;
+  // mobile/web have no preload and fall back to a build-time `__APP_VERSION__`
+  // define in the renderer bundle.
+  clientVersion: (): Promise<{ version: string }> =>
+    ipcRenderer.invoke(IPC.clientVersion),
+
+  // Server-update available subscription (BET-225 stage 3): main subscribes
+  // to bui-server's /events SSE stream (src/main/serverUpdateForwarder.ts),
+  // filters on kind === "serverUpdateAvailable", and forwards the payload
+  // to the renderer via this IPC channel. Mirrors the desktopNotify
+  // one-kind-filter pattern; share the same kind/payload envelope.
+  onServerUpdateAvailable: (cb: (payload: ServerUpdateAvailablePayload) => void): (() => void) => {
+    const listener = (_: unknown, payload: ServerUpdateAvailablePayload) => cb(payload);
+    ipcRenderer.on(IPC.serverUpdateAvailable, listener);
+    return () => ipcRenderer.removeListener(IPC.serverUpdateAvailable, listener);
+  },
 };
 
 // Expose the real preload bridge under a STABLE, dedicated name — NOT "api".

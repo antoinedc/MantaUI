@@ -161,8 +161,12 @@ test("poller: first tick on a newer manifest publishes ONE event AND fires notif
     await new Promise((r) => setImmediate(r));
     assert.equal(updateEvents(bus).length, 1);
     const evt = updateEvents(bus)[0];
-    assert.equal(evt.version, "9.9.9");
-    assert.equal(evt.notesUrl, "https://mantaui.com/releases");
+    // The bus envelope nests per-kind fields inside `payload` (see
+    // src/server/events.mjs comment + the publish call in serverUpdate.mjs) —
+    // the renderer's dispatchFrame destructures `{kind, payload}` so the
+    // listener sees `{version, notesUrl}` as the payload object.
+    assert.equal(evt.payload?.version, "9.9.9");
+    assert.equal(evt.payload?.notesUrl, "https://mantaui.com/releases");
     assert.equal(notifyCalls.length, 1);
     assert.match(notifyCalls[0].message, /Server update 9\.9\.9 available/);
     assert.equal(notifyCalls[0].sessionID, null);
@@ -210,8 +214,7 @@ test("poller: dedup — re-tick on the SAME newer version does NOT republish", a
     lastNotifiedVersion = r.version;
     bus.publish({
       kind: "serverUpdateAvailable",
-      version: r.version,
-      notesUrl: r.notesUrl,
+      payload: { version: r.version, notesUrl: r.notesUrl ?? null },
     });
     await notify({
       message: `Server update ${r.version} available`,
@@ -251,8 +254,7 @@ test("poller: gate advances — strictly newer manifest version resets dedup", a
     lastNotifiedVersion = r.version;
     bus.publish({
       kind: "serverUpdateAvailable",
-      version: r.version,
-      notesUrl: r.notesUrl,
+      payload: { version: r.version, notesUrl: r.notesUrl ?? null },
     });
     await notify({
       message: `Server update ${r.version} available`,
@@ -266,8 +268,8 @@ test("poller: gate advances — strictly newer manifest version resets dedup", a
   await maybePublish();
 
   assert.equal(updateEvents(bus).length, 2);
-  assert.equal(updateEvents(bus)[0].version, "9.9.9");
-  assert.equal(updateEvents(bus)[1].version, "10.0.0");
+  assert.equal(updateEvents(bus)[0].payload?.version, "9.9.9");
+  assert.equal(updateEvents(bus)[1].payload?.version, "10.0.0");
   assert.equal(notifyCalls.length, 2);
 });
 

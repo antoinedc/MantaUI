@@ -4,6 +4,12 @@
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
+// Value import — `isClientTooOld` is the pure semver compare that drives
+// the renderer-side version-skew banner (BET-225 stage 3). Lives in
+// shared/versionCompare.mjs so both src/server/*.mjs and the renderer share
+// one source of truth; re-imported here so chooseUpdateSkewVariant is
+// testable in isolation (no DOM/network, just the compare).
+import { isClientTooOld } from "../shared/versionCompare.mjs";
 
 // Fallback context size used when the active model has no `limit.context`
 // (or no active model is known yet). 200k is the lowest common denominator
@@ -2086,4 +2092,36 @@ export function lastUserMessageText(
     if (text) return text;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Version-skew guard (BET-225 stage 3)
+// ---------------------------------------------------------------------------
+//
+// The renderer's UpdateBar component has two variants:
+//   - "ok"       → no banner
+//   - "outdated" → non-dismissible "this app is out of date" banner
+//
+// `chooseUpdateSkewVariant` picks the variant purely from the two version
+// strings the renderer already has on hand (the desktop's own version from
+// `getClientVersion()` + the server's `minClient` from `getServerVersion()`).
+// Pure: no DOM, no Electron, no network. Tested in chatUtils.test.ts.
+//
+// Treats missing/empty inputs as "no skew signal yet" → "ok", so a renderer
+// that's mid-bootstrap (versions not fetched yet) never spuriously flashes
+// the blocking banner. Both inputs run through `isClientTooOld`, which itself
+// treats malformed versions as "0.0.0" — see src/shared/versionCompare.mjs.
+//
+// The helper is intentionally a string literal union (not a boolean) so the
+// test surface is the exact "two variants" contract the UpdateBar component
+// encodes — extending the set later (e.g. a "warn" tier for non-blocking
+// deprecation hints) is a deliberate choice, not a happy accident.
+export type UpdateSkewVariant = "ok" | "outdated";
+
+export function chooseUpdateSkewVariant(
+  clientVersion: string | null | undefined,
+  minClient: string | null | undefined,
+): UpdateSkewVariant {
+  if (!clientVersion || !minClient) return "ok";
+  return isClientTooOld(clientVersion, minClient) ? "outdated" : "ok";
 }

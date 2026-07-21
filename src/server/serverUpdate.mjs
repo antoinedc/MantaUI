@@ -124,10 +124,15 @@ export function startServerUpdatePoller(
     if (result.version === lastNotifiedVersion) return;
     lastNotifiedVersion = result.version;
 
+    // Match the bus envelope documented in src/server/events.mjs: every
+    // `{kind, payload}` event from the server carries the per-kind fields
+    // INSIDE `payload`, not as siblings of `kind`. The renderer's dispatchFrame
+    // (src/renderer/api/httpApi.ts) destructures `{kind, payload}` and hands
+    // `payload` to its listeners; nesting here is what makes the stage-3
+    // `onServerUpdateAvailable` subscription see `{version, notesUrl}`.
     bus.publish({
       kind: "serverUpdateAvailable",
-      version: result.version,
-      notesUrl: result.notesUrl ?? null,
+      payload: { version: result.version, notesUrl: result.notesUrl ?? null },
     });
 
     if (typeof notify === "function") {

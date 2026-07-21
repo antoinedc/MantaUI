@@ -60,6 +60,7 @@ mac:
   # To re-enable for public distribution: set `notarize: true` and ensure
   # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID are in the Codemagic
   # "mantaui" env group.
+  # TODO: set true before public (non-beta) auto-update rollout — Gatekeeper friction on non-notarized DMGs. See AGENTS.md.
   notarize: false
 
 linux:

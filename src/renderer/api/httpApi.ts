@@ -6,6 +6,7 @@ import {
   type OpencodeEvent,
   type PluginRegistryRow,
   type PtyEvent,
+  type ServerUpdateAvailablePayload,
   type WindowStatus,
 } from "../../shared/types.js";
 import type { Api } from "../../shared/api.js";
@@ -307,7 +308,8 @@ type Kind =
   | "status"
   | "screenshot"
   | "agentFile"
-  | "desktopNotify";
+  | "desktopNotify"
+  | "serverUpdateAvailable";
 
 const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   opencode: new Set(),
@@ -316,6 +318,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   screenshot: new Set(),
   agentFile: new Set(),
   desktopNotify: new Set(),
+  serverUpdateAvailable: new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -921,7 +924,51 @@ export const httpApi: Api = {
   // `server:version` RPC channel (no HTTP round-trip; same value GET
   // /api/version returns for non-renderer clients). MobileSettings renders
   // "Server vX.Y.Z" under the URL field — display only, no gating.
-  getServerVersion: () => rpc<{ version: string }>(IPC.getServerVersion),
+  //
+  // Response also carries `minClient` (the constant the server exports from
+  // src/server/version.mjs) so the renderer's version-skew guard
+  // (BET-225 stage 3) can compute `isClientTooOld` from a single round-trip
+  // — no second endpoint, no parallel poll. The interface keeps `version`
+  // only for backward compat with the BET-180 callers; new consumers
+  // should destructure both fields off the response.
+  getServerVersion: () => rpc<{ version: string; minClient: string }>(IPC.getServerVersion),
+
+  // -- client version (BET-225 stage 3) --
+  // Returns the running client's own version. On desktop the preload bridge
+  // routes to main → `app.getVersion()` (the authoritative live source).
+  // On mobile/web there's no Electron preload — fall back to `__APP_VERSION__`,
+  // the package.json#version Vite `define` baked into the bundle at build
+  // time. The fallback is non-zero so isClientTooOld never trips on a
+  // missing-version client; bumping MIN_CLIENT above the current mobile
+  // build will start surfacing the informational skew banner in MobileApp.
+  getClientVersion: async (): Promise<{ version: string }> => {
+    const preload = getBuiPreload();
+    if (preload?.clientVersion) {
+      try {
+        return await preload.clientVersion();
+      } catch {
+        /* preload rejected — fall through to baked-in fallback */
+      }
+    }
+    return { version: __APP_VERSION__ };
+  },
+
+  // -- server-update apply (BET-225 stage 3) --
+  // Renderer → server RPC: kicks off scripts/self-update.sh on the box.
+  // Returns immediately (fire-and-forget); the restart kills the bui-server
+  // process mid-run so a caller awaiting past the RPC send may never see
+  // a response. Modeled on `opencode:restart` (single-purpose server action,
+  // fixed-argv execFile, no injection surface).
+  serverUpdateApply: () => rpc<void>(IPC.serverUpdateApply),
+
+  // -- server-update available subscription (BET-225 stage 3) --
+  // /events WS stream publishes `{kind: "serverUpdateAvailable", payload}`
+  // (the same envelope shape desktopNotify uses). The renderer's UpdateBar
+  // component renders a "Server update available: {version}" bar with a
+  // button that calls serverUpdateApply(). Mobile gets the same subscription
+  // so the store field stays in sync — actual mobile UI is a later pass.
+  onServerUpdateAvailable: (cb) =>
+    on<ServerUpdateAvailablePayload>("serverUpdateAvailable", cb),
 
   // -- plugins (BET-189 / BET-190) --
   // Read the current plugin registry the Mac executor has published. The
