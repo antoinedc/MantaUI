@@ -70,7 +70,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
       ) : jobs.length === 0 ? (
         <div className="text-text-muted">No scheduled tasks in this session.</div>
       ) : (
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1.5 max-h-[40vh] overflow-y-auto">
           {jobs.map((j) => {
             const next = describeNextRun(j.cron, j.recurring);
             return (
@@ -172,7 +172,7 @@ export const WebhooksCard = memo(function WebhooksCard({
           Multica ping this session when the task finishes”).
         </div>
       ) : (
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1.5 max-h-[40vh] overflow-y-auto">
           {hooks.map((h) => {
             const last =
               h.lastDeliveredAt != null
@@ -377,7 +377,7 @@ export const SecretsCard = memo(function SecretsCard({
           without ever seeing the value.
         </div>
       ) : (
-        <div className="flex flex-col gap-1.5 border-t border-border pt-1.5">
+        <div className="flex flex-col gap-1.5 border-t border-border pt-1.5 max-h-[40vh] overflow-y-auto">
           {secrets.map((s) => (
             <div key={s.id} className="flex items-center gap-2">
               <div className="min-w-0 flex-1">
