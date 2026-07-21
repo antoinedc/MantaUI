@@ -36,6 +36,47 @@ const TIER_CLASS: Record<string, string> = {
   deep: "bg-purple-900/20 text-purple-400",
 };
 
+// iOS-style toggle switch used by the Main + Sub columns. Consolidates the
+// two near-identical checkbox blocks (BET-215 reviewer nit, BET-219 follow-up).
+// The bound state, disabled flag, and an optional aria-label are the only
+// per-call-site differences; rendering is shared.
+interface SwitchProps {
+  checked: boolean;
+  disabled: boolean;
+  onChange: () => void;
+  "aria-label"?: string;
+}
+
+function Switch({ checked, disabled, onChange, "aria-label": ariaLabel }: SwitchProps) {
+  return (
+    <label className="inline-flex items-center cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={onChange}
+        aria-label={ariaLabel}
+        className="peer sr-only"
+      />
+      <span
+        className={`w-[30px] h-[18px] rounded-full border transition-colors relative ${
+          checked
+            ? "bg-accent-soft/40 border-accent"
+            : "bg-bg border-border-strong"
+        }`}
+      >
+        <span
+          className={`absolute top-[2px] w-[12px] h-[12px] rounded-full transition-transform ${
+            checked
+              ? "translate-x-[12px] bg-accent"
+              : "translate-x-[2px] bg-text-faint"
+          }`}
+        />
+      </span>
+    </label>
+  );
+}
+
 export function ModelsCard() {
   const setStoreDefaultModel = useStore((s) => s.setDefaultModel);
   // Saved default echoed in the banner above the search. Mirror the SAVED
@@ -358,56 +399,18 @@ export function ModelsCard() {
                     />
                   </td>
                   <td className="px-3 py-2 align-middle text-center">
-                    <label className="inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={isMain}
-                        disabled={isBusy}
-                        onChange={() => void toggleMain(key, isMain)}
-                        className="peer sr-only"
-                      />
-                      <span
-                        className={`w-[30px] h-[18px] rounded-full border transition-colors relative ${
-                          isMain
-                            ? "bg-accent-soft/40 border-accent"
-                            : "bg-bg border-border-strong"
-                        }`}
-                      >
-                        <span
-                          className={`absolute top-[2px] w-[12px] h-[12px] rounded-full transition-transform ${
-                            isMain
-                              ? "translate-x-[12px] bg-accent"
-                              : "translate-x-[2px] bg-text-faint"
-                          }`}
-                        />
-                      </span>
-                    </label>
+                    <Switch
+                      checked={isMain}
+                      disabled={isBusy}
+                      onChange={() => void toggleMain(key, isMain)}
+                    />
                   </td>
                   <td className="px-3 py-2 align-middle text-center">
-                    <label className="inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={isSub}
-                        disabled={isBusy}
-                        onChange={() => void toggleSub(key, isSub)}
-                        className="peer sr-only"
-                      />
-                      <span
-                        className={`w-[30px] h-[18px] rounded-full border transition-colors relative ${
-                          isSub
-                            ? "bg-accent-soft/40 border-accent"
-                            : "bg-bg border-border-strong"
-                        }`}
-                      >
-                        <span
-                          className={`absolute top-[2px] w-[12px] h-[12px] rounded-full transition-transform ${
-                            isSub
-                              ? "translate-x-[12px] bg-accent"
-                              : "translate-x-[2px] bg-text-faint"
-                          }`}
-                        />
-                      </span>
-                    </label>
+                    <Switch
+                      checked={isSub}
+                      disabled={isBusy}
+                      onChange={() => void toggleSub(key, isSub)}
+                    />
                   </td>
                 </tr>
               );
