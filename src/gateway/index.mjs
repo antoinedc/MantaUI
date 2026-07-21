@@ -7,15 +7,16 @@
 //
 //   GET  /healthz       — 200 {"ok":true}, no auth (deploy probe)
 //   POST /register      — mint or refresh a box's gateway_token; create /
-//                          update the OVH DNS A record for <box_id>.boxes
-//                          .mantaui.com. Rate-limited per source IP.
+//                          update the Cloudflare DNS A record for
+//                          <box_id>.boxes.mantaui.com. Rate-limited per
+//                          source IP.
 //   POST /push          — fan out a notification to the box's registered
 //                          APNs device tokens. Returns per-token results
 //                          so the box can prune its own token store.
 //
 // Pure + injected I/O: every dependency (loadStore / saveStore / fetchImpl /
 // createOrUpdate / sendApns / now) is parameterizable for tests; production
-// uses real FS + global fetch + real OVH + real APNs.
+// uses real FS + global fetch + real Cloudflare DNS + real APNs.
 //
 // Source IP: NEVER trust an `ip` field in the body (spoofable). Read
 // `X-Forwarded-For` first value (Caddy fronts the gateway), fall back to
@@ -31,7 +32,7 @@ import {
   makeEntry,
   hostFor,
 } from "./store.mjs";
-import { createOrUpdate, ovhCredsFromEnv, ovhSubDomainFor } from "./dns.mjs";
+import { createOrUpdate, cloudflareCredsFromEnv, ovhSubDomainFor } from "./dns.mjs";
 import { sendApns, loadApnsConfig } from "./apns.mjs";
 
 // 10 registrations per source IP per hour. Same shape as the relay's pair
@@ -141,10 +142,10 @@ export function generateGatewayToken() {
   return randomBytes(16).toString("hex");
 }
 
-// Compute the OVH sub-domain for a box_id. Re-exported from dns.mjs for
-// callers that want both the OVH primitive and the route helper in one
-// place. (The OVH-side helper that builds the actual record lives in
-// dns.mjs; this re-export just keeps the route's call site tidy.)
+// Compute the DNS record name for a box_id. Re-exported from dns.mjs so the
+// /register route can build the record name it hands to createOrUpdate.
+// (Historical name `ovhSubDomainFor` — kept as an alias through the OVH→
+// Cloudflare migration; it now returns the FULL record name.)
 export { ovhSubDomainFor };
 
 // ---------------------------------------------------------------------------
@@ -181,14 +182,14 @@ export async function handleRegister({
     if (!presented || !tokenEquals(existing.gateway_token, presented)) {
       return { status: 401, json: { error: "unauthorized" } };
     }
-    let updatedRecordId = existing.ovhRecordId;
+    let updatedRecordId = existing.recordId;
     if (existing.ip !== ip) {
       try {
         const r = await createDnsRecord({
           boxId: box_id,
           subDomain: ovhSubDomainFor(box_id),
           target: ip,
-          existingRecordId: existing.ovhRecordId,
+          existingRecordId: existing.recordId,
         });
         updatedRecordId = r.recordId;
       } catch (e) {
@@ -202,7 +203,7 @@ export async function handleRegister({
       ...existing,
       ip,
       updatedAt: now(),
-      ovhRecordId: updatedRecordId,
+      recordId: updatedRecordId,
     };
     store[box_id] = next;
     await persist(store);
@@ -224,7 +225,7 @@ export async function handleRegister({
   }
   const gateway_token = generateGatewayToken();
   const host = hostFor(box_id);
-  const entry = makeEntry({ box_id, gateway_token, ip, host, ovhRecordId: recordId, now });
+  const entry = makeEntry({ box_id, gateway_token, ip, host, recordId, now });
   store[box_id] = entry;
   await persist(store);
   return { status: 200, json: { host, gateway_token } };
@@ -438,7 +439,7 @@ const isMain =
   process.argv[1]?.endsWith("src/gateway/index.mjs");
 
 if (isMain) {
-  const creds = ovhCredsFromEnv();
+  const creds = cloudflareCredsFromEnv();
   if (!creds.ok) {
     console.error(`[gateway] ${creds.error}`);
     process.exit(1);
@@ -448,7 +449,7 @@ if (isMain) {
     console.warn("[gateway] apns config missing — /push will return 503");
   }
   const svc = createGatewayServer({
-    dnsCreds: { appKey: creds.appKey, appSecret: creds.appSecret, consumerKey: creds.consumerKey, endpoint: creds.endpoint },
+    dnsCreds: { apiToken: creds.apiToken, zoneId: creds.zoneId, endpoint: creds.endpoint },
     apnsConfig: apns,
   });
   svc

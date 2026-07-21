@@ -163,7 +163,7 @@ test("POST /register (re-register) with valid bearer + same IP → 200 host, no 
       host: `${VALID_BOX_ID}.boxes.mantaui.com`,
       registeredAt: 1,
       updatedAt: 1,
-      ovhRecordId: 1234,
+      recordId: 1234,
     },
   };
   await withServer({ store }, async ({ port, dnsCalls }) => {
@@ -188,7 +188,7 @@ test("POST /register (re-register) with valid bearer + changed IP → DNS update
       host: `${VALID_BOX_ID}.boxes.mantaui.com`,
       registeredAt: 1,
       updatedAt: 1,
-      ovhRecordId: 1234,
+      recordId: 1234,
     },
   };
   await withServer({ store }, async (ctx) => {
@@ -215,7 +215,7 @@ test("POST /register with wrong bearer → 401", async () => {
       host: `${VALID_BOX_ID}.boxes.mantaui.com`,
       registeredAt: 1,
       updatedAt: 1,
-      ovhRecordId: 1,
+      recordId: 1,
     },
   };
   await withServer({ store }, async ({ port, dnsCalls }) => {
@@ -282,7 +282,7 @@ test("POST /push auth + tokens → 200 {results:[{token, ok, prune}]}", async ()
       host: `${VALID_BOX_ID}.boxes.mantaui.com`,
       registeredAt: 1,
       updatedAt: 1,
-      ovhRecordId: 1,
+      recordId: 1,
     },
   };
   await withServer(
@@ -324,7 +324,7 @@ test("POST /push with >20 tokens → 400 too_many_tokens", async () => {
       host: `${VALID_BOX_ID}.boxes.mantaui.com`,
       registeredAt: 1,
       updatedAt: 1,
-      ovhRecordId: 1,
+      recordId: 1,
     },
   };
   await withServer(

@@ -25,7 +25,7 @@ const ENTRY = {
   host: `${VALID_BOX_ID}.boxes.mantaui.com`,
   registeredAt: 1,
   updatedAt: 1,
-  ovhRecordId: 12345,
+  recordId: 12345,
 };
 
 // Each test that exercises the APNs sender path needs a real .p8 file

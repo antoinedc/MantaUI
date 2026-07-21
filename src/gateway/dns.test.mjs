@@ -1,159 +1,107 @@
-// dns.test.mjs — unit tests for the OVH DNS client (gateway-side).
+// dns.test.mjs — unit tests for the Cloudflare DNS client (gateway-side).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import {
-  ovhSignature,
-  ovhHeaders,
+  cloudflareCredsFromEnv,
   ovhCredsFromEnv,
+  dnsRecordName,
   ovhSubDomainFor,
+  DNS_ZONE,
   OVH_ZONE,
-  OVH_DEFAULT_ENDPOINT,
+  CF_DEFAULT_ENDPOINT,
   createRecord,
   updateRecord,
-  refreshZone,
   createOrUpdate,
 } from "./dns.mjs";
 
 const CREDS = {
-  appKey: "appKeyABC",
-  appSecret: "secretXYZ",
-  consumerKey: "consumer123",
-  endpoint: "https://eu.api.ovh.com/1.0",
+  apiToken: "cf-token-abc",
+  zoneId: "zone123",
+  endpoint: CF_DEFAULT_ENDPOINT,
 };
 
-test("ovhSignature: matches SHA1(secret+consumer+method+url+body) hex + '$1$' prefix", () => {
-  const appSecret = "secretXYZ";
-  const consumerKey = "consumer123";
-  const method = "POST";
-  const url = "https://eu.api.ovh.com/1.0/domain/zone/mantaui.com/record";
-  const body = '{"fieldType":"A","subDomain":"abc","target":"1.2.3.4","ttl":0}';
-  const expectedSha = createHash("sha1")
-    .update(appSecret)
-    .update("+")
-    .update(consumerKey)
-    .update("+")
-    .update(method)
-    .update("+")
-    .update(url)
-    .update("+")
-    .update(body)
-    .digest("hex");
-  assert.equal(
-    ovhSignature({ appSecret, consumerKey, method, url, body }),
-    `$1$${expectedSha}`,
-  );
-});
+// A Cloudflare-shaped fetch fake. `result` is the object the API would put in
+// `.result`; success defaults to true. Records every call.
+function cfFetch({ result = { id: "rec_xyz" }, success = true, status = 200, calls } = {}) {
+  return async (url, init) => {
+    calls?.push({ url, init });
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => ({ success, result, errors: success ? [] : [{ message: "nope" }] }),
+    };
+  };
+}
 
-test("ovhSignature: empty body uses empty string (not undefined)", () => {
-  const sig = ovhSignature({
-    appSecret: "s",
-    consumerKey: "c",
-    method: "POST",
-    url: "https://example/x",
-    body: "",
-  });
-  // Just verify it produces the prefixed format and a 40-char hex tail.
-  assert.match(sig, /^\$1\$[0-9a-f]{40}$/);
-});
-
-test("ovhSignature: throws when inputs are missing", () => {
-  assert.throws(() => ovhSignature({ consumerKey: "c", method: "POST", url: "u", body: "" }), /appSecret/);
-  assert.throws(() => ovhSignature({ appSecret: "s", method: "POST", url: "u", body: "" }), /consumerKey/);
-  assert.throws(() => ovhSignature({ appSecret: "s", consumerKey: "c", url: "u", body: "" }), /method/);
-  assert.throws(() => ovhSignature({ appSecret: "s", consumerKey: "c", method: "GET", body: "" }), /url/);
-});
-
-test("ovhHeaders: includes all five headers + uses injected timestamp", () => {
-  const h = ovhHeaders({
-    appKey: "k",
-    appSecret: "s",
-    consumerKey: "c",
-    method: "GET",
-    url: "https://example/x",
-    body: "",
-    timestamp: 1700000000,
-  });
-  assert.equal(h["X-Ovh-Application"], "k");
-  assert.equal(h["X-Ovh-Consumer"], "c");
-  assert.equal(h["X-Ovh-Timestamp"], "1700000000");
-  assert.match(h["X-Ovh-Signature"], /^\$1\$[0-9a-f]{40}$/);
-  assert.equal(h["Content-Type"], "application/json");
-});
-
-test("ovhHeaders: timestamp defaults to current unix-seconds", () => {
-  const before = Math.floor(Date.now() / 1000);
-  const h = ovhHeaders({
-    appKey: "k", appSecret: "s", consumerKey: "c", method: "GET", url: "https://x", body: "",
-  });
-  const after = Math.floor(Date.now() / 1000);
-  const ts = Number(h["X-Ovh-Timestamp"]);
-  assert.ok(ts >= before && ts <= after);
-});
-
-test("ovhCredsFromEnv: returns ok=true when all three env vars present", () => {
-  const r = ovhCredsFromEnv({
-    OVH_APP_KEY: "k", OVH_APP_SECRET: "s", OVH_CONSUMER_KEY: "c",
+test("cloudflareCredsFromEnv: ok=true when token + zoneId present", () => {
+  const r = cloudflareCredsFromEnv({
+    CLOUDFLARE_API_TOKEN: "t",
+    CLOUDFLARE_ZONE_ID: "z",
   });
   assert.equal(r.ok, true);
-  assert.equal(r.appKey, "k");
-  assert.equal(r.appSecret, "s");
-  assert.equal(r.consumerKey, "c");
-  assert.equal(r.endpoint, OVH_DEFAULT_ENDPOINT);
+  assert.equal(r.apiToken, "t");
+  assert.equal(r.zoneId, "z");
+  assert.equal(r.endpoint, CF_DEFAULT_ENDPOINT);
 });
 
-test("ovhCredsFromEnv: honors OVH_ENDPOINT override", () => {
-  const r = ovhCredsFromEnv({
-    OVH_APP_KEY: "k", OVH_APP_SECRET: "s", OVH_CONSUMER_KEY: "c",
-    OVH_ENDPOINT: "https://api.ovhcloud.com/1.0",
+test("cloudflareCredsFromEnv: honors CLOUDFLARE_ENDPOINT override", () => {
+  const r = cloudflareCredsFromEnv({
+    CLOUDFLARE_API_TOKEN: "t",
+    CLOUDFLARE_ZONE_ID: "z",
+    CLOUDFLARE_ENDPOINT: "https://api.cf.test/v4",
   });
-  assert.equal(r.endpoint, "https://api.ovhcloud.com/1.0");
+  assert.equal(r.endpoint, "https://api.cf.test/v4");
 });
 
-test("ovhCredsFromEnv: ok=false when any are missing", () => {
-  const a = ovhCredsFromEnv({ OVH_APP_KEY: "k" });
-  assert.equal(a.ok, false);
-  const b = ovhCredsFromEnv({});
-  assert.equal(b.ok, false);
+test("cloudflareCredsFromEnv: ok=false when any are missing", () => {
+  assert.equal(cloudflareCredsFromEnv({ CLOUDFLARE_API_TOKEN: "t" }).ok, false);
+  assert.equal(cloudflareCredsFromEnv({ CLOUDFLARE_ZONE_ID: "z" }).ok, false);
+  assert.equal(cloudflareCredsFromEnv({}).ok, false);
 });
 
-test("ovhSubDomainFor: <box_id>.boxes", () => {
+test("ovhCredsFromEnv is an alias of cloudflareCredsFromEnv (back-compat)", () => {
+  assert.equal(ovhCredsFromEnv, cloudflareCredsFromEnv);
+});
+
+test("OVH_ZONE alias equals DNS_ZONE (mantaui.com)", () => {
+  assert.equal(DNS_ZONE, "mantaui.com");
+  assert.equal(OVH_ZONE, DNS_ZONE);
+});
+
+test("dnsRecordName / ovhSubDomainFor: <box_id>.boxes.mantaui.com (full name)", () => {
   const bid = "0".repeat(32);
-  assert.equal(ovhSubDomainFor(bid), `${bid}.boxes`);
-  assert.throws(() => ovhSubDomainFor(""), /box_id/);
+  assert.equal(dnsRecordName(bid), `${bid}.boxes.mantaui.com`);
+  assert.equal(ovhSubDomainFor(bid), `${bid}.boxes.mantaui.com`);
+  assert.throws(() => dnsRecordName(""), /box_id/);
 });
 
-test("createRecord: POSTs to /domain/zone/<zone>/record with body + returns numeric id", async () => {
+test("createRecord: POSTs to /zones/<id>/dns_records unproxied + returns string id", async () => {
   const calls = [];
-  const fetchImpl = async (url, init) => {
-    calls.push({ url, init });
-    return { ok: true, status: 200, body: 12345 };
-  };
+  const fetchImpl = cfFetch({ result: { id: "rec_777" }, calls });
   const id = await createRecord({
-    boxId: "0".repeat(32),
-    subDomain: "0".repeat(32) + ".boxes",
+    subDomain: "0".repeat(32) + ".boxes.mantaui.com",
     target: "1.2.3.4",
     fetchImpl,
     creds: CREDS,
-    timestamp: 1700000000,
   });
-  assert.equal(id, 12345);
+  assert.equal(id, "rec_777");
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, `${CREDS.endpoint}/domain/zone/${OVH_ZONE}/record`);
+  assert.equal(calls[0].url, `${CREDS.endpoint}/zones/${CREDS.zoneId}/dns_records`);
   assert.equal(calls[0].init.method, "POST");
-  assert.match(calls[0].init.body, /"fieldType":"A"/);
-  assert.match(calls[0].init.body, /"subDomain":"0{32}\.boxes"/);
-  assert.match(calls[0].init.body, /"target":"1\.2\.3\.4"/);
-  assert.equal(calls[0].init.headers["X-Ovh-Application"], CREDS.appKey);
+  assert.equal(calls[0].init.headers.Authorization, `Bearer ${CREDS.apiToken}`);
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal(body.type, "A");
+  assert.equal(body.name, "0".repeat(32) + ".boxes.mantaui.com");
+  assert.equal(body.content, "1.2.3.4");
+  assert.equal(body.proxied, false);
 });
 
-test("createRecord: throws on !ok response with status in message", async () => {
-  const fetchImpl = async () => ({ ok: false, status: 403, body: { message: "forbidden" } });
+test("createRecord: throws on success=false with status in message", async () => {
+  const fetchImpl = cfFetch({ success: false, status: 403 });
   await assert.rejects(
     () => createRecord({
-      boxId: "0".repeat(32),
-      subDomain: "0".repeat(32) + ".boxes",
+      subDomain: "0".repeat(32) + ".boxes.mantaui.com",
       target: "1.2.3.4",
       fetchImpl,
       creds: CREDS,
@@ -162,130 +110,94 @@ test("createRecord: throws on !ok response with status in message", async () => 
   );
 });
 
-test("updateRecord: PUTs to /domain/zone/<zone>/record/<id>", async () => {
+test("createRecord: throws when result.id is not a string", async () => {
+  const fetchImpl = cfFetch({ result: { id: 12345 } });
+  await assert.rejects(
+    () => createRecord({
+      subDomain: "x.boxes.mantaui.com",
+      target: "1.2.3.4",
+      fetchImpl,
+      creds: CREDS,
+    }),
+    /unexpected id shape/,
+  );
+});
+
+test("updateRecord: PUTs to /zones/<id>/dns_records/<recordId>", async () => {
   const calls = [];
-  const fetchImpl = async (url, init) => {
-    calls.push({ url, init });
-    return { ok: true, status: 200, body: null };
-  };
+  const fetchImpl = cfFetch({ result: { id: "rec_777" }, calls });
   const r = await updateRecord({
-    recordId: 12345,
-    subDomain: "0".repeat(32) + ".boxes",
+    recordId: "rec_777",
+    subDomain: "0".repeat(32) + ".boxes.mantaui.com",
     target: "5.6.7.8",
     fetchImpl,
     creds: CREDS,
-    timestamp: 1700000000,
   });
   assert.equal(r, true);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].init.method, "PUT");
-  assert.equal(calls[0].url, `${CREDS.endpoint}/domain/zone/${OVH_ZONE}/record/12345`);
-  assert.match(calls[0].init.body, /"target":"5\.6\.7\.8"/);
+  assert.equal(calls[0].url, `${CREDS.endpoint}/zones/${CREDS.zoneId}/dns_records/rec_777`);
+  assert.equal(JSON.parse(calls[0].init.body).content, "5.6.7.8");
 });
 
-test("refreshZone: POSTs to /domain/zone/<zone>/refresh with empty body", async () => {
-  const calls = [];
-  const fetchImpl = async (url, init) => {
-    calls.push({ url, init });
-    return { ok: true, status: 200, body: null };
-  };
-  await refreshZone({ fetchImpl, creds: CREDS, timestamp: 1700000000 });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, `${CREDS.endpoint}/domain/zone/${OVH_ZONE}/refresh`);
-  assert.equal(calls[0].init.method, "POST");
-  // body is empty (undefined on the request, but the signature was built with "")
-  assert.ok(!calls[0].init.body);
+test("updateRecord: requires a string recordId", async () => {
+  await assert.rejects(
+    () => updateRecord({
+      recordId: 123,
+      subDomain: "x.boxes.mantaui.com",
+      target: "5.6.7.8",
+      fetchImpl: cfFetch(),
+      creds: CREDS,
+    }),
+    /recordId required/,
+  );
 });
 
-test("createOrUpdate: existing recordId → PUT then refresh", async () => {
+test("createOrUpdate: no existing recordId → POST, action=create", async () => {
   const calls = [];
-  const fetchImpl = async (url, init) => {
-    calls.push({ url, init });
-    return { ok: true, status: 200, body: url.includes("refresh") ? null : 99 };
-  };
+  const fetchImpl = cfFetch({ result: { id: "rec_new" }, calls });
   const r = await createOrUpdate({
     boxId: "0".repeat(32),
-    subDomain: "0".repeat(32) + ".boxes",
-    target: "9.9.9.9",
-    existingRecordId: 99,
-    fetchImpl,
-    creds: CREDS,
-  });
-  assert.equal(r.recordId, 99);
-  assert.equal(r.action, "update");
-  // PUT then refresh
-  assert.equal(calls[0].init.method, "PUT");
-  assert.equal(calls[1].url, `${CREDS.endpoint}/domain/zone/${OVH_ZONE}/refresh`);
-});
-
-test("createOrUpdate: no existing recordId → POST then refresh", async () => {
-  const calls = [];
-  const fetchImpl = async (url, init) => {
-    calls.push({ url, init });
-    return { ok: true, status: 200, body: url.includes("refresh") ? null : 7777 };
-  };
-  const r = await createOrUpdate({
-    boxId: "0".repeat(32),
-    subDomain: "0".repeat(32) + ".boxes",
+    subDomain: "0".repeat(32) + ".boxes.mantaui.com",
     target: "9.9.9.9",
     fetchImpl,
     creds: CREDS,
   });
-  assert.equal(r.recordId, 7777);
+  assert.equal(r.recordId, "rec_new");
   assert.equal(r.action, "create");
+  assert.equal(calls.length, 1);
   assert.equal(calls[0].init.method, "POST");
-  assert.equal(calls[1].url, `${CREDS.endpoint}/domain/zone/${OVH_ZONE}/refresh`);
 });
 
-test("createOrUpdate: refresh is called AFTER both create and update", async () => {
-  // Already covered by the two above, but make the invariant explicit.
-  const order = [];
-  const fetchImpl = async (url, init) => {
-    order.push(`${init.method} ${url}`);
-    return { ok: true, status: 200, body: url.includes("refresh") ? null : 1 };
-  };
+test("createOrUpdate: existing recordId → PUT, action=update, no create call", async () => {
+  const calls = [];
+  const fetchImpl = cfFetch({ result: { id: "rec_existing" }, calls });
+  const r = await createOrUpdate({
+    boxId: "0".repeat(32),
+    subDomain: "0".repeat(32) + ".boxes.mantaui.com",
+    target: "9.9.9.9",
+    existingRecordId: "rec_existing",
+    fetchImpl,
+    creds: CREDS,
+  });
+  assert.equal(r.recordId, "rec_existing");
+  assert.equal(r.action, "update");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.method, "PUT");
+  assert.equal(calls[0].url, `${CREDS.endpoint}/zones/${CREDS.zoneId}/dns_records/rec_existing`);
+});
+
+test("createOrUpdate: no Cloudflare refresh step (single call per op)", async () => {
+  // OVH needed a POST /refresh after every write; Cloudflare does not. Assert
+  // exactly ONE network call happens per createOrUpdate (regression guard).
+  const calls = [];
+  const fetchImpl = cfFetch({ result: { id: "rec_1" }, calls });
   await createOrUpdate({
     boxId: "0".repeat(32),
-    subDomain: "0".repeat(32) + ".boxes",
+    subDomain: "x.boxes.mantaui.com",
     target: "1.1.1.1",
     fetchImpl,
     creds: CREDS,
   });
-  await createOrUpdate({
-    boxId: "0".repeat(32),
-    subDomain: "0".repeat(32) + ".boxes",
-    target: "1.1.1.1",
-    existingRecordId: 1,
-    fetchImpl,
-    creds: CREDS,
-  });
-  assert.equal(order.length, 4);
-  assert.match(order[0], /^POST.*\/record$/);
-  assert.match(order[1], /^POST.*\/refresh$/);
-  assert.match(order[2], /^PUT.*\/record\/1$/);
-  assert.match(order[3], /^POST.*\/refresh$/);
-});
-
-test("ovhHeaders: signature computed against the EXACT URL passed in (no normalization)", () => {
-  // We MUST pass the URL verbatim because the OVH server hashes the same
-  // string. Pin the signature value so a refactor that adds e.g. a trailing
-  // slash fails the test.
-  const h = ovhHeaders({
-    appKey: "AK",
-    appSecret: "AS",
-    consumerKey: "CK",
-    method: "POST",
-    url: "https://eu.api.ovh.com/1.0/domain/zone/mantaui.com/record",
-    body: '{"x":1}',
-    timestamp: 1700000000,
-  });
-  const expected = ovhSignature({
-    appSecret: "AS",
-    consumerKey: "CK",
-    method: "POST",
-    url: "https://eu.api.ovh.com/1.0/domain/zone/mantaui.com/record",
-    body: '{"x":1}',
-    timestamp: 1700000000,
-  });
-  assert.equal(h["X-Ovh-Signature"], expected);
+  assert.equal(calls.length, 1);
 });

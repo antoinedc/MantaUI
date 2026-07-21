@@ -1,7 +1,7 @@
 // store.mjs — registration store for the gateway service.
 //
 // A single JSON file at /var/lib/manta-gateway/boxes.json maps
-// box_id → { gateway_token, ip, host, registeredAt, updatedAt, ovhRecordId }.
+// box_id → { gateway_token, ip, host, registeredAt, updatedAt, recordId }.
 // Box-side callers (manta-server) register their box_id once at startup,
 // receive a gateway_token, then re-register on each boot to refresh the
 // DNS A record when the box's public IP changes.
@@ -16,10 +16,11 @@
 // the systemd `StateDirectory=manta-gateway` directive on prod (BET-198 WP6
 // runbook step 4).
 //
-// The store keeps `ovhRecordId` (the OVH record-id assigned when the A
+// The store keeps `recordId` (the Cloudflare record-id assigned when the A
 // record was first created) so subsequent /register calls from the SAME box
 // can PUT a target update without ever searching the zone — a single DNS
-// read per box lifetime.
+// read per box lifetime. (Older stores written by the OVH build used the key
+// `ovhRecordId`; normalizeEntry accepts that legacy key too.)
 
 import { writeFile, rename, mkdir, chmod } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
@@ -45,7 +46,15 @@ export function isValidBoxId(boxId) {
 // gateway will publish — <box_id>.boxes.mantaui.com for prod.
 export function normalizeEntry(raw) {
   if (!raw || typeof raw !== "object") return null;
-  const { gateway_token, ip, host, registeredAt, updatedAt, ovhRecordId } = raw;
+  const { gateway_token, ip, host, registeredAt, updatedAt } = raw;
+  // Cloudflare record ids are strings; older OVH stores used numbers. Accept
+  // both under the canonical `recordId` field (falling back to the legacy
+  // `ovhRecordId` key so a store written by the OVH build still loads).
+  const rawRecordId = raw.recordId ?? raw.ovhRecordId ?? null;
+  const recordId =
+    typeof rawRecordId === "string" || typeof rawRecordId === "number"
+      ? rawRecordId
+      : null;
   if (typeof gateway_token !== "string" || !gateway_token) return null;
   if (typeof ip !== "string" || !ip) return null;
   if (typeof host !== "string" || !host) return null;
@@ -57,7 +66,7 @@ export function normalizeEntry(raw) {
     host,
     registeredAt,
     updatedAt,
-    ovhRecordId: typeof ovhRecordId === "number" ? ovhRecordId : null,
+    recordId,
   };
 }
 
@@ -128,7 +137,7 @@ export async function saveStore(map, path = DEFAULT_STORE_PATH) {
 // Compose a fresh entry. `now` injectable for tests. `gateway_token` MUST
 // be passed in (the caller generates it) so the registration route can
 // return the token to the box on first registration.
-export function makeEntry({ box_id, gateway_token, ip, host, ovhRecordId = null, now = () => Date.now() }) {
+export function makeEntry({ box_id, gateway_token, ip, host, recordId = null, now = () => Date.now() }) {
   if (!isValidBoxId(box_id)) throw new Error("makeEntry: invalid box_id");
   if (typeof gateway_token !== "string" || !gateway_token) {
     throw new Error("makeEntry: gateway_token required");
@@ -142,7 +151,7 @@ export function makeEntry({ box_id, gateway_token, ip, host, ovhRecordId = null,
     host,
     registeredAt: t,
     updatedAt: t,
-    ovhRecordId,
+    recordId,
   };
 }
 

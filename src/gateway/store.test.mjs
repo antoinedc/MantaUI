@@ -47,13 +47,13 @@ test("makeEntry: creates an entry with both timestamps equal on first call", () 
     gateway_token: "0".repeat(32),
     ip: "1.2.3.4",
     host: "0".repeat(32) + ".boxes.mantaui.com",
-    ovhRecordId: 42,
+    recordId: "rec_42",
     now: () => NOW,
   });
   assert.equal(e.gateway_token, "0".repeat(32));
   assert.equal(e.ip, "1.2.3.4");
   assert.equal(e.host, "0".repeat(32) + ".boxes.mantaui.com");
-  assert.equal(e.ovhRecordId, 42);
+  assert.equal(e.recordId, "rec_42");
   assert.equal(e.registeredAt, NOW);
   assert.equal(e.updatedAt, NOW);
 });
@@ -74,6 +74,31 @@ test("normalizeEntry: drops malformed entries silently", () => {
   );
 });
 
+test("normalizeEntry: accepts legacy ovhRecordId key, emits canonical recordId", () => {
+  const e = normalizeEntry({
+    gateway_token: "x".repeat(32),
+    ip: "1.2.3.4",
+    host: "h.boxes.mantaui.com",
+    registeredAt: 1,
+    updatedAt: 1,
+    ovhRecordId: 12345, // old OVH numeric id in a store on disk
+  });
+  assert.equal(e.recordId, 12345);
+  assert.equal(e.ovhRecordId, undefined);
+});
+
+test("normalizeEntry: accepts string recordId (Cloudflare)", () => {
+  const e = normalizeEntry({
+    gateway_token: "x".repeat(32),
+    ip: "1.2.3.4",
+    host: "h.boxes.mantaui.com",
+    registeredAt: 1,
+    updatedAt: 1,
+    recordId: "rec_abc",
+  });
+  assert.equal(e.recordId, "rec_abc");
+});
+
 test("atomic write round-trip: save then load returns the same map", async () => {
   const { dir, path } = freshTmpPath("roundtrip");
   try {
@@ -82,7 +107,7 @@ test("atomic write round-trip: save then load returns the same map", async () =>
       gateway_token: "a".repeat(32),
       ip: "1.2.3.4",
       host: "0".repeat(32) + ".boxes.mantaui.com",
-      ovhRecordId: 99,
+      recordId: "rec_99",
       now: () => NOW,
     });
     await saveStore({ [entry.gateway_token ? "0".repeat(32) : "bad"]: entry }, path);
@@ -90,7 +115,7 @@ test("atomic write round-trip: save then load returns the same map", async () =>
     await saveStore({ ["0".repeat(32)]: entry }, path);
     const loaded = loadStore(path);
     assert.equal(loaded["0".repeat(32)].ip, "1.2.3.4");
-    assert.equal(loaded["0".repeat(32)].ovhRecordId, 99);
+    assert.equal(loaded["0".repeat(32)].recordId, "rec_99");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

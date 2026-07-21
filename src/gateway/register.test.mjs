@@ -172,7 +172,7 @@ test("handleRegister: first call mints a 32-hex token, creates DNS, persists", a
   assert.ok(persisted);
   assert.equal(persisted.gateway_token, r.json.gateway_token);
   assert.equal(persisted.ip, "1.2.3.4");
-  assert.equal(persisted.ovhRecordId, 100); // calls.length * 100
+  assert.equal(persisted.recordId, 100); // calls.length * 100
 });
 
 test("handleRegister: re-register with wrong token → 401 (no DNS update)", async () => {
@@ -185,7 +185,7 @@ test("handleRegister: re-register with wrong token → 401 (no DNS update)", asy
       host: `${VALID_BOX_ID}.boxes.mantaui.com`,
       registeredAt: 1,
       updatedAt: 1,
-      ovhRecordId: 12345,
+      recordId: 12345,
     },
   });
   const r = await handleRegister({
@@ -209,7 +209,7 @@ test("handleRegister: re-register with correct token + same IP → 200 host only
       host: `${VALID_BOX_ID}.boxes.mantaui.com`,
       registeredAt: 1,
       updatedAt: 1,
-      ovhRecordId: 12345,
+      recordId: 12345,
     },
   });
   const r = await handleRegister({
@@ -235,7 +235,7 @@ test("handleRegister: re-register with correct token + changed IP → updates DN
       host: `${VALID_BOX_ID}.boxes.mantaui.com`,
       registeredAt: 1,
       updatedAt: 1,
-      ovhRecordId: 12345,
+      recordId: 12345,
     },
   });
   const r = await handleRegister({
@@ -295,7 +295,7 @@ test("handleRegister: DNS update failure on re-register → 200 with existing ho
       host: `${VALID_BOX_ID}.boxes.mantaui.com`,
       registeredAt: 1,
       updatedAt: 1,
-      ovhRecordId: 12345,
+      recordId: 12345,
     },
   });
   const r = await handleRegister({
@@ -310,6 +310,7 @@ test("handleRegister: DNS update failure on re-register → 200 with existing ho
   assert.equal(r.json.host, `${VALID_BOX_ID}.boxes.mantaui.com`);
 });
 
-test("ovhSubDomainFor: <box_id>.boxes", () => {
-  assert.equal(ovhSubDomainFor(VALID_BOX_ID), `${VALID_BOX_ID}.boxes`);
+test("ovhSubDomainFor: full record name <box_id>.boxes.mantaui.com", () => {
+  // Cloudflare wants the FULL record name (not the OVH-style relative name).
+  assert.equal(ovhSubDomainFor(VALID_BOX_ID), `${VALID_BOX_ID}.boxes.mantaui.com`);
 });
