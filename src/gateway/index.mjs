@@ -32,7 +32,7 @@ import {
   hostFor,
 } from "./store.mjs";
 import { createOrUpdate, ovhCredsFromEnv, ovhSubDomainFor } from "./dns.mjs";
-import { sendApns } from "./apns.mjs";
+import { sendApns, loadApnsConfig } from "./apns.mjs";
 
 // 10 registrations per source IP per hour. Same shape as the relay's pair
 // rate limiter (src/relay/server.mjs). The window is one hour, the cap is
