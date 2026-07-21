@@ -39,6 +39,7 @@ import { attachPtyWs } from "./ptyWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { startOutboxPoller } from "./outbox.mjs";
+import { startServerUpdatePoller } from "./serverUpdate.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
 import {
   createCapJob,
@@ -147,6 +148,19 @@ const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
 // (parity with the desktop outbox poller; see src/server/outbox.mjs).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopOutboxPoller } = startOutboxPoller(bus, { intervalMs: 3000 });
+
+// Server-update checker: polls https://mantaui.com/updates/server.json every
+// 6h, publishes a `serverUpdateAvailable` bus event on a newer release (the
+// stage-3 renderer banner consumes this), and fires ONE informational
+// notification through the existing push.fireNotify path so a closed app
+// still learns. Dedup is per-version. See src/server/serverUpdate.mjs +
+// docs/bui-update-system.md (BET-225 stage 2).
+// eslint-disable-next-line no-unused-vars
+const { stop: stopServerUpdatePoller } = startServerUpdatePoller({
+  bus,
+  currentVersion: SERVER_VERSION,
+  notify: push.fireNotify,
+});
 
 // Scheduled-prompt engine: durable jobs in ~/.manta/schedule.json, fired
 // by re-submitting the stored prompt into its opencode session via
