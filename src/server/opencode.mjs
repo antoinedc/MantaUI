@@ -10,6 +10,7 @@
 import { spawn as cpSpawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { readFileSync, existsSync } from "node:fs";
+import path from "node:path";
 import http from "node:http";
 import {
   CREDENTIALS_PATH,
@@ -954,6 +955,26 @@ export async function getVcsBranch(directory) {
 // in-flight refresh promise instead of racing multiple `claude` spawns.
 let _refreshInFlight = null;
 
+/** Resolve the `claude` CLI binary. manta-server's service PATH excludes the
+ *  user's ~/.local/bin (where the claude installer symlinks the binary), so a
+ *  bare "claude" fails to spawn. Check the known install locations first and
+ *  fall back to bare "claude" (resolved via the augmented PATH) if none match. */
+function resolveClaudeBin() {
+  const candidates = [
+    path.join(homedir(), ".local", "bin", "claude"),
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+  ];
+  for (const c of candidates) {
+    try {
+      if (existsSync(c)) return c;
+    } catch {
+      // ignore and try the next candidate
+    }
+  }
+  return "claude";
+}
+
 /** Best-effort read + parse of ~/.claude/.credentials.json. Null on any
  *  read or parse failure (file missing, permissions, malformed JSON). */
 function readCredsSnapshot() {
@@ -998,10 +1019,26 @@ async function doRefresh() {
   // Non-zero exit / spawn error (e.g. ENOENT) doesn't short-circuit — we
   // re-check the actual credentials file afterward, which is the source of
   // truth regardless of the process's exit code.
+  //
+  // manta-server runs as a `systemd --user` service whose PATH is the minimal
+  // system PATH (/usr/local/bin:/usr/bin:/bin) — it does NOT include the
+  // user's ~/.local/bin, where the `claude` CLI installer places its symlink.
+  // A bare cpSpawn("claude") therefore ENOENTs, the refresh reports "failed",
+  // and the auto-refresh card never clears. Resolve the binary explicitly and
+  // augment PATH so the child (and any tool it re-execs) can find it.
+  const claudeBin = resolveClaudeBin();
+  const augmentedPath = [
+    path.join(homedir(), ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    process.env.PATH ?? "",
+  ]
+    .filter(Boolean)
+    .join(":");
   await new Promise((resolve) => {
-    const proc = cpSpawn("claude", ["-p", ".", "--model", "haiku"], {
+    const proc = cpSpawn(claudeBin, ["-p", ".", "--model", "haiku"], {
       cwd: tmpdir(),
-      env: { ...process.env, TERM: "dumb" },
+      env: { ...process.env, TERM: "dumb", PATH: augmentedPath },
       stdio: "ignore",
       timeout: 60_000,
     });
