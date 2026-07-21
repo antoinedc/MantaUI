@@ -29,6 +29,15 @@ function makeFakePreload(): BuiPreload {
     peekRemoteFile: vi.fn(async () => {}),
     pluginsGetEnabled: vi.fn(async () => false),
     pluginsSetEnabled: vi.fn(async () => {}),
+    // BET-225 stage 3: client version + server-update available. The fake
+    // matches the BuiPreload shape added in src/renderer/preloadAccess.ts;
+    // we only care about getBuiPreload's contract here, not the methods
+    // themselves, so minimal vi.fn stubs suffice.
+    clientVersion: vi.fn(async () => ({ version: "test-client" })),
+    onServerUpdateAvailable: vi.fn((cb: (p: unknown) => void) => {
+      cb({ version: "test-server", notesUrl: null });
+      return vi.fn();
+    }),
   };
 }
 

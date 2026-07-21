@@ -65,6 +65,7 @@ import {
   runWithConcurrency,
   credentialRefreshBannerText,
   lastUserMessageText,
+  chooseUpdateSkewVariant,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2944,5 +2945,60 @@ describe("lastUserMessageText", () => {
       { info: { role: "assistant" }, parts: [{ type: "text", text: "hi" }] },
     ]);
     expect(out).toBe(null);
+  });
+});
+
+describe("chooseUpdateSkewVariant", () => {
+  // Version-skew guard (BET-225 stage 3 Part C): the renderer reads its own
+  // client version (`getClientVersion()`) + the server's `minClient`
+  // (from `getServerVersion()`), then asks this helper which variant of
+  // the shared UpdateBar to render. Two-variant contract:
+  //   - "ok"       → no banner (or the normal auto-update / server-update
+  //                  banners if those are independently triggered)
+  //   - "outdated" → non-dismissible "this app is out of date" banner
+  //
+  // The semver compare itself is already covered by versionCompare.test.ts
+  // (BET-225.A); this test pins the renderer-side two-variant state
+  // machine that drives UpdateBar's `dismissible` + `onAction` props.
+
+  it("returns 'outdated' when the client version is strictly older than minClient", () => {
+    expect(chooseUpdateSkewVariant("0.0.1", "0.0.2")).toBe("outdated");
+    expect(chooseUpdateSkewVariant("1.0.0", "2.0.0")).toBe("outdated");
+    expect(chooseUpdateSkewVariant("0.0.0", "1.0.0")).toBe("outdated");
+  });
+
+  it("returns 'ok' when the client version equals or exceeds minClient", () => {
+    expect(chooseUpdateSkewVariant("0.0.2", "0.0.2")).toBe("ok");
+    expect(chooseUpdateSkewVariant("1.0.0", "0.9.9")).toBe("ok");
+    expect(chooseUpdateSkewVariant("2.0.0", "1.0.0")).toBe("ok");
+  });
+
+  it("returns 'ok' when the client version equals minClient exactly (no skew signal)", () => {
+    // The boundary case: equal versions are NOT outdated — the client is
+    // exactly at the minimum. only isClientTooOld() (strictly less than)
+    // matters here.
+    expect(chooseUpdateSkewVariant("1.2.3", "1.2.3")).toBe("ok");
+  });
+
+  it("returns 'ok' for missing/empty clientVersion (mid-bootstrap never flashes the blocking banner)", () => {
+    expect(chooseUpdateSkewVariant(null, "0.0.0")).toBe("ok");
+    expect(chooseUpdateSkewVariant(undefined, "0.0.0")).toBe("ok");
+    expect(chooseUpdateSkewVariant("", "0.0.0")).toBe("ok");
+  });
+
+  it("returns 'ok' for missing/empty minClient (server version fetch failed)", () => {
+    expect(chooseUpdateSkewVariant("1.0.0", null)).toBe("ok");
+    expect(chooseUpdateSkewVariant("1.0.0", undefined)).toBe("ok");
+    expect(chooseUpdateSkewVariant("1.0.0", "")).toBe("ok");
+  });
+
+  it("treats malformed versions as 0.0.0 (delegates to isClientTooOld)", () => {
+    // versionCompare's parseVersion collapses bad input to [0,0,0] — both
+    // sides → 0.0.0 → no skew. This is the "first-line guard" behavior
+    // documented in versionCompare.mjs.
+    expect(chooseUpdateSkewVariant("abc", "0.0.0")).toBe("ok");
+    expect(chooseUpdateSkewVariant("1.x.3", "0.0.0")).toBe("ok");
+    // But once one side has a real version, the compare takes over.
+    expect(chooseUpdateSkewVariant("abc", "0.0.1")).toBe("outdated");
   });
 });

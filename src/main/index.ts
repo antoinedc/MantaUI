@@ -22,6 +22,10 @@ import {
   stopDesktopNotifications,
 } from "./desktopNotify.js";
 import {
+  startServerUpdateForwarder,
+  stopServerUpdateForwarder,
+} from "./serverUpdateForwarder.js";
+import {
   startCapExecutor,
   stopCapExecutor,
 } from "./capExecutor.js";
@@ -213,6 +217,19 @@ app.whenReady().then(() => {
         }
       },
     );
+    // Server-update available (BET-225 stage 3): the box polls its
+    // /updates/server.json manifest, publishes a `serverUpdateAvailable`
+    // bus event when a newer version appears, and the desktop renderer
+    // shows a "Server update available" bar. Same SSE→IPC relay pattern
+    // as startDesktopNotifications (one-kind filter on the busConsumer).
+    startServerUpdateForwarder(
+      () => config,
+      (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(IPC.serverUpdateAvailable, payload);
+        }
+      },
+    );
     // Capability executor (BET-183 / BET-185 / BET-190): when enabled in
     // Settings, this Mac subscribes to bui-server's bus and runs the YAML
     // plugins it finds under ~/.manta/plugins/. startCapExecutor is a
@@ -221,6 +238,14 @@ app.whenReady().then(() => {
     // Defer update check until after the renderer is ready (avoids blocking startup).
     // electron-updater skips the check in dev mode (unpacked app).
     setTimeout(() => checkForUpdates(), 5000);
+    // BET-225 stage 3 (Part B): also re-check for updates every 6 hours
+    // so a long-lived install learns about new versions without restarting.
+    // Plain setInterval with .unref() — same pattern as the other periodic
+    // tasks in this file (screenshotClipboardTimer). No config flag —
+    // always on. Dev-mode checkForUpdates() is a no-op so the timer costs
+    // ~nothing in development.
+    const sixHourTimer = setInterval(() => checkForUpdates(), 6 * 60 * 60 * 1000);
+    sixHourTimer.unref();
   });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -236,6 +261,7 @@ app.on("before-quit", () => {
   stopScreenshotDetector();
   stopDesktopPresence();
   stopDesktopNotifications();
+  stopServerUpdateForwarder();
   stopCapExecutor();
 });
 
@@ -247,6 +273,14 @@ function registerHandlers(): void {
   // `window.api` (which is httpApi post-boot and reaches config over
   // /rpc/config:get instead). See src/preload/index.ts and src/renderer/main.tsx.
   ipcMain.handle(IPC.configGet, () => config);
+
+  // BET-225 stage 3 (Part C): returns the desktop app's own version via
+  // Electron's `app.getVersion()` (reads the same package.json the server
+  // uses for `server:version`). Renderer combines this with `minClient`
+  // from getServerVersion via isClientTooOld to decide whether to render
+  // the non-dismissible skew banner. Renderer-only — no equivalent on the
+  // box server (it has its own version endpoint already).
+  ipcMain.handle(IPC.clientVersion, () => ({ version: app.getVersion() }));
 
   // BET-207: `pluginsEnabled` is a Mac-machine-local toggle (controls
   // whether THIS Mac runs plugins). It MUST persist to the Mac-local

@@ -43,3 +43,35 @@ export async function restartOpencode(exec = execFileAsync) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
+
+/**
+ * Trigger the box's self-update script (`scripts/self-update.sh` in the
+ * repo root). Fixed argv passed to execFile — never a shell string — so
+ * there is no command-injection surface regardless of caller input (this
+ * takes no caller input). The script itself does `git fetch + reset --hard
+ * origin/main + npm ci --omit=dev + systemctl --user restart manta-server`;
+ * the restart will kill this bui-server process mid-run, so we spawn the
+ * child DETACHED and unref() it — never await on exit. The caller (RPC
+ * handler in src/server/rpc.mjs) gets the child PID back; the renderer
+ * UpdateBar fires this on click and the HTTP promise resolves immediately.
+ *
+ * `spawnFile` is injectable for tests; defaults to the real execFileCb
+ * (the callback variant, since we DON'T want the promisified form — we
+ * need the raw ChildProcess to unref). Tests inject a stub that records
+ * the call.
+ *
+ * @param {string} scriptPath - absolute path to scripts/self-update.sh
+ *   (resolved by the RPC handler from `import.meta.url`).
+ * @param {(cmd: string, args: string[], opts: { detached?: boolean, stdio?: string }) => { pid?: number, unref: () => void }} [spawnFile]
+ * @returns {Promise<{ ok: true, pid?: number } | { ok: false, error: string }>}
+ */
+export async function runServerSelfUpdate(scriptPath, spawnFile = execFileCb) {
+  try {
+    const child = spawnFile(scriptPath, [], { detached: true, stdio: "ignore" });
+    child.unref();
+    return { ok: true, pid: child.pid };
+  } catch (e) {
+    console.warn("[opencodeAdmin] self-update failed:", e);
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}

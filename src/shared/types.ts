@@ -251,6 +251,17 @@ export type DesktopNotifyPayload = {
   urgent?: boolean;
 };
 
+// Payload for the server-update-available push (BET-225 stage 3). Published by
+// the server-update poller (src/server/serverUpdate.mjs) on the bui-server bus
+// as `{kind:"serverUpdateAvailable", payload: ServerUpdateAvailablePayload}`,
+// relayed to the desktop renderer by src/main/serverUpdateForwarder.ts. The
+// renderer's UpdateBar component renders a "Server update available: {version}"
+// bar with an "Update & restart" button that calls `window.api.serverUpdateApply()`.
+export type ServerUpdateAvailablePayload = {
+  version: string;
+  notesUrl: string | null;
+};
+
 export const IPC = {
   configGet: "config:get",
   configUpdate: "config:update",
@@ -531,6 +542,32 @@ export const IPC = {
   // drifts between surfaces). Display-only foundation for client/server skew
   // detection; gating / banner / force-update logic lands in a later phase.
   getServerVersion: "server:version",                 // () → { version: string }
+
+  // ---- server self-update apply (BET-225 stage 3) ----
+  // Trigger the server's `scripts/self-update.sh` (git fetch + reset --hard
+  // origin/main + npm ci --omit=dev + systemctl --user restart manta-server).
+  // The handler is fire-and-forget — the restart will kill the process
+  // mid-run, so any caller that awaits past the RPC send may never see a
+  // response. Modeled on `opencode:restart` (single-purpose server action).
+  serverUpdateApply: "server:update-apply",           // () → void
+
+  // ---- client version (BET-225 stage 3) ----
+  // Returns the desktop app's own version via Electron's `app.getVersion()`
+  // (which reads the same package.json the server uses). Renderer combines
+  // this with the server's `minClient` (from getServerVersion) via
+  // isClientTooOld() to decide whether to render the non-dismissible skew
+  // banner. Renderer-only — httpApi returns a baked-in fallback on
+  // mobile/web where there's no Electron app to ask.
+  clientVersion: "client:version",                    // () → { version: string }
+
+  // ---- server-update available push (BET-225 stage 3) ----
+  // Mirrors the desktopNotify pattern: main subscribes to bui-server's
+  // /events SSE stream, filters on kind === "serverUpdateAvailable", and
+  // forwards the payload to the renderer via this IPC channel. The renderer
+  // subscribes through `onServerUpdateAvailable` (httpApi) and renders the
+  // shared UpdateBar component (same component as the desktop
+  // `autoUpdateDownloaded` prompt, just a different message + button label).
+  serverUpdateAvailable: "server:update-available",   // main → renderer push
 
   // ---- plugins (BET-189 / BET-190) ----
   // The renderer reads the plugin registry via this channel (the Settings →

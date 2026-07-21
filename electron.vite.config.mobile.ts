@@ -1,6 +1,12 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
+
+// Same package.json#version injection as electron.vite.config.ts so the
+// mobile renderer bundle knows the build version it shipped with — fallback
+// for getClientVersion when there's no Electron preload to ask.
+const pkg = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8"));
 
 export default defineConfig({
   root: resolve(__dirname, "src/renderer"),
@@ -9,6 +15,7 @@ export default defineConfig({
   define: {
     __MANTA_AXIOM_TOKEN__: JSON.stringify(process.env.MANTA_AXIOM_TOKEN ?? ""),
     __MANTA_AXIOM_DATASET__: JSON.stringify(process.env.MANTA_AXIOM_DATASET ?? "manta"),
+    __APP_VERSION__: JSON.stringify(pkg.version ?? "0.0.0"),
   },
   resolve: { alias: { "@": resolve(__dirname, "src/renderer") } },
   build: {

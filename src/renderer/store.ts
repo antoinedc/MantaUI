@@ -160,6 +160,17 @@ type State = {
   // updateDownloaded event). Guarded — the mobile httpApi shim's
   // onAutoUpdate* are no-ops, so this is desktop-only.
   updatePrompt: { version: string; releaseName?: string } | null;
+  // Single global server-update prompt (BET-225 stage 3). Set when the box's
+  // server-update poller (src/server/serverUpdate.mjs) publishes a
+  // `serverUpdateAvailable` bus event after polling its version manifest.
+  // The renderer shows a "Server update available: {version}" bar; clicking
+  // the button calls serverUpdateApply which runs `scripts/self-update.sh`
+  // on the box (git fetch + reset --hard origin/main + npm ci --omit=dev
+  // + systemctl --user restart manta-server). Dismissed by the × button
+  // (clears the state — the bar won't reappear until the bus fires again
+  // for a STRICTLY newer version; the server-side dedup gate mirrors this
+  // exactly, see src/server/serverUpdate.mjs).
+  serverUpdatePrompt: { version: string; notesUrl?: string | null } | null;
   // Live events-WebSocket connection state (from the shared
   // ConnectionState machine). Surface to the UI so a title-bar pill can
   // show "reconnecting…" when the link is down. Updated by the httpApi
@@ -260,6 +271,9 @@ type State = {
   setScreenshotToast: (t: ScreenshotToast | null) => void;
   setAgentFileToast: (t: AgentFileReady | null) => void;
   setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
+  setServerUpdatePrompt: (
+    p: { version: string; notesUrl?: string | null } | null,
+  ) => void;
   setConnectionState: (s: ConnectionState) => void;
 };
 
@@ -290,6 +304,7 @@ export const useStore = create<State>((set, get) => ({
   screenshotToast: null,
   agentFileToast: null,
   updatePrompt: null,
+  serverUpdatePrompt: null,
   connectionState: { state: "idle" },
   backgroundSyncing: false,
 
@@ -426,6 +441,7 @@ export const useStore = create<State>((set, get) => ({
   setScreenshotToast: (t) => set({ screenshotToast: t }),
   setAgentFileToast: (t) => set({ agentFileToast: t }),
   setUpdatePrompt: (p) => set({ updatePrompt: p }),
+  setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
   setConnectionState: (s) => set({ connectionState: s }),
 
   applyStatusBatch: (batch) =>

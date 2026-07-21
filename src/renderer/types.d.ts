@@ -12,6 +12,14 @@ declare global {
   // token is present; desktop additionally honors AppConfig.shareAnalytics.
   const __MANTA_AXIOM_TOKEN__: string;
   const __MANTA_AXIOM_DATASET__: string;
+  // Build-time injected app version (mirror of package.json#version at the
+  // time of `npm run build`). Used by httpApi.getClientVersion as the
+  // fallback when there's no Electron preload to call app.getVersion()
+  // (mobile/web). On desktop httpApi prefers the live Electron value, so
+  // this constant only matters on the no-preload code path. Bumping the
+  // package.json version automatically propagates to every renderer build
+  // at the next build run.
+  const __APP_VERSION__: string;
 }
 
 export {};

@@ -265,6 +265,22 @@ export function MobileApp() {
     return window.api.onAgentFileReady((ev) => setAgentFileToast(ev));
   }, [setAgentFileToast]);
 
+  // Server-update available (BET-225 stage 3 Part A). Mobile does NOT
+  // currently render an `updatePrompt` (App Store delivers updates out of
+  // band, no in-app auto-update plumbing), so per the stage-3 spec we
+  // wire the store field + bus-case only — no new mobile UI here. The
+  // store stays in sync so a later mobile pass can render a banner
+  // trivially by reading `useStore((s) => s.serverUpdatePrompt)`.
+  useEffect(() => {
+    if (!window.api.onServerUpdateAvailable) return;
+    return window.api.onServerUpdateAvailable((payload) => {
+      useStore.getState().setServerUpdatePrompt({
+        version: payload.version,
+        notesUrl: payload.notesUrl ?? undefined,
+      });
+    });
+  }, []);
+
   const goList = () => setNav({ screen: "list" });
   const openSession = (projectName: string, windowIndex: number) => {
     setActive(projectName, windowIndex);

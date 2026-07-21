@@ -14,6 +14,8 @@ import {
   writeSavedMode,
   resolveLauncherFlags,
 } from "./chatShared";
+import { chooseUpdateSkewVariant } from "./chatUtils";
+import { UpdateBar } from "./UpdateBar";
 import type { AvailableLauncher } from "../shared/types";
 
 // mode -> the composite-key "modeId" segment used for the PTY sessionKey and
@@ -39,6 +41,8 @@ export function App() {
     configSnapshot,
     updatePrompt,
     setUpdatePrompt,
+    serverUpdatePrompt,
+    setServerUpdatePrompt,
     connectionState,
     launcherFlags,
   } = useStore();
@@ -226,6 +230,56 @@ export function App() {
       });
     });
     return off;
+  }, []);
+
+  // Server-update available (BET-225 stage 3): main forwards the box's
+  // `serverUpdateAvailable` bus event to the renderer via the
+  // `serverUpdateAvailable` IPC channel. The renderer renders a "Server
+  // update available: {version}" bar via the shared UpdateBar component —
+  // same component as the desktop auto-update prompt, just a different
+  // message + button label (`serverUpdateApply` runs `scripts/self-update.sh`
+  // on the box). On mobile the IPC listener is a no-op (httpApi shim
+  // returns `() => {}`); mobile-specific mobile UI is out of scope — this
+  // subscription exists so the store field + bus-case stay in sync for a
+  // later mobile pass.
+  useEffect(() => {
+    if (!window.api.onServerUpdateAvailable) return;
+    const off = window.api.onServerUpdateAvailable((payload) => {
+      useStore.getState().setServerUpdatePrompt({
+        version: payload.version,
+        notesUrl: payload.notesUrl ?? undefined,
+      });
+    });
+    return off;
+  }, []);
+
+  // Version-skew guard (BET-225 stage 3 Part C). After the renderer is
+  // mounted, fetch the client + server version pair ONCE (no second poll,
+  // per the stage-3 spec) and let `chooseUpdateSkewVariant` decide
+  // whether to render the non-dismissible "outdated" banner. Missing
+  // versions (mid-bootstrap, transient failure) collapse to "ok" so we
+  // never flash the blocking banner on a fresh launch. getServerVersion
+  // is the same endpoint MobileSettings already calls for its display
+  // — both consume the same `{version, minClient}` payload.
+  const [clientVersion, setClientVersion] = useState<string | null>(null);
+  const [serverMinClient, setServerMinClient] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      window.api.getClientVersion?.().catch(() => null),
+      window.api.getServerVersion?.().catch(() => null),
+    ]).then(([client, server]) => {
+      if (cancelled) return;
+      if (client && typeof client.version === "string") {
+        setClientVersion(client.version);
+      }
+      if (server && typeof server.minClient === "string") {
+        setServerMinClient(server.minClient);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Sidebar status for chat-mode windows. The PTY-pane poller
@@ -529,35 +583,82 @@ export function App() {
     <div className="h-full w-full flex bg-bg text-text">
       <Sidebar ref={sidebarRef} onOpenSettings={() => setSettingsOpen(true)} />
       <main className="flex-1 flex flex-col min-w-0">
-        {/* Auto-update prompt bar. Shown when main has downloaded a new
-            version and is waiting for the user to restart. Positioned at the
-            top of the main area so it's visible regardless of which panel
-            is active. Dismissed by the × button (clears store state). */}
+        {/* Auto-update prompt bar (BET-225 stage 3: shared UpdateBar).
+            Shown when main has downloaded a new version and is waiting for
+            the user to restart. Positioned at the top of the main area so
+            it's visible regardless of which panel is active. Dismissed by
+            the × button (clears store state). The UpdateBar component is
+            the shared banner used for all three update prompts — desktop
+            auto-update, server update, and the version-skew guard (below). */}
         {!showOnboarding && updatePrompt && (
-          <div className="shrink-0 bg-accent/10 border-b border-accent/30 px-3 py-1.5 text-[12px] text-text flex items-center gap-2">
-            <span className="flex-1 truncate">
-              Update available:{" "}
-              <span className="font-medium text-text">
-                {updatePrompt.releaseName || updatePrompt.version}
-              </span>
-            </span>
-            <button
-              onClick={() => {
-                void window.api.autoUpdateInstall();
-              }}
-              className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium"
-            >
-              Restart to update
-            </button>
-            <button
-              onClick={() => setUpdatePrompt(null)}
-              className="shrink-0 text-text-faint hover:text-text leading-none"
-              title="Dismiss"
-            >
-              ×
-            </button>
-          </div>
+          <UpdateBar
+            text={
+              <>
+                Update available:{" "}
+                <span className="font-medium text-text">
+                  {updatePrompt.releaseName || updatePrompt.version}
+                </span>
+              </>
+            }
+            actionLabel="Restart to update"
+            onAction={() => {
+              void window.api.autoUpdateInstall();
+            }}
+            onDismiss={() => setUpdatePrompt(null)}
+          />
         )}
+        {/* Server-update prompt (BET-225 stage 3 Part A): shown when the
+            box's server-update poller sees a newer manifest version. Same
+            UpdateBar component as the desktop auto-update above; the action
+            button fires `serverUpdateApply` which runs scripts/self-update.sh
+            on the box (git fetch + reset --hard origin/main + npm ci
+            --omit=dev + systemctl --user restart manta-server). */}
+        {!showOnboarding && serverUpdatePrompt && (
+          <UpdateBar
+            text={
+              <>
+                Server update available:{" "}
+                <span className="font-medium text-text">
+                  {serverUpdatePrompt.version}
+                </span>
+              </>
+            }
+            actionLabel="Update & restart"
+            onAction={() => {
+              void window.api.serverUpdateApply();
+            }}
+            onDismiss={() => setServerUpdatePrompt(null)}
+          />
+        )}
+        {/* Version-skew guard (BET-225 stage 3 Part C). NON-dismissible —
+            the client version is older than the server's `minClient` (a
+            breaking RPC change shipped in a newer server), so the user
+            MUST update before the app can talk to the box safely. The
+            button picks the right desktop action based on whether an
+            update has already been downloaded (`updatePrompt !== null` →
+            autoUpdateInstall; else → autoUpdateDownload). On mobile the
+            action is informational (App Store) — mobile skips this branch
+            because there's no autoUpdate plumbing. */}
+        {!showOnboarding &&
+          chooseUpdateSkewVariant(clientVersion, serverMinClient) === "outdated" && (
+            <UpdateBar
+              text={
+                <>
+                  This app is out of date and may not work correctly —
+                  please update.
+                </>
+              }
+              actionLabel="Update"
+              onAction={() => {
+                if (updatePrompt) {
+                  void window.api.autoUpdateInstall();
+                } else {
+                  void window.api.autoUpdateDownload();
+                }
+              }}
+              dismissible={false}
+            />
+          )}
         <div className="titlebar-drag h-10 border-b border-border flex items-center px-3 gap-2 min-w-0">
           <div className="text-xs text-text-muted flex items-center gap-2 min-w-0">
             {activeProjectName && (
