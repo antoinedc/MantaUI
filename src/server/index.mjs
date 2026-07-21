@@ -149,19 +149,6 @@ const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
 // eslint-disable-next-line no-unused-vars
 const { stop: stopOutboxPoller } = startOutboxPoller(bus, { intervalMs: 3000 });
 
-// Server-update checker: polls https://mantaui.com/updates/server.json every
-// 6h, publishes a `serverUpdateAvailable` bus event on a newer release (the
-// stage-3 renderer banner consumes this), and fires ONE informational
-// notification through the existing push.fireNotify path so a closed app
-// still learns. Dedup is per-version. See src/server/serverUpdate.mjs +
-// docs/bui-update-system.md (BET-225 stage 2).
-// eslint-disable-next-line no-unused-vars
-const { stop: stopServerUpdatePoller } = startServerUpdatePoller({
-  bus,
-  currentVersion: SERVER_VERSION,
-  notify: push.fireNotify,
-});
-
 // Scheduled-prompt engine: durable jobs in ~/.manta/schedule.json, fired
 // by re-submitting the stored prompt into its opencode session via
 // oc.sendPrompt — the scheduled work then streams into the user's open
@@ -248,6 +235,22 @@ rpcHandlers = buildHandlers({
   authPair: () => authEngine.pair(),
   push,
   serverVersion: SERVER_VERSION,
+});
+
+// Server-update checker: polls https://mantaui.com/updates/server.json every
+// 6h, publishes a `serverUpdateAvailable` bus event on a newer release (the
+// stage-3 renderer banner consumes this), and fires ONE informational
+// notification through the existing push.fireNotify path so a closed app
+// still learns. Dedup is per-version. See src/server/serverUpdate.mjs +
+// docs/bui-update-system.md (BET-225 stage 2). Wired here — AFTER
+// SERVER_VERSION is read — so the poller can capture the box's running
+// version (reviewer caught a TDZ when this was placed next to the other
+// pollers above, before `SERVER_VERSION` was initialised).
+// eslint-disable-next-line no-unused-vars
+const { stop: stopServerUpdatePoller } = startServerUpdatePoller({
+  bus,
+  currentVersion: SERVER_VERSION,
+  notify: push.fireNotify,
 });
 
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
