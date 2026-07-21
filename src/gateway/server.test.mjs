@@ -62,16 +62,22 @@ async function buildServer({ store = {}, dns = makeFetchImpl(), apnsConfig = nul
   };
 }
 
+// Drain an IncomingMessage into { status, headers, body } and resolve. Shared
+// by postJson + getRequest so the chunk-collect boilerplate lives once.
+function collectResponse(res, resolve) {
+  const chunks = [];
+  res.on("data", (c) => chunks.push(c));
+  res.on("end", () =>
+    resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf-8") }),
+  );
+}
+
 function postJson(port, path, body, headers = {}) {
   const data = JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const req = httpRequest(
       { host: "127.0.0.1", port, method: "POST", path, headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data), ...headers } },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf-8") }));
-      },
+      (res) => collectResponse(res, resolve),
     );
     req.on("error", reject);
     req.write(data);
@@ -81,14 +87,28 @@ function postJson(port, path, body, headers = {}) {
 
 function getRequest(port, path) {
   return new Promise((resolve, reject) => {
-    const req = httpRequest({ host: "127.0.0.1", port, method: "GET", path }, (res) => {
-      const chunks = [];
-      res.on("data", (c) => chunks.push(c));
-      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf-8") }));
-    });
+    const req = httpRequest({ host: "127.0.0.1", port, method: "GET", path }, (res) =>
+      collectResponse(res, resolve),
+    );
     req.on("error", reject);
     req.end();
   });
+}
+
+// A store map pre-seeded with the standard VALID_BOX_ID entry. `overrides`
+// merge onto the entry (e.g. a specific gateway_token).
+function seedStore(overrides = {}) {
+  return {
+    [VALID_BOX_ID]: {
+      gateway_token: makeToken("good"),
+      ip: "1.2.3.4",
+      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
+      registeredAt: 1,
+      updatedAt: 1,
+      recordId: 1,
+      ...overrides,
+    },
+  };
 }
 
 async function withServer(opts, fn) {
@@ -156,16 +176,7 @@ test("POST /register with invalid body → 400", async () => {
 
 test("POST /register (re-register) with valid bearer + same IP → 200 host, no DNS", async () => {
   const token = makeToken("seed");
-  const store = {
-    [VALID_BOX_ID]: {
-      gateway_token: token,
-      ip: "9.9.9.9",
-      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
-      registeredAt: 1,
-      updatedAt: 1,
-      recordId: 1234,
-    },
-  };
+  const store = seedStore({ gateway_token: token, ip: "9.9.9.9", recordId: 1234 });
   await withServer({ store }, async ({ port, dnsCalls }) => {
     const r = await postJson(
       port,
@@ -181,16 +192,7 @@ test("POST /register (re-register) with valid bearer + same IP → 200 host, no 
 
 test("POST /register (re-register) with valid bearer + changed IP → DNS update", async () => {
   const token = makeToken("seed");
-  const store = {
-    [VALID_BOX_ID]: {
-      gateway_token: token,
-      ip: "1.1.1.1",
-      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
-      registeredAt: 1,
-      updatedAt: 1,
-      recordId: 1234,
-    },
-  };
+  const store = seedStore({ gateway_token: token, ip: "1.1.1.1", recordId: 1234 });
   await withServer({ store }, async (ctx) => {
     const { port, dnsCalls } = ctx;
     const r = await postJson(
@@ -208,16 +210,7 @@ test("POST /register (re-register) with valid bearer + changed IP → DNS update
 });
 
 test("POST /register with wrong bearer → 401", async () => {
-  const store = {
-    [VALID_BOX_ID]: {
-      gateway_token: makeToken("right"),
-      ip: "1.1.1.1",
-      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
-      registeredAt: 1,
-      updatedAt: 1,
-      recordId: 1,
-    },
-  };
+  const store = seedStore({ gateway_token: makeToken("right"), ip: "1.1.1.1" });
   await withServer({ store }, async ({ port, dnsCalls }) => {
     const r = await postJson(
       port,
@@ -275,16 +268,7 @@ test("POST /push without auth → 401", async () => {
 
 test("POST /push auth + tokens → 200 {results:[{token, ok, prune}]}", async () => {
   const token = makeToken("good");
-  const store = {
-    [VALID_BOX_ID]: {
-      gateway_token: token,
-      ip: "1.2.3.4",
-      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
-      registeredAt: 1,
-      updatedAt: 1,
-      recordId: 1,
-    },
-  };
+  const store = seedStore({ gateway_token: token });
   await withServer(
     { store, apnsConfig: { teamId: "t", keyId: "k", p8Path: "/d", bundleId: "b" } },
     async ({ port }) => {
@@ -317,16 +301,7 @@ test("POST /push auth + tokens → 200 {results:[{token, ok, prune}]}", async ()
 
 test("POST /push with >20 tokens → 400 too_many_tokens", async () => {
   const token = makeToken("good");
-  const store = {
-    [VALID_BOX_ID]: {
-      gateway_token: token,
-      ip: "1.2.3.4",
-      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
-      registeredAt: 1,
-      updatedAt: 1,
-      recordId: 1,
-    },
-  };
+  const store = seedStore({ gateway_token: token });
   await withServer(
     { store, apnsConfig: { teamId: "t", keyId: "k", p8Path: "/d", bundleId: "b" } },
     async ({ port }) => {
