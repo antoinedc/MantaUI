@@ -276,68 +276,34 @@ body,
    footer button means schedules are reachable + their live count visible
    right next to the composer on phone too.) */
 
-/* The ChatPanel transcript is `flex-1 overflow-y-auto px-4 py-3` — a
-   y-only scroller, but it has NO x-axis clamp, so an oversized child
-   (a tool output, a wide table, a wrapped row that didn't actually wrap,
-   the user-message `-mx-4` bar with a long URL, etc.) scrolls
-   horizontally INSIDE the transcript. That's what the user sees as
-   "the message area scrolls sideways" even after .mobile-body has
-   overflow: hidden — the page doesn't scroll, but the transcript box
-   does, which is the same visible bug.
+/* ---- Transcript horizontal-scroll fix moved into shared components (BET-230) ----
 
-   Force overflow-x: hidden on the transcript scroller. The horizontal
-   scroll has nowhere useful to go — the `<pre>` blocks inside still get
-   their own overflow-x: auto and scrollbar (from the rule below), so
-   long code lines remain reachable, they just don't drag the entire
-   transcript with them. Targeted at the FIRST overflow-y-auto inside
-   .mobile-body (ChatPanel's scrollRef container) — not @-typeahead
-   popups or model-picker dropdowns, which use absolute positioning and
-   shouldn't be affected by an x clamp anyway. */
-.mobile-body [class*="overflow-y-auto"] {
-  overflow-x: hidden;
-}
+   The transcript, message rows, and tool rendering components are shared by
+   desktop and mobile, so the root-cause fixes for the chat transcript
+   horizontal-scroll bug now live in the SHARED components rather than as
+   `.mobile-body`-scoped overrides here:
 
-/* ---- Inner-overflow clamps: stop the chat panel pushing past viewport ----
+   - The transcript scroll container's x-axis clamp is set in Transcript.tsx
+     itself (`overflow-x-hidden` next to its existing `overflow-y-auto`).
+   - Every `flex-1` content column inside the shared message-row / tool-call
+     renderers carries `min-w-0` so flex items can shrink below their
+     min-content width and let the inner content wrap.
+   - Wide leaf elements (`<pre>`, `<table>`, `.overflow-x-auto`) carry
+     `max-w-full` so they scroll on their OWN scrollbar instead of dragging
+     the transcript.
+   - `.break-words { overflow-wrap: anywhere }` is now global in index.css so
+     unbreakable tokens (URLs, long file paths) wrap on both transports.
 
-   ChatPanel paints `<pre>`, `<table>` and `overflow-x-auto` containers as
-   children of flex columns that don't carry `min-width: 0`. A flex item's
-   default `min-width` is `auto`, which is the intrinsic min-content width of
-   its content — a `<pre>` with `white-space: pre` reports its widest line as
-   that intrinsic size, so the flex refuses to shrink, the row grows, and
-   `overflow-x-auto` becomes a no-op (the element is already as wide as it
-   wants to be). The desktop avoids this because its <main> wrapper has
-   `min-w-0` baked in, but the mobile wrapper is `absolute inset-0` and the
-   `flex-1` siblings inside ChatPanel weren't authored for a viewport-sized
-   panel.
-
-   Per the AGENTS rule we don't edit ChatPanel; reshape its descendants via
-   `.mobile-body` here instead. These three rules together remove the leaks:
-
-   1. Clamp pre/table/overflow-x-auto containers to the panel width and let
-      the inner content scroll horizontally on its own scrollbar.
-   2. Force `min-width: 0` on ANY .flex-1 inside .mobile-body — the most
-      common flex-item-grows-with-content pattern in ChatPanel (assistant
-      bullet → text column, tool body wrappers, etc.).
-   3. Same for the ModelPicker dropdown's hardcoded `min-w-[240px]`, which
-      can push the panel right when the picker is wrapped to the right of
-      the composer row at phone width. */
-.mobile-body pre,
-.mobile-body table,
-.mobile-body .overflow-x-auto {
-  max-width: 100%;
-}
-.mobile-body .flex-1 {
-  min-width: 0;
-}
+   This keeps desktop and mobile on one code path. The `.mobile-body div[class*="min-w-[240px]"]`
+   rule below stays because it is ModelPicker-dropdown-specific (not the
+   transcript overflow bug). */
+/* ModelPicker dropdown clamp — dropdown-specific, NOT part of the
+   transcript-overflow fix; it forces the dropdown's hardcoded
+   `min-w-[240px]` to shrink to fit phone width when the picker is wrapped
+   into the composer row. */
 .mobile-body div[class*="min-w-[240px]"] {
   min-width: 0;
   max-width: calc(100vw - 32px);
-}
-/* Long unbreakable tokens (URLs, file paths) in user-message bars should
-   wrap rather than push the row. `break-words` alone isn't enough on
-   WebKit for path-like strings — `overflow-wrap: anywhere` is. */
-.mobile-body .break-words {
-  overflow-wrap: anywhere;
 }
 
 /* iOS Safari auto-zooms <input>/<textarea> with font-size < 16px on focus,

@@ -4,6 +4,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Wrap unbreakable tokens (URLs, long file paths) instead of overflowing.
+   Tailwind's `break-words` is `overflow-wrap: break-word`, which is
+   insufficient on WebKit for path-like strings; `anywhere` forces a break.
+   Applied globally so desktop AND mobile behave identically (BET-230 — the
+   transcript-scrolling fix moved this from a mobile-only band-aid to one
+   shared rule). */
+.break-words {
+  overflow-wrap: anywhere;
+}
+
 html, body, #root {
   height: 100%;
   margin: 0;

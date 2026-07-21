@@ -60,7 +60,7 @@ export function Transcript({
   onRejectQuestion,
 }: TranscriptProps) {
   return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3">
+    <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
       <TaskContext.Provider value={taskContextValue}>
         <div className="flex flex-col justify-end min-h-full">
           {messages.length === 0 ? (
