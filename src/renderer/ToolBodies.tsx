@@ -224,7 +224,7 @@ function CollapsibleCode({ body, maxLines }: { body: string; maxLines: number })
   const hiddenCount = lines.length - maxLines;
   return (
     <div className="text-[12px] bg-bg-soft border border-border rounded">
-      <pre className="px-2 py-1 overflow-x-auto whitespace-pre">
+      <pre className="px-2 py-1 overflow-x-auto max-w-full whitespace-pre">
         <code>{shown}</code>
       </pre>
       {overflow && (
@@ -248,7 +248,7 @@ function CollapsiblePathList({ paths, maxLines }: { paths: string[]; maxLines: n
   const hiddenCount = paths.length - maxLines;
   return (
     <div className="text-[12px] bg-bg-soft border border-border rounded">
-      <div className="px-2 py-1 overflow-x-auto">
+      <div className="px-2 py-1 overflow-x-auto max-w-full">
         {shown.map((p, i) => (
           <div key={i} className="text-text-muted whitespace-pre">
             {p}
@@ -279,7 +279,7 @@ export function UnifiedDiff({ text }: { text: string }) {
   let oldLine = 0;
   let newLine = 0;
   return (
-    <div className="font-mono leading-snug my-1 overflow-x-auto">
+    <div className="font-mono leading-snug my-1 overflow-x-auto max-w-full">
       {lines.map((line, i) => {
         // Hunk header: parse counters silently. Skip the visible row — the
         // header carries file/range metadata that's noise next to the actual

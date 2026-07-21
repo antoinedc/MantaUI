@@ -115,7 +115,7 @@ const MD_COMPONENTS: MarkdownComponents = {
     </blockquote>
   ),
   table: ({ children }) => (
-    <div className="my-2 overflow-x-auto">
+    <div className="my-2 overflow-x-auto max-w-full">
       <table className="text-[12px] border-collapse">{children}</table>
     </div>
   ),
@@ -274,7 +274,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
       )}
       {tooLarge ? (
         <pre
-          className="px-2 py-1.5 text-[12px] overflow-x-auto whitespace-pre"
+          className="px-2 py-1.5 text-[12px] overflow-x-auto max-w-full whitespace-pre"
           style={{ background: "transparent" }}
         >
           <code>{cleaned}</code>
@@ -287,7 +287,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
         >
           {({ tokens, getLineProps, getTokenProps }) => (
             <pre
-              className="px-2 py-1.5 text-[12px] overflow-x-auto whitespace-pre"
+              className="px-2 py-1.5 text-[12px] overflow-x-auto max-w-full whitespace-pre"
               // vsDark's default bg would override our bg-bg-soft — disable it.
               style={{ background: "transparent" }}
             >

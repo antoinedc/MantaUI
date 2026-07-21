@@ -131,7 +131,7 @@ export const ActiveTodos = memo(function ActiveTodos({ todos }: { todos: Array<R
             >
               {icon}
             </span>
-            <span className={`flex-1 whitespace-pre-wrap break-words ${textCls}`}>
+            <span className={`flex-1 min-w-0 whitespace-pre-wrap break-words ${textCls}`}>
               {content}
             </span>
           </div>
@@ -143,7 +143,7 @@ export const ActiveTodos = memo(function ActiveTodos({ todos }: { todos: Array<R
             {lastVisibleIdx < 0 ? "⎿" : " "}
           </span>
           <span className="select-none w-4 shrink-0" />
-          <span className="flex-1 text-text-faint">{summary}</span>
+            <span className="flex-1 min-w-0 text-text-faint">{summary}</span>
         </div>
       )}
     </div>
@@ -295,7 +295,7 @@ export const MessageRow = memo(function MessageRow({
           ) : (
             <div className="-mx-4 px-4 py-0.5 bg-bg-soft flex">
               <span className="text-text-faint select-none mr-2 shrink-0">›</span>
-              <span className="flex-1 whitespace-pre-wrap break-words text-text">
+              <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-text">
                 {text}
               </span>
             </div>

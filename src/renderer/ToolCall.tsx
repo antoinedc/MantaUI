@@ -106,7 +106,7 @@ export const AssistantPart = memo(function AssistantPart({
           <span className="select-none w-4 shrink-0">
             {first ? <Prefix char="●" color={color} pulse={pulse} /> : <span className="invisible">●</span>}
           </span>
-          <div className="flex-1">{renderMarkdown(text)}</div>
+          <div className="flex-1 min-w-0">{renderMarkdown(text)}</div>
         </div>
       </div>
     );
@@ -125,7 +125,7 @@ export const AssistantPart = memo(function AssistantPart({
           <span className="select-none w-4 shrink-0">
             <span style={{ color: CLAUDE_ORANGE, opacity: 0.6 }}>✻ </span>
           </span>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <div className="text-text-faint not-italic mb-1">Thinking…</div>
             <div>{text}</div>
           </div>
@@ -146,7 +146,7 @@ export const AssistantPart = memo(function AssistantPart({
         <span className="select-none w-4 shrink-0">
           <span style={{ color: CLAUDE_ORANGE, opacity: 0.6 }}>⎿ </span>
         </span>
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           {files.length === 0
             ? "patched"
             : `patched ${files.length} file${files.length === 1 ? "" : "s"}: ${files.join(", ")}`}
@@ -164,7 +164,7 @@ export const AssistantPart = memo(function AssistantPart({
         <span className="select-none w-4 shrink-0">
           <span style={{ color: CLAUDE_ORANGE, opacity: 0.6 }}>⎿ </span>
         </span>
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <span className="text-text-muted">{filename || "(file)"}</span>
           {mime && <span className="text-text-faint"> · {mime}</span>}
         </div>
@@ -177,7 +177,7 @@ export const AssistantPart = memo(function AssistantPart({
       <span className="select-none w-4 shrink-0">
         <span style={{ color: CLAUDE_ORANGE, opacity: 0.5 }}>○ </span>
       </span>
-      <div className="flex-1 text-xs">[{part.type}]</div>
+      <div className="flex-1 min-w-0 text-xs">[{part.type}]</div>
     </div>
   );
 });
@@ -223,7 +223,7 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
             ●{" "}
           </span>
         </span>
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <span className="text-text">{toolName}</span>
           {state.title && (
             <span className="text-text-muted">({state.title})</span>
