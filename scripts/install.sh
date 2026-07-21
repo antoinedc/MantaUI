@@ -49,6 +49,8 @@
 # Overrides (env):
 #   MANTA_TARBALL_URL   full URL of the release tarball (skips manifest fetch + sha256)
 #   MANTA_RELEASE_HOST  host for the manifest + tarball (default https://mantaui.com)
+#   MANTA_REPO_URL      git URL the deploy is initialised against for `scripts/self-update.sh`
+#                       (default https://github.com/antoinedc/MantaUI.git)
 #   MANTA_HOME          where code is unpacked (default ~/manta)
 #   MANTA_MOBILE_PORT   server port (default 8787)
 #   MANTA_VERSION       version to fetch when MANTA_TARBALL_URL is unset (default: latest)
@@ -250,6 +252,37 @@ main() {
        [ -d "$MANTA_HOME.prev" ] && mv "$MANTA_HOME.prev" "$MANTA_HOME"
        die "could not move extracted tarball into $MANTA_HOME — previous install restored"
     }
+
+  # ---------------------------------------------------------------------------
+  # 4b. Git-aware deploy init. `scripts/self-update.sh` (wired in BET-225.A5)
+  #     assumes $MANTA_HOME is a git checkout pointed at origin/main, so the
+  #     update path can do `git fetch + reset --hard origin/main`. The release
+  #     tarball ships WITHOUT a .git/ (pack.mjs strips it), so we re-create one
+  #     here. Idempotent: a re-run on an existing deploy updates the remote
+  #     URL in place (handles renames) and re-resets to origin/main so the
+  #     tarball + the working tree always agree. Untracked files
+  #     (runtime/, RELEASE.json) survive — `git reset --hard` only touches
+  #     tracked paths.
+  # ---------------------------------------------------------------------------
+  MANTA_REPO_URL="${MANTA_REPO_URL:-https://github.com/antoinedc/MantaUI.git}"
+  if [ "$DRY_RUN" = "1" ]; then
+    dry_log "would init git at $MANTA_HOME, fetch $MANTA_REPO_URL, reset --hard origin/main"
+  else
+    log "Initialising git checkout at $MANTA_HOME (origin=$MANTA_REPO_URL)"
+    if [ ! -d "$MANTA_HOME/.git" ]; then
+      git -C "$MANTA_HOME" init -q -b main \
+        || die "git init failed at $MANTA_HOME — install git and retry"
+    fi
+    # `git remote add` fails if the remote already exists (re-run case);
+    # `set-url` is the idempotent override.
+    git -C "$MANTA_HOME" remote set-url origin "$MANTA_REPO_URL" 2>/dev/null \
+      || git -C "$MANTA_HOME" remote add origin "$MANTA_REPO_URL"
+    git -C "$MANTA_HOME" fetch origin main -q \
+      || die "git fetch origin main failed — check network / MANTA_REPO_URL"
+    git -C "$MANTA_HOME" reset --hard origin/main -q \
+      || die "git reset --hard origin/main failed at $MANTA_HOME"
+    ok "Deploy is git-aware: $(git -C "$MANTA_HOME" rev-parse --short HEAD)"
+  fi
 
   # From here on, EVERY node invocation uses the vendored binary explicitly.
   # No path lookup, no reliance on a system node.
