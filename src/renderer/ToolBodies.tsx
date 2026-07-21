@@ -9,6 +9,7 @@
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import { resolveToolOutput } from "./chatUtils";
 import { CLAUDE_ORANGE, type ToolState } from "./chatShared";
+import { CopyButton } from "./CopyButton";
 
 // Renders a tool's `output` string. If it looks like a unified diff (starts
 // with `--- ` or `@@`, or has multiple `@@` headers), each line is colored
@@ -36,17 +37,23 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
   }
   // Plain code/text output — small monospace block, scroll on overflow.
   return (
-    <pre
-      ref={preRef}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        pinnedRef.current =
-          el.scrollHeight - el.scrollTop - el.clientHeight < 8;
-      }}
-      className="text-[12px] bg-bg-soft border border-border rounded px-2 py-1 max-h-64 overflow-auto whitespace-pre"
-    >
-      <code>{output}</code>
-    </pre>
+    <div className="relative">
+      <CopyButton
+        text={output}
+        className="absolute top-1 right-1 z-10 text-[10px] text-text-faint hover:text-text px-1 rounded"
+      />
+      <pre
+        ref={preRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          pinnedRef.current =
+            el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+        }}
+        className="text-[12px] bg-bg-soft border border-border rounded px-2 py-1 max-h-64 overflow-auto whitespace-pre"
+      >
+        <code>{output}</code>
+      </pre>
+    </div>
   );
 });
 

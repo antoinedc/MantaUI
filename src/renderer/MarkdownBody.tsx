@@ -15,6 +15,7 @@ import remarkGfm from "remark-gfm";
 import type { Components as MarkdownComponents } from "react-markdown";
 import { CLAUDE_ORANGE } from "./chatShared";
 import { getBuiPreload } from "./preloadAccess";
+import { CopyButton } from "./CopyButton";
 
 // Streamed-fence resilience: while a code block is still streaming, the
 // closing ``` hasn't arrived yet. Without a recovery step, remark sees the
@@ -266,12 +267,16 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
     countLines(cleaned) > CODEBLOCK_MAX_LINES;
 
   return (
-    <div className="my-2 rounded border border-border bg-bg-soft overflow-hidden">
+    <div className="my-2 rounded border border-border bg-bg-soft overflow-hidden relative">
       {lang && (
-        <div className="px-2 py-0.5 text-[10px] text-text-faint border-b border-border bg-bg-elev">
+        <div className="px-2 py-0.5 text-[10px] text-text-faint border-b border-border bg-bg-elev pr-7">
           {lang}
         </div>
       )}
+      <CopyButton
+        text={cleaned}
+        className="absolute top-1 right-1 z-10 text-[10px] text-text-faint hover:text-text px-1 rounded"
+      />
       {tooLarge ? (
         <pre
           className="px-2 py-1.5 text-[12px] overflow-x-auto max-w-full whitespace-pre"
