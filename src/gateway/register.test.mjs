@@ -54,6 +54,38 @@ function makeStore(initial = {}) {
   };
 }
 
+// A store pre-seeded with the standard VALID_BOX_ID entry (token seed "good",
+// IP 1.2.3.4, recordId 12345). Overrides merge onto the seeded entry.
+function seededStore(entryOverrides = {}) {
+  return makeStore({
+    [VALID_BOX_ID]: {
+      gateway_token: makeToken("good"),
+      ip: "1.2.3.4",
+      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
+      registeredAt: 1,
+      updatedAt: 1,
+      recordId: 12345,
+      ...entryOverrides,
+    },
+  });
+}
+
+// Invoke handleRegister with the common wiring (store, its persist, an
+// always-allow rate limiter, and the fake DNS createOrUpdate). `body`, `ip`,
+// and any explicit `overrides` (e.g. a rejecting rateLimiter or a failing
+// createDnsRecord) are caller-supplied.
+function callRegister({ store, dns, body, ip, ...overrides }) {
+  return handleRegister({
+    body,
+    ip,
+    store: store.store,
+    persist: store.persist,
+    rateLimiter: () => true,
+    createDnsRecord: dns.createOrUpdate,
+    ...overrides,
+  });
+}
+
 test("isValidGatewayToken: 32 lowercase hex only", () => {
   assert.equal(isValidGatewayToken(makeToken("a")), true);
   assert.equal(isValidGatewayToken("UPPER".padEnd(32, "X")), false);
@@ -137,14 +169,7 @@ test("handleRegister: rejects invalid box_id (XYZ, 0xabc, wrong length, uppercas
   const store = makeStore();
   const dns = makeFakeDns();
   for (const bad of ["XYZ", "0xabcdef", VALID_BOX_ID.slice(0, 31), VALID_BOX_ID.toUpperCase()]) {
-    const r = await handleRegister({
-      body: { box_id: bad },
-      ip: "1.2.3.4",
-      store: store.store,
-      persist: store.persist,
-      rateLimiter: () => true,
-      createDnsRecord: dns.createOrUpdate,
-    });
+    const r = await callRegister({ store, dns, body: { box_id: bad }, ip: "1.2.3.4" });
     assert.equal(r.status, 400, `bad box_id "${bad}" must be rejected`);
   }
 });
@@ -152,13 +177,10 @@ test("handleRegister: rejects invalid box_id (XYZ, 0xabc, wrong length, uppercas
 test("handleRegister: first call mints a 32-hex token, creates DNS, persists", async () => {
   const store = makeStore();
   const dns = makeFakeDns();
-  const r = await handleRegister({
+  const r = await callRegister({
+    store, dns,
     body: { box_id: VALID_BOX_ID },
     ip: "1.2.3.4",
-    store: store.store,
-    persist: store.persist,
-    rateLimiter: () => true,
-    createDnsRecord: dns.createOrUpdate,
   });
   assert.equal(r.status, 200);
   assert.match(r.json.host, /^abcdef.*\.boxes\.mantaui\.com$/);
@@ -172,29 +194,16 @@ test("handleRegister: first call mints a 32-hex token, creates DNS, persists", a
   assert.ok(persisted);
   assert.equal(persisted.gateway_token, r.json.gateway_token);
   assert.equal(persisted.ip, "1.2.3.4");
-  assert.equal(persisted.ovhRecordId, 100); // calls.length * 100
+  assert.equal(persisted.recordId, 100); // calls.length * 100
 });
 
 test("handleRegister: re-register with wrong token → 401 (no DNS update)", async () => {
   const dns = makeFakeDns();
-  // Pre-seed the store.
-  const store = makeStore({
-    [VALID_BOX_ID]: {
-      gateway_token: makeToken("good"),
-      ip: "1.2.3.4",
-      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
-      registeredAt: 1,
-      updatedAt: 1,
-      ovhRecordId: 12345,
-    },
-  });
-  const r = await handleRegister({
+  const store = seededStore();
+  const r = await callRegister({
+    store, dns,
     body: { box_id: VALID_BOX_ID, __bearer: makeToken("bad") },
     ip: "1.2.3.4",
-    store: store.store,
-    persist: store.persist,
-    rateLimiter: () => true,
-    createDnsRecord: dns.createOrUpdate,
   });
   assert.equal(r.status, 401);
   assert.equal(dns.calls.length, 0, "DNS must not have been touched");
@@ -202,23 +211,11 @@ test("handleRegister: re-register with wrong token → 401 (no DNS update)", asy
 
 test("handleRegister: re-register with correct token + same IP → 200 host only (no DNS)", async () => {
   const dns = makeFakeDns();
-  const store = makeStore({
-    [VALID_BOX_ID]: {
-      gateway_token: makeToken("good"),
-      ip: "1.2.3.4",
-      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
-      registeredAt: 1,
-      updatedAt: 1,
-      ovhRecordId: 12345,
-    },
-  });
-  const r = await handleRegister({
+  const store = seededStore();
+  const r = await callRegister({
+    store, dns,
     body: { box_id: VALID_BOX_ID, __bearer: makeToken("good") },
     ip: "1.2.3.4",
-    store: store.store,
-    persist: store.persist,
-    rateLimiter: () => true,
-    createDnsRecord: dns.createOrUpdate,
   });
   assert.equal(r.status, 200);
   assert.equal(r.json.host, `${VALID_BOX_ID}.boxes.mantaui.com`);
@@ -228,23 +225,11 @@ test("handleRegister: re-register with correct token + same IP → 200 host only
 
 test("handleRegister: re-register with correct token + changed IP → updates DNS", async () => {
   const dns = makeFakeDns();
-  const store = makeStore({
-    [VALID_BOX_ID]: {
-      gateway_token: makeToken("good"),
-      ip: "1.2.3.4",
-      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
-      registeredAt: 1,
-      updatedAt: 1,
-      ovhRecordId: 12345,
-    },
-  });
-  const r = await handleRegister({
+  const store = seededStore();
+  const r = await callRegister({
+    store, dns,
     body: { box_id: VALID_BOX_ID, __bearer: makeToken("good") },
     ip: "5.6.7.8",
-    store: store.store,
-    persist: store.persist,
-    rateLimiter: () => true,
-    createDnsRecord: dns.createOrUpdate,
   });
   assert.equal(r.status, 200);
   assert.equal(dns.calls.length, 1);
@@ -257,13 +242,11 @@ test("handleRegister: re-register with correct token + changed IP → updates DN
 test("handleRegister: rate limit 429 takes precedence over validation", async () => {
   const dns = makeFakeDns();
   const store = makeStore();
-  const r = await handleRegister({
+  const r = await callRegister({
+    store, dns,
     body: { box_id: VALID_BOX_ID },
     ip: "1.2.3.4",
-    store: store.store,
-    persist: store.persist,
     rateLimiter: () => false, // always reject
-    createDnsRecord: dns.createOrUpdate,
   });
   assert.equal(r.status, 429);
   assert.equal(dns.calls.length, 0);
@@ -272,14 +255,12 @@ test("handleRegister: rate limit 429 takes precedence over validation", async ()
 
 test("handleRegister: DNS create failure on first registration → 502", async () => {
   const dns = makeFakeDns();
-  const failDns = async () => { throw new Error("OVH boom"); };
+  const failDns = async () => { throw new Error("dns boom"); };
   const store = makeStore();
-  const r = await handleRegister({
+  const r = await callRegister({
+    store, dns,
     body: { box_id: VALID_BOX_ID },
     ip: "1.2.3.4",
-    store: store.store,
-    persist: store.persist,
-    rateLimiter: () => true,
     createDnsRecord: failDns,
   });
   assert.equal(r.status, 502);
@@ -287,29 +268,20 @@ test("handleRegister: DNS create failure on first registration → 502", async (
 });
 
 test("handleRegister: DNS update failure on re-register → 200 with existing host (non-fatal)", async () => {
-  const failDns = async () => { throw new Error("OVH timeout"); };
-  const store = makeStore({
-    [VALID_BOX_ID]: {
-      gateway_token: makeToken("good"),
-      ip: "1.2.3.4",
-      host: `${VALID_BOX_ID}.boxes.mantaui.com`,
-      registeredAt: 1,
-      updatedAt: 1,
-      ovhRecordId: 12345,
-    },
-  });
-  const r = await handleRegister({
+  const dns = makeFakeDns();
+  const failDns = async () => { throw new Error("dns timeout"); };
+  const store = seededStore();
+  const r = await callRegister({
+    store, dns,
     body: { box_id: VALID_BOX_ID, __bearer: makeToken("good") },
     ip: "5.6.7.8",
-    store: store.store,
-    persist: store.persist,
-    rateLimiter: () => true,
     createDnsRecord: failDns,
   });
   assert.equal(r.status, 200);
   assert.equal(r.json.host, `${VALID_BOX_ID}.boxes.mantaui.com`);
 });
 
-test("ovhSubDomainFor: <box_id>.boxes", () => {
-  assert.equal(ovhSubDomainFor(VALID_BOX_ID), `${VALID_BOX_ID}.boxes`);
+test("ovhSubDomainFor: full record name <box_id>.boxes.mantaui.com", () => {
+  // Cloudflare wants the FULL record name (not the OVH-style relative name).
+  assert.equal(ovhSubDomainFor(VALID_BOX_ID), `${VALID_BOX_ID}.boxes.mantaui.com`);
 });
