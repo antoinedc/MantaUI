@@ -19,6 +19,13 @@
 #     (desktop/mobile transport mirrors — see AGENTS.md "when changing one,
 #     change the other").
 #
+# Tooling note (BET-220): settings (minTokens, maxLines=0, ignore patterns)
+# live in `.jscpd.json` at the repo root, the SAME source of truth consumed
+# by scripts/check-duplication-gate.sh. Passed via --config so this script
+# behaves identically regardless of cwd. Keep local + CI on jscpd@^5.x
+# (4.x --max-lines default of 1000 silently masks large files; the 5.x
+# default is `null` / no limit).
+#
 # Usage:
 #   scripts/check-duplication.sh [BASE_REF]   (BASE_REF defaults to origin/main)
 
@@ -55,7 +62,7 @@ fi
 echo "### Copy-paste (jscpd, changed scope, min-tokens 70)"
 echo
 echo '```'
-npx --yes jscpd "${CHANGED[@]}" --min-tokens 70 --reporters consoleFull --absolute 2>&1 \
+npx --yes jscpd --config .jscpd.json "${CHANGED[@]}" 2>&1 \
   | tail -60 || true
 echo '```'
 

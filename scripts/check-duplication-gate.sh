@@ -16,6 +16,14 @@
 # is the advisory report's job — jscpd pairwise over the whole repo is too
 # slow/noisy for a hard gate.
 #
+# Tooling note (BET-220): jscpd settings (minTokens, maxLines=0 to disable
+# the 4.x 1000-line mask, ignore patterns) live in `.jscpd.json` at the repo
+# root — the SINGLE SOURCE OF TRUTH shared with check-duplication.sh and
+# consumed by jscpd via --config. Keep local (`npm install` → jscpd@^5.0.12)
+# and CI (no `npm ci` before this job → fetches latest from npm) on the
+# same 5.x line; both must read this config. If you bump or pin a different
+# jscpd version, update .jscpd.json to match.
+#
 # Usage: scripts/check-duplication-gate.sh [BASE_REF]   (default origin/main)
 # Exit: 0 = no disallowed clones; 1 = clones found (gate fails).
 
@@ -62,8 +70,8 @@ fi
 
 echo "duplication-gate: scanning ${#CHANGED[@]} changed file(s) (min-tokens 70, STRICT)"
 OUT_DIR="$(mktemp -d)"
-npx --yes jscpd "${CHANGED[@]}" --min-tokens 70 --reporters json --output "$OUT_DIR" \
-  --absolute >/dev/null 2>&1 || true
+npx --yes jscpd --config .jscpd.json "${CHANGED[@]}" --output "$OUT_DIR" \
+  >/dev/null 2>&1 || true
 
 REPORT="$OUT_DIR/jscpd-report.json"
 if [ ! -f "$REPORT" ]; then

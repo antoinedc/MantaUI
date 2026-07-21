@@ -1,0 +1,14 @@
+{
+  "minTokens": 70,
+  "minLines": 5,
+  "maxLines": 100000,
+  "maxSize": "100mb",
+  "reporters": ["console", "json", "consoleFull"],
+  "absolute": true,
+  "ignore": [
+    "**/mobile/www/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/out/**"
+  ]
+}
