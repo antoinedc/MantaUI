@@ -1,0 +1,87 @@
+# Push gateway deploy — update + restart the APNs/DNS push gateway on the prod box
+# on a `gateway-v*` git tag.
+#
+# WHY THIS EXISTS
+# ---------------
+# The push gateway (node /opt/manta/src/gateway/index.mjs, systemd
+# `manta-gateway` on the prod box) is the ONLY operated backend left after
+# BET-198/"drop the relay": phones now connect directly to their box's
+# `<box_id>.boxes.mantaui.com`, and every APNs notification is signed by the
+# gateway. Before this workflow a merged gateway fix (APNs bug, DNS-OVH
+# refresh tweak, store schema change) had to be shipped by hand over SSH.
+# This makes it a one-step action: push a `gateway-v*` tag.
+#
+# REPLACES THE OLD RELAY-DEPLOY WORKFLOW (deleted in BET-204). Same shape,
+# same runner, same SSH key — only the tag prefix and the systemd unit name
+# changed. Kept SEPARATE from `web-v*` on purpose: restarting the gateway
+# briefly drops in-flight APNs deliveries (Apple's retry window covers it),
+# so a static-website copy must never bounce it — only tag `gateway-v*` when
+# `src/gateway/**` (or anything the gateway service imports) actually changed.
+#
+# HEALTH-GATED: after the restart it polls `GET /healthz`; any 200 means "up",
+# a connection failure after ~30s of retries FAILS the workflow red so a bad
+# deploy is caught immediately instead of leaving the gateway silently down
+# (which would break ALL push notifications across every box — silent
+# outage).
+#
+# RUNNER + AUTH: self-hosted bui-dev-runner (this dev box), SSH to prod via
+#   ~/.manta-deploy/prod_key. No GitHub secret needed (public half is already
+#   in the prod box's authorized_keys).
+#
+# TRIGGER: push a tag matching gateway-v* (e.g. gateway-v1). Also
+#   workflow_dispatch (deploys current main).
+
+name: Gateway deploy
+
+on:
+  push:
+    tags:
+      - "gateway-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: gateway-deploy
+  cancel-in-progress: false
+
+env:
+  PROD_HOST: root@91.107.196.2
+  SSH_KEY: /home/dev/.manta-deploy/prod_key
+  GATEWAY_URL: https://gateway.mantaui.com
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Pull + restart the gateway
+        run: |
+          set -euo pipefail
+          SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+          echo "▸ Pulling /opt/manta to origin/main"
+          $SSH "$PROD_HOST" "git -C /opt/manta fetch origin main -q && git -C /opt/manta reset --hard origin/main -q && git -C /opt/manta log --oneline -1"
+          echo "▸ Restarting manta-gateway"
+          $SSH "$PROD_HOST" "systemctl restart manta-gateway && sleep 2 && systemctl is-active manta-gateway"
+
+      - name: Health-check the gateway
+        run: |
+          set -euo pipefail
+          # /healthz is the no-auth liveness endpoint: 200 {"ok":true} means up.
+          # Connection failure / timeout (000) means the gateway didn't come
+          # back. Poll up to ~30s before failing red.
+          ok=0
+          for i in $(seq 1 15); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+              "$GATEWAY_URL/healthz" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "✓ gateway responding (HTTP $code) after ${i} attempt(s)"
+              ok=1
+              break
+            fi
+            echo "… gateway not up yet (HTTP $code, attempt $i), retrying"
+            sleep 2
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::Gateway did not respond 200 on /healthz after restart — it may be down."
+            exit 1
+          fi
+          echo "Gateway deployed + healthy."
