@@ -83,8 +83,8 @@ print("splashes regenerated")
 
 # ---- Desktop assets (assets/icon.icns, assets/icons/, renderer header mark) ----
 from PIL import ImageDraw
-def mac_tile(size, bg=NAVY):
-    """Big-Sur style: rounded tile (bg) inset 5% on transparent, mark ~62%."""
+def mac_tile(size, bg=ICON_BG):
+    """Big-Sur style: rounded white tile (bg) inset 5% on transparent, mark ~62%."""
     c = Image.new("RGBA", (size, size), (0,0,0,0))
     inset = round(size*0.05); tile = size - 2*inset
     mask = Image.new("L", (tile, tile), 0)
