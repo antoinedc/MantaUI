@@ -13,6 +13,7 @@
 # WHAT IT DEPLOYS (all static web-root assets)
 #   website/*.html         → /var/www/mantaui/            (marketing site)
 #   website/*.png          → /var/www/mantaui/            (logo/assets)
+#   website/updates/*.json → /var/www/mantaui/updates/    (BET-225 version manifest)
 #   scripts/install.sh     → /var/www/mantaui/install.sh  (curl | bash installer)
 #   llms-install.md        → /var/www/mantaui/llms-install.md (AI install doc)
 #   docs/plugins-authoring.md
@@ -76,6 +77,12 @@ jobs:
           $SCP llms-install.md "$PROD_HOST:$WEBROOT/llms-install.md"
           $SCP docs/plugins-authoring.md "$PROD_HOST:$WEBROOT/llms-plugins.md"
 
+          echo "▸ Copying version manifest (BET-225)"
+          $SSH "$PROD_HOST" "mkdir -p $WEBROOT/updates"
+          if ls website/updates/*.json >/dev/null 2>&1; then
+            $SCP website/updates/*.json "$PROD_HOST:$WEBROOT/updates/"
+          fi
+
           echo "▸ Keeping /opt/manta clone current (source-of-truth parity)"
           $SSH "$PROD_HOST" "git -C /opt/manta fetch origin main -q && git -C /opt/manta reset --hard origin/main -q" || \
             echo "⚠ /opt/manta pull skipped (non-fatal — webroot already updated)"
@@ -103,6 +110,7 @@ jobs:
           check "install.sh" scripts/install.sh
           check "llms-install.md" llms-install.md
           check "llms-plugins.md" docs/plugins-authoring.md
+          check "updates/server.json" website/updates/server.json
           if [ "$fail" -ne 0 ]; then
             echo "::error::One or more web assets are not live or are stale."
             exit 1
