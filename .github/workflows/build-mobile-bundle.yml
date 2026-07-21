@@ -55,8 +55,15 @@ jobs:
         with:
           # Need a real ref (not detached HEAD) to commit + push back to main,
           # and the token must be able to push.
+          #
+          # BUNDLE_PUSH_TOKEN is an admin-owned PAT (antoinedc). main's branch
+          # protection requires 3 status checks (typecheck-test, secret-scan,
+          # dep-audit) enforced at level `non_admins`. The default GITHUB_TOKEN
+          # (github-actions[bot]) is a non-admin, so its direct push to main is
+          # rejected ("required status checks are expected"). An admin PAT
+          # bypasses the required-checks gate, so the bundle commit lands.
           ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.BUNDLE_PUSH_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
