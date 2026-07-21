@@ -48,6 +48,9 @@ Run on the target box:
   hostname `<box_id>.boxes.mantaui.com` resolves and serves HTTPS. The box
   needs outbound HTTPS to the gateway AND inbound TCP 80/443 (Let's Encrypt
   HTTP-01). Tell the user to open these ports if a firewall blocks them.
+  This step is the only place the installer uses `sudo` — see
+  "Sudden failure playbook" below for the bring-your-own-proxy fallback
+  when sudo isn't available or the distro isn't Debian/Ubuntu.
 - `test -f ~/.claude/.credentials.json && echo present || echo missing` —
   chat mode reuses the box's claude login. If missing, tell the user: chat
   will 401 until they run `claude` once on this box and log in. Offer to
@@ -104,6 +107,18 @@ before the user enters it, mint a fresh one:
 - **Caddy reload fails on a non-standard port 80/443 binding** → another
   service (Apache, nginx, Traefik) is already bound. Stop it, or edit the
   Caddy vhost on the box to a non-standard port + your own reverse proxy.
+- **Installer warns "Caddy/gateway section skipped: passwordless sudo
+  is not configured"** → the installer continues normally (the loopback
+  server + pairing code still work), but `<box_id>.boxes.mantaui.com`
+  won't be set up by the installer. The user can either configure
+  passwordless sudo (`$USER ALL=(ALL) NOPASSWD:ALL` in
+  `/etc/sudoers.d/`) and re-run, OR bring their own reverse proxy
+  pointing at `127.0.0.1:8787`. The install prints the exact apt + gpg +
+  tee commands to run by hand.
+- **Installer warns "distro X is not in the v1 supported list"** →
+  same as above (install continues, BYO proxy). v1 supports Debian,
+  Ubuntu, and any distro with `ID_LIKE=debian` (Linux Mint, Raspbian,
+  elementary OS). RHEL / Fedora / Arch / Alpine: out of scope for v1.
 - **Chat 401s** → `~/.claude/.credentials.json` missing (see preflight); after
   the user logs in, `systemctl --user restart opencode-serve`.
 - Anything else: re-run the installer first (idempotent), then read the
