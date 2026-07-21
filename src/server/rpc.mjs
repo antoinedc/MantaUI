@@ -15,6 +15,7 @@ import * as launchers from "./launchers.mjs";
 import { restartOpencode } from "./opencodeAdmin.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
+import { MIN_CLIENT } from "./version.mjs";
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -436,14 +437,16 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
       }
     },
 
-    // ---- server version (BET-180) ----
+    // ---- server version (BET-180, BET-225 stage 2) ----
     // Returns the cached package.json version (read once at startup, same
     // value the GET /api/version REST route returns). The renderer hits this
     // channel via window.api.getServerVersion() so it doesn't have to do an
     // HTTP round-trip just to render "Server vX.Y.Z" under the URL field in
-    // MobileSettings. Returns the snake_case payload the renderer expects;
-    // the JSON-RPC envelope wraps it as { result: { version } }.
-    "server:version": () => ({ version: serverVersion }),
+    // MobileSettings. Also includes `minClient` so the version-skew guard
+    // (BET-225 stage 3, renderer side) can compute `isClientTooOld` from a
+    // single response — no second poll, no parallel endpoint. The
+    // JSON-RPC envelope wraps the body as { result: { version, minClient } }.
+    "server:version": () => ({ version: serverVersion, minClient: MIN_CLIENT }),
 
     // ---- plugins (BET-189 / BET-190) ----
     // Read the current plugin registry the Mac executor has published.

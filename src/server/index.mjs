@@ -39,6 +39,7 @@ import { attachPtyWs } from "./ptyWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { startOutboxPoller } from "./outbox.mjs";
+import { startServerUpdatePoller } from "./serverUpdate.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
 import {
   createCapJob,
@@ -234,6 +235,22 @@ rpcHandlers = buildHandlers({
   authPair: () => authEngine.pair(),
   push,
   serverVersion: SERVER_VERSION,
+});
+
+// Server-update checker: polls https://mantaui.com/updates/server.json every
+// 6h, publishes a `serverUpdateAvailable` bus event on a newer release (the
+// stage-3 renderer banner consumes this), and fires ONE informational
+// notification through the existing push.fireNotify path so a closed app
+// still learns. Dedup is per-version. See src/server/serverUpdate.mjs +
+// docs/bui-update-system.md (BET-225 stage 2). Wired here — AFTER
+// SERVER_VERSION is read — so the poller can capture the box's running
+// version (reviewer caught a TDZ when this was placed next to the other
+// pollers above, before `SERVER_VERSION` was initialised).
+// eslint-disable-next-line no-unused-vars
+const { stop: stopServerUpdatePoller } = startServerUpdatePoller({
+  bus,
+  currentVersion: SERVER_VERSION,
+  notify: push.fireNotify,
 });
 
 // Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that

@@ -20,6 +20,7 @@ import {
   readServerVersion,
   writeVersionResponse,
   FALLBACK_VERSION,
+  MIN_CLIENT,
 } from "./version.mjs";
 import {
   ensureAuth,
@@ -85,7 +86,7 @@ test("readServerVersion returns FALLBACK_VERSION when version field is missing o
 // writeVersionResponse (pure)
 // ---------------------------------------------------------------------------
 
-test("writeVersionResponse writes 200 + JSON { version }", () => {
+test("writeVersionResponse writes 200 + JSON { version, minClient }", () => {
   let captured = null;
   const fakeRes = {
     writeHead(status, headers) {
@@ -99,7 +100,14 @@ test("writeVersionResponse writes 200 + JSON { version }", () => {
   writeVersionResponse(fakeRes, { version: "9.9.9" });
   assert.equal(captured.status, 200);
   assert.equal(captured.headers["content-type"], "application/json");
-  assert.deepEqual(JSON.parse(captured.body), { version: "9.9.9" });
+  const body = JSON.parse(captured.body);
+  assert.equal(body.version, "9.9.9");
+  // minClient MUST be present so the renderer's version-skew guard can
+  // compute isClientTooOld without a second endpoint/polling cycle
+  // (BET-225 stage 2 server side; renderer consumes in stage 3).
+  assert.equal(body.minClient, MIN_CLIENT);
+  assert.equal(typeof body.minClient, "string");
+  assert.ok(body.minClient.length > 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -207,7 +215,7 @@ test("/api/version returns 401 when Bearer is wrong", async () => {
   }
 });
 
-test("/api/version returns 200 + { version } when Bearer present", async () => {
+test("/api/version returns 200 + { version, minClient } when Bearer present", async () => {
   const { server, port } = await startVersionServer("1.2.3-test");
   try {
     const res = await httpRequest(port, "/api/version", {
@@ -215,7 +223,12 @@ test("/api/version returns 200 + { version } when Bearer present", async () => {
     });
     assert.equal(res.status, 200);
     assert.equal(res.headers["content-type"], "application/json");
-    assert.deepEqual(JSON.parse(res.body), { version: "1.2.3-test" });
+    const body = JSON.parse(res.body);
+    assert.equal(body.version, "1.2.3-test");
+    // Same skew-guard contract as the writeVersionResponse test — the route
+    // surface MUST surface minClient to the renderer's `getServerVersion()`
+    // consumer in stage 3.
+    assert.equal(body.minClient, MIN_CLIENT);
   } finally {
     server.close();
   }

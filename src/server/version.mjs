@@ -17,6 +17,15 @@ import { join } from "node:path";
 // the catch in MobileSettings.
 export const FALLBACK_VERSION = "0.0.0";
 
+// The oldest desktop/mobile client version the current server RPC contract
+// still supports. Surfaces in `/api/version` + the `server:version` RPC
+// channel so the renderer's version-skew guard (BET-225 stage 3) can reject
+// stale builds with a non-dismissible banner BEFORE they touch incompatible
+// routes. Bumped manually when a breaking RPC change ships — kept as a
+// constant here (vs. reading from the manifest) so the response is
+// deterministic and never depends on a flaky network fetch.
+export const MIN_CLIENT = "0.0.0";
+
 /**
  * Read the `version` field from `<repoRoot>/package.json`.
  *
@@ -42,8 +51,12 @@ export async function readServerVersion(repoRoot, fs = { readFile }) {
  * Write the /api/version JSON response. Pure: takes `res` (anything with
  * writeHead + end) and `deps` ({ version }) and emits the response body.
  * No IO. Tests pass a recorder `res` and assert on the captured calls.
+ *
+ * Includes `minClient` (the constant from `MIN_CLIENT`) so the
+ * version-skew guard consumer (renderer stage 3) can check the client is
+ * still supported in a single round-trip — no separate endpoint needed.
  */
 export function writeVersionResponse(res, { version }) {
   res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify({ version }));
+  res.end(JSON.stringify({ version, minClient: MIN_CLIENT }));
 }
