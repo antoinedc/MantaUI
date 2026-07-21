@@ -56,8 +56,8 @@ function makeStore(entry = ENTRY) {
 
 // Invoke handlePush with the common defaults (seeded store, a no-op fetch,
 // and the good bearer). `body` fields merge onto a valid baseline; `store`,
-// `apnsConfig`, and `fetchImpl` are overridable per test.
-function callPush({ body = {}, store = makeStore(), apnsConfig = null, fetchImpl } = {}) {
+// `apnsConfig`, and `apnsSender` are overridable per test.
+function callPush({ body = {}, store = makeStore(), apnsConfig = null, apnsSender } = {}) {
   return handlePush({
     body: {
       box_id: VALID_BOX_ID,
@@ -68,7 +68,7 @@ function callPush({ body = {}, store = makeStore(), apnsConfig = null, fetchImpl
     },
     store,
     apnsConfig,
-    fetchImpl: fetchImpl ?? (async () => ({ status: 200, body: null })),
+    apnsSender: apnsSender ?? (async () => ({ status: 200, body: null })),
   });
 }
 
@@ -85,7 +85,7 @@ test("handlePush: 401 without Authorization header", async () => {
     body: { box_id: VALID_BOX_ID, tokens: [], payload: { title: "T", body: "B" } },
     store: makeStore(),
     apnsConfig: null,
-    fetchImpl: async () => ({ status: 200, body: null }),
+    apnsSender: async () => ({ status: 200, body: null }),
   });
   assert.equal(r.status, 401);
 });
@@ -100,7 +100,7 @@ test("handlePush: 401 when token does not match stored value", async () => {
     },
     store: makeStore(),
     apnsConfig: null,
-    fetchImpl: async () => ({ status: 200, body: null }),
+    apnsSender: async () => ({ status: 200, body: null }),
   });
   assert.equal(r.status, 401);
 });
@@ -169,7 +169,7 @@ test("handlePush: returns per-token results in input order with ok+prune shape",
       },
       store: makeStore(),
       apnsConfig: cfg,
-      fetchImpl: sender,
+      apnsSender: sender,
     });
     assert.equal(r.status, 200);
     assert.deepEqual(r.json.results, [
@@ -197,7 +197,7 @@ for (const { label, status, reason } of [
     try {
       const r = await callPush({
         apnsConfig: cfg,
-        fetchImpl: async () => ({ status, body: { reason } }),
+        apnsSender: async () => ({ status, body: { reason } }),
       });
       assert.equal(r.status, 200);
       assert.equal(r.json.results[0].prune, true);
@@ -230,7 +230,7 @@ test("handlePush: a throwing sender → ok:false, prune:false (call continues fo
       },
       store: makeStore(),
       apnsConfig: cfg,
-      fetchImpl: sender,
+      apnsSender: sender,
     });
     assert.equal(r.status, 200);
     assert.equal(calls.length, 3, "all three tokens attempted even when one throws");
