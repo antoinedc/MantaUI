@@ -17,6 +17,7 @@ export function ModelPicker({
   models,
   modelOverride,
   defaultModel,
+  deactivatedMainModels,
   onOpen,
   onSelect,
 }: {
@@ -24,6 +25,10 @@ export function ModelPicker({
   models: OpencodeModel[] | null;
   modelOverride: ModelSelection | null;
   defaultModel: { providerID: string; modelID: string } | null;
+  // BET-215: "providerID/modelID" strings; models in this set are hidden
+  // from the picker. Filter lives in the same `groups` chokepoint as the
+  // existing enabled/status gate. Default [] = no Main filtering.
+  deactivatedMainModels?: string[];
   onOpen: () => void;
   onSelect: (m: ModelSelection | null) => void;
 }) {
@@ -62,15 +67,20 @@ export function ModelPicker({
   // Group models by providerID so the list reads e.g. "anthropic" → 3 models.
   const groups = useMemo(() => {
     if (!models) return null;
+    // BET-215: also skip models the user has toggled Main off for in
+    // Settings → AI → Models. O(1) lookup, mirrors the existing
+    // enabled/status gate style.
+    const deactivatedMain = new Set(deactivatedMainModels ?? []);
     const map = new Map<string, OpencodeModel[]>();
     for (const m of models) {
       if (m.enabled === false || m.status === "deprecated") continue;
+      if (deactivatedMain.has(`${m.providerID}/${m.id}`)) continue;
       const arr = map.get(m.providerID) ?? [];
       arr.push(m);
       map.set(m.providerID, arr);
     }
     return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [models]);
+  }, [models, deactivatedMainModels]);
 
   const isActive = (m: OpencodeModel, variantId?: string): boolean => {
     if (modelOverride) {

@@ -125,6 +125,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
   const configDefaultModel = useStore((s) => s.defaultModel);
+  const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
   // User-configured Anthropic prompt cache TTL — drives the "/clear to
   // save Nk tokens" pill when the session has been idle past this TTL.
   // bui doesn't set the real cache_control.ttl on requests; this is the
@@ -2034,6 +2035,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         models={models}
         modelOverride={modelOverride}
         defaultModel={defaultModel}
+        deactivatedMainModels={deactivatedMainModels}
         activeModel={activeModel}
         onOpenModels={ensureModels}
         onSelectModel={selectModel}

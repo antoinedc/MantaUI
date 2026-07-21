@@ -112,6 +112,10 @@ type State = {
   // Global default model for new/cleared sessions. Set in Settings, persisted
   // to config.json. null = let opencode pick its default.
   defaultModel: { providerID: string; modelID: string } | null;
+  // Models the user has hidden from the chat main-agent picker (BET-215).
+  // "providerID/modelID" strings; absent/empty = every model is Main-available.
+  // Mirror of AppConfig.deactivatedMainModels; read by ModelPicker.
+  deactivatedMainModels: string[];
   // User-added skill registry URLs (written to remote opencode.jsonc on save).
   skillRegistryUrls: string[];
   // Anthropic prompt cache TTL — drives the "/clear to save Nk tokens"
@@ -271,6 +275,7 @@ export const useStore = create<State>((set, get) => ({
   allowAgentPush: false,
   downloadsDir: "",
   defaultModel: null,
+  deactivatedMainModels: [],
   skillRegistryUrls: [],
   cacheTtl: "1h",
   launcherFlags: {},
@@ -385,6 +390,7 @@ export const useStore = create<State>((set, get) => ({
       allowAgentPush: c.allowAgentPush ?? false,
       downloadsDir: c.downloadsDir ?? "",
       defaultModel: c.defaultModel ?? null,
+      deactivatedMainModels: c.deactivatedMainModels ?? [],
       skillRegistryUrls: c.skillRegistryUrls ?? [],
       cacheTtl: c.cacheTtl === "5m" ? "5m" : "1h",
       launcherFlags: c.launcherFlags ?? {},

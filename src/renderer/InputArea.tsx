@@ -58,6 +58,7 @@ export function InputArea({
   models,
   modelOverride,
   defaultModel,
+  deactivatedMainModels,
   activeModel,
   onOpenModels,
   onSelectModel,
@@ -112,6 +113,9 @@ export function InputArea({
   models: OpencodeModel[] | null;
   modelOverride: ModelSelection | null;
   defaultModel: { providerID: string; modelID: string } | null;
+  // BET-215: "providerID/modelID" strings — hidden from the ModelPicker
+  // dropdown. Mirrors the AppConfig.deactivatedMainModels opt-out semantics.
+  deactivatedMainModels: string[];
   // Active model resolved by the parent (modelOverride ?? defaultModel,
   // looked up against `models`). Used to size the context bar against the
   // real provider window (e.g. 1M for Opus 4.7) instead of the 200k
@@ -345,6 +349,7 @@ export function InputArea({
             models={models}
             modelOverride={modelOverride}
             defaultModel={defaultModel}
+            deactivatedMainModels={deactivatedMainModels}
             onOpen={onOpenModels}
             onSelect={onSelectModel}
           />
