@@ -111,13 +111,25 @@ jobs:
           PR_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           ACTOR: ${{ github.event.comment.user.login }}
+          # BET-214: close the BET-N issue on the Multica side after the merge.
+          # Needed because `pull_request_target: closed` events are NOT delivered
+          # when the PR was closed via the GitHub API using GITHUB_TOKEN
+          # (documented at docs.github.com/actions/concepts/security/github_token
+          # — "Other pull_request activity types (such as ... closed) do not
+          # create workflow runs"). So merge-on-command has to do the close
+          # itself; the standalone multica-close-on-merge workflow still handles
+          # the human-via-GitHub-UI merge case.
+          MULTICA_TOKEN: ${{ secrets.MULTICA_TOKEN }}
+          MULTICA_WORKSPACE_ID: 264c89bb-4659-4570-af7b-5f8daaf87985
         run: |
           set -euo pipefail
           python3 <<'PY'
           import json
           import os
+          import re
           import subprocess
           import sys
+          import urllib.request
 
           pr = os.environ["PR_NUMBER"]
           repo = os.environ["REPO"]
@@ -302,4 +314,37 @@ jobs:
 
           post("🟢 Merging — all gates passed.")
           print("Merged.")
+
+          # ── Close the BET issue on Multica (BET-214) ────────────────────
+          # Pulled into this workflow because `pull_request_target: closed`
+          # is suppressed when the closer is the GITHUB_TOKEN identity —
+          # see env:MULTICA_TOKEN comment above for the GitHub docs citation.
+          multica_token = os.environ.get("MULTICA_TOKEN", "")
+          ws_id = os.environ.get("MULTICA_WORKSPACE_ID", "")
+          title = pr_json.get("title") or ""
+          head_ref = ((pr_json.get("head") or {}).get("ref")) or ""
+          m = re.search(r"BET-(\d+)", title) or re.search(r"BET-(\d+)", head_ref)
+          if not multica_token or not ws_id:
+              print("::notice::Multica close skipped (MULTICA_TOKEN or workspace id missing).")
+          elif not m:
+              print(f"::notice::Multica close skipped (no BET-N in title='{title}' or branch='{head_ref}').")
+          else:
+              issue_key = f"BET-{m.group(1)}"
+              try:
+                  api_resp = urllib.request.urlopen(urllib.request.Request(
+                      f"https://api.multica.ai/api/issues/{issue_key}?workspace_id={ws_id}",
+                      method="PUT",
+                      headers={
+                          "Authorization": f"Bearer {multica_token}",
+                          "Content-Type": "application/json",
+                      },
+                      data=json.dumps({"status": "done"}).encode("utf-8"),
+                  ), timeout=15)
+                  print(f"Set {issue_key} to done (HTTP {api_resp.status}).")
+              except Exception as exc:
+                  # Never fail the workflow on a Multica-API hiccup — the merge
+                  # already succeeded; the worst case is the issue stays open
+                  # in Multica until the next manual close or the
+                  # reconcile-done-with-open-prs / human followup catches it.
+                  print(f"::warning::Multica close failed for {issue_key}: {exc}")
           PY
