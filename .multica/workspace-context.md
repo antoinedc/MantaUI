@@ -9,17 +9,17 @@ BUI is an Electron desktop client for working with Claude on a remote Linux box 
 ## Current Architecture
 
 - **Desktop app**: Electron + xterm.js + React (ChatPanel.tsx ~4150 LoC)
-- **Box server**: Node HTTP+WS (`src/server/`) — tmux/pty/opencode proxy
+- **Box server**: Node HTTP+WS (`src/server/`) — tmux/pty/opencode proxy, serves `https://<box_id>.boxes.mantaui.com` directly (Caddy reverse-proxy → `127.0.0.1:8787`)
 - **Mobile**: Capacitor hybrid app (`mobile/`) with iOS/Android native shells
 - **Mobile/web client**: built into `mobile/www/` via Vite, served by `src/server/index.mjs`
-- **Push**: Web Push (VAPID) via `src/server/push.mjs` — iOS revokes if delivered without notification
-- **Auth**: NONE on `src/server/` — `0.0.0.0:8787` open to the internet today
+- **Push gateway** (`gateway.mantaui.com`): the only operated hosted service. The box registers with the gateway on install (`POST /register` → gets a `gateway_token` + its `<box_id>.boxes.mantaui.com` DNS record); the gateway fans out APNs via `POST /push`. Web Push (VAPID) stays box-local.
+- **Auth**: Single-box token (`box_token`) on `src/server/` (`Authorization: Bearer <box_token>`); 6-digit pairing-code handshake in `src/server/auth.mjs` for first-time device claim. The `/auth/claim` endpoint accepts both `pairing_code` and the shorter `code` spelling emitted by the mobile QR / deep-link payload.
 
 ## Key Constraints
 
-1. **No auth in v1** — this is the #1 blocker for commercialization. Must be solved before any paid tier.
+1. **Single-user box** — everything assumes one user, one box (`~/.bui-mobile/`, one opencode on :4096). No multi-tenant complexity on the box itself.
 2. **Mobile is PWA today** — real App Store distribution requires native push (APNs), no cleartext, proper onboarding flow.
-3. **Box is single-user** — everything assumes one user, one box (`~/.bui-mobile/`, single tunnel, single opencode on :4096). Multi-tenancy only needed in the relay.
+3. **Direct connection** — phones reach the box directly at `https://<box_id>.boxes.mantaui.com`. The relay-era hop is gone.
 4. **Upstream dependency** — rides opencode + Claude Max auth. If opencode changes the event wire format, product breaks.
 5. **No auto-update** — README says "pull from git for new versions." Desktop needs packaging (.dmg/.AppImage) + auto-update for commercial viability.
 
@@ -32,8 +32,10 @@ BUI is an Electron desktop client for working with Claude on a remote Linux box 
 **Flow**:
 ```
 1. User installs app (App Store / Play)
-2. App resolves pairing payload (QR or deferred deeplink)
-3. App auto-connects to box (box_id + pairing token)
+2. App resolves pairing payload (QR or deferred deeplink) — the payload
+   carries only the box form: `manta://pair?box=<box_id>&code=<6-digit>`
+3. App auto-connects to https://<box_id>.boxes.mantaui.com and POSTs
+   {pairing_code} to /auth/claim; on success saves {boxToken, boxId, serverUrl}
 4. App shows their projects/sessions list (free preview)
 5. User taps a session → blurred preview with stats
 6. "Start subscription" (Apple IAP / Play Billing) — one tap
@@ -44,37 +46,25 @@ BUI is an Electron desktop client for working with Claude on a remote Linux box 
 - **Free (metadata only)**: project list, session titles, running/idle status, token counts, message/tool counts, blurred placeholder thumbnail
 - **Paid (full capability)**: live transcript streaming, sending prompts, push notifications, terminal access
 
-**Server-side enforcement**: relay gates endpoints — pre-sub metadata endpoints serve free data; transcript/stream endpoints 402 until IAP receipt is bound to box_id. Blur is a placeholder, not CSS-over-real-content.
+**Server-side enforcement**: the gateway gates endpoints — pre-sub metadata endpoints serve free data; transcript/stream endpoints 402 until IAP receipt is bound to box_id. Blur is a placeholder, not CSS-over-real-content.
 
-## The Relay — the operated backend
+## Push Gateway (`gateway.mantaui.com`) — the operated backend
 
-The relay is the operated backend that makes the mobile app work:
-- **TLS termination** + outbound tunnel coordinator (replaces per-user cloudflared)
-- **Account↔box routing** (box_id → tunnel endpoint)
-- **Operated native push** (APNs/FCM via your certs)
-- **IAP receipt validation** (Apple IAP Server Notifications → box_id binding)
-- **Metering/rate-limiting** per box_id (the COGS number)
+The gateway is the only operated service. The relay it replaced is gone (BET-198).
 
-### ✅ Relay decisions (locked 2026-07-03 by @antoinedc) — supersede any "new repo / not in this repo / the paid product" phrasing anywhere
+- **TLS + DNS** — the box registers with `gateway.mantaui.com` on install; the gateway provisions `<box_id>.boxes.mantaui.com` to point at the box's public IP. The box serves `https://<box_id>.boxes.mantaui.com` directly via Caddy.
+- **Operated native push** — APNs/FCM are fan-out'd by the gateway using the gateway_token (`POST /push`). Web Push (VAPID) stays box-local (no external hop).
+- **IAP receipt validation** — Apple IAP Server Notifications → box_id binding. The relay it used to live on is gone.
 
-- **The relay is OSS and lives IN THIS MONOREPO at `src/relay/`** (sibling of `src/server/`), Node `.mjs`, own entry `src/relay/index.mjs`. The box-side outbound daemon is the piece that runs ON THE BOX and dials out. **Only the mobile app is closed-source** — client + server + relay are all open source. What's *sold* is the polished App Store app (and optionally a hosted relay instance), NOT the relay source.
-- **Reuse, don't duplicate:** HMAC/token/rate-limit from `src/server/webhooks.mjs` + `src/server/auth.mjs`; box identity from `src/shared/claim.mjs` + `auth.mjs` (`ensureAuth`, box_token from `~/.bui-mobile/auth.json`); push routing from `src/server/push.mjs` (`routeNotification`); reconnect/backoff from `src/shared/net/` (M0).
-- **Datastore: SQLite** (box↔account bindings, tunnel endpoints, IAP receipts). Prefer `node:sqlite`, else `better-sqlite3`. Not Postgres, not JSON.
-- **Tunnel: WebSocket** (reuse the `ws` dep). Box dials OUT (authenticated with box_token), relay maps `box_id → live WS` and multiplexes phone→box requests. NAT/CGNAT-friendly.
-- **Push: APNs + FCM native** operated by the relay (reuse `routeNotification` decision logic, swap delivery leg); VAPID/Web-Push retained for the PWA. Live cert provisioning is a deploy-time step (stub-testable, may defer to M5).
-- **Dev domain: `bui.dev.antoinedc.com`** → Caddy `reverse_proxy 127.0.0.1:20787` on THIS box (single-level under the existing `*.dev.antoinedc.com` cert; mirror the `capo.`/`ronda.` vhosts). **Prod = a dedicated instance + domain later — not built in M2.**
-
-M2 (BET-36) is the milestone that builds this; its issue carries the full slice ladder. bui-pm decomposes it into staged `src/relay/**` sub-issues per the Decomposition Playbook.
+Reuse, don't duplicate: HMAC/token/rate-limit from `src/server/webhooks.mjs` + `src/server/auth.mjs`; box identity from `src/shared/claim.mjs` + `auth.mjs` (`ensureAuth`, box_token from `~/.bui-mobile/auth.json`); push routing from `src/server/push.mjs` (`routeNotification`); reconnect/backoff from `src/shared/net/`.
 
 ## Token Identity Model (Anonymous by Construction)
 
-- **box_id**: 32 hex chars (128-bit random), opaque pseudonym, maps to nothing human
-- **box_secret**: HMAC key, generated on the box, never leaves the box
-- **claim_code**: one-time, ~15 min TTL, consumed when box registers
-- **pairing_token**: one-time, short TTL, consumed when desktop pairs
-- **device_token**: long-lived, stored in config.json after pairing
+- **box_id**: 32 hex chars (128-bit random), opaque pseudonym, maps to nothing human. Stable for the box's life.
+- **box_token**: 32 hex chars (128-bit random) bearer secret. `Authorization: Bearer <box_token>` on every gated request. Generated on first run, persisted 0600 in `~/.bui-mobile/auth.json`, never logged in full.
+- **pairing_code**: 6 digits, one-time, ~5 min TTL, in-memory only. A device proves physical/visual proximity by echoing it back and receives the box_token. Consumed on first successful claim.
 
-All traffic authenticated with `box_id` + HMAC signature (reuses `webhooks.mjs` pattern: `isValidToken`, `verifySignature`, `createRateLimiter`).
+All traffic authenticated with `box_token` (reuses `webhooks.mjs` pattern: `isValidToken`, constant-time compare, token-bucket rate limiter).
 
 ## Onboarding Flow (M6 — Desktop Upsell)
 
@@ -88,27 +78,29 @@ curl -fsSL https://mantaui.com/install.sh | bash
 ```
 
 **What the script does:**
-1. Installs Node.js if missing (or verifies existing)
-2. Clones bui repo to `~/projects/better-ui` (or `~/.bui/`)
-3. Runs `npm install` + `npm run build:mobile`
-4. Generates `box_id` (32 hex chars) + `box_token` (32 hex chars)
-   - Writes `~/.bui-mobile/secrets.json` (0600)
-   - Writes `~/.bui-mobile/box.json` with `{ box_id, box_token, created_at }`
-5. Creates systemd user service (`~/.config/systemd/user/bui-server.service`)
-6. Enables + starts the service
-7. **Outputs to stdout:**
+1. Verifies prereqs (curl, tar, sha256sum, tmux, git)
+2. Downloads the versioned tarball from the manifest (`manta-latest.txt`), sha256-verifies, extracts to `~/manta/`
+3. Installs opencode (official installer)
+4. Seeds `~/.config/opencode/opencode.jsonc` with the bui opencode-claude-auth plugin
+5. Mints box identity via `ensureAuth` (box_id + box_token → `~/.manta/auth.json`, 0600)
+6. Creates systemd --user service (`manta-server.service`)
+7. **Privileged section (BET-205, sudo NOPASSWD):** installs Caddy via apt, POSTs `gateway.mantaui.com/register {box_id}` for DNS provisioning, writes the per-box Caddy vhost, reloads Caddy
+8. **Outputs to stdout:**
    ```
-   ✓ bui server installed and running
-   
-   Pairing code: 847291
-   (Enter this in the desktop app to connect)
+   Your box serves its own public hostname — https://<box_id>.boxes.mantaui.com
+   (Caddy on this box terminates TLS and reverse-proxies 127.0.0.1:8787). The
+   desktop / mobile app discovers it directly via the box_id below; no relay,
+   no tunnel, no dial-out.
+
+   Pair link:     manta://pair?box=<box_id>&code=<6-digit>
+                  (paste into the desktop app, or scan as a QR)
    ```
 
 **Script location:** `scripts/install.sh` (in repo), served at `https://mantaui.com/install.sh`.
 
 ### Step 2: Desktop Onboarding — Pair (Full-Screen)
 
-**Trigger:** Fresh install (no `config.json` or empty `host` + no `relayToken`).
+**Trigger:** Fresh install (no `config.json` or empty `host` + no `boxId`).
 
 **UI:** Full-screen modal (no sidebar, no header, no footer).
 
@@ -117,34 +109,39 @@ curl -fsSL https://mantaui.com/install.sh | bash
 │                                                         │
 │              Connect to your server                     │
 │                                                         │
+│              Enter Box ID:                              │
+│              [_____________________________________]    │
+│                                                         │
 │              Enter pairing code:                        │
 │              [________]                                 │
 │                                                         │
 │              [Connect]                                  │
 │                                                         │
+│       Or paste the manta://pair?box=…&code=… link       │
+│              [_____________________________________]    │
+│                                                         │
 └─────────────────────────────────────────────────────────┘
 ```
 
 **Behavior:**
-- Pairing code input auto-focuses, 6-digit validation (`^\d{6}$`)
-- "Connect" button disabled until code is valid
-- On connect: POST to relay `/pair { pairing_code }`
-- On success: save `relayToken`, `boxId`, `serverUrl` to `config.json`, close modal, proceed to Step 3
+- Box ID input validates as 32 hex chars; pairing code auto-focuses and validates as 6 digits (`^\d{6}$`). The pair-link paste field accepts the `manta://pair?box=…&code=…` form and routes to the same claim call.
+- "Connect" button disabled until both fields are valid (or pair-link is parseable).
+- On connect: POST `{pairing_code}` to `<boxDirectUrl(boxId)>/auth/claim`. The server claims and returns `{box_token, box_id}`; main persists `{boxToken, boxId, serverUrl = https://<box_id>.boxes.mantaui.com}` to `config.json`, then closes the modal and proceeds to Step 3.
 
-**Config schema (relay mode):**
+**Config schema (direct mode):**
 ```json
 {
-  "relayToken": "<device_token>",
   "boxId": "<box_id>",
-  "serverUrl": "wss://relay.mantaui.com/box/<box_id>",
+  "boxToken": "<box_token>",
+  "serverUrl": "https://<box_id>.boxes.mantaui.com",
   "projects": []
 }
 ```
 
 **Mode detection:**
-- If `relayToken` is set → relay mode (no SSH fields needed)
-- If `host` is set → SSH mode (legacy, for self-hosted without relay)
-- If neither → onboarding flow
+- If `boxId` + `boxToken` are set → direct mode (no SSH fields needed).
+- If `host` is set → SSH mode (legacy, for self-hosted users who don't want the Caddy + DNS path).
+- If neither → onboarding flow.
 
 ### Step 3: Pick AI Providers (Full-Screen)
 
@@ -196,7 +193,7 @@ curl -fsSL https://mantaui.com/install.sh | bash
 **Behavior:**
 
 **Fetch providers:**
-- GET `/provider` from opencode (via relay)
+- GET `/provider` from opencode (over the direct connection)
 - Response shape:
   ```json
   {
@@ -250,7 +247,7 @@ curl -fsSL https://mantaui.com/install.sh | bash
 
 4. **Full-screen onboarding** — no sidebar, no header, no footer. Just the onboarding flow.
 
-5. **SSH fields hidden during onboarding** — relay mode doesn't need them. Can be added later in Settings for self-hosted users.
+5. **SSH fields hidden during onboarding** — direct mode doesn't need them. Can be added later in Settings for self-hosted users.
 
 6. **Separate UI from Settings** — onboarding has simplified provider picker (just select + default model). Settings has full provider management (add/edit/remove/discover models).
 
@@ -264,7 +261,7 @@ curl -fsSL https://mantaui.com/install.sh | bash
 
 4. ✅ **Separate UI from Settings?** — Yes, simplified version for onboarding.
 
-5. ✅ **SSH fields hidden?** — Yes, relay mode doesn't need them.
+5. ✅ **SSH fields hidden?** — Yes, direct mode doesn't need them.
 
 ### Mockups
 
@@ -321,11 +318,11 @@ curl -fsSL https://mantaui.com/install.sh | bash
 
 #### 1. Connection (default tab)
 
-**Purpose:** SSH/relay config + remote setup.
+**Purpose:** Direct/SSH config + remote setup.
 
 **Fields:**
-- **Mode** (relay vs SSH) — shown only if both are possible
-  - Relay: `relayToken`, `boxId`, `serverUrl` (read-only, from pairing)
+- **Mode** (direct vs SSH) — shown only if both are possible
+  - Direct: `boxId`, `boxToken`, `serverUrl` (read-only, from pairing)
   - SSH: `host`, `user`, `identityFile`, `transport`
 - **Test connection** (probe) — runs diagnostic, shows status pills
 - **Bootstrap remote** — installs opencode, merges auth plugin
