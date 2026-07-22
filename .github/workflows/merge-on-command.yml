@@ -23,7 +23,7 @@ name: Merge on /merge command
 #      or `null` for in-progress) blocks.
 #   3. TWO-TIER approval policy (.github/approval-policy.json, read from
 #      main): /merge from @antoinedc passes any class; /merge from
-#      bui-agent[bot] passes ONLY when every changed file classes as "auto" —
+#      manta-agent[bot] passes ONLY when every changed file classes as "auto" —
 #      one "human"-class path blocks with the list needing human sign-off.
 #   4. `mergeable: true` and `mergeable_state` in `{clean, unstable}`. `dirty`
 #      means rebase needed.
@@ -43,7 +43,7 @@ name: Merge on /merge command
 # green + not-draft + mergeable-clean on every merge, which is the part GitHub
 # Free won't do on a private repo. Upgrade path when it matters: mint a manta
 # GitHub App (mirror TEN-312/313), switch agent gh auth to it, and Gate 3
-# becomes load-bearing with zero workflow changes — the bui-agent[bot] login is
+# becomes load-bearing with zero workflow changes — the manta-agent[bot] login is
 # already in the trigger filter below.
 
 on:
@@ -66,7 +66,7 @@ jobs:
     # repeated below in the trigger step so the workflow run records the
     # precise reason it was a no-op.
     # `/merge` may come from the human maintainer (`antoinedc`) OR the agent App
-    # (`bui-agent[bot]`). Agents ARE allowed to merge — the protection is
+    # (`manta-agent[bot]`). Agents ARE allowed to merge — the protection is
     # not "humans only merge" but "no SELF-APPROVAL": Gate 3 below requires a
     # real @antoinedc approving review for any PR NOT authored by the human, so
     # an agent can only complete a merge AFTER a human has reviewed it. (Pre-App,
@@ -75,7 +75,7 @@ jobs:
     if: >-
       github.event.issue.pull_request != null &&
       (github.event.comment.user.login == 'antoinedc' ||
-       github.event.comment.user.login == 'bui-agent[bot]') &&
+       github.event.comment.user.login == 'manta-agent[bot]') &&
       contains(github.event.comment.body, '/merge')
     runs-on: self-hosted
     steps:
@@ -239,7 +239,7 @@ jobs:
           # anti-tamper, same trick as required-checks.json):
           #   - /merge from the human @antoinedc → merges ANY class (the
           #     command is the approval).
-          #   - /merge from the agent identity (bui-agent[bot]) → allowed ONLY
+          #   - /merge from the agent identity (manta-agent[bot]) → allowed ONLY
           #     when EVERY changed file classes as "auto". One "human"-class
           #     file blocks with the list of paths needing sign-off.
           # Until the manta App identity is live, agents share the antoinedc

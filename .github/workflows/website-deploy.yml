@@ -22,7 +22,7 @@
 # so a stale/failed deploy can never masquerade as done.
 #
 # RUNNER + AUTH
-#   Runs on the self-hosted bui-dev-runner (this dev box), which reaches the prod
+#   Runs on the self-hosted manta-dev-runner (this dev box), which reaches the prod
 #   box over SSH with the deploy key at ~/.manta-deploy/prod_key (public half is
 #   in the prod box's authorized_keys). No GitHub secret needed.
 #

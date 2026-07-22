@@ -17,7 +17,7 @@ MANTA is an Electron desktop client for working with Claude on a remote Linux bo
 
 ## Key Constraints
 
-1. **Single-user box** — everything assumes one user, one box (`~/.bui-mobile/`, one opencode on :4096). No multi-tenant complexity on the box itself.
+1. **Single-user box** — everything assumes one user, one box (`~/.manta/`, one opencode on :4096). No multi-tenant complexity on the box itself.
 2. **Mobile is PWA today** — real App Store distribution requires native push (APNs), no cleartext, proper onboarding flow.
 3. **Direct connection** — phones reach the box directly at `https://<box_id>.boxes.mantaui.com`. The relay-era hop is gone.
 4. **Upstream dependency** — rides opencode + Claude Max auth. If opencode changes the event wire format, product breaks.
@@ -56,12 +56,12 @@ The gateway is the only operated service. The relay it replaced is gone (BET-198
 - **Operated native push** — APNs/FCM are fan-out'd by the gateway using the gateway_token (`POST /push`). Web Push (VAPID) stays box-local (no external hop).
 - **IAP receipt validation** — Apple IAP Server Notifications → box_id binding. The relay it used to live on is gone.
 
-Reuse, don't duplicate: HMAC/token/rate-limit from `src/server/webhooks.mjs` + `src/server/auth.mjs`; box identity from `src/shared/claim.mjs` + `auth.mjs` (`ensureAuth`, box_token from `~/.bui-mobile/auth.json`); push routing from `src/server/push.mjs` (`routeNotification`); reconnect/backoff from `src/shared/net/`.
+Reuse, don't duplicate: HMAC/token/rate-limit from `src/server/webhooks.mjs` + `src/server/auth.mjs`; box identity from `src/shared/claim.mjs` + `auth.mjs` (`ensureAuth`, box_token from `~/.manta/auth.json`); push routing from `src/server/push.mjs` (`routeNotification`); reconnect/backoff from `src/shared/net/`.
 
 ## Token Identity Model (Anonymous by Construction)
 
 - **box_id**: 32 hex chars (128-bit random), opaque pseudonym, maps to nothing human. Stable for the box's life.
-- **box_token**: 32 hex chars (128-bit random) bearer secret. `Authorization: Bearer <box_token>` on every gated request. Generated on first run, persisted 0600 in `~/.bui-mobile/auth.json`, never logged in full.
+- **box_token**: 32 hex chars (128-bit random) bearer secret. `Authorization: Bearer <box_token>` on every gated request. Generated on first run, persisted 0600 in `~/.manta/auth.json`, never logged in full.
 - **pairing_code**: 6 digits, one-time, ~5 min TTL, in-memory only. A device proves physical/visual proximity by echoing it back and receives the box_token. Consumed on first successful claim.
 
 All traffic authenticated with `box_token` (reuses `webhooks.mjs` pattern: `isValidToken`, constant-time compare, token-bucket rate limiter).

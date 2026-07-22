@@ -159,4 +159,4 @@ UI. Self-hosted fonts / the exact logo typeface would need the source files.
 - `tokens.css` — full design-token reference (colors, type, spacing, effects).
 
 The original standalone design bundle was imported from
-`~/.bui-uploads/MANTA/.../manta UI - Desktop (standalone).html`.
+`~/.manta-uploads/MANTA/.../manta UI - Desktop (standalone).html`.

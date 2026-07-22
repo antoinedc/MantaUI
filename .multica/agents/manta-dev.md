@@ -107,7 +107,7 @@ starts from zero. Therefore:
 
 - **Mobile/web client is served from `mobile/www/`** — static bundle, NOT live source
 - **No auth today** — `0.0.0.0:8787` open, only `/hook/<token>` is authenticated
-- **Box is single-user** — `~/.bui-mobile/`, one tunnel, one opencode on :4096
+- **Box is single-user** — `~/.manta/`, one tunnel, one opencode on :4096
 - **Relay is multi-tenant** — box_id ↔ account, IAP receipt binding
 - **Token pattern**: 128-bit hex tokens (`isValidToken`), HMAC-SHA256 (`verifySignature`), token-bucket rate limit (`createRateLimiter`) — all in `webhooks.mjs`, reusable
 

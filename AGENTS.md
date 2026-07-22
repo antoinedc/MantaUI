@@ -1933,9 +1933,9 @@ live URL / TestFlight against `main`, then push the right tag.
 |---|---|---|---|---|
 | `ios-v*` | iOS app → TestFlight | Codemagic `mac_mini_m2` | build + sign + notarize `.ipa` → TestFlight | `codemagic.yaml` `ios-testflight` |
 | `mac-v*` | macOS desktop → DMG | Codemagic `mac_mini_m2` | build + Developer ID sign → DMG → publish to `mantaui.com` | `codemagic.yaml` `mac-desktop` |
-| `web-v*` | marketing site + install assets | self-hosted (`bui-dev-runner`, this box) | scp `website/` + `install.sh` + `llms-install.md` → prod webroot, verify | `.github/workflows/website-deploy.yml` |
+| `web-v*` | marketing site + install assets | self-hosted (`manta-dev-runner`, this box) | scp `website/` + `install.sh` + `llms-install.md` → prod webroot, verify | `.github/workflows/website-deploy.yml` |
 | `relay-v*` | ~~relay service~~ (deprecated 2026-07; replaced by direct mode) | n/a | n/a | `.github/workflows/relay-deploy.yml` (deleted in BET-204) |
-| `gateway-v*` | push gateway service (APNs + DNS automation) | self-hosted (`bui-dev-runner`, this box) | `git pull /opt/manta` + restart `manta-gateway`, health-poll `/healthz` | `.github/workflows/gateway-deploy.yml` |
+| `gateway-v*` | push gateway service (APNs + DNS automation) | self-hosted (`manta-dev-runner`, this box) | `git pull /opt/manta` + restart `manta-gateway`, health-poll `/healthz` | `.github/workflows/gateway-deploy.yml` |
 
 Tag-pattern filtering means only the matching workflow runs — an `ios-v*` tag
 never triggers a mac/web/gateway deploy and vice-versa. All targets live in
@@ -2026,7 +2026,7 @@ step, which is exactly why merged site/install changes silently never went live.
 The workflow scp's `website/*.{html,png}` + `scripts/install.sh` +
 `llms-install.md` into the webroot, then VERIFIES each URL is 200 AND
 byte-matches the repo (`sha256`), failing red on any mismatch. Runs on the
-self-hosted `bui-dev-runner` (this dev box) and SSHes to prod with the deploy
+self-hosted `manta-dev-runner` (this dev box) and SSHes to prod with the deploy
 key at `~/.manta-deploy/prod_key` — public half is in the prod box's
 `authorized_keys`; NO GitHub secret is used (the PAT can't write repo secrets
 anyway). Verified assets: `/` (index), `privacy.html`, `terms.html`,

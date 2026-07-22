@@ -214,18 +214,18 @@ test("resolveConfig applies defaults when env is empty", () => {
 });
 
 test("resolveConfig honors MANTA_HOME override", () => {
-  const cfg = resolveConfig({ env: { MANTA_HOME: "/opt/bui" }, home: HOME });
-  assert.equal(cfg.mantaHome, "/opt/bui");
+  const cfg = resolveConfig({ env: { MANTA_HOME: "/opt/manta" }, home: HOME });
+  assert.equal(cfg.mantaHome, "/opt/manta");
   // auth dir stays under HOME, never inside MANTA_HOME — identity survives upgrades
   assert.equal(cfg.authDir, join(HOME, ".manta"));
 });
 
 test("resolveConfig honors MANTA_TARBALL_URL override", () => {
   const cfg = resolveConfig({
-    env: { MANTA_TARBALL_URL: "file:///tmp/bui-test.tar.gz" },
+    env: { MANTA_TARBALL_URL: "file:///tmp/manta-test.tar.gz" },
     home: HOME,
   });
-  assert.equal(cfg.tarballUrl, "file:///tmp/bui-test.tar.gz");
+  assert.equal(cfg.tarballUrl, "file:///tmp/manta-test.tar.gz");
 });
 
 test("resolveConfig treats empty-string env vars as unset (shell footgun)", () => {

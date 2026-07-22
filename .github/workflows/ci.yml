@@ -2,7 +2,7 @@
 #
 # Job name `typecheck-test` is a REQUIRED check (required-checks.json + branch
 # protection). This makes the PM agent's GATE 2 tamper-proof: the gate runs on
-# the repo's self-hosted runner (bui-dev-runner on the dev box), independent of
+# the repo's self-hosted runner (manta-dev-runner on the dev box), independent of
 # whatever an implementer agent claims locally. The PM reads `gh pr checks`
 # instead of checking out PR branches.
 #

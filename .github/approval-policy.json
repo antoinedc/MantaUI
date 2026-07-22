@@ -10,7 +10,7 @@
     "default unreachable by design.",
     "",
     "class semantics:",
-    "  auto  — the PM (bui-agent[bot]) may /merge on green without a human.",
+    "  auto  — the PM (manta-agent[bot]) may /merge on green without a human.",
     "  human — only @antoinedc's /merge passes; the PM must request approval.",
     "",
     "POLICY (2026-07-02, by owner request): the PM drives merges END-TO-END.",
