@@ -47,8 +47,9 @@ const api = {
   },
 
   // bui-server's notification router decided the desktop should show an OS
-  // notification (relayed over the -L 18787 forward). The renderer shows it
-  // via the Notification API after a local "am I viewing this?" check.
+  // notification (delivered from manta-server over the /events SSE stream).
+  // The renderer shows it via the Notification API after a local "am I
+  // viewing this?" check.
   onDesktopNotify: (cb: (payload: DesktopNotifyPayload) => void): (() => void) => {
     const listener = (_: unknown, payload: DesktopNotifyPayload) => cb(payload);
     ipcRenderer.on(IPC.desktopNotify, listener);

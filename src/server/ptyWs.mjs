@@ -1,19 +1,13 @@
 // ptyWs.mjs — the /pty WebSocket handler (BET-158).
 //
 // Owns the WS↔pty lifecycle for the box server's /pty endpoint: a device
-// (or the relay's agent) opens a single WebSocket, sends JSON control
-// strings ({type:"data",data} / {type:"resize",cols,rows}), and receives
-// raw terminal bytes back. One pty per sessionKey; the pty dies with the
-// socket.
+// opens a single WebSocket, sends JSON control strings
+// ({type:"data",data} / {type:"resize",cols,rows}), and receives raw
+// terminal bytes back. One pty per sessionKey; the pty dies with the socket.
 //
 // Lives in its own module so the WS-to-pty wiring is unit-testable without
 // standing up the full HTTP server (src/server/index.mjs owns the upgrade
 // listener that calls into here).
-//
-// This is the box-side counterpart to the relay's STREAM_* bridge: the
-// relay's agent opens ws://127.0.0.1:8787/pty?<query>&token=<box_token>
-// and the box server uses this module to bridge that WS to the ephemeral
-// pty module (src/server/pty.mjs).
 
 // Lazy import: ./pty.mjs pulls in node-pty, which is not available in CI.
 // Keeping the import dynamic lets this module load (and `parsePtyQuery`

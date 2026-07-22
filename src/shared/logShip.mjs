@@ -1,5 +1,5 @@
 // logShip.mjs — shared log shipping module (mobile PWA, desktop renderer,
-// manta-server, relay). One implementation; all four runtimes wrap their
+// manta-server). One implementation; all three runtimes wrap their
 // console once and let every existing `console.log/warn/error` call site
 // ship transparently — no per-call-site edits.
 //
@@ -28,11 +28,10 @@ const MAX_MSG_LEN = 4000;
 
 /**
  * Resolve the Axiom ingest endpoint + token. Env vars win over AppConfig
- * fields (env lets the relay — which has no `~/.manta` directory — be
- * configured without touching code). Dataset defaults to "manta" so a user
- * only needs to provide the token to start shipping. `shareAnalytics ===
- * false` opts this instance OUT entirely (desktop renderer + server; mobile
- * always ships). Absent/undefined → opt-in (default ON).
+ * fields. Dataset defaults to "manta" so a user only needs to provide the
+ * token to start shipping. `shareAnalytics === false` opts this instance
+ * OUT entirely (desktop renderer + server; mobile always ships).
+ * Absent/undefined → opt-in (default ON).
  *
  * @param {object} args
  * @param {Record<string, string | undefined>} args.env    process.env-shaped
@@ -107,7 +106,7 @@ export function formatConsoleArgs(args) {
  * @param {object} opts
  * @param {string} opts.endpoint
  * @param {string} opts.token
- * @param {"mobile"|"desktop"|"server"|"relay"} opts.source
+ * @param {"mobile"|"desktop"|"server"} opts.source
  * @param {string} opts.device
  * @param {(url: string, init: object) => Promise<{ ok: boolean; status?: number }>} [opts.fetchFn]
  * @param {() => number} [opts.now]

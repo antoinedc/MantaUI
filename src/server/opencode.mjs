@@ -505,7 +505,7 @@ export async function getMessage(sessionId, messageId) {
 /** Reconcile a session's transcript.
  *
  *  The desktop main process keeps a per-session transcript cache and does a
- *  fast tail-merge here. The mobile/web server is a stateless relay with no
+ *  fast tail-merge here. The mobile/web server is a stateless proxy with no
  *  such cache to merge against, so reconcile == a full pull. Mobile thus keeps
  *  its current behavior (no regression); the incremental win is desktop-only,
  *  where the cache exists. Kept as a distinct entry point so the renderer can

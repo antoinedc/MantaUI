@@ -27,7 +27,7 @@ export interface LogShipper {
 export interface CreateLogShipperOptions {
   endpoint: string;
   token: string;
-  source: "mobile" | "desktop" | "server" | "relay";
+  source: "mobile" | "desktop" | "server";
   device: string;
   fetchFn?: (url: string, init: { method?: string; headers?: Record<string, string>; body?: string; [k: string]: unknown }) => Promise<{ ok: boolean; status?: number }>;
   now?: () => number;
