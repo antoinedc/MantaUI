@@ -6,7 +6,7 @@ import {
   nativeImage,
   shell,
 } from "electron";
-import { basename, join, resolve as resolvePath } from "node:path";
+import { basename, join } from "node:path";
 import { existsSync, watch as fsWatch } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -172,26 +172,23 @@ function createWindow(): void {
   }
 }
 
-// Pin userData to the historical "better-ui" directory BEFORE setName(). Electron
-// derives userData from the app name, so renaming to "Better UI" would silently
-// repoint it to ".../Better UI/" — a fresh, empty dir — orphaning the existing
-// config.json (host, projects) and leaving the app with no configured host.
-app.setPath("userData", join(app.getPath("appData"), "better-ui"));
+// Pin userData to a stable directory BEFORE setName() (Electron otherwise
+// derives it from the app name, which would repoint it whenever the name
+// changes). Dev uses a SEPARATE directory so `npm run dev` runs fully isolated
+// from a packaged install — its own config.json, pairing, sessions, settings.
+app.setPath("userData", join(app.getPath("appData"), app.isPackaged ? "manta" : "manta-dev"));
 
 // ---------------------------------------------------------------------------
 // manta:// deep-link pairing (protocol handler).
 // Registration + capture live in main; parsing/validation happens renderer-
 // side with the same parsePairPayload the PairStep paste field uses, so
 // there is exactly ONE parser for the wire format.
+//
+// ONLY the packaged app registers the scheme — an OS scheme can be owned by
+// one app, so the dev build (`npm run dev`) must not fight the packaged app
+// for it. In dev, pairing is done by pasting the 6-digit code manually.
 // ---------------------------------------------------------------------------
-if (process.defaultApp) {
-  // dev mode (`electron .`): register with explicit exec path + args
-  if (process.argv.length >= 2) {
-    app.setAsDefaultProtocolClient("manta", process.execPath, [
-      resolvePath(process.argv[1]),
-    ]);
-  }
-} else {
+if (app.isPackaged) {
   app.setAsDefaultProtocolClient("manta");
 }
 
