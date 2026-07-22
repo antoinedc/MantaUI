@@ -52,6 +52,14 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     alert(msg);
   };
 
+  // BET-248: positive counterpart of showError — used when an action
+  // succeeded but left side-effects the user should know about (e.g.
+  // "Kept worktree at <path>"). Same alert() surface so the behavior is
+  // consistent across this file without introducing a new toast system.
+  const showNotice = (msg: string) => {
+    alert(msg);
+  };
+
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
@@ -126,7 +134,16 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     const w = proj?.windows.find((x) => x.index === activeIdx)
       ?? proj?.windows.find((x) => x.active)
       ?? proj?.windows[0];
-    return (w?.paneCurrentPath ?? "").trim();
+    const fallback = (w?.paneCurrentPath ?? "").trim();
+    // BET-248: silent empty return bit a future caller. When neither
+    // defaultCwd nor any paneCurrentPath resolved, surface a warn so the
+    // regression is visible during dev rather than in a downstream NPE.
+    if (!fallback) {
+      console.warn(
+        `[Sidebar] resolveProjectCwd: no usable cwd for project "${projectName}" (defaultCwd=${JSON.stringify(stored)}, paneCurrentPath missing)`,
+      );
+    }
+    return fallback;
   };
 
   // Probe whether the project's cwd is inside a git repo. Reuses the
@@ -452,6 +469,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         // Force-remove failed — surface but still close the session.
         showError(e);
       }
+    } else {
+      // BET-248: the worktree + branch remain on disk, but the session
+      // window still closes. Without this feedback the user gets no
+      // signal that the worktree was kept — the previous behavior left
+      // them wondering whether the click registered.
+      showNotice(`Kept worktree at ${wtPath}`);
     }
     try {
       await window.api.tmuxKillWindow({ sessionName: project, windowIndex: index });
