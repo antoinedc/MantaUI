@@ -1,4 +1,4 @@
-# Provider Management in bui
+# Provider Management in manta
 
 **Date:** 2026-06-29
 **Branch:** `feat/provider-management`
@@ -6,7 +6,7 @@
 
 ## Problem
 
-bui's model picker is dynamic — it reads opencode's `GET /provider` endpoint,
+manta's model picker is dynamic — it reads opencode's `GET /provider` endpoint,
 filters to connected providers, and flattens each provider's `models` map
 (`src/main/opencode.ts:listModels`). But opencode only advertises models that
 are **hand-listed** in the provider's `models` block in `opencode.jsonc` on the
@@ -20,7 +20,7 @@ restarting opencode.
 
 ## Goal
 
-A **Providers** section in bui Settings where the user can:
+A **Providers** section in manta Settings where the user can:
 
 - **Add an endpoint** — name, baseURL, API key (any OpenAI-compatible provider).
 - **Refresh discovery** — query the endpoint's `/v1/models` and list everything
@@ -35,10 +35,10 @@ servable for prompts end-to-end.
 
 ## Non-goals
 
-- bui does NOT route prompts directly to providers. opencode does all prompting;
-  bui only edits opencode's config and triggers a reload.
-- No second persistent store in bui. The endpoint list lives only in
-  `opencode.jsonc`; bui reads it back to populate the UI.
+- manta does NOT route prompts directly to providers. opencode does all prompting;
+  manta only edits opencode's config and triggers a reload.
+- No second persistent store in manta. The endpoint list lives only in
+  `opencode.jsonc`; manta reads it back to populate the UI.
 - Comment preservation in `opencode.jsonc` is out of scope (see Risks).
 
 ## Architecture
@@ -94,7 +94,7 @@ A separate IPC `opencode:discoverModels` wraps piece 1 for the renderer.
 Writing config does NOT restart opencode. After a successful write, the renderer
 shows: *"Restart opencode now to apply? (interrupts active sessions)"* with
 **Apply Now** / **Apply Later**. Apply Now calls a new IPC `opencode:restart`
-that tears down the `bui-opencode` tmux session and lets the existing ensure
+that tears down the `manta-opencode` tmux session and lets the existing ensure
 path respawn it (`opencode.ts`), then the picker re-fetches. Apply Later leaves
 the new config on disk to take effect on the next natural restart.
 

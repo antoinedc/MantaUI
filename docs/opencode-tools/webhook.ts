@@ -1,4 +1,4 @@
-// bui-native `webhook` tool — global opencode custom tool.
+// manta-native `webhook` tool — global opencode custom tool.
 //
 // Install on the opencode host (the Linux box that runs manta-server + opencode):
 //   mkdir -p ~/.config/opencode/tools
@@ -98,7 +98,7 @@ export const create = tool({
       .optional()
       .describe(
         "Set true ONLY if the external system cannot send an HMAC signature. Then the unguessable URL token " +
-          "is the only guard (discouraged). Default false = require a valid X-Bui-Signature on every delivery.",
+          "is the only guard (discouraged). Default false = require a valid X-Manta-Signature on every delivery.",
       ),
   },
   async execute(args, context) {
@@ -118,7 +118,7 @@ export const create = tool({
       args.unsigned
         ? `Configure the external system to POST its event JSON to that URL.`
         : `Configure the external system to POST event JSON with header ` +
-          `X-Bui-Signature: sha256=HMAC_SHA256(secret, rawBody).`,
+          `X-Manta-Signature: sha256=HMAC_SHA256(secret, rawBody).`,
       `When it fires, the event arrives in this session as a new turn.`,
     ].join("\n");
   },

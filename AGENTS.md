@@ -279,7 +279,7 @@ also accept `?token=`. Default bind `127.0.0.1:8787`. Internet access is a
 - `~/.config/systemd/user/manta-server.service` → `node src/server/index.mjs`
   (`MANTA_MOBILE_HOST=127.0.0.1`, port 8787).
 - `~/.config/systemd/user/manta-tunnel.service` (`Requires=manta-server`) →
-  `cloudflared tunnel --config ~/.cloudflared/config.yml run bui`.
+  `cloudflared tunnel --config ~/.cloudflared/config.yml run manta`.
 - Permanent URL: **https://app.mantaui.com** (named tunnel
   `6cdca2ea-…`, zone `mantaui.com`). Stable across restarts — the iOS
   PWA install stays valid.
@@ -467,7 +467,7 @@ the reusable "MantaUI tools" pattern (for future tools like `ping`) is in
   and the tool silently never registers; a real copy resolves the import up the
   tree to `~/.config/opencode/node_modules/`. **Install/update requires
   `systemctl --user restart opencode-serve`** (opencode runs as that systemd
-  service, NOT a `bui-opencode` tmux session — that reference is stale) so it
+  service, NOT a `manta-opencode` tmux session — that reference is stale) so it
   re-scans `tools/`.
 - **The tool is a thin registrar** — it `fetch`es manta-server
   (`127.0.0.1:8787/api/schedule`, same box, no SSH hop) and returns immediately.
@@ -1099,7 +1099,7 @@ and writes it back via an HTTP call to manta-server (`src/server/local.mjs`).
 **Merge is JSONC-comment-stripped** (`//`
 single-line only) before `JSON.parse`; if it's unparseable we start from `{}`
 rather than corrupting other keys. The default registry
-(`https://antoinedc.github.io/bui-skills`) ships in the opencode binary once
+(`https://antoinedc.github.io/manta-skills`) ships in the opencode binary once
 the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
 `cacheTtl: "5m" | "1h"` — Anthropic prompt cache TTL (default `"1h"`).
 Display-only: drives the stale-cache pill threshold in ChatPanel's

@@ -47,7 +47,7 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.screenshotDetected, listener);
   },
 
-  // bui-server's notification router decided the desktop should show an OS
+  // manta-server's notification router decided the desktop should show an OS
   // notification (delivered from manta-server over the /events SSE stream).
   // The renderer shows it via the Notification API after a local "am I
   // viewing this?" check.
@@ -93,7 +93,7 @@ const api = {
     ipcRenderer.invoke(IPC.clientVersion),
 
   // Server-update available subscription (BET-225 stage 3): main subscribes
-  // to bui-server's /events SSE stream (src/main/serverUpdateForwarder.ts),
+  // to manta-server's /events SSE stream (src/main/serverUpdateForwarder.ts),
   // filters on kind === "serverUpdateAvailable", and forwards the payload
   // to the renderer via this IPC channel. Mirrors the desktopNotify
   // one-kind-filter pattern; share the same kind/payload envelope.

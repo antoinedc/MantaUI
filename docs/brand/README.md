@@ -1,6 +1,6 @@
 # Manta UI — Brand & Design System
 
-Source of truth for the **Manta** rebrand (formerly `bui` / `better-ui`).
+Source of truth for the **Manta** rebrand (formerly `manta` / `better-ui`).
 Imported from the Claude design project
 `d88214b7-700d-4179-b4c1-4bbc3c7de0e8` (2026-07-13).
 
@@ -159,4 +159,4 @@ UI. Self-hosted fonts / the exact logo typeface would need the source files.
 - `tokens.css` — full design-token reference (colors, type, spacing, effects).
 
 The original standalone design bundle was imported from
-`~/.bui-uploads/BUI/.../manta UI - Desktop (standalone).html`.
+`~/.bui-uploads/MANTA/.../manta UI - Desktop (standalone).html`.

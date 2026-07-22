@@ -1,14 +1,14 @@
-# bui-native tools — the `notify` tool + cross-device notification routing
+# manta-native tools — the `notify` tool + cross-device notification routing
 
-This is the fourth **bui-native opencode tool** (after `schedule`, `serve_page`,
+This is the fourth **manta-native opencode tool** (after `schedule`, `serve_page`,
 `peers`) and the first to add a **desktop OS notification leg** alongside the
 existing mobile Web Push. It also introduces the **single notification router**
 that decides — for *every* notification, automatic or AI-triggered — whether it
 goes to desktop, mobile, both, or escalates from one to the other, with **no
 duplicates**.
 
-Read `docs/manta-tools-scheduler.md` first for the reusable "bui tools" pattern
-(global opencode tool → thin registrar → bui-server endpoint + durable logic).
+Read `docs/manta-tools-scheduler.md` first for the reusable "manta tools" pattern
+(global opencode tool → thin registrar → manta-server endpoint + durable logic).
 This doc only covers what's notify-specific.
 
 ## Why a single router
@@ -16,11 +16,11 @@ This doc only covers what's notify-specific.
 "No duplicates" requires that **one place** knows the state of *all* devices at
 decision time. Before this feature, two facts were split:
 
-- bui-server (`src/server/push.mjs`) owned the **mobile** leg (Web Push) and
+- manta-server (`src/server/push.mjs`) owned the **mobile** leg (Web Push) and
   already tracked desktop presence (`_desktop`) + mobile focus (`_focus`).
 - The desktop Electron app had **no notifications at all**.
 
-So bui-server is the natural sole arbiter: it already sees every opencode event
+So manta-server is the natural sole arbiter: it already sees every opencode event
 (the `firePush` call in the opencode pump) and already holds both presence
 signals. We extend it to also drive the desktop leg. The desktop app does not
 make its own routing decisions — it only *renders* the OS notification the
@@ -28,14 +28,14 @@ server tells it to (with one local refinement, below).
 
 ```
 opencode event ─┐
-AI notify tool ──┤→ bui-server router (push.mjs)
+AI notify tool ──┤→ manta-server router (push.mjs)
                  │      ├─ desktop leg → bus "desktopNotify" → SSH -L 18787
                  │      │                 → Electron app → new Notification()
                  │      └─ mobile leg  → Web Push (VAPID) → PWA service worker
 ```
 
 - **Mobile leg** = existing Web Push, unchanged transport.
-- **Desktop leg** = the Electron main process subscribes to bui-server's
+- **Desktop leg** = the Electron main process subscribes to manta-server's
   existing `GET /events` SSE **over the already-open `-L 18787` presence
   forward** and reacts only to a new `kind:"desktopNotify"` envelope by showing
   an Electron `Notification`. (Desktop already gets opencode events from its own
@@ -48,7 +48,7 @@ Desktop presence comes from `desktopPresence.ts` heartbeats; three states:
 
 | State | Definition | Source |
 |---|---|---|
-| **active** | a bui window is focused **AND** `getSystemIdleTime() < 30s` | `_desktop.visible === true`, fresh `lastSeen` |
+| **active** | a manta window is focused **AND** `getSystemIdleTime() < 30s` | `_desktop.visible === true`, fresh `lastSeen` |
 | **idle / away** | app open (heartbeat fresh, `lastSeen` within 60s TTL) but `visible === false` (blurred or idle >30s) | fresh `lastSeen`, `visible:false`, outside grace |
 | **gone** | no heartbeat for > 60s TTL (app closed, machine asleep) | `lastSeen` stale |
 
@@ -163,7 +163,7 @@ it with the `schedule` tool (schedule a check, and in that scheduled turn call
 - **Session-tied (locked)**: the tool reads `context.sessionID`; the
   notification carries it so tapping deep-links to that chat and dedupes by
   session — same as every other push.
-- POSTs `{message, title, urgent, sessionID}` to `POST /api/notify`; bui-server
+- POSTs `{message, title, urgent, sessionID}` to `POST /api/notify`; manta-server
   builds a payload `{kind:"notify", title, body, sessionId, tag:"notify-<sid>"}`
   and runs it through the **same router** as opencode events.
 
@@ -195,7 +195,7 @@ Desktop leg:
 
 | Piece | File |
 |---|---|
-| Subscribe to bui-server `/events` over `-L 18787`, filter `desktopNotify`, `new Notification()` | `src/main/notify.ts` (NEW), started from `src/main/index.ts` |
+| Subscribe to manta-server `/events` over `-L 18787`, filter `desktopNotify`, `new Notification()` | `src/main/notify.ts` (NEW), started from `src/main/index.ts` |
 | Local "viewing `S`" + click→focus/deep-link suppression | `src/main/notify.ts` + renderer active-session signal |
 
 Mobile leg: unchanged transport; the router just gates `sendPush` as today.

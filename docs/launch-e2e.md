@@ -38,8 +38,8 @@ passing today**.
 - **VPS**: Hetzner cx22-equivalent (`cpx11`, 2 vCPU, 2 GB RAM, 40 GB disk),
   Ubuntu 24.04, location `ash`, name exactly `manta-e2e`, id `152016692`,
   IPv4 `178.156.203.86`. Created at `2026-07-17T12:56:37Z`.
-- **Project**: the BUI Hetzner project whose token is at
-  `/home/dev/.manta-secrets/projects/BUI/HETZNER_MANTA_BOX` (used by
+- **Project**: the MANTA Hetzner project whose token is at
+  `/home/dev/.manta-secrets/projects/MANTA/HETZNER_MANTA_BOX` (used by
   reference, never echoed).
 - **User**: `manta`, uid 1000, `sudo NOPASSWD:ALL`, linger enabled
   (Linger=yes), SSH keys copied from root.
@@ -183,11 +183,11 @@ launch-blocking — the rest of the workflow works once F1 is fixed.
 ## Step 9 — VPS deletion
 
 ```
-$ HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/BUI/HETZNER_MANTA_BOX) \
+$ HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/MANTA/HETZNER_MANTA_BOX) \
     hcloud server delete manta-e2e
 Server manta-e2e deleted
 
-$ HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/BUI/HETZNER_MANTA_BOX) \
+$ HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/MANTA/HETZNER_MANTA_BOX) \
     hcloud server list
 ID          NAME    STATUS    IPV4           IPV6   PRIVATE NET   LOCATION   AGE
 151615222   manta   running   91.107.196.2   ...    -             fsn1       26h
@@ -283,9 +283,9 @@ paths end-to-end.
 ✓ opencode installed (1.18.3).
 ▸ Seeding opencode-claude-auth plugin (no existing /home/manta/.config/opencode/opencode.jsonc — creating)…
 ✓ opencode.jsonc seeded.
-▸ Copying bui-native opencode tools into /home/manta/.config/opencode/tools…
+▸ Copying manta-native opencode tools into /home/manta/.config/opencode/tools…
 ✓ opencode tools copied.
-▸ Appending bui opencode agent guidance to /home/manta/.config/opencode/AGENTS.md…
+▸ Appending manta opencode agent guidance to /home/manta/.config/opencode/AGENTS.md…
 ✓ opencode AGENTS.md updated.
 ✓ opencode-serve already active — skipping (re-run picks up unit upgrades via daemon-reload below).
 ▸ Waiting for opencode-serve at http://127.0.0.1:4096/…
@@ -552,10 +552,10 @@ passing today.**
 - **VPS**: Hetzner `cpx11` (2 vCPU, 2 GB RAM, 40 GB disk), Ubuntu 24.04,
   location `ash`, name `manta-e2e`, id `152099951`, IPv4 `178.156.203.86`.
   Created at `2026-07-17T17:59:XXZ`. **Deliberately thrown away at end
-  of run — only `manta`/id `151615222` remains on the BUI Hetzner
+  of run — only `manta`/id `151615222` remains on the MANTA Hetzner
   project.**
-- **Hetzner project**: BUI (token at
-  `/home/dev/.manta-secrets/projects/BUI/HETZNER_MANTA_BOX`). Every
+- **Hetzner project**: MANTA (token at
+  `/home/dev/.manta-secrets/projects/MANTA/HETZNER_MANTA_BOX`). Every
   `hcloud` call prefixed with `HCLOUD_TOKEN=…` so it lands on the right
   project (the prior run's throwaway was inadvertently created against
   the operator's default `claude` context — corrected here).
@@ -592,7 +592,7 @@ passing today.**
 ## Step 1 — VPS creation
 
 ```
-HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/BUI/HETZNER_MANTA_BOX) \
+HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/MANTA/HETZNER_MANTA_BOX) \
   hcloud server create \
     --type cpx11 --image ubuntu-24.04 --name manta-e2e \
     --ssh-key alphaclaw@alphaclaw --location ash
@@ -601,7 +601,7 @@ HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/BUI/HETZNER_MANTA_BOX) \
 Returned: `Server 152099951 created`, IPv4 `178.156.203.86`,
 `ash`. A pre-existing `manta-e2e` (id 152099414, presumably from a
 prior cancelled test) was deleted immediately before this create.
-The BUI project's Hetzner account already had `alphaclaw@alphaclaw`
+The MANTA project's Hetzner account already had `alphaclaw@alphaclaw`
 registered (id 115218128, 23h+ old), so no new SSH key was created.
 
 ## Step 2 — advertised one-liner (verbatim, as `manta`)
@@ -628,9 +628,9 @@ $ curl -fsSL https://mantaui.com/install.sh | bash
 ✓ opencode installed (1.18.3).
 ▸ Seeding opencode-claude-auth plugin (no existing /home/manta/.config/opencode/opencode.jsonc — creating)…
 ✓ opencode.jsonc seeded.
-▸ Copying bui-native opencode tools into /home/manta/.config/opencode/tools…
+▸ Copying manta-native opencode tools into /home/manta/.config/opencode/tools…
 ✓ opencode tools copied.
-▸ Appending bui opencode agent guidance to /home/manta/.config/opencode/AGENTS.md…
+▸ Appending manta opencode agent guidance to /home/manta/.config/opencode/AGENTS.md…
 ✓ opencode AGENTS.md updated.
 ▸ Installing opencode-serve systemd --user unit…
 ▸ Waiting for opencode-serve at http://127.0.0.1:4096/…
@@ -737,7 +737,7 @@ body.
 | `GET /auth/status` (no bearer) | 401 |
 | `GET /auth/status` (bearer) | `{"authenticated":true,"box_id":"8cbc8876256084194934c559bc3850af","enforced":true}` |
 | `POST /api/secrets` (set `launch_e2e_test` / hint `throwaway test` / scope `shared`) | 200, secret id `b5b8a30a` |
-| `GET /api/secrets` | 200, lists the new secret with `hasValue:true` (value never returned — bui secrets invariant holds) |
+| `GET /api/secrets` | 200, lists the new secret with `hasValue:true` (value never returned — manta secrets invariant holds) |
 | `POST /api/schedule` (one-shot cron, sessionID `e2e-test-session-001`) | 200, job id `0ba49e41` |
 | `GET /api/schedule` | 200, lists the new job |
 | `DELETE /api/schedule?id=…` | 200, `{"deleted":true}`; subsequent list is empty |
@@ -750,7 +750,7 @@ The serve-page public URL `https://launch-e2e-v2.pages.mantaui.com`
 returned 404 from the throwaway (the public `*.pages.mantaui.com`
 Caddy vhost routes to the **prod** `127.0.0.1:20080`, not to the
 throwaway's). That's expected for any non-prod box — the
-bui-native serve-page is registered with the local box's
+manta-native serve-page is registered with the local box's
 `startFileServer` (`127.0.0.1:20080` on the throwaway), but the
 public DNS points at the prod box. REST surface is healthy and the
 test ran on the prod relay-routed host for any future launch. **Not
@@ -886,18 +886,18 @@ No second-order network problem.
 ## Step 9 — VPS deletion
 
 ```
-$ HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/BUI/HETZNER_MANTA_BOX) \
+$ HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/MANTA/HETZNER_MANTA_BOX) \
     hcloud server delete 152099951
 Waiting for delete_server (server: 152099951) ... done
 Server 152099951 deleted
 
-$ HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/BUI/HETZNER_MANTA_BOX) \
+$ HCLOUD_TOKEN=$(cat /home/dev/.manta-secrets/projects/MANTA/HETZNER_MANTA_BOX) \
     hcloud server list
 ID          NAME    STATUS    IPV4           IPV6                      PRIVATE NET   LOCATION   AGE
 151615222   manta   running   91.107.196.2   ...     -             fsn1       1d
 ```
 
-Only the production box remains on the BUI project.
+Only the production box remains on the MANTA project.
 
 ## PASS / FAIL for BET-160 §2 + BET-172
 

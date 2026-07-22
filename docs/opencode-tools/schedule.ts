@@ -1,10 +1,10 @@
-// bui-native `schedule` tool — global opencode custom tool.
+// manta-native `schedule` tool — global opencode custom tool.
 //
 // Install on the opencode host (the Linux box that runs manta-server + opencode):
 //   mkdir -p ~/.config/opencode/tools
 //   ln -sf <repo>/docs/opencode-tools/schedule.ts ~/.config/opencode/tools/schedule.ts
 // then `systemctl --user restart opencode-serve` so opencode re-scans tools/
-// (NOT a `bui-opencode` tmux session — that reference elsewhere is stale).
+// (NOT a `manta-opencode` tmux session — that reference elsewhere is stale).
 //
 // This tool is a THIN registrar. It validates the request and POSTs it to
 // manta-server (127.0.0.1:8787, same box — no SSH hop), which owns the durable
@@ -12,7 +12,7 @@
 // or run the prompt itself — execute() must return promptly.
 //
 // When a job is due, manta-server re-submits `prompt` into THIS session via
-// opencode, so the scheduled work streams back into the user's open bui chat as
+// opencode, so the scheduled work streams back into the user's open manta chat as
 // a new turn. See docs/manta-tools-scheduler.md for the full design.
 
 import { tool } from "@opencode-ai/plugin";

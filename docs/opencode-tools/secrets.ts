@@ -1,4 +1,4 @@
-// bui-native `secrets` tools — global opencode custom tools.
+// manta-native `secrets` tools — global opencode custom tools.
 //
 // Install on the opencode host (the Linux box that runs manta-server + opencode):
 //   mkdir -p ~/.config/opencode/tools
@@ -9,7 +9,7 @@
 //
 // PURPOSE: let the user hand a secret (a GitHub PAT, an API key…) to THIS agent
 // WITHOUT the value ever entering the transcript. The human stores the secret
-// in the bui UI; the value lives only on the box. These tools are THIN
+// in the manta UI; the value lives only on the box. These tools are THIN
 // registrars hitting manta-server (127.0.0.1:8787/api/secrets, same box, no SSH
 // hop). See src/server/secrets.mjs.
 //
@@ -96,7 +96,7 @@ export const list = tool({
     const result = await call("GET", `/api/secrets?${params.toString()}`);
     const secrets = result.secrets ?? [];
     if (secrets.length === 0) {
-      return "No secrets are available to this session. Ask the user to add one in the bui Secrets card.";
+      return "No secrets are available to this session. Ask the user to add one in the manta Secrets card.";
     }
     return secrets
       .map((s: any) => {
@@ -110,7 +110,7 @@ export const list = tool({
 
 export const provide = tool({
   description: [
-    "Make a stored secret usable WITHOUT exposing its value. bui writes the",
+    "Make a stored secret usable WITHOUT exposing its value. manta writes the",
     "secret's value to a 0600 file on this box and returns ONLY the file path.",
     "Use the secret strictly BY REFERENCE — never cat/echo/print the file, never",
     "put the value in a message. Examples:",

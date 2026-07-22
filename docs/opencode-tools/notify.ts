@@ -1,4 +1,4 @@
-// bui-native `notify` tool — global opencode custom tool.
+// manta-native `notify` tool — global opencode custom tool.
 //
 // Install on the opencode host (the Linux box that runs manta-server + opencode):
 //   mkdir -p ~/.config/opencode/tools
@@ -12,7 +12,7 @@
 // routing + delivery + any escalation timer.
 //
 // See docs/manta-tools-notify.md for the routing design and
-// docs/manta-tools-scheduler.md for the general "bui tools" pattern.
+// docs/manta-tools-scheduler.md for the general "manta tools" pattern.
 
 import { tool } from "@opencode-ai/plugin";
 import { readFileSync } from "node:fs";
@@ -75,7 +75,7 @@ export const notify = tool({
     "happened — e.g. 'notify me when the build finishes', 'ping me when you're",
     "done', 'let me know if the tests fail'. Often paired with the schedule",
     "tool: schedule a recurring check, and call notify from that scheduled turn",
-    "once the condition is met. bui decides which device(s) to deliver to based",
+    "once the condition is met. manta decides which device(s) to deliver to based",
     "on where the user is active (desktop when at the desk, mobile when away,",
     "desktop-first with mobile escalation when idle) — you don't choose the",
     "device. Set urgent:true only for something the user must see right now",
