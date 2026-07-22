@@ -623,7 +623,7 @@ main() {
   install with sudo available. To finish this section by hand:"
         warn "    sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl"
         warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
-        warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/deb.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
+        warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/config.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
         warn "    sudo apt update && sudo apt install caddy"
         warn "  then re-run the installer (the gateway + DNS + Caddyfile steps re-run cleanly)."
         PRIVILEGED_SECTION_SKIP=1
@@ -660,9 +660,18 @@ main() {
       curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
         | sudo -n gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
         || die "failed to download Caddy GPG key"
-      curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/deb.deb.txt \
-        | sudo -n tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null \
-        || die "failed to add Caddy apt repo"
+      # Fetch the repo file to a temp path FIRST, then install it atomically.
+      # A direct `curl … | sudo tee /etc/apt/sources.list.d/caddy-stable.list`
+      # lets tee create a 0-byte file before curl's non-zero exit is seen, so
+      # a fetch failure leaves a truncated .list that poisons the next
+      # `apt update`. Staging + mv avoids the partial write.
+      _caddy_list_tmp="$(mktemp)"
+      curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/config.deb.txt \
+        -o "$_caddy_list_tmp" \
+        || { rm -f "$_caddy_list_tmp"; die "failed to download Caddy apt repo file"; }
+      sudo -n install -m 0644 "$_caddy_list_tmp" /etc/apt/sources.list.d/caddy-stable.list \
+        || { rm -f "$_caddy_list_tmp"; die "failed to add Caddy apt repo"; }
+      rm -f "$_caddy_list_tmp"
       sudo -n apt-get update \
         || die "apt-get update failed"
       sudo -n apt-get install -y caddy \
