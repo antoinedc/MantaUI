@@ -7,9 +7,9 @@
 # among the PR's changed .ts/.tsx/.mjs files fails the gate. Exceptions live
 # ONLY in scripts/duplication-gate-ignore.txt — the documented intentional
 # desktop/mobile transport mirrors (AGENTS.md: "when changing one, change the
-# other"). Changing the ignore list itself is a .github/**-adjacent act: the
-# file lives under scripts/, which approval-policy.json classes as HUMAN, so
-# an agent PR cannot silently widen its own exemptions.
+# other"). Changing the ignore list is reviewed like any scripts/ change; the
+# gate-file human-review boundary now lives in .github/CODEOWNERS
+# (.github/** + .gitleaks.toml → @antoinedc) enforced by the main branch ruleset.
 #
 # Scope note: clones are detected WITHIN the changed-file set (plus each
 # changed file against itself). Cross-file duplication against UNCHANGED files
