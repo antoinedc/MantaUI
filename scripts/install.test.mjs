@@ -429,9 +429,10 @@ test("readBoxIdentity returns null on a corrupt auth.json (server will mint a fr
 test("formatPairingOutput produces a stable human block", () => {
   // BET-177 §2.4: when both box_id AND a 6-digit code are present the output
   // includes the canonical pair link + a terminal-rendered QR (via the real
-  // qrcode-terminal in default mode). We assert on the text half here so the
-  // test doesn't depend on a specific QR rendering — the QR rendering has
-  // its own assertions below with a stubbed renderer.
+  // qrcode-terminal in default mode). We assert on the TEXT half only so the
+  // test doesn't depend on qrcode-terminal being installed or on specific QR
+  // rendering — QR-specific assertions (block chars, indentation) live in the
+  // stub-based tests below which inject a controlled renderer.
   const out = formatPairingOutput({
     pairing_code: "847291",
     box_id: "0123456789abcdef0123456789abcdef",
@@ -442,10 +443,6 @@ test("formatPairingOutput produces a stable human block", () => {
   assert.match(out, /Expires:       2026-07-03 12:34:56 UTC/);
   assert.match(out, /Pair link:     manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
   assert.match(out, /paste into the desktop app, or scan as a QR/);
-  // QR rendering produces some non-empty ANSI block (qrcode-terminal prints
-  // block chars). We don't pin the exact bytes — only that the renderer
-  // contributed at least one row.
-  assert.match(out, /\u2588|\u2584|\u2580/);
 });
 
 test("formatPairingOutput prints ingress hint when no serverUrl given", () => {
