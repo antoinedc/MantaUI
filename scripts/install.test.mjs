@@ -28,6 +28,8 @@ import {
   OPENCODE_CLAUDE_AUTH_PLUGIN,
   DEFAULT_PORT,
   DEFAULT_RELEASE_HOST,
+  DESKTOP_DMG_URL,
+  IOS_APP_URL,
 } from "./install-lib.mjs";
 
 const HOME = "/home/tester";
@@ -428,9 +430,11 @@ test("readBoxIdentity returns null on a corrupt auth.json (server will mint a fr
 // ----------------------------------------------------------------------------
 
 test("formatPairingOutput produces a stable human block", () => {
-  // BET-177 §2.4: when both box_id AND a 6-digit code are present the output
-  // includes the canonical pair link + a terminal-rendered QR (via the real
-  // qrcode-terminal in default mode). We assert on the TEXT half only so the
+  // BET-177 §2.4 + BET-241 Branch A: when both box_id AND a 6-digit code are
+  // present the output includes the single connect block — desktop app link,
+  // the Pair page URL, the canonical pair link, the iOS app hint + QR (via
+  // the real qrcode-terminal in default mode), then the greppable Pairing
+  // code / Box ID / Expires footer. We assert on the TEXT half only so the
   // test doesn't depend on qrcode-terminal being installed or on specific QR
   // rendering — QR-specific assertions (block chars, indentation) live in the
   // stub-based tests below which inject a controlled renderer.
@@ -439,22 +443,40 @@ test("formatPairingOutput produces a stable human block", () => {
     box_id: "0123456789abcdef0123456789abcdef",
     expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
   });
+  assert.match(out, /✓ Manta server is running — connect your devices:/);
+  assert.match(out, /1\. Get the desktop app \(macOS, Apple silicon\)/);
+  assert.match(out, new RegExp(DESKTOP_DMG_URL.replace(/\//g, "\\/")));
+  assert.match(out, /2\. Pair it/);
+  // Canonical pair-link regex (the wire shape is unchanged; just the
+  // surrounding prefix moved into step 2 of the numbered block).
+  assert.match(out, /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
+  assert.match(out, /3\. iPhone \(optional\)/);
+  assert.match(out, new RegExp(`App download: ${IOS_APP_URL.replace(/\//g, "\\/")}  \\(App Store link coming soon\\)`));
   assert.match(out, /Pairing code:  847291/);
   assert.match(out, /Box ID:        0123456789abcdef0123456789abcdef/);
   assert.match(out, /Expires:       2026-07-03 12:34:56 UTC/);
-  assert.match(out, /Pair link:     manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
+  // BET-239: Pair page URL surfaces under step 2 (above the manta:// link),
+  // indented the same 7 spaces as the link itself.
   assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
-  assert.match(out, /paste into the desktop app, or scan as a QR/);
+  // BET-241 Branch A footer: greppable one-time note at the very end of the block.
+  assert.match(out, /\(one-time — mint a fresh one any time with `manta pair`\)/);
 });
 
 test("formatPairingOutput prints ingress hint when no serverUrl given", () => {
+  // BET-241 Branch B — no box_id (degraded / no-gateway install).
   const out = formatPairingOutput({ pairing_code: "000123" });
   assert.match(out, /Pairing code:  000123/);
   assert.match(out, /Tailscale/);
   assert.match(out, /Reverse proxy/);
+  // Branch B surfaces the desktop app URL so the user knows where to paste
+  // the code (no QR + no pair link when box_id is absent).
+  assert.match(out, new RegExp(`Desktop app: ${DESKTOP_DMG_URL.replace(/\//g, "\\/")}`));
 });
 
 test("formatPairingOutput includes serverUrl when provided", () => {
+  // Branch B with serverUrl: the Server URL line replaces the ingress-hint
+  // block (serverUrl goes right after Pairing code in Branch B since Box ID
+  // doesn't exist). Branch A would put Server URL under Box ID instead.
   const out = formatPairingOutput({
     pairing_code: "111111",
     serverUrl: "https://box.tailnet.ts.net",
@@ -467,6 +489,20 @@ test("formatPairingOutput rejects a non-6-digit code", () => {
   assert.throws(() => formatPairingOutput({ pairing_code: "12345" }), /6 digits/);
   assert.throws(() => formatPairingOutput({ pairing_code: "abcdef" }), /6 digits/);
   assert.throws(() => formatPairingOutput({}), /6 digits/);
+});
+
+test("formatPairingOutput pins the greppable 'Pairing code' line shape", () => {
+  // llms-install.md tells AI-installing agents to grep the install output
+  // for `^  Pairing code:  NNNNNN$` to capture the code. formatPairingOutput
+  // is the single source for that line — pin the EXACT shape (two-space
+  // indent, "Pairing code:", two spaces, six digits, end-of-line) so a
+  // future refactor of the block can't silently shift it.
+  const out = formatPairingOutput({
+    pairing_code: "847291",
+    box_id: HEX32,
+    expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
+  });
+  assert.match(out, /^  Pairing code:  847291$/m);
 });
 
 // ----------------------------------------------------------------------------
@@ -506,13 +542,14 @@ test("buildPairLink rejects a non-6-digit code", () => {
   assert.throws(() => buildPairLink(HEX32, ""), /6 digits/);
 });
 
-test("buildPairLink shape matches install.sh's heredoc literal (BET-177 §2.4)", () => {
+test("buildPairLink produces the canonical box-form pair link (BET-177 §2.4)", () => {
   // The renderer's `parsePairPayload` is the gate the mobile app uses to
-  // decide whether a QR is valid; install.sh's heredoc prints the canonical
-  // box-form link in lockstep. The install.test suite is plain Node — we
-  // don't load the .ts parser here — but we CAN enforce the wire shape on
-  // both the install-lib helper AND the literal install.sh heredoc printf,
-  // so a future drift in either side is caught here.
+  // decide whether a QR is valid; install.sh prints the canonical box-form
+  // link (now via formatPairingOutput — BET-241 deleted the install.sh
+  // heredoc duplicate) in lockstep with this helper. The install.test
+  // suite is plain Node — we don't load the .ts parser here — but we CAN
+  // enforce the wire shape on the install-lib helper so a future drift is
+  // caught here.
   //
   // 1. install-lib's buildPairLink produces the canonical shape:
   const fromLib = buildPairLink(HEX32, "847291");
@@ -521,22 +558,6 @@ test("buildPairLink shape matches install.sh's heredoc literal (BET-177 §2.4)",
     "manta://pair?box=0123456789abcdef0123456789abcdef&code=847291",
     "install-lib buildPairLink produces the canonical box-form URL",
   );
-  // 2. install.sh's heredoc uses the SAME shape — read the literal printf
-  //    template and assert it matches the install-lib output structure:
-  const installShSrc = readFileSync(INSTALL_SH, "utf-8");
-  const printfMatch = installShSrc.match(
-    /manta:\/\/pair\?box=%s&code=%s/,
-  );
-  assert.ok(
-    printfMatch,
-    "install.sh heredoc uses the canonical box-form printf template",
-  );
-  // 3. The printf template `manta://pair?box=%s&code=%s` MUST round-trip —
-  //    when sprintf'd with a 32-hex boxId + 6-digit code, it produces the
-  //    same string buildPairLink produces for the same inputs. We pin
-  //    BOTH the printf template AND the install-lib output so a future
-  //    drift in either side surfaces here.
-  assert.match(printfMatch[0], /^manta:\/\/pair\?box=%s&code=%s$/);
 });
 
 // ----------------------------------------------------------------------------
@@ -592,33 +613,42 @@ test("formatPairingOutput includes the pair link + QR", () => {
       qrRender: () => qrText,
     },
   );
-  assert.match(out, /Pair link:     manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
+  // Pair link is now rendered inside step 2 of the numbered block (the
+  // "Pair link:" prefix was retired in BET-241; the canonical URL string is
+  // unchanged — the wire shape still round-trips through buildPairLink).
+  assert.match(out, /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
+  assert.match(out, /2\. Pair it — click this link, or paste it into the app's Connect screen/);
+  // BET-239: Pair page URL surfaces under step 2 (above the manta:// link),
+  // indented the same 7 spaces as the link itself.
   assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
-  assert.match(out, /paste into the desktop app, or scan as a QR/);
   // Stubbed QR rows are indented to match the surrounding 2-space indent.
   // We use a literal newline+two-spaces prefix in the regex (no \s — `s`
   // is .includes-sensitive and we want the exact byte sequence the formatter
   // emits).
   assert.match(out, /\n  \[stubbed QR rows\]/);
   assert.match(out, /\n  row 2/);
-  // The trailing "Enter the pairing code" line is REPLACED by the link+QR
-  // block — only one of them should appear.
+  // Branch B's trailing "Enter the pairing code" line is REPLACED by the
+  // Branch A link+QR block — only Branch B's phrasing should ever appear
+  // when no box_id is provided.
   assert.doesNotMatch(out, /Enter the pairing code in the Manta desktop app/);
 });
 
 test("formatPairingOutput falls back to the text-only block when qrRender throws", () => {
   // A broken qrcode-terminal (e.g. a stripped dev node_modules) must NOT
   // crash the install — the link text is the source of truth, the QR is
-  // best-effort. The text link + the "scan as a QR" hint still appear so the
+  // best-effort. The text link + the iOS-hint line still appear so the
   // operator can paste; only the QR ROWS are absent (the text talks about
   // scanning, but no QR is rendered).
   const out = formatPairingOutput(
     { pairing_code: "847291", box_id: HEX32 },
     { qrRender: () => { throw new Error("qrcode-terminal exploded"); } },
   );
-  assert.match(out, /Pair link:     manta:\/\/pair\?box=/);
+  // Pair link + Pair page are still emitted (the QR row bytes are the only
+  // thing missing — BET-239 added the Pair page URL alongside the manta://
+  // link; BET-241 moved the manta:// URL into step 2 of the numbered block).
+  assert.match(out, /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
   assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
-  assert.match(out, /scan as a QR/);
+  assert.match(out, /3\. iPhone \(optional\) — scan the QR below with your camera/);
   // QR block chars (qrcode-terminal draws U+2588 FULL BLOCK + U+2584 LOWER
   // HALF BLOCK) are absent. We assert on the QR's STUB marker rather than
   // guessing which ANSI bytes the real renderer uses.

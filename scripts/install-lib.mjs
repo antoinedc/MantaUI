@@ -50,6 +50,11 @@ export const DEFAULT_RELEASE_HOST = "https://mantaui.com";
 // touches box identity. `MANTA_HOME` overrides the code location only.
 export const DEFAULT_HOME_DIRNAME = "manta";
 
+// Download links printed in the pairing block. IOS_APP_URL is a placeholder
+// until the App Store listing is live — update it there, nowhere else.
+export const DESKTOP_DMG_URL = "https://mantaui.com/downloads/Manta-latest.dmg";
+export const IOS_APP_URL = "https://mantaui.com";
+
 // Persisted box identity — the file ensureAuth() writes on first server run.
 // Its presence is the idempotency signal: "identity already exists, preserve it."
 export const AUTH_DIRNAME = STATE_DIRNAME;
@@ -649,13 +654,23 @@ export const readBoxIdentity = loadAuth;
  * ingress the user set up — tailscale/reverse-proxy/cloudflared). We can't know
  * it, so it's passed in (or omitted, in which case we print a hint line).
  *
+ * The output is the single connect block both install.sh and `manta pair`
+ * print — install.sh captures it once and emits it LAST so the user sees it
+ * at rest; `manta pair` prints the same block on every re-mint (intentional:
+ * it always surfaces the download links + the iOS hint).
+ *
+ * The 6-digit code validation throw, the injected `qrRender` (with its
+ * try/catch degradation), and the per-row QR indenting loop are all kept
+ * intact — only the assembled line list changes.
+ *
  * BET-177 §2.4: the pair link `manta://pair?box=<id>&code=<code>` is
  * always included in the output (when a box_id + a valid 6-digit code are
  * present) as BOTH a copy-paste line AND a terminal-rendered QR. The QR is
  * for the user who wants to scan with the iOS Camera instead of pasting the
  * link. The link string is the canonical box-form produced by
- * `buildPairLink` (local helper) — single source of truth, shared with
- * install.sh's heredoc via the test that asserts the round-trip.
+ * `buildPairLink` (local helper) — single source of truth, consumed
+ * exclusively by this function now (install.sh's heredoc duplicate was
+ * retired in BET-241).
  *
  * The QR generator is injected (`qrRender`) so tests can capture the output
  * without pulling in `qrcode-terminal` at module-load. The default
@@ -671,35 +686,22 @@ export function formatPairingOutput(
     throw new Error("formatPairingOutput: pairing_code must be 6 digits");
   }
   const lines = [];
-  lines.push("");
-  lines.push("  ✓ manta server is running.");
-  lines.push("");
-  lines.push(`  Pairing code:  ${pairing_code}`);
-  if (expiresAt != null) {
-    lines.push(`  Expires:       ${formatExpiry(expiresAt)}`);
-  }
   if (box_id) {
-    lines.push(`  Box ID:        ${box_id}`);
-  }
-  lines.push("");
-  if (serverUrl) {
-    lines.push(`  Server URL:    ${serverUrl}`);
+    // Branch A — full gateway install (box_id + valid 6-digit code).
     lines.push("");
-  } else {
-    lines.push("  Expose this box to your phone/desktop (pick one):");
-    lines.push("    • Tailscale / VPN  → use the box's tailnet address");
-    lines.push("    • Reverse proxy    → point it at 127.0.0.1:8787");
+    lines.push("  ✓ Manta server is running — connect your devices:");
     lines.push("");
-  }
-  // Render the canonical pair link + QR when we have both halves. The link is
-  // the direct-mode shape (manta://pair?box=<id>&code=<code>) — the desktop /
-  // phone resolve it to https://<box_id>.boxes.mantaui.com and claim against
-  // the box's own /auth/claim.
-  if (box_id && /^[0-9]{6}$/.test(pairing_code)) {
+    lines.push("  1. Get the desktop app (macOS, Apple silicon)");
+    lines.push(`       ${DESKTOP_DMG_URL}`);
+    lines.push("");
+    lines.push("  2. Pair it — click this link, or paste it into the app's Connect screen");
     const pairLink = buildPairLink(box_id, pairing_code);
-    lines.push("  Pair page:     " + buildPairPageUrl(box_id, pairing_code));
-    lines.push("  Pair link:     " + pairLink);
-    lines.push("                 (paste into the desktop app, or scan as a QR)");
+    lines.push(`       Pair page:     ${buildPairPageUrl(box_id, pairing_code)}`);
+    lines.push(`       ${pairLink}`);
+    lines.push("");
+    lines.push("  3. iPhone (optional) — scan the QR below with your camera");
+    lines.push(`       App download: ${IOS_APP_URL}  (App Store link coming soon)`);
+    lines.push("");
     let qr;
     try {
       qr = qrRender(pairLink);
@@ -713,14 +715,42 @@ export function formatPairingOutput(
       // Indent every QR row to match the surrounding two-space indent. The QR
       // itself is rendered with no leading indent; we wrap each line
       // individually so terminal width differences don't break alignment.
-      lines.push("");
       for (const row of String(qr).split("\n")) lines.push("  " + row);
       lines.push("");
     }
-    lines.push("");
+    lines.push(`  Pairing code:  ${pairing_code}`);
+    lines.push(`  Box ID:        ${box_id}`);
+    if (serverUrl) {
+      lines.push(`  Server URL:    ${serverUrl}`);
+    }
+    if (expiresAt != null) {
+      lines.push(`  Expires:       ${formatExpiry(expiresAt)}`);
+    }
+    lines.push("                 (one-time — mint a fresh one any time with `manta pair`)");
   } else {
-    lines.push("  → Enter the pairing code in the Manta desktop app to connect.");
+    // Branch B — degraded / no-gateway install (no box_id). Pair-link + QR
+    // can't be rendered (there's no box half of the link), so we surface the
+    // code + the ingress hint + a tail-line that names the desktop app URL
+    // the user is meant to type the code into.
     lines.push("");
+    lines.push("  ✓ Manta server is running.");
+    lines.push("");
+    lines.push(`  Pairing code:  ${pairing_code}`);
+    if (expiresAt != null) {
+      lines.push(`  Expires:       ${formatExpiry(expiresAt)}`);
+    }
+    lines.push("");
+    if (serverUrl) {
+      lines.push(`  Server URL:    ${serverUrl}`);
+      lines.push("");
+    } else {
+      lines.push("  Expose this box to your phone/desktop (pick one):");
+      lines.push("    • Tailscale / VPN  → use the box's tailnet address");
+      lines.push("    • Reverse proxy    → point it at 127.0.0.1:8787");
+      lines.push("");
+    }
+    lines.push("  → Enter the pairing code in the Manta desktop app to connect.");
+    lines.push(`     Desktop app: ${DESKTOP_DMG_URL}`);
   }
   return lines.join("\n");
 }

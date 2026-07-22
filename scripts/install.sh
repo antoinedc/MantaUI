@@ -895,25 +895,8 @@ main() {
   ok "Server is healthy."
 
   log "Minting pairing code…"
-  # Delegate to the same `manta pair` CLI the user runs later (loopback GET /auth/pair).
-  # We CAPTURE stdout this time so the install-sh heredoc below can quote the
-  # ready-to-paste `manta://pair?box=…&code=…` link — BET-156 §1. manta-pair.mjs
-  # prints a stable "  Pairing code:  NNNNNN" line via formatPairingOutput, which
-  # we sed-extract (no second JSON round-trip; the format is the contract).
+  # Capture the formatted pairing block; printed at the very end of main().
   PAIR_BLOCK="$("$NODE" "$MANTA_HOME/scripts/manta-pair.mjs" 2>/dev/null || true)"
-  # Echo the formatted block so the user still sees it on stdout (the heredoc
-  # below ONLY surfaces the box id + ready-to-paste link, not the full block).
-  printf '%s\n' "$PAIR_BLOCK"
-  PAIR_CODE="$(printf '%s\n' "$PAIR_BLOCK" | sed -n 's/^  Pairing code:[[:space:]]\+\([0-9]\{6\}\).*/\1/p' | head -n1)"
-  export PAIR_CODE
-  if [ -z "$PAIR_CODE" ]; then
-    warn "could not extract a 6-digit code from manta-pair.mjs output — pair link will be omitted."
-  fi
-
-  # Read the box_id from ~/.manta/auth.json via the tested install-lib loader
-  # (NEVER re-parse the JSON in bash — auth.json's shape belongs to the server).
-  BOX_ID_DISPLAY="$(read_box_id_for_gateway)"
-  export BOX_ID_DISPLAY
 
   cat <<EOF
 
@@ -938,20 +921,7 @@ desktop / mobile app discovers it directly via the box_id below; no relay,
 no tunnel, no dial-out.
 EOF
 
-  if [ -n "$BOX_ID_DISPLAY" ]; then
-    printf '\n  Box ID:        %s\n' "$BOX_ID_DISPLAY"
-  fi
-
-  # Ready-to-paste pair link (BET-156 §1) — the desktop app parses this directly
-  # via parsePairPayload and pairs against https://<box_id>.boxes.mantaui.com.
-  if [ -n "${BOX_ID_DISPLAY:-}" ] && [ -n "${PAIR_CODE:-}" ]; then
-    printf '\n  Pair link:     manta://pair?box=%s&code=%s\n' "$BOX_ID_DISPLAY" "$PAIR_CODE"
-    printf '                 (paste into the desktop app, or scan as a QR)\n'
-  fi
-
   cat <<EOF
-
-  (Pairing code printed above by manta pair — re-run any time to mint a fresh one.)
 
 Re-run this installer any time to upgrade in place (your box identity is preserved).
 Run 'manta pair' (or 'node "$NODE" "$MANTA_HOME/scripts/manta-pair.mjs"') to mint a fresh pairing code.
@@ -970,6 +940,9 @@ EOF
     warn "Run \`claude\` once on this box to sign in, then:"
     warn "  systemctl --user restart opencode-serve"
   fi
+
+  # The connect block prints LAST so it's what the user sees at rest.
+  printf '%s\n' "$PAIR_BLOCK"
 
   # Cleanup: the previous install lives at $MANTA_HOME.prev until this point.
   # If we got here, everything is healthy and the new install is serving — drop
