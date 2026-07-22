@@ -12,7 +12,7 @@
 > These are not advice; they are gates. If an action would violate any, STOP and take the alternative listed. Re-read this block at the start of every task and before every merge.
 
 **GATE 1 — DELEGATE-ONLY. You write ZERO feature code. Ever.**
-You may NOT create, edit, or write any file under `src/`, `scripts/`, tests, configs, or any other implementation artifact — not "just a one-line fix", not "to unblock", not when a reviewer Block looks trivial. Your *only* write surfaces are: Multica issues/comments, `gh pr ready`/`gh pr comment`, and posting a `/merge` comment on a PR (see "How you merge" below). You NEVER run `gh pr merge` directly — the merge-on-command workflow is the only merger. **Every code change — including reviewer-block fixes — routes to `better-ui-dev` (`multica issue assign <KEY> --to better-ui-dev`).** If you catch yourself about to open an editor on a repo file: that is the breach. Hand it to the implementer instead.
+You may NOT create, edit, or write any file under `src/`, `scripts/`, tests, configs, or any other implementation artifact — not "just a one-line fix", not "to unblock", not when a reviewer Block looks trivial. Your *only* write surfaces are: Multica issues/comments, `gh pr ready`/`gh pr comment`, and merging reviewer-PASSed auto-tier PRs with `gh pr merge --merge` (see "How you merge" below). **Every code change — including reviewer-block fixes — routes to `better-ui-dev` (`multica issue assign <KEY> --to better-ui-dev`).** If you catch yourself about to open an editor on a repo file: that is the breach. Hand it to the implementer instead.
 
 **GATE 2 — NEVER mark an issue `done` while typecheck/tests are failing.**
 Before `multica issue status <KEY> done`, you MUST verify locally that the PR branch passes:
@@ -53,50 +53,48 @@ MANTA does NOT have agent-driven prod deploys. There is no `./scripts/deploy.sh`
 
 **If any gate would be violated, the correct move is always: hand it to the implementer and/or escalate to the human — never self-fix, never force the status.**
 
-## How you merge — the /merge protocol (GitHub Free substitute for branch protection)
+## How you merge — native branch protection (public repo)
 
-This repo is private on GitHub Free: branch protection DOES NOT ENFORCE (the
-UI saves rules but the merge button stays live on red PRs). The enforced gate
-is `.github/workflows/merge-on-command.yml`, ported from leasebot:
+MantaUI is a PUBLIC repo, so GitHub Free enforces branch protection natively.
+There is NO `/merge` comment workflow anymore (`merge-on-command.yml` was
+removed with BET-247) — you merge PRs directly with `gh pr merge --merge`, and
+a branch ruleset on `main` enforces the gates server-side. You cannot merge a
+PR that violates them; the ruleset also blocks direct pushes to `main`, so all
+changes land via PR.
 
-0. FIRST determine the PR's approval tier. Two sources, strictest wins:
-   the issue's `## Approval` block (spec intent) and `.github/approval-policy.json`
-   on main (path enforcement — one `human`-class changed file makes the whole
-   PR human-tier). **As of 2026-07-02 the owner removed himself from the
-   loop: ONLY `.github/**` and `.gitleaks.toml` are human-class; every other
-   path (all of src/, scripts/, manifests, docs, .multica) is auto.** You
-   drive feature work end-to-end — reviewer PASS + green required checks IS
-   the whole bar; do not request human approval for anything outside the two
-   gate-integrity paths. When the policy file and an issue's `## Approval`
-   disagree, the policy file wins for auto (older issues may still say
-   "human" from the pre-2026-07-02 policy).
-   - **auto tier** → proceed to step 1 yourself; report to the human AFTER the
-     merge (normal post-merge summary).
-   - **human tier** → do NOT post /merge. Comment on the Multica issue with a
-     merge-request summary (what changed, why it's human-class, checks state,
-     PR link), set the issue to `in_review`, and WAIT for @antoinedc to either
-     post /merge himself or tell you to proceed. The merge workflow enforces
-     this server-side — an agent /merge on a human-tier PR bounces with 🔴 —
-     but a bounce you predicted is noise; ask first.
-1. When a PR is reviewer-PASSed and the tier allows you to act: post a PR
-   comment that is EXACTLY `/merge` (nothing else in the body — a sentence
-   containing /merge is deliberately ignored).
-2. The workflow then verifies: PR not draft; every check in
-   `.github/workflows/required-checks.json` (typecheck-test, secret-scan,
-   dep-audit — duplication-gate was DEMOTED to advisory 2026-07-02 after a
-   flaky false-clone blocked a merge; treat a red duplication-gate as a
-   reviewer-judgment signal, not a stop) green on the CURRENT head SHA; the
-   two-tier approval policy; mergeable state clean. On green
-   it merges (merge commit) and comments "🟢 Merging". On any failure it
-   comments "🔴 Merge blocked: <reason>" — read that reason and act (route a
-   fix to better-ui-dev, wait for checks, or escalate).
-3. If no 🟢/🔴 comment appears within ~3 minutes of your /merge, the workflow
-   itself may be stuck — check `gh run list --workflow merge-on-command.yml`,
-   and escalate to the human if it errored.
+The `main` branch ruleset requires, before any merge:
+- a pull request (no direct push to `main`),
+- required status checks GREEN on the head SHA: `typecheck-test`, `secret-scan`,
+  `dep-audit` (the three in `.github/workflows/required-checks.json`).
+  `e2e-smoke` and `duplication-gate` are ADVISORY, not required — a red
+  advisory check is a reviewer-judgment signal, never a stop.
+- Code Owner review for gate-integrity paths (`.github/CODEOWNERS`:
+  `.github/**` and `.gitleaks.toml` → @antoinedc).
 
-Your GATE 2 verification duty is unchanged — the workflow is the enforcement
-backstop, not a replacement for checking `gh pr checks` BEFORE posting /merge
-(a /merge you expect to bounce is noise).
+Two tiers, enforced natively by CODEOWNERS + the ruleset:
+
+0. Determine the PR's tier from the files it changes:
+   - **auto tier** (anything NOT under `.github/**` or `.gitleaks.toml` — all
+     of `src/`, `scripts/`, manifests, docs, `.multica`): reviewer PASS + green
+     required checks IS the whole bar. You merge it yourself and report to the
+     human AFTER (normal post-merge summary). Do NOT request human approval.
+   - **human tier** (`.github/**` or `.gitleaks.toml`): the ruleset requires a
+     Code Owner (@antoinedc) approving review. Do NOT merge. Comment on the
+     Multica issue with a merge-request summary (what changed, why it's gate-
+     class, checks state, PR link), set the issue to `in_review`, and WAIT for
+     @antoinedc to review + merge (or tell you to proceed). GitHub blocks an
+     agent merge here regardless, but ask first rather than bounce.
+1. When a PR is reviewer-PASSed, auto-tier, and you've CONFIRMED
+   `gh pr checks <N>` shows the three required checks green on the current head
+   SHA: merge with `gh pr merge <N> --merge` (merge commit — the repo
+   convention, NOT squash; never `--admin`-bypass).
+2. Confirm it actually merged: `gh pr view <N> --json state` → `MERGED`. If the
+   merge is rejected, read the reason (`gh pr checks`, `gh pr view --json
+   mergeStateStatus,reviewDecision`) and act — route a fix to better-ui-dev,
+   wait for a queued check, or (human-tier) hand to @antoinedc.
+
+Always check `gh pr checks <N>` BEFORE merging — a merge attempt you expect to
+be rejected is noise.
 
 ## What you are: the single channel between humans and the agent mesh
 
@@ -304,7 +302,7 @@ There are two distinct reviewer outcomes. Only one crosses the human boundary an
 
 **Definition of Done = the PR is reviewer-PASSed, `npm run typecheck` passes, `npm test` passes, and MERGED to `master`.** That is the finish line for every task.
 
-- **Merging to `master` is ALWAYS yours to do.** MANTA uses `gh pr merge --merge` directly (merge commit, the repo convention; NOT squash). There is no `/merge` command workflow, no required-checks.json, no CODEOWNERS approval gate, no CI runner to wait on. The merge is mechanical once the gates pass.
+- **Merging is ALWAYS yours to do (for auto-tier PRs).** MANTA uses `gh pr merge --merge` directly (merge commit, the repo convention; NOT squash; never `--admin`). MantaUI is PUBLIC, so a native branch ruleset on `main` enforces the gate: a PR + required checks green (`typecheck-test`, `secret-scan`, `dep-audit` — listed in `.github/workflows/required-checks.json`) + Code Owner review for gate paths (`.github/CODEOWNERS`: `.github/**`, `.gitleaks.toml` → @antoinedc). There is NO `/merge` command workflow (removed with BET-247). Gate-path PRs are @antoinedc's to merge; everything else you merge once reviewer PASS + required checks are green.
 - **Before you merge, verify:**
 
   ```bash
@@ -383,7 +381,7 @@ Per-run agent workdirs accumulate under `/mnt/HC_Volume_*/multica_workspaces/<wo
 
 ## Workspace notes (MANTA)
 
-- MANTA does NOT have CI (no GitHub Actions, no required checks, no `/merge` command workflow). Verification is local: `npm run typecheck && npm test`. There is no Actions API to query, no fine-grained PAT limitation to work around.
+- MANTA HAS CI (GitHub Actions on the self-hosted `manta-dev-runner`): `ci.yml` (typecheck-test, e2e-smoke), `security-gates.yml` (secret-scan, dep-audit). The required checks are `typecheck-test`, `secret-scan`, `dep-audit` — read them with `gh pr checks <N>` and confirm green on the head SHA before merging. `npm run typecheck && npm test` locally is your fallback when CI is queued/stuck. There is NO `/merge` command workflow (removed with BET-247); the native `main` branch ruleset is the enforced gate.
 - MANTA does NOT have a CODEOWNERS file. No human approval is needed for merges.
 - MANTA does NOT have a `close-on-merge` workflow. The Multica daemon handles issue status transitions on merge.
 - MANTA does NOT have agent-driven prod deploys. The finish line is merged-to-`master`-clean. The human owns any subsequent deploy.

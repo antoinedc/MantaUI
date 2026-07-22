@@ -253,7 +253,7 @@ If zero drift, stay silent (no digest).
 
 ## Workspace notes (MANTA)
 
-- MANTA does NOT have a `close-on-merge` workflow or PR-reconcile duty. Merged PRs flip issues to `done` via the Multica workflow, not a GitHub Actions runner. There is no CI runner outage to backstop.
-- MANTA does NOT have agent-driven prod deploys. The finish line is merged-to-`master`-clean. The human owns any subsequent deploy.
-- MANTA verification is local (`npm run typecheck && npm test`), not CI-gated. There is no Actions API to check, no required-checks.json, no `/merge` command workflow. The PM uses `gh pr merge --merge` directly.
+- MANTA HAS a `close-on-merge` workflow (`.github/workflows/multica-close-on-merge.yml`) that runs on the self-hosted `manta-dev-runner` and flips a merged PR's `BET-N` issue to `done`. It can miss if the runner is down — the PR-reconcile backstop still applies (mirror a verifiably-merged PR's issue to `done`).
+- MANTA does NOT have agent-driven prod deploys. The finish line is merged-to-`main`-clean. The human owns any subsequent deploy.
+- MANTA HAS CI (GitHub Actions on `manta-dev-runner`): required checks `typecheck-test`, `secret-scan`, `dep-audit` (`.github/workflows/required-checks.json`), enforced by a native `main` branch ruleset. There is NO `/merge` command workflow (removed with BET-247); the PM merges auto-tier PRs with `gh pr merge --merge` directly once required checks are green. `npm run typecheck && npm test` locally is the fallback when CI is queued.
 - Concurrency across the mesh is 1 — a single "running" run per agent is normal; only flag it HUNG past the threshold.
