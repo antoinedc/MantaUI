@@ -1,4 +1,4 @@
-/* bui service worker — Web Push only.
+/* manta service worker — Web Push only.
  *
  * Deliberately minimal: NO offline/asset caching (the app needs the live
  * server, and an SW cache is exactly what caused stale-bundle pain). Its only
