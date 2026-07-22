@@ -49,7 +49,7 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
           pinnedRef.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 8;
         }}
-        className="text-[12px] bg-bg-soft border border-border rounded px-2 py-1 max-h-64 overflow-auto whitespace-pre"
+        className="text-[12px] bg-bg-soft border border-border rounded px-2 py-1 pr-7 max-h-64 overflow-auto whitespace-pre"
       >
         <code>{output}</code>
       </pre>
