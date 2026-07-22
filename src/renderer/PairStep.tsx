@@ -76,22 +76,19 @@ export function PairStep({
       }
       setSubmitting(true);
       setError(null);
-      // Box form (BET-156, BET-198): serverUrl is empty + boxId is set, so main
-      // resolves the box's public hostname via boxDirectUrl(boxId) before
-      // POSTing /auth/claim. Direct form: serverUrl is set, boxId is undefined.
+      // Box form (BET-156, BET-198): parsePairPayload now returns box form
+      // exclusively (BET-237). The IPC handler resolves the box's public
+      // hostname via boxDirectUrl(boxId) before POSTing /auth/claim.
       const result = await window.api.authClaim({
-        serverUrl: payload.serverUrl ?? "",
-        boxId: payload.boxId ?? undefined,
+        serverUrl: "",
+        boxId: payload.boxId,
         code: payload.code,
       });
       if (result.ok) {
-        // Mirror the persisted serverUrl: the direct form uses the typed URL;
-        // the box form uses the canonical `https://<boxId>.boxes.mantaui.com`
-        // hostname (single source of truth — shared/transport.mjs).
-        const persistedServerUrl =
-          payload.serverUrl ?? (payload.boxId ? boxDirectUrl(payload.boxId) : "");
+        // Mirror the persisted serverUrl — the canonical box-form hostname
+        // (single source of truth — shared/transport.mjs).
         useStore.getState().applyPairing({
-          serverUrl: persistedServerUrl,
+          serverUrl: boxDirectUrl(payload.boxId),
           boxId: result.boxId,
           boxToken: result.boxToken,
         });
