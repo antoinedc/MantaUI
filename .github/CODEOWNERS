@@ -1,0 +1,29 @@
+# CODEOWNERS — native replacement for the two-tier merge-on-command approval
+# policy, now that MantaUI is a PUBLIC repo (GitHub Free enforces branch
+# protection + required Code Owner review on public repos).
+#
+# Rationale
+# ---------
+# The old `.github/workflows/merge-on-command.yml` gate existed ONLY because
+# GitHub Free does not enforce branch protection on PRIVATE repos — so a custom
+# `/merge` workflow simulated it. On a public repo, GitHub enforces protection
+# natively, so the gate collapses to two native mechanisms:
+#
+#   1. A branch ruleset on `main` requiring status checks
+#      (typecheck-test, secret-scan, dep-audit) + a pull request + Code Owner
+#      review. (Configured in Settings → Rules → Rulesets — not in-repo.)
+#   2. THIS file, which reproduces the old policy's ONLY human-class rows:
+#      changes under `.github/**` and to `.gitleaks.toml` require @antoinedc's
+#      review (a PR touching the gate/CI/secret-scan config cannot self-approve).
+#
+# Everything NOT listed here has no required Code Owner — matching the old
+# policy's `** -> auto` default, where any non-gate file could merge on green
+# checks alone. So an agent-authored app-code PR merges once required checks
+# pass; a gate-file PR additionally needs @antoinedc.
+#
+# Ordering: last matching pattern wins (GitHub CODEOWNERS semantics), so the
+# two gate patterns below are the only ones that assign an owner.
+
+# ── Gate integrity: only @antoinedc reviews changes to the merge/CI machinery ──
+/.github/**        @antoinedc
+/.gitleaks.toml    @antoinedc
