@@ -237,7 +237,12 @@ export async function handlePush({
   body,
   store,
   apnsConfig,
-  fetchImpl,
+  // The APNs sender: takes a built request object → { status, body }. In
+  // production this is UNDEFINED so sendApns falls back to its own HTTP/2
+  // `defaultApnsSender`. Tests inject an APNs-shaped fake here. It is NOT the
+  // DNS/global `fetch` — passing global fetch here breaks with "Failed to
+  // parse URL from [object Object]" because fetch expects a URL, not a req.
+  apnsSender,
 }) {
   const { box_id, tokens, payload } = body ?? {};
   if (!isValidBoxId(box_id)) {
@@ -273,7 +278,7 @@ export async function handlePush({
   const results = [];
   for (const token of tokens) {
     try {
-      const r = await sendApns({ token, payload }, apnsConfig, fetchImpl);
+      const r = await sendApns({ token, payload }, apnsConfig, apnsSender);
       results.push({ token, ok: r.ok, prune: r.prune });
     } catch (e) {
       results.push({ token, ok: false, prune: false });
@@ -320,6 +325,11 @@ export function createGatewayServer({
   // calls array (no OVH, no record-id allocation).
   createDnsRecord,
   apnsConfig = null,
+  // APNs sender injected into handlePush → sendApns. UNDEFINED in production so
+  // sendApns uses its own HTTP/2 defaultApnsSender. Kept SEPARATE from the DNS
+  // `fetchImpl` above — they have different call shapes (DNS wants a URL,
+  // APNs wants a built request object). Tests inject an APNs-shaped fake.
+  apnsSender,
   rateLimiter = createRegisterRateLimiter(),
   log = console.log,
   warn = console.warn,
@@ -397,7 +407,7 @@ export function createGatewayServer({
           body,
           store,
           apnsConfig,
-          fetchImpl,
+          apnsSender,
         });
         return sendJson(res, r.status, r.json);
       } catch (e) {
