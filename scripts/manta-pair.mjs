@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// manta-pair.mjs — the `bui pair` CLI.
+// manta-pair.mjs — the `manta pair` CLI.
 //
 // Mints a fresh pairing code by hitting the LOOPBACK-only endpoint
 // GET http://127.0.0.1:8787/auth/pair and pretty-printing the
@@ -12,7 +12,7 @@
 //
 // Install paths (see package.json + install.sh):
 //   * `npm run pair`            (from the repo)
-//   * `bui pair`                (via ~/.local/bin/bui shim the installer drops)
+//   * `manta pair`                (via ~/.local/bin/manta shim the installer drops)
 //
 // Exit codes: 0 on success, 1 on any failure (server down, non-2xx, 403 because
 // the request wasn't local). Keep the logic thin — all formatting lives in the
@@ -39,7 +39,7 @@ async function main() {
   if (res.status === 403) {
     fail(
       "manta-server refused to mint a pairing code: this command must run ON the box.\n" +
-        "  Pairing codes are loopback-only. Run `bui pair` directly on the server\n" +
+        "  Pairing codes are loopback-only. Run `manta pair` directly on the server\n" +
         "  (or over an SSH -L 8787 forward that terminates on the box).",
     );
     return;
@@ -78,7 +78,7 @@ async function main() {
 }
 
 function fail(msg) {
-  process.stderr.write(`bui pair: ${msg}\n`);
+  process.stderr.write(`manta pair: ${msg}\n`);
   process.exitCode = 1;
 }
 

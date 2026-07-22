@@ -72,8 +72,8 @@ function envVal(env, key) {
  * Injectable `home` for tests (defaults to os.homedir()).
  *
  * Returns:
- *   buiHome      — where the code is unpacked (MANTA_HOME || ~/manta)
- *   authDir      — ~/.manta (never inside buiHome)
+ *   mantaHome      — where the code is unpacked (MANTA_HOME || ~/manta)
+ *   authDir      — ~/.manta (never inside mantaHome)
  *   authFile     — ~/.manta/auth.json (idempotency probe target)
  *   tarballUrl   — explicit MANTA_TARBALL_URL, else null (overrides manifest fetch)
  *   releaseHost  — MANTA_RELEASE_HOST || DEFAULT_RELEASE_HOST
@@ -81,7 +81,7 @@ function envVal(env, key) {
  *   healthUrl    — http://127.0.0.1:<port>/auth/status
  */
 export function resolveConfig({ env = process.env, home = homedir() } = {}) {
-  const buiHome = envVal(env, "MANTA_HOME") ?? join(home, DEFAULT_HOME_DIRNAME);
+  const mantaHome = envVal(env, "MANTA_HOME") ?? join(home, DEFAULT_HOME_DIRNAME);
   const authDir = join(home, AUTH_DIRNAME);
   const authFile = join(authDir, AUTH_FILENAME);
   const tarballUrl = envVal(env, "MANTA_TARBALL_URL") ?? null;
@@ -90,7 +90,7 @@ export function resolveConfig({ env = process.env, home = homedir() } = {}) {
   );
   const port = parsePort(envVal(env, "MANTA_MOBILE_PORT")) ?? DEFAULT_PORT;
   return {
-    buiHome,
+    mantaHome,
     authDir,
     authFile,
     tarballUrl,
@@ -804,7 +804,7 @@ export function formatExpiry(expiresAt) {
 // existing resolveConfig tests that probe MANTA_TARBALL_URL still pass.
 export function renderShellConfig(cfg, { version } = {}) {
   const kv = {
-    MANTA_HOME: cfg.buiHome,
+    MANTA_HOME: cfg.mantaHome,
     MANTA_AUTH_DIR: cfg.authDir,
     MANTA_AUTH_FILE: cfg.authFile,
     MANTA_PORT: String(cfg.port),

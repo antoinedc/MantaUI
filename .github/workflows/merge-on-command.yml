@@ -35,13 +35,13 @@ name: Merge on /merge command
 # Auto-merge-on-green is intentionally out of scope — `/merge` is an explicit
 # intent gesture, not a "merge whenever the last gate clears" rule.
 #
-# better-ui adaptation (2026-07-02, ported from leasebot): there is NO bui
+# better-ui adaptation (2026-07-02, ported from leasebot): there is NO manta
 # GitHub App identity yet — ALL commits/PRs/comments (human and agents alike)
 # author as @antoinedc, so Gate 3's author-aware branch currently always waives
 # (same as leasebot pre-App). KNOWN LIMITATION: an agent posting /merge is
 # indistinguishable from the human. The gate still enforces required-checks-
 # green + not-draft + mergeable-clean on every merge, which is the part GitHub
-# Free won't do on a private repo. Upgrade path when it matters: mint a bui
+# Free won't do on a private repo. Upgrade path when it matters: mint a manta
 # GitHub App (mirror TEN-312/313), switch agent gh auth to it, and Gate 3
 # becomes load-bearing with zero workflow changes — the bui-agent[bot] login is
 # already in the trigger filter below.
@@ -242,7 +242,7 @@ jobs:
           #   - /merge from the agent identity (bui-agent[bot]) → allowed ONLY
           #     when EVERY changed file classes as "auto". One "human"-class
           #     file blocks with the list of paths needing sign-off.
-          # Until the bui App identity is live, agents share the antoinedc
+          # Until the manta App identity is live, agents share the antoinedc
           # login, so this gate cannot distinguish them — PM discipline (its
           # instructions) is the interim control, and this branch becomes
           # load-bearing the moment agent gh auth switches to the App.

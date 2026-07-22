@@ -203,7 +203,7 @@ function runAndCapture(scriptPath) {
 
 test("resolveConfig applies defaults when env is empty", () => {
   const cfg = resolveConfig({ env: {}, home: HOME });
-  assert.equal(cfg.buiHome, join(HOME, "manta"));
+  assert.equal(cfg.mantaHome, join(HOME, "manta"));
   assert.equal(cfg.authDir, join(HOME, ".manta"));
   assert.equal(cfg.authFile, join(HOME, ".manta", "auth.json"));
   assert.equal(cfg.tarballUrl, null);
@@ -214,7 +214,7 @@ test("resolveConfig applies defaults when env is empty", () => {
 
 test("resolveConfig honors MANTA_HOME override", () => {
   const cfg = resolveConfig({ env: { MANTA_HOME: "/opt/bui" }, home: HOME });
-  assert.equal(cfg.buiHome, "/opt/bui");
+  assert.equal(cfg.mantaHome, "/opt/bui");
   // auth dir stays under HOME, never inside MANTA_HOME — identity survives upgrades
   assert.equal(cfg.authDir, join(HOME, ".manta"));
 });
@@ -232,7 +232,7 @@ test("resolveConfig treats empty-string env vars as unset (shell footgun)", () =
     env: { MANTA_HOME: "", MANTA_TARBALL_URL: "", MANTA_MOBILE_PORT: "" },
     home: HOME,
   });
-  assert.equal(cfg.buiHome, join(HOME, "manta"));
+  assert.equal(cfg.mantaHome, join(HOME, "manta"));
   assert.equal(cfg.tarballUrl, null);
   assert.equal(cfg.port, DEFAULT_PORT);
 });
@@ -625,9 +625,9 @@ test("renderShellConfig emits eval-able KEY=VALUE lines", () => {
 });
 
 test("renderShellConfig single-quotes values with spaces safely", () => {
-  const cfg = resolveConfig({ env: { MANTA_HOME: "/opt/my bui" }, home: HOME });
+  const cfg = resolveConfig({ env: { MANTA_HOME: "/opt/my manta" }, home: HOME });
   const out = renderShellConfig(cfg, { version: "0.0.1" });
-  assert.match(out, /MANTA_HOME='\/opt\/my bui'/);
+  assert.match(out, /MANTA_HOME='\/opt\/my manta'/);
 });
 
 // ----------------------------------------------------------------------------

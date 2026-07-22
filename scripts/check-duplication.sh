@@ -5,7 +5,7 @@
 # catch that more reliably than instructions alone.
 #
 # This is a SIGNAL, not a gate. It NEVER exits non-zero on findings — it emits
-# a markdown report for the bui-reviewer agent (or a human) to exercise
+# a markdown report for the manta-reviewer agent (or a human) to exercise
 # judgment on. The CI job that calls it (.github/workflows/anti-spaghetti.yml)
 # is non-blocking and NOT in required-checks.json.
 #

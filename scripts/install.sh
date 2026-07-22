@@ -312,7 +312,7 @@ main() {
   fi
 
   # ---------------------------------------------------------------------------
-  # 6. Chat stack provisioning (opencode + bui-native tools + tmux presence).
+  # 6. Chat stack provisioning (opencode + manta-native tools + tmux presence).
   #    A fresh VPS just needs claude code installed (~/.claude/.credentials.json
   #    exists). Re-running is a no-op except for version upgrades; every step
   #    is safe to run twice.
@@ -394,7 +394,7 @@ main() {
   OPENCODE_AGENTS="$OPENCODE_CONFIG_DIR/AGENTS.md"
   if [ -d "$OPENCODE_TOOLS_SRC" ]; then
     mkdir -p "$OPENCODE_TOOLS_DIR"
-    log "Copying bui-native opencode tools into $OPENCODE_TOOLS_DIR…"
+    log "Copying manta-native opencode tools into $OPENCODE_TOOLS_DIR…"
     # cp -f overwrites — tools are versioned with the tarball, so a re-run
     # naturally picks up upgrades.
     cp -f "$OPENCODE_TOOLS_SRC"/*.ts "$OPENCODE_TOOLS_DIR/" \
@@ -404,13 +404,13 @@ main() {
     warn "$OPENCODE_TOOLS_SRC not found in tarball — skipping tool copy (was docs/opencode-tools/* added to release/pack.mjs?)."
   fi
   # AGENTS.md append with marker guard — idempotency by a single grep on a
-  # stable line ("## bui scheduled tasks"). A re-run with the marker present
+  # stable line ("## manta scheduled tasks"). A re-run with the marker present
   # is a clean no-op.
   if [ -f "$OPENCODE_TOOLS_SRC/AGENTS.md" ]; then
-    if [ -f "$OPENCODE_AGENTS" ] && grep -q '^## bui scheduled tasks' "$OPENCODE_AGENTS"; then
-      ok "opencode AGENTS.md already contains bui guidance — skipping append."
+    if [ -f "$OPENCODE_AGENTS" ] && grep -q '^## manta scheduled tasks' "$OPENCODE_AGENTS"; then
+      ok "opencode AGENTS.md already contains manta guidance — skipping append."
     else
-      log "Appending bui opencode agent guidance to $OPENCODE_AGENTS…"
+      log "Appending manta opencode agent guidance to $OPENCODE_AGENTS…"
       {
         [ -f "$OPENCODE_AGENTS" ] && cat "$OPENCODE_AGENTS" && printf '\n'
         cat "$OPENCODE_TOOLS_SRC/AGENTS.md"
