@@ -14,7 +14,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components as MarkdownComponents } from "react-markdown";
 import { CLAUDE_ORANGE } from "./chatShared";
-import { getBuiPreload } from "./preloadAccess";
+import { getMantaPreload } from "./preloadAccess";
 import { CopyButton } from "./CopyButton";
 
 // Streamed-fence resilience: while a code block is still streaming, the
@@ -85,7 +85,7 @@ const MD_COMPONENTS: MarkdownComponents = {
         className="underline"
         style={{ color: CLAUDE_ORANGE }}
         onClick={(e) => {
-          const preload = getBuiPreload();
+          const preload = getMantaPreload();
           if (preload && href) {
             e.preventDefault();
             preload.openExternal(href);

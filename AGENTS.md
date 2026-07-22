@@ -50,8 +50,8 @@ session-state snapshot.
   - `api/httpApi.ts` — implements the full `Api` contract over `/rpc` +
     `/events`. **This is the live data path on BOTH desktop and mobile.**
     `main.tsx` installs it as `window.api` when paired.
-  - `preloadAccess.ts` — the narrow `BuiPreload` interface: the ~9 OS bridges
-    the renderer reaches via `window.__buiPreload` (clipboard, openExternal,
+  - `preloadAccess.ts` — the narrow `MantaPreload` interface: the ~9 OS bridges
+    the renderer reaches via `window.__mantaPreload` (clipboard, openExternal,
     reveal, screenshot, file peek, desktop-notify, getPathForFile).
   - `chatUtils.ts` — pure utility functions extracted for testability
     (`formatTokens`, `formatDuration`, `ctxStageColor`, `filterCommands`,
@@ -59,7 +59,7 @@ session-state snapshot.
     `describeTruncation`, `isTerminalTodo`, `allTodosTerminal`).
     Import from here; don't redeclare them inline in ChatPanel.
 - `src/preload/` — Electron `contextBridge`. Exposes OS-integration bridges as
-  `window.__buiPreload` and is the `export type Api = typeof api` source that
+  `window.__mantaPreload` and is the `export type Api = typeof api` source that
   typechecks `httpApi`. NOTE: it still *declares* ~60 methods but ~90% are dead
   in HTTP mode (their `ipcMain` handlers were removed) — the runtime only needs
   the OS bridges + `authClaim`/`authPair`. See BET-124 / the preload-shrink
@@ -167,7 +167,7 @@ absolute remote path is written into the PTY for claude to read.
 **Click out (peek).** xterm `LinkProvider` for absolute paths + an explicit
 click handler on `WebLinksAddon`. Path click → `GET
 <serverUrl>/api/peek?path=<abs>&session=<name>` streams the remote file bytes
-back → `__buiPreload.writeTempAndOpen` writes to a Mac tmpfile and
+back → `__mantaPreload.writeTempAndOpen` writes to a Mac tmpfile and
 `shell.openPath` opens with the OS default app. URL click →
 `shell.openExternal`. **Don't rely on WebLinksAddon's default** — its
 `window.open` path gets denied by `setWindowOpenHandler` in `main/index.ts`, so
@@ -354,7 +354,7 @@ the pairing flow. No tunnels, no ControlMaster, no mosh.
 - `src/renderer/api/httpApi.ts` implements the full `Api` contract for the
   renderer: `/rpc/<channel>` for method calls, `EventSource` to `GET /events`
   for SSE streaming. Same Bearer token auth.
-- `window.__buiPreload` (from `src/preload/`) provides OS-integration bridges:
+- `window.__mantaPreload` (from `src/preload/`) provides OS-integration bridges:
   `writeTempAndOpen` (file peek), `getPathForFile` (drag-drop paths), clipboard
   access, screenshot detection, native file dialogs. These are Electron-only
   and have no mobile equivalent.

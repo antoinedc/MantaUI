@@ -6,7 +6,7 @@ import { Settings } from "./Settings";
 import { Onboarding } from "./Onboarding";
 import { useStore, flatSessions, resolveSessionOwner } from "./store";
 import { resolveTransportMode } from "../shared/transport.mjs";
-import { getBuiPreload } from "./preloadAccess";
+import { getMantaPreload } from "./preloadAccess";
 import { describe as describeConnection } from "../shared/net/state.js";
 import {
   type SessionMode,
@@ -193,7 +193,7 @@ export function App() {
   // active ChatPanel renders it, and accept/dismiss clear it globally.
   // Routes through the typed preload accessor so it no-ops on mobile/web.
   useEffect(() => {
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     if (!preload) return;
     const off = preload.onScreenshotDetected((ev) => {
       useStore.getState().setScreenshotToast(ev);

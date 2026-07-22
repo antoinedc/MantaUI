@@ -1,10 +1,10 @@
 import type { Api } from "../shared/api";
-import type { BuiPreload } from "./preloadAccess";
+import type { MantaPreload } from "./preloadAccess";
 
 declare global {
   interface Window {
     api: Api;
-    __buiPreload: BuiPreload | null;
+    __mantaPreload: MantaPreload | null;
   }
   // Build-time injected Axiom credentials (electron.vite.config.ts +
   // electron.vite.config.mobile.ts `define`). Empty string → shipping is

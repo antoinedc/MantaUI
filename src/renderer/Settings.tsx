@@ -3,7 +3,7 @@ import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
 import { PairingQR, PairingCountdown } from "./PairingQR";
-import { getBuiPreload } from "./preloadAccess";
+import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
 import type {
   AuthPairResult,
@@ -118,7 +118,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // Read once on mount — the toggle only changes via Save in this same
   // panel, so a live listener isn't needed.
   useEffect(() => {
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     if (!preload?.pluginsGetEnabled) return; // mobile/web has no preload
     preload.pluginsGetEnabled().then(setPluginsOn).catch(() => {});
   }, []);
@@ -195,7 +195,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       // preload bridge — NOT via window.api.configUpdate (which writes the
       // box config the executor never reads). No-op on mobile/web where
       // the plugins tab is not rendered.
-      const preload = getBuiPreload();
+      const preload = getMantaPreload();
       if (preload?.pluginsSetEnabled) {
         await preload.pluginsSetEnabled(pluginsOn);
       }
@@ -529,7 +529,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     href="https://console.groq.com/keys"
                     onClick={(e) => {
                       e.preventDefault();
-                      getBuiPreload()?.openExternal("https://console.groq.com/keys");
+                      getMantaPreload()?.openExternal("https://console.groq.com/keys");
                     }}
                     className="text-accent hover:underline"
                   >
@@ -715,7 +715,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <div className="border-t border-border pt-6">
                 <button
                   onClick={() => {
-                    const preload = getBuiPreload();
+                    const preload = getMantaPreload();
                     if (preload?.revealInFolder) {
                       // Pass the `~`-prefixed plugins path; main's
                       // revealInFolder handler expands it against homedir()

@@ -16,7 +16,7 @@ import {
   type ClaimResult,
 } from "../mobile/pairingLogic.js";
 import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
-import { getBuiPreload } from "../preloadAccess.js";
+import { getMantaPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
 import { shouldForceReconnect } from "../chatUtils";
 import { ship } from "../log";
@@ -533,7 +533,7 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 //
 // DESKTOP HTTP-MODE DEGRADATION AUDIT (BET-58). When the desktop runs in
 // "http" mode this object becomes window.api (the real preload is preserved as
-// window.__buiPreload for Electron-local affordances). Because httpApi
+// window.__mantaPreload for Electron-local affordances). Because httpApi
 // implements the FULL Api type (typecheck-enforced), no renderer call can hit
 // an undefined method — the worst case is a documented no-op, never a crash.
 // The scp-dependent / OS-integration features degrade as follows:
@@ -559,11 +559,11 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 //   • readLocalFile (arbitrary Mac file bytes, for screenshot "Add to chat")
 //     is NOT part of the Api type — the server IS the box and has no access
 //     to the Mac filesystem; callers (ChatPanel's acceptScreenshot) MUST go
-//     through window.__buiPreload.readLocalFile instead, exactly like
+//     through window.__mantaPreload.readLocalFile instead, exactly like
 //     clipboardReadImage.
 //
 // None of these throw. If a future feature MUST use the real preload in http
-// mode (e.g. OS clipboard), reach it explicitly via window.__buiPreload rather
+// mode (e.g. OS clipboard), reach it explicitly via window.__mantaPreload rather
 // than assuming window.api is the preload.
 
 export const httpApi: Api = {
@@ -666,14 +666,14 @@ export const httpApi: Api = {
   getPathForFile: (_file: File): string => "",
 
   // -- misc --
-  // Desktop HTTP-mode: route through window.__buiPreload so the main process
+  // Desktop HTTP-mode: route through window.__mantaPreload so the main process
   // can fetch from /api/peek and open the file with shell.openPath (the
   // renderer has no direct shell access). Falls back to the RPC channel for
   // mobile/web where the server IS the box and reads the file natively.
   //
   // BET-127 review note: there is no ipcMain.handle(IPC.peekRemoteFile, ...)
   // registered in src/main/index.ts today, so the preload call below always
-  // rejects ("no handler registered"). Pre-BET-127, the __buiPreload probe
+  // rejects ("no handler registered"). Pre-BET-127, the __mantaPreload probe
   // checked a name (peekRemoteFileHttp) the preload never exposed, so it
   // never matched and fell through to the RPC no-op — a silent, pre-existing
   // no-op UX for a known-broken feature. BET-127 fixed the probe's NAME to
@@ -686,7 +686,7 @@ export const httpApi: Api = {
   // until a real ipcMain handler lands (tracked as a follow-up; see BET-127
   // PR discussion).
   peekRemoteFile: async (remotePath) => {
-    const preload = (window as { __buiPreload?: { peekRemoteFile?: (p: string) => Promise<void> } }).__buiPreload;
+    const preload = (window as { __mantaPreload?: { peekRemoteFile?: (p: string) => Promise<void> } }).__mantaPreload;
     if (preload?.peekRemoteFile) {
       try {
         return await preload.peekRemoteFile(remotePath);
@@ -762,13 +762,13 @@ export const httpApi: Api = {
    * Electron HTTP-mode note: the main process installs a
    * `setWindowOpenHandler` that returns `{ action: "deny" }`, so
    * `window.open` from the renderer is blocked. We route through the typed
-   * preload accessor (`window.__buiPreload.openExternal`) when it's present
+   * preload accessor (`window.__mantaPreload.openExternal`) when it's present
    * (Electron HTTP mode), which goes through IPC to `shell.openExternal`.
    * On mobile/web there is no preload, so we fall back to `window.open`
    * which works because the WebView IS the browser.
    */
   openExternal: async (url) => {
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     if (preload) {
       try {
         await preload.openExternal(url);
@@ -942,7 +942,7 @@ export const httpApi: Api = {
   // missing-version client; bumping MIN_CLIENT above the current mobile
   // build will start surfacing the informational skew banner in MobileApp.
   getClientVersion: async (): Promise<{ version: string }> => {
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     if (preload?.clientVersion) {
       try {
         return await preload.clientVersion();

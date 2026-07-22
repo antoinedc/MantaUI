@@ -269,7 +269,7 @@ function registerHandlers(): void {
   // Read ONLY by main.tsx's boot sequence (`chooseDesktopTransport`), before
   // httpApi is installed as `window.api` — used to seed httpApi's
   // localStorage credentials from the desktop's local config.json (pairing
-  // triple). Called directly on `window.__buiPreload`, never through
+  // triple). Called directly on `window.__mantaPreload`, never through
   // `window.api` (which is httpApi post-boot and reaches config over
   // /rpc/config:get instead). See src/preload/index.ts and src/renderer/main.tsx.
   ipcMain.handle(IPC.configGet, () => config);

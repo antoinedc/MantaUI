@@ -73,7 +73,7 @@ export function resolveTransportMode(config) {
 // Post-BET-82 the desktop always uses httpApi. `selectDesktopTransport` is
 // kept as a thin wrapper for API compatibility — it always returns "http".
 // The real preload (Electron-local affordances: clipboard, reveal-in-folder,
-// OS notifications) is preserved as `window.__buiPreload`; `window.api` is
+// OS notifications) is preserved as `window.__mantaPreload`; `window.api` is
 // replaced with httpApi unconditionally.
 //
 // `hasPreload` is passed in (the caller checks `!!window.api`) so this stays

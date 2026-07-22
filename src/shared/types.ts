@@ -581,7 +581,7 @@ export const IPC = {
   // whether THIS Mac runs plugins, so it persists to the Mac-local config
   // (read by capExecutor at start time) — NOT the box config that
   // `configGet`/`configUpdate` round-trip through httpApi. Routed via the
-  // preload bridge (window.__buiPreload.pluginsSetEnabled / pluginsGetEnabled)
+  // preload bridge (window.__mantaPreload.pluginsSetEnabled / pluginsGetEnabled)
   // exactly like configGet, which is also handled locally in main on
   // HTTP mode so the renderer can read Mac-local state without an httpApi
   // round-trip to the box.

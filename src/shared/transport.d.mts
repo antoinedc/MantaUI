@@ -39,7 +39,7 @@ export function parseClaimResponse(json: unknown): ClaimResult;
 
 // Which client the DESKTOP should install as window.api (BET-58):
 //   "http"    — paired config → the httpApi server client (keep preload for
-//               Electron-local affordances under window.__buiPreload)
+//               Electron-local affordances under window.__mantaPreload)
 //   "preload" — SSH/onboarding/skipped → the legacy preload bridge
 // `hasPreload` is `!!window.api` (Electron sets it; the mobile build doesn't).
 export function selectDesktopTransport(

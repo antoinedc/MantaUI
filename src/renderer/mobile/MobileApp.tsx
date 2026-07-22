@@ -298,7 +298,7 @@ export function MobileApp() {
     windowIndex: number,
     sessionId: string,
   ) => {
-    (window as Window & { __buiScrollQuestionSession?: string | null }).__buiScrollQuestionSession =
+    (window as Window & { __mantaScrollQuestionSession?: string | null }).__mantaScrollQuestionSession =
       sessionId;
     openSession(projectName, windowIndex);
     window.dispatchEvent(

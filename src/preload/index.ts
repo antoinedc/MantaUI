@@ -14,14 +14,14 @@ import type { ClaimOutcome } from "../shared/claim.mjs";
 // secrets/webhook/voice/git/fs/pty/...) is httpApi-only now (BET-82: "SSH
 // main path gone" — `window.api` is always httpApi on desktop, never this
 // object). See `src/renderer/preloadAccess.ts` for the typed accessor most
-// callers should use (`getBuiPreload()`), and BET-127 for the extraction
+// callers should use (`getMantaPreload()`), and BET-127 for the extraction
 // history.
 const api = {
   // Read ONLY by main.tsx's boot sequence (`chooseDesktopTransport`), before
   // httpApi is installed as `window.api` — used to seed httpApi's
   // localStorage credentials from the desktop's local config.json (pairing
   // triple). This is the one "data" method that must stay: it is called
-  // directly on `window.__buiPreload`, never through `window.api`.
+  // directly on `window.__mantaPreload`, never through `window.api`.
   configGet: (): Promise<AppConfig> => ipcRenderer.invoke(IPC.configGet),
 
   // Onboarding pairing (BET-49): exchange a 6-digit code for the box's tokens
@@ -110,6 +110,6 @@ const api = {
 // renderer entry (main.tsx) needs to install `window.api` itself and, in
 // http/paired mode, SWAP it for the httpApi client — a swap that throws
 // "Cannot assign to read only property 'api'" if `api` is the contextBridge
-// property. So we bridge under `__buiPreload` (immutable, always the genuine
+// property. So we bridge under `__mantaPreload` (immutable, always the genuine
 // Electron preload) and let main.tsx define a writable `window.api` from it.
-contextBridge.exposeInMainWorld("__buiPreload", api);
+contextBridge.exposeInMainWorld("__mantaPreload", api);

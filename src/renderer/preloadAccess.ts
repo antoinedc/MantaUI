@@ -12,7 +12,7 @@ import type { DesktopNotifyPayload, ServerUpdateAvailablePayload } from "../shar
  * `window.api`) includes tmux/opencode/config channels that go over SSH or
  * HTTP — those are NOT OS-integration and must not live here.
  */
-export interface BuiPreload {
+export interface MantaPreload {
   onScreenshotDetected(
     cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
   ): () => void;
@@ -39,7 +39,7 @@ export interface BuiPreload {
   // registered for IPC.peekRemoteFile in src/main/index.ts today, so calling
   // this currently rejects rather than opening a file. That gap predates this
   // extraction and is out of scope here (flagged for a follow-up); this
-  // change only reconciles the name so httpApi's `window.__buiPreload` probe
+  // change only reconciles the name so httpApi's `window.__mantaPreload` probe
   // (httpApi.ts peekRemoteFile) actually finds the method instead of always
   // silently falling through to the (also-stubbed) server RPC no-op.
   peekRemoteFile(remotePath: string): Promise<void>;
@@ -70,16 +70,16 @@ export interface BuiPreload {
 }
 
 /**
- * Typed accessor for `window.__buiPreload`.
+ * Typed accessor for `window.__mantaPreload`.
  *
- * `main.tsx` always initializes `window.__buiPreload`:
+ * `main.tsx` always initializes `window.__mantaPreload`:
  *   - Electron http-mode: the real preload (set in chooseDesktopTransport).
  *   - Electron preload-mode: the real preload (aliased from window.api).
  *   - Mobile/web: null (no preload ran).
  *
- * Callers should treat the return value as `BuiPreload | null` and no-op
+ * Callers should treat the return value as `MantaPreload | null` and no-op
  * when null — never assume it's non-null.
  */
-export function getBuiPreload(): BuiPreload | null {
-  return window.__buiPreload;
+export function getMantaPreload(): MantaPreload | null {
+  return window.__mantaPreload;
 }

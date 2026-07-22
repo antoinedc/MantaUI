@@ -433,7 +433,7 @@ describe("ChatPanel abort rejects orphaned questions", () => {
 // Regression coverage for the HTTP-mode bug where acceptScreenshot dead-ended
 // on window.api.clipboardReadImage / window.api.uploadFiles (both server-side
 // stubs once window.api is httpApi). The fix routes bytes through
-// window.__buiPreload (the real Electron preload, never swapped) and then
+// window.__mantaPreload (the real Electron preload, never swapped) and then
 // uploads them via window.api.uploadBuffer — the one primitive that actually
 // works in HTTP mode. These tests assert the chip reaches "ready" with a
 // remotePath, and that the preload OS bridge (not window.api) supplied bytes.
@@ -443,7 +443,7 @@ describe("ChatPanel screenshot accept", () => {
   afterEach(() => {
     h?.unmount();
     h = null;
-    (window as unknown as { __buiPreload: unknown }).__buiPreload = null;
+    (window as unknown as { __mantaPreload: unknown }).__mantaPreload = null;
   });
 
   it("clipboard source: reads bytes via preload.clipboardReadImage, uploads via window.api.uploadBuffer", async () => {
@@ -451,8 +451,8 @@ describe("ChatPanel screenshot accept", () => {
     const clipboardReadImage = () => Promise.resolve(fakeBuf);
     const readLocalFile = () => Promise.reject(new Error("should not be called"));
     (window as unknown as {
-      __buiPreload: { clipboardReadImage: typeof clipboardReadImage; readLocalFile: typeof readLocalFile };
-    }).__buiPreload = { clipboardReadImage, readLocalFile };
+      __mantaPreload: { clipboardReadImage: typeof clipboardReadImage; readLocalFile: typeof readLocalFile };
+    }).__mantaPreload = { clipboardReadImage, readLocalFile };
 
     let uploadedBuffer: ArrayBuffer | null = null;
     const { api } = installMockApi({
@@ -495,8 +495,8 @@ describe("ChatPanel screenshot accept", () => {
       return Promise.resolve(fakeBuf);
     };
     (window as unknown as {
-      __buiPreload: { readLocalFile: typeof readLocalFile };
-    }).__buiPreload = { readLocalFile };
+      __mantaPreload: { readLocalFile: typeof readLocalFile };
+    }).__mantaPreload = { readLocalFile };
 
     let uploadedBuffer: ArrayBuffer | null = null;
     installMockApi({
@@ -527,7 +527,7 @@ describe("ChatPanel screenshot accept", () => {
   });
 
   it("no preload (mobile/web): chip goes to error state instead of silently dropping", async () => {
-    (window as unknown as { __buiPreload: unknown }).__buiPreload = null;
+    (window as unknown as { __mantaPreload: unknown }).__mantaPreload = null;
     installMockApi();
     resetStore({
       screenshotToast: { source: "clipboard" },

@@ -55,7 +55,7 @@ type PromptAgentMention = {
  * preload's own `api` object only ever backed `window.api` in the retired
  * SSH-main path (BET-82: "SSH main path gone"). Only a small OS-bridge +
  * pairing subset of these methods is still implemented by the preload runtime
- * itself (exposed under `window.__buiPreload`, see `src/preload/index.ts` and
+ * itself (exposed under `window.__mantaPreload`, see `src/preload/index.ts` and
  * `src/renderer/preloadAccess.ts`); everything else here is httpApi-only.
  *
  * Do NOT change any method signature here without also updating `httpApi`

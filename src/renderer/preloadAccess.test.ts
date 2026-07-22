@@ -1,16 +1,16 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getBuiPreload } from "./preloadAccess";
-import type { BuiPreload } from "./preloadAccess";
+import { getMantaPreload } from "./preloadAccess";
+import type { MantaPreload } from "./preloadAccess";
 
-// Simulate mobile/web: no preload, no __buiPreload.
+// Simulate mobile/web: no preload, no __mantaPreload.
 function mockMobileWeb(): void {
-  const w = window as unknown as { __buiPreload: BuiPreload | null };
-  w.__buiPreload = null;
+  const w = window as unknown as { __mantaPreload: MantaPreload | null };
+  w.__mantaPreload = null;
 }
 
 // Build a fake preload with spy callbacks so we can verify forwarding.
-function makeFakePreload(): BuiPreload {
+function makeFakePreload(): MantaPreload {
   return {
     onScreenshotDetected: vi.fn((cb: (ev: unknown) => void) => {
       cb({ source: "clipboard" });
@@ -30,8 +30,8 @@ function makeFakePreload(): BuiPreload {
     pluginsGetEnabled: vi.fn(async () => false),
     pluginsSetEnabled: vi.fn(async () => {}),
     // BET-225 stage 3: client version + server-update available. The fake
-    // matches the BuiPreload shape added in src/renderer/preloadAccess.ts;
-    // we only care about getBuiPreload's contract here, not the methods
+    // matches the MantaPreload shape added in src/renderer/preloadAccess.ts;
+    // we only care about getMantaPreload's contract here, not the methods
     // themselves, so minimal vi.fn stubs suffice.
     clientVersion: vi.fn(async () => ({ version: "test-client" })),
     onServerUpdateAvailable: vi.fn((cb: (p: unknown) => void) => {
@@ -41,7 +41,7 @@ function makeFakePreload(): BuiPreload {
   };
 }
 
-describe("getBuiPreload", () => {
+describe("getMantaPreload", () => {
   beforeEach(() => {
     mockMobileWeb();
   });
@@ -51,15 +51,15 @@ describe("getBuiPreload", () => {
   });
 
   it("returns null on mobile/web (no preload)", () => {
-    expect(getBuiPreload()).toBeNull();
+    expect(getMantaPreload()).toBeNull();
   });
 
-  it("returns the real preload when __buiPreload is set (Electron)", () => {
+  it("returns the real preload when __mantaPreload is set (Electron)", () => {
     const fake = makeFakePreload();
-    const w = window as unknown as { __buiPreload: BuiPreload | null };
-    w.__buiPreload = fake;
+    const w = window as unknown as { __mantaPreload: MantaPreload | null };
+    w.__mantaPreload = fake;
 
-    expect(getBuiPreload()).toBe(fake);
+    expect(getMantaPreload()).toBe(fake);
   });
 
   it("forwards onScreenshotDetected to the callback", () => {
@@ -69,11 +69,11 @@ describe("getBuiPreload", () => {
     fake.onScreenshotDetected = vi.fn((_fn: (ev: unknown) => void) => {
       storedOff = () => {};
       return storedOff;
-    }) as unknown as BuiPreload["onScreenshotDetected"];
-    const w = window as unknown as { __buiPreload: BuiPreload | null };
-    w.__buiPreload = fake;
+    }) as unknown as MantaPreload["onScreenshotDetected"];
+    const w = window as unknown as { __mantaPreload: MantaPreload | null };
+    w.__mantaPreload = fake;
 
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     expect(preload).not.toBeNull();
     const off = preload!.onScreenshotDetected(cb);
     expect(off).toBe(storedOff);
@@ -82,10 +82,10 @@ describe("getBuiPreload", () => {
 
   it("forwards clipboardWriteText to the preload", async () => {
     const fake = makeFakePreload();
-    const w = window as unknown as { __buiPreload: BuiPreload | null };
-    w.__buiPreload = fake;
+    const w = window as unknown as { __mantaPreload: MantaPreload | null };
+    w.__mantaPreload = fake;
 
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     expect(preload).not.toBeNull();
     await preload!.clipboardWriteText("hello");
     expect(fake.clipboardWriteText).toHaveBeenCalledWith("hello");
@@ -93,10 +93,10 @@ describe("getBuiPreload", () => {
 
   it("forwards openExternal to the preload", async () => {
     const fake = makeFakePreload();
-    const w = window as unknown as { __buiPreload: BuiPreload | null };
-    w.__buiPreload = fake;
+    const w = window as unknown as { __mantaPreload: MantaPreload | null };
+    w.__mantaPreload = fake;
 
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     expect(preload).not.toBeNull();
     await preload!.openExternal("https://example.com");
     expect(fake.openExternal).toHaveBeenCalledWith("https://example.com");
@@ -104,10 +104,10 @@ describe("getBuiPreload", () => {
 
   it("forwards revealInFolder to the preload", async () => {
     const fake = makeFakePreload();
-    const w = window as unknown as { __buiPreload: BuiPreload | null };
-    w.__buiPreload = fake;
+    const w = window as unknown as { __mantaPreload: MantaPreload | null };
+    w.__mantaPreload = fake;
 
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     expect(preload).not.toBeNull();
     await preload!.revealInFolder("/tmp/foo");
     expect(fake.revealInFolder).toHaveBeenCalledWith("/tmp/foo");
@@ -115,10 +115,10 @@ describe("getBuiPreload", () => {
 
   it("forwards getPathForFile to the preload", () => {
     const fake = makeFakePreload();
-    const w = window as unknown as { __buiPreload: BuiPreload | null };
-    w.__buiPreload = fake;
+    const w = window as unknown as { __mantaPreload: MantaPreload | null };
+    w.__mantaPreload = fake;
 
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     expect(preload).not.toBeNull();
     const file = new File(["x"], "test.txt");
     const result = preload!.getPathForFile(file);
@@ -126,10 +126,10 @@ describe("getBuiPreload", () => {
     expect(result).toBe("test.txt");
   });
 
-  it("returns null when __buiPreload is not set (true mobile/web)", () => {
-    // Ensure __buiPreload is null (simulating mobile/web where no preload ran).
-    const w = window as unknown as { __buiPreload: BuiPreload | null };
-    w.__buiPreload = null;
-    expect(getBuiPreload()).toBeNull();
+  it("returns null when __mantaPreload is not set (true mobile/web)", () => {
+    // Ensure __mantaPreload is null (simulating mobile/web where no preload ran).
+    const w = window as unknown as { __mantaPreload: MantaPreload | null };
+    w.__mantaPreload = null;
+    expect(getMantaPreload()).toBeNull();
   });
 });

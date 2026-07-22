@@ -65,7 +65,7 @@ import { useVoice } from "./hooks/useVoice";
 import { useTypeahead } from "./hooks/useTypeahead";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
-import { getBuiPreload } from "./preloadAccess";
+import { getMantaPreload } from "./preloadAccess";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
@@ -444,11 +444,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // (warm — app already open on this session). Either arms wantQuestionScroll;
   // the effect below performs the scroll once the questions have rendered.
   useEffect(() => {
-    type ScrollWin = Window & { __buiScrollQuestionSession?: string | null };
+    type ScrollWin = Window & { __mantaScrollQuestionSession?: string | null };
     const w = window as ScrollWin;
-    if (w.__buiScrollQuestionSession && w.__buiScrollQuestionSession === sessionId) {
+    if (w.__mantaScrollQuestionSession && w.__mantaScrollQuestionSession === sessionId) {
       wantQuestionScroll.current = true;
-      w.__buiScrollQuestionSession = null;
+      w.__mantaScrollQuestionSession = null;
     }
     const onEvt = (e: Event) => {
       const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
@@ -1286,7 +1286,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       // Only Electron main can read the Mac clipboard or a Mac file — both
       // must come from the preload OS bridge, never window.api (which is
       // httpApi in HTTP mode and has no OS access; the server IS the box).
-      const preload = getBuiPreload();
+      const preload = getMantaPreload();
       if (!preload) throw new Error("Screenshot capture requires the desktop app");
 
       let buf: ArrayBuffer;
