@@ -207,7 +207,7 @@ app.whenReady().then(() => {
     // Report desktop focus to the mobile server so it suppresses redundant
     // mobile "done" pushes while the user is active on desktop.
     startDesktopPresence(() => config);
-    // Receive desktop OS-notification directives from bui-server's router
+    // Receive desktop OS-notification directives from manta-server's router
     // (over direct HTTPS) and forward them to the renderer.
     startDesktopNotifications(
       () => config,
@@ -231,7 +231,7 @@ app.whenReady().then(() => {
       },
     );
     // Capability executor (BET-183 / BET-185 / BET-190): when enabled in
-    // Settings, this Mac subscribes to bui-server's bus and runs the YAML
+    // Settings, this Mac subscribes to manta-server's bus and runs the YAML
     // plugins it finds under ~/.manta/plugins/. startCapExecutor is a
     // no-op when pluginsEnabled is off.
     startCapExecutor(() => config);

@@ -81,7 +81,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     return storedCwd || trimmed || "~";
   }
 
-  // Resolve a caller's bui project (tmux session) name from its opencode
+  // Resolve a caller's manta project (tmux session) name from its opencode
   // sessionID, for project-scoped secret resolution (mobile in-process path).
   async function resolveProjectName(sessionID) {
     if (!sessionID) return null;
@@ -141,7 +141,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // Same channel names + payload shapes as the desktop IPC, so the
     // renderer code is identical. API key + model overrides come from the
     // mobile-server config (~/.manta/config.json). Stored plaintext —
-    // same trust model as the rest of bui's credentials.
+    // same trust model as the rest of manta's credentials.
     //
     // preload: ipcRenderer.invoke(IPC.voiceTranscribe, { buffer, mime })
     //   → args[0] = { buffer: ArrayBuffer, mime: string }
@@ -296,7 +296,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // server-update apply (BET-225 stage 3 Part A): kick off the box's
     // self-update script (scripts/self-update.sh — git fetch + reset --hard
     // origin/main + npm ci --omit=dev + systemctl --user restart
-    // manta-server). The script's final step kills this bui-server process
+    // manta-server). The script's final step kills this manta-server process
     // mid-run, so the child is detached via `runServerSelfUpdate` rather
     // than awaited here — the caller (renderer UpdateBar) just sees the
     // RPC promise resolve as soon as execFile returns. No caller-supplied
@@ -390,7 +390,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     "opencode:generate-title": ({ directory, instruction }) =>
       oc.generateSessionTitle({ directory, instruction }),
 
-    // ---- scheduled prompts (bui-server owned; in-process on mobile) ----
+    // ---- scheduled prompts (manta-server owned; in-process on mobile) ----
     // Mirror of desktop IPC.scheduleList / scheduleDelete. The store + firing
     // loop live in src/server/schedule.mjs; these just read/mutate it. Delete
     // publishes schedule.updated so the ScheduledTasksCard refetches live.
@@ -400,7 +400,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     "schedule:delete": (id) =>
       scheduleDeleteJob(id, { publish: (evt) => bus.publish(evt) }),
 
-    // ---- secrets (bui-server owned; in-process on mobile) ----
+    // ---- secrets (manta-server owned; in-process on mobile) ----
     // Mirror of desktop IPC.secretsList / secretsSet / secretsDelete. The store
     // lives in src/server/secrets.mjs; the UI never sees secret VALUES — list
     // returns metadata only. Mutations publish secrets.updated so the
@@ -423,7 +423,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     "secrets:delete": (id) =>
       secretsDeleteStore(id, { publish: (evt) => bus.publish(evt) }),
 
-    // ---- inbound webhooks (bui-server owned; in-process on mobile) ----
+    // ---- inbound webhooks (manta-server owned; in-process on mobile) ----
     // Mirror of desktop IPC.webhookList / webhookDelete. The registry + public
     // delivery route live in src/server/webhooks.mjs; these just read/mutate it.
     // list returns metadata only (no signing secret); creation is the AI's job

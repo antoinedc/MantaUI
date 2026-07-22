@@ -37,7 +37,7 @@ async function makeApnsKeyFile() {
   const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   const path = join(
     tmpdir(),
-    `bui-gw-apns-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.p8`,
+    `manta-gw-apns-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.p8`,
   );
   await writeFile(path, pem, "utf-8");
   return { path, cleanup: () => rm(path, { force: true }) };
@@ -264,7 +264,7 @@ test("_resetApnsJwtCache forces a fresh sign (verified via sendApns)", async () 
 
 test("loadApnsConfig: happy path", async () => {
   const { cfg, cleanup: p8Cleanup } = await makeApnsKeyConfig();
-  const dir = join(tmpdir(), `bui-gw-cfg-${process.pid}-${Date.now()}`);
+  const dir = join(tmpdir(), `manta-gw-cfg-${process.pid}-${Date.now()}`);
   await mkdir(dir, { recursive: true });
   const path = join(dir, "apns.json");
   try {
@@ -286,7 +286,7 @@ test("loadApnsConfig: missing file → null", async () => {
 });
 
 test("loadApnsConfig: malformed JSON → null", async () => {
-  const dir = join(tmpdir(), `bui-gw-cfg-${process.pid}-${Date.now()}`);
+  const dir = join(tmpdir(), `manta-gw-cfg-${process.pid}-${Date.now()}`);
   await mkdir(dir, { recursive: true });
   const path = join(dir, "bad.json");
   try {
@@ -299,7 +299,7 @@ test("loadApnsConfig: malformed JSON → null", async () => {
 });
 
 test("loadApnsConfig: missing required fields → null", async () => {
-  const dir = join(tmpdir(), `bui-gw-cfg-${process.pid}-${Date.now()}`);
+  const dir = join(tmpdir(), `manta-gw-cfg-${process.pid}-${Date.now()}`);
   await mkdir(dir, { recursive: true });
   const path = join(dir, "partial.json");
   try {

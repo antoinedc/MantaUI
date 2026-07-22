@@ -1,4 +1,4 @@
-// secrets.mjs — secure secret store for bui-server (the always-on Linux box).
+// secrets.mjs — secure secret store for manta-server (the always-on Linux box).
 //
 // PROBLEM: the user wants to hand a secret (e.g. a GitHub PAT) to a working
 // agent WITHOUT the value ever appearing in the AI transcript. A secret leaks
@@ -13,7 +13,7 @@
 //   The value lives on disk; the transcript only ever holds the path + the
 //   key name + a human-written usage hint (all non-secret).
 //
-// The HUMAN sets secrets via the bui UI (a key-value card) → the value travels
+// The HUMAN sets secrets via the manta UI (a key-value card) → the value travels
 // renderer → HTTPS → here, never through opencode. There is NO
 // `secret_set` tool, on purpose: if an agent could store a secret, the value
 // would pass through the transcript.
@@ -56,7 +56,7 @@ export function isValidScope(scope) {
   return scope === "shared" || scope === "session" || scope === "project";
 }
 
-// A project name = a bui workspace (tmux session) name, e.g. "Ronda". Used as a
+// A project name = a manta workspace (tmux session) name, e.g. "Ronda". Used as a
 // path segment for materialized project secrets, so keep it filesystem-safe.
 export function isValidProject(name) {
   return typeof name === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(name);

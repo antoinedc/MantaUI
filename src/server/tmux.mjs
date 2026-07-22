@@ -78,7 +78,7 @@ export async function listProjects() {
   return parseSessions(sess.stdout, wins.stdout);
 }
 
-// Chat-mode windows don't run a TUI — bui renders its own React ChatPanel
+// Chat-mode windows don't run a TUI — manta renders its own React ChatPanel
 // into the slot. The tmux pane just holds the window alive so the existing
 // project/window model still works. `sleep infinity` exits cleanly when the
 // window is killed (no zombies) and consumes no CPU.
@@ -121,7 +121,7 @@ async function maybeCreateChatSession(oc, chatMode, cwd, title) {
 
 // Create the tmux window with an explicit index-returning form. For chat-mode
 // we launch the holder pane (`sleep infinity`) instead of the default shell so
-// the pane is inert under bui's overlaid ChatPanel; for non-chat we launch the
+// the pane is inert under manta's overlaid ChatPanel; for non-chat we launch the
 // default shell (no trailing command).
 async function newWindowGetIndexInternal(sessionName, windowName, cwd, chatMode) {
   const { stdout } = await run("tmux", [

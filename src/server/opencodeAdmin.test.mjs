@@ -65,8 +65,8 @@ describe("runServerSelfUpdate", () => {
     assert.equal(calls[0].cmd, "/abs/scripts/self-update.sh");
     assert.deepEqual(calls[0].args, []);
     // detached:true is the load-bearing flag — without it the child would
-    // keep the bui-server alive after the restart. stdio:"ignore" keeps
-    // the script's stdout/stderr from blowing up bui-server's stdio.
+    // keep the manta-server alive after the restart. stdio:"ignore" keeps
+    // the script's stdout/stderr from blowing up manta-server's stdio.
     assert.equal(calls[0].opts.detached, true);
     assert.equal(calls[0].opts.stdio, "ignore");
   });

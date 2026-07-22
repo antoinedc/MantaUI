@@ -457,9 +457,9 @@ export function classifyPushEvent(evt, ctx) {
     }
     case "session.error": {
       // A MessageAbortedError is NOT a failure — it's the signal opencode
-      // emits when the running turn was intentionally aborted. bui aborts on
+      // emits when the running turn was intentionally aborted. manta aborts on
       // purpose in two cases: an explicit user abort, and the mid-flight
-      // queued-message DRAIN (user submits while running → bui aborts the
+      // queued-message DRAIN (user submits while running → manta aborts the
       // in-flight turn and resubmits the queued prompt transparently; see
       // ChatPanel `maybeDrainQueuedPrompt` + `isDrainAbortError`). The
       // renderer swallows this error's banner client-side, but that
@@ -680,7 +680,7 @@ async function dispatchNotification(payload, now = Date.now()) {
 }
 
 /**
- * AI-triggered notification — the bui-native `notify` opencode tool POSTs here
+ * AI-triggered notification — the manta-native `notify` opencode tool POSTs here
  * via POST /api/notify. Session-tied: carries the originating sessionID so it
  * deep-links + dedupes like every other push.
  *

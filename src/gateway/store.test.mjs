@@ -17,7 +17,7 @@ import {
 } from "./store.mjs";
 
 function freshTmpPath(label) {
-  const dir = mkdtempSync(join(tmpdir(), `bui-gw-store-${label}-`));
+  const dir = mkdtempSync(join(tmpdir(), `manta-gw-store-${label}-`));
   return { dir, path: join(dir, "boxes.json") };
 }
 

@@ -18,7 +18,7 @@ export const MAX_BODY_BYTES = 256 * 1024;
 // WKWebView) pairs by fetch()ing https://gateway.mantaui.com/* from a
 // cross-origin frame — without Access-Control-Allow-Origin the request
 // hangs on iOS instead of cleanly returning an error. Same shape as the
-// relay/bui-server already use.
+// relay/manta-server already use.
 export function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",

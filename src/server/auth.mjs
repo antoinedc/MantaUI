@@ -1,4 +1,4 @@
-// auth.mjs — single-box token auth for bui-server (the always-on Linux box).
+// auth.mjs — single-box token auth for manta-server (the always-on Linux box).
 //
 // PROBLEM: today src/server/index.mjs binds 0.0.0.0:8787 with ZERO auth. The
 // only authenticated route is the public /hook/<token> webhook leg. Everything
@@ -119,7 +119,7 @@ export function isExemptPath(path) {
 // Local-only gate for minting pairing codes
 // ---------------------------------------------------------------------------
 //
-// GET /auth/pair must be callable ONLY from the box itself (the `bui pair` CLI,
+// GET /auth/pair must be callable ONLY from the box itself (the `manta pair` CLI,
 // or any other channel that terminates on the box).
 // A bare loopback check is NOT enough: cloudflared runs on this box and proxies
 // PUBLIC traffic to 127.0.0.1:8787, so tunnel requests also arrive with a

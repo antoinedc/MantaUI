@@ -1,5 +1,5 @@
 // serverUpdateForwarder.ts — relay server-update-available bus events from
-// bui-server's /events SSE stream to the desktop renderer via IPC.
+// manta-server's /events SSE stream to the desktop renderer via IPC.
 //
 // Mirrors the desktopNotify pattern (src/main/desktopNotify.ts) one-for-one:
 // the SSE plumbing (Bearer-authed long-lived GET, 3s auto-reconnect, frame
@@ -22,7 +22,7 @@ import type { AppConfig, ServerUpdateAvailablePayload } from "../shared/types.js
 let consumer: BusConsumer | null = null;
 
 /**
- * Start forwarding server-update-available envelopes from bui-server's bus
+ * Start forwarding server-update-available envelopes from manta-server's bus
  * to the renderer. `configGetter` returns the live AppConfig (serverUrl +
  * boxToken for HTTPS Bearer auth); `onPayload` delivers the parsed payload
  * to the renderer (typically a webContents.send). Idempotent.

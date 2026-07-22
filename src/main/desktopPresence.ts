@@ -7,7 +7,7 @@
 // box. If the server isn't running, the POST simply fails and we swallow it —
 // presence is a nice-to-have, never load-bearing.
 //
-// ACTIVE = (a bui window is focused) AND (the user actually touched the
+// ACTIVE = (a manta window is focused) AND (the user actually touched the
 // keyboard/mouse recently). Window focus ALONE is not enough: picking up your
 // phone does NOT blur the desktop window (macOS only fires blur when another
 // *Mac* app takes focus), so a focus-only signal would keep reporting "active"
@@ -32,7 +32,7 @@ import type { AppConfig } from "../shared/types.js";
 const POLL_MS = 10_000;
 
 // No keyboard/mouse input for this long ⇒ treat the desktop as "away" even if a
-// bui window is still the frontmost Mac window. Tuned so glancing at your phone
+// manta window is still the frontmost Mac window. Tuned so glancing at your phone
 // for a moment doesn't immediately flip you away, but actually setting the Mac
 // down does. Combined with the server's 30s grace window, the effective
 // hand-off is ~IDLE_ACTIVE_THRESHOLD_S + 30s.
@@ -85,7 +85,7 @@ function anyWindowFocused(): boolean {
   );
 }
 
-// True when the user is genuinely working at the desktop right now: a bui
+// True when the user is genuinely working at the desktop right now: a manta
 // window is frontmost AND there's been recent keyboard/mouse input.
 function isDesktopActive(): boolean {
   if (!anyWindowFocused()) return false;

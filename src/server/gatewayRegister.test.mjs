@@ -18,7 +18,7 @@ const NEW_TOKEN = "aaaa1111bbbb2222cccc3333dddd4444";
 function tmpAuthPath(label) {
   return join(
     tmpdir(),
-    `bui-gateway-register-${label}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    `manta-gateway-register-${label}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     "auth.json",
   );
 }

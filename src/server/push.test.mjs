@@ -608,7 +608,7 @@ test("escalation: re-notify same tag supersedes (no duplicate timer)", async () 
 function makeApnsStorePath(label) {
   return join(
     tmpdir(),
-    `bui-apns-tokens-test-${label}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
+    `manta-apns-tokens-test-${label}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
   );
 }
 

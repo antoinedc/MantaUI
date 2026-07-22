@@ -1,4 +1,4 @@
-// providers.mjs — Provider management for the bui mobile server.
+// providers.mjs — Provider management for the manta mobile server.
 //
 // Ports the pure helpers from src/main/providers.ts (parseModelsResponse,
 // upsertProviderBlock, removeProviderBlock, readProviderEndpoints,
@@ -214,7 +214,7 @@ export function findStoredApiKey(cfg, baseURL) {
 
 // Insert or replace a single named subagent. Only the `agent` key is touched;
 // every other key in `cfg` is preserved by spread. `mode` is always forced to
-// "subagent" (the only config-writable agent type bui manages).
+// "subagent" (the only config-writable agent type manta manages).
 export function upsertAgentBlock(cfg, input) {
   const agents = getAgentMap(cfg);
   agents[input.name] = {

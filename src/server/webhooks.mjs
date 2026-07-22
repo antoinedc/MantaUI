@@ -1,4 +1,4 @@
-// webhooks.mjs — inbound event triggers for bui-server (the always-on Linux box).
+// webhooks.mjs — inbound event triggers for manta-server (the always-on Linux box).
 //
 // PROBLEM: today "wake a session on an external event" is faked with a recurring
 // `schedule` job that re-asks "is it done yet?" every N minutes — a full LLM turn
@@ -8,10 +8,10 @@
 //
 // A webhook is schedule.mjs minus the cron, plus a token registry and a PUBLIC
 // inbound route. It is the inbound counterpart to the outbound `notify` tool and
-// ends at the same primitive every bui tool converges on:
+// ends at the same primitive every manta tool converges on:
 // oc.sendPrompt({sessionId, text}) — inject a turn into a session.
 //
-// SECURITY: this is the FIRST bui endpoint reachable by an external, untrusted
+// SECURITY: this is the FIRST manta endpoint reachable by an external, untrusted
 // actor (it goes through the public Cloudflare tunnel), and its payload becomes a
 // prompt in a session that may have chatAutoAllow on. So:
 //   - the URL carries a 128-bit unguessable token (capability),

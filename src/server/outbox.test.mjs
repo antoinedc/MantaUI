@@ -14,7 +14,7 @@ async function makeOutbox() {
 // ----------------------------------------------------------------------------
 
 test("listOutbox returns [] when the dir doesn't exist", async () => {
-  const entries = await listOutbox(join(tmpdir(), "definitely-not-here-bui-xyz"));
+  const entries = await listOutbox(join(tmpdir(), "definitely-not-here-manta-xyz"));
   assert.deepEqual(entries, []);
 });
 

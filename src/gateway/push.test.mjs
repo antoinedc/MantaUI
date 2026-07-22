@@ -36,7 +36,7 @@ async function makeApnsCfg() {
   const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   const p8Path = join(
     tmpdir(),
-    `bui-gw-pushtest-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.p8`,
+    `manta-gw-pushtest-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.p8`,
   );
   await writeFile(p8Path, pem, "utf-8");
   return {

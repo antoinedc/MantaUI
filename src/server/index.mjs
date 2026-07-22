@@ -1,4 +1,4 @@
-// bui mobile server — runs on the Linux box, exposes tmux over HTTP+WS.
+// manta mobile server — runs on the Linux box, exposes tmux over HTTP+WS.
 // Serves a touch-friendly single-page client at /.
 //
 // Why local-exec: this process IS the remote. tmux + node-pty run in the same
@@ -117,7 +117,7 @@ async function handleApiDelete(req, url, res, deleteFn) {
 // the listen() callback returns, so the late binding is safe.
 let rpcHandlers = null;
 
-// Resolve a caller's bui project (tmux session) name from its opencode
+// Resolve a caller's manta project (tmux session) name from its opencode
 // sessionID and/or cwd, so project-scoped secrets resolve to the right
 // workspace. Reuses the same logic peers.mjs uses. Best-effort: returns null
 // if tmux is unreachable or the session/dir isn't matched.
@@ -244,7 +244,7 @@ rpcHandlers = buildHandlers({
 // stage-3 renderer banner consumes this), and fires ONE informational
 // notification through the existing push.fireNotify path so a closed app
 // still learns. Dedup is per-version. See src/server/serverUpdate.mjs +
-// docs/bui-update-system.md (BET-225 stage 2). Wired here — AFTER
+// docs/manta-update-system.md (BET-225 stage 2). Wired here — AFTER
 // SERVER_VERSION is read — so the poller can capture the box's running
 // version (reviewer caught a TDZ when this was placed next to the other
 // pollers above, before `SERVER_VERSION` was initialised).
@@ -300,7 +300,7 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
           const permId = evt.properties?.id;
           // Scope the reply to the permission's session directory. Without
           // this the unscoped reply 404s (PermissionNotFoundError) — the
-          // exact failure seen in the bui-server logs — so trust-mode
+          // exact failure seen in the manta-server logs — so trust-mode
           // auto-allow never actually allowed the tool and the turn hung.
           const permSessionId = evt.properties?.sessionID;
           if (permId) {
@@ -598,7 +598,7 @@ const server = createServer(async (req, res) => {
     }
     try {
       if (req.method === "GET" && path === "/auth/pair") {
-        // Minting a code is LOCAL-ONLY (the `bui pair` CLI / SSH forward).
+        // Minting a code is LOCAL-ONLY (the `manta pair` CLI / SSH forward).
         // Remote-reachable minting would let anyone claim the box_token in two
         // requests. Loopback alone is insufficient — cloudflared proxies public
         // traffic from 127.0.0.1 — so also reject proxy-injected forwarding
@@ -608,7 +608,7 @@ const server = createServer(async (req, res) => {
           !requireLoopback(
             req,
             res,
-            "pairing codes can only be minted from the box itself (run `bui pair` locally)",
+            "pairing codes can only be minted from the box itself (run `manta pair` locally)",
           )
         ) {
           return;
@@ -1072,7 +1072,7 @@ const server = createServer(async (req, res) => {
   }
 
   // ---------- Inbound webhook delivery (PUBLIC) ----------
-  // POST /hook/<token>  — the ONLY externally-reachable bui route. The raw body
+  // POST /hook/<token>  — the ONLY externally-reachable manta route. The raw body
   // is read verbatim (HMAC needs the exact bytes); the engine resolves the
   // token, rate-limits, verifies the signature (unless the hook is unsigned),
   // and wakes the session (or defers until idle if it's busy). Status codes:
@@ -1086,7 +1086,7 @@ const server = createServer(async (req, res) => {
     const token = path.slice("/hook/".length);
     try {
       const rawBody = await readRawBody(req);
-      const signatureHeader = req.headers["x-bui-signature"];
+      const signatureHeader = req.headers["x-manta-signature"];
       const result = await webhookEngine.deliver({
         token,
         rawBody,
@@ -1243,7 +1243,7 @@ const server = createServer(async (req, res) => {
   }
 
   // ---------- Secrets (secure key→value store) ----------
-  // The user stores secrets (a GitHub PAT, an API key…) via the bui UI; the
+  // The user stores secrets (a GitHub PAT, an API key…) via the manta UI; the
   // value lives ONLY here on the box and is NEVER returned to the AI. The
   // remote AI's global opencode `secret_list` / `secret_provide` tools read
   // through here. `secret_provide` materializes the value to a 0600 file and
