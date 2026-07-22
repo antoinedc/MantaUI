@@ -102,6 +102,9 @@ export function parseBearer(headerValue) {
 // Rationale for each exemption:
 //   /auth/pair, /auth/claim — bootstrap; you can't present a token you don't
 //     have yet. Rate-limited + code-gated instead.
+//   /pair, /pair/qr.png, /pair/logo.png — the pairing onboarding page; a
+//     visitor by definition has no token yet. The page carries no secrets
+//     (code is in the URL fragment; qr.png is a shape-validated encoder).
 //   /hook/<token>          — external senders can't hold the box_token; the hook
 //     already authenticates via its own 128-bit token + HMAC (webhooks.mjs).
 //   OPTIONS (handled by caller) — CORS preflight carries no credentials.
@@ -111,6 +114,7 @@ export function parseBearer(headerValue) {
 export function isExemptPath(path) {
   if (typeof path !== "string") return false;
   if (path === "/auth/pair" || path === "/auth/claim") return true;
+  if (path === "/pair" || path === "/pair/qr.png" || path === "/pair/logo.png") return true;
   if (path === "/hook/" || path.startsWith("/hook/")) return true;
   return false;
 }

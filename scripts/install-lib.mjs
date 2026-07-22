@@ -697,6 +697,7 @@ export function formatPairingOutput(
   // the box's own /auth/claim.
   if (box_id && /^[0-9]{6}$/.test(pairing_code)) {
     const pairLink = buildPairLink(box_id, pairing_code);
+    lines.push("  Pair page:     " + buildPairPageUrl(box_id, pairing_code));
     lines.push("  Pair link:     " + pairLink);
     lines.push("                 (paste into the desktop app, or scan as a QR)");
     let qr;
@@ -747,6 +748,21 @@ export function buildPairLink(boxId, code) {
     throw new Error("buildPairLink: code must be 6 digits");
   }
   return `manta://pair?box=${encodeURIComponent(boxId)}&code=${code}`;
+}
+
+/**
+ * Pair-page URL — the ONE link a fresh install reports. Fragment carries the
+ * code so it never reaches server logs; the page derives the box id from its
+ * own hostname. Shares buildPairLink's validation rules.
+ */
+export function buildPairPageUrl(boxId, code) {
+  if (!/^[0-9a-f]{32}$/.test(boxId ?? "")) {
+    throw new Error("buildPairPageUrl: boxId must be a 32-hex token");
+  }
+  if (!/^[0-9]{6}$/.test(code ?? "")) {
+    throw new Error("buildPairPageUrl: code must be 6 digits");
+  }
+  return `https://${boxId}.boxes.mantaui.com/pair#code=${code}`;
 }
 
 // Lazy-default QR renderer: requires `qrcode-terminal` at call time, not at

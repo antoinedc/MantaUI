@@ -78,6 +78,11 @@ import {
   AUTH_RL_CAPACITY,
   AUTH_RL_REFILL_PER_SEC,
 } from "./auth.mjs";
+import {
+  validatePairQrQuery,
+  renderPairQr,
+  readPairAsset,
+} from "./pairPage.mjs";
 import * as push from "./push.mjs";
 import { registerWithGateway } from "./gatewayRegister.mjs";
 import { readServerVersion, writeVersionResponse } from "./version.mjs";
@@ -638,6 +643,42 @@ const server = createServer(async (req, res) => {
     } catch (e) {
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
+    return;
+  }
+
+  // GET /pair* — box-served onboarding page (auth-exempt like /auth/claim:
+  // it IS the pairing entry point, and the code travels in the URL fragment
+  // which never reaches the server). See pairPage.mjs.
+  if (req.method === "GET" && path === "/pair") {
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    res.end(readPairAsset("pair.html"));
+    return;
+  }
+  if (req.method === "GET" && path === "/pair/logo.png") {
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Cache-Control": "public, max-age=86400",
+    });
+    res.end(readPairAsset("pair-logo.png"));
+    return;
+  }
+  if (req.method === "GET" && path === "/pair/qr.png") {
+    const query = Object.fromEntries(url.searchParams);
+    const v = validatePairQrQuery(query);
+    if (!v.ok) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: v.error }));
+      return;
+    }
+    const png = await renderPairQr(v.payload);
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Cache-Control": "no-store",
+    });
+    res.end(png);
     return;
   }
 
