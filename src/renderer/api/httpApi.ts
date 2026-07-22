@@ -587,6 +587,10 @@ export const httpApi: Api = {
 
   // -- git --
   gitListWorktrees: (cwd) => rpc(IPC.gitListWorktrees, cwd),
+  // BET-246: auto-create a sibling git worktree for a new chat session.
+  gitAddWorktree: (input) => rpc(IPC.gitAddWorktree, input),
+  // BET-246: remove a worktree MantaUI created (safe by default; force on retry).
+  gitRemoveWorktree: (input) => rpc(IPC.gitRemoveWorktree, input),
 
   // -- filesystem --
   fsListDirs: (partial) => rpc(IPC.fsListDirs, partial),

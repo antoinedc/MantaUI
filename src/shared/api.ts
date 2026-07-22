@@ -82,6 +82,10 @@ export interface Api {
     windowName: string;
     cwd?: string;
     chatMode?: boolean;
+    // BET-246: when set, the new tmux window also stamps the worktree path
+    // on `@manta-worktree-path` so clean-on-close knows it owns this
+    // worktree. Optional — omitted for non-worktree windows.
+    worktreePath?: string;
   }): Promise<Project[]>;
   tmuxRenameSession(input: { oldName: string; newName: string }): Promise<Project[]>;
   tmuxRenameWindow(input: {
@@ -94,6 +98,15 @@ export interface Api {
   tmuxSelectWindow(input: { sessionName: string; windowIndex: number }): Promise<void>;
 
   gitListWorktrees(cwd: string): Promise<WorktreeInfo[]>;
+  // BET-246: create a sibling git worktree next to `cwd`'s repo root, named
+  // after `name` (slugified). Returns the new { path, branch }. Errors
+  // propagate so the renderer can fail-closed (no silent fallback to the
+  // shared dir).
+  gitAddWorktree(input: { cwd: string; name: string }): Promise<{ path: string; branch: string }>;
+  // BET-246: remove a worktree MantaUI created. `force:false` returns
+  // { removed:false, reason:"dirty" } on a dirty checkout so the renderer
+  // can confirm before the retry. Any other failure throws.
+  gitRemoveWorktree(input: { path: string; force: boolean }): Promise<{ removed: boolean; reason?: "dirty" | "other" }>;
 
   fsListDirs(partial: string): Promise<string[]>;
 

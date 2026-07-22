@@ -112,6 +112,15 @@ type State = {
   // Agent → laptop push trust flag. When true, files the AI drops in its
   // remote outbox are pulled to the downloads dir without confirmation.
   allowAgentPush: boolean;
+  // BET-246: per-session git-worktree creation default (Settings → Files
+  // tab). Mirrors AppConfig.worktreePerSession. The new-session dialog
+  // seeds its checkbox from this value and lets the user override for
+  // one window. Settings-only — rides the generic configUpdate channel.
+  worktreePerSession: boolean;
+  // BET-246: when true, closing a session whose @manta-worktree-path
+  // user-option is set removes the worktree (and best-effort deletes its
+  // branch) first. Global only — no per-session override.
+  worktreeCleanOnClose: boolean;
   // Override destination for agent-pushed files. "" = main's default (~/Downloads).
   downloadsDir: string;
   // Global default model for new/cleared sessions. Set in Settings, persisted
@@ -297,6 +306,8 @@ export const useStore = create<State>((set, get) => ({
   chatAutoAllow: false,
   autoRenameSessions: false,
   allowAgentPush: false,
+  worktreePerSession: false,
+  worktreeCleanOnClose: false,
   downloadsDir: "",
   defaultModel: null,
   deactivatedMainModels: [],
@@ -415,6 +426,8 @@ export const useStore = create<State>((set, get) => ({
       chatAutoAllow: c.chatAutoAllow ?? false,
       autoRenameSessions: c.autoRenameSessions ?? false,
       allowAgentPush: c.allowAgentPush ?? false,
+      worktreePerSession: c.worktreePerSession ?? false,
+      worktreeCleanOnClose: c.worktreeCleanOnClose ?? false,
       downloadsDir: c.downloadsDir ?? "",
       defaultModel: c.defaultModel ?? null,
       deactivatedMainModels: c.deactivatedMainModels ?? [],

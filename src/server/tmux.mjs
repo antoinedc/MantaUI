@@ -56,12 +56,16 @@ export function parseSessions(sessStdout, winStdout) {
   // Phase 2: join windows into their session. Skip orphan window lines.
   for (const line of winStdout.split("\n").filter(Boolean)) {
     const parts = line.split(FS);
-    const [session, index, wname, active, pane, sidRaw] = parts;
+    const [session, index, wname, active, pane, sidRaw, wtRaw] = parts;
     if (!sessions.has(session)) continue; // defensive: orphan
     sessions.get(session).windows.push({
       index: Number(index), name: wname,
       active: active === "1", paneCurrentPath: pane,
       opencodeSessionId: sidRaw ? sidRaw : null,
+      // BET-246: when MantaUI auto-created a worktree for this window, the
+      // absolute path is stamped on `@manta-worktree-path`. Empty/null = not
+      // a worktree window — clean-on-close must skip it.
+      worktreePath: wtRaw ? wtRaw : null,
     });
   }
   return Array.from(sessions.values()).map((s) => ({
@@ -72,7 +76,7 @@ export function parseSessions(sessStdout, winStdout) {
 
 export async function listProjects() {
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
-  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}`;
+  const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}`;
   const sess = await run("tmux", ["list-sessions", "-F", sessFmt]).catch(() => ({ stdout: "" }));
   const wins = await run("tmux", ["list-windows", "-a", "-F", winFmt]).catch(() => ({ stdout: "" }));
   return parseSessions(sess.stdout, wins.stdout);
@@ -179,7 +183,7 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, o
   if (sid) await restampSessionId(name, idx, sid);
   return listProjects();
 }
-export async function newWindow({ sessionName, windowName, cwd, chatMode, oc }) {
+export async function newWindow({ sessionName, windowName, cwd, chatMode, worktreePath, oc }) {
   const sid = await maybeCreateChatSession(
     oc, chatMode, cwd ?? ".", `${sessionName} / ${windowName}`,
   );
@@ -196,6 +200,11 @@ export async function newWindow({ sessionName, windowName, cwd, chatMode, oc }) 
     await applySessionSurvivability(sessionName);
   }
   if (sid) await restampSessionId(sessionName, idx, sid);
+  // BET-246: stamp the worktree path (if any) so clean-on-close knows this
+  // window owns the worktree and may safely remove it. Mirrors the
+  // restampSessionId pattern — separate option name so the two stamps
+  // never collide.
+  if (worktreePath) await stampWorktreePath(sessionName, idx, worktreePath);
   return listProjects();
 }
 
@@ -259,5 +268,24 @@ export async function restampSessionId(sessionName, windowIndex, sessionId) {
     "set-window-option",
     "-t", `${sessionName}:${windowIndex}`,
     "@manta-session-id", sessionId,
+  ]);
+}
+
+/**
+ * Stamp (or update) the @manta-worktree-path user-option on a tmux window.
+ * Used by BET-246's clean-on-close to know which windows own a worktree
+ * that manta created (vs. pre-existing worktrees, which must NEVER be
+ * removed). Mirrors restampSessionId verbatim — separate option name so
+ * the two stamps never collide.
+ *
+ * @param {string} sessionName
+ * @param {number} windowIndex
+ * @param {string} path   absolute worktree path
+ */
+export async function stampWorktreePath(sessionName, windowIndex, path) {
+  await run("tmux", [
+    "set-window-option",
+    "-t", `${sessionName}:${windowIndex}`,
+    "@manta-worktree-path", path,
   ]);
 }

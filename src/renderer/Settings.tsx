@@ -41,6 +41,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
     voiceCommandModel,
     launcherFlags,
     shareAnalytics,
+    worktreePerSession,
+    worktreeCleanOnClose,
     refresh,
   } = useStore();
 
@@ -59,6 +61,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // Files fields (Files tab)
   const [agentPush, setAgentPush] = useState(allowAgentPush);
   const [dlDir, setDlDir] = useState(downloadsDir);
+  // BET-246: worktree-per-session + clean-on-close toggles. Global-only;
+  // the per-session override lives in the new-session dialog in Sidebar.
+  const [worktreeOn, setWorktreeOn] = useState(worktreePerSession);
+  const [worktreeClean, setWorktreeClean] = useState(worktreeCleanOnClose);
 
   // General fields (General tab)
   const [autoRename, setAutoRename] = useState(autoRenameSessions);
@@ -110,7 +116,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setVoiceCmdModel(voiceCommandModel);
     setLauncherFlagValues(launcherFlags ?? {});
     setAnalytics(shareAnalytics);
-  }, [skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, shareAnalytics]);
+    setWorktreeOn(worktreePerSession);
+    setWorktreeClean(worktreeCleanOnClose);
+  }, [skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, shareAnalytics, worktreePerSession, worktreeCleanOnClose]);
 
   // Seed the Mac-local `pluginsEnabled` toggle from the desktop's config
   // (BET-207). The store mirrors the BOX config (via httpApi.configGet),
@@ -190,6 +198,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
         voiceCommandModel: voiceCmdModel.trim(),
         shareAnalytics: analytics,
         launcherFlags: launcherFlagValues,
+        // BET-246: per-session worktree defaults — global settings only;
+        // the per-window override lives in Sidebar's new-session dialog.
+        worktreePerSession: worktreeOn,
+        worktreeCleanOnClose: worktreeClean,
       });
       // BET-207: persist `pluginsEnabled` to the Mac-local config via the
       // preload bridge — NOT via window.api.configUpdate (which writes the
@@ -620,6 +632,45 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       Destination for AI-sent files. Absolute path; leave empty for your OS Downloads folder.
                     </div>
                   </div>
+                </div>
+              </div>
+              {/* BET-246: per-session git-worktree creation + clean-on-close.
+                  Two independent toggles, same markup as allowAgentPush.
+                  Global-only — the per-window override lives in Sidebar. */}
+              <div className="border-t border-border pt-6">
+                <h3 className="text-base font-semibold mb-4">Session worktrees</h3>
+                <div className="space-y-3">
+                  <label className="flex items-start gap-3 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={worktreeOn}
+                      onChange={(e) => setWorktreeOn(e.target.checked)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      Create git worktree for new sessions
+                      <span className="block text-xs text-text-faint mt-1">
+                        When creating a new chat session in a project that's a git
+                        repo, automatically branch a sibling worktree and start the
+                        session on its own branch. Has no effect on non-git projects.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-3 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={worktreeClean}
+                      onChange={(e) => setWorktreeClean(e.target.checked)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      Remove worktree when a session is closed
+                      <span className="block text-xs text-text-faint mt-1">
+                        Deletes the session's git worktree on close. Prompts
+                        before discarding uncommitted changes.
+                      </span>
+                    </span>
+                  </label>
                 </div>
               </div>
             </div>

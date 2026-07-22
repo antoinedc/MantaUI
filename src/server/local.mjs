@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { deriveWorktree, isWorktreeDirtyError } from "../shared/worktree.mjs";
 
 // ============================================================
 // Config persistence (real implementation — renderer depends on it)
@@ -42,6 +43,10 @@ async function atomicWrite(path, data) {
 const DEFAULT_CONFIG = {
   projects: [],
   chatAutoAllow: false,
+  // BET-246: per-session worktree defaults (settings-only — read via the
+  // generic configGet/configUpdate channel like every other AppConfig field).
+  worktreePerSession: false,
+  worktreeCleanOnClose: false,
 };
 
 let _config = null;
@@ -150,6 +155,105 @@ export async function gitListWorktrees(cwd) {
   const { stdout } = await run("git", ["-C", cwd, "worktree", "list", "--porcelain"])
     .catch(() => ({ stdout: "" }));
   return parseWorktrees(stdout);
+}
+
+// gitAddWorktree({ cwd, name }) → { path, branch }
+// preload: ipcRenderer.invoke(IPC.gitAddWorktree, { cwd, name }) → args[0] = { cwd, name }
+// Resolve repoRoot via `git -C <cwd> rev-parse --show-toplevel`; pick a
+// non-colliding sibling path + branch via the pure deriveWorktree helper;
+// then run `git worktree add -b <branch> <path>` from the repo root. Errors
+// propagate (fail-closed) so the renderer's createSession can surface them
+// without falling back to the shared dir. Pure naming + collision logic
+// lives in src/shared/worktree.mjs — keep all string-shape work there.
+export async function gitAddWorktree({ cwd, name }) {
+  if (!cwd || !cwd.trim()) throw new Error("cwd is required");
+  if (!name || !name.trim()) throw new Error("name is required");
+  const { stdout: repoRootRaw } = await run("git", [
+    "-C", cwd, "rev-parse", "--show-toplevel",
+  ]);
+  const repoRoot = (repoRootRaw ?? "").trim();
+  if (!repoRoot) throw new Error("not a git repository");
+  // Pre-resolve the full branch set so deriveWorktree's collision check
+  // matches reality in a single pass (avoids a per-candidate git fork).
+  const { stdout: branchesRaw } = await run("git", [
+    "-C", repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads",
+  ]);
+  const branchSet = new Set(
+    (branchesRaw ?? "").split("\n").map((b) => b.trim()).filter(Boolean),
+  );
+  const { path, branch } = deriveWorktree({
+    repoRoot,
+    name,
+    dirExists: (p) => existsSync(p),
+    branchExists: (b) => branchSet.has(b),
+  });
+  try {
+    await run("git", ["-C", repoRoot, "worktree", "add", "-b", branch, path]);
+  } catch (err) {
+    // Re-throw with the git stderr in the message so the renderer can show
+    // it without having to inspect the raw error object.
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(msg);
+  }
+  return { path, branch };
+}
+
+// gitRemoveWorktree({ path, force }) → { removed, reason? }
+// preload: ipcRenderer.invoke(IPC.gitRemoveWorktree, { path, force }) → args[0] = { path, force }
+// Safe-first remove; on git's "dirty checkout" refusal, return
+// { removed:false, reason:"dirty" } so the renderer can confirm before
+// retrying with --force. Any OTHER error rethrows so the renderer can show
+// it verbatim. The renderer MUST NOT string-match git output — all of it
+// lives in isWorktreeDirtyError (src/shared/worktree.mjs).
+export async function gitRemoveWorktree({ path: wtPath, force }) {
+  if (!wtPath || !wtPath.trim()) throw new Error("path is required");
+  // Resolve branch BEFORE removal: after `worktree remove` the worktree
+  // directory is gone and `git -C <wt>` would fail. Best-effort branch
+  // delete — a non-clean branch with `-d` will refuse, and that's fine
+  // (the renderer chose not to force the worktree, so we don't force
+  // the branch either).
+  let branch = "";
+  let parentRepo = "";
+  try {
+    const { stdout } = await run("git", [
+      "-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD",
+    ]);
+    branch = (stdout ?? "").trim();
+    const { stdout: commonDir } = await run("git", [
+      "-C", wtPath, "rev-parse", "--path-format=absolute", "--git-common-dir",
+    ]);
+    // git-common-dir is the shared .git dir; the repo root for branch
+    // commands is its grandparent (or the same dir for non-linked worktrees).
+    parentRepo = dirname((commonDir ?? "").trim() || wtPath);
+  } catch {
+    // branch resolution failed → skip the branch delete (best-effort).
+  }
+  let removeErr = null;
+  try {
+    const args = ["worktree", "remove", ...(force ? ["--force"] : []), wtPath];
+    await run("git", ["-C", wtPath, ...args]);
+  } catch (err) {
+    removeErr = err;
+  }
+  if (removeErr) {
+    // run()'s rejection message already embeds the stderr ("<cmd> exited N: <stderr>"),
+    // so feed err.message straight into the classifier — no separate stderr field.
+    const msg = removeErr instanceof Error ? removeErr.message : String(removeErr);
+    if (!force && isWorktreeDirtyError(msg)) {
+      return { removed: false, reason: "dirty" };
+    }
+    throw new Error(msg);
+  }
+  if (branch && parentRepo) {
+    try {
+      await run("git", [
+        "-C", parentRepo, "branch", force ? "-D" : "-d", branch,
+      ]);
+    } catch {
+      // Best-effort: an unmerged branch will refuse -d; that's fine.
+    }
+  }
+  return { removed: true };
 }
 
 // ============================================================
