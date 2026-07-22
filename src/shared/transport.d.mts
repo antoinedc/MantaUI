@@ -5,7 +5,7 @@
 import type { AppConfig } from "./types.js";
 
 // The three transport states a config can resolve to.
-//   "http"       — paired to a bui-server (boxToken present)
+//   "http"       — paired to a manta-server (boxToken present)
 //   "ssh"        — legacy/power SSH mode (host set), or onboarding was skipped
 //   "onboarding" — fresh install; show the full-screen onboarding flow
 export type TransportMode = "http" | "ssh" | "onboarding";

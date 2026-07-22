@@ -44,9 +44,9 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   const owner = sid ? resolveSessionOwner(projects, sid) : null;
 
   // Session-mode toggle (BET-138): Chat / Terminal / an AI CLI TUI launcher.
-  // `sid` is set for every bui-created session, so mode only matters when
+  // `sid` is set for every manta-created session, so mode only matters when
   // it's present; the `!sid` branches below are the legacy foreign-window
-  // fallback (bui never creates those anymore).
+  // fallback (manta never creates those anymore).
   const [mode, setModeState] = useState<SessionMode>(() =>
     sid ? readSavedMode(sid) : "chat",
   );
@@ -70,7 +70,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   };
 
   // "chat" only makes sense when sid is set (guarded in the render switch
-  // below); for a legacy foreign window (no sid — bui never creates these
+  // below); for a legacy foreign window (no sid — manta never creates these
   // anymore) mode is always effectively "terminal", so modeId falls back to
   // "terminal" rather than mis-parsing "chat" as a launcher id.
   const modeId = mode.startsWith("tui:") ? mode.slice("tui:".length) : "terminal";
@@ -161,7 +161,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   //   - chat mode → opencodeAbort(sid), same as the desktop "Esc to stop"
   //     keybind in ChatPanel.
   //   - terminal / AI CLI TUI mode (or a legacy foreign window with no sid,
-  //     which bui never creates anymore) → write \x1b to that mode's shell
+  //     which manta never creates anymore) → write \x1b to that mode's shell
   //     PTY. Select the tmux window first: mobile navigation doesn't
   //     select-window on open, and the legacy fallback path's PTY follows
   //     the active tmux window, so without this ESC could land on a

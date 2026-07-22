@@ -46,7 +46,7 @@ const MD_COMPONENTS: MarkdownComponents = {
     className?: string;
     children?: React.ReactNode;
   } & React.HTMLAttributes<HTMLElement>) {
-    // Inline `code` — bui's accent color, no box. Block code handled below
+    // Inline `code` — manta's accent color, no box. Block code handled below
     // by wrapping pre.
     if (inline) {
       return (

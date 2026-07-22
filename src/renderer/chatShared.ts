@@ -14,7 +14,7 @@ import { createContext } from "react";
 import type { OpencodeMessage, OpencodeModel } from "../shared/types";
 
 // Claude's bullet/spinner accent. Inlined (not in tailwind config) so we only
-// brand the chat panel without touching the rest of bui's blue accent.
+// brand the chat panel without touching the rest of manta's blue accent.
 export const CLAUDE_ORANGE = "#d97757";
 
 // In-flight attachments tracked alongside the textarea content. Each chip

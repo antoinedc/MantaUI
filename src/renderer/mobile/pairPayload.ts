@@ -46,7 +46,7 @@ function coerceBoxId(raw: string): string | null {
 
 /**
  * Parse a raw scanned/deeplinked string into a PairPayload, or null for any
- * malformed / foreign input: not a bui pair URL, missing box, or code not
+ * malformed / foreign input: not a manta pair URL, missing box, or code not
  * exactly 6 digits. Whitespace is trimmed.
  *
  * Accepts the box form only (`box` + `code`, or `box` + `token` — the code

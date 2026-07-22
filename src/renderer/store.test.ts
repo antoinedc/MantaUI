@@ -15,7 +15,7 @@ describe("resolveSessionOwner", () => {
   it("returns null when no window owns the session id", () => {
     const projects = [
       proj({
-        tmuxSession: "bui",
+        tmuxSession: "manta",
         windows: [
           { index: 0, name: "main", active: true, paneCurrentPath: "/x", opencodeSessionId: null },
         ],
@@ -27,15 +27,15 @@ describe("resolveSessionOwner", () => {
   it("finds the owning window and prefers paneCurrentPath over defaultCwd", () => {
     const projects = [
       proj({
-        tmuxSession: "bui",
-        defaultCwd: "~/bui",
+        tmuxSession: "manta",
+        defaultCwd: "~/manta",
         windows: [
           { index: 2, name: "feat", active: false, paneCurrentPath: "/abs/feat", opencodeSessionId: "ses_a" },
         ],
       }),
     ];
     expect(resolveSessionOwner(projects, "ses_a")).toEqual({
-      tmuxSession: "bui",
+      tmuxSession: "manta",
       windowIndex: 2,
       cwd: "/abs/feat",
     });
@@ -44,17 +44,17 @@ describe("resolveSessionOwner", () => {
   it("falls back to project defaultCwd when paneCurrentPath is empty", () => {
     const projects = [
       proj({
-        tmuxSession: "bui",
-        defaultCwd: "~/bui",
+        tmuxSession: "manta",
+        defaultCwd: "~/manta",
         windows: [
           { index: 1, name: "w", active: false, paneCurrentPath: "", opencodeSessionId: "ses_b" },
         ],
       }),
     ];
     expect(resolveSessionOwner(projects, "ses_b")).toEqual({
-      tmuxSession: "bui",
+      tmuxSession: "manta",
       windowIndex: 1,
-      cwd: "~/bui",
+      cwd: "~/manta",
     });
   });
 
@@ -91,7 +91,7 @@ describe("setChatRunning / setChatAttention", () => {
     useStore.setState({
       projects: [
         proj({
-          tmuxSession: "bui",
+          tmuxSession: "manta",
           windows: [
             {
               index: 0,
@@ -117,7 +117,7 @@ describe("setChatRunning / setChatAttention", () => {
 
     it("sets running:true for the matching window", () => {
       useStore.getState().setChatRunning("ses_chat", true);
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win).toMatchObject({
         running: true,
         subagents: 0,
@@ -131,26 +131,26 @@ describe("setChatRunning / setChatAttention", () => {
     it("stamps lastMessageAt on every running-value transition (BET-119)", () => {
       const before = Date.now();
       useStore.getState().setChatRunning("ses_chat", true);
-      const afterStart = useStore.getState().status.bui[0].lastMessageAt;
+      const afterStart = useStore.getState().status.manta[0].lastMessageAt;
       expect(afterStart).toBeGreaterThanOrEqual(before);
 
       useStore.getState().setChatRunning("ses_chat", false);
-      const afterIdle = useStore.getState().status.bui[0].lastMessageAt;
+      const afterIdle = useStore.getState().status.manta[0].lastMessageAt;
       expect(afterIdle).toBeGreaterThanOrEqual(afterStart!);
     });
 
     it("does NOT re-stamp lastMessageAt on a no-op running→running call (BET-119)", () => {
       useStore.getState().setChatRunning("ses_chat", true);
-      const first = useStore.getState().status.bui[0].lastMessageAt;
+      const first = useStore.getState().status.manta[0].lastMessageAt;
       useStore.getState().setChatRunning("ses_chat", true);
-      const second = useStore.getState().status.bui[0].lastMessageAt;
+      const second = useStore.getState().status.manta[0].lastMessageAt;
       expect(second).toBe(first);
     });
 
     it("latches attention='idle' on running → idle when user isn't on the window", () => {
       useStore.getState().setChatRunning("ses_chat", true);
       useStore.getState().setChatRunning("ses_chat", false);
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win.running).toBe(false);
       expect(win.attention).toBe(true);
       expect(win.attentionKind).toBe("idle");
@@ -158,12 +158,12 @@ describe("setChatRunning / setChatAttention", () => {
 
     it("does NOT latch attention when the user IS on the window", () => {
       useStore.setState({
-        activeProjectName: "bui",
-        activeWindowByProject: { bui: 0 },
+        activeProjectName: "manta",
+        activeWindowByProject: { manta: 0 },
       });
       useStore.getState().setChatRunning("ses_chat", true);
       useStore.getState().setChatRunning("ses_chat", false);
-      expect(useStore.getState().status.bui[0].attention).toBe(false);
+      expect(useStore.getState().status.manta[0].attention).toBe(false);
     });
 
     it("downgrades a stale 'question' latch to amber 'idle' on running → idle while away", () => {
@@ -175,20 +175,20 @@ describe("setChatRunning / setChatAttention", () => {
       useStore.getState().setChatRunning("ses_chat", true);
       useStore.getState().setChatAttention("ses_chat", "question");
       useStore.getState().setChatRunning("ses_chat", false);
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win.attention).toBe(true);
       expect(win.attentionKind).toBe("idle");
     });
 
     it("clears a stale 'permission' latch entirely on running → idle while the user IS on the window", () => {
       useStore.setState({
-        activeProjectName: "bui",
-        activeWindowByProject: { bui: 0 },
+        activeProjectName: "manta",
+        activeWindowByProject: { manta: 0 },
       });
       useStore.getState().setChatRunning("ses_chat", true);
       useStore.getState().setChatAttention("ses_chat", "permission");
       useStore.getState().setChatRunning("ses_chat", false);
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win.attention).toBe(false);
       expect(win.attentionKind).toBeUndefined();
     });
@@ -200,7 +200,7 @@ describe("setChatRunning / setChatAttention", () => {
       useStore.getState().setChatRunning("ses_chat", true);
       useStore.getState().setChatAttention("ses_chat", "question");
       useStore.getState().setChatRunning("ses_chat", true);
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win.attention).toBe(true);
       expect(win.attentionKind).toBe("question");
     });
@@ -214,7 +214,7 @@ describe("setChatRunning / setChatAttention", () => {
 
     it("sets attention:true with kind='question'", () => {
       useStore.getState().setChatAttention("ses_chat", "question");
-      expect(useStore.getState().status.bui[0]).toEqual({
+      expect(useStore.getState().status.manta[0]).toEqual({
         running: false,
         subagents: 0,
         attention: true,
@@ -224,7 +224,7 @@ describe("setChatRunning / setChatAttention", () => {
 
     it("sets attention:true with kind='permission'", () => {
       useStore.getState().setChatAttention("ses_chat", "permission");
-      expect(useStore.getState().status.bui[0].attentionKind).toBe(
+      expect(useStore.getState().status.manta[0].attentionKind).toBe(
         "permission",
       );
     });
@@ -232,7 +232,7 @@ describe("setChatRunning / setChatAttention", () => {
     it("clears attention when called with null (replied/rejected)", () => {
       useStore.getState().setChatAttention("ses_chat", "question");
       useStore.getState().setChatAttention("ses_chat", null);
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win.attention).toBe(false);
       expect(win.attentionKind).toBeUndefined();
     });
@@ -244,22 +244,22 @@ describe("setChatRunning / setChatAttention", () => {
       // redundant-but-harmless while active and gets cleared on the
       // next setActive() touch.
       useStore.setState({
-        activeProjectName: "bui",
-        activeWindowByProject: { bui: 0 },
+        activeProjectName: "manta",
+        activeWindowByProject: { manta: 0 },
       });
       useStore.getState().setChatAttention("ses_chat", "question");
-      expect(useStore.getState().status.bui[0]?.attention).toBe(true);
-      expect(useStore.getState().status.bui[0]?.attentionKind).toBe("question");
+      expect(useStore.getState().status.manta[0]?.attention).toBe(true);
+      expect(useStore.getState().status.manta[0]?.attentionKind).toBe("question");
     });
 
     it("latches permission attention EVEN when the user is on the window", () => {
       useStore.setState({
-        activeProjectName: "bui",
-        activeWindowByProject: { bui: 0 },
+        activeProjectName: "manta",
+        activeWindowByProject: { manta: 0 },
       });
       useStore.getState().setChatAttention("ses_chat", "permission");
-      expect(useStore.getState().status.bui[0]?.attention).toBe(true);
-      expect(useStore.getState().status.bui[0]?.attentionKind).toBe(
+      expect(useStore.getState().status.manta[0]?.attention).toBe(true);
+      expect(useStore.getState().status.manta[0]?.attentionKind).toBe(
         "permission",
       );
     });
@@ -268,17 +268,17 @@ describe("setChatRunning / setChatAttention", () => {
       // Soft "go check" signal — if they're already looking at the
       // window, there's nothing to go check.
       useStore.setState({
-        activeProjectName: "bui",
-        activeWindowByProject: { bui: 0 },
+        activeProjectName: "manta",
+        activeWindowByProject: { manta: 0 },
       });
       useStore.getState().setChatAttention("ses_chat", "idle");
-      expect(useStore.getState().status.bui[0]?.attention ?? false).toBe(false);
+      expect(useStore.getState().status.manta[0]?.attention ?? false).toBe(false);
     });
 
     it("preserves running:true while raising attention", () => {
       useStore.getState().setChatRunning("ses_chat", true);
       useStore.getState().setChatAttention("ses_chat", "question");
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win.running).toBe(true);
       expect(win.attention).toBe(true);
       expect(win.attentionKind).toBe("question");
@@ -291,8 +291,8 @@ describe("setChatRunning / setChatAttention", () => {
       // running update could then re-derive a red ?/! glyph from the dead
       // kind. Focusing a window must leave it fully clean.
       useStore.getState().setChatAttention("ses_chat", "question");
-      useStore.getState().setActive("bui", 0);
-      const win = useStore.getState().status.bui[0];
+      useStore.getState().setActive("manta", 0);
+      const win = useStore.getState().status.manta[0];
       expect(win.attention).toBe(false);
       expect(win.attentionKind).toBeUndefined();
     });
@@ -307,27 +307,27 @@ describe("setChatRunning / setChatAttention", () => {
       // with whatever (probably false) the BUSY_RE matched against the
       // empty holder pane.
       useStore.getState().applyStatusBatch([
-        // No entry for bui:0 in the batch (the poller wouldn't include
+        // No entry for manta:0 in the batch (the poller wouldn't include
         // chat-mode windows in a fixed world, but even when it does,
         // the chat-state must win).
       ]);
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win.running).toBe(true);
     });
 
     it("preserves chat-window attentionKind across poller ticks", () => {
       useStore.getState().setChatAttention("ses_chat", "question");
       useStore.getState().applyStatusBatch([]);
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win.attentionKind).toBe("question");
       expect(win.attention).toBe(true);
     });
 
     it("preserves chat-window lastMessageAt across poller ticks (BET-119)", () => {
       useStore.getState().setChatRunning("ses_chat", true);
-      const stamped = useStore.getState().status.bui[0].lastMessageAt;
+      const stamped = useStore.getState().status.manta[0].lastMessageAt;
       useStore.getState().applyStatusBatch([]);
-      expect(useStore.getState().status.bui[0].lastMessageAt).toBe(stamped);
+      expect(useStore.getState().status.manta[0].lastMessageAt).toBe(stamped);
     });
   });
 
@@ -344,7 +344,7 @@ describe("setChatRunning / setChatAttention", () => {
 
     it("sets the subagent count on the matching window", () => {
       useStore.getState().setChatSubagents("ses_chat", 2);
-      expect(useStore.getState().status.bui[0]).toEqual({
+      expect(useStore.getState().status.manta[0]).toEqual({
         running: false,
         subagents: 2,
         attention: false,
@@ -368,7 +368,7 @@ describe("setChatRunning / setChatAttention", () => {
       useStore.getState().setChatRunning("ses_chat", true);
       useStore.getState().setChatAttention("ses_chat", "question");
       useStore.getState().setChatSubagents("ses_chat", 4);
-      const win = useStore.getState().status.bui[0];
+      const win = useStore.getState().status.manta[0];
       expect(win.running).toBe(true);
       expect(win.attention).toBe(true);
       expect(win.attentionKind).toBe("question");
@@ -433,7 +433,7 @@ describe("replayChatAttention", () => {
     useStore.setState({
       projects: [
         proj({
-          tmuxSession: "bui",
+          tmuxSession: "manta",
           windows: [
             {
               index: 0,
@@ -468,7 +468,7 @@ describe("replayChatAttention", () => {
   it("latches 'question' for a session with a pending question", async () => {
     questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q" }];
     await useStore.getState().replayChatAttention();
-    const win = useStore.getState().status.bui[0];
+    const win = useStore.getState().status.manta[0];
     expect(win.attention).toBe(true);
     expect(win.attentionKind).toBe("question");
   });
@@ -476,7 +476,7 @@ describe("replayChatAttention", () => {
   it("latches 'permission' for a session with only a pending permission", async () => {
     permissionsBySid["ses_p"] = [{ id: "p1", sessionID: "ses_p" }];
     await useStore.getState().replayChatAttention();
-    const win = useStore.getState().status.bui[1];
+    const win = useStore.getState().status.manta[1];
     expect(win.attention).toBe(true);
     expect(win.attentionKind).toBe("permission");
   });
@@ -485,7 +485,7 @@ describe("replayChatAttention", () => {
     questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q" }];
     permissionsBySid["ses_q"] = [{ id: "p1", sessionID: "ses_q" }];
     await useStore.getState().replayChatAttention();
-    expect(useStore.getState().status.bui[0].attentionKind).toBe("question");
+    expect(useStore.getState().status.manta[0].attentionKind).toBe("question");
   });
 
   it("does NOT latch attention for sessions with nothing pending", async () => {
@@ -508,7 +508,7 @@ describe("replayChatAttention", () => {
     permissionsBySid["ses_p"] = [{ id: "p1", sessionID: "ses_p" }];
     await useStore.getState().replayChatAttention();
     // ses_p still latched despite ses_q's question fetch throwing.
-    expect(useStore.getState().status.bui[1].attentionKind).toBe("permission");
+    expect(useStore.getState().status.manta[1].attentionKind).toBe("permission");
   });
 
   it("skips the transcript check entirely when nothing is pending (no opencodeMessages call)", async () => {
@@ -520,7 +520,7 @@ describe("replayChatAttention", () => {
     questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q", requestId: "que_1" }];
     messagesBySid["ses_q"] = completedTranscript;
     await useStore.getState().replayChatAttention();
-    expect(useStore.getState().status.bui?.[0]?.attention).not.toBe(true);
+    expect(useStore.getState().status.manta?.[0]?.attention).not.toBe(true);
     expect(rejectCalls).toEqual([{ requestId: "que_1", sessionId: "ses_q" }]);
   });
 
@@ -528,7 +528,7 @@ describe("replayChatAttention", () => {
     questionsBySid["ses_q"] = [{ id: "q1", sessionID: "ses_q" }];
     messagesBySid["ses_q"] = completedTranscript;
     await useStore.getState().replayChatAttention();
-    expect(useStore.getState().status.bui?.[0]?.attention).not.toBe(true);
+    expect(useStore.getState().status.manta?.[0]?.attention).not.toBe(true);
     expect(rejectCalls).toEqual([]);
   });
 
@@ -536,7 +536,7 @@ describe("replayChatAttention", () => {
     permissionsBySid["ses_p"] = [{ id: "p1", sessionID: "ses_p" }];
     messagesBySid["ses_p"] = completedTranscript;
     await useStore.getState().replayChatAttention();
-    expect(useStore.getState().status.bui?.[1]?.attention).not.toBe(true);
+    expect(useStore.getState().status.manta?.[1]?.attention).not.toBe(true);
     expect(rejectCalls).toEqual([]);
   });
 
@@ -547,7 +547,7 @@ describe("replayChatAttention", () => {
       throw new Error("transcript fetch failed");
     };
     await useStore.getState().replayChatAttention();
-    expect(useStore.getState().status.bui?.[0]?.attention).not.toBe(true);
+    expect(useStore.getState().status.manta?.[0]?.attention).not.toBe(true);
     expect(rejectCalls).toEqual([]);
   });
 });
@@ -579,7 +579,7 @@ describe("backfillLastMessageTimes", () => {
     useStore.setState({
       projects: [
         proj({
-          tmuxSession: "bui",
+          tmuxSession: "manta",
           windows: [
             {
               index: 0,
@@ -607,15 +607,15 @@ describe("backfillLastMessageTimes", () => {
   it("stamps lastMessageAt from time.updated for a chat window with no prior stamp", async () => {
     sessionsByDir["/x"] = [{ id: "ses_chat", time: { updated: 12345 } }];
     await useStore.getState().backfillLastMessageTimes();
-    expect(useStore.getState().status.bui[0].lastMessageAt).toBe(12345);
+    expect(useStore.getState().status.manta[0].lastMessageAt).toBe(12345);
   });
 
   it("never stomps a live SSE-driven stamp", async () => {
     useStore.getState().setChatRunning("ses_chat", true);
-    const live = useStore.getState().status.bui[0].lastMessageAt;
+    const live = useStore.getState().status.manta[0].lastMessageAt;
     sessionsByDir["/x"] = [{ id: "ses_chat", time: { updated: 1 } }];
     await useStore.getState().backfillLastMessageTimes();
-    expect(useStore.getState().status.bui[0].lastMessageAt).toBe(live);
+    expect(useStore.getState().status.manta[0].lastMessageAt).toBe(live);
   });
 
   it("only queries chat-mode windows' directories (skips terminal windows)", async () => {
@@ -627,7 +627,7 @@ describe("backfillLastMessageTimes", () => {
     useStore.setState({
       projects: [
         proj({
-          tmuxSession: "bui",
+          tmuxSession: "manta",
           windows: [
             {
               index: 0,
@@ -654,7 +654,7 @@ describe("backfillLastMessageTimes", () => {
     await expect(
       useStore.getState().backfillLastMessageTimes(),
     ).resolves.toBeUndefined();
-    expect(useStore.getState().status.bui?.[0]?.lastMessageAt).toBeUndefined();
+    expect(useStore.getState().status.manta?.[0]?.lastMessageAt).toBeUndefined();
   });
 });
 

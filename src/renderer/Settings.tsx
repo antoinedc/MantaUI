@@ -306,7 +306,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <div>
                 <h3 className="text-base font-semibold mb-4">Pair phone</h3>
                 <div className="text-sm text-text-faint mb-4">
-                  Scan this QR with the BUI mobile app to connect it to your box. The
+                  Scan this QR with the MANTA mobile app to connect it to your box. The
                   code is one-time and valid for ~5 minutes. Generate a new code if the
                   old one expires.
                 </div>
@@ -418,12 +418,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 <div className="text-xs text-text-faint mt-2">
                   How long Anthropic keeps a session's prompt cache warm between
                   requests. Used to predict when a session has gone stale and show
-                  "/clear to save Nk tokens" in the chat footer. bui doesn't set
+                  "/clear to save Nk tokens" in the chat footer. manta doesn't set
                   this value itself — opencode does, when it builds the Anthropic
                   request. Match this setting to opencode's{" "}
                   <code className="text-text-muted">cache_control.ttl</code> so the
                   staleness pill fires at the right time. 1h is the better default
-                  for bui's typical "step away to read code" pattern.
+                  for manta's typical "step away to read code" pattern.
                 </div>
               </div>
 
@@ -473,7 +473,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">Skill registries</h3>
                 <div className="text-sm text-text-faint mb-3">
-                  Extra skill registry URLs fetched by opencode on startup. The default bui registry is
+                  Extra skill registry URLs fetched by opencode on startup. The default manta registry is
                   always included. Add your own to surface additional skills in the AI's toolset.
                 </div>
                 <div className="space-y-2">

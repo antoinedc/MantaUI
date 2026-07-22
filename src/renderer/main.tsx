@@ -72,7 +72,7 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
         // Do NOT return here: chooseDesktopTransport must fall through so boot()
         // still renders. We simply leave window.api as the preload bridge by
         // skipping the httpApi swap below.
-        console.warn("[bui] localStorage seed failed; using preload transport:", e);
+        console.warn("[manta] localStorage seed failed; using preload transport:", e);
         seeded = false;
       }
       if (seeded) {
@@ -83,7 +83,7 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
       }
     }
   } catch (e) {
-    console.warn("[bui] configGet failed at entry:", e);
+    console.warn("[manta] configGet failed at entry:", e);
   }
 }
 

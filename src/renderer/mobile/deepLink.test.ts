@@ -7,7 +7,7 @@ import {
 import { boxDirectUrl } from "../../shared/transport.mjs";
 import type { ClaimOutcome } from "../../shared/claim.mjs";
 
-// A canonical box-form URL the desktop Settings QR + `bui pair` terminal QR
+// A canonical box-form URL the desktop Settings QR + `manta pair` terminal QR
 // both emit. Round-trips through parsePairPayload so we know the deep-link
 // handler is the only moving part under test.
 const BOX = "0123456789abcdef0123456789abcdef"; // 32 hex

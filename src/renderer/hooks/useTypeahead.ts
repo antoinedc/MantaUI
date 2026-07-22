@@ -29,7 +29,7 @@ import type {
   AgentMention,
 } from "../chatShared";
 
-// bui-local slash commands. These are handled in the renderer (not forwarded
+// manta-local slash commands. These are handled in the renderer (not forwarded
 // to opencode's /command endpoint) because opencode doesn't ship equivalents
 // — they're terminal-TUI conventions users expect to "just work".
 const MANTA_BUILTIN_COMMANDS = [

@@ -125,7 +125,7 @@ export interface Api {
     cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
   ): () => void;
 
-  // bui-server's notification router decided the desktop should show an OS
+  // manta-server's notification router decided the desktop should show an OS
   // notification (relayed over the -L 18787 forward). The renderer shows it
   // via the Notification API after a local "am I viewing this?" check.
   onDesktopNotify(cb: (payload: DesktopNotifyPayload) => void): () => void;
@@ -252,11 +252,11 @@ export interface Api {
     windowIndex: number;
   }): Promise<Project[]>;
 
-  // Scheduled prompts (bui-server owned; desktop reaches it over -L 18787).
+  // Scheduled prompts (manta-server owned; desktop reaches it over -L 18787).
   scheduleList(sessionId?: string): Promise<ScheduledJob[]>;
   scheduleDelete(id: string): Promise<{ deleted: boolean }>;
 
-  // Secrets (bui-server owned; desktop reaches it over -L 18787). list returns
+  // Secrets (manta-server owned; desktop reaches it over -L 18787). list returns
   // METADATA ONLY (never values). set carries the value renderer → box (never
   // through the AI). Agents read secrets via opencode tools, not these
   // channels.
@@ -264,7 +264,7 @@ export interface Api {
   secretsSet(input: SecretInput): Promise<{ ok: boolean; meta?: SecretMeta; error?: string }>;
   secretsDelete(id: string): Promise<{ deleted: boolean }>;
 
-  // Inbound webhooks (bui-server owned; desktop reaches it over -L 18787).
+  // Inbound webhooks (manta-server owned; desktop reaches it over -L 18787).
   // list returns METADATA ONLY (no signing secret). Creation is the AI's job
   // via the global `webhook` opencode tool, not a UI channel.
   webhookList(sessionId?: string): Promise<WebhookMeta[]>;
@@ -317,7 +317,7 @@ export interface Api {
   // Returns the RAW model reply ("" on timeout/failure); caller sanitizes.
   opencodeGenerateTitle(input: { directory: string; instruction: string }): Promise<string>;
 
-  // Server version (BET-180): returns the bui-server's package.json version,
+  // Server version (BET-180): returns the manta-server's package.json version,
   // served in-process via the `server:version` RPC channel (no HTTP round
   // trip). Used by MobileSettings to render "Server vX.Y.Z" under the URL
   // field. Display-only — gating / banner logic lands later.
@@ -354,7 +354,7 @@ export interface Api {
 
   // Server-update available subscription (BET-225 stage 3): fires when the
   // box's server-update poller sees a newer manifest version. Mirrors the
-  // desktopNotify pattern — main subscribes to bui-server's /events SSE,
+  // desktopNotify pattern — main subscribes to manta-server's /events SSE,
   // filters on kind === "serverUpdateAvailable", and forwards via IPC. The
   // renderer's UpdateBar component renders a "Server update available:
   // {version}" bar with an "Update & restart" button that calls

@@ -57,7 +57,7 @@ export type SessionResources = {
 
 export function useSessionResources(sessionId: string): SessionResources {
   // ----- Scheduled prompts (the ⏰ ScheduledTasksCard) -----
-  // Jobs are server-owned (bui-server fires them); here we only list + delete
+  // Jobs are server-owned (manta-server fires them); here we only list + delete
   // via the schedule:* window.api channels. Refetch-driven (open + open-poll +
   // post-delete) — NOT a bus event, because desktop's renderer isn't wired to
   // the server bus. See docs/manta-tools-scheduler.md.

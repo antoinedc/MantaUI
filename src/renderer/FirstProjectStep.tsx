@@ -29,7 +29,7 @@ import { StepFooter } from "./onboardingUi";
 // creation chokepoint, per the AGENTS.md "cwd inheritance" gotcha.
 //
 // On success we refresh the projects tree and mark the new session active, so
-// the success screen's "Open bui" drops into the normal shell with this project
+// the success screen's "Open manta" drops into the normal shell with this project
 // selected. A creation failure (bad path, mkdir permission denied, tmux error)
 // renders inline and leaves the user on the form — the flow is never lost.
 //
@@ -95,7 +95,7 @@ export function FirstProjectStep({
         createDir: true,
       });
       // Populate the store's projects tree and select the new session so "Open
-      // bui" lands in the normal shell with this project active.
+      // manta" lands in the normal shell with this project active.
       await useStore.getState().refresh();
       useStore.getState().setActive(projectName);
       setCreating(false);

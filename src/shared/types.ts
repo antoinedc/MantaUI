@@ -10,7 +10,7 @@ export type ProjectMeta = {
 export type AppConfig = {
   projects: ProjectMeta[];
   // ----- HTTP/relay transport (M6 onboarding, BET-49) -----
-  // Base URL of the bui-server the desktop pairs with, e.g.
+  // Base URL of the manta-server the desktop pairs with, e.g.
   // "http://box.example:8787" (or a relay URL later). Set during onboarding
   // step 1 (pairing) alongside boxId/boxToken. Presence of boxToken — NOT this
   // — is what flips transport mode to HTTP; this is where to reach the box.
@@ -21,7 +21,7 @@ export type AppConfig = {
   boxId?: string;
   // 32-hex (128-bit) bearer secret returned by POST /auth/claim. Sent as
   // `Authorization: Bearer <boxToken>` on every HTTP-mode request. Stored
-  // plaintext like other bui credentials. When set, transport mode is "http".
+  // plaintext like other manta credentials. When set, transport mode is "http".
   // Absent/empty on legacy SSH configs (which keep using `host`).
   boxToken?: string;
   // True once the user explicitly skipped the onboarding flow, so it doesn't
@@ -31,7 +31,7 @@ export type AppConfig = {
   onboardingSkipped?: boolean;
   // ----- Agent → laptop file push (outbox) -----
   // The reverse of drag-and-drop upload: the remote AI drops a file into
-  // `~/.manta-outbox/` and bui scp-pulls it to the Mac. An outbox poller in
+  // `~/.manta-outbox/` and manta scp-pulls it to the Mac. An outbox poller in
   // main watches that dir over the warm ControlMaster.
   //
   // Trust flag, analogous to chatAutoAllow. When true, detected outbox files
@@ -74,7 +74,7 @@ export type AppConfig = {
   // default (the first connected provider's default model).
   defaultModel?: { providerID: string; modelID: string };
   // Extra skill registry URLs written to the remote opencode.jsonc as
-  // skills.urls. The default registry (https://antoinedc.github.io/bui-skills)
+  // skills.urls. The default registry (https://antoinedc.github.io/manta-skills)
   // is always prepended by the binary once the upstream PR lands; these are
   // user-added extras. Empty array = no user-added registries.
   skillRegistryUrls?: string[];
@@ -82,7 +82,7 @@ export type AppConfig = {
   // model is auto-registered as a subagent" reconciliation. Entries are
   // "providerID/modelID" strings. A model in this set never gets an
   // opencode.jsonc `agent` block written for it (and any existing block is
-  // removed on the next sync) — deactivation is bui-side state, NOT opencode
+  // removed on the next sync) — deactivation is manta-side state, NOT opencode
   // config, so a deactivated model isn't silently re-added on the next
   // reconcile. Reuses the plain configGet/configUpdate channels like every
   // other AppConfig field — no dedicated IPC channel needed. Absent/empty =
@@ -102,21 +102,21 @@ export type AppConfig = {
   // Anthropic prompt cache TTL used by opencode. Used ONLY to predict when
   // a chat session has gone stale (cache expired → the next user turn
   // would re-bill the entire cached prefix as cache_creation_input_tokens
-  // at full rate + surcharge). bui does NOT itself set
+  // at full rate + surcharge). manta does NOT itself set
   // `cache_control.ttl` — opencode does. This setting must match what
   // opencode is configured to send, otherwise the "/clear to save Nk
   // tokens" pill will fire either too eagerly (configured 1h, opencode
   // sending 5m) or too late (vice versa). Anthropic supports two values:
   //   - "5m" → default sliding 5-minute TTL, 1.25× write cost
   //   - "1h" → opt-in 1-hour TTL via `cache_control.ttl: "1h"`, 2× write
-  //            cost. Best fit for bui's "step away to read code / run a
+  //            cost. Best fit for manta's "step away to read code / run a
   //            build / take a meeting" usage pattern.
-  // Defaults to "1h" because that matches bui's typical multi-minute idle
+  // Defaults to "1h" because that matches manta's typical multi-minute idle
   // pattern; cost-sensitive users can switch to "5m" in Settings.
   cacheTtl?: "5m" | "1h";
   // ----- Voice / speech-to-text (Groq) -----
   // API key for api.groq.com. Stored plaintext in config.json, same as other
-  // bui credentials (ssh identity path, opencode auth). Settings UI shows
+  // manta credentials (ssh identity path, opencode auth). Settings UI shows
   // a masked password input. Absent → mic button is hidden in the UI.
   groqApiKey?: string;
   // ----- Analytics (BET-217) -----
@@ -137,7 +137,7 @@ export type AppConfig = {
   voiceCommandModel?: string;
   // ----- Plugins (BET-183 / BET-185 / BET-190) -----
   // Master switch for the Mac-side plugin executor (capExecutor.ts). When
-  // true, this Mac subscribes to bui-server's SSE bus and runs the YAML
+  // true, this Mac subscribes to manta-server's SSE bus and runs the YAML
   // plugins it finds under ~/.manta/plugins/. Default false (OFF) — toggling
   // takes effect on next app launch. Trust boundary: plugins are user-
   // authored YAML files; each step runs an arbitrary shell command with the
@@ -176,7 +176,7 @@ export type Project = {
 };
 
 export type TmuxConfigStatus = {
-  mantaManaged: boolean;   // ~/.tmux.conf currently has bui's config
+  mantaManaged: boolean;   // ~/.tmux.conf currently has manta's config
   backupExists: boolean; // ~/.tmux.conf.pre-manta exists (restore is possible)
 };
 
@@ -238,7 +238,7 @@ export type WindowStatus = {
   subagents: number;
 };
 
-// A desktop OS-notification directive, relayed from bui-server's notification
+// A desktop OS-notification directive, relayed from manta-server's notification
 // router (push.mjs) to the desktop renderer over the -L 18787 forward + IPC.
 // The renderer does the final "am I viewing this session right now?"
 // suppression and shows it via the Notification API. See docs/manta-tools-notify.md.
@@ -252,7 +252,7 @@ export type DesktopNotifyPayload = {
 };
 
 // Payload for the server-update-available push (BET-225 stage 3). Published by
-// the server-update poller (src/server/serverUpdate.mjs) on the bui-server bus
+// the server-update poller (src/server/serverUpdate.mjs) on the manta-server bus
 // as `{kind:"serverUpdateAvailable", payload: ServerUpdateAvailablePayload}`,
 // relayed to the desktop renderer by src/main/serverUpdateForwarder.ts. The
 // renderer's UpdateBar component renders a "Server update available: {version}"
@@ -288,7 +288,7 @@ export const IPC = {
 
   // Remote tmux config management
   tmuxConfigStatus: "tmux:config-status",
-  tmuxSetupConfig: "tmux:setup-config",     // backup user config, install bui's
+  tmuxSetupConfig: "tmux:setup-config",     // backup user config, install manta's
   tmuxRestoreConfig: "tmux:restore-config", // restore user's backup
 
   // Clipboard (OSC 52 from remote → Mac system clipboard via Electron main)
@@ -346,7 +346,7 @@ export const IPC = {
   // path is only set for file-based detections (Desktop watcher).
   screenshotDetected: "screenshot:detected",
 
-  // main → renderer push: the bui-server notification router decided the
+  // main → renderer push: the manta-server notification router decided the
   // desktop should show an OS notification. Relayed from the server's
   // `desktopNotify` bus event. Payload:
   // DesktopNotifyPayload. The renderer suppresses it if it's already viewing
@@ -479,10 +479,10 @@ export const IPC = {
   // Result: { pairingCode, boxId, expiresAt } or { error }.
   authPair: "auth:pair",
 
-  // ---- scheduled prompts (bui-server owned) ----
-  // Schedules are a bui-SERVER concept (durable jobs fired by the always-on
+  // ---- scheduled prompts (manta-server owned) ----
+  // Schedules are a manta-SERVER concept (durable jobs fired by the always-on
   // box process), NOT an opencode concept — so they get their own channels
-  // that hit bui-server's /api/schedule rather than routing through the
+  // that hit manta-server's /api/schedule rather than routing through the
   // opencode client. Created by the remote AI's global `schedule` opencode
   // tool; listed/deleted by the ScheduledTasksCard UI. Desktop reaches the
   // server store over its existing SSH -L 18787 forward (src/main/schedule.ts);
@@ -490,7 +490,7 @@ export const IPC = {
   scheduleList: "schedule:list", // (sessionId?) → ScheduledJob[]
   scheduleDelete: "schedule:delete", // (id) → { deleted: boolean }
 
-  // ---- secrets (bui-server owned) ----
+  // ---- secrets (manta-server owned) ----
   // A secure key→value store on the box. The user adds/edits secrets in the
   // SecretsCard UI; the VALUE never leaves the box and is never returned here
   // (list yields metadata only). The remote AI reads secrets through its global
@@ -503,7 +503,7 @@ export const IPC = {
   secretsSet: "secrets:set", // (SecretInput) → { ok, meta? , error? }
   secretsDelete: "secrets:delete", // (id) → { deleted: boolean }
 
-  // ---- inbound webhooks (bui-server owned) ----
+  // ---- inbound webhooks (manta-server owned) ----
   // External actors POST to a public /hook/<token> route to wake a chat session
   // with an event (the push counterpart to scheduled polling). CREATED by the
   // remote AI's global `webhook` opencode tool (which gets the URL + signing
@@ -536,7 +536,7 @@ export const IPC = {
   autoUpdateDownloaded: "autoUpdate:downloaded",      // main → renderer: update is ready to install
 
   // ---- server version (BET-180) ----
-  // Returns the bui-server's package.json version (read once at server startup,
+  // Returns the manta-server's package.json version (read once at server startup,
   // served by GET /api/version for non-renderer clients AND by this in-process
   // RPC channel for the renderer — single source of truth on the box, never
   // drifts between surfaces). Display-only foundation for client/server skew
@@ -561,7 +561,7 @@ export const IPC = {
   clientVersion: "client:version",                    // () → { version: string }
 
   // ---- server-update available push (BET-225 stage 3) ----
-  // Mirrors the desktopNotify pattern: main subscribes to bui-server's
+  // Mirrors the desktopNotify pattern: main subscribes to manta-server's
   // /events SSE stream, filters on kind === "serverUpdateAvailable", and
   // forwards the payload to the renderer via this IPC channel. The renderer
   // subscribes through `onServerUpdateAvailable` (httpApi) and renders the
@@ -590,7 +590,7 @@ export const IPC = {
 } as const;
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
-// value (bui-server strips it; only secret_provide materializes the value, to a
+// value (manta-server strips it; only secret_provide materializes the value, to a
 // 0600 file on the box). Store: ~/.manta/secrets.json.
 export type SecretScope = "shared" | "session" | "project";
 export type SecretMeta = {
@@ -598,7 +598,7 @@ export type SecretMeta = {
   key: string; // env-var-style name, e.g. "GITHUB_PAT"
   scope: SecretScope; // shared = every session; session = one sessionID; project = one workspace
   sessionID: string | null; // set when scope === "session"
-  project: string | null; // set when scope === "project" (bui/tmux workspace name)
+  project: string | null; // set when scope === "project" (manta/tmux workspace name)
   hint: string; // optional human usage note (safe to show the agent)
   hasValue: boolean; // a value is stored (always true for persisted secrets)
   createdAt: number | null;

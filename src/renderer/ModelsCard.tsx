@@ -462,7 +462,7 @@ export function ModelsCard() {
         )}
         <div className="text-[10px] text-text-faint">
           Restart applies config to opencode's own service (systemctl --user
-          restart opencode-serve) — separate from bui-server itself.
+          restart opencode-serve) — separate from manta-server itself.
         </div>
       </div>
     </div>

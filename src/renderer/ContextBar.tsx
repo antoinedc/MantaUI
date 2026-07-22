@@ -142,7 +142,7 @@ export function ContextBar({
             "  · /clear  — start a fresh session, skip the re-warm cost entirely",
             "  · /compact — shrink the prefix before re-warming",
             "",
-            "(Cache TTL is set by opencode; bui predicts staleness from the Settings → Prompt cache TTL value. If this fires at the wrong time, that setting probably doesn't match opencode's cache_control.ttl.)",
+            "(Cache TTL is set by opencode; manta predicts staleness from the Settings → Prompt cache TTL value. If this fires at the wrong time, that setting probably doesn't match opencode's cache_control.ttl.)",
           ].join("\n")}
         >
           ⚠ /clear to save {formatTokensCompact(staleCache.staleTokens)} tokens

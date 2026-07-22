@@ -227,7 +227,7 @@ export const WebhooksCard = memo(function WebhooksCard({
 
 // SecretsCard — pinned card above the composer for managing the secrets the
 // agent can use. The user types a key + value here; the value travels to the
-// box (renderer → IPC/RPC → bui-server store) and is NEVER returned or shown
+// box (renderer → IPC/RPC → manta-server store) and is NEVER returned or shown
 // again — the list is metadata only (key, scope, hint). Agents read secrets via
 // the secret_list / secret_provide opencode tools, which materialize the value
 // to a 0600 file on the box and hand the agent only the path, so the value

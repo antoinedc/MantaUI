@@ -4,7 +4,7 @@
 // payload produced by the SHARED `buildPairPayload` helper
 // (src/renderer/mobile/pairPayload.ts). BET-237 removed the deprecated
 // serverUrl / id forms — `parsePairPayload` rejects anything other than
-// `box=<boxId>&code=<6-digit>`. The canonical form is the SAME shape `bui
+// `box=<boxId>&code=<6-digit>`. The canonical form is the SAME shape `manta
 // pair` prints + the install heredoc + the deep-link handler in
 // MobileApp.tsx parses.
 //
@@ -36,7 +36,7 @@ export function PairingQR({
   const [error, setError] = useState<string | null>(null);
 
   const url = useMemo(() => {
-    // Canonical box-form payload — shared with the install heredoc, `bui pair`
+    // Canonical box-form payload — shared with the install heredoc, `manta pair`
     // output, and the mobile deep-link parser. Single source: pairPayload.ts.
     return buildPairPayload({ boxId, code: pairingCode });
   }, [boxId, pairingCode]);

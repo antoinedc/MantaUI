@@ -1,9 +1,9 @@
 // pairingLogic.ts — pure, framework-free core for the mobile pairing screen.
 //
-// M1-T2 (BET-52): when bui-server reports auth-required (httpApi throws
+// M1-T2 (BET-52): when manta-server reports auth-required (httpApi throws
 // AuthRequiredError on a 401), MobileApp renders a 6-digit code-entry screen
 // instead of the session list. The user pairs a device by minting a code on
-// the box (`bui pair` / GET /auth/pair, local-only) and typing it here; we
+// the box (`manta pair` / GET /auth/pair, local-only) and typing it here; we
 // POST it to /auth/claim, and on success persist the returned box_token.
 //
 // Everything a live server or the DOM is NOT required for lives here so it can

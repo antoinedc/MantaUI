@@ -32,7 +32,7 @@ export interface MantaPreload {
   ): () => void;
   // HTTP-mode peek: triggers the main process to fetch from /api/peek and
   // open the file locally. Only available when the desktop is in "http"
-  // transport mode (paired to a bui-server). No-op on mobile/web.
+  // transport mode (paired to a manta-server). No-op on mobile/web.
   //
   // NOTE (BET-127): this is the SAME name the preload runtime exposes
   // (`peekRemoteFile` in src/preload/index.ts) — there is no ipcMain.handle
@@ -61,7 +61,7 @@ export interface MantaPreload {
   // Server-update available subscription (BET-225 stage 3): fires when the
   // box's server-update poller (src/server/serverUpdate.mjs) sees a newer
   // manifest version. Mirrors the desktopNotify pattern — main subscribes
-  // to bui-server's /events SSE, filters by kind, and forwards the payload
+  // to manta-server's /events SSE, filters by kind, and forwards the payload
   // via IPC. The renderer's UpdateBar component renders a "Server update
   // available: {version}" bar with a button that calls serverUpdateApply().
   onServerUpdateAvailable(

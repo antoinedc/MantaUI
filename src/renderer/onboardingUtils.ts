@@ -10,7 +10,7 @@
 //   2 Providers → pick AI providers                (BET-49-T4)
 //   3 Model     → pick the default model           (BET-49-T4, persists defaultModel)
 //   4 Project   → create the first project         (BET-49-T5)
-//   success     → "You're all set!" → Open bui
+//   success     → "You're all set!" → Open manta
 //
 // T2/T4/T5 land the per-step UIs; T3 owns this shell + the resume math so a
 // user who quits mid-flow reopens at the first INCOMPLETE step instead of
