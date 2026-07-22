@@ -112,6 +112,19 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // preload: ipcRenderer.invoke(IPC.gitListWorktrees, cwd)  → args[0] = cwd (string)
     "git:list-worktrees": (cwd) => local.gitListWorktrees(cwd),
 
+    // BET-246: auto-create a sibling git worktree for a new chat session.
+    // preload: ipcRenderer.invoke(IPC.gitAddWorktree, { cwd, name })
+    //   → args[0] = { cwd: string, name: string }
+    "git:add-worktree": (i) => local.gitAddWorktree(i),
+
+    // BET-246: safe/force remove of a worktree MantaUI created. Returns
+    // { removed:false, reason:"dirty" } for the uncommitted-changes case
+    // so the renderer can confirm before retrying with --force; throws on
+    // any other failure.
+    // preload: ipcRenderer.invoke(IPC.gitRemoveWorktree, { path, force })
+    //   → args[0] = { path: string, force: boolean }
+    "git:remove-worktree": (i) => local.gitRemoveWorktree(i),
+
     // preload: ipcRenderer.invoke(IPC.fsListDirs, partial)  → args[0] = partial (string)
     "fs:list-dirs": (partial) => local.fsListDirs(partial),
 

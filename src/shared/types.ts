@@ -60,6 +60,23 @@ export type AppConfig = {
   // so tool calls run without prompting. Closest analog to Claude Code's
   // --dangerously-skip-permissions. Off by default.
   chatAutoAllow?: boolean;
+  // BET-246: when true, every new chat session (window) auto-creates a
+  // sibling git worktree next to the project's repo root, named after the
+  // session. The window's `cwd` is set to the new worktree so the AI
+  // starts on its own branch. Per-session override available in the
+  // new-session dialog (defaults to this value). Only honored when the
+  // project's cwd is inside a git repo — otherwise the override is
+  // disabled and ignored. Settings-only — no IPC channel of its own,
+  // rides the generic configUpdate path.
+  worktreePerSession?: boolean;
+  // BET-246: when true, closing a chat session that has a MantaUI-created
+  // worktree removes the worktree (and best-effort deletes its branch)
+  // first. Safe-by-default: a dirty checkout prompts the user before
+  // `--force`. Global only (no per-session override). Tracked per-window
+  // via the `@manta-worktree-path` tmux user-option — never cleans
+  // pre-existing worktrees or the main checkout. Settings-only — rides
+  // the generic configUpdate path.
+  worktreeCleanOnClose?: boolean;
   // Auto-rename chat-mode tmux windows from the conversation. When true,
   // ChatPanel periodically (every Nth user turn) asks opencode to summarize
   // the recent transcript into a 1-2 word title and renames the window via
@@ -158,6 +175,13 @@ export type TmuxWindow = {
   // Presence of this id is THE signal that the renderer should show ChatPanel
   // instead of Terminal for this window.
   opencodeSessionId: string | null;
+  // BET-246: absolute path of the worktree MantaUI auto-created for this
+  // window (stamped as `@manta-worktree-path`). Null when the window has no
+  // manta-owned worktree (e.g. a legacy window, or one created without the
+  // checkbox). Clean-on-close gates on this field being set + non-null —
+  // a pre-existing worktree is never identified by this stamp, so the
+  // renderer can safely remove ONLY what manta created.
+  worktreePath?: string | null;
 };
 
 export type TmuxSession = {
@@ -282,6 +306,11 @@ export const IPC = {
 
   // Git: detect worktrees under a cwd (for auto-populating sessions on project create)
   gitListWorktrees: "git:list-worktrees",
+  // BET-246: create / remove a git worktree for a new chat session. The
+  // renderer stamps the new path on the tmux window so clean-on-close
+  // knows it can remove the worktree later.
+  gitAddWorktree: "git:add-worktree",
+  gitRemoveWorktree: "git:remove-worktree",
 
   // Directory autocomplete: given a partial path, list matching subdirectories
   fsListDirs: "fs:list-dirs",

@@ -41,6 +41,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     setActive,
     refresh,
     backgroundSyncing,
+    // BET-246: worktree defaults from Settings (Global default for the
+    // new-session checkbox + the clean-on-close gate).
+    worktreePerSession,
+    worktreeCleanOnClose,
   } = useStore();
 
   const showError = (e: unknown) => {
@@ -63,10 +67,21 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
   const [newSessionFor, setNewSessionFor] = useState<string | null>(null);
   const [newSessionName, setNewSessionName] = useState("");
+  // BET-246: per-session worktree override. Seeded from the global
+  // worktreePerSession setting; the dialog disables the checkbox when the
+  // project's cwd isn't a git repo. Defaults to false (non-git projects
+  // always force it false here too).
+  const [newSessionWorktree, setNewSessionWorktree] = useState(false);
+  const [newSessionIsGitRepo, setNewSessionIsGitRepo] = useState(false);
 
   const [confirmDeleteFor, setConfirmDeleteFor] = useState<
     | { kind: "session"; project: string; index: number; name: string }
     | { kind: "project"; project: string }
+    // BET-246: killWindow ran the safe git worktree remove and got the
+    // dirty-checkout refusal — ask the user whether to --force (Remove)
+    // or keep the worktree (Keep). Either choice continues to teardown;
+    // Cancel bails entirely.
+    | { kind: "worktree-dirty"; project: string; index: number; name: string; worktreePath: string }
     | null
   >(null);
 
@@ -86,6 +101,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       if (activeProjectName) {
         setNewSessionFor(activeProjectName);
         setNewSessionName("");
+        // BET-246: seed checkbox + probe git. Non-git projects force the
+        // checkbox off; the dialog disables + mutes it visually.
+        setNewSessionWorktree(worktreePerSession);
+        void probeGitForProject(activeProjectName);
         setCollapsed((prev) => {
           const next = new Set(prev);
           next.delete(activeProjectName);
@@ -94,6 +113,44 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       }
     },
   }));
+
+  // Project cwd resolution (mirror of server-side resolveProjectCwd, but
+  // enough for the renderer's is-git-repo probe + worktree-create cwd).
+  // Prefer the project's stored defaultCwd; fall back to the active
+  // window's paneCurrentPath; "~" / empty → not a usable git probe.
+  const resolveProjectCwd = (projectName: string): string => {
+    const proj = projects.find((p) => p.tmuxSession === projectName);
+    const stored = (proj?.defaultCwd ?? "").trim();
+    if (stored && stored !== "~") return stored;
+    const activeIdx = activeWindowByProject[projectName];
+    const w = proj?.windows.find((x) => x.index === activeIdx)
+      ?? proj?.windows.find((x) => x.active)
+      ?? proj?.windows[0];
+    return (w?.paneCurrentPath ?? "").trim();
+  };
+
+  // Probe whether the project's cwd is inside a git repo. Reuses the
+  // existing gitListWorktrees channel — a non-empty list means at least
+  // the main worktree is registered, which only happens for git repos.
+  const probeGitForProject = async (projectName: string) => {
+    const cwd = resolveProjectCwd(projectName);
+    if (!cwd || cwd === "~") {
+      setNewSessionIsGitRepo(false);
+      setNewSessionWorktree(false);
+      return;
+    }
+    try {
+      const wts = await window.api.gitListWorktrees(cwd);
+      const isRepo = Array.isArray(wts) && wts.length > 0;
+      setNewSessionIsGitRepo(isRepo);
+      if (!isRepo) setNewSessionWorktree(false);
+    } catch {
+      // Probe failure (transient) → leave state alone; the existing checkbox
+      // value stays, and the user sees a non-checked state until they retry
+      // by reopening the form.
+      setNewSessionIsGitRepo(false);
+    }
+  };
 
   const toggleCollapse = (id: string) =>
     setCollapsed((prev) => {
@@ -257,6 +314,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const startNewSession = (projectName: string) => {
     setNewSessionFor(projectName);
     setNewSessionName("");
+    // BET-246: seed checkbox + probe git for the clicked project. Same
+    // dance as openNewSessionInActive above.
+    setNewSessionWorktree(worktreePerSession);
+    void probeGitForProject(projectName);
     setCollapsed((prev) => {
       const next = new Set(prev);
       next.delete(projectName);
@@ -266,27 +327,46 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
   const createSession = async () => {
     if (!newSessionFor) return;
+    const sessionFor = newSessionFor;
     const windowName = newSessionName.trim() || "session";
+    // BET-246: when the user opted in AND the project is a git repo,
+    // branch a sibling worktree first, then create the window with that
+    // path as its cwd. Fail-closed: any worktree error surfaces and the
+    // window is NOT created (no silent fall-through to the shared dir).
+    // The unchecked/non-git path is byte-for-byte the legacy flow.
+    const wantWorktree = newSessionWorktree && newSessionIsGitRepo;
+    let worktreePath: string | undefined;
+    if (wantWorktree) {
+      const projectCwd = resolveProjectCwd(sessionFor);
+      if (!projectCwd || projectCwd === "~") {
+        showError(new Error("project has no cwd; cannot create worktree"));
+        return;
+      }
+      try {
+        const wt = await window.api.gitAddWorktree({ cwd: projectCwd, name: windowName });
+        worktreePath = wt.path;
+      } catch (e) {
+        showError(e);
+        return;
+      }
+    }
     try {
-      // No cwd override — new windows inherit their cwd from the project's
-      // stored defaultCwd. The user already chose a path when they created
-      // the project; needing to retype it for every window was confusing
-      // and led to silent fall-through to ~ when left blank.
       const projects = await window.api.tmuxNewWindow({
-        sessionName: newSessionFor,
+        sessionName: sessionFor,
         windowName,
+        ...(worktreePath ? { cwd: worktreePath, worktreePath } : {}),
         chatMode: true,
       });
       setNewSessionFor(null);
       await refresh();
       // Activate the new window (it'll be at the highest index in this session)
-      const proj = projects.find((p) => p.tmuxSession === newSessionFor);
+      const proj = projects.find((p) => p.tmuxSession === sessionFor);
       const w = proj?.windows.find((x) => x.name === windowName);
       if (w) {
-        setActive(newSessionFor, w.index);
+        setActive(sessionFor, w.index);
         try {
           await window.api.tmuxSelectWindow({
-            sessionName: newSessionFor,
+            sessionName: sessionFor,
             windowIndex: w.index,
           });
         } catch (e) {
@@ -315,7 +395,64 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   };
 
   const killWindow = async (project: string, index: number) => {
+    // BET-246: BEFORE teardown, run the safe worktree remove (if gated).
+    // Only act on windows whose `@manta-worktree-path` is set — that's the
+    // one signal that MantaUI itself created the worktree (a pre-existing
+    // worktree or the main checkout is never stamped, so it's never
+    // cleaned here).
+    const proj = projects.find((p) => p.tmuxSession === project);
+    const w = proj?.windows.find((x) => x.index === index);
+    const wtPath = w?.worktreePath ?? null;
+    if (worktreeCleanOnClose && wtPath) {
+      try {
+        const res = await window.api.gitRemoveWorktree({ path: wtPath, force: false });
+        if (res && res.removed === false && res.reason === "dirty") {
+          // Pause teardown; surface the confirm dialog. The user picks
+          // Remove (force) or Keep (skip).
+          setConfirmDeleteFor({
+            kind: "worktree-dirty",
+            project,
+            index,
+            name: w?.name ?? "",
+            worktreePath: wtPath,
+          });
+          return;
+        }
+      } catch (e) {
+        // Anything other than a classified dirty refusal → show the error
+        // but still continue to teardown. Closing the session must not be
+        // blocked by a cleanup failure.
+        showError(e);
+      }
+    }
     setConfirmDeleteFor(null);
+    try {
+      await window.api.tmuxKillWindow({ sessionName: project, windowIndex: index });
+      await refresh();
+    } catch (e) {
+      showError(e);
+    }
+  };
+
+  // Second-stage kill after the worktree-dirty confirm. force=true retries
+  // git worktree remove with --force; force=false skips removal entirely
+  // (the worktree + branch remain on disk). Either way the tmux window
+  // itself is then torn down — both branches lead to teardown per spec.
+  const killWorktreeDirtyAndClose = async (
+    project: string,
+    index: number,
+    wtPath: string,
+    force: boolean,
+  ) => {
+    setConfirmDeleteFor(null);
+    if (force) {
+      try {
+        await window.api.gitRemoveWorktree({ path: wtPath, force: true });
+      } catch (e) {
+        // Force-remove failed — surface but still close the session.
+        showError(e);
+      }
+    }
     try {
       await window.api.tmuxKillWindow({ sessionName: project, windowIndex: index });
       await refresh();
@@ -675,6 +812,15 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                               onCancel={() => setConfirmDeleteFor(null)}
                             />
                           )}
+                        {confirmDeleteFor?.kind === "worktree-dirty" &&
+                          confirmDeleteFor.project === p.tmuxSession &&
+                          confirmDeleteFor.index === w.index && (
+                            <ConfirmWorktreeDirty
+                              worktreePath={confirmDeleteFor.worktreePath}
+                              onRemove={() => killWorktreeDirtyAndClose(p.tmuxSession, w.index, confirmDeleteFor.worktreePath, true)}
+                              onKeep={() => killWorktreeDirtyAndClose(p.tmuxSession, w.index, confirmDeleteFor.worktreePath, false)}
+                            />
+                          )}
                       </div>
                     );
                   })}
@@ -692,6 +838,26 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                         }}
                         className="w-full bg-bg-soft border border-border px-2 py-0.5 text-xs rounded focus:outline-none focus:border-accent"
                       />
+                      {/* BET-246: per-session worktree override. Disabled
+                          (visibly muted) when the project cwd isn't inside
+                          a git repo; the spec's "disabled, not hidden"
+                          choice. Reuses the same checkbox markup as the
+                          Settings toggles. */}
+                      <label
+                        className={`flex items-center gap-2 text-xs ${
+                          newSessionIsGitRepo ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+                        }`}
+                        title={newSessionIsGitRepo ? undefined : "not a git repository"}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={newSessionWorktree}
+                          disabled={!newSessionIsGitRepo}
+                          onChange={(e) => setNewSessionWorktree(e.target.checked)}
+                          className="accent-accent"
+                        />
+                        <span>Create git worktree</span>
+                      </label>
                       <div className="flex gap-2">
                         <button
                           onClick={createSession}
@@ -928,6 +1094,54 @@ function ConfirmDelete({
           className="text-xs px-2 py-0.5 text-text-faint hover:text-text"
         >
           Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// BET-246: second-stage confirm after the safe git worktree remove hit a
+// dirty checkout. Both buttons lead to teardown — Remove retries with
+// --force (and discards uncommitted work), Keep skips the worktree remove
+// entirely and just closes the tmux window. Same visual shape as
+// ConfirmDelete; reusing the existing confirmDeleteFor state avoids
+// introducing a parallel modal system.
+function ConfirmWorktreeDirty({
+  worktreePath,
+  onRemove,
+  onKeep,
+}: {
+  worktreePath: string;
+  onRemove: () => void;
+  onKeep: () => void;
+}) {
+  return (
+    <div className="ml-2 mt-1 mb-1 px-2 py-1.5 rounded bg-bg-soft border border-border space-y-1.5">
+      <div className="text-xs text-text-muted">
+        <code className="break-all">{worktreePath}</code> has uncommitted
+        changes. Removing the worktree will permanently delete that work.
+        Remove anyway?
+      </div>
+      <div className="flex flex-wrap gap-1">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          className="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-300 hover:bg-red-500/30"
+          title="git worktree remove --force (discards uncommitted changes)"
+        >
+          Remove
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onKeep();
+          }}
+          className="text-xs px-2 py-0.5 text-text-faint hover:text-text"
+          title="leave the worktree + branch on disk; just close the session"
+        >
+          Keep worktree
         </button>
       </div>
     </div>
