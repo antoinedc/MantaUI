@@ -8,6 +8,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
+import { generateKeyPairSync } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { writeFile, rm } from "node:fs/promises";
 import { createGatewayServer, createRegisterRateLimiter } from "./index.mjs";
 
 const VALID_BOX_ID = "abcdef0123456789abcdef0123456789";
@@ -27,7 +31,7 @@ function makeFetchImpl() {
   return { calls, fetchImpl };
 }
 
-async function buildServer({ store = {}, dns = makeFetchImpl(), apnsConfig = null, rateLimiter } = {}) {
+async function buildServer({ store = {}, dns = makeFetchImpl(), apnsConfig = null, rateLimiter, apnsSender } = {}) {
   let liveStore = { ...store };
   const load = async () => ({ ...liveStore });
   const save = async (m) => { liveStore = { ...m }; };
@@ -37,6 +41,13 @@ async function buildServer({ store = {}, dns = makeFetchImpl(), apnsConfig = nul
     dnsCalls.push({ url: "createOrUpdate", init: { method: args.existingRecordId ? "PUT" : "POST" }, args });
     return { recordId: dnsCalls.length * 100, action: args.existingRecordId ? "update" : "create" };
   };
+  // Default fake apnsSender: records every call and returns a 200 success.
+  // Tests that need a real p8-signing path pass their own sender; tests that
+  // just check auth/shape use this default (no network, no real key needed).
+  const defaultApnsFake = async (req) => {
+    apnsCalls.push(req);
+    return { status: 200, body: null };
+  };
   const svc = createGatewayServer({
     port: 0,
     load,
@@ -44,6 +55,12 @@ async function buildServer({ store = {}, dns = makeFetchImpl(), apnsConfig = nul
     fetchImpl,
     createDnsRecord,
     apnsConfig,
+    // Wire the injected apnsSender (or the default fake) so the happy-path
+    // /push test exercises the full handlePush → sendApns wiring end-to-end.
+    // This is the seam BET-236 requires: without it, a bogus p8Path causes
+    // JWT signing to throw and apnsSender is never reached, hiding any
+    // wrong-function-into-wrong-slot regression.
+    apnsSender: apnsSender ?? defaultApnsFake,
     rateLimiter: rateLimiter ?? createRegisterRateLimiter(),
     log: () => {},
     warn: () => {},
@@ -59,6 +76,27 @@ async function buildServer({ store = {}, dns = makeFetchImpl(), apnsConfig = nul
     // destructure — the snapshot would go stale once `save` updates it).
     get liveStore() { return liveStore; },
     apnsCalls,
+  };
+}
+
+// Generate a real EC key + write it to a temp .p8 file so JWT signing
+// succeeds during server-level /push tests. Callers must await cleanup().
+async function makeApnsCfg() {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const p8Path = join(
+    tmpdir(),
+    `manta-gw-server-test-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.p8`,
+  );
+  await writeFile(p8Path, pem, "utf-8");
+  return {
+    cfg: {
+      teamId: "FSQ3HS4Z24",
+      keyId: "82P7483297",
+      bundleId: "com.antoinedc.mantaui",
+      p8Path,
+    },
+    cleanup: () => rm(p8Path, { force: true }),
   };
 }
 
@@ -266,37 +304,72 @@ test("POST /push without auth → 401", async () => {
   });
 });
 
-test("POST /push auth + tokens → 200 {results:[{token, ok, prune}]}", async () => {
-  const token = makeToken("good");
-  const store = seedStore({ gateway_token: token });
-  await withServer(
-    { store, apnsConfig: { teamId: "t", keyId: "k", p8Path: "/d", bundleId: "b" } },
-    async ({ port }) => {
-      const r = await postJson(
-        port,
-        "/push",
-        {
-          box_id: VALID_BOX_ID,
-          tokens: [makeHexToken("a"), makeHexToken("b")],
-          payload: { title: "T", body: "B" },
-        },
-        { authorization: `Bearer ${token}` },
-      );
-      // Note: this test passes a bogus p8Path ("/d") to apnsConfig, so the
-      // APNs JWT signing fails on every send. Each token therefore resolves
-      // to { ok: false, prune: false } from sendApns (the catch path). What
-      // we care about here is that the AUTH + shape are correct: 200 with
-      // one result per token. The proper APNs round-trip (200 + 410 prune)
-      // is covered in src/gateway/apns.test.mjs.
-      assert.equal(r.status, 200);
-      const j = JSON.parse(r.body);
-      assert.equal(j.results.length, 2);
-      assert.equal(typeof j.results[0].ok, "boolean");
-      assert.equal(typeof j.results[0].prune, "boolean");
-      assert.equal(typeof j.results[1].ok, "boolean");
-      assert.equal(typeof j.results[1].prune, "boolean");
-    },
-  );
+test("POST /push auth + tokens → 200 {results:[{token, ok, prune}]} and apnsSender invoked", async () => {
+  // BET-236: use a real EC key so JWT signing succeeds and the injected
+  // apnsSender is actually reached. Before this change, the bogus p8Path
+  // ("/d") made JWT signing throw first, meaning apnsSender was never called
+  // and any wrong-function-into-wrong-slot regression went undetected.
+  const { cfg, cleanup } = await makeApnsCfg();
+  try {
+    const token = makeToken("good");
+    const store = seedStore({ gateway_token: token });
+    const tokA = makeHexToken("a");
+    const tokB = makeHexToken("b");
+    await withServer(
+      { store, apnsConfig: cfg },
+      async ({ port, apnsCalls }) => {
+        const r = await postJson(
+          port,
+          "/push",
+          {
+            box_id: VALID_BOX_ID,
+            tokens: [tokA, tokB],
+            payload: { title: "T", body: "B" },
+          },
+          { authorization: `Bearer ${token}` },
+        );
+        assert.equal(r.status, 200);
+        const j = JSON.parse(r.body);
+        assert.equal(j.results.length, 2);
+        // Both tokens should be ok:true because our fake apnsSender returns 200.
+        assert.deepEqual(j.results[0], { token: tokA, ok: true, prune: false });
+        assert.deepEqual(j.results[1], { token: tokB, ok: true, prune: false });
+
+        // BET-236: assert the fake apnsSender was called with properly-shaped
+        // APNs requests — not with a DNS fetch (URL string) or anything else.
+        // If handlePush accidentally passes the DNS fetchImpl into sendApns,
+        // the sender would receive a URL string rather than a request object,
+        // and these assertions would fail.
+        assert.equal(apnsCalls.length, 2, "apnsSender must be called once per token");
+        for (const [i, req] of apnsCalls.entries()) {
+          assert.equal(req.host, "api.push.apple.com", `call ${i}: host must be APNs`);
+          assert.equal(req.method, "POST", `call ${i}: method must be POST`);
+          assert.ok(
+            typeof req.path === "string" && req.path.startsWith("/3/device/"),
+            `call ${i}: path must be /3/device/<token>`,
+          );
+          assert.ok(
+            typeof req.headers?.authorization === "string" &&
+              req.headers.authorization.startsWith("bearer "),
+            `call ${i}: authorization header must carry APNs bearer JWT`,
+          );
+          assert.equal(
+            req.headers?.["apns-topic"],
+            cfg.bundleId,
+            `call ${i}: apns-topic must match bundleId`,
+          );
+          assert.ok(typeof req.body === "string", `call ${i}: body must be a JSON string`);
+          const parsed = JSON.parse(req.body);
+          assert.ok(parsed?.aps?.alert?.title === "T", `call ${i}: aps.alert.title must match payload`);
+        }
+        // Token routing: each call's path must reference the correct device token.
+        assert.ok(apnsCalls[0].path.includes(tokA), "first call must target tokA");
+        assert.ok(apnsCalls[1].path.includes(tokB), "second call must target tokB");
+      },
+    );
+  } finally {
+    await cleanup();
+  }
 });
 
 test("POST /push with >20 tokens → 400 too_many_tokens", async () => {
