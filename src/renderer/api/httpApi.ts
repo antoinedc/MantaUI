@@ -16,7 +16,7 @@ import {
   type ClaimResult,
 } from "../mobile/pairingLogic.js";
 import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
-import { getBuiPreload } from "../preloadAccess.js";
+import { getMantaPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
 import { shouldForceReconnect } from "../chatUtils";
 import { ship } from "../log";
@@ -53,7 +53,7 @@ export function serverBase(): string {
 // Bearer-token plumbing (M1 auth gate, BET-51)
 // ---------------------------------------------------------------------------
 //
-// bui-server now gates every data route behind a single shared box_token,
+// manta-server now gates every data route behind a single shared box_token,
 // presented as `Authorization: Bearer <box_token>`. The token is obtained via
 // the pairing handshake (POST /auth/claim, done by M1-T2's pairing UI) and
 // persisted client-side in localStorage["manta_token"] — a sibling of the
@@ -273,7 +273,7 @@ async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
 
 /**
  * Like {@link rpc}, but for channels that may not exist on the server (desktop-
- * only optimizations the bui-server doesn't implement, or a channel added after
+ * only optimizations the manta-server doesn't implement, or a channel added after
  * the box was last updated). When the server answers 500 "unknown rpc channel:
  * <ch>" — the exact string src/server/rpc.mjs throws — we treat it as a benign
  * "not supported here" and resolve to `fallback` instead of surfacing a red 500
@@ -456,7 +456,7 @@ function getController(): WsReconnectController {
     },
     onConfigError: (e) =>
       console.warn(
-        "[bui] events WebSocket not opened:",
+        "[manta] events WebSocket not opened:",
         e instanceof Error ? e.message : String(e),
       ),
   });
@@ -533,7 +533,7 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 //
 // DESKTOP HTTP-MODE DEGRADATION AUDIT (BET-58). When the desktop runs in
 // "http" mode this object becomes window.api (the real preload is preserved as
-// window.__buiPreload for Electron-local affordances). Because httpApi
+// window.__mantaPreload for Electron-local affordances). Because httpApi
 // implements the FULL Api type (typecheck-enforced), no renderer call can hit
 // an undefined method — the worst case is a documented no-op, never a crash.
 // The scp-dependent / OS-integration features degrade as follows:
@@ -559,11 +559,11 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 //   • readLocalFile (arbitrary Mac file bytes, for screenshot "Add to chat")
 //     is NOT part of the Api type — the server IS the box and has no access
 //     to the Mac filesystem; callers (ChatPanel's acceptScreenshot) MUST go
-//     through window.__buiPreload.readLocalFile instead, exactly like
+//     through window.__mantaPreload.readLocalFile instead, exactly like
 //     clipboardReadImage.
 //
 // None of these throw. If a future feature MUST use the real preload in http
-// mode (e.g. OS clipboard), reach it explicitly via window.__buiPreload rather
+// mode (e.g. OS clipboard), reach it explicitly via window.__mantaPreload rather
 // than assuming window.api is the preload.
 
 export const httpApi: Api = {
@@ -623,7 +623,7 @@ export const httpApi: Api = {
   onScreenshotDetected: (cb) =>
     on<{ source: "clipboard" | "file"; path?: string }>("screenshot", cb),
 
-  // Desktop OS-notification directives from bui-server's notification router.
+  // Desktop OS-notification directives from manta-server's notification router.
   // The /events WS delivers `desktopNotify` envelopes; subscribing here wires
   // the renderer to the live stream (busConsumer in src/main/desktopNotify.ts
   // forwards them to the renderer via IPC).
@@ -666,14 +666,14 @@ export const httpApi: Api = {
   getPathForFile: (_file: File): string => "",
 
   // -- misc --
-  // Desktop HTTP-mode: route through window.__buiPreload so the main process
+  // Desktop HTTP-mode: route through window.__mantaPreload so the main process
   // can fetch from /api/peek and open the file with shell.openPath (the
   // renderer has no direct shell access). Falls back to the RPC channel for
   // mobile/web where the server IS the box and reads the file natively.
   //
   // BET-127 review note: there is no ipcMain.handle(IPC.peekRemoteFile, ...)
   // registered in src/main/index.ts today, so the preload call below always
-  // rejects ("no handler registered"). Pre-BET-127, the __buiPreload probe
+  // rejects ("no handler registered"). Pre-BET-127, the __mantaPreload probe
   // checked a name (peekRemoteFileHttp) the preload never exposed, so it
   // never matched and fell through to the RPC no-op — a silent, pre-existing
   // no-op UX for a known-broken feature. BET-127 fixed the probe's NAME to
@@ -686,7 +686,7 @@ export const httpApi: Api = {
   // until a real ipcMain handler lands (tracked as a follow-up; see BET-127
   // PR discussion).
   peekRemoteFile: async (remotePath) => {
-    const preload = (window as { __buiPreload?: { peekRemoteFile?: (p: string) => Promise<void> } }).__buiPreload;
+    const preload = (window as { __mantaPreload?: { peekRemoteFile?: (p: string) => Promise<void> } }).__mantaPreload;
     if (preload?.peekRemoteFile) {
       try {
         return await preload.peekRemoteFile(remotePath);
@@ -762,13 +762,13 @@ export const httpApi: Api = {
    * Electron HTTP-mode note: the main process installs a
    * `setWindowOpenHandler` that returns `{ action: "deny" }`, so
    * `window.open` from the renderer is blocked. We route through the typed
-   * preload accessor (`window.__buiPreload.openExternal`) when it's present
+   * preload accessor (`window.__mantaPreload.openExternal`) when it's present
    * (Electron HTTP mode), which goes through IPC to `shell.openExternal`.
    * On mobile/web there is no preload, so we fall back to `window.open`
    * which works because the WebView IS the browser.
    */
   openExternal: async (url) => {
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     if (preload) {
       try {
         await preload.openExternal(url);
@@ -802,7 +802,7 @@ export const httpApi: Api = {
   opencodeMessages: (sessionId) => rpc(IPC.opencodeMessages, sessionId),
   // These three are DESKTOP-ONLY optimizations with no server-side handler:
   //   • messages-cached — reads main's in-process transcript cache for an
-  //     instant first paint. The bui-server keeps no such cache, so there's
+  //     instant first paint. The manta-server keeps no such cache, so there's
   //     nothing to serve; returning null is the documented "cache miss" and the
   //     ChatPanel falls through to its background opencodeMessages() fetch.
   //   • open-/close-stream — main refcounts a per-directory opencode SSE stream.
@@ -877,16 +877,16 @@ export const httpApi: Api = {
     rpc(IPC.opencodeCompactSession, sessionId),
   opencodeDeleteSession: (input) => rpc(IPC.opencodeDeleteSession, input),
 
-  // -- scheduled prompts (bui-server owned; in-process on mobile) --
+  // -- scheduled prompts (manta-server owned; in-process on mobile) --
   scheduleList: (sessionId) => rpc(IPC.scheduleList, sessionId),
   scheduleDelete: (id) => rpc(IPC.scheduleDelete, id),
 
-  // -- secrets (bui-server owned; in-process on mobile) --
+  // -- secrets (manta-server owned; in-process on mobile) --
   secretsList: (sessionId, all) => rpc(IPC.secretsList, sessionId, all),
   secretsSet: (input) => rpc(IPC.secretsSet, input),
   secretsDelete: (id) => rpc(IPC.secretsDelete, id),
 
-  // -- inbound webhooks (bui-server owned; in-process on mobile) --
+  // -- inbound webhooks (manta-server owned; in-process on mobile) --
   webhookList: (sessionId) => rpc(IPC.webhookList, sessionId),
   webhookDelete: (id) => rpc(IPC.webhookDelete, id),
 
@@ -920,7 +920,7 @@ export const httpApi: Api = {
   opencodeGenerateTitle: (input) => rpc(IPC.opencodeGenerateTitle, input),
 
   // -- server version (BET-180) --
-  // Returns the bui-server's package.json version. In-process via the
+  // Returns the manta-server's package.json version. In-process via the
   // `server:version` RPC channel (no HTTP round-trip; same value GET
   // /api/version returns for non-renderer clients). MobileSettings renders
   // "Server vX.Y.Z" under the URL field — display only, no gating.
@@ -942,7 +942,7 @@ export const httpApi: Api = {
   // missing-version client; bumping MIN_CLIENT above the current mobile
   // build will start surfacing the informational skew banner in MobileApp.
   getClientVersion: async (): Promise<{ version: string }> => {
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     if (preload?.clientVersion) {
       try {
         return await preload.clientVersion();
@@ -955,7 +955,7 @@ export const httpApi: Api = {
 
   // -- server-update apply (BET-225 stage 3) --
   // Renderer → server RPC: kicks off scripts/self-update.sh on the box.
-  // Returns immediately (fire-and-forget); the restart kills the bui-server
+  // Returns immediately (fire-and-forget); the restart kills the manta-server
   // process mid-run so a caller awaiting past the RPC send may never see
   // a response. Modeled on `opencode:restart` (single-purpose server action,
   // fixed-argv execFile, no injection surface).

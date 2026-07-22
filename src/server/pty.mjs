@@ -3,7 +3,7 @@
 //
 // BET-138: this module used to attach to a tmux session (`tmux attach-session`,
 // keyed by projectName) for BOTH the /pty WebSocket handler and the pty:* RPC
-// channels. The tmux-attach path and the /pty WS handler are gone (bui never
+// channels. The tmux-attach path and the /pty WS handler are gone (manta never
 // creates a "claude-TUI" tmux window anymore, so there is nothing to attach
 // to). This module now spawns a real shell (or, for a launcher mode, an AI
 // CLI like `claude`) directly in the session's working directory. No tmux
@@ -71,7 +71,7 @@ export function spawnShellPty({ cwd, cols, rows, launcher }) {
   }
 
   // Plain shell-in-cwd (base "terminal" mode): an interactive LOGIN shell.
-  // MANTA_TERMINAL=1 marks this as a bui embedded terminal so a user's rc file
+  // MANTA_TERMINAL=1 marks this as a manta embedded terminal so a user's rc file
   // can skip hostile interactive-login behaviour — notably a tmux auto-attach
   // block (common in ~/.bashrc), which would otherwise hijack this shell into a
   // blank tmux alternate-screen and the terminal would look frozen/empty. The

@@ -50,8 +50,8 @@ session-state snapshot.
   - `api/httpApi.ts` — implements the full `Api` contract over `/rpc` +
     `/events`. **This is the live data path on BOTH desktop and mobile.**
     `main.tsx` installs it as `window.api` when paired.
-  - `preloadAccess.ts` — the narrow `BuiPreload` interface: the ~9 OS bridges
-    the renderer reaches via `window.__buiPreload` (clipboard, openExternal,
+  - `preloadAccess.ts` — the narrow `MantaPreload` interface: the ~9 OS bridges
+    the renderer reaches via `window.__mantaPreload` (clipboard, openExternal,
     reveal, screenshot, file peek, desktop-notify, getPathForFile).
   - `chatUtils.ts` — pure utility functions extracted for testability
     (`formatTokens`, `formatDuration`, `ctxStageColor`, `filterCommands`,
@@ -59,7 +59,7 @@ session-state snapshot.
     `describeTruncation`, `isTerminalTodo`, `allTodosTerminal`).
     Import from here; don't redeclare them inline in ChatPanel.
 - `src/preload/` — Electron `contextBridge`. Exposes OS-integration bridges as
-  `window.__buiPreload` and is the `export type Api = typeof api` source that
+  `window.__mantaPreload` and is the `export type Api = typeof api` source that
   typechecks `httpApi`. NOTE: it still *declares* ~60 methods but ~90% are dead
   in HTTP mode (their `ipcMain` handlers were removed) — the runtime only needs
   the OS bridges + `authClaim`/`authPair`. See BET-124 / the preload-shrink
@@ -167,7 +167,7 @@ absolute remote path is written into the PTY for claude to read.
 **Click out (peek).** xterm `LinkProvider` for absolute paths + an explicit
 click handler on `WebLinksAddon`. Path click → `GET
 <serverUrl>/api/peek?path=<abs>&session=<name>` streams the remote file bytes
-back → `__buiPreload.writeTempAndOpen` writes to a Mac tmpfile and
+back → `__mantaPreload.writeTempAndOpen` writes to a Mac tmpfile and
 `shell.openPath` opens with the OS default app. URL click →
 `shell.openExternal`. **Don't rely on WebLinksAddon's default** — its
 `window.open` path gets denied by `setWindowOpenHandler` in `main/index.ts`, so
@@ -279,7 +279,7 @@ also accept `?token=`. Default bind `127.0.0.1:8787`. Internet access is a
 - `~/.config/systemd/user/manta-server.service` → `node src/server/index.mjs`
   (`MANTA_MOBILE_HOST=127.0.0.1`, port 8787).
 - `~/.config/systemd/user/manta-tunnel.service` (`Requires=manta-server`) →
-  `cloudflared tunnel --config ~/.cloudflared/config.yml run bui`.
+  `cloudflared tunnel --config ~/.cloudflared/config.yml run manta`.
 - Permanent URL: **https://app.mantaui.com** (named tunnel
   `6cdca2ea-…`, zone `mantaui.com`). Stable across restarts — the iOS
   PWA install stays valid.
@@ -354,7 +354,7 @@ the pairing flow. No tunnels, no ControlMaster, no mosh.
 - `src/renderer/api/httpApi.ts` implements the full `Api` contract for the
   renderer: `/rpc/<channel>` for method calls, `EventSource` to `GET /events`
   for SSE streaming. Same Bearer token auth.
-- `window.__buiPreload` (from `src/preload/`) provides OS-integration bridges:
+- `window.__mantaPreload` (from `src/preload/`) provides OS-integration bridges:
   `writeTempAndOpen` (file peek), `getPathForFile` (drag-drop paths), clipboard
   access, screenshot detection, native file dialogs. These are Electron-only
   and have no mobile equivalent.
@@ -453,7 +453,7 @@ lives in `classifyPushEvent` / `firePush`, not the service worker
 The first **MantaUI-native opencode tool**: the remote AI can schedule a prompt to
 run later (once or on a recurring cron) in the SAME chat session. Full design +
 the reusable "MantaUI tools" pattern (for future tools like `ping`) is in
-`docs/bui-tools-scheduler.md`. Key facts:
+`docs/manta-tools-scheduler.md`. Key facts:
 
 - **The AI's awareness comes from a GLOBAL opencode custom tool**, not MantaUI code.
   `docs/opencode-tools/schedule.ts` is **COPIED** (not symlinked) into
@@ -467,7 +467,7 @@ the reusable "MantaUI tools" pattern (for future tools like `ping`) is in
   and the tool silently never registers; a real copy resolves the import up the
   tree to `~/.config/opencode/node_modules/`. **Install/update requires
   `systemctl --user restart opencode-serve`** (opencode runs as that systemd
-  service, NOT a `bui-opencode` tmux session — that reference is stale) so it
+  service, NOT a `manta-opencode` tmux session — that reference is stale) so it
   re-scans `tools/`.
 - **The tool is a thin registrar** — it `fetch`es manta-server
   (`127.0.0.1:8787/api/schedule`, same box, no SSH hop) and returns immediately.
@@ -513,7 +513,7 @@ The second **MantaUI-native opencode tool**: the remote AI can publish a standal
 HTML page to a public URL so it's reachable from anywhere (esp. the machine
 running the MantaUI UI). Built for design previews / demos / mockups that opencode
 generates on the box. Follows the same "MantaUI tools" pattern as the scheduler
-(`docs/bui-tools-scheduler.md`). Key facts:
+(`docs/manta-tools-scheduler.md`). Key facts:
 
 - **Global opencode tool**, `docs/opencode-tools/serve-page.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` import-resolution gotcha as schedule)
@@ -560,7 +560,7 @@ sessions in the SAME workspace are doing AND send them messages. Use case: an
 agent notices files / `git status` changing under it and wants to know which
 other agent is working alongside it (so they don't collide), or wants to
 coordinate / hand off work to a peer. Same "MantaUI tools" pattern as
-schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
+schedule/serve-page (`docs/manta-tools-scheduler.md`). Key facts:
 
 - **Workspace = tmux session (MantaUI project); peers = sibling windows.** The crux
   is the `@manta-session-id` tmux user-option, surfaced by `tmux.listProjects()`
@@ -631,7 +631,7 @@ schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
 
 The fourth **MantaUI-native opencode tool** and the first with a **desktop OS
 notification leg** alongside the existing mobile Web Push. Full design +
-routing matrix + scenarios in `docs/bui-tools-notify.md`. Key facts:
+routing matrix + scenarios in `docs/manta-tools-notify.md`. Key facts:
 
 - **manta-server is the SINGLE notification router.** Every notification —
   automatic opencode event (`firePush`) OR an AI `notify` call (`fireNotify`) —
@@ -1099,7 +1099,7 @@ and writes it back via an HTTP call to manta-server (`src/server/local.mjs`).
 **Merge is JSONC-comment-stripped** (`//`
 single-line only) before `JSON.parse`; if it's unparseable we start from `{}`
 rather than corrupting other keys. The default registry
-(`https://antoinedc.github.io/bui-skills`) ships in the opencode binary once
+(`https://antoinedc.github.io/manta-skills`) ships in the opencode binary once
 the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
 `cacheTtl: "5m" | "1h"` — Anthropic prompt cache TTL (default `"1h"`).
 Display-only: drives the stale-cache pill threshold in ChatPanel's

@@ -1,8 +1,8 @@
-# BUI Architecture Assessment & Productization Plan
+# MANTA Architecture Assessment & Productization Plan
 
 ## Executive Summary
 
-BUI is **~7700 LoC in ChatPanel.tsx alone**, with a monolithic but functional architecture. The codebase has **accumulated significant technical debt** in network/connectivity handling (evident from git history), but a full rewrite is **not the right move** for productization. Instead: **refactor the network layer, stabilize the existing architecture, then build the mobile app on top.**
+MANTA is **~7700 LoC in ChatPanel.tsx alone**, with a monolithic but functional architecture. The codebase has **accumulated significant technical debt** in network/connectivity handling (evident from git history), but a full rewrite is **not the right move** for productization. Instead: **refactor the network layer, stabilize the existing architecture, then build the mobile app on top.**
 
 ## Current Architecture: Honest Assessment
 
@@ -206,7 +206,7 @@ The codebase has **repeated connectivity fixes** because:
 - Free trial (7-day, Apple requires this)
 
 **M8: Launch**
-- Marketing site (bui.app)
+- Marketing site (manta.app)
 - Documentation (self-hosting guide, mobile setup)
 - Support (email, Discord)
 - Monitor (crash reports, usage analytics)
@@ -299,7 +299,7 @@ The codebase has **repeated connectivity fixes** because:
 
 ## Conclusion
 
-BUI's architecture is **monolithic but functional**. A full rewrite is **not the right move** for productization. Instead:
+MANTA's architecture is **monolithic but functional**. A full rewrite is **not the right move** for productization. Instead:
 
 1. **Stabilize** the network layer (M0)
 2. **Extract** ChatPanel into components (M0.5)

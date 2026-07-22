@@ -12,7 +12,7 @@
 # Bind is 127.0.0.1 on purpose: the server is NOT exposed directly. The
 # installer (scripts/install.sh) fronts it with Caddy on
 # https://<box_id>.boxes.mantaui.com, which reverse-proxies loopback to
-# 127.0.0.1:8787. Pairing codes are loopback-gated so `bui pair` must run
+# 127.0.0.1:8787. Pairing codes are loopback-gated so `manta pair` must run
 # on the box.
 
 [Unit]

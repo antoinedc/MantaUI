@@ -1,4 +1,4 @@
-// bui-native `serve_page` tool — global opencode custom tool.
+// manta-native `serve_page` tool — global opencode custom tool.
 //
 // Install on the opencode host (the Linux box that runs manta-server + opencode):
 //   mkdir -p ~/.config/opencode/tools
@@ -11,7 +11,7 @@
 // reverse-proxies *.pages.mantaui.com to this server. The tool does NOT sleep
 // or run the page itself — execute() must return promptly.
 //
-// See docs/bui-tools-scheduler.md for the general "bui tools" pattern.
+// See docs/manta-tools-scheduler.md for the general "manta tools" pattern.
 
 import { tool } from "@opencode-ai/plugin";
 import { readFileSync } from "node:fs";
@@ -72,7 +72,7 @@ export const serve_page = tool({
     "Host a standalone HTML webpage publicly under *.pages.mantaui.com.",
     "Use when you generate a web page (design preview, demo, mockup, interactive",
     "prototype) and want it accessible from anywhere — especially from the",
-    "machine where the bui UI is running. The page is served at",
+    "machine where the manta UI is running. The page is served at",
     "https://<subdomain>.pages.mantaui.com and auto-expires after 24h by",
     "default (configurable via ttlHours). To update a page, call this tool",
     "again with the same subdomain and a new file path.",

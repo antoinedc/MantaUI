@@ -4,7 +4,7 @@
 // BET-82 (M6 desktop HTTP-only) removed the SSH main path. BET-198 dropped the
 // relay — every box now serves its own public hostname directly. The desktop
 // (and mobile) only ever use httpApi (Bearer token, /rpc, /events WS) against
-// bui-server, pointed at `https://<boxId>.boxes.mantaui.com` (see
+// manta-server, pointed at `https://<boxId>.boxes.mantaui.com` (see
 // `boxDirectUrl` below). `resolveTransportMode` collapses to two states:
 // "http" (paired, valid boxToken) or "onboarding" (fresh install → full-screen
 // onboarding flow).
@@ -28,7 +28,7 @@ export function isValidBoxToken(token) {
 //
 // Post-BET-198 the relay is gone: every box now serves its own public hostname
 // (`<boxId>.boxes.mantaui.com`) which terminates TLS at the gateway and
-// proxies to the box's local bui-server. The desktop + mobile clients point
+// proxies to the box's local manta-server. The desktop + mobile clients point
 // httpApi at this URL directly — there is no intermediary relay hop.
 //
 // `BOXES_DOMAIN` is the single source for the suffix; `boxDirectUrl` builds
@@ -53,7 +53,7 @@ export function boxDirectUrl(boxId) {
 // transport path (httpApi) — this function exists to let App.tsx decide whether
 // to show the onboarding shell or the normal app shell:
 //
-//   1. boxToken set (valid 32-hex)  → "http"       (paired to a bui-server)
+//   1. boxToken set (valid 32-hex)  → "http"       (paired to a manta-server)
 //   2. else                         → "onboarding" (fresh install → full-screen
 //                                                    onboarding flow)
 //
@@ -73,7 +73,7 @@ export function resolveTransportMode(config) {
 // Post-BET-82 the desktop always uses httpApi. `selectDesktopTransport` is
 // kept as a thin wrapper for API compatibility — it always returns "http".
 // The real preload (Electron-local affordances: clipboard, reveal-in-folder,
-// OS notifications) is preserved as `window.__buiPreload`; `window.api` is
+// OS notifications) is preserved as `window.__mantaPreload`; `window.api` is
 // replaced with httpApi unconditionally.
 //
 // `hasPreload` is passed in (the caller checks `!!window.api`) so this stays
@@ -109,7 +109,7 @@ export function desktopHttpClientSeed(config) {
 // Validate + normalize the JSON body of a successful POST /auth/claim response.
 // The server returns { ok, box_token, box_id } (see src/server/auth.mjs claim()).
 // We only trust it once BOTH tokens match the 32-hex shape — a wrong shape means
-// the endpoint is misbehaving (or is not a bui-server at all), and persisting a
+// the endpoint is misbehaving (or is not a manta-server at all), and persisting a
 // junk boxToken would flip the config into a broken "http" mode with an
 // unusable Bearer credential.
 //

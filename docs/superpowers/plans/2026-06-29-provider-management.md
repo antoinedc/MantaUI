@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a Providers section to bui Settings (desktop + mobile) to add/remove OpenAI-compatible endpoints, refresh model discovery from each endpoint's `/v1/models`, and toggle which discovered models opencode.jsonc advertises.
+**Goal:** Add a Providers section to manta Settings (desktop + mobile) to add/remove OpenAI-compatible endpoints, refresh model discovery from each endpoint's `/v1/models`, and toggle which discovered models opencode.jsonc advertises.
 
 **Architecture:** opencode.jsonc on the box stays the single source of truth. New `src/main/providers.ts` does discovery (curl on the box) and the read-merge-write of the `provider` key in opencode.jsonc, reusing the tested `buildRemoteConfigWriteCmd` heredoc writer. Three new IPC channels (`getProviders`, `setProviders`, `discoverModels`) plus a reuse of an existing restart path. UI is a `ProvidersCard` rendered in Settings.tsx with a thin mobile mirror. The model picker is unchanged — it keeps reading opencode `/provider`.
 
@@ -541,7 +541,7 @@ git commit -m "feat(providers): SSH-driven discover/get/set against box opencode
 **Files:**
 - Modify: `src/main/opencode.ts`
 
-opencode reloads opencode.jsonc only on (re)start. We expose a restart that tears down the `bui-opencode` tmux session; the existing ensure path respawns it on next use.
+opencode reloads opencode.jsonc only on (re)start. We expose a restart that tears down the `manta-opencode` tmux session; the existing ensure path respawns it on next use.
 
 - [ ] **Step 1: Add the restart function**
 
@@ -549,7 +549,7 @@ In `src/main/opencode.ts`, after `ensureForward`/the tmux helpers (search for `B
 
 ```ts
 // Restart opencode so it reloads opencode.jsonc (config changes — e.g. provider
-// edits — only take effect on (re)start). We kill the bui-opencode tmux session;
+// edits — only take effect on (re)start). We kill the manta-opencode tmux session;
 // the next ensureForward()/ensureOpencode path respawns a fresh server. Active
 // sessions are briefly interrupted — callers MUST gate this behind explicit user
 // consent (prompt-before-restart).
@@ -969,7 +969,7 @@ git commit -m "feat(providers): render ProvidersCard in desktop + mobile Setting
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Build and launch bui locally**
+- [ ] **Step 1: Build and launch manta locally**
 
 Run the app per the project's run path (e.g. `npm run dev`). The remote box (alphaclaw) must be the configured host — provider edits write to ITS opencode.jsonc.
 

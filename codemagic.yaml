@@ -11,7 +11,7 @@
 #   1. Sign up at codemagic.io, connect the GitHub repo antoinedc/MantaUI.
 #   2. Team → Integrations → Developer Portal → add an App Store Connect API key:
 #        - Key ID, Issuer ID, and the .p8 file (the same ASC key already in the
-#          bui Secrets card). Name the integration "codemagic" (referenced below
+#          manta Secrets card). Name the integration "codemagic" (referenced below
 #          as app_store_connect: codemagic).
 #   3. That's it — this file drives everything else.
 #

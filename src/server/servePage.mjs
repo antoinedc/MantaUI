@@ -1,7 +1,7 @@
 // servePage.mjs — file server + page registry for the mobile server.
 //
 // The remote AI calls the global opencode `serve_page` tool
-// (docs/opencode-tools/serve-page.ts), which POSTs to bui-server's
+// (docs/opencode-tools/serve-page.ts), which POSTs to manta-server's
 // /api/serve-page. The source file is copied into a stable directory
 // under ~/.manta/pages/<subdomain>/, and an in-process HTTP server
 // on 127.0.0.1:20080 serves it. Caddy reverse-proxies *.pages.mantaui.com

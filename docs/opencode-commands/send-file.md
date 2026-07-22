@@ -4,14 +4,14 @@ description: Send a file from this remote box down to the user's laptop (their D
 
 # /send-file
 
-Deliver a file from this machine to the user's laptop. bui (the desktop app the
+Deliver a file from this machine to the user's laptop. manta (the desktop app the
 user is running) watches a special outbox directory on this box and pulls any
 file that appears there down to the user's computer — the reverse of the user
 dragging a file into the chat.
 
 ## How to send a file
 
-Copy the file into `~/.manta-outbox/` on this box. That's it — bui detects it
+Copy the file into `~/.manta-outbox/` on this box. That's it — manta detects it
 within a few seconds and saves it to the user's Downloads folder (or, depending
 on the user's settings, asks them to confirm first). The file is removed from
 the outbox once it's been delivered.
@@ -32,6 +32,6 @@ receives.
 - Scope by session if useful: `~/.manta-outbox/<anything>/file.ext` also works;
   the subdirectory is shown to the user as a label and otherwise ignored.
 - This is delivery only. To *read* a file the user sent you, look in
-  `~/.manta-uploads/` (or use the absolute path bui pasted into the prompt).
+  `~/.manta-uploads/` (or use the absolute path manta pasted into the prompt).
 
 $ARGUMENTS

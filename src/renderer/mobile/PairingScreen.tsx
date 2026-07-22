@@ -15,11 +15,11 @@ type Props = {
 
 /**
  * Full-screen pairing gate for the mobile/web client. Shown by MobileApp when
- * bui-server reports auth-required (httpApi throws AuthRequiredError on 401) —
+ * manta-server reports auth-required (httpApi throws AuthRequiredError on 401) —
  * both on a fresh, never-paired browser AND on the re-pair path (a previously
  * stored token was revoked/rotated, so the box now 401s again).
  *
- * The user mints a 6-digit code on the box (`bui pair`, local-only) and types
+ * The user mints a 6-digit code on the box (`manta pair`, local-only) and types
  * it here; we POST /auth/claim, persist the returned box_token on success, and
  * hand control back to MobileApp. All non-UI logic (input contract, HTTP-outcome
  * classification, form state machine) lives in pairingLogic.ts + httpApi's
@@ -59,7 +59,7 @@ export function PairingScreen({ onPaired }: Props) {
         <div className="flex flex-col gap-2">
           <div className="text-text text-lg font-medium">Connect to your server</div>
           <div className="text-text-muted text-sm">
-            Enter the pairing code shown by <code>bui pair</code> on your box.
+            Enter the pairing code shown by <code>manta pair</code> on your box.
           </div>
         </div>
 

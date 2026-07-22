@@ -21,7 +21,7 @@
             </intent-filter>
 
             <!-- Custom URL scheme registration (BET-177 §2.1). The desktop
-                 Settings QR and `bui pair` terminal QR both emit
+                 Settings QR and `manta pair` terminal QR both emit
                  `manta://pair?…` links; Android opens them in this activity
                  (singleTask launchMode above so the existing instance is
                  reused, not duplicated). Universal Links / App Links are

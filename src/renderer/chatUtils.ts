@@ -345,7 +345,7 @@ export function mergeBufferedDeltas<M extends {
 // /clear and starting fresh.
 //
 // `selectCacheTtlMs(ttl)` returns the TTL in milliseconds. The TTL value
-// itself is configured per-request by opencode (NOT by bui); the
+// itself is configured per-request by opencode (NOT by manta); the
 // setting here is the user's claim about what opencode is sending, used
 // solely to predict when to show the "/clear to save Nk tokens" pill.
 //
@@ -1112,8 +1112,8 @@ export function isAssistantTurnComplete(
 //   - state.title / state.output / state.time.{start,end}
 //
 // The child session runs in the parent's `directory`, so its events flow on
-// the SAME scoped `/event?directory=` stream bui already has open. The only
-// thing standing between bui and live subagent rendering is the early
+// the SAME scoped `/event?directory=` stream manta already has open. The only
+// thing standing between manta and live subagent rendering is the early
 // sessionID filter (it drops events whose sessionID === childId). The
 // collector helpers below produce the allowlist that filter consults.
 
@@ -1459,7 +1459,7 @@ export function wasAtBottomBeforeCommit(
 }
 
 // ── Queued-message drain (step-boundary abort) ────────────────────────────
-// When the user queues a prompt mid-turn, bui no longer waits for the whole
+// When the user queues a prompt mid-turn, manta no longer waits for the whole
 // turn to finish. At the next mid-turn STEP BOUNDARY it aborts the in-flight
 // turn and lets the idle-drain submit the queued prompt as a fresh turn.
 // These pure predicates make the decision points testable.

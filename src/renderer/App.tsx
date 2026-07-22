@@ -6,7 +6,7 @@ import { Settings } from "./Settings";
 import { Onboarding } from "./Onboarding";
 import { useStore, flatSessions, resolveSessionOwner } from "./store";
 import { resolveTransportMode } from "../shared/transport.mjs";
-import { getBuiPreload } from "./preloadAccess";
+import { getMantaPreload } from "./preloadAccess";
 import { describe as describeConnection } from "../shared/net/state.js";
 import {
   type SessionMode,
@@ -140,7 +140,7 @@ export function App() {
   activeChatRef.current = activeChatSessionId;
 
   useEffect(() => {
-    // Bootstrap. In HTTP mode (paired to a bui-server) refresh() can reject
+    // Bootstrap. In HTTP mode (paired to a manta-server) refresh() can reject
     // with AuthRequiredError when the box answers 401 — a revoked/rotated
     // box_token mid-session. Route that to the pairing screen (onboarding step
     // 1) instead of letting the app sit dead with no sessions and no
@@ -193,7 +193,7 @@ export function App() {
   // active ChatPanel renders it, and accept/dismiss clear it globally.
   // Routes through the typed preload accessor so it no-ops on mobile/web.
   useEffect(() => {
-    const preload = getBuiPreload();
+    const preload = getMantaPreload();
     if (!preload) return;
     const off = preload.onScreenshotDetected((ev) => {
       useStore.getState().setScreenshotToast(ev);
@@ -361,7 +361,7 @@ export function App() {
     return off;
   }, []);
 
-  // Desktop OS notifications. bui-server's router (push.mjs) decides WHICH
+  // Desktop OS notifications. manta-server's router (push.mjs) decides WHICH
   // device(s) get a notification (no duplicates) and forwards a desktop directive
   // → main → IPC here. We add the final local
   // suppression — if this window is focused AND already showing that exact
@@ -704,7 +704,7 @@ export function App() {
 
           {/* Session-mode dropdown (BET-138): Chat / Terminal / one entry per
               available AI CLI launcher. Only shown for an active chat session
-              — every bui-created window carries one. WebkitAppRegion opts out
+              — every manta-created window carries one. WebkitAppRegion opts out
               of the titlebar's Electron drag region so the select is clickable. */}
           {activeChatSessionId && (
             <div className="ml-auto" style={{ WebkitAppRegion: "no-drag" } as CSSProperties}>
@@ -771,7 +771,7 @@ export function App() {
               {/* session id, visible only when it's the active session AND */}
               {/* the active session's current mode is "chat". */}
               {[...visitedChats.current].map((sid) => {
-                // owner is null if the window was killed remotely but bui
+                // owner is null if the window was killed remotely but manta
                 // still has the panel mounted — fork/delete buttons
                 // gracefully no-op then.
                 const owner = resolveSessionOwner(projects, sid);

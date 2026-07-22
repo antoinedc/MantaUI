@@ -1,4 +1,4 @@
-// busConsumer.ts — shared SSE consumer for bui-server's `/events` stream.
+// busConsumer.ts — shared SSE consumer for manta-server's `/events` stream.
 //
 // Extracted from src/main/desktopNotify.ts so the SSE plumbing (Bearer-authed
 // long-lived GET, 3-second auto-reconnect, `\n\n` frame split, `data:` parse)

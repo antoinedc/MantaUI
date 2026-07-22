@@ -42,7 +42,7 @@ import mantaMark from "./assets/manta-mark-128.png";
 // skipping (onSkip → skip).
 //
 // Props:
-//   onDone — called when onboarding completes (success screen "Open bui") OR is
+//   onDone — called when onboarding completes (success screen "Open manta") OR is
 //            skipped. The parent (App.tsx) re-reads config and drops back to the
 //            normal shell WITHOUT an app restart.
 

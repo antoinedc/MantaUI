@@ -5,7 +5,7 @@
 import type { AppConfig } from "./types.js";
 
 // The three transport states a config can resolve to.
-//   "http"       — paired to a bui-server (boxToken present)
+//   "http"       — paired to a manta-server (boxToken present)
 //   "ssh"        — legacy/power SSH mode (host set), or onboarding was skipped
 //   "onboarding" — fresh install; show the full-screen onboarding flow
 export type TransportMode = "http" | "ssh" | "onboarding";
@@ -39,7 +39,7 @@ export function parseClaimResponse(json: unknown): ClaimResult;
 
 // Which client the DESKTOP should install as window.api (BET-58):
 //   "http"    — paired config → the httpApi server client (keep preload for
-//               Electron-local affordances under window.__buiPreload)
+//               Electron-local affordances under window.__mantaPreload)
 //   "preload" — SSH/onboarding/skipped → the legacy preload bridge
 // `hasPreload` is `!!window.api` (Electron sets it; the mobile build doesn't).
 export function selectDesktopTransport(

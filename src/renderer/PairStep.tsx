@@ -198,7 +198,7 @@ export function PairStep({
           <p className="text-xs text-text-faint">
             Found in your terminal after running{" "}
             <code className="rounded bg-bg-soft px-1.5 py-0.5 text-[11px] text-text-muted">
-              bui pair
+              manta pair
             </code>
           </p>
         </div>

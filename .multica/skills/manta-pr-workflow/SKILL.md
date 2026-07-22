@@ -1,11 +1,11 @@
 ---
-name: bui-pr-workflow
-description: The standard implementer workflow for BUI (Better UI) agents — checkout, branch, implement, typecheck + test, push, draft PR, verification results template, reassign to reviewer. Plus the 50-turn self-policed budget cap. Load this when you're about to take action on an assigned implementer issue.
+name: manta-pr-workflow
+description: The standard implementer workflow for MANTA (Better UI) agents — checkout, branch, implement, typecheck + test, push, draft PR, verification results template, reassign to reviewer. Plus the 50-turn self-policed budget cap. Load this when you're about to take action on an assigned implementer issue.
 ---
 
-# bui-pr-workflow
+# manta-pr-workflow
 
-The standard implementer workflow for the BUI agents.
+The standard implementer workflow for the MANTA agents.
 
 ## Steps
 
@@ -161,7 +161,7 @@ gap.
 **Decision 2 — assign PM or park? (this is where the severity bar lives).**
 Apply the bar to the filed issue:
 
-FILE **and assign `bui-pm`** (priority ≥ parent's, min `high` for a
+FILE **and assign `manta-pm`** (priority ≥ parent's, min `high` for a
 correctness gap) when ANY of:
 - **(a) Dual source of truth / drift trap** — two shapes/paths/configs that
   can silently diverge, with no sync.
@@ -177,8 +177,8 @@ not urgent; the PM's backlog triage handles it) for everything else
 actionable: dead-code deletion, a missing edge-case test, a
 behavior-neutral refactor, a stale doc.
 
-> **NOTE:** you do NOT `assign` to other implementers. "Assign `bui-pm`"
-> means file it, set priority, and `assign` it to **`bui-pm`** so it lands
+> **NOTE:** you do NOT `assign` to other implementers. "Assign `manta-pm`"
+> means file it, set priority, and `assign` it to **`manta-pm`** so it lands
 > in the PM's triage lane. Parked items stay unassigned. Never self-dispatch
 > an above-bar follow-up to `better-ui-dev`.
 
@@ -189,7 +189,7 @@ export MULTICA_WORKSPACE_ID=264c89bb-4659-4570-af7b-5f8daaf87985
 # Above-bar → route to the PM to triage/prioritize:
 multica issue create --title "<concrete, scoped title>" --description-file <path> \
   --status todo --priority <inherit parent's, min high> \
-  --parent <PARENT-ISSUE-UUID> --assignee bui-pm
+  --parent <PARENT-ISSUE-UUID> --assignee manta-pm
 # Parked (actionable but minor) → unassigned + labeled:
 multica issue create --title "<concrete, scoped title>" --description-file <path> \
   --status todo --priority <medium/low> \
@@ -205,9 +205,9 @@ describing any of them in prose.
 
 Self-check addendum (add to the self-check scoring): one criterion is
 **"every actionable follow-up I mention is FILED (not narrated), and every
-above-the-bar one is assigned to `bui-pm`"** — score it, must be 8+ before
-you submit. `bui-pm` re-checks this at its merge gate (GATE 2b) and
-`bui-reviewer`'s `Block (followup-issue)` protocol covers follow-ups *it*
+above-the-bar one is assigned to `manta-pm`"** — score it, must be 8+ before
+you submit. `manta-pm` re-checks this at its merge gate (GATE 2b) and
+`manta-reviewer`'s `Block (followup-issue)` protocol covers follow-ups *it*
 finds — three lines of defense; yours is the cheapest.
 
 ## Anti-spaghetti contract (mandatory, runs before you write code)
@@ -249,13 +249,13 @@ deliberately on every issue:
    behind "just in case" after replacing it, and don't build extension
    points for inputs that don't exist yet.
 
-7. **BUI-specific: respect the process boundary.** Changes in `src/main/`
+7. **MANTA-specific: respect the process boundary.** Changes in `src/main/`
    (Electron main process) must not leak into `src/renderer/` (Chromium
    renderer) without going through IPC. If you're adding a new IPC channel,
    update the preload (`src/preload/`) to expose it, and add the renderer
    types — all three layers must be in sync. Don't patch just one.
 
-8. **BUI-specific: server routes are not renderer code.** `src/server/`
+8. **MANTA-specific: server routes are not renderer code.** `src/server/`
    (Express/Koa/etc.) runs in a separate Node process. Don't import
    renderer modules into server code or vice versa. If you need shared
    logic, put it in a shared module (e.g. `src/shared/` or `src/common/`).

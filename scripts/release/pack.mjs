@@ -25,7 +25,7 @@
 //     node_modules/                  prebuilt production deps (--omit=dev),
 //                                    with node-pty's binding already compiled
 //                                    against the vendored node's ABI
-//     docs/opencode-tools/           bui-native opencode tool bundle
+//     docs/opencode-tools/           manta-native opencode tool bundle
 //     RELEASE.json                   { name, version, built_at, includes,
 //                                      node, arch }
 //

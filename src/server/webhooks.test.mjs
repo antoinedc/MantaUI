@@ -140,7 +140,7 @@ test("deliveryUrl builds /hook/<token> from a base", () => {
 // ----------------------------------------------------------------------------
 
 function tmpStore() {
-  return join(tmpdir(), `bui-webhooks-test-${process.pid}-${Math.random().toString(16).slice(2)}.json`);
+  return join(tmpdir(), `manta-webhooks-test-${process.pid}-${Math.random().toString(16).slice(2)}.json`);
 }
 
 test("createHook → listHooks → deleteHook round-trip via temp store", async () => {

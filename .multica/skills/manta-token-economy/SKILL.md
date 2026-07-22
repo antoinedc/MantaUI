@@ -1,9 +1,9 @@
 ---
-name: bui-token-economy
-description: Token-economy discipline for BUI agents on OpenCode runtime — batch parallel tool calls, compound shell commands, avoid re-reading after Edit, use offset/limit on large files. Load this if a task touches a long file or you find yourself making many sequential tool calls.
+name: manta-token-economy
+description: Token-economy discipline for MANTA agents on OpenCode runtime — batch parallel tool calls, compound shell commands, avoid re-reading after Edit, use offset/limit on large files. Load this if a task touches a long file or you find yourself making many sequential tool calls.
 ---
 
-# bui-token-economy
+# manta-token-economy
 
 Every turn re-reads the cached prefix. **Cache reads count fully against
 the session quota.** Task cost ≈ N_turns × (initial_prefix + cumulative additions).

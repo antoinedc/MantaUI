@@ -51,14 +51,14 @@
 		<true/>
 	</dict>
 	<!-- Custom URL scheme registration (BET-177 §2.1). The desktop Settings QR
-	     and `bui pair` terminal QR both emit `manta://pair?…` links; iOS opens
+	     and `manta pair` terminal QR both emit `manta://pair?…` links; iOS opens
 	     them in this app via the custom-scheme handler. Universal Links /
 	     AASA are explicitly OUT of scope — custom scheme only. -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>com.antoinedc.bui</string>
+			<string>com.antoinedc.mantaui</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>manta</string>

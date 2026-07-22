@@ -1,13 +1,13 @@
 name: Red-check watchdog notify
 
-# When CI fails on an AGENT-authored PR, ping the bui-ops watchdog
+# When CI fails on an AGENT-authored PR, ping the manta-ops watchdog
 # autopilot immediately (instead of waiting up to 10 min for its scheduled
-# poll) so it can diagnose RED-CHECK and route the fix to bui-pm — within
+# poll) so it can diagnose RED-CHECK and route the fix to manta-pm — within
 # the watchdog's existing caps (2 reruns/issue/6h, 15-min PM cooldown).
 #
 # Why workflow_run: the CI job needs to finish (so its conclusion is known)
 # before we can act on a failure. This runs after the `CI` workflow completes.
-# better-ui adaptation: bui has no App identity (agents author as @antoinedc),
+# better-ui adaptation: manta has no App identity (agents author as @antoinedc),
 # so agent PRs are recognized by their `multica/` branch prefix instead of the
 # author login — Multica-dispatched implementers always branch as
 # multica/BET-N-slug. Human PRs are the human's problem, not the mesh's.
@@ -59,7 +59,7 @@ jobs:
           # Branch prefix already established agent-ness; just resolve the tip SHA.
           head_sha="$(gh pr view "$pr_number" --repo "$REPO" --json headCommitOid --jq .headCommitOid 2>/dev/null || echo unknown)"
 
-          echo "::notice::Agent PR #${pr_number} failed CI — pinging bui-ops watchdog."
+          echo "::notice::Agent PR #${pr_number} failed CI — pinging manta-ops watchdog."
           code="$(curl -s -o /tmp/wh_resp -w '%{http_code}' -X POST "$WEBHOOK" \
             -H 'Content-Type: application/json' \
             -d "{\"source\":\"github-actions\",\"reason\":\"red-required-check\",\"repo\":\"${REPO}\",\"pr\":${pr_number},\"head_sha\":\"${head_sha}\",\"ci_run\":${RUN_ID}}")"

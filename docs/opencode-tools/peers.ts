@@ -1,4 +1,4 @@
-// bui-native `peers` tools — global opencode custom tools.
+// manta-native `peers` tools — global opencode custom tools.
 //
 // Install on the opencode host (the Linux box that runs manta-server + opencode):
 //   mkdir -p ~/.config/opencode/tools

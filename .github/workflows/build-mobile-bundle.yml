@@ -3,7 +3,7 @@
 # WHY THIS EXISTS
 # ---------------
 # The mobile/web client (`src/server/` PUBLIC_DIR) is served as a PRE-BUILT
-# static bundle from `mobile/www/` — bui-server reads the files off disk per
+# static bundle from `mobile/www/` — manta-server reads the files off disk per
 # request, there is no build step on the box at deploy time. Historically the
 # bundle was committed into EVERY feature branch (rebuilt by hand via
 # `npm run build:mobile`). Vite content-hashes the asset filenames

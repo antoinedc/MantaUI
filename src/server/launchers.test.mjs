@@ -22,7 +22,7 @@ describe("binExists", () => {
     // Real PATH lookup for a binary that almost certainly doesn't exist —
     // asserts it does NOT throw and resolves to a boolean (guard didn't
     // short-circuit these safe characters).
-    const result = await binExists("bui-test-nonexistent-binary-xyz");
+    const result = await binExists("manta-test-nonexistent-binary-xyz");
     assert.equal(typeof result, "boolean");
   });
 });

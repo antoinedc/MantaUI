@@ -2,7 +2,7 @@
 # design and deliberately NOT in required-checks.json: jscpd on a diff is noisy
 # (coincidental clones, the intentional desktop/mobile transport mirrors), so a
 # hard gate would block nearly every PR. This computes the signal ONCE and
-# posts it as a sticky PR comment; the bui-reviewer agent READS that comment
+# posts it as a sticky PR comment; the manta-reviewer agent READS that comment
 # and exercises judgment (Block / Question / Nit / nothing). CI never decides.
 #
 # Detector logic lives in scripts/check-duplication.sh (single source of

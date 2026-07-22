@@ -1,6 +1,6 @@
 // capExecutor.ts — the Mac-side executor for MantaUI plugins.
 //
-// Subscribes to bui-server's SSE bus, picks up `{kind:"capJob"}` envelopes
+// Subscribes to manta-server's SSE bus, picks up `{kind:"capJob"}` envelopes
 // targeting `host:"mac"`, and runs the matching plugin's manifest. Plugin
 // manifests live as YAML files in ~/.manta/plugins/ (the Mac-side mirror of
 // the AI's authoring surface); this module owns the in-memory map of parsed

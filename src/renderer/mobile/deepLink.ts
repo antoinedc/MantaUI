@@ -6,9 +6,9 @@
 //
 // Phase 2 of BET-177: the iOS app registers the `manta://` custom scheme (see
 // Info.plist's CFBundleURLTypes + AndroidManifest.xml's intent-filter); the
-// desktop Settings QR and the `bui pair` terminal QR both emit
+// desktop Settings QR and the `manta pair` terminal QR both emit
 // `manta://pair?box=<id>&code=<6-digit>`. When the user scans the QR with
-// the iOS Camera, iOS opens the bui app via this scheme; the Capacitor App
+// the iOS Camera, iOS opens the manta app via this scheme; the Capacitor App
 // plugin delivers the URL to the renderer via
 //   • `getLaunchUrl()` — the URL the app was COLD-STARTED with
 //   • `appUrlOpen` event — URLs delivered while the app is already RUNNING

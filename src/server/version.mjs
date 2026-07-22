@@ -1,4 +1,4 @@
-// GET /api/version — bui-server's package.json version, read once at startup.
+// GET /api/version — manta-server's package.json version, read once at startup.
 //
 // Pure helpers (no IO at import time) so the route, the RPC handler, and the
 // tests can all consume the same source of truth without duplicating logic.

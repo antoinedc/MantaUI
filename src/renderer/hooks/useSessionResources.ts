@@ -57,10 +57,10 @@ export type SessionResources = {
 
 export function useSessionResources(sessionId: string): SessionResources {
   // ----- Scheduled prompts (the ⏰ ScheduledTasksCard) -----
-  // Jobs are server-owned (bui-server fires them); here we only list + delete
+  // Jobs are server-owned (manta-server fires them); here we only list + delete
   // via the schedule:* window.api channels. Refetch-driven (open + open-poll +
   // post-delete) — NOT a bus event, because desktop's renderer isn't wired to
-  // the server bus. See docs/bui-tools-scheduler.md.
+  // the server bus. See docs/manta-tools-scheduler.md.
   const [showSchedules, setShowSchedules] = useState(false);
   const [schedules, setSchedules] = useState<ScheduledJob[]>([]);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
@@ -102,7 +102,7 @@ export function useSessionResources(sessionId: string): SessionResources {
   // Hooks are server-owned (external POSTs wake the session); here we only list
   // + revoke via the webhook:* channels (creation is the AI's job via the
   // `webhook` opencode tool, which returns the one-time signing secret).
-  // Refetch-driven like schedules/secrets. See docs/bui-tools-webhook.md.
+  // Refetch-driven like schedules/secrets. See docs/manta-tools-webhook.md.
   const [showWebhooks, setShowWebhooks] = useState(false);
   const [webhooks, setWebhooks] = useState<WebhookMeta[]>([]);
   const [webhookError, setWebhookError] = useState<string | null>(null);

@@ -15,7 +15,7 @@ import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
 const OPENCODE_FANOUT_CONCURRENCY = 4;
 
 // Overlay the desktop-local pairing secrets (serverUrl/boxToken) onto a config
-// snapshot. In http mode window.api.configGet() returns the bui-server's config,
+// snapshot. In http mode window.api.configGet() returns the manta-server's config,
 // which never carries these — they live only on this desktop, mirrored into
 // localStorage by main.tsx (manta_server/manta_token) at boot. Reading them here
 // keeps resolveTransportMode() from seeing an empty boxToken and forcing
@@ -119,7 +119,7 @@ type State = {
   // User-added skill registry URLs (written to remote opencode.jsonc on save).
   skillRegistryUrls: string[];
   // Anthropic prompt cache TTL — drives the "/clear to save Nk tokens"
-  // pill in ChatPanel's footer. Display-only (bui doesn't set the actual
+  // pill in ChatPanel's footer. Display-only (manta doesn't set the actual
   // cache_control.ttl on requests — opencode does); must match opencode's
   // setting. Defaults to "1h".
   cacheTtl: "5m" | "1h";
@@ -358,7 +358,7 @@ export const useStore = create<State>((set, get) => ({
 
   refresh: async () => {
     const cfg = await window.api.configGet();
-    // In http mode window.api.configGet() returns the bui-SERVER's config,
+    // In http mode window.api.configGet() returns the manta-SERVER's config,
     // which structurally lacks the desktop-local pairing secrets
     // (serverUrl/boxId/boxToken). Those live only on this desktop — mirrored
     // into localStorage["manta_server"]/["manta_token"] by main.tsx at boot (and by

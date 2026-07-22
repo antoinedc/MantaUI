@@ -161,7 +161,7 @@ xcrun stapler validate "dist/desktop/Manta UI-<version>-arm64.dmg"
 - Download `Manta-latest.dmg` from `mantaui.com`, open it, drag Manta UI to
   Applications, launch. No "damaged/unidentified developer" warning.
 - Pairing: same 6-digit code / QR flow as mobile (Settings → Connection →
-  Generate Pairing Code on another paired device, or `bui pair` on the box).
+  Generate Pairing Code on another paired device, or `manta pair` on the box).
 
 ## If you skip notarization (NOT recommended for beta)
 

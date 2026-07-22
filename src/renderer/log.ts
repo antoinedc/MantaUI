@@ -16,9 +16,9 @@
 // returns without installing anything: NO fetches to axiom.co, NO console
 // noise.
 //
-// SPEC GUARD: the renderer ships DIRECTLY to Axiom (not through bui-
+// SPEC GUARD: the renderer ships DIRECTLY to Axiom (not through manta-
 // server). When the phone↔box path is broken — the exact bug being
-// debugged — the renderer must still be able to ship, so a bui-server
+// debugged — the renderer must still be able to ship, so a manta-server
 // proxy is explicitly out of scope.
 
 import {

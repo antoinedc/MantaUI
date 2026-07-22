@@ -1,12 +1,12 @@
 // peers.mjs — peer-session awareness for the mobile server.
 //
 // Lets an opencode session see what OTHER sessions in the SAME workspace are
-// doing. A "workspace" is a tmux session (bui project); each window is an
+// doing. A "workspace" is a tmux session (manta project); each window is an
 // app-session. Sibling windows = peers. The crux is the `@manta-session-id`
 // tmux user-option, surfaced by tmux.listProjects() as window.opencodeSessionId.
 //
 // The remote AI calls the global opencode `peers_list` / `peers_inspect` tools
-// (docs/opencode-tools/peers.ts), which GET bui-server's /api/peers. Use case:
+// (docs/opencode-tools/peers.ts), which GET manta-server's /api/peers. Use case:
 // an agent notices git status / files changing and wants to know which other
 // agent is doing it, and what they're working on.
 //

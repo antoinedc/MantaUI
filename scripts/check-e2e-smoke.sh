@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# E2E smoke test gate for the BUI Electron build.
+# E2E smoke test gate for the MANTA Electron build.
 #
 # Builds the Electron bundles, then runs the Playwright e2e suite against the
 # built app. This is a HARD gate — exits non-zero on any failure.

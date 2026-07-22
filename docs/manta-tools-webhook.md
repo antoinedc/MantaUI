@@ -1,13 +1,13 @@
-# bui-native tools — the `webhook` tool + inbound event triggers
+# manta-native tools — the `webhook` tool + inbound event triggers
 
-This is the sixth **bui-native opencode tool** (after `schedule`, `serve_page`,
+This is the sixth **manta-native opencode tool** (after `schedule`, `serve_page`,
 `peers`, `notify`, `secrets`) and the first **inbound** one: it lets an external
-actor (Multica, GitHub, CI, a finished job on another box) wake a bui chat
+actor (Multica, GitHub, CI, a finished job on another box) wake a manta chat
 session by HTTP POST. It is the push counterpart to the pull-style `schedule`
 loop, and the inbound counterpart to the outbound `notify` tool.
 
-Read `docs/bui-tools-scheduler.md` first for the reusable "bui tools" pattern
-(global opencode tool → thin registrar → bui-server endpoint + durable logic).
+Read `docs/manta-tools-scheduler.md` first for the reusable "manta tools" pattern
+(global opencode tool → thin registrar → manta-server endpoint + durable logic).
 This doc only covers what's webhook-specific.
 
 ## Why — kill the polling loop
@@ -24,7 +24,7 @@ brain" split the Multica ops-supervisor already describes
 (`shared/multica/ops-supervisor/README.md`: a plain cron scan with no LLM that
 only fires the agent via `trigger-add --kind webhook` on a real anomaly).
 
-It completes the trigger matrix every prior bui tool converges on — they all
+It completes the trigger matrix every prior manta tool converges on — they all
 end at the same primitive, `oc.sendPrompt({sessionId, text})` (inject a turn
 into a session, which streams into the open ChatPanel and fires a push if the
 user is away):
@@ -49,7 +49,7 @@ goes green", "let GitHub notify this chat on a new issue".
   optional `instructions` (a standing directive prepended to every delivered
   payload — what the agent should DO when this fires, e.g. "When this arrives,
   pull the Multica run output and summarize it"). No timing args — the firing is
-  driven by the external POST, not by bui.
+  driven by the external POST, not by manta.
 - The tool POSTs `{label, instructions, sessionID, directory}` to
   `POST /api/webhook`. `sessionID` comes from the tool `context` so deliveries
   land back in the **same chat session** the user is in.
@@ -64,16 +64,16 @@ delivery time). `webhook_delete` removes one by id (revokes the token).
 
 ```
 POST https://app.mantaui.com/hook/<token>
-X-Bui-Signature: sha256=<hmac>          # required unless the hook is unsigned
+X-Manta-Signature: sha256=<hmac>          # required unless the hook is unsigned
 Content-Type: application/json
 { "event": "task.completed", "key": "CAPO-123", "result": "merged", ... }
 ```
 
-bui looks up `<token>` → the registered hook → its `sessionID`, verifies the
+manta looks up `<token>` → the registered hook → its `sessionID`, verifies the
 signature, formats the payload into a turn, and `oc.sendPrompt`s it. The turn
 appears inline in the user's open ChatPanel; if they're away, the existing push
 leg notifies them (a webhook delivery is `informational` tier — see
-`docs/bui-tools-notify.md`).
+`docs/manta-tools-notify.md`).
 
 ### Delivered turn shape — payload is DATA, never instructions
 
@@ -100,7 +100,7 @@ defense-in-depth on top of the signature.
 
 ## Security — the part that needs real care
 
-Every prior bui tool endpoint binds to `127.0.0.1` (same box, implicit trust).
+Every prior manta tool endpoint binds to `127.0.0.1` (same box, implicit trust).
 A webhook is **the first endpoint that must be reachable by an external,
 untrusted actor**, so it goes through the public Cloudflare tunnel
 (`app.mantaui.com`). And the payload it carries becomes a prompt in a session
@@ -116,7 +116,7 @@ Locked decisions:
    referrers, screenshots).
 2. **HMAC signature is the real auth.** Each hook has a per-hook secret
    (`whsec_<randomBytes(24).hex>`, returned to the agent ONCE at create). The
-   sender computes `sha256=HMAC(secret, rawBody)` into `X-Bui-Signature`; bui
+   sender computes `sha256=HMAC(secret, rawBody)` into `X-Manta-Signature`; manta
    recomputes over the **raw** request bytes and rejects on mismatch with `401`.
    Constant-time compare (`crypto.timingSafeEqual`). GitHub/Multica/Stripe all
    support this exact scheme. A hook MAY be created `unsigned: true` for sources
@@ -145,7 +145,7 @@ source's own event id is enough for our single-user case), per-hook scopes.
 
 ## Durability (locked decision: server-owned, mirrors schedule)
 
-Hooks live on **bui-server**, the always-on systemd process, so they survive
+Hooks live on **manta-server**, the always-on systemd process, so they survive
 Mac-app-close, chat navigation, and box reboot (systemd `enable-linger`).
 
 - **Store**: `~/.manta/webhooks.json`, atomic temp-rename writes (same
@@ -228,13 +228,13 @@ Two route families, added alongside the existing `/api/*` blocks:
 - `GET /api/webhook?sessionID=` → `{hooks:[...]}` (metadata only, no secret).
 - `DELETE /api/webhook?id=` → `{deleted:bool}`.
 
-**Delivery (PUBLIC, the only externally-reachable bui route):**
+**Delivery (PUBLIC, the only externally-reachable manta route):**
 - `POST /hook/<token>` — raw body read (NOT `readJsonBody` — HMAC needs the
   exact bytes), signature verified, → 200/202/400/401/404/429. This is a
   top-level path (not under `/api/`) so the Caddy/Cloudflare config can treat it
   distinctly and, if desired, apply edge rate-limiting.
 
-**Exposure:** `/hook/*` is served by bui-server (port 8787) and reached through
+**Exposure:** `/hook/*` is served by manta-server (port 8787) and reached through
 the existing `app.mantaui.com` Cloudflare tunnel — no new tunnel, no new Caddy
 block needed (distinct from the `*.pages.mantaui.com` serve-page path). The
 management routes stay loopback-only in practice (desktop reaches them over the
@@ -252,12 +252,12 @@ badge (unsigned = red) · last-delivered relative time + delivery count · a `�
 revoke button. A "reveal secret" affordance is **not** offered post-create (the
 secret is shown once at creation, in the agent's tool result / a one-time toast;
 to rotate, delete + recreate). Refetch-driven freshness (open + 10s poll), same
-as the other cards; bui-server still publishes `webhook.updated` on every
+as the other cards; manta-server still publishes `webhook.updated` on every
 mutation for a future mobile optimization.
 
 ## Transport wiring — `webhook:*` channels (NOT `opencode:*`)
 
-Webhooks are a **bui-server** concept, mirroring `schedule:*` / `secrets:*`
+Webhooks are a **manta-server** concept, mirroring `schedule:*` / `secrets:*`
 exactly. `window.api.webhookList / webhookCreate / webhookDelete` wired across
 the standard six sites:
 
@@ -266,7 +266,7 @@ the standard six sites:
 | IPC const | `src/shared/types.ts` `IPC.webhook*` | same |
 | Renderer call | `src/preload/index.ts` | `src/renderer/api/httpApi.ts` |
 | Handler | `src/main/index.ts` ipcMain.handle | `src/server/rpc.mjs` dispatch |
-| Impl | `src/main/webhook.ts` (NEW — `fetch`es bui-server `/api/webhook` over the `-L 18787` presence forward) | in-process call into `webhooks.mjs` |
+| Impl | `src/main/webhook.ts` (NEW — `fetch`es manta-server `/api/webhook` over the `-L 18787` presence forward) | in-process call into `webhooks.mjs` |
 
 Desktop-forward-down degrades to a list/create error toast; existing hooks
 **still deliver** (server-owned). Mobile is in-process so always works.
@@ -287,7 +287,7 @@ is its sibling.
 
 ```bash
 cp <repo>/docs/opencode-tools/webhook.ts ~/.config/opencode/tools/webhook.ts
-cat <repo>/docs/opencode-tools/AGENTS.md >> ~/.config/opencode/AGENTS.md   # add ## bui webhooks guidance
+cat <repo>/docs/opencode-tools/AGENTS.md >> ~/.config/opencode/AGENTS.md   # add ## manta webhooks guidance
 systemctl --user restart opencode-serve
 ```
 

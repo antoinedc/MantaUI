@@ -5,7 +5,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { getBuiPreload } from "./preloadAccess";
+import { getMantaPreload } from "./preloadAccess";
 
 /**
  * Handle an OSC 52 escape sequence: decode the base64 payload and write the
@@ -99,7 +99,7 @@ export function Terminal({ sessionKey, cwd, active, launcher }: Props) {
     // URLs → open in the user's default browser via Electron main.
     term.loadAddon(
       new WebLinksAddon((_event, uri) => {
-        getBuiPreload()?.openExternal(uri).catch((e) =>
+        getMantaPreload()?.openExternal(uri).catch((e) =>
           console.warn("openExternal failed:", e),
         );
       }),
@@ -151,7 +151,7 @@ export function Terminal({ sessionKey, cwd, active, launcher }: Props) {
     // calls navigator.clipboard.writeText, which Electron silently blocks
     // for non-user-gesture writes (and OSC 52 arrives async, no gesture).
     //
-    // On desktop (Electron), `getBuiPreload()?.clipboardWriteText` routes
+    // On desktop (Electron), `getMantaPreload()?.clipboardWriteText` routes
     // through IPC to the main-process `clipboard.writeText`. On mobile/web
     // there is no preload, so we fall back to `navigator.clipboard` which
     // works in modern browsers (the browser grants clipboard write on
@@ -161,7 +161,7 @@ export function Terminal({ sessionKey, cwd, active, launcher }: Props) {
       console.log("[osc52]", JSON.stringify(data.slice(0, 120)));
       const handled = handleOsc52(data, (text) => {
         console.log("[osc52] -> clipboard:", JSON.stringify(text.slice(0, 80)));
-        const preload = getBuiPreload();
+        const preload = getMantaPreload();
         if (preload) {
           preload.clipboardWriteText(text);
         } else {

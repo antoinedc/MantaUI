@@ -1,7 +1,7 @@
-# bui mobile (Capacitor)
+# manta mobile (Capacitor)
 
-Native shell around the bui mobile web client. The app is a remote viewer —
-it connects over WebSocket to a bui server you run on your own Linux box.
+Native shell around the manta mobile web client. The app is a remote viewer —
+it connects over WebSocket to a manta server you run on your own Linux box.
 No code runs on the device.
 
 ## Layout
@@ -54,7 +54,7 @@ Run the `npm` commands below from `mobile/`.
 5. Release: Xcode → Product → Archive → Distribute App → TestFlight.
 
 `Info.plist` already has `NSAllowsArbitraryLoads` so the app can reach
-HTTP (non-TLS) bui servers on a LAN.
+HTTP (non-TLS) manta servers on a LAN.
 
 ### Bumping the iOS build / version per release
 
@@ -75,17 +75,17 @@ To bump before a release:
    System" on "Apple Generic".
 4. Commit the resulting `project.pbxproj` change alongside the
    `package.json` version bump — they should move together so a deployed
-   build's `MARKETING_VERSION` matches the bui-server version it ships
+   build's `MARKETING_VERSION` matches the manta-server version it ships
    with. The mobile `MobileSettings` → `Server vX.Y.Z` line is the
    foundation for surfacing skew between the two; gating lands later.
 
 App Store / TestFlight description:
 
-> bui connects to your own remote Linux server to display tmux terminal
+> manta connects to your own remote Linux server to display tmux terminal
 > sessions. All code execution is on your server; the app is a remote viewer.
 
 ## First launch
 
-The app shows a server-URL screen. Enter your bui server (e.g.
-`http://192.168.1.50:8787` or `https://bui.example.com`). It is saved to
+The app shows a server-URL screen. Enter your manta server (e.g.
+`http://192.168.1.50:8787` or `https://manta.example.com`). It is saved to
 localStorage; change it later via the gear icon in the session list header.

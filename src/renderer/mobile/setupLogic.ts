@@ -28,7 +28,7 @@ export function canConnectSetup(input: SetupFields): boolean {
  * hostname is derived from the box ID via the shared `boxDirectUrl` helper
  * (src/shared/transport.mjs) — single source of truth for the URL shape. The
  * claim POSTs `{pairing_code}` to `<serverUrl>/auth/claim` against the box's
- * own bui-server. The Box ID is trimmed.
+ * own manta-server. The Box ID is trimmed.
  */
 export function buildSetupClaimInput(input: {
   boxId: string;

@@ -194,7 +194,7 @@ test("authorizationForRequest result feeds authorize() end-to-end", () => {
 // ----------------------------------------------------------------------------
 
 function tmpPath(name) {
-  return join(tmpdir(), `bui-auth-test-${process.pid}-${Date.now()}-${name}.json`);
+  return join(tmpdir(), `manta-auth-test-${process.pid}-${Date.now()}-${name}.json`);
 }
 
 test("loadAuth returns null for a missing file", () => {

@@ -1,9 +1,9 @@
 ---
-name: bui-e2e-smoke
-description: Drive BUI's built Electron app in a real renderer context (Playwright's electron launcher) and assert that key UI surfaces render correctly — no crash, no blank screen, sidebar/chat/terminal present. Load BEFORE marking any frontend/UI task done, and when bui-pr-workflow or bui-handle-reviewer-return verifies a renderer change. Catches the runtime/render/layout failures that `npm run typecheck && npm test` + `npm run build` all miss.
+name: manta-e2e-smoke
+description: Drive MANTA's built Electron app in a real renderer context (Playwright's electron launcher) and assert that key UI surfaces render correctly — no crash, no blank screen, sidebar/chat/terminal present. Load BEFORE marking any frontend/UI task done, and when manta-pr-workflow or manta-handle-reviewer-return verifies a renderer change. Catches the runtime/render/layout failures that `npm run typecheck && npm test` + `npm run build` all miss.
 ---
 
-# bui-e2e-smoke
+# manta-e2e-smoke
 
 `typecheck` proves the code **compiles**. Unit tests prove **isolated logic**.
 `npm run build` proves the **bundle produces artifacts**. NONE of them prove the
@@ -19,7 +19,7 @@ Electron renderer can. This skill is that renderer.
 > to trip multica's 30-min "no new messages" force-stop. If you ran this gate
 > *before* `git push`, that timeout discards your entire implementation — the
 > workdir is ephemeral and the rerun starts from a clean `origin` clone. Per
-> `bui-pr-workflow` step 8, your committed work must already be on `origin`
+> `manta-pr-workflow` step 8, your committed work must already be on `origin`
 > before you get here. If it isn't, `git push -u origin <branch>` NOW, then run
 > the gate. Push any post-gate fixes again afterward.
 
@@ -33,14 +33,14 @@ Electron renderer can. This skill is that renderer.
 
 ## When to run
 
-- **`bui-frontend` / `bui-backend`**: before marking ANY change to:
+- **`manta-frontend` / `manta-backend`**: before marking ANY change to:
   - `src/renderer/` (ChatPanel, Terminal, Sidebar, Settings, App, ProvidersCard)
   - `src/preload/` (IPC bridge surface)
   - `src/main/` (IPC handlers, setup, transport)
   - `src/shared/` (types consumed by renderer)
   Paste the result into the `Test results` block. A green build does NOT prove
   the sidebar renders, the chat panel mounts, or the app didn't crash on load.
-- **`bui-pr-workflow` / `bui-handle-reviewer-return`**: when verifying a
+- **`manta-pr-workflow` / `manta-handle-reviewer-return`**: when verifying a
   delivered frontend feature (the per-task "verify on dev" step). This is the
   check that makes "renders in Electron, confirm no crash" a REAL gate instead
   of an unenforceable instruction.

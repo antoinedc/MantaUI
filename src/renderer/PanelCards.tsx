@@ -17,7 +17,7 @@ import { CLAUDE_ORANGE } from "./chatShared";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
 // scheduled prompts (created by the AI's `schedule` opencode tool) with a
-// per-row delete. See docs/bui-tools-scheduler.md.
+// per-row delete. See docs/manta-tools-scheduler.md.
 export const ScheduledTasksCard = memo(function ScheduledTasksCard({
   jobs,
   error,
@@ -113,7 +113,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
 // WebhooksCard — pinned card above the composer listing this session's inbound
 // webhooks (created by the AI's `webhook` opencode tool) with a per-row revoke.
 // List is metadata only — the signing secret is shown once at create (in the
-// agent's tool result) and never re-exposed here. See docs/bui-tools-webhook.md.
+// agent's tool result) and never re-exposed here. See docs/manta-tools-webhook.md.
 export const WebhooksCard = memo(function WebhooksCard({
   hooks,
   error,
@@ -227,7 +227,7 @@ export const WebhooksCard = memo(function WebhooksCard({
 
 // SecretsCard — pinned card above the composer for managing the secrets the
 // agent can use. The user types a key + value here; the value travels to the
-// box (renderer → IPC/RPC → bui-server store) and is NEVER returned or shown
+// box (renderer → IPC/RPC → manta-server store) and is NEVER returned or shown
 // again — the list is metadata only (key, scope, hint). Agents read secrets via
 // the secret_list / secret_provide opencode tools, which materialize the value
 // to a 0600 file on the box and hand the agent only the path, so the value

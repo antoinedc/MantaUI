@@ -60,7 +60,7 @@ export function MobileApp() {
 
   const [nav, setNav] = useState<Nav>({ screen: "list" });
   const [bootError, setBootError] = useState<string | null>(null);
-  // True when bui-server answered the bootstrap with 401 (unpaired, or a stored
+  // True when manta-server answered the bootstrap with 401 (unpaired, or a stored
   // token was revoked/rotated). Routes the whole app to the pairing screen
   // instead of the session list — this IS the re-pair path too, since a rotated
   // token 401s exactly like a fresh browser.
@@ -298,7 +298,7 @@ export function MobileApp() {
     windowIndex: number,
     sessionId: string,
   ) => {
-    (window as Window & { __buiScrollQuestionSession?: string | null }).__buiScrollQuestionSession =
+    (window as Window & { __mantaScrollQuestionSession?: string | null }).__mantaScrollQuestionSession =
       sessionId;
     openSession(projectName, windowIndex);
     window.dispatchEvent(

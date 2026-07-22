@@ -65,12 +65,12 @@ import { useVoice } from "./hooks/useVoice";
 import { useTypeahead } from "./hooks/useTypeahead";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
-import { getBuiPreload } from "./preloadAccess";
+import { getMantaPreload } from "./preloadAccess";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
 
-// bui-local slash commands. These are handled in the renderer (not forwarded
+// manta-local slash commands. These are handled in the renderer (not forwarded
 // to opencode's /command endpoint) because opencode doesn't ship equivalents
 // — they're terminal-TUI conventions users expect to "just work". Each one
 // dispatches to a function on the ChatPanel.
@@ -91,7 +91,7 @@ const MANTA_BUILTIN_NAMES = new Set(MANTA_BUILTIN_COMMANDS.map((c) => c.name));
 
 function buildHelpText(): string {
   const lines = [
-    "Slash commands (bui-local):",
+    "Slash commands (manta-local):",
     ...MANTA_BUILTIN_COMMANDS.map((c) => `  /${c.name.padEnd(8)} — ${c.description}`),
     "",
     "Shortcuts:",
@@ -128,7 +128,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
   // User-configured Anthropic prompt cache TTL — drives the "/clear to
   // save Nk tokens" pill when the session has been idle past this TTL.
-  // bui doesn't set the real cache_control.ttl on requests; this is the
+  // manta doesn't set the real cache_control.ttl on requests; this is the
   // user's claim about what opencode is sending. See AppConfig comment.
   const cacheTtl = useStore((s) => s.cacheTtl);
   // Server-owned resource cards (⏰ schedules, 🔑 secrets, 🪝 webhooks) —
@@ -444,11 +444,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // (warm — app already open on this session). Either arms wantQuestionScroll;
   // the effect below performs the scroll once the questions have rendered.
   useEffect(() => {
-    type ScrollWin = Window & { __buiScrollQuestionSession?: string | null };
+    type ScrollWin = Window & { __mantaScrollQuestionSession?: string | null };
     const w = window as ScrollWin;
-    if (w.__buiScrollQuestionSession && w.__buiScrollQuestionSession === sessionId) {
+    if (w.__mantaScrollQuestionSession && w.__mantaScrollQuestionSession === sessionId) {
       wantQuestionScroll.current = true;
-      w.__buiScrollQuestionSession = null;
+      w.__mantaScrollQuestionSession = null;
     }
     const onEvt = (e: Event) => {
       const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
@@ -647,13 +647,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       },
     ]);
 
-    // Slash-command path: bui-local builtins → opencode commands → normal prompt.
+    // Slash-command path: manta-local builtins → opencode commands → normal prompt.
     const slashMatch = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
     const cmdName = slashMatch ? slashMatch[1] : null;
 
     if (cmdName && MANTA_BUILTIN_NAMES.has(cmdName)) {
       setRunning(false);
-      // bui builtins are renderer-only — no prompt actually sent, so strip
+      // manta builtins are renderer-only — no prompt actually sent, so strip
       // the optimistic transcript entry we just added.
       setMessages((prev) =>
         prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
@@ -1286,7 +1286,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       // Only Electron main can read the Mac clipboard or a Mac file — both
       // must come from the preload OS bridge, never window.api (which is
       // httpApi in HTTP mode and has no OS access; the server IS the box).
-      const preload = getBuiPreload();
+      const preload = getMantaPreload();
       if (!preload) throw new Error("Screenshot capture requires the desktop app");
 
       let buf: ArrayBuffer;
@@ -1712,7 +1712,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       onDragLeave={onPanelDragLeave}
       onDrop={onPanelDrop}
     >
-      {/* Header dropped — bui's outer chrome already shows project/window. */}
+      {/* Header dropped — manta's outer chrome already shows project/window. */}
 
       {/* Drop overlay: dotted border + tinted bg only while files are over */}
       {/* the panel. pointer-events-none so the inner DOM still receives the */}

@@ -1,13 +1,13 @@
 // Scheduled-prompt engine for the mobile server (the always-on, systemd-managed
 // process on the Linux box). The remote AI calls the global opencode `schedule`
-// tool (docs/opencode-tools/schedule.ts), which POSTs to bui-server's
+// tool (docs/opencode-tools/schedule.ts), which POSTs to manta-server's
 // /api/schedule. Jobs are stored here durably and fired by a periodic tick that
 // re-submits the prompt into the SAME opencode session via oc.sendPrompt — the
 // scheduled work then streams back into the user's open ChatPanel as a new turn.
 //
 // Server-owned (NOT duplicated in desktop main) so jobs survive Mac-app-close,
 // session navigation, and box reboot. This is strictly more durable than Claude
-// Code's session-scoped /loop. See docs/bui-tools-scheduler.md for the full
+// Code's session-scoped /loop. See docs/manta-tools-scheduler.md for the full
 // design + scope cuts (no jitter / no 7-day expiry / no catch-up in v1).
 //
 // Shape mirrors src/server/outbox.mjs: a dependency-injected createScheduler()

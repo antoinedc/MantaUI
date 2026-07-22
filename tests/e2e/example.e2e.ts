@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import * as path from 'path';
 
-test.describe('BUI Electron App Build Verification', () => {
+test.describe('MANTA Electron App Build Verification', () => {
   test('main process bundle exists and is valid', () => {
     const mainBundle = path.join(process.cwd(), 'out/main/index.js');
     expect(existsSync(mainBundle)).toBe(true);

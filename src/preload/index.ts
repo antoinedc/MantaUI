@@ -14,14 +14,14 @@ import type { ClaimOutcome } from "../shared/claim.mjs";
 // secrets/webhook/voice/git/fs/pty/...) is httpApi-only now (BET-82: "SSH
 // main path gone" — `window.api` is always httpApi on desktop, never this
 // object). See `src/renderer/preloadAccess.ts` for the typed accessor most
-// callers should use (`getBuiPreload()`), and BET-127 for the extraction
+// callers should use (`getMantaPreload()`), and BET-127 for the extraction
 // history.
 const api = {
   // Read ONLY by main.tsx's boot sequence (`chooseDesktopTransport`), before
   // httpApi is installed as `window.api` — used to seed httpApi's
   // localStorage credentials from the desktop's local config.json (pairing
   // triple). This is the one "data" method that must stay: it is called
-  // directly on `window.__buiPreload`, never through `window.api`.
+  // directly on `window.__mantaPreload`, never through `window.api`.
   configGet: (): Promise<AppConfig> => ipcRenderer.invoke(IPC.configGet),
 
   // Onboarding pairing (BET-49): exchange a 6-digit code for the box's tokens
@@ -47,7 +47,7 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.screenshotDetected, listener);
   },
 
-  // bui-server's notification router decided the desktop should show an OS
+  // manta-server's notification router decided the desktop should show an OS
   // notification (delivered from manta-server over the /events SSE stream).
   // The renderer shows it via the Notification API after a local "am I
   // viewing this?" check.
@@ -93,7 +93,7 @@ const api = {
     ipcRenderer.invoke(IPC.clientVersion),
 
   // Server-update available subscription (BET-225 stage 3): main subscribes
-  // to bui-server's /events SSE stream (src/main/serverUpdateForwarder.ts),
+  // to manta-server's /events SSE stream (src/main/serverUpdateForwarder.ts),
   // filters on kind === "serverUpdateAvailable", and forwards the payload
   // to the renderer via this IPC channel. Mirrors the desktopNotify
   // one-kind-filter pattern; share the same kind/payload envelope.
@@ -110,6 +110,6 @@ const api = {
 // renderer entry (main.tsx) needs to install `window.api` itself and, in
 // http/paired mode, SWAP it for the httpApi client — a swap that throws
 // "Cannot assign to read only property 'api'" if `api` is the contextBridge
-// property. So we bridge under `__buiPreload` (immutable, always the genuine
+// property. So we bridge under `__mantaPreload` (immutable, always the genuine
 // Electron preload) and let main.tsx define a writable `window.api` from it.
-contextBridge.exposeInMainWorld("__buiPreload", api);
+contextBridge.exposeInMainWorld("__mantaPreload", api);

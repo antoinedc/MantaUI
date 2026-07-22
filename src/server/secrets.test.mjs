@@ -53,7 +53,7 @@ test("isValidScope allows shared|session|project", () => {
 });
 
 test("isValidProject accepts workspace names, rejects path-unsafe", () => {
-  for (const ok of ["Ronda", "BUI", "ethernal", "my-proj_1.2"]) {
+  for (const ok of ["Ronda", "MANTA", "ethernal", "my-proj_1.2"]) {
     assert.equal(isValidProject(ok), true, `${ok} valid`);
   }
   for (const bad of ["", "a/b", "../x", "name space", "x".repeat(65), null]) {

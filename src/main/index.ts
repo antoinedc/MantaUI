@@ -207,7 +207,7 @@ app.whenReady().then(() => {
     // Report desktop focus to the mobile server so it suppresses redundant
     // mobile "done" pushes while the user is active on desktop.
     startDesktopPresence(() => config);
-    // Receive desktop OS-notification directives from bui-server's router
+    // Receive desktop OS-notification directives from manta-server's router
     // (over direct HTTPS) and forward them to the renderer.
     startDesktopNotifications(
       () => config,
@@ -231,7 +231,7 @@ app.whenReady().then(() => {
       },
     );
     // Capability executor (BET-183 / BET-185 / BET-190): when enabled in
-    // Settings, this Mac subscribes to bui-server's bus and runs the YAML
+    // Settings, this Mac subscribes to manta-server's bus and runs the YAML
     // plugins it finds under ~/.manta/plugins/. startCapExecutor is a
     // no-op when pluginsEnabled is off.
     startCapExecutor(() => config);
@@ -269,7 +269,7 @@ function registerHandlers(): void {
   // Read ONLY by main.tsx's boot sequence (`chooseDesktopTransport`), before
   // httpApi is installed as `window.api` — used to seed httpApi's
   // localStorage credentials from the desktop's local config.json (pairing
-  // triple). Called directly on `window.__buiPreload`, never through
+  // triple). Called directly on `window.__mantaPreload`, never through
   // `window.api` (which is httpApi post-boot and reaches config over
   // /rpc/config:get instead). See src/preload/index.ts and src/renderer/main.tsx.
   ipcMain.handle(IPC.configGet, () => config);

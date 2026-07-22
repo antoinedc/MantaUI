@@ -32,7 +32,7 @@ type Props = { onClose: () => void };
 // Deliberately omitted on mobile:
 //   - SSH host/user/identity (mobile server has no SSH hop)
 //   - Transport selector (mobile is always direct)
-//   - Tmux config setup (UI is bui-managed only when the user opts in;
+//   - Tmux config setup (UI is manta-managed only when the user opts in;
 //     deferred for now — not a UX gap in practice)
 //   - Setup wizard (rpc.mjs returns stub n/a responses; no UI value)
 //   - Upload cleanup hours (server-side default works)
@@ -281,7 +281,7 @@ export function MobileSettings({ onClose }: Props) {
           <div className="text-xs text-text-faint">
             Leave blank to use the page's own origin (default). Override only
             if your Manta server is on a different host (e.g.{" "}
-            <code className="text-text-muted">https://bui.example.com</code>).
+            <code className="text-text-muted">https://manta.example.com</code>).
             Changes take effect after Save.
           </div>
           {/* Server version (BET-180) — display only. Lets a user confirm
@@ -439,7 +439,7 @@ export function MobileSettings({ onClose }: Props) {
           </div>
           <div className="text-xs text-text-faint">
             Must match opencode's <code className="text-text-muted">cache_control.ttl</code> —
-            bui only uses this to predict when a chat has gone stale (drives
+            manta only uses this to predict when a chat has gone stale (drives
             the "/clear to save Nk tokens" pill).
           </div>
         </section>
@@ -550,7 +550,7 @@ export function MobileSettings({ onClose }: Props) {
             Skill registries
           </label>
           <div className="text-xs text-text-faint">
-            Extra opencode skill registry URLs. The default bui registry is
+            Extra opencode skill registry URLs. The default manta registry is
             always included.
           </div>
           <div className="space-y-1">

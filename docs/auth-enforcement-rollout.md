@@ -1,8 +1,8 @@
 # Auth-enforcement rollout runbook (M1)
 
-**Audience:** whoever operates a live bui-server box when the M1 auth gate ships.
+**Audience:** whoever operates a live manta-server box when the M1 auth gate ships.
 
-**Why this exists:** the live bui-server predates the auth gate. It has been
+**Why this exists:** the live manta-server predates the auth gate. It has been
 serving `0.0.0.0:8787` with **no authentication**. Once the M1 code is deployed
 and the process restarts, `createAuthEngine({ enforce: true })` is the default —
 **every data route immediately requires a valid `Authorization: Bearer <box_token>`.**
@@ -60,7 +60,7 @@ and drops to its pairing screen.
 
 ### 2. Mint a pairing code on the box (per device)
 
-Run the loopback pairing request **on the box** (the `bui pair` CLI does this;
+Run the loopback pairing request **on the box** (the `manta pair` CLI does this;
 the equivalent raw call is a loopback curl):
 
 ```bash

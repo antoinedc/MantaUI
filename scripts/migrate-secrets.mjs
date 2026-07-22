@@ -18,17 +18,17 @@
 // SCOPING (per the agreed mapping):
 //   - shared          → dev-infra (gh/modal/heroku) + index.md "shared" creds
 //                       (Cloudflare ronda+ethernal, Census, BLS, NordVPN).
-//   - project:<name>  → creds tied to a bui workspace, by filename keyword
+//   - project:<name>  → creds tied to a manta workspace, by filename keyword
 //                       (ronda→Ronda, bannerman→Bannerman, tenanture→Leasebot)
 //                       and per-project repo `.credentials*` files.
-//   - skipped         → AWS "polymarket" profile (no bui project; ignored).
+//   - skipped         → AWS "polymarket" profile (no manta project; ignored).
 //
 // Usage (on the box):
 //   node scripts/migrate-secrets.mjs           # DRY RUN — shows what it'd import
 //   node scripts/migrate-secrets.mjs --apply   # actually import into the store
 //
 // Re-running is safe: an existing (scope, owner, key) slot is overwritten with
-// the same value. Prune / rescope afterwards in the bui Secrets card.
+// the same value. Prune / rescope afterwards in the manta Secrets card.
 
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -38,7 +38,7 @@ const APPLY = process.argv.includes("--apply");
 const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 const HOME = homedir();
 
-// bui projects (tmux workspaces) → repo dir. Edit if your layout differs.
+// manta projects (tmux workspaces) → repo dir. Edit if your layout differs.
 // Bannerman's cwd is $HOME (infra, not a repo) so it has no repo scan — its
 // creds live in ~/.credentials/bannerman-*.
 const PROJECT_DIRS = {
@@ -46,7 +46,7 @@ const PROJECT_DIRS = {
   Leasebot: join(HOME, "projects/leasebot"),
   ethernal: join(HOME, "projects/ethernal"),
   Capo: "/mnt/HC_Volume_105783934/relocated/airtranscript",
-  BUI: join(HOME, "projects/better-ui"),
+  MANTA: join(HOME, "projects/better-ui"),
 };
 
 // Raw discovered entries; classified + deduped after collection. `value` is held
@@ -287,7 +287,7 @@ for (const r of raw) {
 }
 
 if (final.length === 0) {
-  console.log("No credentials found to migrate. Add secrets in the bui Secrets card (🔑).");
+  console.log("No credentials found to migrate. Add secrets in the manta Secrets card (🔑).");
   process.exit(0);
 }
 
@@ -308,7 +308,7 @@ for (const g of [...groups.keys()].sort()) {
 }
 
 if (!APPLY) {
-  console.log("DRY RUN. Re-run with --apply to import these into the bui store.");
+  console.log("DRY RUN. Re-run with --apply to import these into the manta store.");
   console.log("(Values are read locally and POSTed straight to manta-server — they");
   console.log(" never appear in this output or any AI transcript.)");
   process.exit(0);
@@ -338,4 +338,4 @@ for (const f of final) {
     console.log(`  ✗ ${f.key} — ${e?.message ?? e}`);
   }
 }
-console.log(`\nDone. Imported ${ok}/${final.length}. Manage them in the bui Secrets card.`);
+console.log(`\nDone. Imported ${ok}/${final.length}. Manage them in the manta Secrets card.`);

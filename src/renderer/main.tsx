@@ -18,7 +18,7 @@ import {
 //
 //  2. Preload present (Electron desktop) → always install httpApi as
 //     window.api (SSH main path gone). We keep the real preload available as
-//     window.__buiPreload so Electron-LOCAL affordances (clipboard, reveal-
+//     window.__mantaPreload so Electron-LOCAL affordances (clipboard, reveal-
 //     in-folder, OS notifications) still work — the split is: data/tmux/
 //     opencode go over http; OS-integration stays on the preload.
 //
@@ -27,11 +27,11 @@ import {
 // component ever observes a half-installed window.api.
 
 // The genuine Electron preload bridge is exposed by src/preload/index.ts under
-// `__buiPreload` (a read-only contextBridge property). We NEVER write to that
+// `__mantaPreload` (a read-only contextBridge property). We NEVER write to that
 // name; instead we install our own writable `window.api` below, so http mode
 // can swap it for the httpApi client. On the mobile/web build there is no
-// preload at all → `__buiPreload` is undefined → mobile path.
-const preload = (window as unknown as { __buiPreload?: Api }).__buiPreload;
+// preload at all → `__mantaPreload` is undefined → mobile path.
+const preload = (window as unknown as { __mantaPreload?: Api }).__mantaPreload;
 const isMobile = !preload;
 
 // Install `window.api` as a WRITABLE, configurable property. contextBridge
@@ -49,7 +49,7 @@ function setWindowApi(next: unknown): void {
 
 async function chooseDesktopTransport(realPreload: Api): Promise<void> {
   // Desktop always uses httpApi (BET-82: SSH main path gone).
-  // The real preload already lives at window.__buiPreload (exposed read-only by
+  // The real preload already lives at window.__mantaPreload (exposed read-only by
   // the preload's contextBridge) — we NEVER write to that name. Here we only
   // decide whether to swap the primary window.api over to httpApi.
 
@@ -72,18 +72,18 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
         // Do NOT return here: chooseDesktopTransport must fall through so boot()
         // still renders. We simply leave window.api as the preload bridge by
         // skipping the httpApi swap below.
-        console.warn("[bui] localStorage seed failed; using preload transport:", e);
+        console.warn("[manta] localStorage seed failed; using preload transport:", e);
         seeded = false;
       }
       if (seeded) {
-        // The real preload already lives at window.__buiPreload (contextBridge)
+        // The real preload already lives at window.__mantaPreload (contextBridge)
         // for Electron-local affordances (clipboard, reveal, OS notifications).
         // Install httpApi as the primary window.api.
         setWindowApi(httpApi);
       }
     }
   } catch (e) {
-    console.warn("[bui] configGet failed at entry:", e);
+    console.warn("[manta] configGet failed at entry:", e);
   }
 }
 
@@ -95,7 +95,7 @@ async function boot(): Promise<void> {
     // this default install + the http-mode swap are both legal assignments.
     setWindowApi(preload);
     await chooseDesktopTransport(preload);
-    // chooseDesktopTransport already assigned window.__buiPreload.
+    // chooseDesktopTransport already assigned window.__mantaPreload.
     // Initialize renderer logging AFTER window.api is wired so configGet
     // works — but BEFORE React mounts so early-render errors still ship.
     // Fire-and-forget; initRendererLogging is no-op when no token is set.

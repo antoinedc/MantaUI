@@ -1,29 +1,29 @@
-# bui-native tools — design + the `schedule` tool
+# manta-native tools — design + the `schedule` tool
 
-This documents the **extensible "bui tools" pattern** (so the remote AI gains
-new capabilities bui owns) and its first instance, the **`schedule` tool**.
+This documents the **extensible "manta tools" pattern** (so the remote AI gains
+new capabilities manta owns) and its first instance, the **`schedule` tool**.
 
 ## The pattern (reusable for future tools: ping, etc.)
 
-bui chat mode talks to **opencode**, not the `claude` TUI. opencode is the
-agent runtime; bui is an HTTP client of it. For "any AI we run here" to *know
-about and autonomously call* a bui capability, the capability must be a tool
+manta chat mode talks to **opencode**, not the `claude` TUI. opencode is the
+agent runtime; manta is an HTTP client of it. For "any AI we run here" to *know
+about and autonomously call* a manta capability, the capability must be a tool
 **registered inside opencode**, globally.
 
 opencode auto-loads global custom tools from `~/.config/opencode/tools/*.ts`.
 They are available to **every project, every session, every model**, with zero
 per-repo config. The tool's `execute` runs TypeScript in opencode's Bun runtime
-**on the same Linux box** as bui-server (`127.0.0.1:8787`) and opencode itself
-(`127.0.0.1:4096`). So a tool just `fetch`es bui-server — no SSH hop, same
+**on the same Linux box** as manta-server (`127.0.0.1:8787`) and opencode itself
+(`127.0.0.1:4096`). So a tool just `fetch`es manta-server — no SSH hop, same
 trust boundary as the existing `/send-file` outbox convention.
 
 Three pieces per tool:
 
 1. **opencode tool** (`~/.config/opencode/tools/<name>.ts`) — thin registrar.
-   Validates args, `fetch`es a bui-server `/api/...` endpoint, returns a short
+   Validates args, `fetch`es a manta-server `/api/...` endpoint, returns a short
    confirmation string. **No long-running work here** — `execute` must return
    promptly (it can't sleep for 5 minutes).
-2. **bui-server endpoint + logic** (`src/server/*.mjs`) — the always-on,
+2. **manta-server endpoint + logic** (`src/server/*.mjs`) — the always-on,
    systemd-managed process owns durable state and any long-lived loop. This is
    where the real behavior lives.
 3. **Global guidance** (`~/.config/opencode/AGENTS.md`) — one line telling the
@@ -54,9 +54,9 @@ resolves the import up the tree to `~/.config/opencode/node_modules/`. (The
 imports — tools are not.)
 
 opencode runs as the **`opencode-serve` systemd --user service** (NOT a
-`bui-opencode` tmux session — that reference elsewhere is stale). It re-scans
+`manta-opencode` tmux session — that reference elsewhere is stale). It re-scans
 `tools/` on `systemctl --user restart opencode-serve`. Note: restarting
-opencode severs any live bui chat connection to `:4096` mid-turn.
+opencode severs any live manta chat connection to `:4096` mid-turn.
 
 ## The `schedule` tool — behavior
 
@@ -67,14 +67,14 @@ open PRs".
 - **Args**: `cron` (5-field string), `prompt` (what to run), `recurring`
   (bool; false = one-shot), optional `label`.
 - The model converts natural language → cron itself (it's good at this, and it
-  mirrors Claude Code's `CronCreate` contract). bui does NOT parse NL.
+  mirrors Claude Code's `CronCreate` contract). manta does NOT parse NL.
 - Tool POSTs `{cron, prompt, recurring, label, sessionID}` to
   `POST /api/schedule`. `sessionID` comes from the tool `context` so the fired
   prompt lands back in the **same chat session** the user is in.
 
 ### Durability (locked decision: server-owned)
 
-Jobs live on **bui-server**, fired by the always-on systemd process. They
+Jobs live on **manta-server**, fired by the always-on systemd process. They
 survive: Mac app close, chat session navigation, and box reboot (systemd
 `enable-linger`). This is strictly more durable than Claude Code's
 session-scoped `/loop`, which dies with the session.
@@ -155,8 +155,8 @@ v1 ships a real UI surface so the user can always see what's pending and kill it
 
 ### Transport wiring — `schedule:*` channels (NOT `opencode:*`)
 
-Schedules are a **bui-server** concept, not an opencode concept, so they get
-their own `window.api` channels that hit bui-server's `/api/schedule`
+Schedules are a **manta-server** concept, not an opencode concept, so they get
+their own `window.api` channels that hit manta-server's `/api/schedule`
 endpoints — they do NOT route through the opencode client methods. New methods
 (both transports, kept in sync per the AGENTS.md rule):
 
@@ -172,10 +172,10 @@ Six edit sites (the standard new-`window.api`-method pattern):
 | IPC const | `src/shared/types.ts` `IPC.scheduleList` / `scheduleDelete` | same |
 | Renderer call | `src/preload/index.ts` (ipcRenderer.invoke) | `src/renderer/api/httpApi.ts` (`rpc(...)`) |
 | Handler | `src/main/index.ts` ipcMain.handle | `src/server/rpc.mjs` `buildHandlers` dispatch |
-| Impl | `src/main/schedule.ts` (NEW — `fetch`es bui-server `/api/schedule` over the existing `-L 18787` presence forward, OR direct if reachable) | `src/server/schedule.mjs` calls in-process (no HTTP needed; same process) |
+| Impl | `src/main/schedule.ts` (NEW — `fetch`es manta-server `/api/schedule` over the existing `-L 18787` presence forward, OR direct if reachable) | `src/server/schedule.mjs` calls in-process (no HTTP needed; same process) |
 
 **Desktop reach to the server store**: the scheduler store lives on
-bui-server. Desktop already opens a best-effort `-L 18787:127.0.0.1:8787`
+manta-server. Desktop already opens a best-effort `-L 18787:127.0.0.1:8787`
 forward for push presence (`ensurePresenceForward` in `src/main/opencode.ts`).
 `src/main/schedule.ts` reuses that forward to `GET`/`DELETE`
 `127.0.0.1:18787/api/schedule`. If the forward is down, desktop list/delete
@@ -230,12 +230,12 @@ bus event:
 - Refetch after the user deletes a row (optimistic remove + reconcile).
 
 **Why not a `schedule.updated` bus event reaching the renderer?** On *mobile*
-the renderer subscribes to bui-server's `/events` bus over WS, so a new
+the renderer subscribes to manta-server's `/events` bus over WS, so a new
 `schedule.updated` kind would work. But on *desktop* the renderer is wired to
 the Electron main process's opencode SSE bus — it does NOT subscribe to the
 mobile server's in-process bus, so the event never arrives without building a
 whole desktop→server event bridge. Refetch-on-open + open-poll is identical on
-both transports and far less plumbing for v1. bui-server still PUBLISHES
+both transports and far less plumbing for v1. manta-server still PUBLISHES
 `schedule.updated` on every mutation (cheap, already wired) so a future mobile
 optimization can consume it, but the UI does not depend on it.
 
@@ -249,13 +249,13 @@ anything it doesn't recognize — never throws, never blocks rendering.
 
 ## What is NOT in v1 (deliberate scope cuts)
 
-- **No desktop-main duplication.** The scheduler lives only on bui-server. The
+- **No desktop-main duplication.** The scheduler lives only on manta-server. The
   desktop app already reaches opencode through the same box; jobs fire
   regardless of whether the Mac app is open. A desktop-side scheduler would
   double-fire — explicitly avoided. (If desktop ever runs without the box…
   it can't; opencode IS on the box.)
 - **No jitter / 7-day expiry.** Claude Code adds these for multi-tenant API
-  fairness and forgotten-loop bounding. bui is single-user on one box; skip for
+  fairness and forgotten-loop bounding. manta is single-user on one box; skip for
   v1. Revisit if recurring jobs accumulate.
 - **No global "all sessions" schedule view.** The `ScheduledTasksCard` shows
   only the current session's jobs. `scheduleList()` with no sessionId returns

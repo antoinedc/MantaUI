@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-BUI is an Electron desktop client for working with Claude on a remote Linux box over SSH+tmux. Sidebar of projects (tmux sessions) with multiple windows each; xterm.js terminal in one tab type, a native React chat panel powered by opencode in the other.
+MANTA is an Electron desktop client for working with Claude on a remote Linux box over SSH+tmux. Sidebar of projects (tmux sessions) with multiple windows each; xterm.js terminal in one tab type, a native React chat panel powered by opencode in the other.
 
 **The business model**: open-source everything except the mobile app subscription. Users bring their own compute (VPS, laptop, whatever). We sell a polished App Store/Play Store app that auto-connects to their box with zero setup.
 
@@ -81,7 +81,7 @@ curl -fsSL https://mantaui.com/install.sh | bash
 1. Verifies prereqs (curl, tar, sha256sum, tmux, git)
 2. Downloads the versioned tarball from the manifest (`manta-latest.txt`), sha256-verifies, extracts to `~/manta/`
 3. Installs opencode (official installer)
-4. Seeds `~/.config/opencode/opencode.jsonc` with the bui opencode-claude-auth plugin
+4. Seeds `~/.config/opencode/opencode.jsonc` with the manta opencode-claude-auth plugin
 5. Mints box identity via `ensureAuth` (box_id + box_token → `~/.manta/auth.json`, 0600)
 6. Creates systemd --user service (`manta-server.service`)
 7. **Privileged section (BET-205, sudo NOPASSWD):** installs Caddy via apt, POSTs `gateway.mantaui.com/register {box_id}` for DNS provisioning, writes the per-box Caddy vhost, reloads Caddy
