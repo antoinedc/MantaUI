@@ -55,7 +55,7 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
-import { CompactionCard, CredRefreshCard, PermissionCard, RetryCard } from "./Cards";
+import { CompactionCard, CredRefreshCard, PermissionCard, RetryCard, TranscriptLoadingCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
@@ -1770,6 +1770,18 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
+      {/* Transcript-loading card (BET-242). Surfaces the warm-stale-reopen */}
+      {/* refetch: the previous transcript is on-screen but the latest messages */}
+      {/* are still being synced in the background. `refreshing` is flipped */}
+      {/* true in scheduleRefetch and false in .finally — see useTranscriptState. */}
+      {/* Cold-load (`messages === null`) is still covered by the full-screen */}
+      {/* "Connecting to session…" spinner above. */}
+      {refreshing && (
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <TranscriptLoadingCard />
+        </div>
+      )}
+
       {/* Live compaction progress. Streams the summary as it's produced and */}
       {/* flips to a brief "Compacted" confirmation after .ended; clears on */}
       {/* a timer (session.compacted refetch has already landed by then). */}
@@ -2018,7 +2030,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         abort={abort}
         running={running}
         branch={branch}
-        refreshing={refreshing}
         modelLabel={modelLabel}
         chatAutoAllow={chatAutoAllow}
         setChatAutoAllow={setChatAutoAllow}

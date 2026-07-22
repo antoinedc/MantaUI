@@ -159,6 +159,7 @@ export function useTranscriptState(params: {
     if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
     refetchTimerRef.current = setTimeout(() => {
       refetchTimerRef.current = null;
+      setRefreshing(true);
       window.api
         .opencodeMessages(sessionId)
         .then((m) => {
@@ -167,9 +168,10 @@ export function useTranscriptState(params: {
             childSessionIds.current.add(cid);
           }
         })
-        .catch(() => { /* keep last-known state */ });
+        .catch(() => { /* keep last-known state */ })
+        .finally(() => setRefreshing(false));
     }, 300);
-  }, [sessionId]);
+  }, [sessionId, setRefreshing]);
 
   const scheduleFlush = useCallback(() => {
     if (flushTimer.current) return;

@@ -41,7 +41,6 @@ export function InputArea({
   abort,
   running,
   branch,
-  refreshing,
   modelLabel,
   chatAutoAllow,
   setChatAutoAllow,
@@ -83,7 +82,6 @@ export function InputArea({
   abort: () => void;
   running: boolean;
   branch: string | null;
-  refreshing: boolean;
   modelLabel: string | null;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
@@ -334,14 +332,6 @@ export function InputArea({
               title={`Current branch: ${branch}`}
             >
               ⎇ {branch}
-            </span>
-          )}
-          {refreshing && (
-            <span
-              className="text-text-faint shrink-0 animate-pulse"
-              title="Refreshing transcript from opencode (large sessions can take 20–30s)"
-            >
-              ↻ refreshing…
             </span>
           )}
           <ModelPicker
