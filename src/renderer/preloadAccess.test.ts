@@ -16,6 +16,10 @@ function makeFakePreload(): MantaPreload {
       cb({ source: "clipboard" });
       return vi.fn();
     }),
+    // BET-240: deep-link pairing bridge. Matches the MantaPreload shape in
+    // src/renderer/preloadAccess.ts; we don't exercise its buffering here —
+    // that's tested implicitly by App.tsx's wiring + PairStep's prefill.
+    onPairLink: vi.fn((_cb: (url: string) => void) => vi.fn()),
     clipboardWriteText: vi.fn(async () => {}),
     clipboardReadImage: vi.fn(async () => null),
     readLocalFile: vi.fn(async () => new ArrayBuffer(0)),

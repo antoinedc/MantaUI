@@ -346,6 +346,12 @@ export const IPC = {
   // path is only set for file-based detections (Desktop watcher).
   screenshotDetected: "screenshot:detected",
 
+  // Deep-link pairing: main → renderer push when the OS delivers a
+  // manta://pair?... URL (protocol handler). Payload: the raw URL string;
+  // the renderer validates it with parsePairPayload and routes it into
+  // the onboarding PairStep. Invalid URLs are dropped renderer-side.
+  pairLinkReceived: "pair:link-received",
+
   // main → renderer push: the manta-server notification router decided the
   // desktop should show an OS notification. Relayed from the server's
   // `desktopNotify` bus event. Payload:

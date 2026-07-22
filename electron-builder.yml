@@ -30,6 +30,15 @@ files:
 extraMetadata:
   main: out/main/index.js
 
+# Custom URL scheme for OS-level deep-link pairing (BET-240). electron-builder
+# generates `CFBundleURLTypes` on macOS and the `MimeType=x-scheme-handler/manta`
+# entry on Linux `.desktop` files from this block — do NOT hand-edit any plist.
+# iOS already handles `manta://` via mobile/ios/.../Info.plist (BET-156).
+protocols:
+  - name: MantaUI Pairing
+    schemes:
+      - manta
+
 mac:
   icon: "assets/icon.icns"
   category: "public.app-category.developer-tools"

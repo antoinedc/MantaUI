@@ -100,6 +100,11 @@ type State = {
   // that would otherwise resolve to "http" mode (e.g. an already-paired
   // box). Cleared when the flow completes or is skipped. Not persisted.
   onboardingForced: boolean;
+  // Deep-link pairing (BET-240): the raw manta://pair?… URL delivered by the
+  // OS protocol handler. Set in App.tsx when the preload pushes a URL, read
+  // by Onboarding (to force step 1) and PairStep (to prefill the paste field).
+  // Cleared once consumed. Not persisted — purely transient routing state.
+  pendingPairLink: string | null;
   chatAutoAllow: boolean;
   // Auto-rename chat-mode windows from the conversation (opt-in). See
   // AppConfig.autoRenameSessions.
@@ -274,6 +279,10 @@ type State = {
   setServerUpdatePrompt: (
     p: { version: string; notesUrl?: string | null } | null,
   ) => void;
+  // Deep-link pairing (BET-240): write/clear the pending pair link. Pass
+  // null to consume (PairStep clears on use); App.tsx writes the URL when
+  // the preload's pair:link-received IPC fires.
+  setPendingPairLink: (url: string | null) => void;
   setConnectionState: (s: ConnectionState) => void;
 };
 
@@ -284,6 +293,7 @@ export const useStore = create<State>((set, get) => ({
   boxToken: "",
   onboardingSkipped: false,
   onboardingForced: false,
+  pendingPairLink: null,
   chatAutoAllow: false,
   autoRenameSessions: false,
   allowAgentPush: false,
@@ -384,6 +394,8 @@ export const useStore = create<State>((set, get) => ({
     const next = await window.api.configUpdate({ onboardingSkipped: false });
     set({ onboardingSkipped: next.onboardingSkipped ?? false });
   },
+
+  setPendingPairLink: (url) => set({ pendingPairLink: url }),
 
   finishOnboarding: async () => {
     // Drop the force flag and re-read config so the app transitions to the

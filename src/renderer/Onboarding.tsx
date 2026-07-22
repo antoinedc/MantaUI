@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ONBOARDING_STEPS,
   STEP_LABELS,
@@ -109,9 +109,23 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   // Derive the resume point once from the current config so a quit-mid-flow
   // reopens at the first incomplete step. Read straight from the store's
   // config snapshot (App gates on `loaded`, so config is present by mount).
+  //
+  // Deep-link pairing (BET-240): if a manta://pair?... URL is pending in the
+  // store, force step 1 regardless of the resume point — re-pairing to a new
+  // box is a legitimate flow that resolveInitialStep would otherwise skip.
   const [pos, setPos] = useState<OnboardingPosition>(() =>
-    resolveInitialStep(useStore.getState().configSnapshot()),
+    useStore.getState().pendingPairLink
+      ? 1
+      : resolveInitialStep(useStore.getState().configSnapshot()),
   );
+
+  // Deep-link pairing (BET-240): a link that arrives WHILE onboarding is
+  // already open (e.g. user clicked the link from Terminal after the app
+  // was running) must also jump to step 1.
+  const pendingPairLink = useStore((s) => s.pendingPairLink);
+  useEffect(() => {
+    if (pendingPairLink) setPos(1);
+  }, [pendingPairLink]);
 
   const goNext = () => setPos((p) => nextPosition(p));
   const goBack = () => setPos((p) => prevPosition(p));
