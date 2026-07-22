@@ -87,9 +87,12 @@ test("parseBearer extracts token from Authorization header", () => {
 // isExemptPath
 // ----------------------------------------------------------------------------
 
-test("isExemptPath exempts only /auth pairing + /hook delivery", () => {
+test("isExemptPath exempts only /auth pairing + /pair onboarding + /hook delivery", () => {
   assert.equal(isExemptPath("/auth/pair"), true);
   assert.equal(isExemptPath("/auth/claim"), true);
+  assert.equal(isExemptPath("/pair"), true);
+  assert.equal(isExemptPath("/pair/qr.png"), true);
+  assert.equal(isExemptPath("/pair/logo.png"), true);
   assert.equal(isExemptPath("/hook/deadbeef"), true);
   assert.equal(isExemptPath("/hook/"), true);
   // NOT exempt — these must be gated
@@ -97,6 +100,8 @@ test("isExemptPath exempts only /auth pairing + /hook delivery", () => {
   assert.equal(isExemptPath("/api/projects"), false);
   assert.equal(isExemptPath("/rpc/tmux"), false);
   assert.equal(isExemptPath("/events"), false);
+  assert.equal(isExemptPath("/pair/other"), false); // narrow exemption: only the 3 exact paths
+  assert.equal(isExemptPath("/pairx"), false);      // prefix attack guard
   assert.equal(isExemptPath("/"), false);
   assert.equal(isExemptPath(null), false);
 });
@@ -331,11 +336,16 @@ test("authorize allows exempt + preflight + public-asset paths without a token",
   assert.equal(eng.authorize({ method: "OPTIONS", path: "/api/projects" }).ok, true);
   assert.equal(eng.authorize({ method: "GET", path: "/auth/pair" }).ok, true);
   assert.equal(eng.authorize({ method: "POST", path: "/auth/claim" }).ok, true);
+  assert.equal(eng.authorize({ method: "GET", path: "/pair" }).ok, true);
+  assert.equal(eng.authorize({ method: "GET", path: "/pair/qr.png" }).ok, true);
+  assert.equal(eng.authorize({ method: "GET", path: "/pair/logo.png" }).ok, true);
   assert.equal(eng.authorize({ method: "POST", path: "/hook/abcd" }).ok, true);
   assert.equal(eng.authorize({ method: "GET", path: "/" }).ok, true);
   assert.equal(eng.authorize({ method: "GET", path: "/assets/x.js" }).ok, true);
   // /auth/status is NOT exempt → gated
   assert.equal(eng.authorize({ method: "GET", path: "/auth/status" }).ok, false);
+  // /pair/other is NOT exempt — narrow allowlist
+  assert.equal(eng.authorize({ method: "GET", path: "/pair/other" }).ok, false);
   // a POST to an asset-looking path is still gated (assets are GET-only)
   assert.equal(eng.authorize({ method: "POST", path: "/assets/x.js" }).ok, false);
 });

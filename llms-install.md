@@ -128,8 +128,15 @@ before the user enters it, mint a fresh one:
 
 Tell the user, in this order:
 
-1. The **pairing code** (and that it expires in ~5 minutes — you can mint a
-   fresh one any time) and the **box id**.
+1. The **pair page** as the single clickable entry point — the box hosts a
+   3-step wizard that walks them through downloading the desktop app,
+   connecting it, and (optionally) installing the mobile app:
+
+   [Open this link to connect your devices](https://<box_id>.boxes.mantaui.com/pair#code=<code>)
+
+   The **pairing code** (and that it expires in ~5 minutes — you can mint a
+   fresh one any time) and the **box id** below, as a fallback if they
+   prefer to enter the values manually in the desktop app.
 2. Devices connect directly to `https://<box_id>.boxes.mantaui.com` —
    desktop: paste the `manta://pair` link or enter the code; phone: install
    the app / open the URL and pair the same way.

@@ -14,6 +14,7 @@ import {
   readBoxIdentity,
   formatPairingOutput,
   buildPairLink,
+  buildPairPageUrl,
   formatExpiry,
   renderShellConfig,
   stripJsoncLineComments,
@@ -441,6 +442,7 @@ test("formatPairingOutput produces a stable human block", () => {
   assert.match(out, /Box ID:        0123456789abcdef0123456789abcdef/);
   assert.match(out, /Expires:       2026-07-03 12:34:56 UTC/);
   assert.match(out, /Pair link:     manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
   assert.match(out, /paste into the desktop app, or scan as a QR/);
   // QR rendering produces some non-empty ANSI block (qrcode-terminal prints
   // block chars). We don't pin the exact bytes — only that the renderer
@@ -541,6 +543,37 @@ test("buildPairLink shape matches install.sh's heredoc literal (BET-177 §2.4)",
 });
 
 // ----------------------------------------------------------------------------
+// buildPairPageUrl — box-served /pair onboarding URL (BET-239 §2.6)
+// ----------------------------------------------------------------------------
+//
+// Single source of truth for the printed "Pair page:" line. The URL hosts the
+// 3-step wizard served by /pair; the code travels in the URL fragment so it
+// never reaches server logs. Shares buildPairLink's validation rules so a
+// future drift in box/code shape fails BOTH helpers in lockstep.
+
+test("buildPairPageUrl emits the canonical https://<box>.boxes.mantaui.com/pair#code= shape", () => {
+  const url = buildPairPageUrl(HEX32, "847291");
+  assert.equal(
+    url,
+    "https://0123456789abcdef0123456789abcdef.boxes.mantaui.com/pair#code=847291",
+  );
+});
+
+test("buildPairPageUrl rejects a non-32-hex boxId", () => {
+  assert.throws(() => buildPairPageUrl("not-32-hex", "847291"), /32-hex token/);
+  assert.throws(() => buildPairPageUrl(HEX32.slice(0, 31), "847291"), /32-hex token/);
+  assert.throws(() => buildPairPageUrl(HEX32 + "0", "847291"), /32-hex token/);
+  assert.throws(() => buildPairPageUrl("", "847291"), /32-hex token/);
+  assert.throws(() => buildPairPageUrl(null, "847291"), /32-hex token/);
+});
+
+test("buildPairPageUrl rejects a non-6-digit code", () => {
+  assert.throws(() => buildPairPageUrl(HEX32, "12345"), /6 digits/);
+  assert.throws(() => buildPairPageUrl(HEX32, "abcdef"), /6 digits/);
+  assert.throws(() => buildPairPageUrl(HEX32, ""), /6 digits/);
+});
+
+// ----------------------------------------------------------------------------
 // formatPairingOutput — pair-link + QR block (BET-177 §2.4)
 // ----------------------------------------------------------------------------
 //
@@ -563,6 +596,7 @@ test("formatPairingOutput includes the pair link + QR", () => {
     },
   );
   assert.match(out, /Pair link:     manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
   assert.match(out, /paste into the desktop app, or scan as a QR/);
   // Stubbed QR rows are indented to match the surrounding 2-space indent.
   // We use a literal newline+two-spaces prefix in the regex (no \s — `s`
@@ -586,6 +620,7 @@ test("formatPairingOutput falls back to the text-only block when qrRender throws
     { qrRender: () => { throw new Error("qrcode-terminal exploded"); } },
   );
   assert.match(out, /Pair link:     manta:\/\/pair\?box=/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
   assert.match(out, /scan as a QR/);
   // QR block chars (qrcode-terminal draws U+2588 FULL BLOCK + U+2584 LOWER
   // HALF BLOCK) are absent. We assert on the QR's STUB marker rather than

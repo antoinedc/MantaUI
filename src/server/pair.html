@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect · MantaUI</title>
+<style>
+:root{
+  --navy-950:#0B1020;--navy-850:#12182F;--navy-800:#171F3A;
+  --navy-700:#253055;--navy-600:#33406B;
+  --blue-400:#5A88FF;--blue-500:#2E6BFF;
+  --cyan-400:#49D7F5;
+  --slate-50:#F8FAFC;--slate-200:#CBD3E1;--slate-300:#A7B1C4;--slate-400:#7E889D;
+  --green-500:#22C79A;--amber-400:#F5BE5C;
+  --surface-app:var(--navy-950);--surface-panel:var(--navy-850);--surface-card:var(--navy-800);--surface-inset:#070B17;
+  --border-subtle:#FFFFFF14;--border-default:var(--navy-700);--border-strong:var(--navy-600);
+  --text-primary:var(--slate-50);--text-secondary:var(--slate-200);--text-muted:var(--slate-300);
+  --fill-subtle:#FFFFFF0D;
+  --font-sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --font-mono:'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace;
+  --ease-out:cubic-bezier(0.22,1,0.36,1);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--surface-app);color:var(--text-secondary);font-family:var(--font-sans);font-size:15px;line-height:1.6;
+  -webkit-font-smoothing:antialiased;min-height:100vh;display:flex;flex-direction:column}
+.mono{font-family:var(--font-mono)}
+.glow{position:fixed;top:-240px;left:50%;transform:translateX(-50%);width:820px;height:500px;pointer-events:none;
+  background:radial-gradient(ellipse at center,rgba(46,107,255,.22),rgba(73,215,245,.07) 40%,transparent 70%);filter:blur(12px)}
+header{border-bottom:1px solid var(--border-subtle);background:rgba(11,16,32,.72);backdrop-filter:blur(12px)}
+.hwrap{max-width:660px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:11px}
+.mark{width:28px;height:28px;object-fit:contain;display:block}
+.brand{font-weight:700;color:var(--text-primary);font-size:14.5px}
+.boxchip{margin-left:auto;display:flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-muted)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--green-500);box-shadow:0 0 8px rgba(34,199,154,.8)}
+main{flex:1;width:100%;max-width:660px;margin:0 auto;padding:40px 24px 60px;position:relative}
+.stepper{display:flex;align-items:center;justify-content:center;margin-bottom:36px}
+.step-tab{display:flex;align-items:center;gap:9px;background:none;border:0;cursor:pointer;padding:6px 4px;font-family:var(--font-sans)}
+.step-num{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;
+  font-family:var(--font-mono);color:var(--slate-300);background:var(--fill-subtle);border:1px solid var(--border-strong);transition:all .15s var(--ease-out)}
+.step-name{font-size:13px;font-weight:600;color:var(--slate-400);transition:color .15s var(--ease-out)}
+.step-tab[aria-current="true"] .step-num{background:var(--blue-500);border-color:var(--blue-400);color:#fff;box-shadow:0 0 14px rgba(46,107,255,.45)}
+.step-tab[aria-current="true"] .step-name{color:var(--text-primary)}
+.step-tab.done .step-num{background:rgba(34,199,154,.15);border-color:rgba(34,199,154,.5);color:var(--green-500)}
+.step-tab:hover .step-name{color:var(--text-secondary)}
+.step-line{width:44px;height:1px;background:var(--border-strong);margin:0 8px;flex-shrink:0}
+@media(max-width:540px){.step-name{display:none}.step-line{width:28px}}
+.panel{background:var(--surface-card);border:1px solid var(--border-default);border-radius:18px;padding:40px 42px 34px;text-align:center;
+  box-shadow:0 18px 48px rgba(3,6,15,.5)}
+@media(max-width:540px){.panel{padding:30px 20px 26px}}
+.picon{width:52px;height:52px;margin:0 auto 16px;border-radius:14px;background:var(--fill-subtle);border:1px solid var(--border-default);
+  display:grid;place-items:center;color:var(--cyan-400)}
+.picon svg{width:24px;height:24px}
+h1{font-size:22px;font-weight:750;color:var(--text-primary);letter-spacing:-.015em;line-height:1.25}
+h1 .opt{font-size:13px;font-weight:600;color:var(--slate-300)}
+.lead{margin:10px auto 0;color:var(--text-muted);font-size:14.5px;max-width:420px}
+.lead b{color:var(--text-primary);font-weight:600}
+.action{margin-top:26px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;height:48px;padding:0 30px;border-radius:11px;
+  font-size:15px;font-weight:650;text-decoration:none;border:1px solid transparent;cursor:pointer;transition:all .12s var(--ease-out);font-family:var(--font-sans)}
+.btn-primary{background:var(--blue-500);color:#fff}
+.btn-primary:hover{background:var(--blue-400);box-shadow:0 0 0 1px rgba(46,107,255,.5),0 0 22px rgba(46,107,255,.35)}
+.hint{margin-top:13px;font-size:13px;color:var(--slate-300)}
+.hint b{color:var(--text-secondary)}
+.skiplink{margin-top:22px;font-size:13.5px}
+.skiplink a{color:var(--text-muted);text-decoration:none;border-bottom:1px dotted var(--border-strong)}
+.skiplink a:hover{color:var(--cyan-400);border-color:var(--cyan-400)}
+details{margin-top:24px;text-align:left;background:var(--surface-panel);border:1px solid var(--border-subtle);border-radius:10px}
+summary{cursor:pointer;padding:11px 16px;font-size:13.5px;color:var(--text-muted);list-style:none;display:flex;align-items:center;gap:8px}
+summary:hover{color:var(--text-secondary)}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"\25B8";font-size:11px;transition:transform .15s}
+details[open] summary::before{transform:rotate(90deg)}
+.dbody{padding:2px 16px 18px;font-size:13.5px;color:var(--text-muted)}
+.dbody p{margin-bottom:10px}
+.dbody a.deeplink{color:var(--cyan-400);font-family:var(--font-mono);font-size:12.5px;word-break:break-all;text-decoration:underline;text-underline-offset:3px}
+.kv{display:flex;flex-direction:column;gap:12px;margin-top:14px}
+.kv .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--slate-300);font-weight:700}
+.kv .v{font-family:var(--font-mono);font-size:13.5px;color:var(--text-primary);margin-top:3px;white-space:nowrap}
+.qrframe{display:inline-block;background:#F8FAFC;border-radius:14px;padding:12px;box-shadow:0 0 0 1px var(--border-default)}
+.qrframe img{display:block;width:172px;height:172px;image-rendering:pixelated}
+.storebadge{display:inline-flex;align-items:center;gap:10px;background:#000;border:1px solid #2a2f3e;border-radius:10px;
+  padding:8px 18px;text-decoration:none;margin-bottom:20px}
+.storebadge svg{width:22px;height:26px;fill:#fff}
+.storebadge .st{text-align:left;line-height:1.15}
+.storebadge .st small{display:block;font-size:9.5px;color:#cfd4de;letter-spacing:.02em}
+.storebadge .st span{font-size:15.5px;font-weight:600;color:#fff;letter-spacing:-.01em}
+.codestrip{margin-top:34px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:13px;color:var(--text-muted);text-align:center}
+.codestrip .code{font-family:var(--font-mono);font-weight:700;color:var(--text-primary);letter-spacing:.14em;font-size:14px}
+.codestrip .sep{color:var(--border-strong)}
+.codestrip .missing{display:none;color:var(--amber-400)}
+.codestrip .missing code{font-family:var(--font-mono);background:var(--fill-subtle);border:1px solid var(--border-subtle);border-radius:5px;padding:1px 6px;font-size:12px;color:var(--slate-200)}
+body.nocode .codestrip .live{display:none}
+body.nocode .codestrip .missing{display:inline}
+body.nocode #openlink{pointer-events:none;opacity:.45}
+body.nocode .qrframe{display:none}
+footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28px}
+.stepview{display:none}
+.stepview.active{display:block;animation:fadein .18s var(--ease-out)}
+@keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="glow"></div>
+<header><div class="hwrap">
+  <img class="mark" src="/pair/logo.png" alt="Manta">
+  <div class="brand">MantaUI</div>
+  <div class="boxchip"><span class="dot"></span> <span id="boxchip-id">box</span> · online</div>
+</div></header>
+
+<main>
+  <nav class="stepper" aria-label="Setup steps">
+    <button class="step-tab" id="tab-1" aria-current="true" onclick="go(1)"><span class="step-num">1</span><span class="step-name">Get the app</span></button>
+    <div class="step-line"></div>
+    <button class="step-tab" id="tab-2" aria-current="false" onclick="go(2)"><span class="step-num">2</span><span class="step-name">Connect</span></button>
+    <div class="step-line"></div>
+    <button class="step-tab" id="tab-3" aria-current="false" onclick="go(3)"><span class="step-num">3</span><span class="step-name">Mobile app</span></button>
+  </nav>
+
+  <section class="stepview active" id="step-1">
+    <div class="panel">
+      <div class="picon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </div>
+      <h1>Get the Manta app</h1>
+      <p class="lead">Download it, drag it to Applications, and open it.<br>First launch: <b>right-click → Open</b>.</p>
+      <div class="action"><a class="btn btn-primary" href="https://mantaui.com/downloads/Manta-latest.dmg" onclick="go(2)">Download for macOS</a></div>
+      <p class="hint">Apple silicon · ~90 MB</p>
+      <p class="skiplink"><a href="#" onclick="go(2);return false">Already have Manta installed? Skip</a></p>
+    </div>
+  </section>
+
+  <section class="stepview" id="step-2">
+    <div class="panel">
+      <div class="picon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+      </div>
+      <h1>Connect it to your box</h1>
+      <p class="lead">One click — Manta opens and asks you to confirm the pairing.</p>
+      <div class="action"><a class="btn btn-primary" id="openlink" href="#" onclick="go(3)">Open in Manta</a></div>
+      <p class="hint">Manta shows <b>"Connect to box <span id="confirm-short">…</span>?"</b> — click Connect.</p>
+      <details>
+        <summary>Nothing happened?</summary>
+        <div class="dbody">
+          <p>Make sure Manta is installed and running, then click this link:</p>
+          <p><a class="deeplink" id="deeplink" href="#">…</a></p>
+          <p style="margin-top:12px">Or enter these on Manta's Connect screen:</p>
+          <div class="kv">
+            <div><div class="k">Box ID</div><div class="v" id="kv-box">—</div></div>
+            <div><div class="k">Pairing code</div><div class="v" id="kv-code">—</div></div>
+          </div>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section class="stepview" id="step-3">
+    <div class="panel">
+      <div class="picon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01"/></svg>
+      </div>
+      <h1>Install the mobile app <span class="opt">(optional)</span></h1>
+      <p class="lead">Get Manta for iPhone, then point your camera at the code — it opens already paired.</p>
+      <div class="action">
+        <a class="storebadge" href="https://mantaui.com" aria-label="Download on the App Store">
+          <svg viewBox="0 0 384 512"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
+          <span class="st"><small>Download on the</small><span>App Store</span></span>
+        </a>
+        <div><div class="qrframe"><img id="qr" src="" alt="Pairing QR"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="codestrip">
+    <span class="live">Pairing code&nbsp;<span class="code" id="code-value">—</span></span>
+    <span class="sep live">·</span>
+    <span class="live">one-time, valid ~5 minutes from minting</span>
+    <span class="missing">No active pairing code — run <code>manta pair</code> on your box (or ask your agent), then open the freshly printed link.</span>
+  </div>
+</main>
+
+<footer>Served by your box · the pairing code never leaves your machines</footer>
+
+<script>
+function go(n){
+  for(var i=1;i<=3;i++){
+    document.getElementById("step-"+i).classList.toggle("active", i===n);
+    var t=document.getElementById("tab-"+i);
+    t.setAttribute("aria-current", i===n ? "true":"false");
+    t.classList.toggle("done", i<n);
+  }
+}
+(function init(){
+  var HEX32=/^[0-9a-f]{32}$/, CODE=/^\d{6}$/;
+  var q=new URLSearchParams(location.hash.replace(/^#/,""));
+  var code=(q.get("code")||"").trim();
+  if(!CODE.test(code)) code="";
+  var box=(q.get("box")||"").trim().toLowerCase();
+  if(!HEX32.test(box)){
+    var label=location.hostname.split(".")[0].toLowerCase();
+    box=HEX32.test(label)?label:"";
+  }
+  var short=box?box.slice(0,8)+"…"+box.slice(-4):"unknown";
+  document.getElementById("boxchip-id").textContent="box "+short;
+  document.getElementById("confirm-short").textContent=short;
+  document.getElementById("kv-box").textContent=box||"—";
+  document.getElementById("kv-code").textContent=code||"—";
+  if(box&&code){
+    var link="manta://pair?box="+box+"&code="+code;
+    document.getElementById("openlink").setAttribute("href",link);
+    var dl=document.getElementById("deeplink");
+    dl.setAttribute("href",link);
+    dl.textContent=link;
+    document.getElementById("qr").src="/pair/qr.png?box="+box+"&code="+code;
+    document.getElementById("code-value").textContent=code.slice(0,3)+" "+code.slice(3);
+  }else{
+    document.body.classList.add("nocode");
+  }
+})();
+</script>
+</body>
+</html>
