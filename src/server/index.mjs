@@ -22,12 +22,14 @@ import * as local from "./local.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 
 // BET-187: ship every console.* (and any startup banner / poller log) to
-// Axiom when MANTA_AXIOM_TOKEN is set in env OR `axiomToken` lives in
-// AppConfig. Without a token, resolveAxiomConfig returns null and this
-// block is a silent no-op — the server behaves EXACTLY as before, no
-// fetches to axiom.co, no console noise. Must run BEFORE createBus() /
-// any subsequent `console.log` so the existing `[push]` / `[opencode-pump]`
-// / `[push]` / `[opencode-pump]` / `[auth]` call sites ship transparently.
+// Axiom when MANTA_AXIOM_TOKEN is set in env AND AppConfig.shareAnalytics
+// is not explicitly false (BET-217 dropped the user-typed axiomToken field;
+// the gating boolean is the sole opt-out). Without a token or when opted
+// out, resolveAxiomConfig returns null and this block is a silent no-op —
+// the server behaves EXACTLY as before, no fetches to axiom.co, no console
+// noise. Must run BEFORE createBus() / any subsequent `console.log` so the
+// existing `[push]` / `[opencode-pump]` / `[push]` / `[opencode-pump]` /
+// `[auth]` call sites ship transparently.
 {
   const axiomCfg = resolveAxiomConfig({ env: process.env, config: await local.configGet() });
   if (axiomCfg) {

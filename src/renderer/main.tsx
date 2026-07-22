@@ -103,9 +103,9 @@ async function boot(): Promise<void> {
   } else {
     // Mobile/web: install the shim (no preload to preserve).
     setWindowApi(httpApi);
-    // Mobile reads config (and thus axiomToken) via the same httpApi
-    // configGet; no MobileSettings UI per the spec — token is entered once
-    // on desktop.
+    // Mobile reads config (and thus shareAnalytics) via the same httpApi
+    // configGet; no MobileSettings UI per the spec — preference is set
+    // once on desktop. Mobile always ships regardless.
     void initRendererLogging("mobile");
   }
 
