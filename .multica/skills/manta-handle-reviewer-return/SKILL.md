@@ -1,9 +1,9 @@
 ---
-name: bui-handle-reviewer-return
-description: Protocol for BUI implementer agents when reviewer reassigns an issue back. Distinguishes `Block (fix-here)` vs `Block (followup-issue)` and handles `Question` resolutions. Load this when an issue you previously sent to reviewer comes back to you with status `todo`.
+name: manta-handle-reviewer-return
+description: Protocol for MANTA implementer agents when reviewer reassigns an issue back. Distinguishes `Block (fix-here)` vs `Block (followup-issue)` and handles `Question` resolutions. Load this when an issue you previously sent to reviewer comes back to you with status `todo`.
 ---
 
-# bui-handle-reviewer-return
+# manta-handle-reviewer-return
 
 If the reviewer reassigns an issue back to you (status `todo`,
 your PR still open in the comment chain), **read `loop_history` FIRST**,
