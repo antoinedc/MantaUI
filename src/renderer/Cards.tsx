@@ -133,33 +133,6 @@ export function CompactionCard({
   );
 }
 
-// ===== Transcript-loading card =====
-//
-// Rendered while the renderer is refetching the canonical transcript from
-// opencode (BET-242). The "Connecting to session…" full-screen spinner covers
-// the cold-load case where `messages === null`; this card covers the warm-
-// stale-reopen case where the previous transcript is on-screen but the
-// latest messages are still being synced in the background. Wire state lives
-// in `useTranscriptState` (`refreshing` is set true around the refetch and
-// false in `.finally`).
-
-export function TranscriptLoadingCard() {
-  return (
-    <div
-      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
-      style={{ borderColor: CLAUDE_ORANGE + "55" }}
-    >
-      <div className="flex items-center gap-2">
-        <span style={{ color: CLAUDE_ORANGE }}>
-          <span className="inline-block animate-pulse">✻</span>
-        </span>
-        <span className="text-text">Loading transcript…</span>
-        <span className="text-text-faint">· syncing latest messages</span>
-      </div>
-    </div>
-  );
-}
-
 // ===== Permission card =====
 //
 // Rendered when opencode has paused a tool waiting for user approval. We

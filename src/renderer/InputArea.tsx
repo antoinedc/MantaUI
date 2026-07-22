@@ -40,6 +40,9 @@ export function InputArea({
   submit,
   abort,
   running,
+  // True while the canonical transcript is being refetched in the background.
+  // Drives the ambient orange gradient on the top divider (below).
+  refreshing,
   branch,
   modelLabel,
   chatAutoAllow,
@@ -81,6 +84,9 @@ export function InputArea({
   submit: () => void;
   abort: () => void;
   running: boolean;
+  // True while the canonical transcript is being refetched in the background.
+  // Drives the ambient orange gradient on the top divider (below).
+  refreshing: boolean;
   branch: string | null;
   modelLabel: string | null;
   chatAutoAllow: boolean;
@@ -196,13 +202,19 @@ export function InputArea({
       {/* red line while voice is active so the user has clear peripheral */}
       {/* feedback that the mic is hot (the `>` glyph also recolors red). */}
       {/* Border width stays at 1px in both states to avoid a 1px row jump */}
-      {/* when recording starts/stops. */}
+      {/* when recording starts/stops. While a background transcript refetch */}
+      {/* is in flight (BET-251), the resting hairline is replaced by an */}
+      {/* ambient orange gradient — the line itself stays 1px tall (the */}
+      {/* gradient is painted as a background-image, not a thicker border). */}
       <div
         className={
           voiceActive
             ? "border-t border-red-500 animate-pulse shadow-[0_0_6px_rgba(239,68,68,0.6)]"
-            : "border-t border-text/25"
+            : refreshing
+              ? "manta-loading-divider"
+              : "border-t border-text/25"
         }
+        aria-busy={refreshing || undefined}
       />
       {/* Input row — no box, generous vertical padding. The mic affordance */}
       {/* on desktop is keyboard-only (Ctrl+M to toggle, Enter to stop+send, */}

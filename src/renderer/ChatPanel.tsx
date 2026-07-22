@@ -55,7 +55,7 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
-import { CompactionCard, CredRefreshCard, PermissionCard, RetryCard, TranscriptLoadingCard } from "./Cards";
+import { CompactionCard, CredRefreshCard, PermissionCard, RetryCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
@@ -1770,17 +1770,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
-      {/* Transcript-loading card (BET-242). Surfaces the warm-stale-reopen */}
-      {/* refetch: the previous transcript is on-screen but the latest messages */}
-      {/* are still being synced in the background. `refreshing` is flipped */}
-      {/* true in scheduleRefetch and false in .finally — see useTranscriptState. */}
+      {/* Transcript-loading card removed (BET-251). The warm-stale-reopen */}
+      {/* refetch is now surfaced as an ambient orange sweep on the composer's */}
+      {/* top divider — see InputArea + `manta-loading-divider` in index.css. */}
       {/* Cold-load (`messages === null`) is still covered by the full-screen */}
       {/* "Connecting to session…" spinner above. */}
-      {refreshing && (
-        <div className="shrink-0 px-4 pt-2 pb-2">
-          <TranscriptLoadingCard />
-        </div>
-      )}
+      {/* `refreshing` is still threaded into the composer below. */}
 
       {/* Live compaction progress. Streams the summary as it's produced and */}
       {/* flips to a brief "Compacted" confirmation after .ended; clears on */}
@@ -2029,6 +2024,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         submit={submit}
         abort={abort}
         running={running}
+        refreshing={refreshing}
         branch={branch}
         modelLabel={modelLabel}
         chatAutoAllow={chatAutoAllow}

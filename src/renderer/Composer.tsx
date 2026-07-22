@@ -27,7 +27,7 @@ import type { Attachment, TypeaheadRow, TypeaheadState } from "./chatShared";
 type InputAreaProps = Parameters<typeof InputArea>[0];
 
 export type ComposerProps = InputAreaProps & {
-  // Attachment chips strip — rendered only when something is pending.
+  // Attachment chips strip — rendered only when something pending.
   attachments: Attachment[];
   onRemoveAttachment: (id: string) => void;
   // Typeahead popup state + the resolved rows to render.
@@ -35,6 +35,10 @@ export type ComposerProps = InputAreaProps & {
   typeaheadRows: TypeaheadRow[];
   onTypeaheadSelect: (row: TypeaheadRow) => void;
   onTypeaheadHover: (idx: number) => void;
+  // True while the canonical transcript is being refetched in the background
+  // (warm-stale reopen). Drives the ambient loading animation on the composer's
+  // top divider. Threaded straight through to InputArea.
+  refreshing: boolean;
 };
 
 export function Composer({
