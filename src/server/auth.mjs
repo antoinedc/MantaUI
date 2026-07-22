@@ -3,9 +3,9 @@
 // PROBLEM: today src/server/index.mjs binds 0.0.0.0:8787 with ZERO auth. The
 // only authenticated route is the public /hook/<token> webhook leg. Everything
 // else (/rpc, /events, /pty, /api/*, /push/*) is open to anyone who can reach
-// the box. That is the #1 blocker for shipping anything commercial — the mobile
-// sub and the relay both assume the box can tell "my paired device" from "a
-// random internet scanner."
+// the box. That is the #1 blocker for shipping anything commercial — every
+// paired device (desktop + mobile) must be distinguishable from "a random
+// internet scanner."
 //
 // SOLUTION (M1, job zero): a single shared bearer token (`box_token`) that every
 // request must carry, plus a short-lived pairing-code handshake so a new device
@@ -187,14 +187,12 @@ export function isPublicAssetPath(path) {
 // Browsers cannot set an Authorization header on a WebSocket handshake (or on
 // an EventSource), so the streaming route accepts the box_token as a
 // ?token=<box_token> query param instead. This is DELIBERATELY limited to
-// /events: every other route must present a real Bearer header, so a token
-// can never leak into a proxy/referrer log for a normal data request.
+// /events + /pty: every other route must present a real Bearer header, so a
+// token can never leak into a proxy/referrer log for a normal data request.
 // (BET-138 removed the /pty WS — BET-158 brings it back as a binary-safe
-// terminal WS that the relay bridges via STREAM_* frames. The relay agent
-// connects to it with the box's own box_token (ADR-1) and the device connects
-// to the relay under /box/<id>/pty, so ?token= on /pty only matters for the
-// non-relay path — e.g. an old direct-mode client that uses WS for the
-// terminal instead of the pty:* RPC channels.)
+// terminal WS. Direct clients (desktop + mobile browser) connect with the
+// box's own box_token; the ?token= query param is the browser-fallback for
+// clients that can't set WS headers.)
 //
 // Pure + testable: given a path, the Authorization header value, and the raw
 // ?token= query value, return the effective Authorization value to feed into

@@ -12,7 +12,6 @@ import type { ClaimOutcome } from "../../shared/claim.mjs";
 // handler is the only moving part under test.
 const BOX = "0123456789abcdef0123456789abcdef"; // 32 hex
 const BOX_URL = `manta://pair?box=${BOX}&code=847291`;
-const DIRECT_URL = "manta://pair?server=http://box:8787&code=123456";
 
 // A typed factory so each test can mutate just one field without rebuilding
 // the full outcome shape. Returns a successful outcome by default — tests
@@ -98,7 +97,7 @@ describe("handlePairUrl — ignored / foreign / malformed", () => {
     const deps = makeDeps();
     // wrong host segment → parsePairPayload returns null
     const out = await handlePairUrl(
-      "manta://connect?server=http://box:8787&code=123456",
+      "manta://connect?box=" + BOX + "&code=123456",
       deps,
     );
     expect(out).toBe("ignored");
@@ -109,6 +108,26 @@ describe("handlePairUrl — ignored / foreign / malformed", () => {
   it("returns 'ignored' on a plain text payload", async () => {
     const deps = makeDeps();
     const out = await handlePairUrl("hello world", deps);
+    expect(out).toBe("ignored");
+    expect(deps.authClaimCalls).toEqual([]);
+  });
+
+  it("returns 'ignored' on the deprecated server= form (BET-237)", async () => {
+    const deps = makeDeps();
+    const out = await handlePairUrl(
+      "manta://pair?server=http://box:8787&code=123456",
+      deps,
+    );
+    expect(out).toBe("ignored");
+    expect(deps.authClaimCalls).toEqual([]);
+  });
+
+  it("returns 'ignored' on the legacy id= form (BET-237)", async () => {
+    const deps = makeDeps();
+    const out = await handlePairUrl(
+      "manta://pair?id=" + BOX + "&token=847291",
+      deps,
+    );
     expect(out).toBe("ignored");
     expect(deps.authClaimCalls).toEqual([]);
   });
@@ -146,27 +165,6 @@ describe("handlePairUrl — box form (direct hostname, BET-198)", () => {
       },
     });
     const out = await handlePairUrl(BOX_URL, deps);
-    expect(out).toBe("failed");
-    expect(deps.persistCalls).toEqual([]);
-  });
-});
-
-describe("handlePairUrl — direct form (serverUrl)", () => {
-  it("claims via authClaim with serverUrl, then persists the payload's serverUrl", async () => {
-    const deps = makeDeps();
-    const out = await handlePairUrl(DIRECT_URL, deps);
-    expect(out).toBe("paired");
-    expect(deps.authClaimCalls).toEqual([
-      { serverUrl: "http://box:8787", code: "123456" },
-    ]);
-    expect(deps.persistCalls).toEqual(["http://box:8787"]);
-  });
-
-  it("returns 'failed' on a classified failure (no persist)", async () => {
-    const deps = makeDeps({
-      authClaim: async () => failOutcome(),
-    });
-    const out = await handlePairUrl(DIRECT_URL, deps);
     expect(out).toBe("failed");
     expect(deps.persistCalls).toEqual([]);
   });

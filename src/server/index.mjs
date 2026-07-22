@@ -439,11 +439,10 @@ const readRawBody = (req, limit) => readBody(req, { parse: false, limit });
 // ---------- tiny HTTP helpers ----------
 //
 // respondJson — write a JSON response (the most common response shape in this
-// file). Pulling it out eliminates a verbatim writeHead+end boilerplate that
-// the duplication-gate flagged between /auth/pair and the now-removed
-// /relay/status handler (10-27 line clones) — every JSON-shaped handler in
-// this file now goes through here. Status code + body shape stay identical
-// to the inline versions they replace.
+// file). Pulling it out eliminates verbatim writeHead+end boilerplate that
+// the duplication-gate flagged across JSON-shaped handlers — every
+// JSON-shaped handler in this file now goes through here. Status code +
+// body shape stay identical to the inline versions they replace.
 //
 // requireLoopback — gate a handler on the loopback-direct check (currently
 // used by /auth/pair). Returns true (proceed) when the request is
@@ -624,12 +623,8 @@ const server = createServer(async (req, res) => {
       }
       if (req.method === "POST" && path === "/auth/claim") {
         const body = await readJsonBody(req);
-        // Accept BOTH field spellings: direct-HTTPS clients POST
-        // { pairing_code } (claimAgainst), but the relay forwards a phone's
-        // QR/deep-link claim as { code } (src/relay/server.mjs routePair). The
-        // box read only `pairing_code`, so every relay-routed (QR) pairing was
-        // rejected with the box seeing `pairing_code: undefined` → the relay
-        // surfaced 401 claim_rejected. Coalesce so both paths work.
+        // Accept both `pairing_code` and the shorter `code` spelling emitted
+        // by the mobile QR / deep-link payload — coalesce so both work.
         const pairing_code = body?.pairing_code ?? body?.code;
         const result = authEngine.claim({ pairing_code });
         if (!result.ok) {
@@ -1455,9 +1450,7 @@ const server = createServer(async (req, res) => {
 // channels. Client→server is JSON control strings (typed messages:
 // data/resize); server→client is raw terminal bytes. The endpoint is gated
 // like the rest of the surface; browsers without an Authorization header
-// use ?token=<box_token>. (Formerly the relay's agent dials this WS to
-// forward bytes frame-by-frame through STREAM_* mux frames — BET-198 removed
-// the relay; direct clients use this endpoint.)
+// use ?token=<box_token>.
 
 const wss = new WebSocketServer({ noServer: true });
 
@@ -1495,8 +1488,7 @@ server.on("upgrade", (req, socket, head) => {
   if (url.pathname === "/pty") {
     // Binary-safe terminal bridge (BET-158). Direct clients (header bearer
     // or ?token=<box_token>) connect here for a low-latency raw-byte
-    // terminal stream. The relay that previously proxied this for phones
-    // was removed in BET-198; the endpoint itself stays.
+    // terminal stream.
     wss.handleUpgrade(req, socket, head, (ws) => attachPtyWs(ws, url));
     return;
   }

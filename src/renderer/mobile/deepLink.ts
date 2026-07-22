@@ -1,11 +1,15 @@
 // deepLink.ts — native Capacitor deep-link handler for `manta://pair?…` URLs.
 //
+// Post-BET-198, phones connect DIRECTLY to https://<box_id>.boxes.mantaui.com
+// (Caddy on the box reverse-proxies 127.0.0.1:8787). The only live pair
+// payload shape is the box form `manta://pair?box=<box_id>&code=<6-digit>`.
+//
 // Phase 2 of BET-177: the iOS app registers the `manta://` custom scheme (see
 // Info.plist's CFBundleURLTypes + AndroidManifest.xml's intent-filter); the
 // desktop Settings QR and the `bui pair` terminal QR both emit
-// `manta://pair?box=<id>&code=<6-digit>` (or the direct server form). When
-// the user scans the QR with the iOS Camera, iOS opens the bui app via this
-// scheme; the Capacitor App plugin delivers the URL to the renderer via
+// `manta://pair?box=<id>&code=<6-digit>`. When the user scans the QR with
+// the iOS Camera, iOS opens the bui app via this scheme; the Capacitor App
+// plugin delivers the URL to the renderer via
 //   • `getLaunchUrl()` — the URL the app was COLD-STARTED with
 //   • `appUrlOpen` event — URLs delivered while the app is already RUNNING
 //
@@ -87,12 +91,11 @@ export type DeepLinkDeps = {
     code: string;
   }) => Promise<ClaimOutcome>;
   /** Persist the resolved server URL to localStorage["manta_server"]. Called
-   *  AFTER a successful claim. Box form writes the shared direct hostname
-   *  `https://<boxId>.boxes.mantaui.com` (built by `boxDirectUrl`); direct
-   *  form writes the payload's serverUrl. The deep-link handler is the only
-   *  caller that needs this — direct pairing flows (PairingScreen /
-   *  SetupScreen) persist serverUrl directly because the user already typed
-   *  it. */
+   *  AFTER a successful claim — the URL is the shared direct hostname
+   *  `https://<boxId>.boxes.mantaui.com` (built by `boxDirectUrl`). The
+   *  deep-link handler is the only caller that needs this — direct pairing
+   *  flows (PairingScreen / SetupScreen) persist serverUrl directly because
+   *  the user already typed it. */
   persistServer: (serverUrl: string) => void;
 };
 
@@ -105,13 +108,11 @@ export type DeepLinkDeps = {
  * - Foreign URLs (any non-manta scheme, or a manta:// URL that fails
  *   parsePairPayload) → "ignored" — no claim is attempted, no localStorage
  *   write happens.
- * - A direct-form pair URL → claimAgainst with the payload's serverUrl, then
- *   persistServer(payload.serverUrl) on success.
- * - A box-form pair URL → claimAgainst with `https://<boxId>.boxes.mantaui.com`,
- *   then persistServer with the SAME string on success. The URL shape is
- *   produced by the SHARED `boxDirectUrl` helper so the desktop
- *   (PairStep.tsx) and the mobile deep-link handler write the EXACT same
- *   string.
+ * - A box-form pair URL → claimAgainst with
+ *   `https://<boxId>.boxes.mantaui.com`, then persistServer with the SAME
+ *   string on success. The URL shape is produced by the SHARED `boxDirectUrl`
+ *   helper so the desktop (PairStep.tsx) and the mobile deep-link handler
+ *   write the EXACT same string.
  */
 export async function handlePairUrl(
   raw: string,
@@ -123,7 +124,7 @@ export async function handlePairUrl(
     return "ignored";
   }
   dlog(
-    `[deeplink] parsed: ${payload.boxId ? `box=${payload.boxId.slice(0, 8)}… (direct)` : `server=${payload.serverUrl} (direct)`} code=${payload.code}`,
+    `[deeplink] parsed: box=${payload.boxId.slice(0, 8)}… (direct) code=${payload.code}`,
   );
 
   const claimInput = buildClaimInput(payload);
@@ -165,10 +166,7 @@ function buildClaimInput(payload: PairPayload): {
   serverUrl: string;
   code: string;
 } {
-  if (payload.boxId) {
-    return { serverUrl: boxDirectUrl(payload.boxId), code: payload.code };
-  }
-  return { serverUrl: payload.serverUrl ?? "", code: payload.code };
+  return { serverUrl: boxDirectUrl(payload.boxId), code: payload.code };
 }
 
 /**
@@ -179,8 +177,5 @@ function buildClaimInput(payload: PairPayload): {
  * helper is defensive).
  */
 function resolveServerUrl(payload: PairPayload): string {
-  if (payload.boxId) {
-    return boxDirectUrl(payload.boxId);
-  }
-  return payload.serverUrl ?? "";
+  return boxDirectUrl(payload.boxId);
 }

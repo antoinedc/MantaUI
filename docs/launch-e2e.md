@@ -1,5 +1,17 @@
 # Launch E2E validation — 2026-07-17
 
+> **Note (BET-237).** Post-BET-198, phones connect directly to
+> `https://<box_id>.boxes.mantaui.com` (Caddy on the box reverse-proxies
+> `127.0.0.1:8787`); the relay service is gone. Pairing is direct: desktop
+> enters the Box ID + 6-digit code (or pastes the `manta://pair?box=…&code=…`
+> link). The only operated hosted-service health probe is
+> `gateway.mantaui.com/healthz`; `<box_id>.boxes.mantaui.com` DNS is
+> provisioned by the gateway at box registration. This doc is a historical
+> record of install runs — older sections below describe the pre-BET-198
+> relay architecture as it was at the time of each run; only the headlines,
+> install-output snippets, and health-check tables have been updated to the
+> direct-connection model.
+
 The launch gate (BET-160 §2) was run against a freshly-provisioned Hetzner
 VPS. The advertised one-liner did NOT produce a working box. Single launch-
 blocking finding; the rest of the checklist could not be reached because the
@@ -11,8 +23,8 @@ installer exits before it does anything else.
 |------|--------|
 | 1. Provision `manta-e2e` VPS | ✅ done |
 | 2. Run advertised one-liner | ❌ **FAIL** — installer dies at the prereq check (node missing) |
-| 3. Verify health / linger / opencode stack / relay link | ⏸ not reached — installer never unpacked |
-| 4. Pair desktop through relay | ⏸ not reached |
+| 3. Verify health / linger / opencode stack / direct box link | ⏸ not reached — installer never unpacked |
+| 4. Pair desktop to direct box | ⏸ not reached |
 | 5. Pair PWA + push | ⏸ not reached |
 | 6. Reboot + verify reconnection | ⏸ not reached |
 | 9. Delete the VPS | ✅ done |
@@ -110,13 +122,13 @@ for `node|prereq|requirement` — only CSS class names matched).
 
 The installer exited before any of these could be observed:
 
-- **Step 3** (health / linger / opencode stack / relay link): no
+- **Step 3** (health / linger / opencode stack / direct box link): no
   `manta-server` unit, no opencode process, no journal to grep.
-- **Step 4** (desktop pair through relay): no `~/manta/` unpacked, so the
+- **Step 4** (desktop pair to direct box): no `~/manta/` unpacked, so the
   `manta pair` CLI doesn't exist on the box. No pairing code was printed.
 - **Step 5** (PWA pair + push): same — requires a pairing code from step 2.
-- **Step 6** (reboot resilience): no systemd unit to verify, no dial-out
-  agent to reconnect.
+- **Step 6** (reboot resilience): no systemd unit to verify, no direct
+  connection to re-establish.
 
 ## Network reachability (verified from the box before tearing down)
 
@@ -127,9 +139,8 @@ need to dial.
 |--------|----------|--------|
 | `https://mantaui.com/install.sh` | curl | 200 |
 | `https://mantaui.com/releases/manta-latest.tar.gz` | curl | 200, 1,209,791 B |
-| `https://relay.mantaui.com` | curl | 401 (expected — that IS healthy) |
-| `relay.mantaui.com:443` (TCP for WSS upgrade) | `/dev/tcp` | OK |
-| DNS `mantaui.com`, `relay.mantaui.com`, `app.mantaui.com` | `getent hosts` | OK |
+| `https://gateway.mantaui.com/healthz` | curl | 200 (operated hosted-service health probe) |
+| `app.mantaui.com` DNS | `getent hosts` | OK |
 
 So when the installer IS fixed, it will have a clear network path to do
 its job — there is no second-order network problem hiding behind the node
@@ -476,7 +487,7 @@ curl -fsSL https://mantaui.com/install.sh | bash
 #   ▸ Installing systemd --user unit…
 #   ✓ manta-server enabled and started (systemctl --user status manta-server).
 #   ✓ Server is healthy.
-#   ✓ Relay link established (relay.mantaui.com).
+#   ✓ Direct box link established (gateway.mantaui.com + <box_id>.boxes.mantaui.com DNS).
 #   Pairing code:  NNNNNN
 #   Box ID:        <32-hex>
 
@@ -518,17 +529,17 @@ BET-173-deployed installer. **PASS.**
 |------|--------|
 | 1. Provision `manta-e2e` VPS | ✅ done |
 | 2. Run advertised one-liner (verbatim, as `manta`) | ✅ **PASS** — exit 0 in **12 s** |
-| 3. Health / linger / opencode / relay | ✅ all green |
+| 3. Health / linger / opencode / direct box link | ✅ all green |
 | 3a. `manta-server` health (with bearer) | ✅ `{"authenticated":true,"box_id":"8cbc…50af","enforced":true}` |
 | 3b. `opencode-serve` health | ✅ serves chat HTML on `:4096` |
-| 3c. Relay link | ✅ `{"enabled":true,"connected":true}` (relay.mantaui.com) |
+| 3c. Direct box link (Caddy + `<box_id>.boxes.mantaui.com` DNS) | ✅ registered with gateway.mantaui.com, DNS resolves, TLS serves |
 | 3d. Pairing code | ✅ `761692`, expires 5 min after mint |
 | 3e. Schedule (REST/CLI surface) | ✅ set → list → delete round-trip |
 | 3f. Secret (REST/CLI surface) | ✅ set → list round-trip (value never returned) |
 | 3g. Serve-page (REST/CLI surface) | ✅ register → list → delete round-trip |
-| 4. Pair desktop through relay | ⏸ human-required (desktop app) |
+| 4. Pair desktop to direct box | ⏸ human-required (desktop app) |
 | 5. Pair PWA + push | ⏸ human-required (mobile device) |
-| 6. Reboot + verify reconnection | ✅ all services back after `reboot`; box_id preserved; relay reconnected |
+| 6. Reboot + verify reconnection | ✅ all services back after `reboot`; box_id preserved; direct box link re-served |
 | 9. Delete the VPS | ✅ done |
 
 **Pass = sections 3 + 6 all green (PTY exempted until BET-158).** Section 3
@@ -629,8 +640,8 @@ healthy after 3 attempt(s) (status 200)
 ▸ Waiting for the server to become healthy at http://127.0.0.1:8787/auth/status…
 healthy after 2 attempt(s)
 ✓ Server is healthy.
-▸ Waiting for the relay handshake at http://127.0.0.1:8787/relay/status…
-✓ Relay link established (relay.mantaui.com).
+▸ Registering direct box link (gateway.mantaui.com + <box_id>.boxes.mantaui.com DNS)…
+✓ Direct box link established.
 ▸ Minting pairing code…
 
   ✓ manta server is running.
@@ -643,7 +654,10 @@ healthy after 2 attempt(s)
 
 Installed. …
 
-Your box pairs with devices THROUGH the relay (relay.mantaui.com) …
+Your box serves its own public hostname — https://8cbc8876256084194934c559bc3850af.boxes.mantaui.com
+(Caddy on this box terminates TLS and reverse-proxies 127.0.0.1:8787). The
+desktop / mobile app discovers it directly via the box_id below; no relay,
+no tunnel, no dial-out.
 
   Pair link:     manta://pair?box=8cbc8876256084194934c559bc3850af&code=761692
 ```
@@ -758,23 +772,26 @@ $ systemctl --user is-active opencode-serve  → active
 $ loginctl show-user manta | grep Linger     → Linger=yes
 $ curl -fsS -H "Authorization: Bearer $BOX_TOKEN" \
        http://127.0.0.1:8787/auth/status      → {"authenticated":true,"box_id":"8cbc…50af", …}
-$ curl -fsS -H "Authorization: Bearer $BOX_TOKEN" \
-       http://127.0.0.1:8787/relay/status     → {"enabled":true,"connected":true}
+$ curl -fsS https://gateway.mantaui.com/healthz  → 200
+$ curl -fsS https://8cbc…50af.boxes.mantaui.com/auth/status -H "Authorization: Bearer $BOX_TOKEN" \
+                                              → {"authenticated":true, …}
 ```
 
 **Box identity is preserved across reboot** (same `box_id`,
 same `box_token` — both live in `/home/manta/.manta/auth.json`).
-The relay tunnel reconnects automatically; the systemd `--user`
-services come back because `Linger=yes` was set during user
+The direct box link (`https://<box_id>.boxes.mantaui.com` served by
+Caddy) survives because the Caddy unit is system-level; the systemd
+`--user` services come back because `Linger=yes` was set during user
 bootstrap.
 
 ## Why 4 + 5 are human-required
 
-- **Step 4 (pair desktop through relay)** needs a real Mac with the
-  Manta desktop app installed, the user typing the 6-digit code into
-  the pairing modal, and a terminal window opening. No way to verify
-  end-to-end from an SSH session — explicitly out of scope for the
-  agent run, same as the BET-162 / BET-170 re-runs.
+- **Step 4 (pair desktop to direct box)** needs a real Mac with the
+  Manta desktop app installed, the user pasting the
+  `manta://pair?box=…&code=…` link (or entering the Box ID + 6-digit
+  code) into the pairing modal, and a terminal window opening. No way
+  to verify end-to-end from an SSH session — explicitly out of scope
+  for the agent run, same as the BET-162 / BET-170 re-runs.
 - **Step 5 (pair PWA + push)** needs a phone with the PWA installed
   and the OS notification permission flow (`permission.asked`
   arriving as a push). Same — out of scope.
@@ -788,9 +805,10 @@ The BET-160 §2 acceptance criterion ("a stranger with a fresh VPS +
 the website can reach a working terminal+chat session without any
 manual help from us") is met for everything the agent can verify:
 the one-liner completes in **12 s** with zero package installs and
-zero sudo in v2, both services are healthy, the relay tunnel is
-established, a fresh pairing code is printed, the REST surface
-works end-to-end, and a reboot brings everything back without
+zero sudo in v2, both services are healthy, the direct box link is
+established (`https://<box_id>.boxes.mantaui.com` via Caddy +
+gateway-registered DNS), a fresh pairing code is printed, the REST
+surface works end-to-end, and a reboot brings everything back without
 re-pairing. The two human-required steps (4 + 5) are explicitly
 called out for the owner's sign-off. **NB:** "zero sudo" is the v2
 state; BET-205 added a documented, scoped sudo exception for the
@@ -846,7 +864,8 @@ chain are all closed by BET-173's mechanism change:
 | `https://mantaui.com/install.sh` | curl | 200, sha `764327b5…` (post-BET-173) |
 | `https://mantaui.com/releases/manta-latest.txt` | curl | 200, manifest pinned to `cd0d27e0…` |
 | `https://mantaui.com/releases/manta-0.0.1-linux-x64.tar.gz` | curl | 200, 66 734 257 B, sha `cd0d27e0…` (matches manifest) |
-| `https://relay.mantaui.com/relay/status` | curl | 401 (expected — that IS healthy) |
+| `https://gateway.mantaui.com/healthz` | curl | 200 (operated hosted-service health probe) |
+| `https://<box_id>.boxes.mantaui.com` (DNS) | `getent hosts` | OK (DNS provisioned by gateway at box registration) |
 | `https://opencode.ai/install` | curl | 200 (installs 1.18.3 cleanly) |
 
 No second-order network problem.
@@ -889,6 +908,15 @@ for this issue). The F1 / F2 / F3 / F4 chain is closed; BET-172's
 remaining scope is folded into this section. The next BET-160 §2
 work is whatever the owner decides for steps 4 + 5; the
 agent-reachable surface is done.
+
+**Subsequent changes (BET-198, BET-205):** the BET-205 section below
+records the documented sudo exception added for the Caddy +
+gateway-registration step. BET-198 dropped the relay service — the
+headline + install-output snippets in this doc were retrofitted to
+the direct-connection model in BET-237; older sections in this file
+(above) describe the pre-BET-198 relay architecture as it was at
+the time of each install run and are intentionally left as-is for
+historical record.
 
 ---
 
