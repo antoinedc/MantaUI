@@ -16,6 +16,17 @@ import type { ClaimOutcome } from "../shared/claim.mjs";
 // object). See `src/renderer/preloadAccess.ts` for the typed accessor most
 // callers should use (`getMantaPreload()`), and BET-127 for the extraction
 // history.
+
+// pair-link buffering: main may push the URL (cold start) before React has
+// mounted and subscribed. Register the ipc listener immediately at preload
+// load; hold the last URL until the renderer attaches its callback.
+let bufferedPairUrl: string | null = null;
+let pairLinkCb: ((url: string) => void) | null = null;
+ipcRenderer.on(IPC.pairLinkReceived, (_event, url: string) => {
+  if (pairLinkCb) pairLinkCb(url);
+  else bufferedPairUrl = url;
+});
+
 const api = {
   // Read ONLY by main.tsx's boot sequence (`chooseDesktopTransport`), before
   // httpApi is installed as `window.api` — used to seed httpApi's
@@ -45,6 +56,18 @@ const api = {
     const listener = (_: unknown, ev: { source: "clipboard" | "file"; path?: string }) => cb(ev);
     ipcRenderer.on(IPC.screenshotDetected, listener);
     return () => ipcRenderer.removeListener(IPC.screenshotDetected, listener);
+  },
+
+  onPairLink: (cb: (url: string) => void): (() => void) => {
+    pairLinkCb = cb;
+    if (bufferedPairUrl) {
+      const url = bufferedPairUrl;
+      bufferedPairUrl = null;
+      cb(url);
+    }
+    return () => {
+      if (pairLinkCb === cb) pairLinkCb = null;
+    };
   },
 
   // manta-server's notification router decided the desktop should show an OS

@@ -691,3 +691,23 @@ describe("setDefaultModel (onboarding Step 3 + Settings)", () => {
     expect(useStore.getState().defaultModel).toBeNull();
   });
 });
+
+describe("setPendingPairLink (BET-240 deep-link pairing)", () => {
+  beforeEach(() => {
+    useStore.setState({ pendingPairLink: null });
+  });
+
+  it("writes the raw URL into pendingPairLink", () => {
+    const url = "manta://pair?box=0123456789abcdef0123456789abcdef&code=123456";
+    useStore.getState().setPendingPairLink(url);
+    expect(useStore.getState().pendingPairLink).toBe(url);
+  });
+
+  it("clears the field when null is passed (consume-on-use)", () => {
+    useStore.setState({
+      pendingPairLink: "manta://pair?box=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code=111111",
+    });
+    useStore.getState().setPendingPairLink(null);
+    expect(useStore.getState().pendingPairLink).toBeNull();
+  });
+});

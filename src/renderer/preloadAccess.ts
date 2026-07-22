@@ -16,6 +16,12 @@ export interface MantaPreload {
   onScreenshotDetected(
     cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
   ): () => void;
+  // Subscribe to manta:// pair links delivered by the OS protocol handler.
+  // The renderer validates the URL with parsePairPayload and routes it into
+  // the onboarding PairStep. Buffering lives in the preload so a URL that
+  // arrives before React mounts is replayed on subscribe. Absent on
+  // mobile/web (no window.__mantaPreload).
+  onPairLink(cb: (url: string) => void): () => void;
   clipboardWriteText(text: string): Promise<void>;
   // Read the current clipboard image as PNG bytes (null if no image). Only
   // main can touch the OS clipboard — this must go through the preload, NOT

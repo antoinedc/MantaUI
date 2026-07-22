@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { normalizeCode } from "../shared/claim.mjs";
 import { normalizeServerUrl, isValidServerUrl, canConnect } from "./pairStepLogic";
 import { parsePairPayload } from "./mobile/pairPayload";
@@ -55,6 +55,18 @@ export function PairStep({
   const [error, setError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
   const pairLinkRef = useRef<HTMLInputElement>(null);
+
+  // Deep-link pairing (BET-240): prefill the paste field from a pending
+  // manta:// pair URL that App.tsx stashed in the store when the OS protocol
+  // handler fired. The existing `linkHasContent` gate below makes the link
+  // win over any typed server/code values; the existing connect() claim path
+  // does the rest when the user clicks Connect.
+  const pendingPairLink = useStore((s) => s.pendingPairLink);
+  useEffect(() => {
+    if (!pendingPairLink) return;
+    setPairLink(pendingPairLink);
+    useStore.getState().setPendingPairLink(null); // consume once
+  }, [pendingPairLink]);
 
   // When the user pastes a pair link, the link's payload takes precedence
   // over any typed server/code fields. The submit gate follows.

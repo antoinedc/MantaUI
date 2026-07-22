@@ -16,6 +16,7 @@ import {
 } from "./chatShared";
 import { chooseUpdateSkewVariant } from "./chatUtils";
 import { UpdateBar } from "./UpdateBar";
+import { parsePairPayload } from "./mobile/pairPayload";
 import type { AvailableLauncher } from "../shared/types";
 
 // mode -> the composite-key "modeId" segment used for the PTY sessionKey and
@@ -199,6 +200,23 @@ export function App() {
       useStore.getState().setScreenshotToast(ev);
     });
     return off;
+  }, []);
+
+  // Deep-link pairing (BET-240): the OS protocol handler (electron-builder
+  // `protocols:` + Electron `setAsDefaultProtocolClient`) delivers a
+  // manta://pair?... URL via the preload's `pair:link-received` IPC. We
+  // validate with the SAME parsePairPayload PairStep's paste field uses,
+  // stash the URL in the store for PairStep to prefill, and reuse the
+  // existing relaunchOnboarding so a re-pair to a new box lands on step 1
+  // even when resolveInitialStep would skip past it (already paired).
+  useEffect(() => {
+    const pre = getMantaPreload();
+    if (!pre?.onPairLink) return;
+    return pre.onPairLink((url) => {
+      if (!parsePairPayload(url)) return; // not a valid pair link — ignore
+      useStore.getState().setPendingPairLink(url);
+      void useStore.getState().relaunchOnboarding();
+    });
   }, []);
 
   // Agent → laptop file push. Same single-listener pattern as screenshots: a

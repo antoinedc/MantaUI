@@ -6,7 +6,7 @@ import {
   nativeImage,
   shell,
 } from "electron";
-import { join, basename } from "node:path";
+import { basename, join, resolve as resolvePath } from "node:path";
 import { existsSync, watch as fsWatch } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -178,6 +178,61 @@ function createWindow(): void {
 // config.json (host, projects) and leaving the app with no configured host.
 app.setPath("userData", join(app.getPath("appData"), "better-ui"));
 
+// ---------------------------------------------------------------------------
+// manta:// deep-link pairing (protocol handler).
+// Registration + capture live in main; parsing/validation happens renderer-
+// side with the same parsePairPayload the PairStep paste field uses, so
+// there is exactly ONE parser for the wire format.
+// ---------------------------------------------------------------------------
+if (process.defaultApp) {
+  // dev mode (`electron .`): register with explicit exec path + args
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient("manta", process.execPath, [
+      resolvePath(process.argv[1]),
+    ]);
+  }
+} else {
+  app.setAsDefaultProtocolClient("manta");
+}
+
+let pendingPairUrl: string | null = null;
+
+function deliverPairLink(url: string): void {
+  if (typeof url !== "string" || !url.startsWith("manta://")) return;
+  if (mainWindow && !mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.send(IPC.pairLinkReceived, url);
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  } else {
+    // window not up yet (cold start) — flushed from the did-finish-load hook
+    pendingPairUrl = url;
+  }
+}
+
+// macOS delivers protocol URLs via open-url (warm AND cold start — cold-start
+// delivery arrives before ready, which is why pendingPairUrl exists).
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  deliverPairLink(url);
+});
+
+// Windows/Linux deliver protocol URLs as argv of a SECOND instance; the lock
+// forwards them to the running one.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", (_event, argv) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+    const url = argv.find((a) => a.startsWith("manta://"));
+    if (url) deliverPairLink(url);
+  });
+}
+
 // Set the app name as early as possible (before `ready`). This drives the
 // product name shown in the macOS menu bar, the dock, AND — for packaged
 // builds — the source name on OS notifications (otherwise the renderer's
@@ -203,6 +258,14 @@ app.whenReady().then(() => {
   createWindow();
   // Defer poller start until renderer is ready to receive events.
   mainWindow?.webContents.once("did-finish-load", () => {
+    // Deep-link cold start: macOS parked the URL in pendingPairUrl (open-url
+    // fires pre-ready); Windows/Linux pass it in this process's argv.
+    const argvPairUrl = process.argv.find((a) => a.startsWith("manta://")) ?? null;
+    const coldPairUrl = pendingPairUrl ?? argvPairUrl;
+    pendingPairUrl = null;
+    if (coldPairUrl) {
+      mainWindow?.webContents.send(IPC.pairLinkReceived, coldPairUrl);
+    }
     startScreenshotDetector();
     // Report desktop focus to the mobile server so it suppresses redundant
     // mobile "done" pushes while the user is active on desktop.
