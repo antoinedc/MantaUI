@@ -453,7 +453,7 @@ lives in `classifyPushEvent` / `firePush`, not the service worker
 The first **MantaUI-native opencode tool**: the remote AI can schedule a prompt to
 run later (once or on a recurring cron) in the SAME chat session. Full design +
 the reusable "MantaUI tools" pattern (for future tools like `ping`) is in
-`docs/bui-tools-scheduler.md`. Key facts:
+`docs/manta-tools-scheduler.md`. Key facts:
 
 - **The AI's awareness comes from a GLOBAL opencode custom tool**, not MantaUI code.
   `docs/opencode-tools/schedule.ts` is **COPIED** (not symlinked) into
@@ -513,7 +513,7 @@ The second **MantaUI-native opencode tool**: the remote AI can publish a standal
 HTML page to a public URL so it's reachable from anywhere (esp. the machine
 running the MantaUI UI). Built for design previews / demos / mockups that opencode
 generates on the box. Follows the same "MantaUI tools" pattern as the scheduler
-(`docs/bui-tools-scheduler.md`). Key facts:
+(`docs/manta-tools-scheduler.md`). Key facts:
 
 - **Global opencode tool**, `docs/opencode-tools/serve-page.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` import-resolution gotcha as schedule)
@@ -560,7 +560,7 @@ sessions in the SAME workspace are doing AND send them messages. Use case: an
 agent notices files / `git status` changing under it and wants to know which
 other agent is working alongside it (so they don't collide), or wants to
 coordinate / hand off work to a peer. Same "MantaUI tools" pattern as
-schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
+schedule/serve-page (`docs/manta-tools-scheduler.md`). Key facts:
 
 - **Workspace = tmux session (MantaUI project); peers = sibling windows.** The crux
   is the `@manta-session-id` tmux user-option, surfaced by `tmux.listProjects()`
@@ -631,7 +631,7 @@ schedule/serve-page (`docs/bui-tools-scheduler.md`). Key facts:
 
 The fourth **MantaUI-native opencode tool** and the first with a **desktop OS
 notification leg** alongside the existing mobile Web Push. Full design +
-routing matrix + scenarios in `docs/bui-tools-notify.md`. Key facts:
+routing matrix + scenarios in `docs/manta-tools-notify.md`. Key facts:
 
 - **manta-server is the SINGLE notification router.** Every notification —
   automatic opencode event (`firePush`) OR an AI `notify` call (`fireNotify`) —

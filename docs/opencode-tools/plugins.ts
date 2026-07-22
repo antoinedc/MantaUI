@@ -7,7 +7,7 @@
 //   cp <repo>/docs/opencode-tools/plugins.ts ~/.config/opencode/tools/plugins.ts
 // then `systemctl --user restart opencode-serve` so opencode re-scans tools/.
 // (COPY, never symlink — the `@opencode-ai/plugin` import-resolution gotcha in
-// docs/bui-tools-scheduler.md §"DO NOT symlink".)
+// docs/manta-tools-scheduler.md §"DO NOT symlink".)
 //
 // These tools are THIN registrars. They validate inputs and POST to
 // manta-server (127.0.0.1:8787, same box — no SSH hop), which owns the durable

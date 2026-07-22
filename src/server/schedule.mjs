@@ -7,7 +7,7 @@
 //
 // Server-owned (NOT duplicated in desktop main) so jobs survive Mac-app-close,
 // session navigation, and box reboot. This is strictly more durable than Claude
-// Code's session-scoped /loop. See docs/bui-tools-scheduler.md for the full
+// Code's session-scoped /loop. See docs/manta-tools-scheduler.md for the full
 // design + scope cuts (no jitter / no 7-day expiry / no catch-up in v1).
 //
 // Shape mirrors src/server/outbox.mjs: a dependency-injected createScheduler()

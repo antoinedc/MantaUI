@@ -21,7 +21,7 @@
 //   - deliveries are rate-limited per token,
 //   - a busy session DEFERS delivery until idle (never the drain-abort path —
 //     an external POST must not kill the user's in-flight work).
-// See docs/bui-tools-webhook.md for the full design + scope cuts.
+// See docs/manta-tools-webhook.md for the full design + scope cuts.
 //
 // Server-owned + durable (survives Mac-app-close / reboot), same pattern as
 // schedule.mjs / secrets.mjs. Store: ~/.manta/webhooks.json (0600).

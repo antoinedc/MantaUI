@@ -14,7 +14,7 @@
 // chat session by HTTP POST — the push alternative to polling with `schedule`.
 // webhook_create returns a public delivery URL + an HMAC signing secret to hand
 // to that system. When it POSTs an event, manta-server injects it into this
-// session as a new turn. See docs/bui-tools-webhook.md for the full design.
+// session as a new turn. See docs/manta-tools-webhook.md for the full design.
 
 import { tool } from "@opencode-ai/plugin";
 import { readFileSync } from "node:fs";

@@ -290,7 +290,7 @@ export function shouldSuppressForDesktop(desktop, now = Date.now()) {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-device router (the single arbiter — see docs/bui-tools-notify.md)
+// Cross-device router (the single arbiter — see docs/manta-tools-notify.md)
 //
 // Every notification (automatic opencode event OR an AI `notify` call) runs
 // through `routeNotification`, which decides — knowing BOTH device presences —

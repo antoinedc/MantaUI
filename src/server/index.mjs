@@ -1168,7 +1168,7 @@ const server = createServer(async (req, res) => {
   // Created by the remote AI's global opencode `notify` tool. Runs through the
   // same cross-device router as opencode events (push.mjs fireNotify →
   // routeNotification): desktop OS notification and/or mobile Web Push, with
-  // desktop-first escalation when away. See docs/bui-tools-notify.md.
+  // desktop-first escalation when away. See docs/manta-tools-notify.md.
   if (path === "/api/notify") {
     try {
       if (req.method === "POST") {

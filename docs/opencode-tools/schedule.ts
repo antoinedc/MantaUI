@@ -13,7 +13,7 @@
 //
 // When a job is due, manta-server re-submits `prompt` into THIS session via
 // opencode, so the scheduled work streams back into the user's open bui chat as
-// a new turn. See docs/bui-tools-scheduler.md for the full design.
+// a new turn. See docs/manta-tools-scheduler.md for the full design.
 
 import { tool } from "@opencode-ai/plugin";
 import { readFileSync } from "node:fs";

@@ -241,7 +241,7 @@ export type WindowStatus = {
 // A desktop OS-notification directive, relayed from bui-server's notification
 // router (push.mjs) to the desktop renderer over the -L 18787 forward + IPC.
 // The renderer does the final "am I viewing this session right now?"
-// suppression and shows it via the Notification API. See docs/bui-tools-notify.md.
+// suppression and shows it via the Notification API. See docs/manta-tools-notify.md.
 export type DesktopNotifyPayload = {
   kind: string; // "permission" | "question" | "error" | "done" | "notify"
   title: string;

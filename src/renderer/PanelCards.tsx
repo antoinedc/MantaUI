@@ -17,7 +17,7 @@ import { CLAUDE_ORANGE } from "./chatShared";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
 // scheduled prompts (created by the AI's `schedule` opencode tool) with a
-// per-row delete. See docs/bui-tools-scheduler.md.
+// per-row delete. See docs/manta-tools-scheduler.md.
 export const ScheduledTasksCard = memo(function ScheduledTasksCard({
   jobs,
   error,
@@ -113,7 +113,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
 // WebhooksCard — pinned card above the composer listing this session's inbound
 // webhooks (created by the AI's `webhook` opencode tool) with a per-row revoke.
 // List is metadata only — the signing secret is shown once at create (in the
-// agent's tool result) and never re-exposed here. See docs/bui-tools-webhook.md.
+// agent's tool result) and never re-exposed here. See docs/manta-tools-webhook.md.
 export const WebhooksCard = memo(function WebhooksCard({
   hooks,
   error,

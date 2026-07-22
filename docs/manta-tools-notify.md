@@ -7,7 +7,7 @@ that decides — for *every* notification, automatic or AI-triggered — whether
 goes to desktop, mobile, both, or escalates from one to the other, with **no
 duplicates**.
 
-Read `docs/bui-tools-scheduler.md` first for the reusable "bui tools" pattern
+Read `docs/manta-tools-scheduler.md` first for the reusable "bui tools" pattern
 (global opencode tool → thin registrar → bui-server endpoint + durable logic).
 This doc only covers what's notify-specific.
 

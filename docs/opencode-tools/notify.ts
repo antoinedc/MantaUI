@@ -11,8 +11,8 @@
 // desktop-first escalation). execute() returns promptly; manta-server owns the
 // routing + delivery + any escalation timer.
 //
-// See docs/bui-tools-notify.md for the routing design and
-// docs/bui-tools-scheduler.md for the general "bui tools" pattern.
+// See docs/manta-tools-notify.md for the routing design and
+// docs/manta-tools-scheduler.md for the general "bui tools" pattern.
 
 import { tool } from "@opencode-ai/plugin";
 import { readFileSync } from "node:fs";

@@ -6,7 +6,7 @@ actor (Multica, GitHub, CI, a finished job on another box) wake a bui chat
 session by HTTP POST. It is the push counterpart to the pull-style `schedule`
 loop, and the inbound counterpart to the outbound `notify` tool.
 
-Read `docs/bui-tools-scheduler.md` first for the reusable "bui tools" pattern
+Read `docs/manta-tools-scheduler.md` first for the reusable "bui tools" pattern
 (global opencode tool → thin registrar → bui-server endpoint + durable logic).
 This doc only covers what's webhook-specific.
 
@@ -73,7 +73,7 @@ bui looks up `<token>` → the registered hook → its `sessionID`, verifies the
 signature, formats the payload into a turn, and `oc.sendPrompt`s it. The turn
 appears inline in the user's open ChatPanel; if they're away, the existing push
 leg notifies them (a webhook delivery is `informational` tier — see
-`docs/bui-tools-notify.md`).
+`docs/manta-tools-notify.md`).
 
 ### Delivered turn shape — payload is DATA, never instructions
 

@@ -11,7 +11,7 @@
 // reverse-proxies *.pages.mantaui.com to this server. The tool does NOT sleep
 // or run the page itself — execute() must return promptly.
 //
-// See docs/bui-tools-scheduler.md for the general "bui tools" pattern.
+// See docs/manta-tools-scheduler.md for the general "bui tools" pattern.
 
 import { tool } from "@opencode-ai/plugin";
 import { readFileSync } from "node:fs";

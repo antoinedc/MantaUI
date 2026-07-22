@@ -49,7 +49,7 @@ a plugin = one YAML manifest at ~/.manta/plugins/<name>.yaml on the executor
 ```
 
 This mirrors and generalizes the "MantaUI-native tools" pattern documented in
-`docs/bui-tools-scheduler.md` (§"The pattern"). Every existing native tool is,
+`docs/manta-tools-scheduler.md` (§"The pattern"). Every existing native tool is,
 in effect, a hardcoded MantaUI-server plugin; v3 makes the YAML manifest
 first-class so the user (or the AI, on the user's request) can add new
 capabilities without touching MantaUI source.
