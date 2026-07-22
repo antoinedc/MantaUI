@@ -24,7 +24,7 @@
 # (which would break ALL push notifications across every box — silent
 # outage).
 #
-# RUNNER + AUTH: self-hosted bui-dev-runner (this dev box), SSH to prod via
+# RUNNER + AUTH: self-hosted manta-dev-runner (this dev box), SSH to prod via
 #   ~/.manta-deploy/prod_key. No GitHub secret needed (public half is already
 #   in the prod box's authorized_keys).
 #
