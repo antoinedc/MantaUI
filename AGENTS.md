@@ -2237,19 +2237,20 @@ then restart `opencode-serve` for opencode to reload.
 MantaUI has a Multica workspace for structured issue dispatch to AI agents.
 
 - **Workspace**: https://multica.ai/better-ui (ID: `264c89bb-4659-4570-af7b-5f8daaf87985`)
-- **Agent**: `better-ui-dev` (ID: `87bf6d8f-5fd0-4fb6-8dd8-a5e7c36b0747`) — OpenCode runtime, covers the full codebase
-- **Skill**: `verify-build-better-ui` (ID: `95d4a528-3756-4ee0-a4e2-bf072e54399a`) — runs `npm run typecheck && npm test`
+- **Implementer**: `manta-dev` (ID: `ab49c3e2-0239-43cb-81cf-32d3ee9102f2`) — OpenCode runtime, covers the full codebase
+- **Coordinators**: `manta-pm` (ID: `df781c72-9408-47e3-be9e-cfa317ed6bc9`, delivery) · `manta-reviewer` (ID: `f4605213-cc2e-4ab6-9e53-af6695174779`, PR review) · `manta-ops` (ID: `b3f61b23-bceb-4cba-8404-574cff90ee5b`, reliability watchdog)
+- **Skill**: `verify-build-manta` (ID: `ef855df1-92f6-4cff-906f-80f8ab53b48e`) — runs `npm run typecheck && npm test`
 
 **Source of truth**: `.multica/` directory in this repo. Edit files there, commit, then push to Cloud.
 
 ```bash
 # Push updated agent instructions
-multica agent update 87bf6d8f-5fd0-4fb6-8dd8-a5e7c36b0747 \
-  --instructions "$(cat .multica/agents/better-ui-dev.md)"
+multica agent update ab49c3e2-0239-43cb-81cf-32d3ee9102f2 \
+  --instructions "$(cat .multica/agents/manta-dev.md)"
 
 # Push updated skill
-multica skill update 95d4a528-3756-4ee0-a4e2-bf072e54399a \
-  --content "$(sed '/^---$/,/^---$/d' .multica/skills/verify-build/SKILL.md)"
+multica skill update ef855df1-92f6-4cff-906f-80f8ab53b48e \
+  --content "$(sed '/^---$/,/^---$/d' .multica/skills/verify-build-manta/SKILL.md)"
 
 # Push updated workspace context
 multica workspace update 264c89bb-4659-4570-af7b-5f8daaf87985 \
@@ -2257,7 +2258,7 @@ multica workspace update 264c89bb-4659-4570-af7b-5f8daaf87985 \
 
 # Create and assign an issue
 multica issue create --title "..." --description "..." --project <project-id> --priority medium
-multica issue assign <key> --to better-ui-dev
+multica issue assign <key> --to manta-dev
 
 # Check status
 multica daemon status

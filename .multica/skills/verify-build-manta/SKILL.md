@@ -1,13 +1,13 @@
 ---
-name: verify-build-better-ui
+name: verify-build-manta
 description: Runs npm run typecheck && npm test. Mandatory before marking any task done.
 ---
 
-# Verify Build — Better UI
+# Verify Build — MANTA
 
 ## What
 
-Runs the full verification suite for the Better UI project.
+Runs the full verification suite for the MANTA (Better UI) project.
 
 ## Commands
 

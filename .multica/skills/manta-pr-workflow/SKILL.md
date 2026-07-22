@@ -180,7 +180,7 @@ behavior-neutral refactor, a stale doc.
 > **NOTE:** you do NOT `assign` to other implementers. "Assign `manta-pm`"
 > means file it, set priority, and `assign` it to **`manta-pm`** so it lands
 > in the PM's triage lane. Parked items stay unassigned. Never self-dispatch
-> an above-bar follow-up to `better-ui-dev`.
+> an above-bar follow-up to `manta-dev`.
 
 How to file:
 

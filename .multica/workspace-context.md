@@ -385,8 +385,9 @@ Saved to `/tmp/screenshots/settings/`:
 ## Existing Multica Setup
 
 - **Workspace**: https://multica.ai/better-ui (ID: `264c89bb-4659-4570-af7b-5f8daaf87985`)
-- **Agent**: `better-ui-dev` (ID: `87bf6d8f-5fd0-4fb6-8dd8-a5e7c36b0747`) — OpenCode runtime
-- **Skill**: `verify-build-better-ui` (ID: `95d4a528-3756-4ee0-a4e2-bf072e54399a`) — runs `npm run typecheck && npm test`
+- **Implementer**: `manta-dev` (ID: `ab49c3e2-0239-43cb-81cf-32d3ee9102f2`) — OpenCode runtime
+- **Coordinators**: `manta-pm` (ID: `df781c72-9408-47e3-be9e-cfa317ed6bc9`) · `manta-reviewer` (ID: `f4605213-cc2e-4ab6-9e53-af6695174779`) · `manta-ops` (ID: `b3f61b23-bceb-4cba-8404-574cff90ee5b`)
+- **Skill**: `verify-build-manta` (ID: `ef855df1-92f6-4cff-906f-80f8ab53b48e`) — runs `npm run typecheck && npm test`
 
 ## Hard Rules
 

@@ -1,4 +1,4 @@
-# Agent: better-ui-dev
+# Agent: manta-dev
 
 ## Role
 
