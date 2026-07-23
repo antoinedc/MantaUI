@@ -623,7 +623,7 @@ main() {
   install with sudo available. To finish this section by hand:"
         warn "    sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl"
         warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
-        warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/config.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
+        warn "    echo 'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu noble main' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
         warn "    sudo apt update && sudo apt install caddy"
         warn "  then re-run the installer (the gateway + DNS + Caddyfile steps re-run cleanly)."
         PRIVILEGED_SECTION_SKIP=1
@@ -666,15 +666,40 @@ main() {
       curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
         | sudo -n gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
         || die "failed to download Caddy GPG key"
-      # Fetch the repo file to a temp path FIRST, then install it atomically.
-      # A direct `curl … | sudo tee /etc/apt/sources.list.d/caddy-stable.list`
-      # lets tee create a 0-byte file before curl's non-zero exit is seen, so
-      # a fetch failure leaves a truncated .list that poisons the next
-      # `apt update`. Staging + mv avoids the partial write.
+      # Write the apt repo line DIRECTLY with a resolved, known-good codename
+      # instead of piping Cloudsmith's config.deb.txt. That script probes
+      # /etc/os-release and, on a distro its detector doesn't recognize (e.g.
+      # Ubuntu's rolling "resolute"), falls back to the generic
+      # `deb/any-distro any-version` suite — which Cloudsmith no longer serves,
+      # so the next `apt update` 404s and the poisoned .list blocks all apt.
+      # We map the running codename to the nearest supported Ubuntu/Debian
+      # suite ourselves so an unknown/rolling release still resolves to a live
+      # repo. Cloudsmith's Caddy repo is keyed by real distro codenames.
+      # Source os-release in a SUBSHELL so it can't leak $ID/$NAME/$VERSION/etc
+      # into the rest of main() — we only want the codename out.
+      _caddy_codename="$(
+        if [ -r /etc/os-release ]; then
+          # shellcheck disable=SC1091
+          . /etc/os-release
+          printf '%s' "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+        fi
+      )"
+      # Cloudsmith serves these Caddy suites (Ubuntu + Debian codenames).
+      # Anything not in this allowlist (or empty) → pin to the current
+      # Ubuntu LTS, which is always live.
+      case "$_caddy_codename" in
+        noble|jammy|focal|bookworm|bullseye|trixie) : ;;   # known-good, use as-is
+        *) _caddy_codename="noble" ;;                      # unknown/rolling → LTS fallback
+      esac
+      # Fetch nothing; render the .list line to a temp path FIRST, then install
+      # it atomically. A direct `… | sudo tee /etc/apt/sources.list.d/…` lets
+      # tee create a partial file before an error is seen, poisoning the next
+      # `apt update`. Staging + install(1) avoids the partial write.
       _caddy_list_tmp="$(mktemp)"
-      curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/config.deb.txt \
-        -o "$_caddy_list_tmp" \
-        || { rm -f "$_caddy_list_tmp"; die "failed to download Caddy apt repo file"; }
+      {
+        printf 'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu %s main\n' "$_caddy_codename"
+        printf 'deb-src [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu %s main\n' "$_caddy_codename"
+      } > "$_caddy_list_tmp"
       sudo -n install -m 0644 "$_caddy_list_tmp" /etc/apt/sources.list.d/caddy-stable.list \
         || { rm -f "$_caddy_list_tmp"; die "failed to add Caddy apt repo"; }
       rm -f "$_caddy_list_tmp"
