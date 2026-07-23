@@ -244,9 +244,14 @@ workflows:
           scp -i ~/.ssh/prod_key dist/desktop/*.dmg "$HOST:/var/www/mantaui/updates/"
           # Human-facing downloads + refresh the canonical Manta-latest.dmg
           # (arm64 preferred; falls back to whatever single dmg exists).
+          # MUST pick the HIGHEST version, not the alphabetically-first —
+          # `ls | head -1` returned 0.0.1 once both 0.0.1 and 0.0.4 were in the
+          # dir, so Manta-latest.dmg silently served the OLDEST build (BET-252
+          # shipped in 0.0.4 but the download link stayed on 0.0.1). Always
+          # version-sort and take the tail.
           scp -i ~/.ssh/prod_key dist/desktop/*.dmg "$HOST:/var/www/mantaui/downloads/"
           $SSH "$HOST" 'cd /var/www/mantaui/downloads && \
-            latest=$(ls -1 *arm64*.dmg 2>/dev/null | head -1); \
+            latest=$(ls -1 *arm64*.dmg 2>/dev/null | sort -V | tail -1); \
             [ -z "$latest" ] && latest=$(ls -1 *.dmg | sort -V | tail -1); \
             cp -f "$latest" Manta-latest.dmg && echo "Manta-latest.dmg -> $latest"'
     artifacts:
