@@ -288,6 +288,25 @@ const { stop: stopServePageCleanup } = startCleanupPoller();
 // the async trust-mode logic in an immediately-invoked async function
 // with .catch() to avoid unhandled rejection warnings if the async work
 // rejects — the pump loop itself is unaffected.
+// Compute live chat-session directories once at startup (best-effort). Used to
+// eagerly open their scoped opencode event streams so the first turn streams
+// live on a fresh box. Bounded to actual chat windows (those stamped with an
+// opencode session id) — not the full catalog. Top-level `await` is available
+// in this module (index.mjs is ESM and runs top-level awaits already).
+let eagerChatDirs = [];
+try {
+  const projects = await tmux.listProjects();
+  eagerChatDirs = [
+    ...new Set(
+      (projects ?? [])
+        .flatMap((p) => p.windows ?? [])
+        .filter((w) => typeof w.opencodeSessionId === "string" && w.opencodeSessionId.length > 0)
+        .map((w) => w.paneCurrentPath)
+        .filter((d) => typeof d === "string" && d.length > 0),
+    ),
+  ];
+} catch { /* non-fatal */ }
+
 // eslint-disable-next-line no-unused-vars
 const stopOpencodePump = oc.subscribeEvents((evt) => {
   // Track per-session busy state for the webhook defer-until-idle queue. Cheap,
@@ -343,6 +362,8 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
   // what (if anything) to send; permission.asked is handled in the branch
   // above so it isn't double-fired here.
   push.firePush(evt);
+}, {
+  eagerDirectories: () => eagerChatDirs,
 });
 
 const PORT = Number(process.env.MANTA_MOBILE_PORT ?? 8787);
