@@ -400,10 +400,22 @@ export const useStore = create<State>((set, get) => ({
 
   relaunchOnboarding: async () => {
     // Clear the persisted skip flag and force the shell open, even if the
-    // config would otherwise resolve to http/ssh mode (already paired).
+    // config would otherwise resolve to http/ssh mode (already paired). The
+    // local `set` is what actually forces onboarding open; persisting the
+    // skip flag is best-effort.
     set({ onboardingSkipped: false, onboardingForced: true });
-    const next = await window.api.configUpdate({ onboardingSkipped: false });
-    set({ onboardingSkipped: next.onboardingSkipped ?? false });
+    // GUARD: on a fresh/unpaired desktop boot window.api is still the preload
+    // OS-bridge (no configUpdate — that lives only on httpApi). Calling it
+    // unguarded throws "configUpdate is not a function", which — when this is
+    // invoked from the deep-link onPairLink handler — aborted pairing-link
+    // prefill (BET-240 regression). Skip the persist when the method is absent.
+    if (!window.api.configUpdate) return;
+    try {
+      const next = await window.api.configUpdate({ onboardingSkipped: false });
+      set({ onboardingSkipped: next.onboardingSkipped ?? false });
+    } catch {
+      /* config persist is best-effort; onboardingForced already forced open */
+    }
   },
 
   setPendingPairLink: (url) => set({ pendingPairLink: url }),

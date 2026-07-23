@@ -214,8 +214,18 @@ export function App() {
     if (!pre?.onPairLink) return;
     return pre.onPairLink((url) => {
       if (!parsePairPayload(url)) return; // not a valid pair link — ignore
+      // Stash the URL FIRST so PairStep's prefill effect always sees it,
+      // regardless of what relaunchOnboarding does to the render tree.
       useStore.getState().setPendingPairLink(url);
-      void useStore.getState().relaunchOnboarding();
+      // Only FORCE onboarding open when the app isn't already in it (a re-pair
+      // from a paired shell). When already unpaired/onboarding, forcing it is
+      // redundant and its config-persist would be a no-op — skipping it avoids
+      // a needless re-render that could race PairStep's prefill.
+      const st = useStore.getState();
+      const alreadyOnboarding =
+        st.onboardingForced ||
+        resolveTransportMode(st.configSnapshot()) === "onboarding";
+      if (!alreadyOnboarding) void st.relaunchOnboarding();
     });
   }, []);
 

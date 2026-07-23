@@ -172,6 +172,10 @@ export function MobileSettings({ onClose }: Props) {
   // Which AI CLI TUIs are set up on this box — non-fatal, an empty list just
   // hides the launch-options section below.
   useEffect(() => {
+    if (!window.api.launchersList) {
+      setAvailableLaunchers([]);
+      return;
+    }
     window.api
       .launchersList()
       .then((list) => setAvailableLaunchers(list))

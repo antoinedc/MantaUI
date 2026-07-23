@@ -132,8 +132,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
   }, []);
 
   // Fetch which AI CLI TUIs are set up on this box (non-fatal — an empty list
-  // just hides the launch-options section).
+  // just hides the launch-options section). Guarded like App.tsx: on an
+  // unpaired / mid-onboarding desktop boot, window.api is still the raw preload
+  // OS-bridge subset (no launchersList) until the http-mode transport swap in
+  // main.tsx completes, so a bare call throws synchronously (the .catch never
+  // sees it — the access itself is the crash).
   useEffect(() => {
+    if (!window.api.launchersList) {
+      setAvailableLaunchers([]);
+      return;
+    }
     window.api
       .launchersList()
       .then((list) => setAvailableLaunchers(list))
