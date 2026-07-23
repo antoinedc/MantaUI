@@ -64,12 +64,25 @@ export function ProvidersStep({
   // tells us whether an OpenAI block already exists so the card reflects it.
   const load = useCallback(async () => {
     setLoadError(null);
+    // Guard method existence (BET-254): if window.api was never swapped to the
+    // httpApi client (e.g. a regression that skips installHttpTransport after
+    // pairing), opencodeModels is `undefined` and calling it throws a
+    // synchronous TypeError that bypasses `.catch(...)` and hangs the step.
+    // Surface the missing method via the existing error state instead.
+    const models$ =
+      typeof window.api.opencodeModels === "function"
+        ? window.api.opencodeModels()
+        : Promise.reject(new Error("transport not ready"));
+    const eps$ =
+      typeof window.api.opencodeGetProviders === "function"
+        ? window.api.opencodeGetProviders()
+        : Promise.resolve([] as ProviderEndpoint[]);
     const [m, eps] = await Promise.all([
-      window.api.opencodeModels().catch(() => {
+      models$.catch(() => {
         setLoadError("Couldn't reach the box to check providers.");
         return [] as OpencodeModel[];
       }),
-      window.api.opencodeGetProviders().catch(() => [] as ProviderEndpoint[]),
+      eps$.catch(() => [] as ProviderEndpoint[]),
     ]);
     setModels(m);
     setEndpoints(eps);
