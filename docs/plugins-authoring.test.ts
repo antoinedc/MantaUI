@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DOC_PATH = join(__dirname, "..", "plugins-authoring.md");
+const DOC_PATH = join(__dirname, "plugins-authoring.md");
 
 const REQUIRED_SECTIONS = [
   "## 1. What a plugin is + where it lives",
