@@ -7,9 +7,8 @@ import "./mobile/mobile.css";
 import { httpApi } from "./api/httpApi";
 import { initRendererLogging } from "./log";
 import type { Api } from "../shared/api";
-import {
-  desktopHttpClientSeed,
-} from "../shared/transport.mjs";
+import { desktopHttpClientSeed } from "../shared/transport.mjs";
+import { installHttpTransport, setWindowApi } from "./transportInstall";
 
 // Transport selection at renderer entry (BET-82):
 //
@@ -34,19 +33,6 @@ import {
 const preload = (window as unknown as { __mantaPreload?: Api }).__mantaPreload;
 const isMobile = !preload;
 
-// Install `window.api` as a WRITABLE, configurable property. contextBridge
-// properties are read-only, which is why main.tsx (not the preload) owns
-// `window.api` — this makes the http-mode swap at boot a legal assignment
-// rather than a "Cannot assign to read only property 'api'" TypeError.
-function setWindowApi(next: unknown): void {
-  Object.defineProperty(window, "api", {
-    value: next,
-    writable: true,
-    configurable: true,
-    enumerable: true,
-  });
-}
-
 async function chooseDesktopTransport(realPreload: Api): Promise<void> {
   // Desktop always uses httpApi (BET-82: SSH main path gone).
   // The real preload already lives at window.__mantaPreload (exposed read-only by
@@ -61,29 +47,14 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
     const config = await realPreload.configGet();
     const seed = desktopHttpClientSeed(config);
     if (seed) {
-      // Seed the two localStorage keys httpApi reads for its base URL + token.
-      let seeded = true;
-      try {
-        localStorage.setItem("manta_server", seed.manta_server);
-        localStorage.setItem("manta_token", seed.manta_token);
-      } catch (e) {
-        // localStorage unavailable is fatal for http mode (httpApi can't read
-        // its base) — fall back to preload rather than a 401-looping client.
-        // Do NOT return here: chooseDesktopTransport must fall through so boot()
-        // still renders. We simply leave window.api as the preload bridge by
-        // skipping the httpApi swap below.
-        console.warn("[manta] localStorage seed failed; using preload transport:", e);
-        seeded = false;
-      }
-      if (seeded) {
-        // The real preload already lives at window.__mantaPreload (contextBridge)
-        // for Electron-local affordances (clipboard, reveal, OS notifications).
-        // Install httpApi as the primary window.api.
-        setWindowApi(httpApi);
-      }
+      // Sole transport-install path (BET-254) — also called from PairStep on
+      // first-time pairing so the next onboarding step can use httpApi in the
+      // SAME session. On localStorage failure it falls back to the preload
+      // bridge (window.api stays as-is).
+      installHttpTransport(seed);
     }
   } catch (e) {
-    console.warn("[manta] configGet failed at entry:", e);
+    console.warn("[bui] configGet failed at entry:", e);
   }
 }
 

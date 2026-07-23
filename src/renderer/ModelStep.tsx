@@ -52,8 +52,15 @@ export function ModelStep({
 
   useEffect(() => {
     let cancelled = false;
-    window.api
-      .opencodeModels()
+    // Guard method existence (BET-254): if window.api was never swapped to
+    // httpApi (regression), opencodeModels is undefined and the call throws a
+    // synchronous TypeError that bypasses .catch and hangs the step. Surface
+    // it via the existing error state instead.
+    const fetch$ =
+      typeof window.api.opencodeModels === "function"
+        ? window.api.opencodeModels()
+        : Promise.resolve([] as OpencodeModel[]);
+    fetch$
       .then((list) => {
         if (!cancelled) setModels(list);
       })

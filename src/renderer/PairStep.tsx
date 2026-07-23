@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { normalizeCode } from "../shared/claim.mjs";
 import { normalizeServerUrl, isValidServerUrl, canConnect } from "./pairStepLogic";
 import { parsePairPayload } from "./mobile/pairPayload";
-import { boxDirectUrl } from "../shared/transport.mjs";
+import { boxDirectUrl, desktopHttpClientSeed } from "../shared/transport.mjs";
 import { useStore } from "./store";
+import { installHttpTransport } from "./transportInstall";
 
 // PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2;
 // extended BET-156 for box-paired flows).
@@ -99,11 +100,21 @@ export function PairStep({
       if (result.ok) {
         // Mirror the persisted serverUrl — the canonical box-form hostname
         // (single source of truth — shared/transport.mjs).
+        const persistedServerUrl = boxDirectUrl(payload.boxId);
         useStore.getState().applyPairing({
-          serverUrl: boxDirectUrl(payload.boxId),
+          serverUrl: persistedServerUrl,
           boxId: result.boxId,
           boxToken: result.boxToken,
         });
+        // Swap window.api to the httpApi client NOW so the next onboarding step
+        // (Providers/Model) can call opencodeModels() in this same session —
+        // otherwise window.api is still the preload bridge (no opencodeModels)
+        // and the step hangs (BET-254).
+        const seed = desktopHttpClientSeed({
+          serverUrl: persistedServerUrl,
+          boxToken: result.boxToken,
+        });
+        if (seed) installHttpTransport(seed);
         setSubmitting(false);
         onPaired();
         return;
@@ -122,11 +133,21 @@ export function PairStep({
     if (result.ok) {
       // main already persisted to config.json; mirror into the store so the
       // shell + transport resolution see the paired state without a re-read.
+      const persistedServerUrl = normalizeServerUrl(serverUrl);
       useStore.getState().applyPairing({
-        serverUrl: normalizeServerUrl(serverUrl),
+        serverUrl: persistedServerUrl,
         boxId: result.boxId,
         boxToken: result.boxToken,
       });
+      // Swap window.api to the httpApi client NOW so the next onboarding step
+      // (Providers/Model) can call opencodeModels() in this same session —
+      // otherwise window.api is still the preload bridge (no opencodeModels)
+      // and the step hangs (BET-254).
+      const seed = desktopHttpClientSeed({
+        serverUrl: persistedServerUrl,
+        boxToken: result.boxToken,
+      });
+      if (seed) installHttpTransport(seed);
       setSubmitting(false);
       onPaired();
       return;
