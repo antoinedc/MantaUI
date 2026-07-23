@@ -655,6 +655,12 @@ main() {
       # 100% user-space — this is the only privileged step (and it has
       # already been gated at the top of step 7.5: distro is
       # Debian/Ubuntu and `sudo -n true` has been verified to succeed).
+      # Refresh apt lists first — on a fresh box the package index can be
+      # empty/stale, which makes `apt-get install debian-keyring …` fail with
+      # "Unable to locate package". The Caddy docs run `apt update` up front
+      # for exactly this reason.
+      sudo -n apt-get update \
+        || die "apt-get update failed"
       sudo -n apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
         || die "apt-get install prerequisites for Caddy failed"
       curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
@@ -752,20 +758,35 @@ main() {
       warn "could not determine the box's public IP — skipping DNS wait + Caddy setup."
       warn "  the box will retry on every server restart."
     else
+      # DNS_TIMED_OUT gates step E below: if the box hostname hasn't
+      # propagated yet, writing the Caddy vhost is pointless (Let's Encrypt
+      # HTTP-01 would fail cert issuance against an unresolvable name), so we
+      # skip it and let the operator re-run once DNS is live.
+      DNS_TIMED_OUT=0
       if [ "$DRY_RUN" = "1" ]; then
-        dry_log "would poll DNS for $GATEWAY_HOST (expecting $BOX_PUBLIC_IP) for up to 5 minutes"
+        dry_log "would poll DNS for $GATEWAY_HOST (expecting $BOX_PUBLIC_IP) for up to 90 seconds"
       else
-        log "Waiting for $GATEWAY_HOST to resolve to $BOX_PUBLIC_IP (up to 5 minutes)…"
+        # Bounded at ~90s (18 × 5s) rather than 5 min. A fresh gateway
+        # registration normally propagates in well under a minute; a longer
+        # wait just looks like a hang. On timeout we WARN (never die) so the
+        # installer still reaches the pair-code print — the box re-registers
+        # + retries DNS on every server restart, and re-running the installer
+        # picks up step E cleanly once the name resolves.
+        log "Waiting for $GATEWAY_HOST to resolve to $BOX_PUBLIC_IP (up to 90 seconds)…"
         if ! "$NODE" "$LIB" wait-for-dns \
             --hostname "$GATEWAY_HOST" \
             --expected-ip "$BOX_PUBLIC_IP" \
-            --max-attempts 30 \
-            --interval-ms 10000; then
-          die "$GATEWAY_HOST did not resolve to $BOX_PUBLIC_IP — gateway registration may have failed.
-            Check: curl -fsS $GATEWAY_BASE/healthz
-            And:   journalctl --user -u manta-server -n 50 (for the gateway-register lines)"
+            --max-attempts 18 \
+            --interval-ms 5000; then
+          warn "$GATEWAY_HOST did not resolve to $BOX_PUBLIC_IP within 90s — skipping the Caddy vhost for now."
+          warn "  DNS propagation can lag; the box re-registers on every server restart."
+          warn "  Once it resolves, re-run the installer (or: sudo systemctl reload caddy) to finish public TLS."
+          warn "  Check: curl -fsS $GATEWAY_BASE/healthz"
+          warn "  And:   journalctl --user -u manta-server -n 50 (for the gateway-register lines)"
+          DNS_TIMED_OUT=1
+        else
+          ok "DNS resolved."
         fi
-        ok "DNS resolved."
       fi
 
       # --- E. Write the Caddy vhost and reload ----------------------------
@@ -782,12 +803,20 @@ main() {
       # local CADDY_E_SKIP flag — any privileged call that returns
       # non-zero sets the flag, and the rest of 7.5.E is skipped. The
       # pair-code step (8) below runs regardless.
-      CADDY_E_SKIP=0
+      #
+      # Seed the flag from the DNS wait: if the box hostname didn't resolve,
+      # skip the vhost write entirely (cert issuance would fail against an
+      # unresolvable name). DRY_RUN never times out, so this is a no-op there.
+      CADDY_E_SKIP="${DNS_TIMED_OUT:-0}"
       CADDY_DIR_D="/etc/caddy/Caddyfile.d"
       if [ "$DRY_RUN" = "1" ]; then
         dry_log "would render Caddy vhost (box_id=$BOX_ID_FOR_GATEWAY, port=$MANTA_PORT)"
         dry_log "would write the snippet to $CADDY_DIR_D/manta.caddy"
         dry_log "would run: systemctl reload caddy"
+      elif [ "$CADDY_E_SKIP" != "0" ]; then
+        # DNS didn't resolve above — skip the vhost write; the reload guard
+        # below (CADDY_E_SKIP != 0) will also be skipped. Re-run once DNS is live.
+        :
       else
         if [ -d "$CADDY_DIR_D" ]; then
           # Caddyfile.d exists → write the snippet as a separate file.
