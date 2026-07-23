@@ -17,6 +17,7 @@ import {
 import { chooseUpdateSkewVariant } from "./chatUtils";
 import { UpdateBar } from "./UpdateBar";
 import { parsePairPayload } from "./mobile/pairPayload";
+import { claimBox } from "./pairClaim";
 import type { AvailableLauncher } from "../shared/types";
 
 // mode -> the composite-key "modeId" segment used for the PTY sessionKey and
@@ -202,30 +203,50 @@ export function App() {
     return off;
   }, []);
 
-  // Deep-link pairing (BET-240): the OS protocol handler (electron-builder
-  // `protocols:` + Electron `setAsDefaultProtocolClient`) delivers a
-  // manta://pair?... URL via the preload's `pair:link-received` IPC. We
-  // validate with the SAME parsePairPayload PairStep's paste field uses,
-  // stash the URL in the store for PairStep to prefill, and reuse the
-  // existing relaunchOnboarding so a re-pair to a new box lands on step 1
-  // even when resolveInitialStep would skip past it (already paired).
+  // Deep-link pairing (BET-240, BET-255): the OS protocol handler
+  // (electron-builder `protocols:` + Electron `setAsDefaultProtocolClient`)
+  // delivers a manta://pair?... URL via the preload's `pair:link-received`
+  // IPC. We validate with the SAME `parsePairPayload` PairStep / mobile
+  // share, then auto-claim via the SHARED `claimBox` helper (the same code
+  // path PairStep's Connect button runs). On success `finishOnboarding()`
+  // drops the shell to the normal app — the user is paired, no manual
+  // "Connect" click required. On failure we fall back to the OLD behaviour
+  // of opening onboarding at step 1 (Onboarding reads `pendingPairLink` to
+  // force step 1) so the user can retry by hand.
   useEffect(() => {
     const pre = getMantaPreload();
     if (!pre?.onPairLink) return;
     return pre.onPairLink((url) => {
-      if (!parsePairPayload(url)) return; // not a valid pair link — ignore
-      // Stash the URL FIRST so PairStep's prefill effect always sees it,
-      // regardless of what relaunchOnboarding does to the render tree.
-      useStore.getState().setPendingPairLink(url);
-      // Only FORCE onboarding open when the app isn't already in it (a re-pair
-      // from a paired shell). When already unpaired/onboarding, forcing it is
-      // redundant and its config-persist would be a no-op — skipping it avoids
-      // a needless re-render that could race PairStep's prefill.
-      const st = useStore.getState();
-      const alreadyOnboarding =
-        st.onboardingForced ||
-        resolveTransportMode(st.configSnapshot()) === "onboarding";
-      if (!alreadyOnboarding) void st.relaunchOnboarding();
+      const payload = parsePairPayload(url);
+      if (!payload) return; // not a valid pair link — ignore
+      // Auto-claim immediately. claimBox() handles the IPC, persists the
+      // credentials to config.json, mirrors them into the store, and swaps
+      // window.api to httpApi — all the same side effects PairStep does on
+      // a manual Connect. We don't await it on purpose: the listener is
+      // sync from the preload's perspective and the claim is best-effort
+      // (failures fall through to the onboarding-open fallback below).
+      void (async () => {
+        const result = await claimBox({ boxId: payload.boxId, code: payload.code });
+        if (result.ok) {
+          // Drop out of onboarding: clears `onboardingForced` + re-reads
+          // config so the app renders the normal shell with the new
+          // boxToken. Works whether we were already in the normal shell
+          // (just a config refresh) or in onboarding (the new boxToken
+          // flips resolveTransportMode to "http" on the re-read).
+          await useStore.getState().finishOnboarding();
+          return;
+        }
+        // Failure: open onboarding at step 1 with the URL stashed so the
+        // shell jumps to step 1 (PairStep shows empty fields for the user
+        // to retry by hand — the URL gives the shell enough signal to land
+        // on the pair step even from a paired/normal config).
+        const st = useStore.getState();
+        st.setPendingPairLink(url);
+        const alreadyOnboarding =
+          st.onboardingForced ||
+          resolveTransportMode(st.configSnapshot()) === "onboarding";
+        if (!alreadyOnboarding) void st.relaunchOnboarding();
+      })();
     });
   }, []);
 

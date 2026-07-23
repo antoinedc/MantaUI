@@ -1,36 +1,42 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { normalizeCode } from "../shared/claim.mjs";
-import { normalizeServerUrl, isValidServerUrl, canConnect } from "./pairStepLogic";
-import { parsePairPayload } from "./mobile/pairPayload";
-import { boxDirectUrl, desktopHttpClientSeed } from "../shared/transport.mjs";
-import { useStore } from "./store";
-import { installHttpTransport } from "./transportInstall";
+import { canConnectSetup } from "./mobile/setupLogic";
+import { isValidBoxToken } from "../shared/transport.mjs";
+import { claimBox } from "./pairClaim";
 
-// PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2;
-// extended BET-156 for box-paired flows).
+// PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2,
+// BET-255).
 //
 // Mounts into Onboarding.tsx's step-1 slot. Owns the pairing form:
-//   • a server-URL input (prefilled from config if the user has paired before)
+//   • a Box ID input (32-hex box id, post-BET-198 every box serves its own
+//     public hostname — `https://<boxId>.boxes.mantaui.com` — so no
+//     server-URL field is needed)
 //   • a 6-digit monospace pairing code input (auto-focused)
-//   • an OPTIONAL "pair link" paste input (BET-156): a single textbox that
-//     runs parsePairPayload on submit and routes to the same claim call —
-//     reuse the exact same form/input styling as the existing screen
 //   • inline errors for every claim-failure branch (wrong/expired code,
 //     rate-limited, unreachable server, malformed response)
-//   • its own Connect button (gated by canConnect) + a "Skip setup" link
+//   • its own Connect button (gated by canConnectSetup) + a "Skip setup" link
 //
 // The claim itself runs in the MAIN process over the `auth:claim` IPC channel
-// (window.api.authClaim), which POSTs <serverUrl>/auth/claim (BET-49 direct
-// HTTPS) for the manual form, and <boxDirectUrl(boxId)>/auth/claim (BET-198 —
-// every box now serves its own public hostname) for the box-form pair link.
-// On success, main persists { serverUrl, boxId, boxToken } to config.json. We
-// mirror those into the store (applyPairing) so resolveTransportMode reads
-// "http" immediately, then call onPaired() to let the shell advance to Step 2.
+// (window.api.authClaim), which POSTs <boxDirectUrl(boxId)>/auth/claim (the
+// URL is built by the shared `buildSetupClaimInput` helper, the SAME one the
+// mobile setup screen and the deep-link handler use — single source of
+// truth). On success, main persists { serverUrl, boxId, boxToken } to
+// config.json. The shared `claimBox` helper mirrors those into the store
+// (applyPairing) so resolveTransportMode reads "http" immediately, then
+// swaps window.api to httpApi so the next onboarding step (Providers/Model)
+// can call opencodeModels() in this same session (BET-254). Finally we call
+// onPaired() to let the shell advance to Step 2.
 //
-// All non-React logic (URL normalization, the submit gate, the 6-digit
-// contract, HTTP-outcome classification) is pure + unit-tested in
-// pairStepLogic.ts + src/shared/claim.test.ts + pairPayload.test.ts — this
-// file is just the wiring.
+// The deep-link `manta://pair?box=…&code=…` flow no longer lands here —
+// App.tsx's onPairLink handler auto-claims via the SAME `claimBox` helper and
+// advances via `finishOnboarding()`. If the auto-claim fails, the handler
+// falls back to opening onboarding at step 1 (Onboarding.tsx still reads
+// `pendingPairLink` to force step 1) so the user can retry by hand.
+//
+// All non-React logic (Box ID validation, the submit gate, the 6-digit
+// contract, HTTP-outcome classification, the claim itself) is shared with
+// the mobile client via renderer/mobile/setupLogic.ts + shared/transport.mjs
+// + the new renderer/pairClaim.ts. This file is just the wiring.
 //
 // Props:
 //   onPaired — successful claim; the shell advances to the next step.
@@ -47,107 +53,20 @@ export function PairStep({
   onPaired: () => void;
   onSkip: () => void;
 }) {
-  // Prefill the server URL from config (empty on a fresh install). Read once at
-  // mount — the store's serverUrl is already populated (App gates on `loaded`).
-  const [serverUrl, setServerUrl] = useState(() => useStore.getState().serverUrl ?? "");
+  const [boxId, setBoxId] = useState("");
   const [code, setCode] = useState("");
-  const [pairLink, setPairLink] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
-  const pairLinkRef = useRef<HTMLInputElement>(null);
 
-  // Deep-link pairing (BET-240): prefill the paste field from a pending
-  // manta:// pair URL that App.tsx stashed in the store when the OS protocol
-  // handler fired. The existing `linkHasContent` gate below makes the link
-  // win over any typed server/code values; the existing connect() claim path
-  // does the rest when the user clicks Connect.
-  const pendingPairLink = useStore((s) => s.pendingPairLink);
-  useEffect(() => {
-    if (!pendingPairLink) return;
-    setPairLink(pendingPairLink);
-    useStore.getState().setPendingPairLink(null); // consume once
-  }, [pendingPairLink]);
-
-  // When the user pastes a pair link, the link's payload takes precedence
-  // over any typed server/code fields. The submit gate follows.
-  const linkHasContent = pairLink.trim() !== "";
-  const connectEnabled =
-    linkHasContent || canConnect({ serverUrl, code, submitting });
+  const connectEnabled = canConnectSetup({ boxId, code, submitting });
 
   const connect = async () => {
-    // Mirror the pure gate so an Enter keypress can't fire from a non-ready
-    // state (the button is also disabled, but Enter bypasses that).
-    if (submitting) return;
-    if (linkHasContent) {
-      // Pair link wins: parse it, then route to the same claim call.
-      const payload = parsePairPayload(pairLink);
-      if (!payload) {
-        setError("Couldn't read that pair link — paste the full manta://pair?… line.");
-        pairLinkRef.current?.focus();
-        return;
-      }
-      setSubmitting(true);
-      setError(null);
-      // Box form (BET-156, BET-198): parsePairPayload now returns box form
-      // exclusively (BET-237). The IPC handler resolves the box's public
-      // hostname via boxDirectUrl(boxId) before POSTing /auth/claim.
-      const result = await window.api.authClaim({
-        serverUrl: "",
-        boxId: payload.boxId,
-        code: payload.code,
-      });
-      if (result.ok) {
-        // Mirror the persisted serverUrl — the canonical box-form hostname
-        // (single source of truth — shared/transport.mjs).
-        const persistedServerUrl = boxDirectUrl(payload.boxId);
-        useStore.getState().applyPairing({
-          serverUrl: persistedServerUrl,
-          boxId: result.boxId,
-          boxToken: result.boxToken,
-        });
-        // Swap window.api to the httpApi client NOW so the next onboarding step
-        // (Providers/Model) can call opencodeModels() in this same session —
-        // otherwise window.api is still the preload bridge (no opencodeModels)
-        // and the step hangs (BET-254).
-        const seed = desktopHttpClientSeed({
-          serverUrl: persistedServerUrl,
-          boxToken: result.boxToken,
-        });
-        if (seed) installHttpTransport(seed);
-        setSubmitting(false);
-        onPaired();
-        return;
-      }
-      setSubmitting(false);
-      setError(result.message);
-      return;
-    }
-    if (!canConnect({ serverUrl, code, submitting })) return;
+    if (!canConnectSetup({ boxId, code, submitting })) return;
     setSubmitting(true);
     setError(null);
-    const result = await window.api.authClaim({
-      serverUrl: normalizeServerUrl(serverUrl),
-      code,
-    });
+    const result = await claimBox({ boxId: boxId.trim(), code });
     if (result.ok) {
-      // main already persisted to config.json; mirror into the store so the
-      // shell + transport resolution see the paired state without a re-read.
-      const persistedServerUrl = normalizeServerUrl(serverUrl);
-      useStore.getState().applyPairing({
-        serverUrl: persistedServerUrl,
-        boxId: result.boxId,
-        boxToken: result.boxToken,
-      });
-      // Swap window.api to the httpApi client NOW so the next onboarding step
-      // (Providers/Model) can call opencodeModels() in this same session —
-      // otherwise window.api is still the preload bridge (no opencodeModels)
-      // and the step hangs (BET-254).
-      const seed = desktopHttpClientSeed({
-        serverUrl: persistedServerUrl,
-        boxToken: result.boxToken,
-      });
-      if (seed) installHttpTransport(seed);
       setSubmitting(false);
       onPaired();
       return;
@@ -164,10 +83,9 @@ export function PairStep({
     void connect();
   };
 
-  // A bad/empty URL is only flagged once the user has typed something, so a
-  // pristine field doesn't show a scary red border on first paint.
-  const urlLooksBad =
-    serverUrl.trim() !== "" && !isValidServerUrl(serverUrl);
+  // A bad/empty Box ID is only flagged once the user has typed something, so
+  // a pristine field doesn't show a scary red border on first paint.
+  const boxIdLooksBad = boxId.trim() !== "" && !isValidBoxToken(boxId.trim());
 
   return (
     <div>
@@ -175,32 +93,32 @@ export function PairStep({
         Connect to your server
       </h2>
       <p className="text-sm text-text-muted leading-relaxed mb-8 max-w-md">
-        Enter the 6-digit pairing code shown on your VPS terminal to establish a
-        secure connection.
+        Enter the Box ID and 6-digit pairing code shown on your VPS terminal to
+        establish a secure connection.
       </p>
 
       <form onSubmit={onFormSubmit} className="flex flex-col gap-5">
-        {/* Server URL */}
+        {/* Box ID */}
         <div className="flex flex-col gap-1.5">
-          <label htmlFor="pair-server-url" className="text-xs font-medium text-text-muted">
-            Server URL
+          <label htmlFor="pair-box-id" className="text-xs font-medium text-text-muted">
+            Box ID
           </label>
           <input
-            id="pair-server-url"
+            id="pair-box-id"
             type="text"
-            inputMode="url"
+            inputMode="text"
             autoComplete="off"
             spellCheck={false}
-            placeholder="http://your-box:8787"
+            placeholder="0d5784a7a43451f4ad70dd3d9ee5cf72"
             disabled={submitting}
-            value={serverUrl}
+            value={boxId}
             onChange={(e) => {
-              setServerUrl(e.target.value);
+              setBoxId(e.target.value.trim());
               setError(null);
             }}
-            aria-invalid={urlLooksBad}
+            aria-invalid={boxIdLooksBad}
             className="w-full rounded-md bg-bg-soft border px-3 py-2.5 text-sm text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
-            style={{ borderColor: urlLooksBad ? DANGER : undefined }}
+            style={{ borderColor: boxIdLooksBad ? DANGER : undefined }}
           />
         </div>
 
@@ -220,8 +138,8 @@ export function PairStep({
             aria-invalid={error != null}
             placeholder="000000"
             maxLength={6}
-            disabled={submitting || linkHasContent}
-            value={linkHasContent ? "" : code}
+            disabled={submitting}
+            value={code}
             onChange={(e) => {
               setCode(normalizeCode(e.target.value));
               setError(null);
@@ -234,33 +152,6 @@ export function PairStep({
               manta pair
             </code>
           </p>
-        </div>
-
-        {/* Pair link (BET-156) — an optional single-paste field that runs
-            parsePairPayload and routes to the SAME claim call. Reuses the
-            exact form/input styling of the existing fields. */}
-        <div className="flex flex-col gap-1.5">
-          <label
-            htmlFor="pair-link"
-            className="text-xs font-medium text-text-muted"
-          >
-            Or paste a pair link{" "}
-            <span className="text-text-faint font-normal">(optional)</span>
-          </label>
-          <input
-            id="pair-link"
-            ref={pairLinkRef}
-            type="text"
-            spellCheck={false}
-            placeholder="manta://pair?box=…&code=…"
-            disabled={submitting}
-            value={pairLink}
-            onChange={(e) => {
-              setPairLink(e.target.value);
-              setError(null);
-            }}
-            className="w-full rounded-md bg-bg-soft border border-border px-3 py-2.5 text-sm text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
-          />
         </div>
 
         {error && (
