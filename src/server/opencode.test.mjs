@@ -1153,3 +1153,138 @@ test("subscribeEvents _sweep evicts a dead/idle scoped stream but keeps global +
     _setEventStreamTransport(null);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Eager scoped-stream open at startup (BET-253 first-turn SSE race fix)
+//
+// On a fresh box, the first chat turn's events were lost because the scoped
+// `/event?directory=<dir>` subscription for a live chat window wasn't open
+// when the prompt POSTed. subscribeEvents now accepts an `eagerDirectories()`
+// callback (e.g. live chat-session directories from tmux.listProjects()) and
+// pre-opens those streams during the bootstrap IIFE — the full catalog stays
+// quietly cached (the many-workspace flood fix). These tests pin the
+// behaviour: eager open fires for the supplied dirs at startup, de-dup/empty
+// filtering skips no-ops, and the default (no opts) preserves the flood fix
+// (only the global /event stream is opened at startup).
+// ---------------------------------------------------------------------------
+
+test("subscribeEvents eagerly opens scoped streams for supplied eagerDirectories at startup", async () => {
+  // Capture every SSE URL the stream transport is asked to open. The eager
+  // open fires from the bootstrap IIFE — no prompt, no session use, just
+  // startup. Assert both /work/a and /work/b scoped URLs show up in the URL
+  // list, alongside the global /event URL.
+  const openedUrls = [];
+  _setEventStreamTransport(async (url) => {
+    openedUrls.push(String(url));
+    return { ok: true, body: { getReader: () => ({ read: () => new Promise(() => {}), releaseLock() {} }) } };
+  });
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+
+  const stop = subscribeEvents(() => {}, {
+    sweepIntervalMs: 0,
+    eagerDirectories: () => ["/work/a", "/work/b"],
+  });
+  try {
+    // The bootstrap IIFE is async; wait until both eager URLs have been
+    // requested (or a short deadline elapses) before asserting.
+    const deadline = Date.now() + 1000;
+    while (
+      Date.now() < deadline &&
+      !(openedUrls.some((u) => u.includes("directory=%2Fwork%2Fa")) &&
+        openedUrls.some((u) => u.includes("directory=%2Fwork%2Fb")))
+    ) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(
+      openedUrls.some((u) => u.endsWith("/event?directory=%2Fwork%2Fa")),
+      `expected /event?directory=/work/a to be opened eagerly; saw ${JSON.stringify(openedUrls)}`,
+    );
+    assert.ok(
+      openedUrls.some((u) => u.endsWith("/event?directory=%2Fwork%2Fb")),
+      `expected /event?directory=/work/b to be opened eagerly; saw ${JSON.stringify(openedUrls)}`,
+    );
+    assert.ok(
+      openedUrls.some((u) => u.endsWith("/event") && !u.includes("directory=")),
+      `expected the unscoped global /event to also be opened; saw ${JSON.stringify(openedUrls)}`,
+    );
+    // Stream keys reflect the same set.
+    const keys = stop._streamKeys();
+    assert.ok(keys.includes(""), "global stream key present");
+    assert.ok(keys.includes("/work/a"), "/work/a eager stream key present");
+    assert.ok(keys.includes("/work/b"), "/work/b eager stream key present");
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+  }
+});
+
+test("subscribeEvents eager open de-dupes and skips empty/null entries", async () => {
+  // The eagerDirectories set is a small bounded list, but callers may still
+  // pass dupes or blanks by accident (e.g. a chat window whose
+  // paneCurrentPath is empty). The eager loop must:
+  //   - open /work/a exactly once even when listed twice,
+  //   - skip "" and null entries without throwing or opening a bogus stream.
+  const openedUrls = [];
+  _setEventStreamTransport(async (url) => {
+    openedUrls.push(String(url));
+    return { ok: true, body: { getReader: () => ({ read: () => new Promise(() => {}), releaseLock() {} }) } };
+  });
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+
+  const stop = subscribeEvents(() => {}, {
+    sweepIntervalMs: 0,
+    eagerDirectories: () => ["/work/a", "/work/a", "", null, "/work/a"],
+  });
+  try {
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && !openedUrls.some((u) => u.includes("directory=%2Fwork%2Fa"))) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const aOpens = openedUrls.filter((u) => u.endsWith("/event?directory=%2Fwork%2Fa"));
+    assert.equal(aOpens.length, 1, `expected /work/a opened exactly once, saw ${aOpens.length} (${JSON.stringify(openedUrls)})`);
+    assert.ok(
+      !openedUrls.some((u) => u.includes("directory=") && (u.endsWith("directory=") || u.endsWith("directory=&") || u.includes("directory=null"))),
+      `empty/null entries must not produce scoped stream URLs; saw ${JSON.stringify(openedUrls)}`,
+    );
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+  }
+});
+
+test("subscribeEvents default (no eagerDirectories) opens NO scoped stream at startup — flood fix preserved", async () => {
+  // Regression guard: the many-workspace flood fix relied on the catalog
+  // being cached quietly (no per-session open). Eager open is opt-in via
+  // `opts.eagerDirectories`. When the caller doesn't supply it, only the
+  // global /event stream must be opened at startup — no scoped /event
+  // requests, no per-catalog flood.
+  const openedUrls = [];
+  _setEventStreamTransport(async (url) => {
+    openedUrls.push(String(url));
+    return { ok: true, body: { getReader: () => ({ read: () => new Promise(() => {}), releaseLock() {} }) } };
+  });
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+
+  const stop = subscribeEvents(() => {}, { sweepIntervalMs: 0 });
+  try {
+    // Give the bootstrap IIFE a moment to settle (it tries listSessions and
+    // catches; the empty eagerDirectories path completes a tick later).
+    await new Promise((r) => setTimeout(r, 50));
+    const scoped = openedUrls.filter((u) => u.includes("directory="));
+    assert.deepEqual(
+      scoped,
+      [],
+      `no scoped /event?directory= should be opened at startup when eagerDirectories is absent; saw ${JSON.stringify(scoped)}`,
+    );
+    const globals = openedUrls.filter((u) => u.endsWith("/event") && !u.includes("directory="));
+    assert.equal(globals.length, 1, `expected exactly one unscoped global /event open; saw ${globals.length} (${JSON.stringify(openedUrls)})`);
+    const keys = stop._streamKeys();
+    assert.deepEqual(keys, [""], `only the global key should be live at startup; saw ${JSON.stringify(keys)}`);
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+  }
+});

@@ -1246,6 +1246,7 @@ function openEventStream(onEvent, directory, hooks = {}, opts = {}) {
         if (!res.ok || !res.body) {
           throw new Error(`opencode SSE ${res.status}: ${res.statusText}`);
         }
+        console.log(`[opencode-bus] stream CONNECTED dir=${key}`);
         onConnect?.();
         lastByteAt = Date.now();
         // Liveness watchdog: abort the connection if it goes silent past the
@@ -1309,6 +1310,7 @@ function openEventStream(onEvent, directory, hooks = {}, opts = {}) {
       // for the NEXT successful connect instead of resolving off a stale "was
       // connected" promise.
       if (!stopped) {
+        console.log(`[opencode-bus] stream DISCONNECTED dir=${key}`);
         onDisconnect?.();
         // A deaf reconnect is immediate — the subscription is already dead and
         // every second of silence is dropped events. A normal error backs off.
@@ -1342,6 +1344,12 @@ function openEventStream(onEvent, directory, hooks = {}, opts = {}) {
  *   `_sweep` directly).
  * @param {number} [opts.idleMs]      idle-eviction threshold (default STREAM_IDLE_MS)
  * @param {number} [opts.maxStreams]  LRU cap (default STREAM_MAX)
+ * @param {() => string[]} [opts.eagerDirectories]  callback returning the small
+ *   bounded set of directories to pre-open scoped streams for at startup
+ *   (e.g. live chat-session directories supplied by index.mjs from
+ *   `tmux.listProjects()`). The full session catalog stays lazily-opened — the
+ *   many-workspace flood fix — only this bounded live set is pre-opened so a
+ *   fresh box's first turn never races an unopened subscription.
  * @returns {() => void} stop
  */
 export function subscribeEvents(onEvent, opts = {}) {
@@ -1355,6 +1363,15 @@ export function subscribeEvents(onEvent, opts = {}) {
   const maxStreams = opts.maxStreams ?? STREAM_MAX;
   const sweepIntervalMs =
     opts.sweepIntervalMs != null ? opts.sweepIntervalMs : STREAM_SWEEP_MS;
+  // Directories of LIVE chat sessions (a small bounded set — the actual open
+  // chat windows), injected by index.mjs from tmux.listProjects(). Their scoped
+  // streams are opened EAGERLY at startup so a fresh box's first turn never
+  // races an unopened subscription. The full session catalog stays
+  // lazily-opened (the many-workspace flood fix); only this bounded live set
+  // is pre-opened.
+  const eagerDirectories = typeof opts.eagerDirectories === "function"
+    ? opts.eagerDirectories
+    : () => [];
   // Liveness-watchdog knobs (see openEventStream) — passed through, injectable
   // for tests. Undefined → openEventStream's defaults (45s timeout / 15s check).
   const streamOpts = {
@@ -1451,6 +1468,22 @@ export function subscribeEvents(onEvent, opts = {}) {
         }
       }
     } catch { /* non-fatal: bootstrap is best-effort */ }
+
+    // Eagerly open scoped streams for live chat-session directories so the
+    // first turn on a fresh box streams immediately. De-duped; skips empties.
+    // openFor is idempotent, so this is safe even if a dir was already opened
+    // lazily. Only the eagerDirectories() set is pre-opened — the full catalog
+    // stays quietly cached above (the many-workspace flood fix).
+    try {
+      const dirs = eagerDirectories();
+      const seen = new Set();
+      for (const dir of Array.isArray(dirs) ? dirs : []) {
+        if (stopped) break;
+        if (typeof dir !== "string" || dir.length === 0 || seen.has(dir)) continue;
+        seen.add(dir);
+        openFor(dir, dir);
+      }
+    } catch { /* non-fatal: eager-open is best-effort */ }
   })();
 
   // Periodic eviction sweep. unref() so it never keeps the process alive on its
