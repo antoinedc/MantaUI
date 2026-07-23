@@ -957,6 +957,30 @@ main() {
 
   ok "Server is healthy."
 
+  # Drop a `manta` CLI shim so `manta pair` works (the pairing block + docs tell
+  # the user to run `manta pair`, but nothing put it on PATH — it was only ever
+  # runnable as `node .../manta-pair.mjs` or `npm run pair`). ~/.local/bin is on
+  # PATH by default on modern Debian/Ubuntu (~/.profile adds it); if it isn't,
+  # the footer below still prints the explicit node invocation as a fallback.
+  MANTA_BIN_DIR="$HOME/.local/bin"
+  MANTA_SHIM="$MANTA_BIN_DIR/manta"
+  mkdir -p "$MANTA_BIN_DIR"
+  cat > "$MANTA_SHIM" <<SHIM
+#!/usr/bin/env bash
+# manta — thin CLI shim dropped by install.sh. Today it only knows 'pair'.
+set -euo pipefail
+MANTA_HOME="$MANTA_HOME"
+NODE="$NODE"
+case "\${1:-}" in
+  pair) exec "\$NODE" "\$MANTA_HOME/scripts/manta-pair.mjs" ;;
+  ""|-h|--help|help)
+    echo "usage: manta pair   # mint a fresh pairing code"; exit 0 ;;
+  *) echo "manta: unknown command '\$1' (try: manta pair)" >&2; exit 1 ;;
+esac
+SHIM
+  chmod +x "$MANTA_SHIM"
+  ok "Installed \`manta\` CLI shim at $MANTA_SHIM (run: manta pair)."
+
   log "Minting pairing code…"
   # Capture the formatted pairing block; printed at the very end of main().
   PAIR_BLOCK="$("$NODE" "$MANTA_HOME/scripts/manta-pair.mjs" 2>/dev/null || true)"
@@ -987,7 +1011,8 @@ EOF
   cat <<EOF
 
 Re-run this installer any time to upgrade in place (your box identity is preserved).
-Run 'manta pair' (or 'node "$NODE" "$MANTA_HOME/scripts/manta-pair.mjs"') to mint a fresh pairing code.
+Run 'manta pair' to mint a fresh pairing code (if 'manta' isn't found, open a new
+shell so ~/.local/bin is on PATH, or run: "$NODE" "$MANTA_HOME/scripts/manta-pair.mjs").
 EOF
 
   # --- Final claude credentials check (warn — not die — per BET-153 step F).
