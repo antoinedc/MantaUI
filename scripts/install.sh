@@ -396,9 +396,22 @@ main() {
     mkdir -p "$OPENCODE_TOOLS_DIR"
     log "Copying manta-native opencode tools into $OPENCODE_TOOLS_DIR…"
     # cp -f overwrites — tools are versioned with the tarball, so a re-run
-    # naturally picks up upgrades.
-    cp -f "$OPENCODE_TOOLS_SRC"/*.ts "$OPENCODE_TOOLS_DIR/" \
-      || die "failed to copy opencode tools from $OPENCODE_TOOLS_SRC"
+    # naturally picks up upgrades. EXCLUDE *.test.ts: opencode loads EVERY file
+    # in tools/ as a tool, and a test file imports vitest (absent under
+    # ~/.config/opencode/node_modules), which makes tool resolution throw and
+    # every chat turn fail with "Cannot find package 'vitest'". Copy only real
+    # tool sources.
+    copied_any=0
+    for _tool in "$OPENCODE_TOOLS_SRC"/*.ts; do
+      case "$_tool" in
+        *.test.ts) continue ;;
+      esac
+      [ -e "$_tool" ] || continue
+      cp -f "$_tool" "$OPENCODE_TOOLS_DIR/" \
+        || die "failed to copy opencode tool $_tool"
+      copied_any=1
+    done
+    [ "$copied_any" = "1" ] || warn "no opencode tool .ts files found in $OPENCODE_TOOLS_SRC"
     ok "opencode tools copied."
   else
     warn "$OPENCODE_TOOLS_SRC not found in tarball — skipping tool copy (was docs/opencode-tools/* added to release/pack.mjs?)."
