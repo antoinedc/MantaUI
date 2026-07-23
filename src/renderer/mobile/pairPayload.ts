@@ -73,8 +73,18 @@ export function parsePairPayload(raw: string): PairPayload | null {
   const isDeferredPath = /^\/m(\/|$)/.test(url.pathname);
 
   if (isMantaScheme) {
-    // manta://pair — the host segment must be "pair" (URL puts it in .hostname).
-    if (url.hostname !== "pair") return null;
+    // manta://pair — the "pair" authority segment lands in DIFFERENT URL fields
+    // depending on the engine, because `manta:` is a NON-SPECIAL scheme:
+    //   • Node's URL           → url.hostname === "pair", pathname === ""
+    //   • Chromium (renderer)  → url.hostname === "",     pathname === "//pair"
+    // The parser originally checked only `url.hostname === "pair"`, which is
+    // true in Node (where the unit tests run) but FALSE in the packaged
+    // Electron renderer — so every real deep-link / pasted manta:// link was
+    // rejected in-app with "Couldn't read that pair link". Accept the segment
+    // from either field (BET-240 regression).
+    const host = url.hostname;
+    const pathSeg = url.pathname.replace(/^\/+/, ""); // "//pair" → "pair"
+    if (host !== "pair" && pathSeg !== "pair") return null;
   } else if (isHttps) {
     if (!isDeferredPath) return null;
   } else {

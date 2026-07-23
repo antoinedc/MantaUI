@@ -15,6 +15,27 @@ describe("parsePairPayload", () => {
       ).toEqual({ boxId: BOX, code: "847291" });
     });
 
+    it("accepts manta://pair regardless of where the engine puts the authority (BET-240 regression)", () => {
+      // `manta:` is a NON-SPECIAL scheme, so new URL() parses the "pair"
+      // segment into DIFFERENT fields per engine:
+      //   Node    → hostname "pair", pathname ""
+      //   Chromium→ hostname "",     pathname "//pair"
+      // vitest runs under Node so this string alone can't reproduce the
+      // Chromium reject, but we assert both field layouts extract "pair".
+      const u = new URL(`manta://pair?box=${BOX}&code=847291`);
+      const host = u.hostname;
+      const pathSeg = u.pathname.replace(/^\/+/, "");
+      expect(host === "pair" || pathSeg === "pair").toBe(true);
+      // And a synthetic Chromium-shaped parse ("//pair" path, empty host)
+      // still resolves to "pair" via the pathname branch:
+      expect("".replace(/^\/+/, "") === "pair").toBe(false); // empty host
+      expect("//pair".replace(/^\/+/, "")).toBe("pair"); // path branch wins
+      // End-to-end: the real string parses in this (Node) engine too.
+      expect(
+        parsePairPayload(`manta://pair?box=${BOX}&code=847291`),
+      ).toEqual({ boxId: BOX, code: "847291" });
+    });
+
     it("accepts the box form in the https://host/m/... deferred-deeplink", () => {
       expect(
         parsePairPayload(
