@@ -18,7 +18,29 @@
 // the request wasn't local). Keep the logic thin — all formatting lives in the
 // tested install-lib.mjs.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { resolveConfig, formatPairingOutput } from "./install-lib.mjs";
+
+// BET-267: the install writes `~/.manta/ingress.json` so `manta pair` (which
+// does NOT receive env vars from the install) can pick the right base URL for
+// the connect block. A missing file or unparseable JSON falls back to "public"
+// — the legacy default; the pair-page URL points at <boxId>.boxes.mantaui.com
+// and the manta:// deep-link is preserved. This is intentionally permissive
+// because the only thing the file controls is the printed URL; it never
+// affects what the server actually serves.
+function readIngressServerUrl(authDir) {
+  try {
+    const raw = readFileSync(join(authDir, "ingress.json"), "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed?.mode === "tailscale" && typeof parsed.serverUrl === "string" && parsed.serverUrl !== "") {
+      return parsed.serverUrl;
+    }
+  } catch {
+    // missing file / unparseable JSON — fall through to the public default.
+  }
+  return undefined;
+}
 
 async function main() {
   const cfg = resolveConfig();
@@ -70,6 +92,7 @@ async function main() {
       pairing_code: data?.pairing_code,
       box_id: data?.box_id,
       expiresAt: data?.expiresAt,
+      serverUrl: readIngressServerUrl(cfg.authDir),
     });
     process.stdout.write(block + "\n");
   } catch (e) {

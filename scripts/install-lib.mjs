@@ -435,6 +435,80 @@ export function mergeGatewayAuth(
 }
 
 // ---------------------------------------------------------------------------
+// Tailscale status parser — pure (BET-267).
+//
+// `tailscale status --json` returns a large JSON blob; the only fields we need
+// are `BackendState` (must be exactly "Running") and `Self.TailscaleIPs` (a
+// string array; we want the FIRST IPv4 — Tailscale's order is stable and IPv4
+// comes first on a typical box, but we don't rely on it: we filter).
+//
+// Returns `{ ip: string }` on success, `null` for any failure: invalid JSON,
+// BackendState != "Running", missing TailscaleIPs, or no IPv4 in the list. Raw
+// IP only — we deliberately do NOT return the MagicDNS name. Plain HTTP over
+// the WireGuard tunnel needs the raw IP (MagicDNS resolution requires the
+// `tailscale0` interface up on the requester).
+//
+// IPv4 regex is intentionally permissive (`\d{1,3}` per octet, not `0-255`) —
+// the caller doesn't need to validate octet ranges, just that the shape is
+// dotted-quad. A Tailscale-allocated IP is always a valid 100.64.0.0/10
+// address, so an over-permissive regex is harmless here.
+// ---------------------------------------------------------------------------
+const IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+export function parseTailscaleStatus(jsonText) {
+  if (typeof jsonText !== "string" || jsonText.trim() === "") return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  if (parsed.BackendState !== "Running") return null;
+  const ips = parsed?.Self?.TailscaleIPs;
+  if (!Array.isArray(ips)) return null;
+  for (const candidate of ips) {
+    if (typeof candidate === "string" && IPV4_RE.test(candidate)) {
+      return { ip: candidate };
+    }
+  }
+  return null;
+}
+
+// Build the ingress.json payload — pure helper. Validates that tailscale mode
+// carries both an IP and a port (the CLI subcommand below also enforces this,
+// but the pure form lets the test assert without spawning a subprocess).
+//
+// Returns { ok: true, text, changed } | { ok: false, error }.
+//   text is the rendered JSON (pretty-printed + trailing newline, matching the
+//   mergeGatewayAuth output shape so the on-disk style stays consistent).
+//   changed reflects whether the new JSON differs from the existing text (used
+//   to avoid needless atomic writes on a re-run with identical state).
+const INGRESS_MODES = new Set(["public", "tailscale"]);
+export function buildIngressJson(
+  existingText,
+  { mode, tailnetIp, port } = {},
+) {
+  if (!INGRESS_MODES.has(mode)) {
+    return { ok: false, error: `buildIngressJson: mode must be "public" or "tailscale" (got ${JSON.stringify(mode)})` };
+  }
+  let next;
+  if (mode === "tailscale") {
+    if (typeof tailnetIp !== "string" || !IPV4_RE.test(tailnetIp)) {
+      return { ok: false, error: "buildIngressJson: tailscale mode requires tailnetIp (IPv4)" };
+    }
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      return { ok: false, error: "buildIngressJson: tailscale mode requires port (1-65535)" };
+    }
+    next = { mode: "tailscale", tailnetIp, serverUrl: `http://${tailnetIp}:${port}` };
+  } else {
+    next = { mode: "public" };
+  }
+  const text = JSON.stringify(next, null, 2) + "\n";
+  const changed = text !== (typeof existingText === "string" ? existingText : "");
+  return { ok: true, text, changed };
+}
+
+// ---------------------------------------------------------------------------
 // DNS-resolution poller — pure, used by install.sh after gateway registration
 // (BET-205 WP5). Once the box has registered with the gateway, OVH needs a
 // few seconds to publish the new A record (<box_id>.boxes.mantaui.com). We
@@ -726,16 +800,33 @@ export function formatPairingOutput(
     lines.push(`       ${DESKTOP_DMG_URL}`);
     lines.push("");
     lines.push("  2. Pair it — click this link, or paste it into the app's Connect screen");
-    const pairLink = buildPairLink(box_id, pairing_code);
-    lines.push(`       Pair page:     ${buildPairPageUrl(box_id, pairing_code)}`);
-    lines.push(`       ${pairLink}`);
+    // BET-267: when a non-public serverUrl is provided (tailscale path), the
+    // pair-page URL and the QR must point at THAT base. We also drop the
+    // `manta://pair?…` deep-link line: the resolver on the mobile/desktop side
+    // routes that link through `boxDirectUrl` → `https://<boxId>.boxes.mantaui.com`,
+    // which is unreachable on the tailscale path. The pair-page URL is the
+    // single source of truth for the connect block in tailscale mode.
+    const useServerUrl = typeof serverUrl === "string" && serverUrl !== "";
+    const pairPageUrl = buildPairPageUrl(box_id, pairing_code, {
+      baseUrl: useServerUrl ? serverUrl : undefined,
+    });
+    lines.push(`       Pair page:     ${pairPageUrl}`);
+    if (!useServerUrl) {
+      // Public path keeps the manta:// deep link for one-tap mobile pairing.
+      const pairLink = buildPairLink(box_id, pairing_code);
+      lines.push(`       ${pairLink}`);
+    }
     lines.push("");
     lines.push("  3. iPhone (optional) — scan the QR below with your camera");
     lines.push(`       App download: ${IOS_APP_URL}  (App Store link coming soon)`);
     lines.push("");
+    // QR encodes the pair-page URL when a serverUrl is in play (the QR has to
+    // open a URL the scanning device can actually reach), the manta:// link
+    // otherwise (preserves the old wire shape for the public install).
+    const qrPayload = useServerUrl ? pairPageUrl : buildPairLink(box_id, pairing_code);
     let qr;
     try {
-      qr = qrRender(pairLink);
+      qr = qrRender(qrPayload);
     } catch {
       // qrcode-terminal missing / broken (e.g. a dev's stripped node_modules) —
       // degrade to text-only rather than crash the install. The QR is a
@@ -815,13 +906,24 @@ export function buildPairLink(boxId, code) {
  * Pair-page URL — the ONE link a fresh install reports. Fragment carries the
  * code so it never reaches server logs; the page derives the box id from its
  * own hostname. Shares buildPairLink's validation rules.
+ *
+ * `options.baseUrl` (BET-267): when the box is reached over a non-public
+ * ingress (currently Tailscale), the pair-page URL must use THAT base, not the
+ * canonical `<boxId>.boxes.mantaui.com`. The fragment (#code=) is preserved
+ * so the page still gets the code from the URL fragment and the box id from
+ * the host header. The boxId regex check is skipped in that mode — the page
+ * derives the box id from the request's host header, not from the URL path.
  */
-export function buildPairPageUrl(boxId, code) {
+export function buildPairPageUrl(boxId, code, { baseUrl } = {}) {
   if (!/^[0-9a-f]{32}$/.test(boxId ?? "")) {
     throw new Error("buildPairPageUrl: boxId must be a 32-hex token");
   }
   if (!/^[0-9]{6}$/.test(code ?? "")) {
     throw new Error("buildPairPageUrl: code must be 6 digits");
+  }
+  if (typeof baseUrl === "string" && baseUrl !== "") {
+    const trimmed = baseUrl.replace(/\/+$/, "");
+    return `${trimmed}/pair#code=${code}`;
   }
   return `https://${boxId}.boxes.mantaui.com/pair#code=${code}`;
 }
@@ -1092,9 +1194,97 @@ async function cliMain(argv) {
     process.stdout.write(JSON.stringify(status) + "\n");
     return 0;
   }
+  if (cmd === "parse-tailscale-status") {
+    // node install-lib.mjs parse-tailscale-status
+    // Reads ALL of stdin (the JSON output of `tailscale status --json`), and
+    // on success prints the chosen Tailscale IPv4 to stdout (no trailing
+    // newline — install.sh's `$()` capture strips them anyway, and a stray
+    // newline would leak into the systemd unit). On any failure exits 1
+    // silently so install.sh's `||` short-circuits the tailscale path.
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    const raw = Buffer.concat(chunks).toString("utf-8");
+    const res = parseTailscaleStatus(raw);
+    if (res === null) {
+      return 1;
+    }
+    process.stdout.write(res.ip);
+    return 0;
+  }
+  if (cmd === "write-ingress") {
+    // node install-lib.mjs write-ingress --file <path> --mode <public|tailscale>
+    //                                 [--tailnet-ip <ip>] [--port <N>]
+    // Persists the install's ingress decision to <file> (default:
+    // ~/.manta/ingress.json) atomically (write <path>.tmp then rename + 0600).
+    // `tailscale` mode REQUIRES --tailnet-ip AND --port — they're used to
+    // derive the serverUrl the device side connects to. On a no-op rewrite
+    // (existing file already matches) we still go through the atomic write
+    // path so permissions are normalised, but `changed=0` is reported so
+    // callers can log if they care.
+    const filePath = flags.file;
+    const mode = flags.mode;
+    if (!filePath) {
+      process.stderr.write("write-ingress: --file <path> required\n");
+      return 2;
+    }
+    if (mode !== "public" && mode !== "tailscale") {
+      process.stderr.write(`write-ingress: --mode must be "public" or "tailscale" (got ${JSON.stringify(mode ?? "")})\n`);
+      return 2;
+    }
+    let tailnetIp;
+    let port;
+    if (mode === "tailscale") {
+      tailnetIp = flags["tailnet-ip"];
+      if (!tailnetIp) {
+        process.stderr.write("write-ingress: tailscale mode requires --tailnet-ip <ip>\n");
+        return 2;
+      }
+      const portStr = flags.port;
+      const portNum = portStr ? Number(portStr) : NaN;
+      if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) {
+        process.stderr.write("write-ingress: tailscale mode requires --port <N> (1-65535)\n");
+        return 2;
+      }
+      port = portNum;
+    }
+    const { existsSync: existsSyncLocal, readFileSync: readFileSyncLocal, mkdirSync, writeFileSync, renameSync, chmodSync } = await import("node:fs");
+    const { dirname: dirnameLocal } = await import("node:path");
+    let existing = "";
+    if (existsSyncLocal(filePath)) {
+      try {
+        existing = readFileSyncLocal(filePath, "utf-8");
+      } catch (e) {
+        process.stderr.write(`write-ingress: read failed: ${e?.message ?? e}\n`);
+        return 1;
+      }
+    }
+    const res = buildIngressJson(existing, { mode, tailnetIp, port });
+    if (!res.ok) {
+      process.stderr.write(`write-ingress: ${res.error}\n`);
+      return 1;
+    }
+    try {
+      mkdirSync(dirnameLocal(filePath), { recursive: true });
+      writeFileSync(`${filePath}.tmp`, res.text);
+      renameSync(`${filePath}.tmp`, filePath);
+      // 0600 — same shape as auth.json; the file's only "secret" is the IP
+      // (not strictly sensitive), but matching the auth.json convention keeps
+      // a single chmod policy for everything in ~/.manta/.
+      try {
+        chmodSync(filePath, 0o600);
+      } catch {
+        // chmod can fail on weird fs (e.g. FAT mounts); ignore.
+      }
+    } catch (e) {
+      process.stderr.write(`write-ingress: write failed: ${e?.message ?? e}\n`);
+      return 1;
+    }
+    process.stderr.write(`changed=${res.changed ? "1" : "0"}\n`);
+    return 0;
+  }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-gateway|wait-for-dns|render-caddy-vhost|detect-distro|render-systemd-unit> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--placeholder K=V]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-gateway|wait-for-dns|render-caddy-vhost|detect-distro|render-systemd-unit|parse-tailscale-status|write-ingress> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--tailnet-ip IP] [--placeholder K=V]\n",
   );
   return 2;
 }
@@ -1118,6 +1308,7 @@ function parseFlags(args) {
     "port",
     "mode",
     "os-release",
+    "tailnet-ip",
   ]);
   for (let i = 0; i < args.length; i++) {
     const tok = args[i];
