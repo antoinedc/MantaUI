@@ -390,6 +390,44 @@ body,
   color: #FF7A88;
 }
 
+/* Key bar docked above the on-screen keyboard (chat mode, BET-259). On
+   hosts that resize the WebView on keyboard open (Capacitor), normal flow
+   at the bottom of the .mobile-screen flex column lands the bar flush on
+   top of the keyboard with no positioning work. On iOS Safari (PWA), the
+   keyboard overlays the layout viewport, so the bar applies a translateY
+   equal to the visual-viewport keyboard inset (see KeyboardBar.tsx). The
+   safe-area padding only matters in the keyboard-closed running state —
+   when the keyboard is open the OS gesture bar is behind it. */
+.mobile-kbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+  background: #10162B;
+  border-top: 1px solid #253055;
+  position: relative;
+  z-index: 40;
+  flex: none;
+}
+.mobile-kbar-key {
+  min-width: 44px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #171F3A;
+  border: 1px solid #33406B;
+  border-radius: 7px;
+  color: #F8FAFC;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.mobile-kbar-key:active { background: #1E2747; }
+.mobile-kbar-key--wide { min-width: 52px; }
+.mobile-kbar-key--danger { color: #F0505F; }
+.mobile-kbar-spacer { flex: 1; }
+
 /* Spinner rotation for ConnectingScreen. A @keyframes is global (not a
    selector) so it's exempt from the "no unscoped selector" rule above — the
    ring elements it animates are inside the .mobile tree. */

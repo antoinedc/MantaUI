@@ -176,6 +176,57 @@ describe("ChatPanel session resources", () => {
     expect((api?.calls?.secretsList?.length ?? 0) >= 0).toBe(true);
     expect(h.container.querySelector("input[type=password]")).not.toBeNull();
   });
+
+  // Mobile keyboard bar → /clear (BET-259). The KeyboardBar's `clear` key
+  // already showed the user a confirm; this bridge hands control to the
+  // existing /clear builtin so optimistic-message cleanup and model-override
+  // carry-over to the new session behave exactly like a typed `/clear`.
+  it("runs /clear when the manta-run-clear bridge fires for this session", async () => {
+    ({ api } = installMockApi());
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("manta-run-clear", { detail: { sessionId: "ses_test" } }),
+      );
+    });
+    await h.flush();
+
+    // The bridge set input to "/clear" and submitted via submitRef; the
+    // submit hits the /clear builtin path which calls opencodeClearSession
+    // with the owning tmux window. The mock auto-records every call.
+    expect(api.calls.opencodeClearSession ?? []).toEqual([
+      [
+        {
+          sessionName: "proj",
+          windowIndex: 1,
+          cwd: "/home/dev/projects/x",
+          title: "proj / cleared",
+        },
+      ],
+    ]);
+  });
+
+  it("ignores a manta-run-clear bridge for another session id", async () => {
+    ({ api } = installMockApi());
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("manta-run-clear", { detail: { sessionId: "ses_OTHER" } }),
+      );
+    });
+    await h.flush();
+
+    // A bridge for a different session must NOT trigger a clear in THIS
+    // panel. Without the gate, the spec's "must reuse /clear builtin" rule
+    // would silently wipe the wrong session.
+    expect(api.calls.opencodeClearSession ?? []).toEqual([]);
+  });
 });
 
 // ===== Transcript rendering (via the mounted ChatPanel) =====
