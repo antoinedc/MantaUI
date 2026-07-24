@@ -6,16 +6,22 @@
 # What it does (in order; each step idempotent and runs unconditionally unless
 # its artifact is missing — desktop is a separately-shippable leg, not a failure):
 #   1. preflight   refuse if git tree is dirty, if v<version> tag already
-#                  exists, or if dist/manta-<version>-linux-x64.tar.gz OR
-#                  dist/manta-<version>.txt (the manifest) is absent.
-#                  (Run `npm run pack` first.)
-#   2. tarball     scp dist/manta-<version>-linux-x64.tar.gz + the manifest
-#                  to <host>:/var/www/mantaui/releases/. THEN (strictly last)
+#                  exists, or if EITHER per-arch tarball (linux-x64 +
+#                  linux-arm64) OR its per-arch manifest sidecar is absent.
+#                  publish.sh is the manual FULL release path — it requires
+#                  BOTH arches. To build + publish only one arch locally, run
+#                  the server-tarball-deploy.yml workflow (which builds + ships
+#                  both via matrix on a tag). Or to ship both from this box,
+#                  run pack.mjs --arch x64 AND --arch arm64 first.
+#   2. tarballs    merge the two per-arch sidecars into the combined manifest
+#                  (scripts/release/merge-manifest.mjs), then scp BOTH
+#                  tarballs + the combined manifest to
+#                  <host>:/var/www/mantaui/releases/. THEN (strictly last)
 #                  ssh to copy manta-<version>.txt → manta-latest.txt — this
 #                  ordering is the atomicity guarantee: a client either sees
-#                  the OLD manifest (and old tarball) or the NEW manifest
-#                  (with new tarball already uploaded). Drift between the two
-#                  is impossible.
+#                  the OLD manifest (and old tarballs) or the NEW manifest
+#                  (with new tarballs already uploaded). Drift between the
+#                  manifest and either tarball is impossible.
 #   3. desktop     if dist/desktop/ has binaries: scp them + the latest-*.yml
 #                  feeds to <host>:/var/www/mantaui/updates/ and the binaries
 #                  to /var/www/mantaui/downloads/, then refresh
@@ -30,12 +36,14 @@
 #                  the repo checkout, but Caddy serves install.sh statically
 #                  from the web root, so without this copy the advertised
 #                  one-liner keeps serving the stale installer (BET-171).
-#   5. verify      HEAD each published URL — tarball 200, manifest live with
-#                  matching version + tarball sha, install.sh 200, install.sh
-#                  body byte-matches the repo. Fail loudly on any non-200,
-#                  manifest drift, or install.sh drift. This makes the
-#                  script/tarball/manifest drift (the F4 class from BET-171)
-#                  fail the publish loudly.
+#   5. verify      HEAD each published tarball URL (both arches) → 200, fetch
+#                  served manta-latest.txt and assert version match, then for
+#                  each arch download the referenced tarball and assert its
+#                  sha256 equals the manifest's sha256_<archkey>. Plus the
+#                  install.sh / llms-install.md byte-match loop (arch-
+#                  independent). Fail loudly on any non-200, manifest drift,
+#                  or install.sh drift. This makes the script/tarball/manifest
+#                  drift (the F4 class from BET-171) fail the publish loudly.
 #   6. tag         git tag v<version> && git push origin v<version> (a tag
 #                  means "published and verified").
 #
@@ -59,13 +67,22 @@ PROD_HOST="${MANTA_PROD_HOST:-root@91.107.196.2}"
 SITE="${MANTA_SITE:-https://mantaui.com}"
 
 VERSION="$(node -p 'require("./package.json").version')"
-TARBALL="dist/manta-${VERSION}-linux-x64.tar.gz"
-MANIFEST="dist/manta-${VERSION}.txt"
+# Filename form (matches tarball basename + nodejs.org convention):
+#   linux-x64 → ARCH_KEY linux_x64, linux-arm64 → linux_arm64.
+# Single source of truth — adding an arch is one line here + one entry in
+# pack.mjs's resolveArch / install.sh's resolve_arch. No copy-pasted per-arch
+# blocks downstream.
+ARCHES=(linux-x64 linux-arm64)
+COMBINED_MANIFEST="dist/manta-${VERSION}.txt"
 DESKTOP_DIR="dist/desktop"
 WEBROOT_DIR="/var/www/mantaui"
 RELEASES_DIR="${WEBROOT_DIR}/releases"
 UPDATES_DIR="${WEBROOT_DIR}/updates"
 DOWNLOADS_DIR="${WEBROOT_DIR}/downloads"
+
+# Derive the underscore manifest-key form from the hyphen filename form
+# (`linux-x64` → `linux_x64`). Used for file_<key>= / sha256_<key>= lookups.
+arch_key() { printf '%s' "$1" | tr '-' '_'; }
 
 log()  { printf '\033[36m▸\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
@@ -83,28 +100,50 @@ if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
   die "tag v${VERSION} already exists — a tag means 'published and verified'. To re-publish the same version (idempotent), delete the tag first: git tag -d v${VERSION} && git push origin :v${VERSION}"
 fi
 
-if [ ! -f "${TARBALL}" ]; then
-  die "${TARBALL} missing — run \`npm run pack\` first"
+if [ ! -f "${COMBINED_MANIFEST}" ] && [ ! -f "dist/manta-${VERSION}-linux-x64.txt" ]; then
+  die "no manifest artifacts in dist/ — run pack.mjs for both arches first (x64 + arm64)"
 fi
 
-if [ ! -f "${MANIFEST}" ]; then
-  die "${MANIFEST} missing — run \`npm run pack\` first (the tarball's manifest sidecar)"
+# Publish.sh is the full manual release path — require both arches so the
+# published manifest always lists every arch we ship. A laptop with only x64
+# built should push a `server-v*` tag instead (server-tarball-deploy.yml builds
+# both via matrix on a tag).
+missing_arch=""
+for arch in "${ARCHES[@]}"; do
+  if [ ! -f "dist/manta-${VERSION}-${arch}.tar.gz" ] || [ ! -f "dist/manta-${VERSION}-${arch}.txt" ]; then
+    missing_arch="${arch}"
+    break
+  fi
+done
+if [ -n "${missing_arch}" ]; then
+  die "${missing_arch} tarball or per-arch manifest missing from dist/ — publish.sh requires BOTH arches
+    Run \`node scripts/release/pack.mjs --arch ${missing_arch%%-*}\` to build the missing arch locally,
+    OR push a server-v* tag so server-tarball-deploy.yml builds both via matrix."
 fi
 
 ok "preflight ok"
 
-# --- 2. tarball + manifest (atomicity: tarball first, manifest pointer last) -
-log "Uploading ${TARBALL} → ${PROD_HOST}:${RELEASES_DIR}/…"
-scp "${TARBALL}" "${PROD_HOST}:${RELEASES_DIR}/"
-log "Uploading ${MANIFEST} → ${PROD_HOST}:${RELEASES_DIR}/…"
-scp "${MANIFEST}" "${PROD_HOST}:${RELEASES_DIR}/"
+# --- 2. tarballs + combined manifest (atomicity: tarballs first, pointer last) -
+log "Merging per-arch manifests → ${COMBINED_MANIFEST}…"
+node scripts/release/merge-manifest.mjs \
+  "dist/manta-${VERSION}-linux-x64.txt" \
+  "dist/manta-${VERSION}-linux-arm64.txt" \
+  --out "${COMBINED_MANIFEST}"
+ok "combined manifest written"
+
+for arch in "${ARCHES[@]}"; do
+  log "Uploading dist/manta-${VERSION}-${arch}.tar.gz → ${PROD_HOST}:${RELEASES_DIR}/…"
+  scp "dist/manta-${VERSION}-${arch}.tar.gz" "${PROD_HOST}:${RELEASES_DIR}/"
+done
+log "Uploading ${COMBINED_MANIFEST} → ${PROD_HOST}:${RELEASES_DIR}/…"
+scp "${COMBINED_MANIFEST}" "${PROD_HOST}:${RELEASES_DIR}/"
 
 # The latest-pointer copy goes LAST. Clients either see the old manifest (the
-# old tarball is still served too) OR the new manifest (and the new tarball is
-# already up). Drift between manifest and tarball is impossible.
+# old tarballs are still served too) OR the new manifest (and the new tarballs
+# are already up). Drift between manifest and any arch's tarball is impossible.
 log "Publishing manifest pointer ${PROD_HOST}:${RELEASES_DIR}/manta-latest.txt…"
 ssh "${PROD_HOST}" "cd ${RELEASES_DIR} && cp -f manta-${VERSION}.txt manta-latest.txt"
-ok "tarball + manifest published"
+ok "tarballs + manifest published"
 
 # --- 3. desktop (optional leg) ----------------------------------------------
 shopt -s nullglob
@@ -183,32 +222,40 @@ check_200() {
   ok "${url} → 200"
 }
 
-check_200 "${SITE}/releases/manta-${VERSION}-linux-x64.tar.gz"
+for arch in "${ARCHES[@]}"; do
+  check_200 "${SITE}/releases/manta-${VERSION}-${arch}.tar.gz"
+done
 for pair in "${WEBROOT_DOCS[@]}"; do
   check_200 "${SITE}/${pair##*:}"
 done
 
-# Manifest + tarball drift check (BET-171 F4 class). The publish script just
-# pushed both files; we re-fetch the manifest over HTTPS and assert that the
-# served tarball's sha256 matches the manifest's sha256_linux_x64 line. A
-# failure here means we shipped a tarball + manifest that disagree — clients
-# would download the tarball, sha256-fail it, and die. Catch that HERE.
-log "Verifying manifest ↔ tarball drift…"
+# Manifest + tarball drift check (BET-171 F4 class), generalized to BOTH
+# arches via the same loop. The publish script just pushed both tarballs and
+# the combined manifest; we re-fetch the served manifest over HTTPS and for
+# each arch download the referenced tarball + assert its sha256 matches the
+# manifest's sha256_<archkey> line. A failure here means we shipped a
+# tarball + manifest that disagree — clients would download the tarball,
+# sha256-fail it, and die. Catch that HERE.
+log "Verifying manifest ↔ tarball drift (both arches)…"
 SERVED_MANIFEST="$(curl -fsSL "${SITE}/releases/manta-latest.txt")"
 SERVED_VERSION="$(printf '%s\n' "$SERVED_MANIFEST" | grep '^version=' | head -n1 | cut -d= -f2-)"
 if [ "$SERVED_VERSION" != "$VERSION" ]; then
   die "manifest not live: served version='${SERVED_VERSION}' expected='${VERSION}'"
 fi
-SERVED_FILE="$(printf '%s\n' "$SERVED_MANIFEST" | grep '^file_linux_x64=' | head -n1 | cut -d= -f2-)"
-SERVED_SHA="$(printf '%s\n' "$SERVED_MANIFEST" | grep '^sha256_linux_x64=' | head -n1 | cut -d= -f2-)"
-if [ -z "$SERVED_FILE" ] || [ -z "$SERVED_SHA" ]; then
-  die "served manifest is malformed (missing file_linux_x64 or sha256_linux_x64)"
-fi
-ACTUAL_SHA="$(curl -fsSL "${SITE}/releases/${SERVED_FILE}" | sha256sum | awk '{print $1}')"
-if [ "$ACTUAL_SHA" != "$SERVED_SHA" ]; then
-  die "tarball/manifest drift: served sha=${SERVED_SHA} actual=${ACTUAL_SHA} for ${SERVED_FILE}"
-fi
-ok "served manifest live (version=${VERSION}, sha=${ACTUAL_SHA})"
+for arch in "${ARCHES[@]}"; do
+  key="$(arch_key "${arch}")"
+  SERVED_FILE="$(printf '%s\n' "$SERVED_MANIFEST" | grep "^file_${key}=" | head -n1 | cut -d= -f2-)"
+  SERVED_SHA="$(printf '%s\n' "$SERVED_MANIFEST" | grep "^sha256_${key}=" | head -n1 | cut -d= -f2-)"
+  if [ -z "$SERVED_FILE" ] || [ -z "$SERVED_SHA" ]; then
+    die "served manifest is malformed (missing file_${key} or sha256_${key})"
+  fi
+  ACTUAL_SHA="$(curl -fsSL "${SITE}/releases/${SERVED_FILE}" | sha256sum | awk '{print $1}')"
+  if [ "$ACTUAL_SHA" != "$SERVED_SHA" ]; then
+    die "tarball/manifest drift (${arch}): served sha=${SERVED_SHA} actual=${ACTUAL_SHA} for ${SERVED_FILE}"
+  fi
+  ok "${arch} (${SERVED_FILE}) sha256 matches manifest"
+done
+ok "served manifest live (version=${VERSION}, both arches verified)"
 
 # A 200 is not enough — a stale file also 200s (BET-171). Verify each
 # web-root doc byte-matches the repo so we know the deploy actually took.

@@ -1,0 +1,226 @@
+# Server tarball deploy — build BOTH arch tarballs (x64 + arm64) and publish
+# them + a combined two-arch manifest on a `server-v*` git tag.
+#
+# WHY THIS EXISTS
+# ---------------
+# The Linux box server tarball is the artifact install.sh downloads. Until
+# BET-263 it was x64-only (the tarball filename encoded the arch; the manifest
+# only carried the x64 sha). Stage 1 (BET-263) made the build/install scripts
+# arch-parameterized. This workflow is the matching CI side: builds the arm64
+# tarball natively (no QEMU, no cross-compile — node-pty's native binding
+# cannot be cross-compiled), then publishes BOTH tarballs + the combined
+# manifest in a single deploy.
+#
+# WHAT IT DEPLOYS
+#   dist/manta-<v>-linux-x64.tar.gz    → <PROD_HOST>:/var/www/mantaui/releases/
+#   dist/manta-<v>-linux-arm64.tar.gz  → <PROD_HOST>:/var/www/mantaui/releases/
+#   dist/manta-<v>.txt                 → <PROD_HOST>:/var/www/mantaui/releases/
+#   (then cp manta-<v>.txt → manta-latest.txt, last — atomicity guarantee)
+#
+# BUILD HOST CHOICE
+#   GitHub-hosted ubuntu-latest (x64) + ubuntu-24.04-arm (arm64) runners, one
+#   pack.mjs invocation per arch. node-pty's prebuilt .node binding compiles
+#   natively for its runner's ABI — no QEMU, no cross-compile (BET-262 design
+#   constraint). Both runners are GitHub-hosted, so no self-hosted runner
+#   capacity is burned on the slow arm64 build.
+#
+# PUBLISH HOST + AUTH
+#   Self-hosted runner (same as website-deploy.yml + gateway-deploy.yml) —
+#   reaches prod over SSH with the deploy key at ~/.manta-deploy/prod_key. No
+#   GitHub secret needed. Reuses website-deploy.yml's scp/ssh invocation
+#   verbatim.
+#
+# ATOMICITY
+#   tarballs + versioned manifest are uploaded FIRST; manta-latest.txt is the
+#   pointer that install.sh fetches by default, and it is copied LAST. A client
+#   therefore either sees the OLD latest.txt (and the OLD tarballs are still
+#   served) OR the NEW latest.txt (and the NEW tarballs are already uploaded).
+#   Drift between manifest and tarballs is impossible. (Same rule publish.sh
+#   documents — generalized to both arches via a loop.)
+#
+# VERIFY
+#   After publish, fail red on:
+#     - any tarball URL returning non-200
+#     - served manta-latest.txt's version != the version we just published
+#     - any arch's served tarball sha256 != the manifest's sha256_<archkey>
+#   This is the two-arch generalization of publish.sh's existing drift check.
+#
+# TRIGGER: push a tag matching server-v* (e.g. server-v1). Also runnable
+#   manually via workflow_dispatch (deploys current main).
+
+name: Server tarball deploy
+
+on:
+  push:
+    tags:
+      - "server-v*"
+  workflow_dispatch:
+
+# Serialize: two quick tags must not race two deploys that overwrite each
+# other's manifests / tarballs. Same group shape as build-mobile-bundle.yml +
+# gateway-deploy.yml.
+concurrency:
+  group: server-tarball-deploy
+  cancel-in-progress: false
+
+env:
+  PROD_HOST: root@91.107.196.2
+  SSH_KEY: /home/dev/.manta-deploy/prod_key
+  RELEASES_DIR: /var/www/mantaui/releases
+  SITE: https://mantaui.com
+
+jobs:
+  build:
+    name: pack (${{ matrix.arch }})
+    # One job per arch — node-pty's native binding cannot be cross-compiled,
+    # so each arch needs its own runner's ABI.
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # System node only RUNS pack.mjs; pack downloads its own vendored node
+      # internally. We just need a recent enough node for the script.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # devDeps are needed by pack.mjs's `npm run build:mobile` step (vite
+      # builds the mobile/www bundle that gets embedded in the tarball).
+      - run: npm ci
+
+      - name: pack ${{ matrix.arch }}
+        run: node scripts/release/pack.mjs --arch ${{ matrix.arch }}
+
+      - name: Upload tarball + manifest artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-tarball-${{ matrix.arch }}
+          path: |
+            dist/manta-*-linux-${{ matrix.arch }}.tar.gz
+            dist/manta-*-linux-${{ matrix.arch }}.txt
+          if-no-files-found: error
+
+  publish:
+    name: publish + verify
+    needs: build
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Resolve VERSION once (from package.json) so the steps below can
+      # reference it via ${{ steps.vars.outputs.version }} instead of
+      # duplicating `node -p` in each one.
+      - id: vars
+        name: Resolve version
+        run: echo "version=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_OUTPUT"
+
+      # Pull both per-arch artifacts into one dist/ — merge-manifest reads
+      # from the same dir it expects (matches publish.sh's layout).
+      - name: Download per-arch artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: server-tarball-*
+          path: dist
+          merge-multiple: true
+
+      - name: Merge per-arch manifests into the combined manifest
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/release/merge-manifest.mjs \
+            "dist/manta-${VERSION}-linux-x64.txt" \
+            "dist/manta-${VERSION}-linux-arm64.txt" \
+            --out "dist/manta-${VERSION}.txt"
+          echo "✓ combined manifest: dist/manta-${VERSION}.txt"
+
+      # Same scp/ssh plumbing as website-deploy.yml — no new secrets, no new
+      # key path. tarballs + versioned manifest first; manta-latest.txt pointer
+      # LAST so a client either sees old (and old tarballs) or new (and new
+      # tarballs are already uploaded) — drift is impossible.
+      - name: Upload tarballs + combined manifest to prod
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+          SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+          SCP="scp -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+          for arch in linux-x64 linux-arm64; do
+            tarball="dist/manta-${VERSION}-${arch}.tar.gz"
+            echo "▸ Uploading ${tarball}"
+            $SCP "$tarball" "$PROD_HOST:$RELEASES_DIR/"
+          done
+          manifest="dist/manta-${VERSION}.txt"
+          echo "▸ Uploading ${manifest}"
+          $SCP "$manifest" "$PROD_HOST:$RELEASES_DIR/"
+
+          echo "▸ Publishing manta-latest.txt pointer (LAST — atomicity)"
+          $SSH "$PROD_HOST" "cd $RELEASES_DIR && cp -f manta-${VERSION}.txt manta-latest.txt"
+
+      - name: Verify deploy (both arches)
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+          fail=0
+
+          echo "▸ HEAD each tarball URL → 200"
+          for arch in linux-x64 linux-arm64; do
+            url="$SITE/releases/manta-${VERSION}-${arch}.tar.gz"
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || echo 000)
+            if [ "$code" != "200" ]; then
+              echo "::error::${url} → ${code} (expected 200)"
+              fail=1
+            else
+              echo "✓ ${url} → 200"
+            fi
+          done
+
+          echo "▸ Fetch served manta-latest.txt and assert version"
+          served=$(curl -fsSL "$SITE/releases/manta-latest.txt")
+          served_version=$(printf '%s\n' "$served" | grep '^version=' | head -n1 | cut -d= -f2-)
+          if [ "$served_version" != "$VERSION" ]; then
+            echo "::error::served version='${served_version}' expected='${VERSION}'"
+            exit 1
+          fi
+          echo "✓ served version=${served_version}"
+
+          echo "▸ For each arch: download served tarball, assert sha256 against the manifest"
+          for arch in linux-x64 linux-arm64; do
+            arch_key=$(printf '%s' "$arch" | tr '-' '_')
+            served_file=$(printf '%s\n' "$served" | grep "^file_${arch_key}=" | head -n1 | cut -d= -f2-)
+            served_sha=$(printf '%s\n' "$served"  | grep "^sha256_${arch_key}=" | head -n1 | cut -d= -f2-)
+            if [ -z "$served_file" ] || [ -z "$served_sha" ]; then
+              echo "::error::served manifest is missing file_${arch_key} or sha256_${arch_key}"
+              fail=1
+              continue
+            fi
+            actual_sha=$(curl -fsSL "$SITE/releases/${served_file}" | sha256sum | cut -d' ' -f1)
+            if [ "$actual_sha" != "$served_sha" ]; then
+              echo "::error::${arch}: tarball/manifest drift — served sha=${served_sha} actual=${actual_sha}"
+              fail=1
+            else
+              echo "✓ ${arch} (${served_file}) sha256 matches manifest"
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more verifications failed."
+            exit 1
+          fi
+          echo "All verifications passed (x64 + arm64, both sha256s match the served manifest)."
