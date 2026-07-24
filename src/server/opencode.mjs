@@ -1459,21 +1459,15 @@ export function subscribeEvents(onEvent, opts = {}) {
   // getSessionDirectoryQuery → ensureStreamForDirectory). This is the fix for
   // the connection flood: on a many-workspace box, eagerly streaming every
   // session in listSessions() opened hundreds of connections to opencode.
+  //
+  // Eager-open runs FIRST (synchronously inside the IIFE) so it never blocks
+  // behind listSessions — a slow / hung opencode on the bootstrap fetch
+  // would otherwise defer the scoped streams and the first turn on a live
+  // chat window would race an unopened subscription (BET-256 follow-up —
+  // test `subscribeEvents eagerly opens scoped streams for supplied
+  // eagerDirectories at startup` was flaky under CI load when listSessions
+  // blocked the IIFE).
   (async () => {
-    try {
-      const sessions = await listSessions();
-      for (const s of sessions || []) {
-        if (s?.id && typeof s?.directory === "string") {
-          cacheSessionDirectoryQuiet(s.id, s.directory);
-        }
-      }
-    } catch { /* non-fatal: bootstrap is best-effort */ }
-
-    // Eagerly open scoped streams for live chat-session directories so the
-    // first turn on a fresh box streams immediately. De-duped; skips empties.
-    // openFor is idempotent, so this is safe even if a dir was already opened
-    // lazily. Only the eagerDirectories() set is pre-opened — the full catalog
-    // stays quietly cached above (the many-workspace flood fix).
     try {
       const dirs = eagerDirectories();
       const seen = new Set();
@@ -1484,6 +1478,15 @@ export function subscribeEvents(onEvent, opts = {}) {
         openFor(dir, dir);
       }
     } catch { /* non-fatal: eager-open is best-effort */ }
+
+    try {
+      const sessions = await listSessions();
+      for (const s of sessions || []) {
+        if (s?.id && typeof s?.directory === "string") {
+          cacheSessionDirectoryQuiet(s.id, s.directory);
+        }
+      }
+    } catch { /* non-fatal: bootstrap is best-effort */ }
   })();
 
   // Periodic eviction sweep. unref() so it never keeps the process alive on its
