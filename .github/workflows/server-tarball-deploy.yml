@@ -126,7 +126,18 @@ jobs:
       # duplicating `node -p` in each one.
       - id: vars
         name: Resolve version
-        run: echo "version=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_OUTPUT"
+        # NOTE: do NOT backslash-escape the inner quotes of the node script.
+        # `node -p 'require(\"./package.json\").version'` makes node evaluate a
+        # literal backslash-quote, which is a syntax error → stdout is empty →
+        # VERSION="" → every downstream path becomes `manta--linux-*` and the
+        # merge/upload/verify steps fail (server-v1's first-run failure). Read
+        # package.json without any inner double quotes instead.
+        run: |
+          set -euo pipefail
+          version=$(node -e 'process.stdout.write(require("./package.json").version)')
+          test -n "$version" || { echo "::error::empty version from package.json"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "resolved version=$version"
 
       # Pull both per-arch artifacts into one dist/ — merge-manifest reads
       # from the same dir it expects (matches publish.sh's layout).
