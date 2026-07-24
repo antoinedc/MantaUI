@@ -508,6 +508,46 @@ main() {
   # ---------------------------------------------------------------------------
   # 7. manta-server systemd --user unit: substitute placeholders and enable.
   # ---------------------------------------------------------------------------
+
+  # --- Ingress mode (BET-267) ----------------------------------------------
+  # Resolved BEFORE step 7 so the systemd unit template can be rendered
+  # with the correct MANTA_TAILNET_HOST value (empty on public path, the
+  # Tailscale IPv4 on the tailnet path). The decision is persisted to
+  # ~/.manta/ingress.json as the single source of truth for `manta pair`
+  # (which has no access to the install's env vars).
+  #
+  # MANTA_INGRESS: auto (default — tailnet iff Tailscale is up) | public |
+  # tailscale (force tailnet; die if detection fails).
+  MANTA_INGRESS="${MANTA_INGRESS:-auto}"
+  TAILNET_IP=""
+  case "$MANTA_INGRESS" in
+    public) ;;
+    tailscale)
+      TAILNET_IP="$(detect_tailscale_ip)" \
+        || die "MANTA_INGRESS=tailscale but Tailscale is not running (need 'tailscale status' BackendState=Running with an IPv4). Start tailscale, or use MANTA_INGRESS=public."
+      ;;
+    auto)
+      TAILNET_IP="$(detect_tailscale_ip 2>/dev/null || true)"
+      ;;
+    *) die "MANTA_INGRESS must be auto, public, or tailscale (got: $MANTA_INGRESS)" ;;
+  esac
+  INGRESS_MODE="public"
+  if [ -n "$TAILNET_IP" ]; then INGRESS_MODE="tailscale"; fi
+
+  # Persist the decision. write-ingress creates the parent dir if missing
+  # and writes 0600 atomically (write <file>.tmp then rename).
+  INGRESS_JSON="$AUTH_DIR/ingress.json"
+  if [ "$DRY_RUN" = "1" ]; then
+    dry_log "would persist ingress decision to $INGRESS_JSON (mode=$INGRESS_MODE${TAILNET_IP:+, tailnetIp=$TAILNET_IP})"
+  else
+    ING_ARGS=("$NODE" "$LIB" write-ingress --file "$INGRESS_JSON" --mode "$INGRESS_MODE")
+    if [ -n "$TAILNET_IP" ]; then
+      ING_ARGS+=(--tailnet-ip "$TAILNET_IP" --port "$MANTA_PORT")
+    fi
+    "${ING_ARGS[@]}" >/dev/null 2>/tmp/manta-ingress.err \
+      || warn "write-ingress failed (see /tmp/manta-ingress.err) — \`manta pair\` will fall back to public-default connect block."
+  fi
+
   UNIT_SRC="$MANTA_HOME/scripts/systemd/manta-server.service"
   [ -f "$UNIT_SRC" ] || die "missing systemd template: $UNIT_SRC"
 
@@ -518,6 +558,7 @@ main() {
       -e "s|@@MANTA_HOME@@|$MANTA_HOME|g" \
       -e "s|@@NODE_BIN@@|$NODE|g" \
       -e "s|@@MANTA_PORT@@|$MANTA_PORT|g" \
+      -e "s|@@MANTA_TAILNET_HOST@@|$TAILNET_IP|g" \
       "$UNIT_SRC" > "$UNIT_DIR/manta-server.service"
 
     # Survive logout/reboot without an active session.
@@ -531,7 +572,7 @@ main() {
   else
     warn "systemctl not found (not a systemd host?). Starting the server in the background instead."
     warn "It will NOT survive reboot — set up your own supervisor for that."
-    ( MANTA_MOBILE_HOST=127.0.0.1 MANTA_MOBILE_PORT="$MANTA_PORT" nohup "$NODE" "$MANTA_HOME/src/server/index.mjs" >"$AUTH_DIR/server.log" 2>&1 & )
+    ( MANTA_MOBILE_HOST=127.0.0.1 MANTA_MOBILE_PORT="$MANTA_PORT" MANTA_TAILNET_HOST="$TAILNET_IP" nohup "$NODE" "$MANTA_HOME/src/server/index.mjs" >"$AUTH_DIR/server.log" 2>&1 & )
     SERVER_MANAGED=nohup
   fi
 
@@ -556,6 +597,21 @@ main() {
         process.stdout.write(id?.box_id ?? "");
       }).catch(() => process.stdout.write(""));
     ' 2>/dev/null || true
+  }
+
+  # detect_tailscale_ip — wrapper around `tailscale status --json` piped
+  # through the lib's `parse-tailscale-status` subcommand. Returns the
+  # detected Tailscale IPv4 on stdout, exit 0 — OR exits 1 with no output
+  # when Tailscale is missing / not running / has no IPv4. install.sh uses
+  # the exit code to drive the INGRESS_MODE decision (BET-267).
+  #
+  # Silent on stderr by design: install.sh logs the result separately so
+  # we never want a `tailscale: command not found` warning to leak through
+  # the box's user-facing output (the absence of tailscale is normal on
+  # the public-path install).
+  detect_tailscale_ip() {
+    command -v tailscale >/dev/null 2>&1 || return 1
+    tailscale status --json 2>/dev/null | "$NODE" "$LIB" parse-tailscale-status
   }
 
   # ===========================================================================
@@ -613,8 +669,15 @@ main() {
   # (the dry_log lines are below). In real mode we bail with a clear
   # bring-your-own-proxy hint when distro isn't Debian/Ubuntu or sudo
   # isn't usable.
+  #
+  # Tailscale path (BET-267): distro / sudo checks are irrelevant — no sudo
+  # is needed at all on the tailnet path (the whole point is "skip Caddy +
+  # public DNS"). PRIVILEGED_SECTION_SKIP is left at 0 so sub-steps B + C
+  # (gateway register + merge-gateway) still run — they are user-space and
+  # the gateway_token is still needed for APNs push. A/D/E/port-check/reload
+  # are gated on `INGRESS_MODE != tailscale` further down.
   PRIVILEGED_SECTION_SKIP=0
-  if [ "$DRY_RUN" != "1" ]; then
+  if [ "$DRY_RUN" != "1" ] && [ "$INGRESS_MODE" != "tailscale" ]; then
     # Distro check (Debian/Ubuntu only for v1 — see reviewer guidance §4).
     DISTRO_STATUS="$("$NODE" "$LIB" detect-distro 2>/dev/null || echo "")"
     DISTRO_SUPPORTED="$(printf '%s' "$DISTRO_STATUS" | "$NODE" -e '
@@ -670,12 +733,73 @@ main() {
     fi
   fi
 
-  if [ "$PRIVILEGED_SECTION_SKIP" = "1" ]; then
+  if [ "$INGRESS_MODE" = "tailscale" ]; then
+    # Tailscale path (BET-267): skip Caddy install + DNS wait + vhost write +
+    # port-check + caddy reload. B/C (gateway register + merge-gateway) still
+    # run below — the gateway_token is still needed for APNs push.
+    log "Tailscale detected ($TAILNET_IP) — skipping Caddy + public DNS; devices connect over the tailnet."
+  elif [ "$PRIVILEGED_SECTION_SKIP" = "1" ]; then
     log "Skipping public-TLS step (bring-your-own-proxy keeps the rest of the install working)."
   else
     log "Configuring public TLS via Caddy + gateway registration (privileged)…"
+  fi
 
-    # --- A. Install Caddy if absent ------------------------------------------
+  # --- B/C. Register with the gateway + persist gateway_token -------------
+  # B (POST /register) and C (merge-gateway into auth.json) are user-space and
+  # run in BOTH ingress modes. On tailscale the gateway records an A record
+  # that is unused but harmless; the persisted gateway_token is still the
+  # APNs push credential (BET-198). Skipped entirely only on distro/sudo
+  # failure (PRIVILEGED_SECTION_SKIP=1) where the rest of the section is
+  # being skipped.
+  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ]; then
+    BOX_ID_FOR_GATEWAY="$(read_box_id_for_gateway)"
+
+    if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
+      warn "no box_id in $MANTA_AUTH_FILE yet — skipping gateway registration."
+      warn "  start the manta-server at least once (systemctl --user restart manta-server) and re-run."
+    else
+      GATEWAY_BASE="${MANTA_GATEWAY_BASE:-https://gateway.mantaui.com}"
+      # Use the existing gateway_token if present so re-registration is an
+      # idempotent IP refresh; otherwise POST /register with no auth and the
+      # gateway returns a fresh token + host. The gateway response always
+      # carries {host}; the token is only present on first registration.
+      PRIOR_TOKEN="$("$NODE" -e '
+        const fs = require("node:fs");
+        try {
+          const a = JSON.parse(fs.readFileSync(process.env.MANTA_AUTH_FILE, "utf-8"));
+          process.stdout.write(typeof a?.gateway_token === "string" ? a.gateway_token : "");
+        } catch { process.stdout.write(""); }
+      ' 2>/dev/null || true)"
+
+      if [ "$DRY_RUN" = "1" ]; then
+        dry_log "would POST $GATEWAY_BASE/register with box_id=$BOX_ID_FOR_GATEWAY (prior_token=${PRIOR_TOKEN:+set})"
+        dry_log "would persist gateway response into $MANTA_AUTH_FILE via merge-gateway"
+      else
+        log "Registering with gateway $GATEWAY_BASE/register…"
+        REGISTER_ARGS=(-fsSL -X POST -H "content-type: application/json" --data "$(printf '{"box_id":"%s"}' "$BOX_ID_FOR_GATEWAY")")
+        if [ -n "$PRIOR_TOKEN" ]; then
+          REGISTER_ARGS+=(-H "authorization: Bearer $PRIOR_TOKEN")
+        fi
+        GW_RESP="$(curl "${REGISTER_ARGS[@]}" "$GATEWAY_BASE/register")" \
+          || { warn "gateway registration POST failed — the box will retry on every server restart.
+            Pair the device via SSH port-forward or use a non-gateway ingress until this works."; GW_RESP=""; }
+        if [ -n "$GW_RESP" ]; then
+          # Pipe the JSON to merge-gateway via stdin (lib subcommand) so the
+          # auth.json write is atomic temp-rename + 0600, preserving
+          # box_id / box_token / created_at.
+          printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err \
+            || warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
+          ok "gateway registration complete."
+        fi
+      fi
+    fi
+  fi
+
+  # --- A. Install Caddy if absent ------------------------------------------
+  # A, D, E/port-check/reload only run on the public path (BET-267). The
+  # tailscale path never binds :80/:443, never writes a Caddy vhost, never
+  # waits on DNS, never reloads Caddy.
+  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ] && [ "$INGRESS_MODE" != "tailscale" ]; then
     if command -v caddy >/dev/null 2>&1; then
       ok "caddy already installed ($(caddy version 2>/dev/null || echo unknown))."
     elif [ "$DRY_RUN" = "1" ]; then
@@ -743,53 +867,11 @@ main() {
         || die "apt-get install caddy failed"
       ok "caddy installed ($(caddy version 2>/dev/null || echo unknown))."
     fi
+  fi
 
-    # --- B/C. Register with the gateway + persist gateway_token -------------
-  # Read box_id from auth.json (the server's first start minted it). Skip
-  # the registration block entirely if we can't find one — a re-run before
-  # the server has booted at least once has no box_id to register.
-  BOX_ID_FOR_GATEWAY="$(read_box_id_for_gateway)"
-
-  if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
-    warn "no box_id in $MANTA_AUTH_FILE yet — skipping gateway registration + Caddy setup."
-    warn "  start the manta-server at least once (systemctl --user restart manta-server) and re-run."
-  else
-    GATEWAY_BASE="${MANTA_GATEWAY_BASE:-https://gateway.mantaui.com}"
-    # Use the existing gateway_token if present so re-registration is an
-    # idempotent IP refresh; otherwise POST /register with no auth and the
-    # gateway returns a fresh token + host. The gateway response always
-    # carries {host}; the token is only present on first registration.
-    PRIOR_TOKEN="$("$NODE" -e '
-      const fs = require("node:fs");
-      try {
-        const a = JSON.parse(fs.readFileSync(process.env.MANTA_AUTH_FILE, "utf-8"));
-        process.stdout.write(typeof a?.gateway_token === "string" ? a.gateway_token : "");
-      } catch { process.stdout.write(""); }
-    ' 2>/dev/null || true)"
-
-    if [ "$DRY_RUN" = "1" ]; then
-      dry_log "would POST $GATEWAY_BASE/register with box_id=$BOX_ID_FOR_GATEWAY (prior_token=${PRIOR_TOKEN:+set})"
-      dry_log "would persist gateway response into $MANTA_AUTH_FILE via merge-gateway"
-    else
-      log "Registering with gateway $GATEWAY_BASE/register…"
-      REGISTER_ARGS=(-fsSL -X POST -H "content-type: application/json" --data "$(printf '{"box_id":"%s"}' "$BOX_ID_FOR_GATEWAY")")
-      if [ -n "$PRIOR_TOKEN" ]; then
-        REGISTER_ARGS+=(-H "authorization: Bearer $PRIOR_TOKEN")
-      fi
-      GW_RESP="$(curl "${REGISTER_ARGS[@]}" "$GATEWAY_BASE/register")" \
-        || { warn "gateway registration POST failed — the box will retry on every server restart.
-          Pair the device via SSH port-forward or use a non-gateway ingress until this works."; GW_RESP=""; }
-      if [ -n "$GW_RESP" ]; then
-        # Pipe the JSON to merge-gateway via stdin (lib subcommand) so the
-        # auth.json write is atomic temp-rename + 0600, preserving
-        # box_id / box_token / created_at.
-        printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err \
-          || warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
-        ok "gateway registration complete."
-      fi
-    fi
-
-    # --- D. Poll DNS until <box_id>.boxes.mantaui.com resolves to us -------
+  # --- D. Poll DNS until <box_id>.boxes.mantaui.com resolves to us -------
+  # Public path only (BET-267); the tailnet path has no DNS wait.
+  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ] && [ "$INGRESS_MODE" != "tailscale" ]; then
     # Re-read gateway_host (or default to the canonical pattern if the
     # gateway didn't return one yet) for the polling target.
     GATEWAY_HOST="$("$NODE" -e '
@@ -970,7 +1052,6 @@ main() {
       fi
     fi
   fi
-  fi # close: if [ "$PRIVILEGED_SECTION_SKIP" = "1" ] (step 7.5 wrapper)
 
   # ---------------------------------------------------------------------------
   # 8. Wait for health, then mint + print a pairing code. Devices connect
@@ -1033,14 +1114,29 @@ Chat backend (opencode-serve) on http://127.0.0.1:4096:
 EOF
 
   # Trailing-pairing block — direct mode only. The Box ID line and the footer
-  # are always printed.
-  cat <<EOF
+  # are always printed. The "how does this box reach the internet" line varies
+  # by ingress mode (BET-267): on the public path Caddy terminates TLS at
+  # https://<box_id>.boxes.mantaui.com; on the tailscale path the server binds
+  # a second listener on the Tailscale interface at http://<tailscale-ip>:<port>
+  # (plain HTTP — WireGuard encrypts the hop), and no public DNS / Caddy is
+  # involved.
+  if [ "$INGRESS_MODE" = "tailscale" ]; then
+    cat <<EOF
+
+Tailscale detected ($TAILNET_IP) — your box is reachable over the tailnet at
+http://$TAILNET_IP:$MANTA_PORT (plain HTTP; WireGuard encrypts the hop). No public
+DNS, no Caddy, no Let's Encrypt on this path. Devices on the same tailnet can
+connect directly; off-tailnet devices need Tailscale access first.
+EOF
+  else
+    cat <<EOF
 
 Your box serves its own public hostname — https://<box_id>.boxes.mantaui.com
 (Caddy on this box terminates TLS and reverse-proxies 127.0.0.1:8787). The
 desktop / mobile app discovers it directly via the box_id below; no relay,
 no tunnel, no dial-out.
 EOF
+  fi
 
   cat <<EOF
 
