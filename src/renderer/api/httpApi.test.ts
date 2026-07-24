@@ -218,6 +218,19 @@ describe("serverBase", () => {
     expect(serverBase()).toBe("https://box-direct.example.com");
   });
 
+  // BET-268 — tailnet ingress path: a page served from the box's own
+  // plain-http tailnet listener (e.g. http://100.x.y.z:8787 — opened from the
+  // `/pair#code=...` route) must resolve to itself as the same-origin base.
+  it("falls back to same-origin for an http page on a tailnet host (BET-268)", () => {
+    delete mockLocalStorage["manta_server"];
+    stubWindowLocation({
+      protocol: "http:",
+      hostname: "100.64.1.5",
+      origin: "http://100.64.1.5:8787",
+    });
+    expect(serverBase()).toBe("http://100.64.1.5:8787");
+  });
+
   it("throws ServerNotConfiguredError on Capacitor localhost (no override)", () => {
     delete mockLocalStorage["manta_server"];
     stubWindowLocation({
