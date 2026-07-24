@@ -906,6 +906,48 @@ test("waitForHealth acceptAnyStatus=true (default) accepts 404 as healthy", asyn
 });
 
 // ----------------------------------------------------------------------------
+// waitForHealth — per-request timeout (the "installer hangs on 'waiting for
+// opencode', restart fixes it" bug). opencode binds :4096 before it can answer
+// on first boot; a fetch to that half-open socket must abort + retry, not hang.
+// ----------------------------------------------------------------------------
+
+test("waitForHealth aborts a hung request and keeps polling (does not hang)", async () => {
+  let calls = 0;
+  const res = await waitForHealth("http://127.0.0.1:4096/", {
+    maxAttempts: 3,
+    requestTimeoutMs: 20,
+    sleep: async () => {},
+    // Attempt 1 + 2 simulate a stalled socket: resolve ONLY when aborted.
+    // Attempt 3 answers immediately.
+    fetchFn: (url, opts) => {
+      calls += 1;
+      if (calls >= 3) return Promise.resolve({ status: 200 });
+      return new Promise((_resolve, reject) => {
+        opts.signal.addEventListener("abort", () =>
+          reject(new Error("aborted")),
+        );
+      });
+    },
+  });
+  assert.equal(res.ok, true, "must recover once the socket answers");
+  assert.equal(res.attempts, 3);
+  assert.equal(calls, 3);
+});
+
+test("waitForHealth passes an abort signal to fetchFn when requestTimeoutMs > 0", async () => {
+  let sawSignal = false;
+  await waitForHealth("http://127.0.0.1:4096/", {
+    requestTimeoutMs: 100,
+    sleep: async () => {},
+    fetchFn: (_url, opts) => {
+      sawSignal = Boolean(opts && opts.signal);
+      return Promise.resolve({ status: 200 });
+    },
+  });
+  assert.equal(sawSignal, true);
+});
+
+// ----------------------------------------------------------------------------
 // install.sh — bash syntax + manifest_get / verify_sha256 / resolve_arch
 // ----------------------------------------------------------------------------
 //
