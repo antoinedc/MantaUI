@@ -169,6 +169,16 @@ export function checkIdentity(cfg, { exists = existsSync } = {}) {
  * Deterministic + testable: inject `fetchFn`, `sleep`, and `now`. No real
  * timers when those are provided.
  *
+ * Each attempt is bounded by `requestTimeoutMs` (via AbortController). This is
+ * load-bearing: opencode binds :4096 EARLY on first boot but then stalls before
+ * it can answer (loading the claude-auth plugin / doing first-run OAuth). A
+ * fetch to that half-open socket connects and then waits for a response body
+ * that never comes — Node's global fetch (undici) has a very long default, so
+ * without an abort the very first probe hangs FOREVER and the maxAttempts
+ * ceiling is never reached ("installer hangs on 'waiting for opencode',
+ * restart fixes it"). The timeout turns a stalled request into a failed
+ * attempt so the loop retries and the budget is actually enforced.
+ *
  * @returns { ok:true, attempts } on success, or { ok:false, attempts, error }
  *          after `maxAttempts` exhausted.
  */
@@ -177,6 +187,7 @@ export async function waitForHealth(
   {
     maxAttempts = 60,
     intervalMs = 1000,
+    requestTimeoutMs = 5000,
     acceptAnyStatus = true,
     fetchFn = globalThis.fetch,
     sleep = defaultSleep,
@@ -191,7 +202,7 @@ export async function waitForHealth(
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const res = await fetchFn(url);
+      const res = await fetchWithTimeout(fetchFn, url, requestTimeoutMs);
       // Any HTTP answer means the socket is bound and serving.
       if (res && typeof res.status === "number") {
         if (acceptAnyStatus) {
@@ -220,6 +231,26 @@ export async function waitForHealth(
 
 function defaultSleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Call `fetchFn(url)` but abort it after `timeoutMs` so a half-open / stalled
+ * connection rejects (and is retried) instead of hanging the whole poll. A
+ * non-positive `timeoutMs`, or a `fetchFn` that ignores the abort signal (e.g.
+ * an injected test stub), falls back to the bare call — the timeout is a
+ * safety net, not a contract.
+ */
+async function fetchWithTimeout(fetchFn, url, timeoutMs) {
+  if (!(timeoutMs > 0) || typeof AbortController !== "function") {
+    return fetchFn(url);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchFn(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -483,13 +483,16 @@ main() {
   fi
   # Health-wait: opencode is loopback-only on :4096. acceptAnyStatus:true is
   # the default in waitForHealth; we pass it explicitly so a future reader
-  # sees the intent ("any response = listening").
+  # sees the intent ("any response = listening"). requestTimeoutMs bounds each
+  # probe so a half-open socket (opencode binds :4096 before it can answer on
+  # first boot) can't hang the whole wait — see waitForHealth's doc comment.
   log "Waiting for opencode-serve at http://127.0.0.1:4096/…"
   "$NODE" -e '
     import("'"$LIB"'").then(async (m) => {
       const r = await m.waitForHealth("http://127.0.0.1:4096/", {
         maxAttempts: 30,
         intervalMs: 1000,
+        requestTimeoutMs: 5000,
         acceptAnyStatus: true,
       });
       if (!r.ok) { console.error(r.error); process.exit(1); }
