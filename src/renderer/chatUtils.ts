@@ -2125,3 +2125,26 @@ export function chooseUpdateSkewVariant(
   if (!clientVersion || !minClient) return "ok";
   return isClientTooOld(clientVersion, minClient) ? "outdated" : "ok";
 }
+
+// ===== Composer arrow-key: history vs caret navigation =====
+//
+// The OLD logic scanned for `\n` before/after the caret to decide "first/last
+// line". That is blind to SOFT WRAP: a long single line with no `\n` wraps to
+// multiple rows, so a caret on visual row 2 wrongly triggered history. The DOM
+// measures the caret's VISUAL row (see caretRowInfo in InputArea) and passes it
+// here; these pure predicates decide whether the arrow cycles history.
+export type CaretRow = {
+  atFirstRow: boolean; // caret on the topmost visual row
+  atLastRow: boolean;  // caret on the bottommost visual row
+};
+
+// True when ArrowUp should navigate prompt history (caret on first visual row).
+// False → caller must let the browser move the caret up one row (no preventDefault).
+export function arrowUpNavigatesHistory(row: CaretRow): boolean {
+  return row.atFirstRow;
+}
+
+// True when ArrowDown should navigate prompt history (caret on last visual row).
+export function arrowDownNavigatesHistory(row: CaretRow): boolean {
+  return row.atLastRow;
+}

@@ -17,6 +17,9 @@ import {
   readSavedMode,
   writeSavedMode,
   resolveLauncherFlags,
+  readPromptHistory,
+  appendPromptHistory,
+  mergePromptHistory,
 } from "./chatShared";
 import type { OpencodeModel } from "../shared/types";
 
@@ -227,5 +230,88 @@ describe("resolveLauncherFlags", () => {
     expect(
       resolveLauncherFlags(schema, { skipPermissions: false, ghostFlag: true } as never),
     ).toEqual({ skipPermissions: false, verbose: false });
+  });
+});
+
+describe("prompt history persistence (survives /clear)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("returns [] when nothing is saved", () => {
+    expect(readPromptHistory("proj", 0)).toEqual([]);
+  });
+
+  it("returns [] for a null/absent window identity", () => {
+    expect(readPromptHistory(null, 0)).toEqual([]);
+    expect(readPromptHistory("proj", null)).toEqual([]);
+  });
+
+  it("appends and round-trips chronologically (freshest last)", () => {
+    appendPromptHistory("proj", 0, "first");
+    appendPromptHistory("proj", 0, "second");
+    expect(readPromptHistory("proj", 0)).toEqual(["first", "second"]);
+  });
+
+  it("is keyed by window — survives a session-id swap (the /clear case)", () => {
+    appendPromptHistory("proj", 2, "before clear");
+    expect(readPromptHistory("proj", 2)).toEqual(["before clear"]);
+  });
+
+  it("scopes per window index", () => {
+    appendPromptHistory("proj", 0, "w0");
+    appendPromptHistory("proj", 1, "w1");
+    expect(readPromptHistory("proj", 0)).toEqual(["w0"]);
+    expect(readPromptHistory("proj", 1)).toEqual(["w1"]);
+  });
+
+  it("trims and skips empty/whitespace prompts", () => {
+    appendPromptHistory("proj", 0, "  spaced  ");
+    appendPromptHistory("proj", 0, "   ");
+    expect(readPromptHistory("proj", 0)).toEqual(["spaced"]);
+  });
+
+  it("collapses a consecutive duplicate", () => {
+    appendPromptHistory("proj", 0, "same");
+    appendPromptHistory("proj", 0, "same");
+    appendPromptHistory("proj", 0, "diff");
+    appendPromptHistory("proj", 0, "same");
+    expect(readPromptHistory("proj", 0)).toEqual(["same", "diff", "same"]);
+  });
+
+  it("caps the list at 200 (oldest dropped)", () => {
+    for (let i = 0; i < 250; i++) appendPromptHistory("proj", 0, `p${i}`);
+    const list = readPromptHistory("proj", 0);
+    expect(list.length).toBe(200);
+    expect(list[0]).toBe("p50");
+    expect(list[list.length - 1]).toBe("p249");
+  });
+
+  it("no-ops append for a null window identity", () => {
+    appendPromptHistory(null, 0, "x");
+    appendPromptHistory("proj", null, "x");
+    expect(readPromptHistory("proj", 0)).toEqual([]);
+  });
+
+  it("survives a corrupt stored value (returns [])", () => {
+    localStorage.setItem("manta:window:proj:0:history", "{not json");
+    expect(readPromptHistory("proj", 0)).toEqual([]);
+  });
+});
+
+describe("mergePromptHistory", () => {
+  it("concatenates persisted then transcript", () => {
+    expect(mergePromptHistory(["a", "b"], ["c", "d"])).toEqual(["a", "b", "c", "d"]);
+  });
+  it("collapses the seam duplicate (last persisted == first transcript)", () => {
+    expect(mergePromptHistory(["a", "shared"], ["shared", "d"])).toEqual(["a", "shared", "d"]);
+  });
+  it("drops empty entries", () => {
+    expect(mergePromptHistory(["a", ""], ["", "b"])).toEqual(["a", "b"]);
+  });
+  it("handles empty inputs on either side", () => {
+    expect(mergePromptHistory([], ["a"])).toEqual(["a"]);
+    expect(mergePromptHistory(["a"], [])).toEqual(["a"]);
+    expect(mergePromptHistory([], [])).toEqual([]);
   });
 });

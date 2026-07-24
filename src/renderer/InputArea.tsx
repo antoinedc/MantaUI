@@ -16,8 +16,11 @@ import type { OpencodeModel } from "../shared/types";
 import type { VoiceMode, VoicePhase } from "./voice";
 import {
   ASSUMED_CONTEXT_TOKENS,
+  arrowDownNavigatesHistory,
+  arrowUpNavigatesHistory,
   computeContextBreakdown,
   resolveContextLimit,
+  type CaretRow,
   type StaleCacheResult,
 } from "./chatUtils";
 import {
@@ -32,6 +35,62 @@ import { MicButton, SessionToolbar } from "./ComposerParts";
 // "./InputArea"` call sites (ChatPanel) keep working after these leaf
 // components moved to ./ComposerParts.
 export { AttachmentStrip, TypeaheadPopup } from "./ComposerParts";
+
+// Measure the caret's VISUAL row within a textarea, accounting for soft wrap.
+// Render a hidden mirror <div> that copies the textarea's box + text styling,
+// place a marker span at the caret offset, and compare the marker's top against
+// the content-box top (first row) and content height (last row). Returns null
+// when measurement isn't possible (no element / SSR) — callers treat null as
+// "unknown" and fall back to navigating history.
+const MIRROR_COPIED_PROPS = [
+  "boxSizing", "width",
+  "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+  "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+  "fontFamily", "fontSize", "fontWeight", "fontStyle",
+  "letterSpacing", "textTransform", "wordSpacing", "lineHeight", "tabSize",
+] as const;
+
+export function caretRowInfo(el: HTMLTextAreaElement | null): CaretRow | null {
+  if (!el || typeof document === "undefined") return null;
+  const value = el.value;
+  const caret = el.selectionStart ?? value.length;
+
+  const style = window.getComputedStyle(el);
+  const mirror = document.createElement("div");
+  const ms = mirror.style;
+  ms.position = "absolute";
+  ms.visibility = "hidden";
+  ms.top = "0";
+  ms.left = "-9999px";
+  ms.whiteSpace = "pre-wrap";
+  ms.wordWrap = "break-word";
+  for (const prop of MIRROR_COPIED_PROPS) {
+    ms[prop] = style[prop];
+  }
+
+  mirror.textContent = value.slice(0, caret);
+  const marker = document.createElement("span");
+  marker.textContent = value.slice(caret) || ".";
+  mirror.appendChild(marker);
+  document.body.appendChild(mirror);
+
+  const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) || 16;
+  const mirrorRect = mirror.getBoundingClientRect();
+  const markerRect = marker.getBoundingClientRect();
+  const padTop = parseFloat(style.paddingTop) || 0;
+  const padBottom = parseFloat(style.paddingBottom) || 0;
+  const borderTop = parseFloat(style.borderTopWidth) || 0;
+  const borderBottom = parseFloat(style.borderBottomWidth) || 0;
+
+  const caretTop = markerRect.top - mirrorRect.top - borderTop - padTop;
+  const contentHeight = mirrorRect.height - borderTop - borderBottom - padTop - padBottom;
+
+  document.body.removeChild(mirror);
+
+  const atFirstRow = caretTop < lineHeight * 0.5;
+  const atLastRow = caretTop + lineHeight > contentHeight - lineHeight * 0.5;
+  return { atFirstRow, atLastRow };
+}
 
 export function InputArea({
   input,
@@ -283,15 +342,16 @@ export function InputArea({
               return;
             }
             // Prompt history when typeahead is closed. Only navigate history
-            // when the caret is already on the first line (Up) or last line
-            // (Down) — otherwise let the cursor move within the multiline text.
-            // While running, Up on an empty-or-first-line input pops the last
-            // queued message back into the input so it can be edited/removed.
+            // when the caret is on the first VISUAL row (Up) or last VISUAL row
+            // (Down) — soft-wrapped long lines occupy multiple rows, and a caret
+            // on row 2 must NOT jump to history. Measurement failure (null)
+            // degrades to "navigate history" so the arrows never wedge.
+            // While running, Up on an empty first-row input pops the last queued
+            // message back into the input so it can be edited/removed.
             if (e.key === "ArrowUp" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
               const el = e.currentTarget;
-              const textBefore = el.value.slice(0, el.selectionStart ?? 0);
-              const onFirstLine = !textBefore.includes("\n");
-              if (onFirstLine) {
+              const row = caretRowInfo(el);
+              if (row == null || arrowUpNavigatesHistory(row)) {
                 e.preventDefault();
                 if (running && el.value.trim() === "") {
                   onQueuePop();
@@ -303,9 +363,8 @@ export function InputArea({
             }
             if (e.key === "ArrowDown" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
               const el = e.currentTarget;
-              const textAfter = el.value.slice(el.selectionEnd ?? el.value.length);
-              const onLastLine = !textAfter.includes("\n");
-              if (onLastLine) {
+              const row = caretRowInfo(el);
+              if (row == null || arrowDownNavigatesHistory(row)) {
                 e.preventDefault();
                 onHistoryDown();
               }
