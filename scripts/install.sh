@@ -38,8 +38,10 @@
 #
 # Release resolution:
 #   1. Fetch `${MANTA_RELEASE_HOST:-https://mantaui.com}/releases/manta-${MANTA_VERSION:-latest}.txt`
-#      — a flat key=value manifest written by `npm run pack`.
-#   2. Parse `file_linux_x64` + `sha256_linux_x64` from the manifest.
+#      — a flat key=value manifest written by `npm run pack`. Combined manifest
+#      carries BOTH arches (Stage 2 merges per-arch sidecars); install.sh reads
+#      the keys for the arch `resolve_arch` resolved from `uname -m`.
+#   2. Parse `file_${ARCH_KEY}` + `sha256_${ARCH_KEY}` from the manifest.
 #   3. Download the tarball, verify sha256, extract.
 #
 # `MANTA_TARBALL_URL` overrides the whole flow: use a local file:// or a
@@ -69,7 +71,7 @@
 # === Always-defined helpers (test-safe: defined even in test mode) ===========
 # These are defined BEFORE the test-mode guard so the unit tests in
 # scripts/install.test.mjs can source this script and call manifest_get /
-# verify_sha256 / require_arch without the install body running.
+# verify_sha256 / resolve_arch without the install body running.
 log()  { printf '\033[36m▸\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
@@ -83,10 +85,16 @@ manifest_get() { # $1=manifest-body $2=key
   printf '%s\n' "$1" | grep "^$2=" | head -n1 | cut -d= -f2-
 }
 
-# Die unless running on supported arch.
-require_arch() {
+# Map uname -m to the release manifest arch key. Sets global ARCH_KEY.
+# Dies on any arch we don't ship a tarball for. This is the SINGLE place
+# the installer decides which arch it is.
+resolve_arch() {
   local m; m="$(uname -m)"
-  [ "$m" = "x86_64" ] || die "only x86_64 Linux is supported by this installer today (got: $m)"
+  case "$m" in
+    x86_64)         ARCH_KEY="linux_x64" ;;
+    aarch64|arm64)  ARCH_KEY="linux_arm64" ;;
+    *) die "unsupported architecture: $m (this installer ships linux x86_64 and arm64 only)" ;;
+  esac
 }
 
 # Verify $1's sha256 equals $2 (64-hex). Dies on mismatch.
@@ -100,7 +108,7 @@ verify_sha256() {
 
 # Test mode: when sourced by scripts/install.test.mjs with MANTA_INSTALL_TEST_MODE=1,
 # only the bash helpers (log/ok/warn/die + manifest_get + verify_sha256 +
-# require_arch) are loaded. The actual install does NOT run. Lets the unit
+# resolve_arch) are loaded. The actual install does NOT run. Lets the unit
 # tests exercise the helpers with mocked `uname`/etc. without hitting the
 # network. See scripts/install.test.mjs.
 if [ "${MANTA_INSTALL_TEST_MODE:-0}" = "1" ]; then
@@ -116,7 +124,7 @@ set -euo pipefail
 # never reaches main).
 # ---------------------------------------------------------------------------
 main() {
-  require_arch
+  resolve_arch
 
   # ---------------------------------------------------------------------------
   # 0. Argument parsing. `--dry-run` walks the install path with every external
@@ -194,10 +202,10 @@ main() {
     manifest="$(curl -fsSL "$host/releases/manta-${version}.txt")" \
       || die "manifest fetch failed: $host/releases/manta-${version}.txt
           (set MANTA_RELEASE_HOST to a reachable mirror, or MANTA_TARBALL_URL to a local file://)"
-    TARBALL_FILE="$(manifest_get "$manifest" "file_linux_x64")"
-    TARBALL_SHA="$(manifest_get "$manifest" "sha256_linux_x64")"
+    TARBALL_FILE="$(manifest_get "$manifest" "file_${ARCH_KEY}")"
+    TARBALL_SHA="$(manifest_get "$manifest" "sha256_${ARCH_KEY}")"
     if [ -z "$TARBALL_FILE" ] || [ -z "$TARBALL_SHA" ]; then
-      die "manifest is malformed or this version has no linux-x64 build"
+      die "manifest is malformed or this version has no ${ARCH_KEY} build"
     fi
     TARBALL_URL="$host/releases/$TARBALL_FILE"
   fi
