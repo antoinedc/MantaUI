@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-# install.sh — one-command VPS self-install for the manta box server.
+# install.sh — one-command self-install for the manta box server.
 #
 #   curl -fsSL https://mantaui.com/install.sh | bash
 #
-# Gets manta-server running under systemd --user on a fresh Linux box and prints a
-# 6-digit pairing code to enter in the desktop app. Idempotent: re-running
-# upgrades the code in place and PRESERVES ~/.manta/ (box identity + config)
-# — the script never generates box_id/box_token itself; ensureAuth() in
-# src/server/auth.mjs is the single source of truth.
+# On a fresh Linux box: gets manta-server running under systemd --user and
+# prints a 6-digit pairing code to enter in the desktop app.
+#
+# On a fresh macOS box (Apple Silicon, BET-274): gets manta-server running
+# in the background and prints a 6-digit pairing code. macOS is loopback +
+# Tailscale-only — no Caddy, no public DNS, no Let's Encrypt. The persistent
+# service-manager (LaunchAgent) lands in Issue C (BET-277); until then the
+# macOS install warns that the background process does NOT survive
+# logout/reboot.
+#
+# Idempotent: re-running upgrades the code in place and PRESERVES ~/.manta/
+# (box identity + config) — the script never generates box_id/box_token
+# itself; ensureAuth() in src/server/auth.mjs is the single source of truth.
 #
 # Prerequisites on the box (we check, never install — same `require_cmd` tone
 # as Homebrew/rustup):
@@ -87,15 +95,28 @@ manifest_get() { # $1=manifest-body $2=key
   printf '%s\n' "$1" | grep "^$2=" | head -n1 | cut -d= -f2-
 }
 
-# Map uname -m to the release manifest arch key. Sets global ARCH_KEY.
-# Dies on any arch we don't ship a tarball for. This is the SINGLE place
-# the installer decides which arch it is.
+# Map (uname -s, uname -m) to the release manifest arch key. Sets global
+# ARCH_KEY. Dies on any (OS, arch) we don't ship a tarball for. This is the
+# SINGLE place the installer decides which OS+arch it is — see BET-274.
 resolve_arch() {
-  local m; m="$(uname -m)"
-  case "$m" in
-    x86_64)         ARCH_KEY="linux_x64" ;;
-    aarch64|arm64)  ARCH_KEY="linux_arm64" ;;
-    *) die "unsupported architecture: $m (this installer ships linux x86_64 and arm64 only)" ;;
+  local s m; s="$(uname -s)"; m="$(uname -m)"
+  case "$s" in
+    Linux)
+      case "$m" in
+        x86_64)         ARCH_KEY="linux_x64" ;;
+        aarch64|arm64)  ARCH_KEY="linux_arm64" ;;
+        *) die "unsupported architecture: $m on Linux (this installer ships linux x86_64 and arm64)" ;;
+      esac
+      ;;
+    Darwin)
+      case "$m" in
+        arm64)  ARCH_KEY="darwin_arm64" ;;
+        *) die "unsupported Mac: $m — the MantaUI box installer supports Apple Silicon (arm64) Macs only.
+      Intel Macs are not supported as a box. If you just want to USE MantaUI on this Mac,
+      install the desktop app instead: https://mantaui.com/downloads/Manta-latest.dmg" ;;
+      esac
+      ;;
+    *) die "unsupported OS: $s (the MantaUI box installer supports Linux and macOS/Apple Silicon)" ;;
   esac
 }
 
@@ -127,6 +148,15 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 main() {
   resolve_arch
+
+  # OS gate — set ONCE from `uname -s` so the rest of the install branches
+  # on a single flag instead of re-running uname in scattered places. The
+  # macOS box path (BET-274 / BET-276) keys off this: loopback + Tailscale
+  # only, no apt/Caddy/DNS/vhost. Issue C (BET-277) will add the launchd
+  # service path; until then, the macOS nohup fallback gets a temporary
+  # warn so a partial merge is never silently broken.
+  IS_MACOS=0
+  [ "$(uname -s)" = "Darwin" ] && IS_MACOS=1
 
   # ---------------------------------------------------------------------------
   # 0. Argument parsing. `--dry-run` walks the install path with every external
@@ -480,6 +510,13 @@ main() {
     else
       warn "systemctl not found. Starting opencode-serve in the background instead."
       warn "It will NOT survive reboot — set up your own supervisor for that."
+      if [ "$IS_MACOS" = "1" ]; then
+        # macOS path (BET-274 / BET-276) — Issue C (BET-277) replaces this
+        # nohup fallback with a proper LaunchAgent; until then we warn so a
+        # partial merge is never silently broken (opencode dies on logout).
+        warn "macOS: falling back to a non-persistent background process (BET launchd support pending)."
+        warn "  The server will NOT survive logout/reboot until launchd support is installed."
+      fi
       ( nohup "$OPENCODE_BIN" serve --port 4096 --hostname 127.0.0.1 >"$AUTH_DIR/opencode.log" 2>&1 & )
     fi
   fi
@@ -596,6 +633,13 @@ main() {
   else
     warn "systemctl not found (not a systemd host?). Starting the server in the background instead."
     warn "It will NOT survive reboot — set up your own supervisor for that."
+    if [ "$IS_MACOS" = "1" ]; then
+      # macOS path (BET-274 / BET-276) — Issue C (BET-277) replaces this
+      # nohup fallback with a proper LaunchAgent; until then we warn so a
+      # partial merge is never silently broken (manta-server dies on logout).
+      warn "macOS: falling back to a non-persistent background process (BET launchd support pending)."
+      warn "  The server will NOT survive logout/reboot until launchd support is installed."
+    fi
     ( MANTA_MOBILE_HOST=127.0.0.1 MANTA_MOBILE_PORT="$MANTA_PORT" MANTA_TAILNET_HOST="$TAILNET_IP" nohup "$NODE" "$MANTA_HOME/src/server/index.mjs" >"$AUTH_DIR/server.log" 2>&1 & )
     SERVER_MANAGED=nohup
   fi
@@ -674,19 +718,31 @@ main() {
   #     (the gates only fire when we're actually about to do real work).
   # ===========================================================================
 
+  # Public-TLS predicate — ONE gate, ONE source of truth for the Caddy/apt/
+  # DNS/vhost sub-steps (A/D/E/port-check/reload). Merges the macOS case
+  # (BET-274 / BET-276) with the existing tailscale case (BET-267): both
+  # skip the public TLS path; gateway-register (B/C) still runs in both
+  # because it's user-space and the gateway_token is still needed for
+  # APNs push. Computed once, used by every guard below.
+  SKIP_PUBLIC_TLS=0
+  if [ "$INGRESS_MODE" = "tailscale" ] || [ "$IS_MACOS" = "1" ]; then
+    SKIP_PUBLIC_TLS=1
+  fi
+
   # Gate the section. In dry-run mode we always show what we would do
   # (the dry_log lines are below). In real mode we bail with a clear
   # bring-your-own-proxy hint when distro isn't Debian/Ubuntu or sudo
   # isn't usable.
   #
-  # Tailscale path (BET-267): distro / sudo checks are irrelevant — no sudo
-  # is needed at all on the tailnet path (the whole point is "skip Caddy +
-  # public DNS"). PRIVILEGED_SECTION_SKIP is left at 0 so sub-steps B + C
-  # (gateway register + merge-gateway) still run — they are user-space and
-  # the gateway_token is still needed for APNs push. A/D/E/port-check/reload
-  # are gated on `INGRESS_MODE != tailscale` further down.
+  # Tailscale path (BET-267) AND macOS path (BET-276): distro / sudo checks
+  # are irrelevant — no sudo is needed at all on either path (the whole
+  # point is "skip Caddy + public DNS"). PRIVILEGED_SECTION_SKIP is left
+  # at 0 so sub-steps B + C (gateway register + merge-gateway) still run —
+  # they are user-space and the gateway_token is still needed for APNs
+  # push. A/D/E/port-check/reload are gated on SKIP_PUBLIC_TLS further
+  # down.
   PRIVILEGED_SECTION_SKIP=0
-  if [ "$DRY_RUN" != "1" ] && [ "$INGRESS_MODE" != "tailscale" ]; then
+  if [ "$DRY_RUN" != "1" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
     # Distro check (Debian/Ubuntu only for v1 — see reviewer guidance §4).
     DISTRO_STATUS="$("$NODE" "$LIB" detect-distro 2>/dev/null || echo "")"
     DISTRO_SUPPORTED="$(printf '%s' "$DISTRO_STATUS" | "$NODE" -e '
@@ -747,6 +803,13 @@ main() {
     # port-check + caddy reload. B/C (gateway register + merge-gateway) still
     # run below — the gateway_token is still needed for APNs push.
     log "Tailscale detected ($TAILNET_IP) — skipping Caddy + public DNS; devices connect over the tailnet."
+  elif [ "$IS_MACOS" = "1" ]; then
+    # macOS path (BET-274 / BET-276): no apt, no Caddy, no public DNS, no
+    # Let's Encrypt. The box is loopback-only on the Mac; remote access
+    # requires Tailscale (a Mac that's never logged in is unsupported —
+    # Issue C will wire that up via LaunchAgents). B/C (gateway register
+    # + merge-gateway) still run below for the APNs push token.
+    log "macOS detected — skipping Caddy/apt/DNS/vhost; box is loopback-only. Use Tailscale to reach this box off-network."
   elif [ "$PRIVILEGED_SECTION_SKIP" = "1" ]; then
     log "Skipping public-TLS step (bring-your-own-proxy keeps the rest of the install working)."
   else
@@ -806,9 +869,10 @@ main() {
 
   # --- A. Install Caddy if absent ------------------------------------------
   # A, D, E/port-check/reload only run on the public path (BET-267). The
-  # tailscale path never binds :80/:443, never writes a Caddy vhost, never
-  # waits on DNS, never reloads Caddy.
-  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ] && [ "$INGRESS_MODE" != "tailscale" ]; then
+  # tailscale path AND the macOS path (BET-276) never bind :80/:443, never
+  # write a Caddy vhost, never wait on DNS, never reload Caddy. Gated via
+  # SKIP_PUBLIC_TLS which merges both cases into one predicate.
+  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
     if command -v caddy >/dev/null 2>&1; then
       ok "caddy already installed ($(caddy version 2>/dev/null || echo unknown))."
     elif [ "$DRY_RUN" = "1" ]; then
@@ -879,8 +943,9 @@ main() {
   fi
 
   # --- D. Poll DNS until <box_id>.boxes.mantaui.com resolves to us -------
-  # Public path only (BET-267); the tailnet path has no DNS wait.
-  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ] && [ "$INGRESS_MODE" != "tailscale" ]; then
+  # Public path only (BET-267 + BET-276); the tailnet path AND the macOS
+  # path have no DNS wait. Gated via SKIP_PUBLIC_TLS.
+  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
     # Re-read gateway_host (or default to the canonical pattern if the
     # gateway didn't return one yet) for the polling target.
     GATEWAY_HOST="$("$NODE" -e '

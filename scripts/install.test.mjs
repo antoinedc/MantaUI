@@ -1156,30 +1156,35 @@ verify_sha256 "${file}" "${wrongSha}"
 });
 
 // ----------------------------------------------------------------------------
-// resolve_arch — map `uname -m` to the manifest arch key (`linux_x64` /
-// `linux_arm64`). Sets the global `ARCH_KEY` the manifest reader uses; dies
-// only on arches we don't ship a tarball for. The harness overrides `uname`
-// via a function in preBody (same mocking style as the deleted bootstrap_*
-// tests used for `command` and `detect_distro_id`).
+// resolve_arch — map `(uname -s, uname -m)` to the manifest arch key
+// (`linux_x64` / `linux_arm64` / `darwin_arm64`). Sets the global
+// `ARCH_KEY` the manifest reader uses; dies on any (OS, arch) we don't
+// ship a tarball for. The harness overrides `uname` via a function in
+// preBody (same mocking style as the deleted bootstrap_* tests used for
+// `command` and `detect_distro_id`).
+//
+// BET-276 made resolve_arch OS-aware: it now branches on `uname -s` first
+// (Linux vs Darwin) before mapping the arch token. The mock has to switch
+// on the arg so it answers both `-s` and `-m` correctly.
 // ----------------------------------------------------------------------------
 
-test("resolve_arch sets ARCH_KEY=linux_x64 on x86_64", () => {
+test("resolve_arch sets ARCH_KEY=linux_x64 on Linux x86_64", () => {
   const out = runBootstrap({
     preBody: `
-uname() { echo "x86_64"; }
+uname() { case "$1" in -s) echo "Linux" ;; -m) echo "x86_64" ;; esac; }
 resolve_arch
 echo "AK=\$ARCH_KEY"
 `,
   });
   assert.match(out, /AK=linux_x64/);
   assert.match(out, /BOOTSTRAP_EXIT=0/);
-  assert.doesNotMatch(out, /unsupported architecture/);
+  assert.doesNotMatch(out, /unsupported/);
 });
 
-test("resolve_arch sets ARCH_KEY=linux_arm64 on aarch64", () => {
+test("resolve_arch sets ARCH_KEY=linux_arm64 on Linux aarch64", () => {
   const out = runBootstrap({
     preBody: `
-uname() { echo "aarch64"; }
+uname() { case "$1" in -s) echo "Linux" ;; -m) echo "aarch64" ;; esac; }
 resolve_arch
 echo "AK=\$ARCH_KEY"
 `,
@@ -1194,7 +1199,7 @@ test("resolve_arch accepts arm64 spelling too", () => {
   // depending on which uname token the distro uses.
   const out = runBootstrap({
     preBody: `
-uname() { echo "arm64"; }
+uname() { case "$1" in -s) echo "Linux" ;; -m) echo "arm64" ;; esac; }
 resolve_arch
 echo "AK=\$ARCH_KEY"
 `,
@@ -1203,15 +1208,89 @@ echo "AK=\$ARCH_KEY"
   assert.match(out, /BOOTSTRAP_EXIT=0/);
 });
 
-test("resolve_arch dies on armv7l (unsupported arch)", () => {
+test("resolve_arch dies on Linux armv7l (unsupported arch)", () => {
   const out = runBootstrap({
     preBody: `
-uname() { echo "armv7l"; }
+uname() { case "$1" in -s) echo "Linux" ;; -m) echo "armv7l" ;; esac; }
 resolve_arch
 `,
   });
   assert.match(out, /unsupported architecture/);
   assert.match(out, /armv7l/);
+});
+
+// BET-276 (Stage 2 of the macOS box epic): resolve_arch becomes OS-aware
+// and adds a darwin_arm64 mapping for Apple Silicon Macs. Intel Macs die
+// with a clear message, unknown OSes die too. The new resolve_arch calls
+// both `uname -s` and `uname -m`, so the mock has to switch on the arg.
+// The mock pattern stays identical to the existing tests (function shadow
+// AFTER sourcing install.sh).
+
+test("resolve_arch sets ARCH_KEY=darwin_arm64 on Darwin arm64 (BET-276)", () => {
+  const out = runBootstrap({
+    preBody: `
+uname() { case "$1" in -s) echo "Darwin" ;; -m) echo "arm64" ;; esac; }
+resolve_arch
+echo "AK=\$ARCH_KEY"
+`,
+  });
+  assert.match(out, /AK=darwin_arm64/);
+  assert.match(out, /BOOTSTRAP_EXIT=0/);
+  assert.doesNotMatch(out, /unsupported/);
+});
+
+test("resolve_arch dies on Darwin x86_64 (Intel Mac — explicit refusal, BET-276)", () => {
+  // Intel Macs are not supported as a box. The installer must die here
+  // BEFORE the manifest fetch — otherwise the user gets a cryptic
+  // "cannot execute binary file" later (the real bug BET-274 fixed).
+  const out = runBootstrap({
+    preBody: `
+uname() { case "$1" in -s) echo "Darwin" ;; -m) echo "x86_64" ;; esac; }
+resolve_arch
+`,
+  });
+  assert.match(out, /unsupported Mac/);
+  assert.match(out, /Apple Silicon/);
+  assert.match(out, /Intel Macs are not supported/);
+  // Must point at the desktop app as the alternative.
+  assert.match(out, /mantaui\.com\/downloads\/Manta-latest\.dmg/);
+});
+
+test("resolve_arch dies on unknown OS (e.g. FreeBSD, BET-276)", () => {
+  const out = runBootstrap({
+    preBody: `
+uname() { case "$1" in -s) echo "FreeBSD" ;; -m) echo "amd64" ;; esac; }
+resolve_arch
+`,
+  });
+  assert.match(out, /unsupported OS/);
+  assert.match(out, /FreeBSD/);
+});
+
+test("resolve_arch still maps Linux x86_64 → linux_x64 after the OS branch (BET-276 regression)", () => {
+  // Belt-and-braces: the OS branch must not break the existing Linux path.
+  // x86_64 is the canonical Linux x64 case.
+  const out = runBootstrap({
+    preBody: `
+uname() { case "$1" in -s) echo "Linux" ;; -m) echo "x86_64" ;; esac; }
+resolve_arch
+echo "AK=\$ARCH_KEY"
+`,
+  });
+  assert.match(out, /AK=linux_x64/);
+  assert.match(out, /BOOTSTRAP_EXIT=0/);
+});
+
+test("resolve_arch still maps Linux aarch64 → linux_arm64 after the OS branch (BET-276 regression)", () => {
+  const out = runBootstrap({
+    preBody: `
+uname() { case "$1" in -s) echo "Linux" ;; -m) echo "aarch64" ;; esac; }
+resolve_arch
+echo "AK=\$ARCH_KEY"
+`,
+  });
+  assert.match(out, /AK=linux_arm64/);
+  assert.match(out, /BOOTSTRAP_EXIT=0/);
 });
 
 // ----------------------------------------------------------------------------
