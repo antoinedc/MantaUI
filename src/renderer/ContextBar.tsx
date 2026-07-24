@@ -145,7 +145,12 @@ export function ContextBar({
             "(Cache TTL is set by opencode; manta predicts staleness from the Settings → Prompt cache TTL value. If this fires at the wrong time, that setting probably doesn't match opencode's cache_control.ttl.)",
           ].join("\n")}
         >
-          ⚠ /clear to save {formatTokensCompact(staleCache.staleTokens)} tokens
+          <span className="manta-stale-full">
+            ⚠ /clear to save {formatTokensCompact(staleCache.staleTokens)} tokens
+          </span>
+          <span className="manta-stale-min hidden">
+            ⚠ {formatTokensCompact(staleCache.staleTokens)}
+          </span>
         </span>
       )}
     </span>

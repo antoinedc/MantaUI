@@ -24,7 +24,7 @@ export function SessionToolbar({
   onWebhooks: () => void;
 }) {
   return (
-    <span className="flex items-center gap-1 text-[10px]">
+    <span className="manta-session-toolbar flex items-center gap-1 text-[10px]">
       <button
         onClick={onSchedules}
         className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"

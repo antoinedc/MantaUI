@@ -242,6 +242,15 @@ body,
   flex-wrap: wrap;
   row-gap: 4px;
 }
+/* The meta footer row's two inner spans (left: branch/model/ctx, right:
+   toolbar) are nested one level below the wrap rule above and were the
+   actual overlap: their shrink-0 children painted over the model label.
+   Let them wrap and shrink. */
+.mobile-body > div > div:last-child > div[class*="justify-between"] > span {
+  flex-wrap: wrap;
+  min-width: 0;
+  row-gap: 4px;
+}
 /* The static desktop keyboard-hint span (ctrl+o · shift+⏎ newline · ⏎ send)
    was removed from ChatPanel entirely, so there's no longer a hint span to
    hide here. The footer's right-hand group now holds the ⏰ schedules button
@@ -260,6 +269,14 @@ body,
   overflow: hidden;
 }
 
+/* Stale-cache pill: tokens number only on phone ("⚠ 79k"); the full
+   "/clear to save … tokens" copy is desktop-width text. */
+.mobile-body .manta-stale-full { display: none; }
+.mobile-body .manta-stale-min { display: inline; }
+
+/* 1px sweep is invisible at arm's length on phone DPI. */
+.mobile .manta-loading-divider { height: 2px; }
+
 /* Drop the dotted context-usage BAR on mobile but keep the % number.
    ChatPanel's ContextBar renders [ <span.w-24 track> , <span.tabular-nums %> ].
    The track is the only `w-24` element in the reused tree — hide just that;
@@ -268,13 +285,14 @@ body,
   display: none;
 }
 
-/* SessionToolbar now contains ONLY the ⏰ schedules toggle (fork/compact/
-   delete moved to the header ⋯ bottom-sheet). The schedules button IS wanted
-   on mobile — it's the only way to surface the schedules count + open the
-   ScheduledTasksCard from the composer — so it is NOT hidden here. (Mobile
-   previously had a redundant ⋯-sheet "Scheduled tasks" entry; keeping the
-   footer button means schedules are reachable + their live count visible
-   right next to the composer on phone too.) */
+/* SessionToolbar (⏰/🔑/🪝) is hidden on mobile — all three are reachable
+   from the header ⋯ bottom-sheet, and the live schedules count moved onto
+   the sheet label (see SessionScreen.tsx scheduleCount + SessionScreen
+   ⋯ sheet entry). Keeping the footer toolbar was crowding the meta row
+   alongside the model picker / ctx % / stale-cache pill. */
+/* ⏰🔑🪝 live in the header ⋯ sheet on mobile — the footer copies are
+   redundant and were crowding the meta row. */
+.mobile-body .manta-session-toolbar { display: none; }
 
 /* ---- Transcript horizontal-scroll fix moved into shared components (BET-230) ----
 
@@ -304,6 +322,11 @@ body,
 .mobile-body div[class*="min-w-[240px]"] {
   min-width: 0;
   max-width: calc(100vw - 32px);
+}
+/* ModelPicker trigger: truncate long provider/model ids instead of
+   crowding out the ctx % + stale pill. */
+.mobile-body > div > div:last-child div[class*="relative"][class*="min-w-0"] {
+  max-width: 40vw;
 }
 
 /* iOS Safari auto-zooms <input>/<textarea> with font-size < 16px on focus,

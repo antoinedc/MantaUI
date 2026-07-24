@@ -27,6 +27,10 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
+  // Live schedules count for the ⋯ sheet label — the footer toolbar (which
+  // used to surface it) is hidden on mobile (BET-258), so the sheet carries
+  // it instead. Count is omitted entirely on 0 or fetch failure.
+  const [scheduleCount, setScheduleCount] = useState(0);
 
   const project = projects.find((p) => p.tmuxSession === projectName);
   const win = project?.windows.find((w) => w.index === windowIndex);
@@ -58,6 +62,28 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
       .then(setAvailableLaunchers)
       .catch(() => setAvailableLaunchers([]));
   }, [sid]);
+
+  // Fetch the schedules count when the ⋯ sheet opens so the live count
+  // shows on the sheet label (the footer toolbar that used to carry it
+  // is hidden on mobile). Guarded with a cancelled flag so a fast
+  // open/close can't land setState on an unmounted render.
+  useEffect(() => {
+    if (!sheetOpen || !sid) return;
+    let cancelled = false;
+    window.api
+      .scheduleList(sid)
+      .then((jobs) => {
+        if (cancelled) return;
+        setScheduleCount(Array.isArray(jobs) ? jobs.length : 0);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setScheduleCount(0);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sheetOpen, sid]);
 
   useEffect(() => {
     setModeState(sid ? readSavedMode(sid, availableLaunchers) : "chat");
@@ -333,7 +359,9 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                         closeSheet();
                       }}
                     >
-                      Scheduled tasks
+                      {scheduleCount > 0
+                        ? `Scheduled tasks · ${scheduleCount}`
+                        : "Scheduled tasks"}
                     </button>
                     <button
                       onClick={() => {
