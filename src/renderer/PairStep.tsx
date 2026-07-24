@@ -1,31 +1,33 @@
 import { useRef, useState } from "react";
 import { normalizeCode } from "../shared/claim.mjs";
-import { canConnectSetup } from "./mobile/setupLogic";
+import { canConnectSetup, normalizeServerUrl } from "./mobile/setupLogic";
 import { isValidBoxToken } from "../shared/transport.mjs";
 import { claimBox } from "./pairClaim";
 
 // PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2,
-// BET-255).
+// BET-255, BET-268).
 //
 // Mounts into Onboarding.tsx's step-1 slot. Owns the pairing form:
-//   • a Box ID input (32-hex box id, post-BET-198 every box serves its own
-//     public hostname — `https://<boxId>.boxes.mantaui.com` — so no
-//     server-URL field is needed)
+//   • a Box ID input (32-hex box id)
 //   • a 6-digit monospace pairing code input (auto-focused)
+//   • an optional Advanced "server URL" field (BET-268 — tailnet boxes may
+//     live at http://100.x.y.z:8787 instead of the public hostname). Collapsed
+//     by default; expanding it lets the user paste a non-default listener
+//     (the claim + persist both use that URL verbatim when set).
 //   • inline errors for every claim-failure branch (wrong/expired code,
 //     rate-limited, unreachable server, malformed response)
 //   • its own Connect button (gated by canConnectSetup) + a "Skip setup" link
 //
 // The claim itself runs in the MAIN process over the `auth:claim` IPC channel
-// (window.api.authClaim), which POSTs <boxDirectUrl(boxId)>/auth/claim (the
-// URL is built by the shared `buildSetupClaimInput` helper, the SAME one the
-// mobile setup screen and the deep-link handler use — single source of
-// truth). On success, main persists { serverUrl, boxId, boxToken } to
-// config.json. The shared `claimBox` helper mirrors those into the store
-// (applyPairing) so resolveTransportMode reads "http" immediately, then
-// swaps window.api to httpApi so the next onboarding step (Providers/Model)
-// can call opencodeModels() in this same session (BET-254). Finally we call
-// onPaired() to let the shell advance to Step 2.
+// (window.api.authClaim), which POSTs to `<serverUrl>/auth/claim`. The URL is
+// built by the shared `buildSetupClaimInput` helper — the SAME one the mobile
+// setup screen uses — single source of truth. On success, main persists
+// { serverUrl, boxId, boxToken } to config.json. The shared `claimBox`
+// helper mirrors those into the store (applyPairing) so resolveTransportMode
+// reads "http" immediately, then swaps window.api to httpApi so the next
+// onboarding step (Providers/Model) can call opencodeModels() in this same
+// session (BET-254). Finally we call onPaired() to let the shell advance to
+// Step 2.
 //
 // The deep-link `manta://pair?box=…&code=…` flow no longer lands here —
 // App.tsx's onPairLink handler auto-claims via the SAME `claimBox` helper and
@@ -34,9 +36,10 @@ import { claimBox } from "./pairClaim";
 // `pendingPairLink` to force step 1) so the user can retry by hand.
 //
 // All non-React logic (Box ID validation, the submit gate, the 6-digit
-// contract, HTTP-outcome classification, the claim itself) is shared with
-// the mobile client via renderer/mobile/setupLogic.ts + shared/transport.mjs
-// + the new renderer/pairClaim.ts. This file is just the wiring.
+// contract, server-URL normalization, HTTP-outcome classification, the claim
+// itself) is shared with the mobile client via renderer/mobile/setupLogic.ts
+// + shared/transport.mjs + the new renderer/pairClaim.ts. This file is just
+// the wiring.
 //
 // Props:
 //   onPaired — successful claim; the shell advances to the next step.
@@ -45,6 +48,7 @@ import { claimBox } from "./pairClaim";
 
 const ACCENT = "#5A88FF"; // matches Onboarding.tsx + the app's accent token
 const DANGER = "#FF7A88"; // inline error text (no dedicated tailwind token)
+const SERVER_URL_ERROR = "Server URL must start with http:// or https://";
 
 export function PairStep({
   onPaired,
@@ -55,17 +59,35 @@ export function PairStep({
 }) {
   const [boxId, setBoxId] = useState("");
   const [code, setCode] = useState("");
+  const [serverUrl, setServerUrl] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
 
-  const connectEnabled = canConnectSetup({ boxId, code, submitting });
+  // Server URL is only "bad" when the user typed something non-empty that
+  // doesn't match `^https?://` — empty stays the default path (no inline
+  // error). Pure check via the shared helper.
+  const serverUrlTrimmed = serverUrl.trim();
+  const serverUrlInvalid =
+    serverUrlTrimmed !== "" && normalizeServerUrl(serverUrlTrimmed) === null;
+
+  const connectEnabled = canConnectSetup({
+    boxId,
+    code,
+    submitting,
+    serverUrl: serverUrlTrimmed,
+  });
 
   const connect = async () => {
-    if (!canConnectSetup({ boxId, code, submitting })) return;
+    if (!connectEnabled) return;
     setSubmitting(true);
     setError(null);
-    const result = await claimBox({ boxId: boxId.trim(), code });
+    const result = await claimBox({
+      boxId: boxId.trim(),
+      code,
+      serverUrl: serverUrlTrimmed,
+    });
     if (result.ok) {
       setSubmitting(false);
       onPaired();
@@ -152,6 +174,59 @@ export function PairStep({
               manta pair
             </code>
           </p>
+        </div>
+
+        {/* Advanced — optional server URL override (BET-268, tailnet path).
+            Collapsed by default; only renders the field when the user opts in. */}
+        <div className="flex flex-col gap-1.5">
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={() => setAdvancedOpen((v) => !v)}
+            aria-expanded={advancedOpen}
+            aria-controls="pair-server-url"
+            className="self-start text-xs text-text-muted hover:text-text transition-colors disabled:opacity-60"
+          >
+            {advancedOpen ? "▾" : "▸"} Advanced
+          </button>
+          {advancedOpen && (
+            <>
+              <label
+                htmlFor="pair-server-url"
+                className="text-xs font-medium text-text-muted"
+              >
+                Server URL
+              </label>
+              <input
+                id="pair-server-url"
+                type="text"
+                inputMode="url"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="http://100.x.y.z:8787"
+                disabled={submitting}
+                value={serverUrl}
+                onChange={(e) => {
+                  setServerUrl(e.target.value);
+                  setError(null);
+                }}
+                aria-invalid={serverUrlInvalid}
+                aria-describedby={serverUrlInvalid ? "pair-server-url-err" : undefined}
+                className="w-full rounded-md bg-bg-soft border px-3 py-2.5 text-sm text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
+                style={{ borderColor: serverUrlInvalid ? DANGER : undefined }}
+              />
+              {serverUrlInvalid && (
+                <div
+                  id="pair-server-url-err"
+                  role="alert"
+                  className="text-xs"
+                  style={{ color: DANGER }}
+                >
+                  {SERVER_URL_ERROR}
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         {error && (

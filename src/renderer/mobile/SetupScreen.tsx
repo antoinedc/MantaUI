@@ -11,6 +11,7 @@ import {
   canConnectSetup,
   buildSetupClaimInput,
   resolveSetupServerUrl,
+  normalizeServerUrl,
 } from "./setupLogic";
 
 type Props = {
@@ -25,9 +26,11 @@ type Props = {
   pairStatus?: null | "pairing" | "failed" | "invalid";
 };
 
+const SERVER_URL_ERROR = "Server URL must start with http:// or https://";
+
 /**
  * First-run setup screen for the mobile client (BET-177 Phase 1, redesigned
- * BET-186). Shown by MobileApp when serverBase() throws
+ * BET-186, BET-268). Shown by MobileApp when serverBase() throws
  * ServerNotConfiguredError on a fresh iOS Capacitor install.
  *
  * Primary path is QR scan: the default view is instructions for getting a QR
@@ -36,35 +39,51 @@ type Props = {
  * requires no interaction here). A "Manual setup" link opens a bottom sheet
  * for typed pairing.
  *
- * The manual sheet asks for a Box ID + pairing code; the box's public
- * hostname (`https://<boxId>.boxes.mantaui.com`) is derived from the Box ID
- * via the shared `boxDirectUrl` helper, so no server-URL field is needed.
- * Every box serves its own public hostname directly.
+ * The manual sheet asks for a Box ID + pairing code. By default the box's
+ * public hostname (`https://<boxId>.boxes.mantaui.com`) is derived from the
+ * Box ID via the shared `boxDirectUrl` helper. BET-268 adds an optional
+ * Advanced "Server URL" field (collapsed by default) for tailnet boxes that
+ * live at e.g. `http://100.x.y.z:8787`; when set, the claim + the persisted
+ * manta_server use that URL verbatim.
  *
  * All non-React logic (URL/box-id/code validation, the submit gate,
- * claim-input construction, HTTP-outcome classification) is pure +
- * unit-tested in setupLogic.ts + pairStepLogic.ts + ../../shared/claim.mjs.
- * This file is the wiring.
+ * claim-input construction, server-URL normalization, HTTP-outcome
+ * classification) is pure + unit-tested in setupLogic.ts +
+ * pairStepLogic.ts + ../../shared/claim.mjs. This file is the wiring.
  */
 export function SetupScreen({ onConnected, pairStatus }: Props) {
   const [manualOpen, setManualOpen] = useState(false);
   const [boxId, setBoxId] = useState("");
   const [code, setCode] = useState("");
+  const [serverUrl, setServerUrl] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
 
+  // Server URL is only "bad" when the user typed something non-empty that
+  // doesn't match `^https?://` — empty stays the default path (no inline
+  // error). Pure check via the shared helper.
+  const serverUrlTrimmed = serverUrl.trim();
+  const serverUrlInvalid =
+    serverUrlTrimmed !== "" && normalizeServerUrl(serverUrlTrimmed) === null;
+
   const submit = async () => {
-    if (!canConnectSetup({ boxId, code, submitting })) return;
+    if (!canConnectSetup({ boxId, code, submitting, serverUrl: serverUrlTrimmed })) return;
     setSubmitting(true);
     setError(null);
     const result = await window.api.authClaim(
-      buildSetupClaimInput({ boxId, code }),
+      buildSetupClaimInput({ boxId, code, serverUrl: serverUrlTrimmed }),
     );
     if (result.ok) {
       // Token is already persisted by authClaim. Persist the resolved server
-      // URL (boxDirectUrl(boxId)) so serverBase() resolves on the next refresh.
-      localStorage.setItem("manta_server", resolveSetupServerUrl({ boxId }));
+      // URL (explicit override if Advanced was set, else boxDirectUrl(boxId))
+      // so serverBase() resolves to the same listener the claim succeeded
+      // against on the next refresh.
+      localStorage.setItem(
+        "manta_server",
+        resolveSetupServerUrl({ boxId, serverUrl: serverUrlTrimmed }),
+      );
       setSubmitting(false);
       onConnected();
       return;
@@ -214,6 +233,63 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                 />
               </Field>
 
+              {/* Advanced — optional server URL override (BET-268, tailnet
+                  path). Collapsed by default; only renders the field when the
+                  user opts in. */}
+              <div className="flex flex-col gap-1.5">
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => setAdvancedOpen((v) => !v)}
+                  aria-expanded={advancedOpen}
+                  aria-controls="mobile-setup-server-url"
+                  className="mobile-tap self-start text-xs text-text-muted"
+                >
+                  {advancedOpen ? "▾" : "▸"} Advanced
+                </button>
+                {advancedOpen && (
+                  <>
+                    <label
+                      htmlFor="mobile-setup-server-url"
+                      className="text-xs font-medium text-text-muted self-start"
+                    >
+                      Server URL
+                    </label>
+                    <input
+                      id="mobile-setup-server-url"
+                      type="text"
+                      inputMode="url"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="http://100.x.y.z:8787"
+                      disabled={submitting}
+                      value={serverUrl}
+                      onChange={(e) => {
+                        setServerUrl(e.target.value);
+                        setError(null);
+                      }}
+                      aria-invalid={serverUrlInvalid}
+                      aria-describedby={
+                        serverUrlInvalid ? "mobile-setup-server-url-err" : undefined
+                      }
+                      className="w-full rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 text-sm outline-none focus:border-accent disabled:opacity-60"
+                      style={{
+                        borderColor: serverUrlInvalid ? "#FF7A88" : undefined,
+                      }}
+                    />
+                    {serverUrlInvalid && (
+                      <div
+                        id="mobile-setup-server-url-err"
+                        role="alert"
+                        className="text-red-400 text-xs"
+                      >
+                        {SERVER_URL_ERROR}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
               {error && (
                 <div role="alert" className="text-red-400 text-sm">
                   {error}
@@ -222,7 +298,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
 
               <button
                 type="submit"
-                disabled={!canConnectSetup({ boxId, code, submitting })}
+                disabled={!canConnectSetup({ boxId, code, submitting, serverUrl: serverUrlTrimmed })}
                 className="mobile-tap w-full px-5 py-3.5 rounded-xl bg-accent-soft text-white font-semibold disabled:opacity-40"
               >
                 {submitting ? "Connecting…" : "Connect"}
