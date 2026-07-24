@@ -171,12 +171,18 @@ workflows:
       app_store_connect: APS Key
     environment:
       groups:
-        # Mac signing + deploy vars live in the Codemagic UI group "mantaui":
-        # CSC_LINK (Developer ID .p12, base64), CSC_KEY_PASSWORD, APPLE_TEAM_ID,
-        # and (optional) PROD_SSH_KEY. NOTE: notarization now uses the ASC API key
-        # from the "APS Key" integration (APP_STORE_CONNECT_*), NOT an Apple-ID
-        # app-specific password — APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD are no
-        # longer read by this workflow and can be removed from the group.
+        # Mac signing + deploy + notarization vars live in the "mantaui" group:
+        #   CSC_LINK            — Developer ID .p12, base64 (app + DMG signing)
+        #   CSC_KEY_PASSWORD    — .p12 password
+        #   APPLE_TEAM_ID       — FSQ3HS4Z24
+        #   ASC_API_KEY_P8_B64  — base64 of the App Store Connect .p8 (notarization)
+        #   ASC_API_KEY_ID      — the 10-char ASC key id
+        #   ASC_ISSUER_ID       — the ASC issuer UUID
+        #   PROD_SSH_KEY        — (optional) base64 deploy key for mantaui.com
+        # Notarization uses the ASC .p8 from ASC_API_KEY_P8_B64 (a real secure var,
+        # NOT the "APS Key" integration — that integration only feeds the
+        # app-store-connect CLI implicitly and does NOT expose the full key as a
+        # shell variable). APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD are unused.
         - mantaui
       node: 22
       xcode: latest
@@ -216,54 +222,33 @@ workflows:
           echo "CSC_LINK=$KEYCHAIN_CERT" >> "$CM_ENV"
       - name: Materialize ASC API key for notarization
         script: |
-          # Notarization authenticates with an App Store Connect API key (.p8) —
-          # NOT an Apple-ID app-specific password. We reuse the SAME ASC key that
-          # the ios-testflight workflow uses (the "APS Key" integration exposes it
-          # as $APP_STORE_CONNECT_PRIVATE_KEY / $APP_STORE_CONNECT_KEY_IDENTIFIER /
-          # $APP_STORE_CONNECT_ISSUER_ID). Write the .p8 to a file for both
-          # electron-builder's app notarization and the DMG notarytool submit.
-          #
-          # PEM RECONSTRUCTION: the integration variable often arrives with its
-          # newlines flattened (literal "\n" sequences, or the header/body/footer
-          # run together on one line). electron-builder's @electron/notarize
-          # tolerates that, but `xcrun notarytool` is strict and rejects a
-          # single-line key with "Error: invalidPEMDocument" (the ios-v0.0.10 DMG
-          # step failure). Normalize to a real multi-line PEM before writing:
-          #   1. turn literal "\n" into real newlines,
-          #   2. if it is STILL one line, rebuild the PEM by putting the base64
-          #      body on its own 64-char-wrapped lines between the BEGIN/END markers.
+          # Notarization authenticates with an App Store Connect API key (.p8),
+          # NOT an Apple-ID app-specific password. We do NOT rely on the "APS Key"
+          # INTEGRATION exposing the key as a shell variable — it does not: the
+          # working ios-testflight workflow consumes the integration only through
+          # the `app-store-connect` CLI (which reads it implicitly), and
+          # $APP_STORE_CONNECT_PRIVATE_KEY came through as a 72-char stub, breaking
+          # notarytool. Instead the FULL .p8 is stored as a dedicated secure
+          # environment variable ASC_API_KEY_P8_B64 (base64 of the raw .p8) plus
+          # ASC_API_KEY_ID / ASC_ISSUER_ID, all in the "mantaui" group. Decode it.
           set -e
-          mkdir -p "$HOME/.appstoreconnect/private_keys"
-          ASC_KEY_FILE="$CM_BUILD_DIR/asc-api-key.p8"
-          # ALWAYS reconstruct from the base64 body, shape-agnostic. This is the
-          # SAME approach the box's working asc.mjs JWT signer uses. We do NOT rely
-          # on `sed 's/\\n/\n/g'` (POSIX/BSD sed does not expand \n in the
-          # replacement, so a literal-"\n" key would slip through unchanged): strip
-          # the BEGIN/END markers, strip the literal characters backslash + n, strip
-          # ALL whitespace to get the pure base64 body, then 64-char-wrap it back
-          # between fresh markers. Works whether the input is one line, has literal
-          # "\n", or is already multi-line.
-          RAW="$APP_STORE_CONNECT_PRIVATE_KEY"
-          BODY=$(printf '%s' "$RAW" \
-            | sed -E 's/-----BEGIN [A-Z ]*PRIVATE KEY-----//; s/-----END [A-Z ]*PRIVATE KEY-----//' \
-            | sed 's/\\n//g' \
-            | tr -d ' \t\r\n')
-          {
-            echo "-----BEGIN PRIVATE KEY-----"
-            printf '%s' "$BODY" | fold -w 64
-            echo ""
-            echo "-----END PRIVATE KEY-----"
-          } > "$ASC_KEY_FILE"
-          chmod 600 "$ASC_KEY_FILE"
-          # Validate with `openssl pkey` (the read-only "is this a parseable private
-          # key" check — NOT `openssl pkcs8 -topk8`, which is a re-encode and can
-          # false-fail on a perfectly valid key, the mac-v0.0.10 attempt-2 failure).
-          if ! openssl pkey -in "$ASC_KEY_FILE" -noout 2>/dev/null; then
-            echo "ASC .p8 did not parse as an EC private key after reconstruction."
-            echo "First line: $(head -1 "$ASC_KEY_FILE") | lines: $(wc -l < "$ASC_KEY_FILE") | body chars: ${#BODY}"
+          if [ -z "${ASC_API_KEY_P8_B64:-}" ]; then
+            echo "ASC_API_KEY_P8_B64 is not set. Add it (base64 of the ASC .p8) to the"
+            echo "Codemagic 'mantaui' env group, plus ASC_API_KEY_ID and ASC_ISSUER_ID."
             exit 1
           fi
-          echo "OK: ASC .p8 written as valid PEM ($(wc -l < "$ASC_KEY_FILE") lines, body ${#BODY} chars)."
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          ASC_KEY_FILE="$CM_BUILD_DIR/asc-api-key.p8"
+          printf '%s' "$ASC_API_KEY_P8_B64" | base64 --decode > "$ASC_KEY_FILE"
+          chmod 600 "$ASC_KEY_FILE"
+          # Validate it is a parseable EC private key (read-only check).
+          if ! openssl pkey -in "$ASC_KEY_FILE" -noout 2>/dev/null; then
+            echo "Decoded ASC .p8 is not a parseable EC private key — check ASC_API_KEY_P8_B64."
+            echo "First line: $(head -1 "$ASC_KEY_FILE") | lines: $(wc -l < "$ASC_KEY_FILE")"
+            exit 1
+          fi
+          echo "OK: ASC .p8 decoded + parsed ($(wc -l < "$ASC_KEY_FILE") lines)."
+          echo "ASC_KEY_FILE=$ASC_KEY_FILE" >> "$CM_ENV"
           echo "OK: ASC .p8 written as valid PEM ($(wc -l < "$ASC_KEY_FILE") lines)."
           echo "ASC_KEY_FILE=$ASC_KEY_FILE" >> "$CM_ENV"
       - name: Build + sign app + notarize the .app inside the DMG
@@ -280,8 +265,8 @@ workflows:
           # THE mac-desktop notarization bug.
           set -e
           export APPLE_API_KEY="$ASC_KEY_FILE"
-          export APPLE_API_KEY_ID="$APP_STORE_CONNECT_KEY_IDENTIFIER"
-          export APPLE_API_ISSUER="$APP_STORE_CONNECT_ISSUER_ID"
+          export APPLE_API_KEY_ID="$ASC_API_KEY_ID"
+          export APPLE_API_ISSUER="$ASC_ISSUER_ID"
           export APPLE_TEAM_ID="$APPLE_TEAM_ID"
           npm run build
           npx electron-builder --mac --publish never -c.mac.notarize=true
@@ -299,8 +284,8 @@ workflows:
             codesign --force --timestamp --sign "$IDENTITY" "$dmg"
             xcrun notarytool submit "$dmg" \
               --key "$ASC_KEY_FILE" \
-              --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-              --issuer "$APP_STORE_CONNECT_ISSUER_ID" \
+              --key-id "$ASC_API_KEY_ID" \
+              --issuer "$ASC_ISSUER_ID" \
               --wait
             xcrun stapler staple "$dmg"
           done
