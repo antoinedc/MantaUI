@@ -2,14 +2,16 @@
 // pack.mjs — build a self-contained, versioned release tarball the VPS
 // installer downloads.
 //
-//   node scripts/release/pack.mjs [--out dist] [--skip-build] [--arch x64|arm64]
+//   node scripts/release/pack.mjs [--out dist] [--skip-build] [--arch x64|arm64|darwin-arm64]
 //
 // Produces a per-arch tarball + per-arch manifest sidecar in `dist/`. ONE
-// invocation builds ONE arch (`--arch x64` or `--arch arm64`); two invocations
-// (one per arch, run on native runners) are merged into the combined
-// `manta-<version>.txt` by `scripts/release/merge-manifest.mjs` — install.sh
-// reads the combined manifest and picks its own arch's keys via `resolve_arch`.
-// (`<arch>` is linux-x64 / linux-arm64; manifest keys are linux_x64 / linux_arm64.)
+// invocation builds ONE arch (`--arch x64`, `arm64`, or `darwin-arm64`); the
+// per-arch invocations are merged into the combined `manta-<version>.txt`
+// by `scripts/release/merge-manifest.mjs` — install.sh reads the combined
+// manifest and picks its own arch's keys via `resolve_arch`. (`<arch>` is
+// linux-x64 / linux-arm64 / darwin-arm64; manifest keys are linux_x64 /
+// linux_arm64 / darwin_arm64.) The darwin-arm64 tarball MUST be built on a
+// macOS runner — node-pty's native binding cannot be cross-compiled.
 //
 // The tarball's top-level dir is `manta-<version>/`. install.sh extracts with
 // `--strip-components=1` into `~/manta`. The tarball is SELF-CONTAINED — the
@@ -63,17 +65,18 @@ const NODE_VERSION = "20.20.2";
 const NODE_SHA_FILE = "SHASUMS256.txt";
 const NODE_SHA_URL = `https://nodejs.org/dist/v${NODE_VERSION}/${NODE_SHA_FILE}`;
 
-// Map the --arch flag to the two arch-dependent strings. Single source of
-// truth so a third arch is one line here, not scattered edits. The hyphen
+// Map the --arch flag to the arch-dependent strings. Single source of
+// truth so a new arch is one line here, not scattered edits. The hyphen
 // `file` form matches nodejs.org's tarball filename token (linux-x64 /
-// linux-arm64); the underscore `key` form matches install.sh's
-// manifest_get keys (file_linux_x64 / file_linux_arm64).
+// linux-arm64 / darwin-arm64); the underscore `key` form matches install.sh's
+// manifest_get keys (file_linux_x64 / file_linux_arm64 / file_darwin_arm64).
 function resolveArch(arch) {
   switch (arch) {
-    case "x64":   return { key: "linux_x64",   file: "linux-x64" };
-    case "arm64": return { key: "linux_arm64", file: "linux-arm64" };
+    case "x64":          return { key: "linux_x64",    file: "linux-x64" };
+    case "arm64":        return { key: "linux_arm64",  file: "linux-arm64" };
+    case "darwin-arm64": return { key: "darwin_arm64", file: "darwin-arm64" };
     default:
-      throw new Error(`unsupported --arch ${JSON.stringify(arch)} (expected: x64 | arm64)`);
+      throw new Error(`unsupported --arch ${JSON.stringify(arch)} (expected: x64 | arm64 | darwin-arm64)`);
   }
 }
 
@@ -96,8 +99,8 @@ function parseArgs(argv) {
     else if (argv[i] === "--arch") out.arch = argv[++i];
   }
   // Validate --arch eagerly so an invalid value dies before any work.
-  if (out.arch !== "x64" && out.arch !== "arm64") {
-    die(`unsupported --arch ${JSON.stringify(out.arch)} (expected: x64 | arm64)`);
+  if (!["x64", "arm64", "darwin-arm64"].includes(out.arch)) {
+    die(`unsupported --arch ${JSON.stringify(out.arch)} (expected: x64 | arm64 | darwin-arm64)`);
   }
   return out;
 }
@@ -261,7 +264,7 @@ async function main() {
     die(`package.json version ${JSON.stringify(version)} is not a valid release version`);
   }
 
-  // Resolve the arch flag into the two strings this pack uses. `ARCH` is the
+  // Resolve the arch flag into the strings this pack uses. `ARCH` is the
   // hyphen form (matches nodejs.org's tarball filename + our tarball name);
   // `ARCH_KEY` is the underscore form (matches install.sh's manifest_get
   // keys). Resolved once here so nothing else in main() re-spells them.
@@ -275,7 +278,7 @@ async function main() {
   // Archive name encodes the arch so a future arm64 build is data, not code.
   // install.sh's manifest key file_linux_<arch> mirrors this.
   const outFile = join(REPO_ROOT, args.outDir, `manta-${version}-${ARCH}.tar.gz`);
-  // Per-arch sidecar manifest — keeps two arch builds from overwriting each
+  // Per-arch sidecar manifest — keeps per-arch builds from overwriting each
   // other on the release host. Stage 2 merges these into the combined
   // `manta-<version>.txt` install.sh fetches by default.
   const outManifest = join(REPO_ROOT, args.outDir, `manta-${version}-${ARCH}.txt`);

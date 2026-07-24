@@ -1,5 +1,5 @@
-# Server tarball deploy — build BOTH arch tarballs (x64 + arm64) and publish
-# them + a combined two-arch manifest on a `server-v*` git tag.
+# Server tarball deploy — build ALL arch tarballs (x64 + arm64 + darwin-arm64)
+# and publish them + a combined multi-arch manifest on a `server-v*` git tag.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -9,20 +9,25 @@
 # arch-parameterized. This workflow is the matching CI side: builds the arm64
 # tarball natively (no QEMU, no cross-compile — node-pty's native binding
 # cannot be cross-compiled), then publishes BOTH tarballs + the combined
-# manifest in a single deploy.
+# manifest in a single deploy. BET-275 adds darwin-arm64 (Apple Silicon) as
+# a third arch for the macOS box path; the darwin build runs on a macos-14
+# runner (native Mach-O binding for node-pty).
 #
 # WHAT IT DEPLOYS
-#   dist/manta-<v>-linux-x64.tar.gz    → <PROD_HOST>:/var/www/mantaui/releases/
-#   dist/manta-<v>-linux-arm64.tar.gz  → <PROD_HOST>:/var/www/mantaui/releases/
-#   dist/manta-<v>.txt                 → <PROD_HOST>:/var/www/mantaui/releases/
+#   dist/manta-<v>-linux-x64.tar.gz     → <PROD_HOST>:/var/www/mantaui/releases/
+#   dist/manta-<v>-linux-arm64.tar.gz   → <PROD_HOST>:/var/www/mantaui/releases/
+#   dist/manta-<v>-darwin-arm64.tar.gz  → <PROD_HOST>:/var/www/mantaui/releases/
+#   dist/manta-<v>.txt                  → <PROD_HOST>:/var/www/mantaui/releases/
 #   (then cp manta-<v>.txt → manta-latest.txt, last — atomicity guarantee)
 #
 # BUILD HOST CHOICE
-#   GitHub-hosted ubuntu-latest (x64) + ubuntu-24.04-arm (arm64) runners, one
-#   pack.mjs invocation per arch. node-pty's prebuilt .node binding compiles
-#   natively for its runner's ABI — no QEMU, no cross-compile (BET-262 design
-#   constraint). Both runners are GitHub-hosted, so no self-hosted runner
-#   capacity is burned on the slow arm64 build.
+#   GitHub-hosted ubuntu-latest (x64) + ubuntu-24.04-arm (linux-arm64) +
+#   macos-14 (darwin-arm64) runners, one pack.mjs invocation per arch.
+#   node-pty's prebuilt .node binding compiles natively for its runner's ABI
+#   — no QEMU, no cross-compile (BET-262 design constraint; the darwin Node
+#   is macOS-only and the node-pty binding MUST be a Mach-O arm64 binary).
+#   All runners are GitHub-hosted, so no self-hosted runner capacity is
+#   burned on the slow arm64 build.
 #
 # PUBLISH HOST + AUTH
 #   Self-hosted runner (same as website-deploy.yml + gateway-deploy.yml) —
@@ -73,12 +78,16 @@ jobs:
   build:
     name: pack (${{ matrix.arch }})
     # One job per arch — node-pty's native binding cannot be cross-compiled,
-    # so each arch needs its own runner's ABI.
+    # so each arch needs its own runner's ABI. darwin-arm64 must run on a
+    # macOS runner (Mach-O binding + macOS-only Node tarball).
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+        arch: [x64, arm64, darwin-arm64]
+    runs-on: >-
+      ${{ matrix.arch == 'darwin-arm64' && 'macos-14'
+          || matrix.arch == 'arm64' && 'ubuntu-24.04-arm'
+          || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -102,9 +111,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: server-tarball-${{ matrix.arch }}
+          # Each per-job artifact name (`server-tarball-<arch>`) isolates this
+          # job's upload — `linux-arm64` and `darwin-arm64` tarballs would both
+          # collide on `*-arm64.tar.gz`, but only this job's files exist in
+          # its `dist/`. Match the full tarball basename so the darwin-arm64
+          # filename (no `linux-` prefix) is captured.
           path: |
-            dist/manta-*-linux-${{ matrix.arch }}.tar.gz
-            dist/manta-*-linux-${{ matrix.arch }}.txt
+            dist/manta-*.tar.gz
+            dist/manta-*.txt
           if-no-files-found: error
 
   publish:
@@ -156,6 +170,7 @@ jobs:
           node scripts/release/merge-manifest.mjs \
             "dist/manta-${VERSION}-linux-x64.txt" \
             "dist/manta-${VERSION}-linux-arm64.txt" \
+            "dist/manta-${VERSION}-darwin-arm64.txt" \
             --out "dist/manta-${VERSION}.txt"
           echo "✓ combined manifest: dist/manta-${VERSION}.txt"
 
@@ -171,7 +186,7 @@ jobs:
           SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
           SCP="scp -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 
-          for arch in linux-x64 linux-arm64; do
+          for arch in linux-x64 linux-arm64 darwin-arm64; do
             tarball="dist/manta-${VERSION}-${arch}.tar.gz"
             echo "▸ Uploading ${tarball}"
             $SCP "$tarball" "$PROD_HOST:$RELEASES_DIR/"
@@ -191,7 +206,7 @@ jobs:
           fail=0
 
           echo "▸ HEAD each tarball URL → 200"
-          for arch in linux-x64 linux-arm64; do
+          for arch in linux-x64 linux-arm64 darwin-arm64; do
             url="$SITE/releases/manta-${VERSION}-${arch}.tar.gz"
             code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || echo 000)
             if [ "$code" != "200" ]; then
@@ -212,7 +227,7 @@ jobs:
           echo "✓ served version=${served_version}"
 
           echo "▸ For each arch: download served tarball, assert sha256 against the manifest"
-          for arch in linux-x64 linux-arm64; do
+          for arch in linux-x64 linux-arm64 darwin-arm64; do
             arch_key=$(printf '%s' "$arch" | tr '-' '_')
             served_file=$(printf '%s\n' "$served" | grep "^file_${arch_key}=" | head -n1 | cut -d= -f2-)
             served_sha=$(printf '%s\n' "$served"  | grep "^sha256_${arch_key}=" | head -n1 | cut -d= -f2-)
@@ -234,4 +249,4 @@ jobs:
             echo "::error::One or more verifications failed."
             exit 1
           fi
-          echo "All verifications passed (x64 + arm64, both sha256s match the served manifest)."
+          echo "All verifications passed (x64 + arm64 + darwin-arm64, all sha256s match the served manifest)."
