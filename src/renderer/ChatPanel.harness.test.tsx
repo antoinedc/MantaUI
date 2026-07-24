@@ -227,6 +227,80 @@ describe("ChatPanel session resources", () => {
     // would silently wipe the wrong session.
     expect(api.calls.opencodeClearSession ?? []).toEqual([]);
   });
+
+  // Mobile ⋯ sheet → attach-files bridge (BET-260). The hidden <input
+  // type="file"> inside SessionScreen's ⋯ sheet dispatches
+  // `manta-attach-files` with the user's selected File[]; ChatPanel hands
+  // them to addDroppedFiles, which renders the uploading→ready chip and
+  // ships bytes via uploadBuffer (the byte path on mobile — getPathForFile
+  // returns ""). No new upload code lives in ChatPanel; this test pins the
+  // wiring so the bridge can't silently regress to a no-op.
+  it("uploads attached files when the manta-attach-files bridge fires for this session", async () => {
+    ({ api } = installMockApi({
+      uploadBuffer: () => Promise.resolve("/remote/img.png"),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const fakeFile = new File(["x"], "img.png", { type: "image/png" });
+    // jsdom's File doesn't implement arrayBuffer() — addDroppedFiles reads
+    // bytes via file.arrayBuffer() on the byte path (getPathForFile → ""),
+    // so polyfill it for the test. Real browsers (incl. mobile webviews)
+    // ship arrayBuffer; this is purely a jsdom gap.
+    (fakeFile as File & { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer =
+      () => Promise.resolve(new ArrayBuffer(1));
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("manta-attach-files", {
+          detail: { sessionId: "ses_test", files: [fakeFile] },
+        }),
+      );
+    });
+    await h.flush();
+
+    // The bridge routes through addDroppedFiles → uploadBuffer with the
+    // correct filename and project. Bytes ride the byte path because
+    // jsdom's getPathForFile mock returns "".
+    const calls = api.calls.uploadBuffer ?? [];
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][0]).toMatchObject({
+      projectName: "proj",
+      filename: "img.png",
+    });
+    // Chip landed in "ready" state — title attr carries the remotePath.
+    const chip = h.container.querySelector('[title="/remote/img.png"]');
+    expect(chip).toBeTruthy();
+  });
+
+  it("ignores a manta-attach-files bridge for another session id", async () => {
+    ({ api } = installMockApi({
+      uploadBuffer: () => Promise.resolve("/remote/img.png"),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const fakeFile = new File(["x"], "img.png", { type: "image/png" });
+    (fakeFile as File & { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer =
+      () => Promise.resolve(new ArrayBuffer(1));
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("manta-attach-files", {
+          detail: { sessionId: "ses_OTHER", files: [fakeFile] },
+        }),
+      );
+    });
+    await h.flush();
+
+    // A bridge for a different session must NOT upload to THIS panel's
+    // session. Without the gate, an accidental global dispatch would
+    // attach a file to the wrong tmux window's session.
+    expect(api.calls.uploadBuffer ?? []).toEqual([]);
+    expect(h.container.querySelector('[title="/remote/img.png"]')).toBeNull();
+  });
 });
 
 // ===== Transcript rendering (via the mounted ChatPanel) =====

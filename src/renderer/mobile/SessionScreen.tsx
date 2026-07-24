@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore, resolveSessionOwner } from "../store";
 import { ChatPanel } from "../ChatPanel";
 import { Terminal } from "../Terminal";
@@ -32,6 +32,14 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   // used to surface it) is hidden on mobile (BET-258), so the sheet carries
   // it instead. Count is omitted entirely on 0 or fetch failure.
   const [scheduleCount, setScheduleCount] = useState(0);
+
+  // Hidden <input type="file"> that the "Attach photo or file…" sheet button
+  // clicks via .click() — iOS only opens the native picker from a user
+  // gesture, so the click on the input must happen synchronously in the
+  // tap handler (BET-260). Rendered at the component root (NOT inside the
+  // conditional sheet subtree) so it survives the sheet closing while the
+  // native picker is up.
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const project = projects.find((p) => p.tmuxSession === projectName);
   const win = project?.windows.find((w) => w.index === windowIndex);
@@ -220,6 +228,25 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
 
   return (
     <div className="mobile-screen">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*,application/pdf"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = e.target.files;
+          if (sid && files && files.length > 0) {
+            window.dispatchEvent(
+              new CustomEvent("manta-attach-files", {
+                detail: { sessionId: sid, files: Array.from(files) },
+              }),
+            );
+          }
+          // Reset so picking the same file twice re-fires change.
+          e.target.value = "";
+        }}
+      />
       <div className="mobile-header">
         <button
           className="mobile-tap text-accent text-2xl leading-none"
@@ -357,6 +384,17 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
             ) : (
               <>
                 <button onClick={startRename}>Rename</button>
+                <button
+                  onClick={() => {
+                    // iOS only opens the picker from a user gesture — the click
+                    // on the hidden input must happen synchronously in this
+                    // tap handler (BET-260).
+                    fileInputRef.current?.click();
+                    closeSheet();
+                  }}
+                >
+                  Attach photo or file…
+                </button>
                 {sid && (
                   <>
                     <button onClick={forkSession}>Fork session</button>

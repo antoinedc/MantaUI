@@ -1229,6 +1229,29 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     [tmuxSession],
   );
 
+  // Mobile ⋯ sheet → attach-files bridge (BET-260). The hidden <input
+  // type="file"> inside SessionScreen's ⋯ sheet dispatches this with the
+  // user's selected File[]; we hand them to addDroppedFiles, which already
+  // runs the byte path on mobile (getPathForFile → ""), renders the
+  // uploading→ready chip, and converts ready media chips into FileParts at
+  // submit. No new upload code lives here. The listener sits next to
+  // addDroppedFiles so the function is in scope (the existing mobile
+  // bridges — manta-scroll-to-question, manta-run-clear — sit higher up
+  // because they only need state primitives declared earlier).
+  useEffect(() => {
+    const onAttachFiles = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { sessionId?: string; files?: File[] }
+        | undefined;
+      if (detail?.sessionId !== sessionId) return;
+      const files = detail?.files ?? [];
+      if (files.length === 0) return;
+      void addDroppedFiles(files);
+    };
+    window.addEventListener("manta-attach-files", onAttachFiles);
+    return () => window.removeEventListener("manta-attach-files", onAttachFiles);
+  }, [sessionId, addDroppedFiles]);
+
   const removeAttachment = useCallback((id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
