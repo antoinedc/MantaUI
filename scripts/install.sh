@@ -480,13 +480,44 @@ main() {
     fi
   fi
 
-  # --- D. opencode-serve systemd --user unit (or nohup fallback). ----------
-  # Mirrors the manta-server install path right below: substitute the
-  # @@OPENCODE_BIN@@ placeholder, install to ~/.config/systemd/user/, then
-  # enable --now. Health-wait reuses the existing waitForHealth lib with
-  # acceptAnyStatus:true (any HTTP status = listener is up — opencode's HTTP
-  # surface is minimal and may not respond to a bare GET /). Same fallback
-  # chain as manta-server when systemctl is unavailable.
+  # install_launchd_agent <label> <template-src> <dest-plist> — render the
+  # @@…@@ placeholders and (re)load the LaunchAgent idempotently. macOS only.
+  # Mirrors the systemd `daemon-reload + enable --now` shape:
+  #   * bootout (ignore failure if not loaded) → bootstrap → kickstart.
+  #   * Older macOS where `bootstrap` isn't available falls back to
+  #     `launchctl load -w` (deprecated but still works).
+  #   * kickstart -k forces a restart so a re-run picks up the new plist
+  #     immediately, mirroring `systemctl restart`.
+  # Caller MUST have already created the dest-plist's parent dir (mkdir -p).
+  install_launchd_agent() {
+    local label="$1" src="$2" dest="$3"
+    [ -f "$src" ] || die "missing launchd template: $src"
+    sed \
+      -e "s|@@MANTA_HOME@@|$MANTA_HOME|g" \
+      -e "s|@@NODE_BIN@@|$NODE|g" \
+      -e "s|@@MANTA_PORT@@|$MANTA_PORT|g" \
+      -e "s|@@MANTA_TAILNET_HOST@@|${TAILNET_IP:-}|g" \
+      -e "s|@@OPENCODE_BIN@@|${OPENCODE_BIN:-}|g" \
+      -e "s|@@AUTH_DIR@@|$AUTH_DIR|g" \
+      "$src" > "$dest"
+    local uid; uid="$(id -u)"
+    # bootout first (ignore failure if not loaded), then bootstrap for a clean
+    # reload that picks up template changes on re-run.
+    launchctl bootout "gui/$uid/$label" 2>/dev/null || true
+    if ! launchctl bootstrap "gui/$uid" "$dest" 2>/dev/null; then
+      # Older macOS where `bootstrap` isn't available.
+      launchctl load -w "$dest" 2>/dev/null \
+        || warn "launchctl could not load $label — check: launchctl print gui/$uid/$label"
+    fi
+    launchctl kickstart -k "gui/$uid/$label" 2>/dev/null || true
+  }
+
+  # --- D. opencode-serve: systemd --user (Linux) / launchd (macOS) / nohup (other). ----
+  # Three-way branch mirroring the manta-server install path right below.
+  # Health-wait reuses the existing waitForHealth lib with acceptAnyStatus:true
+  # (any HTTP status = listener is up — opencode's HTTP surface is minimal and
+  # may not respond to a bare GET /). Same health-wait works for all three
+  # branches — opencode binds 127.0.0.1:4096 regardless of supervisor.
   OC_UNIT_SRC="$MANTA_HOME/scripts/systemd/opencode-serve.service"
   OC_UNIT="$UNIT_DIR/opencode-serve.service"
   [ -f "$OC_UNIT_SRC" ] || die "missing systemd template: $OC_UNIT_SRC"
@@ -504,19 +535,24 @@ main() {
       systemctl --user daemon-reload
       systemctl --user enable --now opencode-serve.service
     fi
+  elif [ "$IS_MACOS" = "1" ]; then
+    # macOS path (BET-277): proper LaunchAgent so opencode-serve survives
+    # logout/reboot — the previous nohup fallback died on logout. Loaded
+    # per-user into the GUI session; RunAtLoad=true + KeepAlive=true handle
+    # the lifecycle, no `enable-linger` equivalent needed.
+    LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+    OC_PLIST_SRC="$MANTA_HOME/scripts/launchd/com.mantaui.opencode.plist"
+    OC_PLIST="$LAUNCH_AGENTS_DIR/com.mantaui.opencode.plist"
+    [ -f "$OC_PLIST_SRC" ] || die "missing launchd template: $OC_PLIST_SRC"
+    log "Installing opencode-serve LaunchAgent (com.mantaui.opencode)…"
+    mkdir -p "$LAUNCH_AGENTS_DIR"
+    install_launchd_agent "com.mantaui.opencode" "$OC_PLIST_SRC" "$OC_PLIST"
   else
     if pgrep -f 'opencode serve --port 4096' >/dev/null 2>&1; then
       ok "opencode-serve already running (nohup) — skipping."
     else
       warn "systemctl not found. Starting opencode-serve in the background instead."
       warn "It will NOT survive reboot — set up your own supervisor for that."
-      if [ "$IS_MACOS" = "1" ]; then
-        # macOS path (BET-274 / BET-276) — Issue C (BET-277) replaces this
-        # nohup fallback with a proper LaunchAgent; until then we warn so a
-        # partial merge is never silently broken (opencode dies on logout).
-        warn "macOS: falling back to a non-persistent background process (BET launchd support pending)."
-        warn "  The server will NOT survive logout/reboot until launchd support is installed."
-      fi
       ( nohup "$OPENCODE_BIN" serve --port 4096 --hostname 127.0.0.1 >"$AUTH_DIR/opencode.log" 2>&1 & )
     fi
   fi
@@ -630,16 +666,22 @@ main() {
     systemctl --user enable --now manta-server.service
     ok "manta-server enabled and started (systemctl --user status manta-server)."
     SERVER_MANAGED=systemd
+  elif [ "$IS_MACOS" = "1" ]; then
+    # macOS path (BET-277): proper LaunchAgent so manta-server survives
+    # logout/reboot — the previous nohup fallback died on logout. Loaded
+    # per-user into the GUI session; RunAtLoad=true + KeepAlive=true handle
+    # the lifecycle, no `enable-linger` equivalent needed.
+    LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+    SERVER_PLIST_SRC="$MANTA_HOME/scripts/launchd/com.mantaui.server.plist"
+    SERVER_PLIST="$LAUNCH_AGENTS_DIR/com.mantaui.server.plist"
+    [ -f "$SERVER_PLIST_SRC" ] || die "missing launchd template: $SERVER_PLIST_SRC"
+    log "Installing manta-server LaunchAgent (com.mantaui.server)…"
+    mkdir -p "$LAUNCH_AGENTS_DIR"
+    install_launchd_agent "com.mantaui.server" "$SERVER_PLIST_SRC" "$SERVER_PLIST"
+    SERVER_MANAGED=launchd
   else
     warn "systemctl not found (not a systemd host?). Starting the server in the background instead."
     warn "It will NOT survive reboot — set up your own supervisor for that."
-    if [ "$IS_MACOS" = "1" ]; then
-      # macOS path (BET-274 / BET-276) — Issue C (BET-277) replaces this
-      # nohup fallback with a proper LaunchAgent; until then we warn so a
-      # partial merge is never silently broken (manta-server dies on logout).
-      warn "macOS: falling back to a non-persistent background process (BET launchd support pending)."
-      warn "  The server will NOT survive logout/reboot until launchd support is installed."
-    fi
     ( MANTA_MOBILE_HOST=127.0.0.1 MANTA_MOBILE_PORT="$MANTA_PORT" MANTA_TAILNET_HOST="$TAILNET_IP" nohup "$NODE" "$MANTA_HOME/src/server/index.mjs" >"$AUTH_DIR/server.log" 2>&1 & )
     SERVER_MANAGED=nohup
   fi
@@ -648,6 +690,9 @@ main() {
   if [ "${SERVER_MANAGED:-}" = "systemd" ] && [ "${MANTA_RESTART:-1}" = "1" ]; then
     systemctl --user restart manta-server.service \
       || warn "systemctl --user restart manta-server failed — run it manually"
+  elif [ "${SERVER_MANAGED:-}" = "launchd" ] && [ "${MANTA_RESTART:-1}" = "1" ]; then
+    launchctl kickstart -k "gui/$(id -u)/com.mantaui.server" 2>/dev/null \
+      || warn "launchctl kickstart com.mantaui.server failed — restart manually"
   fi
 
   # Single source of truth for the inline `node -e readBoxIdentity`
@@ -1174,7 +1219,30 @@ SHIM
   # Capture the formatted pairing block; printed at the very end of main().
   PAIR_BLOCK="$("$NODE" "$MANTA_HOME/scripts/manta-pair.mjs" 2>/dev/null || true)"
 
-  cat <<EOF
+  if [ "$IS_MACOS" = "1" ]; then
+    # macOS path (BET-277): LaunchAgent management commands, not systemctl.
+    # `launchctl print` introspects a loaded agent; `launchctl kickstart -k`
+    # restarts it (the -k kills if already running). Logs go to the
+    # StandardOutPath/StandardErrorPath the plist declares
+    # ($AUTH_DIR/server.log + $AUTH_DIR/opencode.log).
+    cat <<EOF
+
+Installed. Manage the server with:
+  launchctl print gui/\$(id -u)/com.mantaui.server
+  launchctl kickstart -k gui/\$(id -u)/com.mantaui.server
+  tail -f $AUTH_DIR/server.log
+
+Chat backend (opencode-serve) on http://127.0.0.1:4096:
+  launchctl print gui/\$(id -u)/com.mantaui.opencode
+  launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode
+  tail -f $AUTH_DIR/opencode.log
+
+Note: LaunchAgents load at GUI login and survive reboot as long as the
+user is logged in. A headless-never-logs-in Mac would need a LaunchDaemon
+(requires root) — out of scope.
+EOF
+  else
+    cat <<EOF
 
 Installed. Manage the server with:
   systemctl --user status manta-server
@@ -1186,6 +1254,7 @@ Chat backend (opencode-serve) on http://127.0.0.1:4096:
   systemctl --user restart opencode-serve
   journalctl --user -u opencode-serve -f
 EOF
+  fi
 
   # Trailing-pairing block — direct mode only. The Box ID line and the footer
   # are always printed. The "how does this box reach the internet" line varies
@@ -1230,7 +1299,11 @@ EOF
   else
     warn "no \$HOME/.claude/.credentials.json — chat will start but reject requests until you authenticate."
     warn "Run \`claude\` once on this box to sign in, then:"
-    warn "  systemctl --user restart opencode-serve"
+    if [ "$IS_MACOS" = "1" ]; then
+      warn "  launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
+    else
+      warn "  systemctl --user restart opencode-serve"
+    fi
   fi
 
   # The connect block prints LAST so it's what the user sees at rest.

@@ -118,7 +118,19 @@ refresh_mobile_bundle() {
 
 refresh_mobile_bundle
 
-echo "▸ self-update: restarting manta-server.service"
-systemctl --user restart manta-server.service
+# Restart the supervisor that runs manta-server. Linux uses the systemd
+# --user unit (default since v1); macOS (BET-277) uses the LaunchAgent
+# installed by install.sh — `launchctl kickstart -k` kills any running
+# instance and starts a fresh one. Other hosts have no persistent
+# supervisor and the user is expected to restart by hand.
+if command -v systemctl >/dev/null 2>&1; then
+  echo "▸ self-update: restarting manta-server.service"
+  systemctl --user restart manta-server.service
+elif [ "$(uname -s)" = "Darwin" ]; then
+  echo "▸ self-update: kickstarting com.mantaui.server LaunchAgent"
+  launchctl kickstart -k "gui/$(id -u)/com.mantaui.server"
+else
+  echo "⚠ self-update: no systemctl/launchctl — restart manta-server manually"
+fi
 
 echo "✓ self-update: complete"

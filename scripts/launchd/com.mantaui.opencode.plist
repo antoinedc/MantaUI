@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.mantaui.opencode.plist — LaunchAgent (per-user) for the opencode chat
+  backend (BET-153). macOS equivalent of
+  scripts/systemd/opencode-serve.service.
+
+  Pairs with scripts/launchd/com.mantaui.server.plist: the server unit
+  serves the box HTTP API (mobile / web), this unit serves the opencode chat
+  backend on loopback 127.0.0.1:4096. The two live in the same
+  `gui/$(id -u)` launchd session and have NO ordering dependency;
+  manta-server's opencode.mjs HTTP proxy just talks to 127.0.0.1:4096
+  regardless of which unit binds it.
+
+  Loaded per-user via `launchctl bootstrap gui/$(id -u) plist` by
+  scripts/install.sh. RunAtLoad=true + KeepAlive=true plus login-time load
+  gives reboot persistence without an explicit `enable-linger` equivalent
+  (LaunchAgent natural lifecycle handles it for a logged-in Mac; see
+  BET-277 "Design decisions ALREADY MADE" for the headless-never-logs-in
+  caveat).
+
+  Bind is 127.0.0.1 on purpose: the chat backend is NOT exposed directly.
+  Everything reaches it through manta-server auth-gated reverse proxy,
+  which itself is loopback-only. The chat service needs Anthropic OAuth
+  (the `opencode-claude-auth@latest` plugin seeded by install.sh step C),
+  which it picks up from the user `~/.claude/.credentials.json`, the only
+  auth prerequisite the installer assumes.
+
+  The installer substitutes the placeholder tokens and writes the result to
+  ~/Library/LaunchAgents/com.mantaui.opencode.plist.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mantaui.opencode</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@OPENCODE_BIN@@</string>
+    <string>serve</string>
+    <string>--port</string>
+    <string>4096</string>
+    <string>--hostname</string>
+    <string>127.0.0.1</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@@AUTH_DIR@@/opencode.log</string>
+  <key>StandardErrorPath</key>
+  <string>@@AUTH_DIR@@/opencode.log</string>
+</dict>
+</plist>
