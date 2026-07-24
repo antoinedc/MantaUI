@@ -60,17 +60,21 @@ mac:
   # present (or set CSC_LINK/CSC_KEY_PASSWORD to a .p12). Explicit so an App
   # Store cert in the keychain isn't picked by mistake.
   identity: "Developer ID Application"
-  # NOTARIZATION DISABLED for the beta. The DMG is still Developer ID-SIGNED, so
-  # macOS shows a milder "unidentified developer" prompt rather than "damaged".
-  # A selected beta tester opens it once via right-click → Open (or
-  #   xattr -dr com.apple.quarantine "/Applications/Manta UI.app"
-  # ), after which it launches normally. This skips Apple's notarization
-  # round-trip, which was adding 20-40 min of queue latency per build.
-  # To re-enable for public distribution: set `notarize: true` and ensure
-  # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID are in the Codemagic
-  # "mantaui" env group.
-  # TODO: set true before public (non-beta) auto-update rollout — Gatekeeper friction on non-notarized DMGs. See AGENTS.md.
-  notarize: false
+  # NOTARIZATION ENABLED. electron-builder notarizes + staples the .app inside
+  # the bundle via @electron/notarize, authenticating with an App Store Connect
+  # API KEY (not an Apple-ID app-specific password): the codemagic mac-desktop
+  # workflow exports APPLE_API_KEY (path to the .p8) / APPLE_API_KEY_ID /
+  # APPLE_API_ISSUER / APPLE_TEAM_ID before running electron-builder. NOTE: this
+  # only covers the .app — the OUTER .dmg is separately signed, notarized and
+  # stapled by the workflow's "Sign + notarize + staple the DMG itself" step,
+  # because an unsigned/un-notarized DMG fails Gatekeeper on download
+  # ("source=no usable signature") even when the app inside is notarized.
+  #
+  # Building WITHOUT the ASC key present (e.g. a bare local `electron-builder
+  # --mac` with no creds) will fail the notarize step. For a signed-only local
+  # build, override on the CLI: `electron-builder --mac -c.mac.notarize=false`,
+  # or use the macos-desktop-notarize plugin with notarize=false.
+  notarize: true
 
 linux:
   icon: "assets/icons"

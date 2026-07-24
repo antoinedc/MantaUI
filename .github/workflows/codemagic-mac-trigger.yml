@@ -1,0 +1,78 @@
+# Reliably trigger the Codemagic macOS desktop build on ANY mac-v* tag push.
+#
+# WHY THIS EXISTS
+# ---------------
+# codemagic.yaml's mac-desktop workflow has a
+# `triggering: { events: [tag], tag_patterns: [mac-v*] }` block, but that path
+# depends on GitHub delivering a webhook to Codemagic for the tag-push event —
+# and that delivery is NOT reliable:
+#   - Tags pushed with a workflow's GITHUB_TOKEN are withheld from webhooks by
+#     GitHub entirely.
+#   - Tags pushed from a non-standard path (e.g. the dev box, via a
+#     branch-protection bypass) also silently fail to deliver — verified
+#     2026-07-24: mac-v0.0.10 existed on the remote but Codemagic created no
+#     build until it was kicked via the API by hand.
+# When the webhook silently drops, the build never starts and there is no
+# signal — you only notice by the ABSENCE of a published DMG.
+#
+# This workflow removes the webhook from the critical path: on every mac-v*
+# tag push it POSTs to the Codemagic REST API to start the mac-desktop build
+# explicitly, and produces a red/green Action run confirming the request. It
+# runs on GitHub's side on the tag `push` event, so it fires regardless of who
+# or what pushed the tag (human, dev box, or a bot). This is the sibling of
+# codemagic-ios-trigger.yml for the desktop target.
+#
+# DE-DUP NOTE
+# -----------
+# Codemagic de-dups: a second POST for the same tag+commit while a build is
+# queued/running is rejected, so even if the native webhook ALSO fires, the
+# duplicate trigger is harmless.
+#
+# TOKEN
+# -----
+# Uses the CODEMAGIC_API_KEY repo secret (shared with the iOS trigger). This
+# makes the trigger independent of where the runner lives (no box-local secret
+# file).
+
+name: Codemagic macOS trigger
+
+on:
+  push:
+    tags:
+      - "mac-v*"
+
+concurrency:
+  # One in-flight trigger per tag; never cancel (we want the POST to complete).
+  group: codemagic-mac-trigger-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start Codemagic mac-desktop build for this tag
+        env:
+          CODEMAGIC_API_KEY: ${{ secrets.CODEMAGIC_API_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CODEMAGIC_API_KEY:-}" ]; then
+            echo "::error::CODEMAGIC_API_KEY repo secret is not set — cannot trigger Codemagic."
+            exit 1
+          fi
+          echo "Triggering Codemagic mac-desktop build for tag ${TAG}…"
+          # -f makes curl exit non-zero on an HTTP error so this Action fails RED
+          # (a silent 4xx/5xx must not read as success).
+          RESP="$(curl -sf -X POST \
+            -H "x-auth-token: ${CODEMAGIC_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"appId\":\"6a5bfe08d7050a29d2f33802\",\"workflowId\":\"mac-desktop\",\"tag\":\"${TAG}\"}" \
+            https://api.codemagic.io/builds)"
+          echo "Codemagic response: ${RESP}"
+          # Confirm the API returned a buildId; anything else is a failure.
+          echo "${RESP}" | grep -q '"buildId"' || {
+            echo "::error::Codemagic did not return a buildId for ${TAG}: ${RESP}"
+            exit 1
+          }
+          echo "Codemagic build started for ${TAG}."
