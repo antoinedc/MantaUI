@@ -64,7 +64,11 @@ html, body, #root {
    Border-only, no layout shift. Voice recording still takes visual priority
    (red pulse) in InputArea. */
 .manta-loading-divider {
-  border-top: 1px solid transparent;
+  /* Paint a real 1px-high gradient line. A `border-top` with a transparent
+     color plus a background-image does NOT render — the content box is 0px
+     tall so the background has no surface to fill. Use an explicit height +
+     background instead so the orange sweep is actually visible. */
+  height: 1px;
   background-image: linear-gradient(
     90deg,
     rgba(217, 119, 87, 0.15),

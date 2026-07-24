@@ -196,6 +196,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     pinnedToBottom,
     stickToBottom,
     refreshing,
+    setRefreshing,
     childSessionIds,
     childMessages,
     setChildMessages,
@@ -245,6 +246,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     sessionId,
     cwd,
     setMessages,
+    setRefreshing,
     scheduleRefetch,
     spliceMessage,
     scheduleChildRefetch: (childId: string) => {
@@ -386,7 +388,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       window.api
         .opencodeVcsBranch(cwd)
         .then((b) => {
-          setBranch(b);
+          // Preserve last-known branch on a transient null. getVcsBranch
+          // resolves null (never rejects) for a git-index-lock / spawn blip
+          // as well as a genuine non-git cwd, so blanking on every null made
+          // the indicator flicker on the 5s poll. cwd changes re-init this
+          // effect (branch resets to null in useSseBus), so a real dir change
+          // still clears it.
+          setBranch((prev) => b ?? prev);
         })
         .catch(() => { /* non-fatal — non-git cwd or transport blip */ });
     };
@@ -613,7 +621,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     // Snap the branch indicator to current truth on every submit.
     window.api
       .opencodeVcsBranch(cwd)
-      .then((b) => setBranch(b))
+      .then((b) => setBranch((prev) => b ?? prev))
       .catch(() => { /* non-fatal */ });
     // If the pinned todo list is fully terminal, hide the stale checklist.
     if (activeTodos && allTodosTerminal(activeTodos)) {

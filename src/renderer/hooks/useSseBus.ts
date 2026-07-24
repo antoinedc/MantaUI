@@ -118,6 +118,7 @@ export function useSseBus(params: {
   sessionId: string;
   cwd: string;
   setMessages: React.Dispatch<React.SetStateAction<OpencodeMessage[] | null>>;
+  setRefreshing: React.Dispatch<React.SetStateAction<boolean>>;
   scheduleRefetch: () => void;
   spliceMessage: (messageId: string) => void;
   scheduleChildRefetch: (childId: string) => void;
@@ -143,6 +144,7 @@ export function useSseBus(params: {
   const {
     sessionId,
     setMessages,
+    setRefreshing,
     scheduleRefetch,
     spliceMessage,
     scheduleChildRefetch,
@@ -603,7 +605,11 @@ export function useSseBus(params: {
       }
     });
 
-    // Initial fetch
+    // Initial fetch. Arm `refreshing` here (not just in scheduleRefetch) so the
+    // ambient loading divider shows during the REAL transcript load when a
+    // session first opens — previously only background refetches drove the bar,
+    // so the initial load flashed nothing and the indicator "disappeared".
+    setRefreshing(true);
     void window.api.opencodeMessages(sessionId).then((m) => {
       setMessages(m);
       for (const cid of collectChildSessionIds(m)) {
@@ -613,7 +619,7 @@ export function useSseBus(params: {
       // case an event slipped through during stream warm-up. Idempotent,
       // gated on active panel by scheduleRefetch itself.
       scheduleRefetch();
-    }).catch(() => { /* non-fatal */ });
+    }).catch(() => { /* non-fatal */ }).finally(() => setRefreshing(false));
 
     return () => {
       off();
