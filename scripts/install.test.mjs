@@ -50,7 +50,7 @@ const HEX32 = "0123456789abcdef0123456789abcdef";
  *
  * Mock pattern: define functions AFTER sourcing install.sh. Bash uses the
  * latest definition, so the test's mocks override install.sh's helpers.
- * Tests shadow `uname` for require_arch; previously the deleted bootstrap_*
+ * Tests shadow `uname` for resolve_arch; previously the deleted bootstrap_*
  * tests shadowed `command` / `detect_distro_id`.
  *
  * Never throws — helpers' `die` calls `exit 1`, which would otherwise
@@ -906,13 +906,13 @@ test("waitForHealth acceptAnyStatus=true (default) accepts 404 as healthy", asyn
 });
 
 // ----------------------------------------------------------------------------
-// install.sh — bash syntax + manifest_get / verify_sha256 / require_arch
+// install.sh — bash syntax + manifest_get / verify_sha256 / resolve_arch
 // ----------------------------------------------------------------------------
 //
 // These tests shell out to bash because install.sh is bash, not JS. They use
 // the MANTA_INSTALL_TEST_MODE=1 sentinel (added in install.sh) which bails
 // before the install body runs and only loads the bash helpers
-// (log/ok/warn/die + manifest_get + verify_sha256 + require_arch). The unit
+// (log/ok/warn/die + manifest_get + verify_sha256 + resolve_arch). The unit
 // tests then exercise the helpers with mocked `uname`/tmpfiles so nothing
 // hits the network.
 //
@@ -999,6 +999,28 @@ echo "U=\$(manifest_get "\$manifest" some_url)"
   assert.match(out, /U=https:\/\/mirror\.example\.com\/x\?token=abc=def==/);
 });
 
+test("manifest_get extracts the arm64 key from a two-arch manifest", () => {
+  // Stage 2 of the arch-parameterize plan merges two per-arch sidecars into
+  // a single combined manifest carrying BOTH `file_linux_x64` + `sha256_linux_x64`
+  // and `file_linux_arm64` + `sha256_linux_arm64`. The install on aarch64
+  // boxes must be able to read its own arch's keys without the x64 lines
+  // shadowing them. This pins the two-arch manifest shape the installer
+  // depends on.
+  const out = runBootstrap({
+    preBody: `
+manifest='version=0.0.1
+file_linux_x64=manta-0.0.1-linux-x64.tar.gz
+sha256_linux_x64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+file_linux_arm64=manta-0.0.1-linux-arm64.tar.gz
+sha256_linux_arm64=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210'
+echo "F=\$(manifest_get "\$manifest" file_linux_arm64)"
+echo "S=\$(manifest_get "\$manifest" sha256_linux_arm64)"
+`,
+  });
+  assert.match(out, /F=manta-0\.0\.1-linux-arm64\.tar\.gz/);
+  assert.match(out, /S=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210/);
+});
+
 // ----------------------------------------------------------------------------
 // verify_sha256 — the sha256 check install.sh runs before extracting the
 // tarball. Dies loudly on mismatch (the operator must see why, not silently
@@ -1049,47 +1071,62 @@ verify_sha256 "${file}" "${wrongSha}"
 });
 
 // ----------------------------------------------------------------------------
-// require_arch — die unless uname -m reports x86_64. The harness overrides
-// `uname` via a function in preBody (same mocking style as the deleted
-// bootstrap_* tests used for `command` and `detect_distro_id`).
+// resolve_arch — map `uname -m` to the manifest arch key (`linux_x64` /
+// `linux_arm64`). Sets the global `ARCH_KEY` the manifest reader uses; dies
+// only on arches we don't ship a tarball for. The harness overrides `uname`
+// via a function in preBody (same mocking style as the deleted bootstrap_*
+// tests used for `command` and `detect_distro_id`).
 // ----------------------------------------------------------------------------
 
-test("require_arch passes when uname emits x86_64", () => {
+test("resolve_arch sets ARCH_KEY=linux_x64 on x86_64", () => {
   const out = runBootstrap({
     preBody: `
 uname() { echo "x86_64"; }
-require_arch
-echo "RA_OK=\$?"
+resolve_arch
+echo "AK=\$ARCH_KEY"
 `,
   });
-  assert.match(out, /RA_OK=0/);
+  assert.match(out, /AK=linux_x64/);
   assert.match(out, /BOOTSTRAP_EXIT=0/);
-  assert.doesNotMatch(out, /only x86_64 Linux is supported/);
+  assert.doesNotMatch(out, /unsupported architecture/);
 });
 
-test("require_arch dies with a clear message on aarch64", () => {
-  // `die` calls `exit 1`, so the harness captures the error stream and
-  // stops there — no separate exit-code marker is reachable. Assert on the
-  // die message body (which carries the architecture the user has).
+test("resolve_arch sets ARCH_KEY=linux_arm64 on aarch64", () => {
   const out = runBootstrap({
     preBody: `
 uname() { echo "aarch64"; }
-require_arch
+resolve_arch
+echo "AK=\$ARCH_KEY"
 `,
   });
-  assert.match(out, /only x86_64 Linux is supported by this installer today/);
-  assert.match(out, /got: aarch64/);
+  assert.match(out, /AK=linux_arm64/);
+  assert.match(out, /BOOTSTRAP_EXIT=0/);
 });
 
-test("require_arch dies on armv7l too (no fallthrough for any non-x86_64)", () => {
+test("resolve_arch accepts arm64 spelling too", () => {
+  // Some kernels report `arm64` rather than `aarch64`. Both spellings must
+  // map to the same linux_arm64 manifest key so the installer doesn't break
+  // depending on which uname token the distro uses.
+  const out = runBootstrap({
+    preBody: `
+uname() { echo "arm64"; }
+resolve_arch
+echo "AK=\$ARCH_KEY"
+`,
+  });
+  assert.match(out, /AK=linux_arm64/);
+  assert.match(out, /BOOTSTRAP_EXIT=0/);
+});
+
+test("resolve_arch dies on armv7l (unsupported arch)", () => {
   const out = runBootstrap({
     preBody: `
 uname() { echo "armv7l"; }
-require_arch
+resolve_arch
 `,
   });
-  assert.match(out, /only x86_64 Linux is supported/);
-  assert.match(out, /got: armv7l/);
+  assert.match(out, /unsupported architecture/);
+  assert.match(out, /armv7l/);
 });
 
 // ----------------------------------------------------------------------------

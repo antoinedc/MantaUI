@@ -2,14 +2,19 @@
 // pack.mjs — build a self-contained, versioned release tarball the VPS
 // installer downloads.
 //
-//   node scripts/release/pack.mjs [--out dist] [--skip-build]
+//   node scripts/release/pack.mjs [--out dist] [--skip-build] [--arch x64|arm64]
 //
 // Produces TWO artifacts in `dist/`:
 //
-//   manta-<version>-linux-x64.tar.gz   the runtime + app + production deps
-//   manta-<version>.txt                flat key=value manifest with the sha256
-//                                      (install.sh fetches this first, then
-//                                      downloads + verifies the tarball)
+//   manta-<version>-<arch>.tar.gz      the runtime + app + production deps
+//                                      (`<arch>` is linux-x64 / linux-arm64)
+//   manta-<version>-<arch>.txt         per-arch flat key=value manifest with
+//                                      the sha256 (install.sh fetches this
+//                                      first, then downloads + verifies the
+//                                      tarball). A separate sidecar per arch
+//                                      so two arch builds don't overwrite
+//                                      each other; Stage 2 merges them into
+//                                      the combined `manta-<version>.txt`.
 //
 // The tarball's top-level dir is `manta-<version>/`. install.sh extracts with
 // `--strip-components=1` into `~/manta`. The tarball is SELF-CONTAINED — the
@@ -60,15 +65,22 @@ const REPO_ROOT = resolve(__dirname, "..", "..");
 // runtime is built once on the pack box and shipped as-is — the box never
 // touches a package manager.
 const NODE_VERSION = "20.20.2";
-const NODE_TARBALL = `node-v${NODE_VERSION}-linux-x64.tar.gz`;
 const NODE_SHA_FILE = "SHASUMS256.txt";
-const NODE_TARBALL_URL = `https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}`;
 const NODE_SHA_URL = `https://nodejs.org/dist/v${NODE_VERSION}/${NODE_SHA_FILE}`;
-// Arch as it appears in the *filename* (hyphen). Manifest keys use the
-// underscore form (`file_linux_x64`) to match the install.sh parser.
-const ARCH = "linux-x64";
-// Manifest key segment — underscore form (matches install.sh's manifest_get calls).
-const ARCH_KEY = "linux_x64";
+
+// Map the --arch flag to the two arch-dependent strings. Single source of
+// truth so a third arch is one line here, not scattered edits. The hyphen
+// `file` form matches nodejs.org's tarball filename token (linux-x64 /
+// linux-arm64); the underscore `key` form matches install.sh's
+// manifest_get keys (file_linux_x64 / file_linux_arm64).
+function resolveArch(arch) {
+  switch (arch) {
+    case "x64":   return { key: "linux_x64",   file: "linux-x64" };
+    case "arm64": return { key: "linux_arm64", file: "linux-arm64" };
+    default:
+      throw new Error(`unsupported --arch ${JSON.stringify(arch)} (expected: x64 | arm64)`);
+  }
+}
 
 function log(msg) {
   process.stdout.write(`▸ ${msg}\n`);
@@ -82,10 +94,15 @@ function die(msg) {
 }
 
 function parseArgs(argv) {
-  const out = { outDir: "dist", skipBuild: false };
+  const out = { outDir: "dist", skipBuild: false, arch: "x64" };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--out") out.outDir = argv[++i];
     else if (argv[i] === "--skip-build") out.skipBuild = true;
+    else if (argv[i] === "--arch") out.arch = argv[++i];
+  }
+  // Validate --arch eagerly so an invalid value dies before any work.
+  if (out.arch !== "x64" && out.arch !== "arm64") {
+    die(`unsupported --arch ${JSON.stringify(out.arch)} (expected: x64 | arm64)`);
   }
   return out;
 }
@@ -123,16 +140,16 @@ async function sha256OfFile(path) {
 }
 
 // Verify `tarballPath` (a file on disk) matches the sha256 recorded in the
-// nodejs.org SHASUMS256.txt for `NODE_TARBALL`. Dies on mismatch.
-async function verifyTarballSha256(tarballPath, shaFileText) {
-  const expected = parseShaSums(shaFileText)[NODE_TARBALL];
+// nodejs.org SHASUMS256.txt for `nodeTarball`. Dies on mismatch.
+async function verifyTarballSha256(tarballPath, shaFileText, nodeTarball) {
+  const expected = parseShaSums(shaFileText)[nodeTarball];
   if (!expected) {
-    die(`SHASUMS256.txt did not contain a line for ${NODE_TARBALL}`);
+    die(`SHASUMS256.txt did not contain a line for ${nodeTarball}`);
   }
   const actual = await sha256OfFile(tarballPath);
   if (actual !== expected) {
     die(
-      `sha256 mismatch for ${NODE_TARBALL}\n` +
+      `sha256 mismatch for ${nodeTarball}\n` +
         `  expected: ${expected}\n` +
         `  actual:   ${actual}\n` +
         `  (re-run; if it persists, the upstream distribution may be corrupt)`,
@@ -145,32 +162,33 @@ async function verifyTarballSha256(tarballPath, shaFileText) {
 // tarball's sha256 against the file, and extract the runtime into <stage>/runtime/node.
 // Dies on any failure.
 //
-// Cache location: <outDir>/.cache/node-v<version>-linux-x64.tar.gz (and the
+// Cache location: <outDir>/.cache/node-v<version>-<arch>.tar.gz (and the
 // matching SHASUMS256.txt). A subsequent pack with the same version skips the
 // network round-trip (the SHA is byte-stable).
-async function ensureNodeRuntime(cacheDir, stageDir) {
+async function ensureNodeRuntime(cacheDir, stageDir, nodeTarball) {
+  const nodeTarballUrl = `https://nodejs.org/dist/v${NODE_VERSION}/${nodeTarball}`;
   await mkdir(cacheDir, { recursive: true });
-  const cachedTar = join(cacheDir, NODE_TARBALL);
+  const cachedTar = join(cacheDir, nodeTarball);
   const cachedSha = join(cacheDir, NODE_SHA_FILE);
 
   if (!existsSync(cachedTar) || !existsSync(cachedSha)) {
     log(`Downloading vendored Node ${NODE_VERSION}…`);
     const [tarRes, shaRes] = await Promise.all([
-      fetch(NODE_TARBALL_URL),
+      fetch(nodeTarballUrl),
       fetch(NODE_SHA_URL),
     ]);
-    if (!tarRes.ok) die(`download failed: ${NODE_TARBALL_URL} → ${tarRes.status}`);
+    if (!tarRes.ok) die(`download failed: ${nodeTarballUrl} → ${tarRes.status}`);
     if (!shaRes.ok) die(`download failed: ${NODE_SHA_URL} → ${shaRes.status}`);
     const tarBytes = Buffer.from(await tarRes.arrayBuffer());
     const shaText = await shaRes.text();
     await writeFile(cachedTar, tarBytes);
     await writeFile(cachedSha, shaText);
   } else {
-    log(`Reusing cached ${NODE_TARBALL} (.cache/).`);
+    log(`Reusing cached ${nodeTarball} (.cache/).`);
   }
 
   log(`Verifying sha256 of vendored Node ${NODE_VERSION}…`);
-  await verifyTarballSha256(cachedTar, readFileSync(cachedSha, "utf-8"));
+  await verifyTarballSha256(cachedTar, readFileSync(cachedSha, "utf-8"), nodeTarball);
 
   // Extract into <stage>/runtime/node, stripping the leading `node-v.../`.
   // After this, <stage>/runtime/node/bin/{node,npm,corepack,...} exist.
@@ -248,12 +266,24 @@ async function main() {
     die(`package.json version ${JSON.stringify(version)} is not a valid release version`);
   }
 
+  // Resolve the arch flag into the two strings this pack uses. `ARCH` is the
+  // hyphen form (matches nodejs.org's tarball filename + our tarball name);
+  // `ARCH_KEY` is the underscore form (matches install.sh's manifest_get
+  // keys). Resolved once here so nothing else in main() re-spells them.
+  const { key: ARCH_KEY, file: ARCH } = resolveArch(args.arch);
+  // nodejs.org's tarball filename token is exactly the hyphen form, so the
+  // vendored-node URL + cache key + sha lookup all use this single string.
+  const NODE_TARBALL = `node-v${NODE_VERSION}-${ARCH}.tar.gz`;
+
   const stageRoot = join(REPO_ROOT, args.outDir, ".stage");
   const stageDir = join(stageRoot, `manta-${version}`);
   // Archive name encodes the arch so a future arm64 build is data, not code.
-  // install.sh's manifest key file_linux_x64 mirrors this.
+  // install.sh's manifest key file_linux_<arch> mirrors this.
   const outFile = join(REPO_ROOT, args.outDir, `manta-${version}-${ARCH}.tar.gz`);
-  const outManifest = join(REPO_ROOT, args.outDir, `manta-${version}.txt`);
+  // Per-arch sidecar manifest — keeps two arch builds from overwriting each
+  // other on the release host. Stage 2 merges these into the combined
+  // `manta-<version>.txt` install.sh fetches by default.
+  const outManifest = join(REPO_ROOT, args.outDir, `manta-${version}-${ARCH}.txt`);
   const cacheDir = join(REPO_ROOT, args.outDir, ".cache");
 
   // 1. Build the renderer bundle unless told to skip (CI may pre-build).
@@ -292,7 +322,7 @@ async function main() {
   // 3. Vendored Node 20.20.2 — downloaded + sha256-verified + extracted under
   //    stage/runtime/node. Tarball is cached under .cache/ so re-packs skip the
   //    network round-trip. This is the runtime the box will use.
-  await ensureNodeRuntime(cacheDir, stageDir);
+  await ensureNodeRuntime(cacheDir, stageDir, NODE_TARBALL);
 
   // 4. Prebuilt production deps via the vendored npm/node. Runs BEFORE
   //    RELEASE.json/tar so the box gets a tarball whose node_modules is already
