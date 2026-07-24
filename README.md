@@ -262,11 +262,15 @@ steps in each file's header are human-only (agent Hard Rule #4 forbids
 
 - **Monitoring** (`scripts/prod/healthcheck.mjs`, scheduled every 10 min
   on the dev box via `schedule_create`): off-site probes of `mantaui.com`,
-  `gateway.mantaui.com/healthz` (200 = healthy), `app.mantaui.com`,
-  `/install.sh`, `/releases/manta-latest.tar.gz` (and the live
-  `manta-latest.txt` manifest's `sha256_linux_x64` must match the served
-  tarball). On failure the opencode turn calls `notify` urgent:true naming
-  the failing URL.
+  `gateway.mantaui.com/healthz` (200 = healthy), `app.mantaui.com`, and
+  `/install.sh`, plus the per-arch tarball drift check: HEAD the tarballs
+  the live `manta-latest.txt` manifest declares (`file_linux_x64=`,
+  `file_linux_arm64=`) AND sha256-verify each against the manifest's
+  `sha256_linux_x64` / `sha256_linux_arm64`. Same loop publish.sh runs at
+  verify-time, pushed out off-site so it catches tarballs that drift from
+  the manifest AFTER publish (BET-171 F4 class, BET-264 two-arch). On
+  failure the opencode turn calls `notify` urgent:true naming the failing
+  URL.
 - **Log caps** (`scripts/prod/systemd-journald.conf`,
   `scripts/prod/caddy-logrotate`): journald capped at 500M; Caddy access
   logs (only if they exist on the box — check first) rotated daily with
