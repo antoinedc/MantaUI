@@ -171,9 +171,12 @@ workflows:
       app_store_connect: APS Key
     environment:
       groups:
-        # All mac signing + deploy vars live in one Codemagic UI group named
-        # "mantaui": CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID,
-        # APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID, and (optional) PROD_SSH_KEY.
+        # Mac signing + deploy vars live in the Codemagic UI group "mantaui":
+        # CSC_LINK (Developer ID .p12, base64), CSC_KEY_PASSWORD, APPLE_TEAM_ID,
+        # and (optional) PROD_SSH_KEY. NOTE: notarization now uses the ASC API key
+        # from the "APS Key" integration (APP_STORE_CONNECT_*), NOT an Apple-ID
+        # app-specific password — APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD are no
+        # longer read by this workflow and can be removed from the group.
         - mantaui
       node: 22
       xcode: latest
@@ -195,35 +198,94 @@ workflows:
       - name: Install deps
         script: |
           npm ci
-      - name: Decode Developer ID cert into the keychain
+      - name: Decode + import Developer ID cert into the keychain
         script: |
-          # electron-builder reads CSC_LINK as a FILE PATH or a base64 string.
-          # We stored the .p12 base64 in CSC_LINK; write it to a temp file and
-          # point CSC_LINK at it so electron-builder + codesign can use it.
+          # electron-builder reads CSC_LINK as a FILE PATH or a base64 string; we
+          # stored the .p12 base64 in CSC_LINK. Write it to a temp file (for
+          # electron-builder) AND import it into the Codemagic CLI keychain so
+          # `security find-identity` + our standalone `codesign` on the DMG (a
+          # later step) can resolve the Developer ID Application identity. Without
+          # the import, electron-builder's own throwaway keychain is gone by the
+          # time we sign the DMG and find-identity returns nothing.
           set -e
           KEYCHAIN_CERT="$CM_BUILD_DIR/dist_cert.p12"
           echo "$CSC_LINK" | base64 --decode > "$KEYCHAIN_CERT"
-          # Re-export CSC_LINK as the file path for the build step.
+          keychain initialize
+          keychain add-certificates --certificate "$KEYCHAIN_CERT" --certificate-password "$CSC_KEY_PASSWORD"
+          # Re-export CSC_LINK as the file path for the electron-builder step.
           echo "CSC_LINK=$KEYCHAIN_CERT" >> "$CM_ENV"
-      - name: Build + sign + notarize DMG
+      - name: Materialize ASC API key for notarization
         script: |
-          # electron-vite build → electron-builder --mac. electron-builder auto:
-          #   - signs with the Developer ID cert from CSC_LINK/CSC_KEY_PASSWORD
-          #   - notarizes via APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID
-          #     (mac.notarize.teamId is set in electron-builder.yml)
-          #   - staples the ticket into the .dmg
-          # --publish never: emit latest-mac.yml but don't use electron-builder's
-          # own uploader (we scp to the prod box in the next step).
+          # Notarization authenticates with an App Store Connect API key (.p8) —
+          # NOT an Apple-ID app-specific password. We reuse the SAME ASC key that
+          # the ios-testflight workflow uses (the "APS Key" integration exposes it
+          # as $APP_STORE_CONNECT_PRIVATE_KEY / $APP_STORE_CONNECT_KEY_IDENTIFIER /
+          # $APP_STORE_CONNECT_ISSUER_ID). Write the .p8 to a file for both
+          # electron-builder's app notarization and the DMG notarytool submit.
+          set -e
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          ASC_KEY_FILE="$CM_BUILD_DIR/asc-api-key.p8"
+          printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$ASC_KEY_FILE"
+          chmod 600 "$ASC_KEY_FILE"
+          echo "ASC_KEY_FILE=$ASC_KEY_FILE" >> "$CM_ENV"
+      - name: Build + sign app + notarize the .app inside the DMG
+        script: |
+          # electron-vite build → electron-builder --mac. electron-builder:
+          #   - signs the .app with the Developer ID cert (CSC_LINK/CSC_KEY_PASSWORD)
+          #   - notarizes + staples the .app INSIDE the bundle via the ASC API key
+          #     (APPLE_API_KEY* env, @electron/notarize). electron-builder.yml has
+          #     mac.notarize:false for the beta, so override it here on the CLI.
+          # IMPORTANT: electron-builder does NOT sign or notarize the OUTER .dmg —
+          # that is done in the next two steps. A DMG left unsigned is notarizable
+          # but Gatekeeper REJECTS it on open ("source=no usable signature")
+          # because there is no code signature to anchor the ticket to. This was
+          # THE mac-desktop notarization bug.
+          set -e
+          export APPLE_API_KEY="$ASC_KEY_FILE"
+          export APPLE_API_KEY_ID="$APP_STORE_CONNECT_KEY_IDENTIFIER"
+          export APPLE_API_ISSUER="$APP_STORE_CONNECT_ISSUER_ID"
+          export APPLE_TEAM_ID="$APPLE_TEAM_ID"
           npm run build
-          npx electron-builder --mac --publish never
+          npx electron-builder --mac --publish never -c.mac.notarize=true
+      - name: Sign + notarize + staple the DMG itself
+        script: |
+          # The missing steps. Sign the DMG with the Developer ID cert, submit it
+          # to the notary service as its own artifact (fast — the app inside is
+          # already notarized), then staple the ticket. Without signing first,
+          # notarization + staple "succeed" but Gatekeeper still rejects the DMG.
+          set -e
+          IDENTITY=$(security find-identity -v -p codesigning | grep -m1 "Developer ID Application" | sed -E 's/.*"(.*)".*/\1/')
+          [ -n "$IDENTITY" ] || { echo "No Developer ID Application identity in keychain"; exit 1; }
+          echo "Signing DMG(s) with: $IDENTITY"
+          for dmg in dist/desktop/*.dmg; do
+            codesign --force --timestamp --sign "$IDENTITY" "$dmg"
+            xcrun notarytool submit "$dmg" \
+              --key "$ASC_KEY_FILE" \
+              --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+              --issuer "$APP_STORE_CONNECT_ISSUER_ID" \
+              --wait
+            xcrun stapler staple "$dmg"
+          done
       - name: Verify notarization
         script: |
+          # Assess the DMG with -t open (the "opening a downloaded file" context),
+          # NOT -t install (that is for .pkg installers and reports a FALSE
+          # "rejected / no usable signature" on a perfectly good DMG). The pass
+          # signal a downloading user sees is 'accepted' + 'Notarized Developer ID'.
           set -e
+          FAIL=0
           for dmg in dist/desktop/*.dmg; do
             echo "▸ $dmg"
-            spctl -a -vvv -t install "$dmg" 2>&1 | grep -i "notarized\|accepted" || true
-            xcrun stapler validate "$dmg" || echo "⚠ stapler validate failed for $dmg"
+            if spctl -a -vvv -t open --context context:primary-signature "$dmg" 2>&1 | grep -q "source=Notarized Developer ID"; then
+              echo "  OK: Notarized Developer ID accepted."
+            else
+              spctl -a -vvv -t open --context context:primary-signature "$dmg" 2>&1 || true
+              echo "  ⚠ Gatekeeper did NOT accept $dmg"
+              FAIL=1
+            fi
+            xcrun stapler validate "$dmg" || { echo "  ⚠ stapler validate failed for $dmg"; FAIL=1; }
           done
+          [ "$FAIL" = "0" ] || { echo "DMG verification failed."; exit 1; }
       - name: Publish to mantaui.com (optional)
         script: |
           # Skips cleanly if no deploy key is configured, so the workflow still
