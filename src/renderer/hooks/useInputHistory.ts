@@ -26,7 +26,7 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { OpencodeMessage } from "../../shared/types";
-import type { TypeaheadState } from "../chatShared";
+import { mergePromptHistory, readPromptHistory, type TypeaheadState } from "../chatShared";
 
 export type InputHistory = {
   promptHistory: string[];
@@ -40,8 +40,28 @@ export function useInputHistory(params: {
   setInput: (v: string) => void;
   setTypeahead: React.Dispatch<React.SetStateAction<TypeaheadState | null>>;
   updateInput: (next: string) => void;
+  // Window identity for the persisted history (BET-257). The hook reads
+  // localStorage on submit so a `/clear` (which swaps in a new opencode
+  // sessionId with an empty transcript) still leaves the prior prompts
+  // cyclable. Both may be null during the brief window before the panel
+  // knows its tmux window — helpers treat that as "no history".
+  tmuxSession: string | null;
+  windowIndex: number | null;
+  // Bumped by the container after each submit so this hook re-reads
+  // localStorage (which is not reactive). Keeps the typed history and the
+  // persisted history in lock-step without re-rendering on storage writes.
+  historyEpoch?: number;
 }): InputHistory {
-  const { messages, inputRef, setInput, setTypeahead, updateInput } = params;
+  const {
+    messages,
+    inputRef,
+    setInput,
+    setTypeahead,
+    updateInput,
+    tmuxSession,
+    windowIndex,
+    historyEpoch,
+  } = params;
 
   // Active history index. Internal to navigateHistory's setter — never read
   // elsewhere, so the setter is all we keep. draftInput saves whatever the
@@ -50,8 +70,9 @@ export function useInputHistory(params: {
   const [, setHistoryIdx] = useState<number | null>(null);
   const draftInput = useRef<string>("");
 
-  // Prompt history from user messages — chronological, freshest last.
-  const promptHistory = useMemo<string[]>(() => {
+  // Transcript-derived history — the live opencode session's user turns,
+  // chronological, freshest last. Source-of-truth for the CURRENT session.
+  const transcriptHistory = useMemo<string[]>(() => {
     if (!messages) return [];
     const out: string[] = [];
     for (const m of messages) {
@@ -65,6 +86,19 @@ export function useInputHistory(params: {
     }
     return out;
   }, [messages]);
+
+  // Full prompt history = persisted (pre-clear prompts from localStorage)
+  // MERGED with the live transcript. mergePromptHistory collapses the seam
+  // duplicate so a prompt that's both the last persisted entry and the first
+  // transcript entry doesn't appear twice. Re-reads localStorage when the
+  // container bumps historyEpoch (otherwise localStorage writes are invisible).
+  const promptHistory = useMemo<string[]>(() => {
+    const persisted = readPromptHistory(tmuxSession, windowIndex);
+    return mergePromptHistory(persisted, transcriptHistory);
+    // historyEpoch is intentionally a dep: it re-reads localStorage after a
+    // submit appends a new entry (storage is not reactive).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transcriptHistory, tmuxSession, windowIndex, historyEpoch]);
 
   // Prompt history navigation — Up cycles back, Down cycles forward. We bypass
   // updateInput's typeahead detection here (calling setInput directly) so

@@ -321,3 +321,67 @@ export function resolveLauncherFlags(
   for (const f of schema) out[f.key] = saved?.[f.key] ?? f.default;
   return out;
 }
+
+// ===== Persisted prompt history (survives /clear) =====
+//
+// Keyed by the tmux WINDOW (project session + window index), NOT the opencode
+// sessionId — /clear swaps in a new sessionId with an empty transcript, so a
+// session-keyed history would reset on every clear. The window is the stable
+// identity across clears (and across app reloads, since this is localStorage).
+const HISTORY_MAX = 200;
+
+export function historyKey(tmuxSession: string, windowIndex: number): string {
+  return `manta:window:${tmuxSession}:${windowIndex}:history`;
+}
+
+export function readPromptHistory(
+  tmuxSession: string | null,
+  windowIndex: number | null,
+): string[] {
+  if (!tmuxSession || windowIndex == null) return [];
+  try {
+    const raw = localStorage.getItem(historyKey(tmuxSession, windowIndex));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === "string");
+  } catch {
+    return [];
+  }
+}
+
+// Append a freshly-submitted prompt. Chronological (freshest last), collapses a
+// consecutive duplicate, caps at HISTORY_MAX (oldest dropped first).
+export function appendPromptHistory(
+  tmuxSession: string | null,
+  windowIndex: number | null,
+  text: string,
+): void {
+  if (!tmuxSession || windowIndex == null) return;
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  try {
+    const list = readPromptHistory(tmuxSession, windowIndex);
+    if (list[list.length - 1] === trimmed) return; // collapse consecutive dup
+    list.push(trimmed);
+    const capped = list.length > HISTORY_MAX ? list.slice(-HISTORY_MAX) : list;
+    localStorage.setItem(historyKey(tmuxSession, windowIndex), JSON.stringify(capped));
+  } catch { /* quota / disabled storage */ }
+}
+
+// Merge persisted history with the live transcript's user turns into one
+// chronological list (freshest last). Concatenate then collapse CONSECUTIVE
+// duplicates, which handles the common "last persisted == first transcript"
+// seam without reordering. Pure — unit-tested.
+export function mergePromptHistory(
+  persisted: string[],
+  transcript: string[],
+): string[] {
+  const out: string[] = [];
+  for (const item of [...persisted, ...transcript]) {
+    if (!item) continue;
+    if (out[out.length - 1] === item) continue; // collapse consecutive dup
+    out.push(item);
+  }
+  return out;
+}

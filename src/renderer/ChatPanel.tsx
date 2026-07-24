@@ -42,6 +42,7 @@ import {
 } from "./chatUtils";
 import {
   CLAUDE_ORANGE,
+  appendPromptHistory,
   guessMime,
   mimeToInputMode,
   modelInputModes,
@@ -174,6 +175,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const submitRef = useRef<() => void>(() => {});
   // Input state must be declared before useSseBus (which needs setInput).
   const [input, setInput] = useState("");
+  // Bumped after each submit so useInputHistory re-reads localStorage and the
+  // freshly-persisted prompt becomes immediately cyclable (BET-257). The hook
+  // can't watch localStorage on its own — we drive the re-read from here.
+  const [historyEpoch, setHistoryEpoch] = useState(0);
 
   // ===== Claude credential auto-refresh (BET-139) =====
   //
@@ -603,6 +608,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     const typed = input.trim();
     const text = pathRefText ? (typed ? `${typed} ${pathRefText}` : pathRefText) : typed;
     if (!text) return;
+    // Record the prompt into the per-window localStorage list BEFORE the
+    // running-queue early-return so queued prompts also persist (a queued
+    // prompt still belongs to this tmux window — `/clear` shouldn't lose it).
+    // epoch bump drives useInputHistory to re-read storage on its next render.
+    appendPromptHistory(tmuxSession, windowIndex, text);
+    setHistoryEpoch((e) => e + 1);
     // If the AI is already running, push to the queue instead of aborting.
     if (running) {
       setMessageQueue((q) => [...q, text]);
@@ -1398,6 +1409,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setInput,
     setTypeahead: setTypeaheadFromHook,
     updateInput,
+    tmuxSession,
+    windowIndex,
+    historyEpoch,
   });
 
   // Model line: last assistant message's modelID (provider/model).

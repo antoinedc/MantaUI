@@ -66,6 +66,8 @@ import {
   credentialRefreshBannerText,
   lastUserMessageText,
   chooseUpdateSkewVariant,
+  arrowUpNavigatesHistory,
+  arrowDownNavigatesHistory,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -3000,5 +3002,27 @@ describe("chooseUpdateSkewVariant", () => {
     expect(chooseUpdateSkewVariant("1.x.3", "0.0.0")).toBe("ok");
     // But once one side has a real version, the compare takes over.
     expect(chooseUpdateSkewVariant("abc", "0.0.1")).toBe("outdated");
+  });
+});
+
+// ===== arrow history predicates (BET-257) =====
+//
+// The composer's ArrowUp/ArrowDown need to decide: cycle prompt history, OR
+// move the caret one visual row. The DOM layer (InputArea.caretRowInfo)
+// measures whether the caret sits on the first or last VISUAL row (soft wrap
+// means a single long line can occupy several rows), and these predicates
+// translate the row info into "navigate history?" booleans. Pure + tested in
+// isolation — the visual-row measurement is the only DOM-touching piece.
+
+describe("arrow history predicates", () => {
+  it("ArrowUp navigates history only on the first visual row", () => {
+    expect(arrowUpNavigatesHistory({ atFirstRow: true, atLastRow: false })).toBe(true);
+    expect(arrowUpNavigatesHistory({ atFirstRow: false, atLastRow: false })).toBe(false);
+    expect(arrowUpNavigatesHistory({ atFirstRow: true, atLastRow: true })).toBe(true);
+  });
+  it("ArrowDown navigates history only on the last visual row", () => {
+    expect(arrowDownNavigatesHistory({ atFirstRow: false, atLastRow: true })).toBe(true);
+    expect(arrowDownNavigatesHistory({ atFirstRow: false, atLastRow: false })).toBe(false);
+    expect(arrowDownNavigatesHistory({ atFirstRow: true, atLastRow: true })).toBe(true);
   });
 });
