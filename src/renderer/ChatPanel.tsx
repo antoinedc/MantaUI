@@ -235,7 +235,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setTodosDismissed,
     liveTodos,
     branch,
-    setBranch,
+    refreshBranch,
     liveChildStatus,
     commandByMessageId,
     finishByMessageId,
@@ -384,26 +384,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setDragHover(false);
     setCredRefresh(null);
     // Branch indicator: poll every 5s while this session is mounted.
-    const fetchBranch = () => {
-      window.api
-        .opencodeVcsBranch(cwd)
-        .then((b) => {
-          // Preserve last-known branch on a transient null. getVcsBranch
-          // resolves null (never rejects) for a git-index-lock / spawn blip
-          // as well as a genuine non-git cwd, so blanking on every null made
-          // the indicator flicker on the 5s poll. cwd changes re-init this
-          // effect (branch resets to null in useSseBus), so a real dir change
-          // still clears it.
-          setBranch((prev) => b ?? prev);
-        })
-        .catch(() => { /* non-fatal — non-git cwd or transport blip */ });
-    };
-    fetchBranch();
-    const branchPoll = setInterval(fetchBranch, 5000);
+    refreshBranch(cwd);
+    const branchPoll = setInterval(() => refreshBranch(cwd), 5000);
     return () => {
       clearInterval(branchPoll);
     };
-  }, [sessionId, cwd]);
+  }, [sessionId, cwd, refreshBranch]);
 
   // Refresh permissions list. Called on any permission event.
   const refreshPermissions = useCallback(() => {
@@ -619,10 +605,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setRunning(true); // optimistic — session.status will confirm
     setInput("");
     // Snap the branch indicator to current truth on every submit.
-    window.api
-      .opencodeVcsBranch(cwd)
-      .then((b) => setBranch((prev) => b ?? prev))
-      .catch(() => { /* non-fatal */ });
+    refreshBranch(cwd);
     // If the pinned todo list is fully terminal, hide the stale checklist.
     if (activeTodos && allTodosTerminal(activeTodos)) {
       setTodosDismissed(true);

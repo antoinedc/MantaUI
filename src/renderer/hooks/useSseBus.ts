@@ -98,7 +98,7 @@ export type SseBus = {
   setLiveChildStatus: React.Dispatch<React.SetStateAction<Map<string, "running" | "idle">>>;
   drainAbortRef: React.MutableRefObject<boolean>;
   branch: string | null;
-  setBranch: React.Dispatch<React.SetStateAction<string | null>>;
+  refreshBranch: (cwd: string) => void;
   submit: () => void;
   submitRef: React.RefObject<() => void>;
   abort: () => void;
@@ -203,6 +203,19 @@ export function useSseBus(params: {
     Map<string, "running" | "idle">
   >(() => new Map());
   const [branch, setBranch] = useState<string | null>(null);
+
+  // Preserve last-known branch on a transient null. getVcsBranch resolves
+  // null (never rejects) for a git-index-lock / spawn blip as well as a
+  // genuine non-git cwd, so blanking on every null made the indicator
+  // flicker on the 5s poll. cwd changes re-init the consumer effect
+  // (branch resets to null here on remount), so a real dir change still
+  // clears it.
+  const refreshBranch = useCallback((cwd: string) => {
+    window.api
+      .opencodeVcsBranch(cwd)
+      .then((b) => setBranch((prev) => b ?? prev))
+      .catch(() => { /* non-fatal — non-git cwd or transport blip */ });
+  }, []);
 
   // Any question that was blocking an aborted turn is dead — opencode's
   // pending list never expires on its own (see BET-116), so it would
@@ -520,7 +533,10 @@ export function useSseBus(params: {
       }
 
       if (ev.type === "vcs.branch.updated") {
-        setBranch(String(props.branch ?? null));
+        // Preserve last-known branch when the event carries no branch, rather
+        // than blanking (or worse, `String(null)` → the truthy string "null").
+        const b = props.branch ? String(props.branch) : null;
+        setBranch((prev) => b ?? prev);
       }
 
       if (ev.type === "todo.updated") {
@@ -679,7 +695,7 @@ export function useSseBus(params: {
     liveChildStatus,
     setLiveChildStatus,
     branch,
-    setBranch,
+    refreshBranch,
     drainAbortRef,
     submit,
     submitRef,
