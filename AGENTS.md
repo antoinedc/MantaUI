@@ -1946,13 +1946,14 @@ deploy is the tag push. If someone reports "issue X is done but not live", the
 fix is almost always "it was merged but no release tag was pushed" — check the
 live URL / TestFlight against `main`, then push the right tag.
 
-### The four release targets (each its own tag prefix)
+### The five release targets (each its own tag prefix)
 
 | Tag prefix | Target | Runner | What fires | Config |
 |---|---|---|---|---|
 | `ios-v*` | iOS app → TestFlight | Codemagic `mac_mini_m2` | build + sign + notarize `.ipa` → TestFlight | `codemagic.yaml` `ios-testflight` |
 | `mac-v*` | macOS desktop → DMG | Codemagic `mac_mini_m2` | build + Developer ID sign → DMG → publish to `mantaui.com` | `codemagic.yaml` `mac-desktop` |
 | `web-v*` | marketing site + install assets | self-hosted (`manta-dev-runner`, this box) | scp `website/` + `install.sh` + `llms-install.md` → prod webroot, verify | `.github/workflows/website-deploy.yml` |
+| `server-v*` | Linux box server tarball(s) → `mantaui.com/releases` | GitHub-hosted (`ubuntu-latest` x64 + `ubuntu-24.04-arm` matrix) + self-hosted publish (`manta-dev-runner`) | build x64 + arm64 tarballs natively, merge the two per-arch sidecars via `scripts/release/merge-manifest.mjs`, scp both tarballs + the combined manifest to prod, verify both arches (200 + sha256 drift) | `.github/workflows/server-tarball-deploy.yml` |
 | `relay-v*` | ~~relay service~~ (deprecated 2026-07; replaced by direct mode) | n/a | n/a | `.github/workflows/relay-deploy.yml` (deleted in BET-204) |
 | `gateway-v*` | push gateway service (APNs + DNS automation) | self-hosted (`manta-dev-runner`, this box) | `git pull /opt/manta` + restart `manta-gateway`, health-poll `/healthz` | `.github/workflows/gateway-deploy.yml` |
 
@@ -1972,6 +1973,9 @@ git tag mac-v0.0.2 && git push origin mac-v0.0.2
 
 # Website / install.sh / llms-install.md:
 git tag web-v2 && git push origin web-v2
+
+# Linux box server tarballs (x64 + arm64):
+git tag server-v1 && git push origin server-v1
 
 # Push gateway (only when the gateway service code changed — APNs, DNS, store):
 git tag gateway-v2 && git push origin gateway-v2
@@ -2088,8 +2092,12 @@ box-local and unchanged — it doesn't touch the gateway.
 - **`scripts/release/publish.sh`** is the OLDER manual all-in-one deploy
   (tarball + desktop + server + install.sh, run from a laptop over
   `MANTA_PROD_HOST`). The tag-driven workflows above supersede it for
-  site/gateway/desktop; publish.sh is still the path for the self-contained
-  Linux tarball release (`v<version>` tag).
+  site/gateway/desktop; the Linux box server tarball is now ALSO built by the
+  `server-v*`-tagged `.github/workflows/server-tarball-deploy.yml` workflow
+  (both x64 + arm64, built natively on a GitHub-hosted matrix + merged into a
+  single two-arch manifest before publish). `publish.sh` remains the manual
+  full-release path — the loop over `linux-x64`/`linux-arm64` covers the same
+  arches, and preflight refuses to publish unless BOTH are present.
 
 ### Verifying a deploy actually landed
 
@@ -2098,6 +2106,8 @@ check the live artifact:
 ```
 curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/llms-install.md   # web
 curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/downloads/Manta-latest.dmg  # desktop
+curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/releases/manta-latest-linux-x64.tar.gz   # server x64
+curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/releases/manta-latest-linux-arm64.tar.gz  # server arm64
 curl -fsS https://gateway.mantaui.com/healthz    # gateway → {"ok":true}
 node /tmp/opencode/asc.mjs   # (on the box) — ASC build state for iOS (VALID = really uploaded)
 ```

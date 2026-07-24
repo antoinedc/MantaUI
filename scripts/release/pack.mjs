@@ -4,17 +4,12 @@
 //
 //   node scripts/release/pack.mjs [--out dist] [--skip-build] [--arch x64|arm64]
 //
-// Produces TWO artifacts in `dist/`:
-//
-//   manta-<version>-<arch>.tar.gz      the runtime + app + production deps
-//                                      (`<arch>` is linux-x64 / linux-arm64)
-//   manta-<version>-<arch>.txt         per-arch flat key=value manifest with
-//                                      the sha256 (install.sh fetches this
-//                                      first, then downloads + verifies the
-//                                      tarball). A separate sidecar per arch
-//                                      so two arch builds don't overwrite
-//                                      each other; Stage 2 merges them into
-//                                      the combined `manta-<version>.txt`.
+// Produces a per-arch tarball + per-arch manifest sidecar in `dist/`. ONE
+// invocation builds ONE arch (`--arch x64` or `--arch arm64`); two invocations
+// (one per arch, run on native runners) are merged into the combined
+// `manta-<version>.txt` by `scripts/release/merge-manifest.mjs` — install.sh
+// reads the combined manifest and picks its own arch's keys via `resolve_arch`.
+// (`<arch>` is linux-x64 / linux-arm64; manifest keys are linux_x64 / linux_arm64.)
 //
 // The tarball's top-level dir is `manta-<version>/`. install.sh extracts with
 // `--strip-components=1` into `~/manta`. The tarball is SELF-CONTAINED — the
