@@ -27,6 +27,12 @@ WorkingDirectory=@@MANTA_HOME@@
 ExecStart=@@NODE_BIN@@ @@MANTA_HOME@@/src/server/index.mjs
 Environment=MANTA_MOBILE_HOST=127.0.0.1
 Environment=MANTA_MOBILE_PORT=@@MANTA_PORT@@
+# Optional second listener bound to the Tailscale interface (BET-266).
+# Set to a Tailscale IPv4 by install.sh on the tailnet ingress path;
+# left empty (single-quoted empty string) on the public path so the
+# server's tailnet listener is a no-op. WireGuard encrypts the tailnet
+# hop, so the box is reachable WITHOUT TLS on this listener.
+Environment=MANTA_TAILNET_HOST=@@MANTA_TAILNET_HOST@@
 Restart=on-failure
 RestartSec=2
 # Give the server a moment to flush on stop before SIGKILL.

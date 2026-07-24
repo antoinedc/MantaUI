@@ -20,6 +20,8 @@ import {
   stripJsoncLineComments,
   mergeOpencodeConfig,
   mergeGatewayAuth,
+  parseTailscaleStatus,
+  buildIngressJson,
   waitForDns,
   renderCaddyVhost,
   readOsReleaseIds,
@@ -2266,4 +2268,305 @@ echo "RELOAD_RAN=$RELOAD_RAN"
   });
   assert.match(out, /PORT_CHECK_RAN=1/);
   assert.match(out, /RELOAD_RAN=1/);
+});
+
+// ----------------------------------------------------------------------------
+// Tailscale ingress path (BET-267)
+//
+// install.sh's tailscale detection drives an "INGRESS_MODE=tailscale" branch
+// that skips Caddy/DNS and pairs over http://<tailscale-ip>:<port>. The pure
+// helpers + CLI subcommands live in install-lib.mjs and are tested here
+// directly; the bash orchestration tests above pin the gate behavior.
+// ----------------------------------------------------------------------------
+
+test("parseTailscaleStatus returns the first IPv4 when BackendState is Running", () => {
+  // The headlining acceptance criterion for BET-267's Tailscale detection:
+  // given a real `tailscale status --json` blob (or a faithful fixture),
+  // parseTailscaleStatus returns the IPv4 the installer is going to bind
+  // its tailnet listener to.
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["100.64.1.5", "fd7a:115c:a1e0::1"] },
+  });
+  const res = parseTailscaleStatus(fixture);
+  assert.deepEqual(res, { ip: "100.64.1.5" });
+});
+
+test("parseTailscaleStatus picks IPv4 even when IPv6 comes first in the list", () => {
+  // Tailscale returns an array in a stable order, but we MUST NOT rely on
+  // it — IPv6 may be listed first on some boxes / daemons. The function
+  // filters for the first IPv4-shaped entry.
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["fd7a:115c:a1e0::1", "fd00::1", "100.99.99.99"] },
+  });
+  const res = parseTailscaleStatus(fixture);
+  assert.deepEqual(res, { ip: "100.99.99.99" });
+});
+
+test("parseTailscaleStatus returns null when BackendState is not Running", () => {
+  const fixture = JSON.stringify({
+    BackendState: "Stopped",
+    Self: { TailscaleIPs: ["100.64.1.5"] },
+  });
+  assert.equal(parseTailscaleStatus(fixture), null);
+});
+
+test("parseTailscaleStatus returns null when Self.TailscaleIPs is missing", () => {
+  const fixture = JSON.stringify({ BackendState: "Running" });
+  assert.equal(parseTailscaleStatus(fixture), null);
+});
+
+test("parseTailscaleStatus returns null when only IPv6 addresses are present", () => {
+  // The function deliberately filters on `\d+\.\d+\.\d+\.\d+` so an
+  // IPv6-only tailnet (rare, but possible) does NOT bind a listener on
+  // an unreachable address — installer falls back to public mode.
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["fd7a:115c:a1e0::1", "fd7a:115c:a1e0::2"] },
+  });
+  assert.equal(parseTailscaleStatus(fixture), null);
+});
+
+test("parseTailscaleStatus returns null on invalid JSON", () => {
+  assert.equal(parseTailscaleStatus("{ not json"), null);
+  assert.equal(parseTailscaleStatus(""), null);
+  assert.equal(parseTailscaleStatus(null), null);
+});
+
+test("buildIngressJson tailscale mode emits {mode, tailnetIp, serverUrl}", () => {
+  // The install persists this exact shape to ~/.manta/ingress.json on
+  // the tailnet path; `manta pair` reads it back to compose the connect
+  // block. serverUrl is derived from tailnetIp + port so the two never
+  // drift.
+  const res = buildIngressJson("", {
+    mode: "tailscale",
+    tailnetIp: "100.64.1.5",
+    port: 8787,
+  });
+  assert.equal(res.ok, true);
+  const parsed = JSON.parse(res.text);
+  assert.deepEqual(parsed, {
+    mode: "tailscale",
+    tailnetIp: "100.64.1.5",
+    serverUrl: "http://100.64.1.5:8787",
+  });
+  assert.equal(res.changed, true);
+});
+
+test("buildIngressJson tailscale mode requires a valid IPv4 + port", () => {
+  const missingIp = buildIngressJson("", { mode: "tailscale", port: 8787 });
+  assert.equal(missingIp.ok, false);
+  assert.match(missingIp.error, /tailnetIp/);
+  const badIp = buildIngressJson("", { mode: "tailscale", tailnetIp: "fd00::1", port: 8787 });
+  assert.equal(badIp.ok, false);
+  const missingPort = buildIngressJson("", { mode: "tailscale", tailnetIp: "100.64.1.5" });
+  assert.equal(missingPort.ok, false);
+  assert.match(missingPort.error, /port/);
+  const badPort = buildIngressJson("", { mode: "tailscale", tailnetIp: "100.64.1.5", port: 99999 });
+  assert.equal(badPort.ok, false);
+});
+
+test("buildIngressJson public mode emits {mode:'public'} and reports no change on re-run", () => {
+  const res = buildIngressJson("", { mode: "public" });
+  assert.equal(res.ok, true);
+  const parsed = JSON.parse(res.text);
+  assert.deepEqual(parsed, { mode: "public" });
+  assert.equal(res.changed, true);
+  // Re-running with the same shape is a no-op (changed=false) so the
+  // atomic write is skipped — a no-op rewrite would still be safe, but
+  // skipping it keeps a re-install truly idempotent.
+  const again = buildIngressJson(res.text, { mode: "public" });
+  assert.equal(again.ok, true);
+  assert.equal(again.changed, false);
+  assert.equal(again.text, res.text);
+});
+
+test("buildIngressJson rejects unknown modes", () => {
+  const res = buildIngressJson("", { mode: "cloudflared" });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /must be "public" or "tailscale"/);
+});
+
+test("parse-tailscale-status CLI subcommand prints the IP on a running fixture", () => {
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["100.64.1.5"] },
+  });
+  const out = execSync(
+    `node ${join(__dirname, "install-lib.mjs")} parse-tailscale-status`,
+    { input: fixture, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+  );
+  // No trailing newline: install.sh captures via `$()` which strips it,
+  // and a stray newline would leak into the systemd unit's environment line.
+  assert.equal(out, "100.64.1.5");
+});
+
+test("parse-tailscale-status CLI subcommand exits 1 on a stopped fixture", () => {
+  const fixture = JSON.stringify({
+    BackendState: "Stopped",
+    Self: { TailscaleIPs: ["100.64.1.5"] },
+  });
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} parse-tailscale-status`,
+      { input: fixture, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.fail("parse-tailscale-status must exit non-zero on Stopped backend");
+  } catch (e) {
+    assert.equal(e.status, 1);
+    assert.equal(e.stdout ?? "", "", "no stdout on failure");
+  }
+});
+
+test("write-ingress CLI subcommand persists tailscale mode with derived serverUrl", () => {
+  // Mirror of the merge-gateway test style (BET-267 inherits the same
+  // atomic-write + 0600 contract). The file's contents must round-trip
+  // exactly through JSON.parse so manta-pair.mjs's `cfg.authDir + ingress.json`
+  // read finds a serverUrl it can hand to formatPairingOutput.
+  const dir = mkdtempSync(join(tmpdir(), "manta-write-ingress-"));
+  const ingressFile = join(dir, "ingress.json");
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
+        `--file ${ingressFile} --mode tailscale --tailnet-ip 100.64.1.5 --port 8787`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const written = JSON.parse(readFileSync(ingressFile, "utf-8"));
+    assert.deepEqual(written, {
+      mode: "tailscale",
+      tailnetIp: "100.64.1.5",
+      serverUrl: "http://100.64.1.5:8787",
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write-ingress CLI subcommand persists public mode", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-write-ingress-public-"));
+  const ingressFile = join(dir, "ingress.json");
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
+        `--file ${ingressFile} --mode public`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const written = JSON.parse(readFileSync(ingressFile, "utf-8"));
+    assert.deepEqual(written, { mode: "public" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write-ingress CLI subcommand rejects tailscale without --tailnet-ip", () => {
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
+        `--file /tmp/__no_tailnet__ --mode tailscale --port 8787`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.fail("write-ingress tailscale without --tailnet-ip must exit non-zero");
+  } catch (e) {
+    assert.match(e.stderr ?? "", /--tailnet-ip/);
+  }
+});
+
+test("write-ingress CLI subcommand rejects an unknown --mode", () => {
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
+        `--file /tmp/__bad_mode__ --mode cloudflared`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.fail("write-ingress with unknown --mode must exit non-zero");
+  } catch (e) {
+    assert.match(e.stderr ?? "", /--mode must be/);
+  }
+});
+
+test("write-ingress CLI subcommand creates the parent dir if it does not exist", () => {
+  // Same safety-net the install relies on: ~/.manta/ is created on the
+  // first install. The lib uses mkdirSync({ recursive: true }), so the
+  // nested parent dir + the file land in one atomic write.
+  const dir = mkdtempSync(join(tmpdir(), "manta-write-ingress-nested-"));
+  const ingressFile = join(dir, "nested", "deeper", "ingress.json");
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
+        `--file ${ingressFile} --mode public`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const written = JSON.parse(readFileSync(ingressFile, "utf-8"));
+    assert.deepEqual(written, { mode: "public" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildPairPageUrl accepts an explicit baseUrl (BET-267 tailnet path)", () => {
+  // When the install sets INGRESS_MODE=tailscale it passes the tailnet
+  // serverUrl as `baseUrl` so the pair page points at the box's Tailscale
+  // listener instead of <boxId>.boxes.mantaui.com (which would be
+  // unreachable on the tailnet path). The fragment (#code=) is preserved
+  // so the pair page still derives box_id from the request's host header.
+  const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "http://100.64.1.5:8787" });
+  assert.equal(url, "http://100.64.1.5:8787/pair#code=847291");
+});
+
+test("buildPairPageUrl strips a trailing slash from baseUrl", () => {
+  // Defensive: install.sh's tailnet serverUrl is rendered with no
+  // trailing slash today, but if a future caller passes one (e.g. via an
+  // env var override), the helper must not produce a doubled slash in
+  // the final URL.
+  const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "http://100.64.1.5:8787/" });
+  assert.equal(url, "http://100.64.1.5:8787/pair#code=847291");
+});
+
+test("buildPairPageUrl falls back to the canonical host when baseUrl is empty", () => {
+  // Empty baseUrl is treated the same as no option — preserves the public
+  // path's wire shape (regression guard against a future caller passing
+  // an unset env var through to the option).
+  const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "" });
+  assert.equal(url, `https://${HEX32}.boxes.mantaui.com/pair#code=847291`);
+});
+
+test("formatPairingOutput uses serverUrl as the pair-page base on the tailnet path (BET-267)", () => {
+  // Headline acceptance criterion for BET-267 Branch A: when a non-public
+  // serverUrl is provided, the connect block must point at THAT base.
+  // The manta:// deep-link is dropped because the mobile/desktop resolver
+  // routes that link through `boxDirectUrl` → https://<boxId>.boxes.mantaui.com,
+  // which is unreachable on the tailnet path. The canonical
+  // boxes.mantaui.com hostname MUST NOT appear in the tailnet output
+  // (a stray one would mislead the device).
+  const out = formatPairingOutput({
+    pairing_code: "847291",
+    box_id: HEX32,
+    expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
+    serverUrl: "http://100.64.1.5:8787",
+  });
+  assert.match(out, /Pair page:     http:\/\/100\.64\.1\.5:8787\/pair#code=847291/);
+  assert.doesNotMatch(out, /manta:\/\/pair/);
+  assert.doesNotMatch(out, /boxes\.mantaui\.com/);
+  // The footer (Pairing code / Box ID / Server URL) stays identical to
+  // the public-path shape — only the pair-page URL + dropped deep link
+  // change.
+  assert.match(out, /Server URL:    http:\/\/100\.64\.1\.5:8787/);
+  assert.match(out, /Pairing code:  847291/);
+  assert.match(out, /Box ID:        0123456789abcdef0123456789abcdef/);
+});
+
+test("formatPairingOutput keeps the manta:// deep-link on the public path (BET-267 regression guard)", () => {
+  // Companion to the above: when no serverUrl is passed (or a public
+  // https URL is), the existing wire shape (manta:// deep link +
+  // canonical boxes.mantaui.com pair page) MUST stay unchanged so a
+  // reinstall of an existing public box produces an identical connect
+  // block. Pin the exact strings.
+  const out = formatPairingOutput({
+    pairing_code: "847291",
+    box_id: HEX32,
+    expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
+  });
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
+  assert.match(out, /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
 });
