@@ -235,27 +235,35 @@ workflows:
           set -e
           mkdir -p "$HOME/.appstoreconnect/private_keys"
           ASC_KEY_FILE="$CM_BUILD_DIR/asc-api-key.p8"
-          # Step 1: literal backslash-n -> newline.
-          printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY" | sed 's/\\n/\n/g' > "$ASC_KEY_FILE"
-          # Step 2: if markers + body are on one line, reconstruct a valid PEM.
-          if ! grep -q "BEGIN PRIVATE KEY" "$ASC_KEY_FILE" || [ "$(wc -l < "$ASC_KEY_FILE")" -lt 2 ]; then
-            BODY=$(cat "$ASC_KEY_FILE" \
-              | sed -E 's/-----BEGIN PRIVATE KEY-----//; s/-----END PRIVATE KEY-----//' \
-              | tr -d ' \t\r\n')
-            {
-              echo "-----BEGIN PRIVATE KEY-----"
-              printf '%s' "$BODY" | fold -w 64
-              echo ""
-              echo "-----END PRIVATE KEY-----"
-            } > "$ASC_KEY_FILE"
-          fi
+          # ALWAYS reconstruct from the base64 body, shape-agnostic. This is the
+          # SAME approach the box's working asc.mjs JWT signer uses. We do NOT rely
+          # on `sed 's/\\n/\n/g'` (POSIX/BSD sed does not expand \n in the
+          # replacement, so a literal-"\n" key would slip through unchanged): strip
+          # the BEGIN/END markers, strip the literal characters backslash + n, strip
+          # ALL whitespace to get the pure base64 body, then 64-char-wrap it back
+          # between fresh markers. Works whether the input is one line, has literal
+          # "\n", or is already multi-line.
+          RAW="$APP_STORE_CONNECT_PRIVATE_KEY"
+          BODY=$(printf '%s' "$RAW" \
+            | sed -E 's/-----BEGIN [A-Z ]*PRIVATE KEY-----//; s/-----END [A-Z ]*PRIVATE KEY-----//' \
+            | sed 's/\\n//g' \
+            | tr -d ' \t\r\n')
+          {
+            echo "-----BEGIN PRIVATE KEY-----"
+            printf '%s' "$BODY" | fold -w 64
+            echo ""
+            echo "-----END PRIVATE KEY-----"
+          } > "$ASC_KEY_FILE"
           chmod 600 "$ASC_KEY_FILE"
-          # Fail fast with a clear message if the key still is not parseable.
-          if ! openssl pkcs8 -nocrypt -in "$ASC_KEY_FILE" -inform PEM -topk8 -out /dev/null 2>/dev/null; then
-            echo "ASC .p8 did not parse as PEM after reconstruction — check APP_STORE_CONNECT_PRIVATE_KEY formatting."
-            head -1 "$ASC_KEY_FILE"; echo "(lines: $(wc -l < "$ASC_KEY_FILE"))"
+          # Validate with `openssl pkey` (the read-only "is this a parseable private
+          # key" check — NOT `openssl pkcs8 -topk8`, which is a re-encode and can
+          # false-fail on a perfectly valid key, the mac-v0.0.10 attempt-2 failure).
+          if ! openssl pkey -in "$ASC_KEY_FILE" -noout 2>/dev/null; then
+            echo "ASC .p8 did not parse as an EC private key after reconstruction."
+            echo "First line: $(head -1 "$ASC_KEY_FILE") | lines: $(wc -l < "$ASC_KEY_FILE") | body chars: ${#BODY}"
             exit 1
           fi
+          echo "OK: ASC .p8 written as valid PEM ($(wc -l < "$ASC_KEY_FILE") lines, body ${#BODY} chars)."
           echo "OK: ASC .p8 written as valid PEM ($(wc -l < "$ASC_KEY_FILE") lines)."
           echo "ASC_KEY_FILE=$ASC_KEY_FILE" >> "$CM_ENV"
       - name: Build + sign app + notarize the .app inside the DMG
