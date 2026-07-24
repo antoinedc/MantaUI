@@ -509,6 +509,30 @@ main() {
   # 7. manta-server systemd --user unit: substitute placeholders and enable.
   # ---------------------------------------------------------------------------
 
+  # detect_tailscale_ip — wrapper around `tailscale status --json` piped
+  # through the lib's `parse-tailscale-status` subcommand. Returns the
+  # detected Tailscale IPv4 on stdout, exit 0 — OR exits 1 with no output
+  # when Tailscale is missing / not running / has no IPv4. install.sh uses
+  # the exit code to drive the INGRESS_MODE decision (BET-267).
+  #
+  # HOISTED ABOVE the mode-resolution block (BET-267 review fix): bash does
+  # NOT forward-reference function definitions within the same function, so
+  # defining this AFTER its call sites (the original placement, near
+  # read_box_id_for_gateway) silently failed with
+  # `detect_tailscale_ip: command not found` and the auto branch fell through
+  # to public mode even when Tailscale was running. Moving the definition
+  # above the call sites is the minimal fix; `bash -n` parses but does not
+  # execute, so this only shows up under real (or DRY_RUN=1) tracing.
+  #
+  # Silent on stderr by design: install.sh logs the result separately so
+  # we never want a `tailscale: command not found` warning to leak through
+  # the box's user-facing output (the absence of tailscale is normal on
+  # the public-path install).
+  detect_tailscale_ip() {
+    command -v tailscale >/dev/null 2>&1 || return 1
+    tailscale status --json 2>/dev/null | "$NODE" "$LIB" parse-tailscale-status
+  }
+
   # --- Ingress mode (BET-267) ----------------------------------------------
   # Resolved BEFORE step 7 so the systemd unit template can be rendered
   # with the correct MANTA_TAILNET_HOST value (empty on public path, the
@@ -597,21 +621,6 @@ main() {
         process.stdout.write(id?.box_id ?? "");
       }).catch(() => process.stdout.write(""));
     ' 2>/dev/null || true
-  }
-
-  # detect_tailscale_ip — wrapper around `tailscale status --json` piped
-  # through the lib's `parse-tailscale-status` subcommand. Returns the
-  # detected Tailscale IPv4 on stdout, exit 0 — OR exits 1 with no output
-  # when Tailscale is missing / not running / has no IPv4. install.sh uses
-  # the exit code to drive the INGRESS_MODE decision (BET-267).
-  #
-  # Silent on stderr by design: install.sh logs the result separately so
-  # we never want a `tailscale: command not found` warning to leak through
-  # the box's user-facing output (the absence of tailscale is normal on
-  # the public-path install).
-  detect_tailscale_ip() {
-    command -v tailscale >/dev/null 2>&1 || return 1
-    tailscale status --json 2>/dev/null | "$NODE" "$LIB" parse-tailscale-status
   }
 
   # ===========================================================================

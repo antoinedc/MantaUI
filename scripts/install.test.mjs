@@ -980,6 +980,47 @@ test("install.sh is bash-syntax-clean (bash -n)", () => {
   }
 });
 
+test("install.sh defines detect_tailscale_ip BEFORE every call site (BET-267 review regression)", () => {
+  // Regression guard for the BET-267 review finding: bash does NOT forward-
+  // reference function definitions within the same function body, so a
+  // detect_tailscale_ip() definition placed AFTER its call sites silently
+  // fails with `command not found`. The auto branch then falls through to
+  // public mode even when Tailscale is running, and the tailscale branch
+  // dies with a misleading "Tailscale is not running" message.
+  //
+  // `bash -n` parses the script but does not execute it, so it cannot catch
+  // this; we do a static-layout check instead — every $(detect_tailscale_ip…)
+  // call site must come after the function definition. Comments that mention
+  // the helper name in prose are explicitly excluded.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const defMatch = src.match(/^[ \t]*detect_tailscale_ip\(\)[ \t]*\{/m);
+  assert.ok(defMatch, "expected a detect_tailscale_ip() function definition in install.sh");
+  // Locate the definition's line number by finding the byte offset of the
+  // match and counting newlines before it.
+  const defOffset = src.indexOf(defMatch[0]);
+  const defLine = src.slice(0, defOffset).split("\n").length;
+  const lines = src.split("\n");
+  let firstCallLine = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Skip comment lines that mention the helper in prose.
+    if (/^\s*#/.test(line)) continue;
+    // Look for `$(detect_tailscale_ip` (with optional whitespace after `$(`).
+    if (/\$\(\s*detect_tailscale_ip/.test(line)) {
+      firstCallLine = i + 1;
+      break;
+    }
+  }
+  assert.ok(
+    firstCallLine !== null,
+    "expected at least one $(detect_tailscale_ip…) call site in install.sh",
+  );
+  assert.ok(
+    defLine < firstCallLine,
+    `detect_tailscale_ip() must be defined BEFORE its call site: def at line ${defLine}, first call at line ${firstCallLine}. Bash does not forward-reference function definitions within the same function — defining the helper after its call sites silently fails with "command not found".`,
+  );
+});
+
 // ----------------------------------------------------------------------------
 // manifest_get — the bash helper install.sh uses to read key=value from the
 // release manifest BEFORE any node exists on the box.
