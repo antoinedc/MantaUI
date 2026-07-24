@@ -478,6 +478,28 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // Mobile keyboard-bar → /clear bridge (BET-259). The KeyboardBar's
+  // `clear` key already showed the user a confirm; this listener hands the
+  // clear to ChatPanel's existing /clear builtin path so optimistic-message
+  // cleanup and model-override carry-over to the new session behave exactly
+  // like a typed `/clear`. The submit is deferred via setTimeout(…, 0) so the
+  // setInput("/clear") re-render commits first — calling submit() in the
+  // same tick would read the stale input closure. Don't call
+  // opencodeClearSession directly; the builtin path in submit() owns the
+  // model-carry-over.
+  useEffect(() => {
+    const onRunClear = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
+      if (detail?.sessionId !== sessionId) return;
+      setInput("/clear");
+      setTimeout(() => {
+        submitRef.current?.();
+      }, 0);
+    };
+    window.addEventListener("manta-run-clear", onRunClear);
+    return () => window.removeEventListener("manta-run-clear", onRunClear);
+  }, [sessionId, setInput]);
+
   // (manta-open-schedules / -secrets / -webhooks mobile bridges moved to
   // useSessionResources.)
 

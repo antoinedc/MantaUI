@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStore, resolveSessionOwner } from "../store";
 import { ChatPanel } from "../ChatPanel";
 import { Terminal } from "../Terminal";
+import { KeyboardBar } from "./KeyboardBar";
 import {
   type SessionMode,
   readSavedMode,
@@ -153,24 +154,18 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
   };
 
   // Esc / stop — interrupt the running agent. Mobile soft keyboards rarely
-  // expose an Esc key, so it gets an explicit header button that works for
-  // BOTH session kinds. It's always available (not gated on a "running"
-  // flag): a stuck agent is exactly the case where the running indicator may
-  // be stale, so the stop must work regardless. Aborting an already-idle
-  // session is a harmless no-op.
-  //   - chat mode → opencodeAbort(sid), same as the desktop "Esc to stop"
-  //     keybind in ChatPanel.
-  //   - terminal / AI CLI TUI mode (or a legacy foreign window with no sid,
-  //     which manta never creates anymore) → write \x1b to that mode's shell
-  //     PTY. Select the tmux window first: mobile navigation doesn't
-  //     select-window on open, and the legacy fallback path's PTY follows
-  //     the active tmux window, so without this ESC could land on a
-  //     different window than the one shown.
+  // expose an Esc key, so terminal / AI CLI TUI windows keep an explicit
+  // header button that writes \x1b to the mode's shell PTY. Chat mode's
+  // interrupt lives in the KeyboardBar (which dispatches a synthetic Escape
+  // keydown to the textarea → ChatPanel's existing onKeyDown → abort()).
+  // Always available (not gated on a "running" flag): a stuck agent is
+  // exactly the case where the running indicator may be stale, so the stop
+  // must work regardless. Writing \x1b to an idle PTY is a harmless no-op.
+  // Select the tmux window first: mobile navigation doesn't select-window
+  // on open, and the legacy fallback path's PTY follows the active tmux
+  // window, so without this ESC could land on a different window than the
+  // one shown.
   const sendEsc = () => {
-    if (sid) {
-      window.api.opencodeAbort(sid).catch(() => {});
-      return;
-    }
     window.api
       .tmuxSelectWindow({ sessionName: projectName, windowIndex: win.index })
       .catch(() => {})
@@ -231,17 +226,22 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
           )}
         </div>
         {/* Esc / stop — interrupts the running agent the way pressing Esc
-            would on desktop. Shown for both chat and terminal windows; see
-            sendEsc for why it's always available rather than gated on a
-            running flag. */}
-        <button
-          className="mobile-tap text-text-muted text-xs font-semibold px-2 border border-border rounded"
-          onClick={sendEsc}
-          aria-label="Send Esc to stop the agent"
-          title="Esc"
-        >
-          Esc
-        </button>
+            would on desktop. Shown ONLY in terminal / AI CLI TUI mode; chat
+            mode's interrupt lives in the KeyboardBar (esc key → synthetic
+            keydown → textarea handler → abort). Always available rather than
+            gated on a running flag: a stuck agent is exactly the case where
+            the running indicator may be stale, so the stop must work
+            regardless. */}
+        {!(sid && mode === "chat") && (
+          <button
+            className="mobile-tap text-text-muted text-xs font-semibold px-2 border border-border rounded"
+            onClick={sendEsc}
+            aria-label="Send Esc to stop the agent"
+            title="Esc"
+          >
+            Esc
+          </button>
+        )}
         {/* Action sheet is available for both chat and terminal windows now —
             terminal windows get rename + kill; chat windows additionally get
             fork / compact / delete. */}
@@ -272,6 +272,20 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
           />
         )}
       </div>
+
+      {/* Keyboard accessory bar — chat mode only (BET-259). Rendered as the
+          last child of the .mobile-screen flex column so normal flow docks
+          it directly above the composer / on-screen keyboard on hosts that
+          resize the viewport (Capacitor). iOS Safari's overlay-keyboard
+          host uses an explicit translateY(-inset) computed from
+          window.visualViewport (see KeyboardBar.tsx). */}
+      {sid && mode === "chat" && (
+        <KeyboardBar
+          sessionId={sid}
+          projectName={projectName}
+          windowIndex={win.index}
+        />
+      )}
 
       {sheetOpen && (
         <div className="mobile-sheet-backdrop" onClick={closeSheet}>
