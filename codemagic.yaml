@@ -241,6 +241,23 @@ workflows:
           ASC_KEY_FILE="$CM_BUILD_DIR/asc-api-key.p8"
           printf '%s' "$ASC_API_KEY_P8_B64" | base64 --decode > "$ASC_KEY_FILE"
           chmod 600 "$ASC_KEY_FILE"
+          # DEFENSIVE PEM NORMALIZATION: the base64 should already decode to a
+          # multi-line PEM, but if whoever set ASC_API_KEY_P8_B64 encoded a
+          # newline-FLATTENED key (the box's ASC_API_KEY_P8 secret stores it with
+          # spaces instead of newlines — the Secrets card flattens it), the decoded
+          # file is one line and `openssl pkey` / notarytool reject it. Rebuild the
+          # PEM from the pure base64 body so either input shape works.
+          if ! openssl pkey -in "$ASC_KEY_FILE" -noout 2>/dev/null; then
+            BODY=$(sed -E 's/-----BEGIN [A-Z ]*PRIVATE KEY-----//; s/-----END [A-Z ]*PRIVATE KEY-----//' "$ASC_KEY_FILE" \
+              | sed 's/\\n//g' | tr -d ' \t\r\n')
+            {
+              echo "-----BEGIN PRIVATE KEY-----"
+              printf '%s' "$BODY" | fold -w 64
+              echo ""
+              echo "-----END PRIVATE KEY-----"
+            } > "$ASC_KEY_FILE"
+            chmod 600 "$ASC_KEY_FILE"
+          fi
           # Validate it is a parseable EC private key (read-only check).
           if ! openssl pkey -in "$ASC_KEY_FILE" -noout 2>/dev/null; then
             echo "Decoded ASC .p8 is not a parseable EC private key — check ASC_API_KEY_P8_B64."
