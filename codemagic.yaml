@@ -222,11 +222,41 @@ workflows:
           # as $APP_STORE_CONNECT_PRIVATE_KEY / $APP_STORE_CONNECT_KEY_IDENTIFIER /
           # $APP_STORE_CONNECT_ISSUER_ID). Write the .p8 to a file for both
           # electron-builder's app notarization and the DMG notarytool submit.
+          #
+          # PEM RECONSTRUCTION: the integration variable often arrives with its
+          # newlines flattened (literal "\n" sequences, or the header/body/footer
+          # run together on one line). electron-builder's @electron/notarize
+          # tolerates that, but `xcrun notarytool` is strict and rejects a
+          # single-line key with "Error: invalidPEMDocument" (the ios-v0.0.10 DMG
+          # step failure). Normalize to a real multi-line PEM before writing:
+          #   1. turn literal "\n" into real newlines,
+          #   2. if it is STILL one line, rebuild the PEM by putting the base64
+          #      body on its own 64-char-wrapped lines between the BEGIN/END markers.
           set -e
           mkdir -p "$HOME/.appstoreconnect/private_keys"
           ASC_KEY_FILE="$CM_BUILD_DIR/asc-api-key.p8"
-          printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$ASC_KEY_FILE"
+          # Step 1: literal backslash-n -> newline.
+          printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY" | sed 's/\\n/\n/g' > "$ASC_KEY_FILE"
+          # Step 2: if markers + body are on one line, reconstruct a valid PEM.
+          if ! grep -q "BEGIN PRIVATE KEY" "$ASC_KEY_FILE" || [ "$(wc -l < "$ASC_KEY_FILE")" -lt 2 ]; then
+            BODY=$(cat "$ASC_KEY_FILE" \
+              | sed -E 's/-----BEGIN PRIVATE KEY-----//; s/-----END PRIVATE KEY-----//' \
+              | tr -d ' \t\r\n')
+            {
+              echo "-----BEGIN PRIVATE KEY-----"
+              printf '%s' "$BODY" | fold -w 64
+              echo ""
+              echo "-----END PRIVATE KEY-----"
+            } > "$ASC_KEY_FILE"
+          fi
           chmod 600 "$ASC_KEY_FILE"
+          # Fail fast with a clear message if the key still is not parseable.
+          if ! openssl pkcs8 -nocrypt -in "$ASC_KEY_FILE" -inform PEM -topk8 -out /dev/null 2>/dev/null; then
+            echo "ASC .p8 did not parse as PEM after reconstruction — check APP_STORE_CONNECT_PRIVATE_KEY formatting."
+            head -1 "$ASC_KEY_FILE"; echo "(lines: $(wc -l < "$ASC_KEY_FILE"))"
+            exit 1
+          fi
+          echo "OK: ASC .p8 written as valid PEM ($(wc -l < "$ASC_KEY_FILE") lines)."
           echo "ASC_KEY_FILE=$ASC_KEY_FILE" >> "$CM_ENV"
       - name: Build + sign app + notarize the .app inside the DMG
         script: |
