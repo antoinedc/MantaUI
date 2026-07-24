@@ -384,19 +384,19 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
             ) : (
               <>
                 <button onClick={startRename}>Rename</button>
-                <button
-                  onClick={() => {
-                    // iOS only opens the picker from a user gesture — the click
-                    // on the hidden input must happen synchronously in this
-                    // tap handler (BET-260).
-                    fileInputRef.current?.click();
-                    closeSheet();
-                  }}
-                >
-                  Attach photo or file…
-                </button>
                 {sid && (
                   <>
+                    <button
+                      onClick={() => {
+                        // iOS only opens the picker from a user gesture — the click
+                        // on the hidden input must happen synchronously in this
+                        // tap handler (BET-260).
+                        fileInputRef.current?.click();
+                        closeSheet();
+                      }}
+                    >
+                      Attach photo or file…
+                    </button>
                     <button onClick={forkSession}>Fork session</button>
                     <button onClick={compactSession}>Compact context</button>
                     <button
