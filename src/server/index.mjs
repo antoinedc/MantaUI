@@ -368,6 +368,7 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
 
 const PORT = Number(process.env.MANTA_MOBILE_PORT ?? 8787);
 const HOST = process.env.MANTA_MOBILE_HOST ?? "0.0.0.0";
+const TAILNET_HOST = process.env.MANTA_TAILNET_HOST ?? "";
 
 // ---------- static file serving ----------
 
@@ -585,7 +586,7 @@ async function handleDownload(req, res, url) {
 
 // ---------- HTTP ----------
 
-const server = createServer(async (req, res) => {
+const handleRequest = async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   const path = url.pathname;
 
@@ -1500,7 +1501,9 @@ const server = createServer(async (req, res) => {
 
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("not found");
-});
+};
+
+const server = createServer(handleRequest);
 
 // ---------- WebSocket: /events live stream + /pty terminal bridge ----------
 //
@@ -1516,7 +1519,7 @@ const server = createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ noServer: true });
 
-server.on("upgrade", (req, socket, head) => {
+const handleUpgrade = (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
   // Auth gate for WS upgrades. Browsers can't set an Authorization header on a
@@ -1555,7 +1558,9 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
   socket.destroy();
-});
+};
+
+server.on("upgrade", handleUpgrade);
 
 server.listen(PORT, HOST, () => {
   console.log(`manta listening on http://${HOST}:${PORT}`);
@@ -1569,3 +1574,19 @@ server.listen(PORT, HOST, () => {
     console.warn(`[gateway-register] unexpected: ${String(err?.message ?? err)}`);
   });
 });
+
+if (TAILNET_HOST) {
+  const tailnetServer = createServer(handleRequest);
+  tailnetServer.on("upgrade", handleUpgrade);
+  const listenTailnet = () => {
+    tailnetServer.listen(PORT, TAILNET_HOST, () => {
+      console.log(`manta listening on http://${TAILNET_HOST}:${PORT} (tailnet)`);
+    });
+  };
+  tailnetServer.on("error", (err) => {
+    console.warn(`[tailnet] listener error (${err.code ?? err.message}); retrying in 30s`);
+    const t = setTimeout(listenTailnet, 30_000);
+    t.unref();
+  });
+  listenTailnet();
+}
