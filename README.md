@@ -216,27 +216,61 @@ session by POST). Install/update = copy to `~/.config/opencode/tools/`
 In order. No decisions, no extra steps:
 
 1. Bump `package.json` version.
-2. `npm run pack` — produces `dist/manta-<version>-linux-x64.tar.gz` (the
-   self-contained tarball) AND `dist/manta-<version>.txt` (the key=value
-   manifest install.sh fetches first).
+2. Build the box-server tarballs (one invocation per arch; requires BOTH
+   arches before `publish.sh` will proceed):
+   - `node scripts/release/pack.mjs --arch x64` — produces
+     `dist/manta-<version>-linux-x64.tar.gz` (the self-contained
+     tarball) AND `dist/manta-<version>-linux-x64.txt` (the per-arch
+     key=value manifest sidecar).
+   - `node scripts/release/pack.mjs --arch arm64` — same two outputs
+     with `linux-arm64` in the filename. Run on a native arm64 host
+     (the arm64 `node-pty` binding cannot be cross-compiled; the
+     `server-tarball-deploy.yml` workflow builds both arches in a
+     matrix on a `server-v<version>` tag — see `AGENTS.md` "Release &
+     CD pipeline").
+   - `node scripts/release/merge-manifest.mjs \
+       dist/manta-<version>-linux-x64.txt \
+       dist/manta-<version>-linux-arm64.txt \
+       --out dist/manta-<version>.txt` — assembles the combined
+     key=value manifest `install.sh` fetches at runtime.
 3. (Mac only, on a Mac) `bash scripts/release/desktop.sh` — produces
    `dist/desktop/*.dmg` and the `latest-*.yml` updater feeds. Linux
    builds run on any host.
-4. `bash scripts/release/publish.sh` — uploads the tarball + desktop
-   artifacts, restarts `manta-server` on prod, HEAD-checks every URL,
-   tags `v<version>`. Idempotent: re-publishing the same version is a safe
-   no-op. Override the target with `MANTA_PROD_HOST=...` for staging.
+4. `bash scripts/release/publish.sh` — uploads both per-arch tarballs
+   + the combined manifest, restarts `manta-server` on prod,
+   HEAD-checks every URL, tags `v<version>`. Idempotent: re-publishing
+   the same version is a safe no-op. Override the target with
+   `MANTA_PROD_HOST=...` for staging.
 
 Done.
 
-**Rollback:** point `manta-latest.tar.gz` at the previous tarball on the
-prod box and restart the server:
+**Rollback:** the atomic pointer is `manta-latest.txt` (the combined
+manifest), not a tarball — `publish.sh` uploads every release's
+per-arch tarballs (`manta-<version>-linux-x64.tar.gz` +
+`manta-<version>-linux-arm64.tar.gz`) into `/var/www/mantaui/releases/`
+and never deletes the previous release's files, so reversing the
+manifest pointer is all that's needed to restore an older release on
+the box:
 
 ```
 ssh $MANTA_PROD_HOST 'cd /var/www/mantaui/releases \\
-    && cp -f manta-<prev-version>.tar.gz manta-latest.tar.gz \\
+    && cp -f manta-<prev-version>.txt manta-latest.txt \\
     && git -C /opt/manta checkout v<prev-version> \\
     && systemctl restart manta-server'
+```
+
+If `manta-<prev-version>.txt` is missing on the prod box, recover it
+by re-merging the previous release's per-arch sidecars (still served
+under their versioned filenames) on any host that has
+`scripts/release/merge-manifest.mjs`:
+
+```
+scp $MANTA_PROD_HOST:/var/www/mantaui/releases/manta-<prev-version>-{linux-x64,linux-arm64}.txt .
+node scripts/release/merge-manifest.mjs \
+    manta-<prev-version>-linux-x64.txt \
+    manta-<prev-version>-linux-arm64.txt \
+    --out manta-<prev-version>.txt
+scp manta-<prev-version>.txt $MANTA_PROD_HOST:/var/www/mantaui/releases/
 ```
 
 ## Production infra (ours)
