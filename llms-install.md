@@ -36,8 +36,8 @@ the desktop app's onboarding handles those.
 
 Run on the target box:
 
-- `uname -m` — must be `x86_64`. Anything else: stop and tell the user only
-  x86_64 Linux is supported today.
+- `uname -m` — must be `x86_64` or `aarch64` / `arm64`. Anything else: stop and
+  tell the user only x86_64 and arm64 Linux are supported today.
 - `for c in curl tar sha256sum tmux git; do command -v $c >/dev/null || echo "missing: $c"; done`
   — all five are hard requirements the installer does NOT install. For any
   missing one, give the user the exact command for their distro

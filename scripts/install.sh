@@ -38,10 +38,12 @@
 #
 # Release resolution:
 #   1. Fetch `${MANTA_RELEASE_HOST:-https://mantaui.com}/releases/manta-${MANTA_VERSION:-latest}.txt`
-#      — a flat key=value manifest written by `npm run pack`. Combined manifest
-#      carries BOTH arches (Stage 2 merges per-arch sidecars); install.sh reads
-#      the keys for the arch `resolve_arch` resolved from `uname -m`.
-#   2. Parse `file_${ARCH_KEY}` + `sha256_${ARCH_KEY}` from the manifest.
+#      — a flat key=value manifest carrying BOTH arch pairs (`file_<archkey>`
+#      + `sha256_<archkey>` for each). Written per-arch by `npm run pack`,
+#      merged into the combined manifest by `scripts/release/merge-manifest.mjs`
+#      in the `server-v*` deploy workflow (`.github/workflows/server-tarball-deploy.yml`).
+#   2. Parse `file_<arch>` + `sha256_<arch>` where `<arch>` is `linux_x64` or
+#      `linux_arm64`, selected from `uname -m` via `resolve_arch` (below).
 #   3. Download the tarball, verify sha256, extract.
 #
 # `MANTA_TARBALL_URL` overrides the whole flow: use a local file:// or a
