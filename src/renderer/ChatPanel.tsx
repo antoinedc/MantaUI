@@ -1200,6 +1200,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
+  // Patch one attachment by id with a Partial<Attachment>. Reused by the
+  // paste/screenshot upload paths to flip status from "uploading" -> "ready"
+  // (with remotePath) or -> "error" (with errorMsg) without repeating the
+  // setAttachments(prev => prev.map(a => a.id === id ? {...a, ...patch} : a))
+  // closure at every site (duplication-gate).
+  const patchAttachment = useCallback(
+    (id: string, patch: Partial<Attachment>) => {
+      setAttachments((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+      );
+    },
+    [],
+  );
+
   // ===== Clipboard paste (screenshots) =====
   //
   // When the user pastes into the textarea, check for image/* items in the
@@ -1236,14 +1250,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             filename,
             buffer: arrayBuffer,
           });
-          setAttachments((prev) =>
-            prev.map((a) => (a.id === id ? { ...a, status: "ready", remotePath } : a)),
-          );
+          patchAttachment(id, { status: "ready", remotePath });
         } catch (err) {
           const msg = String((err as Error)?.message ?? err);
-          setAttachments((prev) =>
-            prev.map((a) => (a.id === id ? { ...a, status: "error", errorMsg: msg } : a)),
-          );
+          patchAttachment(id, { status: "error", errorMsg: msg });
         }
       }
     },
@@ -1298,14 +1308,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         buffer: buf,
       });
       if (!remotePath) throw new Error("Upload failed");
-      setAttachments((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, status: "ready", remotePath } : a)),
-      );
+      patchAttachment(id, { status: "ready", remotePath });
     } catch (err) {
       const msg = String((err as Error)?.message ?? err);
-      setAttachments((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, status: "error", errorMsg: msg } : a)),
-      );
+      patchAttachment(id, { status: "error", errorMsg: msg });
     }
   }, [screenshotToast, tmuxSession]);
 
