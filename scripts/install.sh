@@ -344,7 +344,15 @@ main() {
     # non-interactive shells (which is how install.sh runs) don't source
     # .bashrc, so the binary isn't on PATH in the current shell — we add
     # it explicitly. The fallback covers the documented path.
-    curl -fsSL https://opencode.ai/install | bash \
+    # NOTE: </dev/null on the inner installer is load-bearing. install.sh is
+    # itself run as `curl -fsSL … | bash`, so the OUTER bash reads THIS script
+    # from stdin (the pipe). The opencode installer is `curl … | bash` too, and
+    # its bash inherits the parent's stdin. If the opencode installer reads
+    # stdin at all (a prompt / read / cat), it drains the rest of install.sh's
+    # bytes and the OUTER bash then hits EOF right here and exits 0 — no error,
+    # the install silently stops "after opencode install". Redirecting the
+    # inner installer's stdin to /dev/null keeps our script's stdin intact.
+    curl -fsSL https://opencode.ai/install | bash </dev/null \
       || die "opencode install failed — install manually: https://opencode.ai"
     # Refresh PATH from .bashrc if the installer wrote there, then also
     # probe the well-known install location as a safety net.
