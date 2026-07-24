@@ -101,3 +101,36 @@ test("ignores unknown extra keys gracefully", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("merges three per-arch sidecars (linux_x64 + linux_arm64 + darwin_arm64)", () => {
+  // BET-275: the deploy workflow now produces a third arch (darwin-arm64)
+  // for the macOS box path. merge-manifest.mjs must keep the darwin_arm64
+  // keypair in the combined manifest (not silently drop it as "unknown").
+  const dir = fresh();
+  try {
+    const a = writeSidecar(
+      dir,
+      "x64.txt",
+      "version=2.5.0\nfile_linux_x64=manta-2.5.0-linux-x64.tar.gz\nsha256_linux_x64=aaaa\n",
+    );
+    const b = writeSidecar(
+      dir,
+      "arm64.txt",
+      "version=2.5.0\nfile_linux_arm64=manta-2.5.0-linux-arm64.tar.gz\nsha256_linux_arm64=bbbb\n",
+    );
+    const c = writeSidecar(
+      dir,
+      "darwin.txt",
+      "version=2.5.0\nfile_darwin_arm64=manta-2.5.0-darwin-arm64.tar.gz\nsha256_darwin_arm64=cccc\n",
+    );
+    const out = join(dir, "combined.txt");
+    runMerge([a, b, c, "--out", out]);
+    const got = readFileSync(out, "utf-8");
+    assert.equal(
+      got,
+      "version=2.5.0\nfile_linux_x64=manta-2.5.0-linux-x64.tar.gz\nsha256_linux_x64=aaaa\nfile_linux_arm64=manta-2.5.0-linux-arm64.tar.gz\nsha256_linux_arm64=bbbb\nfile_darwin_arm64=manta-2.5.0-darwin-arm64.tar.gz\nsha256_darwin_arm64=cccc\n",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

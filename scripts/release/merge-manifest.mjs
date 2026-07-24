@@ -6,11 +6,12 @@
 //   node scripts/release/merge-manifest.mjs <sidecar1.txt> [<sidecar2.txt> ...] --out <combined.txt>
 //
 // Each sidecar carries `version=`, `file_<archkey>=`, `sha256_<archkey>=` where
-// `<archkey>` is the underscore form (`linux_x64`, `linux_arm64`). The combined
-// manifest echoes `version=` first, then each sidecar's arch pair in the order
-// the sidecars were passed in. Unknown keys are dropped silently (forward
-// compatibility). Mismatched `version=` between sidecars is a hard error —
-// that means the two arch builds are from different commits.
+// `<archkey>` is the underscore form (`linux_x64`, `linux_arm64`,
+// `darwin_arm64`). The combined manifest echoes `version=` first, then each
+// sidecar's arch pair in the order the sidecars were passed in. Unknown keys
+// are dropped silently (forward compatibility). Mismatched `version=` between
+// sidecars is a hard error — that means the arch builds are from different
+// commits.
 //
 // Pure node, no deps. Kept tiny (this file is intentionally short — it is
 // only used by publish.sh + server-tarball-deploy.yml, never on the box).
@@ -27,8 +28,8 @@ function log(msg) {
 }
 
 // Parse a sidecar body into { version, arches: { archKey: { file, sha } } }.
-// `archKey` is the underscore form (linux_x64 / linux_arm64). Values may
-// contain `=` — split on the first one only.
+// `archKey` is the underscore form (linux_x64 / linux_arm64 / darwin_arm64).
+// Values may contain `=` — split on the first one only.
 function parseSidecar(body) {
   const out = { version: null, arches: {} };
   for (const line of body.split(/\r?\n/)) {
@@ -41,7 +42,7 @@ function parseSidecar(body) {
       continue;
     }
     // Recognize file_<archkey> + sha256_<archkey>. Drop unknown keys.
-    const m = key.match(/^(file|sha256)_(linux_(?:x64|arm64))$/);
+    const m = key.match(/^(file|sha256)_(linux_(?:x64|arm64)|darwin_arm64)$/);
     if (!m) continue;
     const [, kind, archKey] = m;
     const arch = (out.arches[archKey] ||= {});
