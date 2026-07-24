@@ -51,13 +51,16 @@ function tarballBytes(archKey) {
   };
 }
 
-// Manifest content (combined, post-Stage-2 / BET-264). Two arches.
+// Manifest content (combined, post-Stage-2 / BET-264 + BET-279 darwin-arm64).
+// Three arches.
 const GOOD_MANIFEST = [
   "version=1.2.3",
   `file_linux_x64=manta-1.2.3-linux-x64.tar.gz`,
   `sha256_linux_x64=${tarballBytes("linux_x64").sha256}`,
   `file_linux_arm64=manta-1.2.3-linux-arm64.tar.gz`,
   `sha256_linux_arm64=${tarballBytes("linux_arm64").sha256}`,
+  `file_darwin_arm64=manta-1.2.3-darwin-arm64.tar.gz`,
+  `sha256_darwin_arm64=${tarballBytes("darwin_arm64").sha256}`,
   "release_channel=stable",
 ].join("\n");
 
@@ -66,6 +69,7 @@ function defaultHealthyHandlers(manifestText = GOOD_MANIFEST) {
   const tb = {
     "linux_x64": tarballBytes("linux_x64"),
     "linux_arm64": tarballBytes("linux_arm64"),
+    "darwin_arm64": tarballBytes("darwin_arm64"),
   };
   const manifestUrl = `${SITE_URL}/releases/manta-latest.txt`;
   return {
@@ -82,6 +86,10 @@ function defaultHealthyHandlers(manifestText = GOOD_MANIFEST) {
       method === "HEAD"
         ? makeRes({ status: 200 })
         : makeRes({ status: 200, bodyBytes: tb.linux_arm64.bytes }),
+    [`${SITE_URL}/releases/manta-1.2.3-darwin-arm64.tar.gz`]: ({ method }) =>
+      method === "HEAD"
+        ? makeRes({ status: 200 })
+        : makeRes({ status: 200, bodyBytes: tb.darwin_arm64.bytes }),
   };
 }
 
@@ -91,7 +99,7 @@ function defaultHealthyHandlers(manifestText = GOOD_MANIFEST) {
 
 test("SITE_URL + ARCH_KEYS match scripts/release/publish.sh (single source of truth)", () => {
   assert.equal(SITE_URL, "https://mantaui.com");
-  assert.deepEqual(ARCH_KEYS, ["linux_x64", "linux_arm64"]);
+  assert.deepEqual(ARCH_KEYS, ["linux_x64", "linux_arm64", "darwin_arm64"]);
 });
 
 test("DEFAULT_TARGETS covers the live surfaces but NOT the per-arch tarballs (those live behind the manifest)", () => {
@@ -186,6 +194,8 @@ test("parseManifest extracts every key=value line (first occurrence wins)", () =
     "sha256_linux_x64=aaaa",
     "file_linux_arm64=manta-1.2.3-linux-arm64.tar.gz",
     "sha256_linux_arm64=bbbb",
+    "file_darwin_arm64=manta-1.2.3-darwin-arm64.tar.gz",
+    "sha256_darwin_arm64=cccc",
     "release_channel=stable",
     "# a comment-looking line",
     "malformed line no equals",
@@ -197,6 +207,8 @@ test("parseManifest extracts every key=value line (first occurrence wins)", () =
     sha256_linux_x64: "aaaa",
     file_linux_arm64: "manta-1.2.3-linux-arm64.tar.gz",
     sha256_linux_arm64: "bbbb",
+    file_darwin_arm64: "manta-1.2.3-darwin-arm64.tar.gz",
+    sha256_darwin_arm64: "cccc",
     release_channel: "stable",
   });
 });
@@ -209,7 +221,7 @@ test("parseManifest returns {} on empty / non-string input", () => {
 });
 
 // ---------------------------------------------------------------------------
-// verifyManifestDrift — the headline check (BET-171 F4 class, BET-264 two-arch).
+// verifyManifestDrift — the headline check (BET-171 F4 class, BET-264 + BET-279).
 // ---------------------------------------------------------------------------
 
 test("verifyManifestDrift returns ok:true when every arch HEAD+sha256 matches", async () => {
@@ -220,6 +232,7 @@ test("verifyManifestDrift returns ok:true when every arch HEAD+sha256 matches", 
     [`${SITE_URL}/releases/manta-latest.txt`]: handlers[`${SITE_URL}/releases/manta-latest.txt`],
     [`${SITE_URL}/releases/manta-1.2.3-linux-x64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-linux-x64.tar.gz`],
     [`${SITE_URL}/releases/manta-1.2.3-linux-arm64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-linux-arm64.tar.gz`],
+    [`${SITE_URL}/releases/manta-1.2.3-darwin-arm64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-darwin-arm64.tar.gz`],
   });
   const result = await verifyManifestDrift({ fetchFn, log: () => {} });
   assert.equal(result.ok, true);
@@ -267,6 +280,7 @@ test("verifyManifestDrift flags a tarball HEAD 404 on one arch", async () => {
     [`${SITE_URL}/releases/manta-latest.txt`]: handlers[`${SITE_URL}/releases/manta-latest.txt`],
     [`${SITE_URL}/releases/manta-1.2.3-linux-x64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-linux-x64.tar.gz`],
     [`${SITE_URL}/releases/manta-1.2.3-linux-arm64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-linux-arm64.tar.gz`],
+    [`${SITE_URL}/releases/manta-1.2.3-darwin-arm64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-darwin-arm64.tar.gz`],
   });
   const result = await verifyManifestDrift({ fetchFn, log: () => {} });
   assert.equal(result.ok, false);
@@ -286,6 +300,7 @@ test("verifyManifestDrift flags a sha256 mismatch on one arch (the headline BET-
     [`${SITE_URL}/releases/manta-latest.txt`]: handlers[`${SITE_URL}/releases/manta-latest.txt`],
     [`${SITE_URL}/releases/manta-1.2.3-linux-x64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-linux-x64.tar.gz`],
     [`${SITE_URL}/releases/manta-1.2.3-linux-arm64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-linux-arm64.tar.gz`],
+    [`${SITE_URL}/releases/manta-1.2.3-darwin-arm64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-darwin-arm64.tar.gz`],
   });
   const result = await verifyManifestDrift({ fetchFn, log: () => {} });
   assert.equal(result.ok, false);
@@ -304,11 +319,14 @@ test("verifyManifestDrift refuses manifest entries with path-traversal / slashes
     "sha256_linux_x64=aaaa",
     "file_linux_arm64=manta-1.2.3-linux-arm64.tar.gz",
     `sha256_linux_arm64=${tarballBytes("linux_arm64").sha256}`,
+    `file_darwin_arm64=manta-1.2.3-darwin-arm64.tar.gz`,
+    `sha256_darwin_arm64=${tarballBytes("darwin_arm64").sha256}`,
   ].join("\n");
   const handlers = defaultHealthyHandlers(evil);
   const fetchFn = fakeFetch({
     [`${SITE_URL}/releases/manta-latest.txt`]: handlers[`${SITE_URL}/releases/manta-latest.txt`],
     [`${SITE_URL}/releases/manta-1.2.3-linux-arm64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-linux-arm64.tar.gz`],
+    [`${SITE_URL}/releases/manta-1.2.3-darwin-arm64.tar.gz`]: handlers[`${SITE_URL}/releases/manta-1.2.3-darwin-arm64.tar.gz`],
   });
   const result = await verifyManifestDrift({ fetchFn, log: () => {} });
   assert.equal(result.ok, false);

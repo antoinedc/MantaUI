@@ -35,7 +35,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------------------
 
 export const SITE_URL = "https://mantaui.com";
-export const ARCH_KEYS = ["linux_x64", "linux_arm64"];
+export const ARCH_KEYS = ["linux_x64", "linux_arm64", "darwin_arm64"];
 
 // ---------------------------------------------------------------------------
 // Default probe set (single source of truth — also used by the test suite).
@@ -64,7 +64,8 @@ export const DEFAULT_TARGETS = [
 // Manifest parser — pure, mirrors the install.sh `manifest_get` shape
 // (scripts/install.sh reads `key=value` lines, first-occurrence wins).
 // Keys we care about per arch: file_<archkey>= and sha256_<archkey>=
-// (e.g. file_linux_x64=manta-1.2.3-linux-x64.tar.gz). Future keys are
+// (e.g. file_linux_x64=manta-1.2.3-linux-x64.tar.gz,
+// file_darwin_arm64=manta-1.2.3-darwin-arm64.tar.gz). Future keys are
 // ignored — we never want a new arch to break a stale parser.
 // ---------------------------------------------------------------------------
 
@@ -80,8 +81,8 @@ export function parseManifest(text) {
 }
 
 // ---------------------------------------------------------------------------
-// Manifest ↔ tarball drift check (BET-171 F4 class, generalized to BOTH
-// arches per BET-264). Same loop publish.sh runs at verify-time, but
+// Manifest ↔ tarball drift check (BET-171 F4 class, generalized to EVERY
+// arch per BET-264 + BET-279). Same loop publish.sh runs at verify-time, but
 // pushed out to every 10 min from an off-site box: catches the case
 // where the served tarball silently drifted from what manta-latest.txt
 // promises (file replaced, partial upload, etc.) AFTER publish.sh's
