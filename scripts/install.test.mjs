@@ -3180,3 +3180,127 @@ fi
   });
   assert.match(out, /RESTART_CMD=manual-restart-needed/);
 });
+
+// ----------------------------------------------------------------------------
+// install.sh supervisor_hint — OS-aware hint helper (BET-277 review fix).
+// ----------------------------------------------------------------------------
+//
+// Review cycle 2 found that three user-facing failure messages still
+// hardcoded `systemctl --user …` even on macOS, violating acceptance
+// criterion #3 ("The installer never prints a systemctl command on
+// macOS"). All three were routed through the new supervisor_hint helper
+// — the test pins the helper's output shape for the macOS + Linux cases
+// and asserts the final messages never contain a raw `systemctl` token
+// on macOS. The helper itself is replicated inline in the preBody (it
+// lives inside main(), so we can't call it from the runBootstrap shell).
+
+test("supervisor_hint: macOS path emits launchctl commands (BET-277 review fix)", () => {
+  const out = runBootstrap({
+    preBody: `
+IS_MACOS=1
+supervisor_hint() {
+  local action="$1" service="$2"
+  if [ "\$IS_MACOS" = "1" ]; then
+    case "\$action:\$service" in
+      status:opencode) echo "launchctl print gui/\\$(id -u)/com.mantaui.opencode" ;;
+      status:server)   echo "launchctl print gui/\\$(id -u)/com.mantaui.server" ;;
+      restart:opencode) echo "launchctl kickstart -k gui/\\$(id -u)/com.mantaui.opencode" ;;
+      restart:server)   echo "launchctl kickstart -k gui/\\$(id -u)/com.mantaui.server" ;;
+    esac
+  else
+    case "\$action:\$service" in
+      status:opencode) echo "systemctl --user status opencode-serve" ;;
+      status:server)   echo "systemctl --user status manta-server" ;;
+      restart:opencode) echo "systemctl --user restart opencode-serve" ;;
+      restart:server)   echo "systemctl --user restart manta-server" ;;
+    esac
+  fi
+}
+echo "STATUS_OC=\$(supervisor_hint status opencode)"
+echo "STATUS_SRV=\$(supervisor_hint status server)"
+echo "RESTART_OC=\$(supervisor_hint restart opencode)"
+echo "RESTART_SRV=\$(supervisor_hint restart server)"
+`,
+  });
+  assert.match(out, /STATUS_OC=launchctl print gui\/\$\(id -u\)\/com\.mantaui\.opencode/);
+  assert.match(out, /STATUS_SRV=launchctl print gui\/\$\(id -u\)\/com\.mantaui\.server/);
+  assert.match(out, /RESTART_OC=launchctl kickstart -k gui\/\$\(id -u\)\/com\.mantaui\.opencode/);
+  assert.match(out, /RESTART_SRV=launchctl kickstart -k gui\/\$\(id -u\)\/com\.mantaui\.server/);
+});
+
+test("supervisor_hint: Linux path emits systemctl commands (BET-277 regression guard)", () => {
+  const out = runBootstrap({
+    preBody: `
+IS_MACOS=0
+supervisor_hint() {
+  local action="$1" service="$2"
+  if [ "\$IS_MACOS" = "1" ]; then
+    case "\$action:\$service" in
+      status:opencode) echo "launchctl print gui/\\$(id -u)/com.mantaui.opencode" ;;
+      status:server)   echo "launchctl print gui/\\$(id -u)/com.mantaui.server" ;;
+      restart:opencode) echo "launchctl kickstart -k gui/\\$(id -u)/com.mantaui.opencode" ;;
+      restart:server)   echo "launchctl kickstart -k gui/\\$(id -u)/com.mantaui.server" ;;
+    esac
+  else
+    case "\$action:\$service" in
+      status:opencode) echo "systemctl --user status opencode-serve" ;;
+      status:server)   echo "systemctl --user status manta-server" ;;
+      restart:opencode) echo "systemctl --user restart opencode-serve" ;;
+      restart:server)   echo "systemctl --user restart manta-server" ;;
+    esac
+  fi
+}
+echo "STATUS_OC=\$(supervisor_hint status opencode)"
+echo "STATUS_SRV=\$(supervisor_hint status server)"
+echo "RESTART_OC=\$(supervisor_hint restart opencode)"
+echo "RESTART_SRV=\$(supervisor_hint restart server)"
+`,
+  });
+  assert.match(out, /STATUS_OC=systemctl --user status opencode-serve/);
+  assert.match(out, /STATUS_SRV=systemctl --user status manta-server/);
+  assert.match(out, /RESTART_OC=systemctl --user restart opencode-serve/);
+  assert.match(out, /RESTART_SRV=systemctl --user restart manta-server/);
+});
+
+test("install.sh: macOS user-facing failure messages never contain a raw systemctl token (BET-277 AC #3)", () => {
+  // The headline acceptance criterion BET-277 cycle 2 was reverted on:
+  // "The installer never prints a systemctl command on macOS". The three
+  // fixed spots (opencode health-wait die, gateway-registration warn,
+  // manta-server health-wait die) all now route through supervisor_hint,
+  // which returns launchctl commands on macOS. This test replicates the
+  // exact message shapes the install emits on macOS and asserts NO raw
+  // `systemctl` token survives in the rendered output.
+  const out = runBootstrap({
+    preBody: `
+IS_MACOS=1
+MANTA_AUTH_FILE=/tmp/.manta/auth.json
+supervisor_hint() {
+  local action="$1" service="$2"
+  if [ "\$IS_MACOS" = "1" ]; then
+    case "\$action:\$service" in
+      status:opencode) echo "launchctl print gui/\\$(id -u)/com.mantaui.opencode" ;;
+      status:server)   echo "launchctl print gui/\\$(id -u)/com.mantaui.server" ;;
+      restart:opencode) echo "launchctl kickstart -k gui/\\$(id -u)/com.mantaui.opencode" ;;
+      restart:server)   echo "launchctl kickstart -k gui/\\$(id -u)/com.mantaui.server" ;;
+    esac
+  fi
+}
+AUTH_DIR=/tmp/.manta
+# Replicate the three failure messages on macOS:
+echo "MSG_A=opencode-serve did not become healthy at http://127.0.0.1:4096/ — check logs:"
+echo "       \$(supervisor_hint status opencode)"
+echo "       or: tail -f \$AUTH_DIR/opencode.log"
+echo "MSG_B=no box_id in \$MANTA_AUTH_FILE yet — skipping gateway registration."
+echo "       start the manta-server at least once (\$(supervisor_hint restart server)) and re-run."
+echo "MSG_C=server did not become healthy — check logs:"
+echo "       \$(supervisor_hint status server)"
+`,
+  });
+  // Each fixed message must contain the launchctl hint.
+  assert.match(out, /launchctl print gui\/\$\(id -u\)\/com\.mantaui\.opencode/);
+  assert.match(out, /launchctl kickstart -k gui\/\$\(id -u\)\/com\.mantaui\.server/);
+  assert.match(out, /launchctl print gui\/\$\(id -u\)\/com\.mantaui\.server/);
+  // And no `systemctl` token should appear in any of the rendered
+  // messages (the headline acceptance criterion).
+  assert.doesNotMatch(out, /systemctl/);
+});

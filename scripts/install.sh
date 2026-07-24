@@ -512,6 +512,41 @@ main() {
     launchctl kickstart -k "gui/$uid/$label" 2>/dev/null || true
   }
 
+  # supervisor_hint <action> <service> — emit the right supervisor command
+  # for the OS we're actually running on (BET-277 acceptance criterion #3:
+  # "The installer never prints a `systemctl` command on macOS"). Three
+  # failure-path messages (the opencode health-wait die, the gateway-
+  # registration warn when box_id is missing, the manta-server health-wait
+  # die) used to hardcode `systemctl --user …`; this helper makes them
+  # launchctl on macOS and systemctl everywhere else.
+  #
+  # Usage: echo "hint: $(supervisor_hint status server)"   # → status command
+  #        echo "hint: $(supervisor_hint restart opencode)" # → restart command
+  # The `gui/$(id -u)` token is intentionally left literal (no command
+  # substitution) so the hint prints verbatim — the user runs it on their
+  # own box, where $UID will resolve. Same pattern the trailing footer
+  # uses for the launchctl commands.
+  supervisor_hint() {
+    local action="$1" service="$2"
+    if [ "$IS_MACOS" = "1" ]; then
+      case "$action:$service" in
+        status:opencode) echo "launchctl print gui/\$(id -u)/com.mantaui.opencode" ;;
+        status:server)   echo "launchctl print gui/\$(id -u)/com.mantaui.server" ;;
+        restart:opencode) echo "launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode" ;;
+        restart:server)   echo "launchctl kickstart -k gui/\$(id -u)/com.mantaui.server" ;;
+        *) echo "supervisor_hint: unknown action:service $action:$service" >&2; return 2 ;;
+      esac
+    else
+      case "$action:$service" in
+        status:opencode) echo "systemctl --user status opencode-serve" ;;
+        status:server)   echo "systemctl --user status manta-server" ;;
+        restart:opencode) echo "systemctl --user restart opencode-serve" ;;
+        restart:server)   echo "systemctl --user restart manta-server" ;;
+        *) echo "supervisor_hint: unknown action:service $action:$service" >&2; return 2 ;;
+      esac
+    fi
+  }
+
   # --- D. opencode-serve: systemd --user (Linux) / launchd (macOS) / nohup (other). ----
   # Three-way branch mirroring the manta-server install path right below.
   # Health-wait reuses the existing waitForHealth lib with acceptAnyStatus:true
@@ -574,7 +609,7 @@ main() {
       console.error("healthy after " + r.attempts + " attempt(s) (status " + r.status + ")");
     }).catch((e) => { console.error(String(e)); process.exit(1); });
   ' || die "opencode-serve did not become healthy at http://127.0.0.1:4096/ — check logs:
-        systemctl --user status opencode-serve ; journalctl --user -u opencode-serve -n 50
+        $(supervisor_hint status opencode)
         or: tail -f $AUTH_DIR/opencode.log"
   ok "opencode-serve is healthy."
 
@@ -873,7 +908,7 @@ main() {
 
     if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
       warn "no box_id in $MANTA_AUTH_FILE yet — skipping gateway registration."
-      warn "  start the manta-server at least once (systemctl --user restart manta-server) and re-run."
+      warn "  start the manta-server at least once ($(supervisor_hint restart server)) and re-run."
     else
       GATEWAY_BASE="${MANTA_GATEWAY_BASE:-https://gateway.mantaui.com}"
       # Use the existing gateway_token if present so re-registration is an
@@ -1187,7 +1222,7 @@ main() {
       console.error("healthy after " + r.attempts + " attempt(s)");
     }).catch((e) => { console.error(String(e)); process.exit(1); });
   ' || die "server did not become healthy — check logs:
-        systemctl --user status manta-server ; journalctl --user -u manta-server -n 50"
+        $(supervisor_hint status server)"
 
   ok "Server is healthy."
 
