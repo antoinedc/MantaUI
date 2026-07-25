@@ -17,6 +17,8 @@ import {
   parseCredentials,
   isRefreshTokenExpired,
   classifyRefreshOutcome,
+  isClaudeCredentialError,
+  shouldAttemptRecovery,
 } from "./claudeAuth.mjs";
 
 const REMOTE_PORT = 4096;
@@ -948,12 +950,27 @@ export async function getVcsBranch(directory) {
 }
 
 // ---------------------------------------------------------------------------
-// Claude credential auto-refresh (BET-139)
+// Claude credential auto-refresh (BET-139, BET-280)
 // ---------------------------------------------------------------------------
 
-// Single-flight guard: concurrent ProviderAuthError events share one
-// in-flight refresh promise instead of racing multiple `claude` spawns.
+// Single-flight guard: concurrent auth-error events share one in-flight
+// refresh promise instead of racing multiple `claude` spawns. The cooldown
+// in `maybeRecoverCredentials` is the FIRST gate (saves most spawns);
+// this guard catches whatever still gets through inside the same burst.
 let _refreshInFlight = null;
+// Last-recovery timestamp (epoch ms) for the cooldown gate. A single
+// expired-credential burst on the live box produced ~12 error events in
+// ~25 seconds; without a cooldown each one would spawn its own `claude`
+// process.
+let _lastRecoveryAt = null;
+/** Test-only: peek the recovery cooldown state. */
+export function _getRecoveryCooldownState() {
+  return { lastRecoveryAt: _lastRecoveryAt };
+}
+/** Test-only: reset recovery cooldown state between scenarios. */
+export function _resetRecoveryCooldownState() {
+  _lastRecoveryAt = null;
+}
 
 /** Resolve the `claude` CLI binary. manta-server's service PATH excludes the
  *  user's ~/.local/bin (where the claude installer symlinks the binary), so a
@@ -990,9 +1007,10 @@ function readCredsSnapshot() {
  * CLI — the exact fix the user performs by hand today. Mirrors getVcsBranch's
  * cpSpawn-wrapped-in-a-Promise shape.
  *
- * Triggered from exactly ONE place: the renderer's ProviderAuthError handler
- * (via the opencode:refresh-credentials RPC channel). Single-flight guarded
- * so concurrent auth errors share one refresh instead of duplicate spawns.
+ * Triggered from exactly ONE place: `maybeRecoverCredentials` below, which is
+ * called from the opencode event pump (`src/server/index.mjs`). Single-flight
+ * guarded so concurrent auth errors share one refresh instead of duplicate
+ * spawns.
  *
  * @returns {Promise<{ ok: boolean, reason?: "no-credentials" | "refresh-token-expired" | "failed", expiresAt?: number }>}
  */
@@ -1002,6 +1020,42 @@ export async function refreshClaudeCredentials() {
     _refreshInFlight = null;
   });
   return _refreshInFlight;
+}
+
+/**
+ * Server-side trigger for the Claude credential auto-refresh (BET-280).
+ * Called from the opencode event pump on every `session.error`; only fires
+ * a refresh when the error matches our message-shape predicate (catches the
+ * UnknownError wrapper the plugin throws today AND the legacy error-name
+ * compatibility branch in `isClaudeCredentialError`) AND the cooldown gate
+ * is open (catches the burst).
+ *
+ * Runs without a client attached — that's the BET-280 whole point. The
+ * renderer used to drive this via an IPC channel + an SSE callback, which
+ * required a chat panel for the session to be mounted in a connected client.
+ * Errors on a session nobody was watching (the live failure) never recovered.
+ *
+ * Never throws — a rejection from `refreshClaudeCredentials` is swallowed
+ * (the function logs its own outcome line and the caller doesn't await the
+ * result anyway).
+ *
+ * @param {unknown} evt  opencode event from `subscribeEvents`
+ */
+export async function maybeRecoverCredentials(evt) {
+  try {
+    if (evt?.type !== "session.error") return;
+    if (!isClaudeCredentialError(evt.properties?.error)) return;
+    if (!shouldAttemptRecovery(_lastRecoveryAt, Date.now())) return;
+    _lastRecoveryAt = Date.now();
+    // The refresh function logs its own outcome; we don't await it because
+    // the pump must never block. A failure is benign (next event within the
+    // cooldown won't retry; one past the cooldown will).
+    void refreshClaudeCredentials();
+  } catch (e) {
+    // Defensive: a thrown predicate or unexpected shape must never escape
+    // into the pump. Log so the operator can see it happened.
+    console.warn("[claude-auth] maybeRecoverCredentials failed:", e?.message ?? e);
+  }
 }
 
 async function doRefresh() {

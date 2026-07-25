@@ -63,8 +63,6 @@ import {
   shouldForceReconnect,
   shouldReconnectOnAppStateChange,
   runWithConcurrency,
-  credentialRefreshBannerText,
-  lastUserMessageText,
   chooseUpdateSkewVariant,
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
@@ -2385,7 +2383,7 @@ describe("isDrainAbortError", () => {
   });
 
   it("never swallows other error names even while draining", () => {
-    expect(isDrainAbortError("ProviderAuthError", true)).toBe(false);
+    expect(isDrainAbortError("ApiError", true)).toBe(false);
     expect(isDrainAbortError("ContextOverflowError", true)).toBe(false);
     expect(isDrainAbortError(undefined, true)).toBe(false);
   });
@@ -2888,65 +2886,6 @@ describe("runWithConcurrency", () => {
       seen.push(item);
     });
     expect(seen.sort((a, b) => a - b)).toEqual(items);
-  });
-});
-
-// ===== credentialRefreshBannerText =====
-
-describe("credentialRefreshBannerText", () => {
-  it("maps refresh-token-expired to a re-login instruction", () => {
-    expect(credentialRefreshBannerText("refresh-token-expired")).toBe(
-      "Claude login expired — run `opencode auth login anthropic` on the box, then retry.",
-    );
-  });
-
-  it("maps no-credentials to a login instruction", () => {
-    expect(credentialRefreshBannerText("no-credentials")).toBe(
-      "No Claude credentials found — run `opencode auth login anthropic` on the box.",
-    );
-  });
-
-  it("maps failed (and undefined) to a generic manual-fix instruction", () => {
-    const expected =
-      "Couldn't refresh Claude credentials automatically. Run `claude` on the box, then retry.";
-    expect(credentialRefreshBannerText("failed")).toBe(expected);
-    expect(credentialRefreshBannerText(undefined)).toBe(expected);
-  });
-});
-
-// ===== lastUserMessageText =====
-
-describe("lastUserMessageText", () => {
-  it("returns the most recent non-empty user message", () => {
-    const out = lastUserMessageText([
-      { info: { role: "user" }, parts: [{ type: "text", text: "first" }] },
-      { info: { role: "assistant" }, parts: [{ type: "text", text: "reply" }] },
-      { info: { role: "user" }, parts: [{ type: "text", text: "second" }] },
-    ]);
-    expect(out).toBe("second");
-  });
-
-  it("skips synthetic/ignored/empty user messages when searching backward", () => {
-    const out = lastUserMessageText([
-      { info: { role: "user" }, parts: [{ type: "text", text: "keep me" }] },
-      {
-        info: { role: "user" },
-        parts: [{ type: "text", text: "dropped", synthetic: true }],
-      },
-    ]);
-    expect(out).toBe("keep me");
-  });
-
-  it("returns null for null/empty transcripts", () => {
-    expect(lastUserMessageText(null)).toBe(null);
-    expect(lastUserMessageText([])).toBe(null);
-  });
-
-  it("returns null when there are no user messages", () => {
-    const out = lastUserMessageText([
-      { info: { role: "assistant" }, parts: [{ type: "text", text: "hi" }] },
-    ]);
-    expect(out).toBe(null);
   });
 });
 

@@ -1,11 +1,15 @@
-// Pure helpers for the Claude credential auto-refresh flow (BET-139).
+// Pure helpers for the Claude credential auto-refresh flow (BET-139, BET-280).
 //
 // Chat mode authenticates to Anthropic via the opencode-claude-auth plugin,
 // which reads/writes ~/.claude/.credentials.json. When the plugin can't
-// refresh a stale access token, opencode emits a ProviderAuthError. The
-// user's manual fix today is to run `claude` once on the box, which re-mints
-// the token; this module supplies the PURE decision logic for automating
-// that fix. All IO (spawn, file read) lives in src/server/opencode.mjs
+// refresh a stale access token, opencode emits an error event whose
+// `error.data.message` reads "Claude Code credentials are unavailable or
+// expired. Run `claude` to refresh them." — opencode wraps the plugin's
+// plain `Error` throw as `UnknownError`, so the legacy ProviderAuthError
+// name match never fires in production (BET-280 follow-up). The user's
+// manual fix today is to run `claude` once on the box, which re-mints the
+// token; this module supplies the PURE decision logic for automating that
+// fix. All IO (spawn, file read) lives in src/server/opencode.mjs
 // (refreshClaudeCredentials) — this file has no top-level side effects and
 // no imports of node:fs / node:child_process, so it's directly node:test-able
 // with in-memory literals.
@@ -77,4 +81,57 @@ export function classifyRefreshOutcome({ credsBefore, credsAfter, now }) {
     return "ok";
   }
   return "failed";
+}
+
+/**
+ * True when an `error`-shaped payload (typically `evt.properties.error` from a
+ * `session.error` event) reports an expired/unavailable Claude credential.
+ *
+ * Returns true if EITHER:
+ *   1. `err.name === "ProviderAuthError"` — kept for forward compatibility if
+ *      opencode ever starts emitting that name again (it currently does NOT —
+ *      the plugin throws a plain `Error` that opencode wraps as
+ *      `UnknownError`); OR
+ *   2. the message — read from `err?.data?.message` and coerced via
+ *      `String(...)` — matches ALL THREE case-insensitive patterns:
+ *      `/claude/`, `/credential/`, `/(expired|unavailable)/`.
+ *
+ * Matching on the message shape (rather than the exact upstream string) is
+ * the entire point of BET-280: BET-139 keyed off `err.name` only and never
+ * fired in production because opencode wraps the plugin's throw. The
+ * three-substring AND keeps the gate tight enough not to catch unrelated
+ * errors, while tolerating minor wording changes upstream.
+ *
+ * Returns false for null, undefined, non-objects, and any payload that
+ * matches neither branch.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isClaudeCredentialError(err) {
+  if (err == null || typeof err !== "object") return false;
+  if (err.name === "ProviderAuthError") return true;
+  const raw = err?.data?.message;
+  if (raw == null) return false;
+  const msg = String(raw).toLowerCase();
+  return /claude/.test(msg) && /credential/.test(msg) && /(expired|unavailable)/.test(msg);
+}
+
+/**
+ * Cooldown gate for the auto-recovery trigger — returns true when enough time
+ * has passed since the last attempt. A single expired-credential burst on the
+ * live box produced ~12 error events in ~25 seconds; without this gate each
+ * one would spawn its own `claude` process.
+ *
+ * True when `lastAttemptAt == null` OR `now - lastAttemptAt >= cooldownMs`.
+ * Nothing else.
+ *
+ * @param {number | null | undefined} lastAttemptAt  epoch ms, or null/undefined for "never"
+ * @param {number} now                                epoch ms
+ * @param {number} [cooldownMs=60_000]                gate window
+ * @returns {boolean}
+ */
+export function shouldAttemptRecovery(lastAttemptAt, now, cooldownMs = 60_000) {
+  if (lastAttemptAt == null) return true;
+  return now - lastAttemptAt >= cooldownMs;
 }

@@ -316,6 +316,8 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
   } catch (e) {
     console.warn("[webhook] observeEvent failed:", e?.message ?? e);
   }
+  // Auto-recover expired Claude credentials (server-side; works with no client attached).
+  oc.maybeRecoverCredentials(evt).catch(() => {});
   if (evt && evt.type === "permission.asked") {
     (async () => {
       try {
