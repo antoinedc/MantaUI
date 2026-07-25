@@ -272,6 +272,14 @@ const { stop: stopFileServer } = startFileServer();
 // eslint-disable-next-line no-unused-vars
 const { stop: stopServePageCleanup } = startCleanupPoller();
 
+// Proactive pre-expiry Claude credential refresh (BET-281): clocks
+// ~/.claude/.credentials.json every 10 min and refreshes ~30 min ahead of
+// expiry. Reactive recovery (BET-280) becomes a backup. See
+// src/server/opencode.mjs (startCredentialRefreshPoller) — same shape as
+// the other timer pollers above.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopCredentialRefreshPoller } = oc.startCredentialRefreshPoller();
+
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.
 // subscribeEvents reconnects silently on failure (opencode may not be up

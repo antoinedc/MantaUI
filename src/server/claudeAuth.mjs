@@ -135,3 +135,30 @@ export function shouldAttemptRecovery(lastAttemptAt, now, cooldownMs = 60_000) {
   if (lastAttemptAt == null) return true;
   return now - lastAttemptAt >= cooldownMs;
 }
+
+/**
+ * Pre-expiry gate for the proactive refresh poller (BET-281). Returns true
+ * when the OAuth access token is "about to expire" (within `leadMs`) AND a
+ * refresh is still possible (the refresh token itself is not expired).
+ *
+ * True when ALL of:
+ *   - `creds` is non-null
+ *   - `typeof creds.expiresAt === "number"`
+ *   - `creds.expiresAt - now <= leadMs`
+ *   - `isRefreshTokenExpired(creds, now)` is false
+ *
+ * Returns false otherwise. Pure — no IO, no imports beyond what this file
+ * already has. Reuses `isRefreshTokenExpired` rather than re-implementing the
+ * refresh-token check (single source of truth).
+ *
+ * @param {{ expiresAt?: number, refreshTokenExpiresAt?: number } | null | undefined} creds
+ * @param {number} now        epoch ms
+ * @param {number} [leadMs=30 * 60_000]  refresh this far before expiry
+ * @returns {boolean}
+ */
+export function shouldRefreshAhead(creds, now, leadMs = 30 * 60_000) {
+  if (!creds) return false;
+  if (typeof creds.expiresAt !== "number") return false;
+  if (creds.expiresAt - now > leadMs) return false;
+  return !isRefreshTokenExpired(creds, now);
+}
