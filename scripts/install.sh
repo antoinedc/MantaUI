@@ -19,7 +19,10 @@
 #
 # Prerequisites on the box (we check, never install — same `require_cmd` tone
 # as Homebrew/rustup):
-#   * curl, tar, sha256sum  — download + verify the release tarball
+#   * curl, tar, sha256sum (or `shasum -a 256` on macOS)  — download + verify
+#     the release tarball. macOS ships shasum by default but NOT sha256sum
+#     (no coreutils out of the box); the installer accepts either, see
+#     `_sha256_of` + the prereq check in step 1.
 #   * tmux, git             — the manta server needs them at runtime
 #
 # Everything else (Node runtime, npm, node_modules with node-pty's native
@@ -120,9 +123,21 @@ resolve_arch() {
   esac
 }
 
+# _sha256_of echoes the sha256 hex of $1. Prefers GNU sha256sum (Linux ships
+# it via coreutils); falls back to BSD `shasum -a 256` on macOS, which ships
+# shasum by default but NOT sha256sum. Single shared helper so the prereq
+# check (step 1) and verify_sha256 can't drift — the BET-278 review concern.
+_sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
 # Verify $1's sha256 equals $2 (64-hex). Dies on mismatch.
 verify_sha256() {
-  local actual; actual="$(sha256sum "$1" | cut -d' ' -f1)"
+  local actual; actual="$(_sha256_of "$1")"
   [ "$actual" = "$2" ] || die "checksum mismatch for $1
       expected: $2
       actual:   $actual
@@ -130,10 +145,10 @@ verify_sha256() {
 }
 
 # Test mode: when sourced by scripts/install.test.mjs with MANTA_INSTALL_TEST_MODE=1,
-# only the bash helpers (log/ok/warn/die + manifest_get + verify_sha256 +
-# resolve_arch) are loaded. The actual install does NOT run. Lets the unit
-# tests exercise the helpers with mocked `uname`/etc. without hitting the
-# network. See scripts/install.test.mjs.
+# only the bash helpers (log/ok/warn/die + manifest_get + _sha256_of +
+# verify_sha256 + resolve_arch) are loaded. The actual install does NOT run.
+# Lets the unit tests exercise the helpers with mocked `uname`/etc. without
+# hitting the network. See scripts/install.test.mjs.
 if [ "${MANTA_INSTALL_TEST_MODE:-0}" = "1" ]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -206,10 +221,19 @@ main() {
     fi
   }
 
-  log "Checking prerequisites (curl, tar, sha256sum, tmux, git)…"
+  log "Checking prerequisites (curl, tar, sha256sum|shasum, tmux, git)…"
   require_cmd curl      "apt-get install -y curl   # or your distro's package manager"
   require_cmd tar       "apt-get install -y tar"
-  require_cmd sha256sum "apt-get install -y coreutils"
+  # sha256sum (coreutils, Linux) or shasum (BSD/macOS) — accept either so
+  # the macOS box path doesn't need coreutils. _sha256_of picks whichever
+  # is available at runtime.
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    die "missing prerequisite: sha256sum or shasum
+      Install one and re-run. Suggested:
+        apt-get install -y coreutils   # provides sha256sum
+        brew install coreutils         # provides sha256sum (macOS)
+        # macOS ships 'shasum' by default — no install needed on a stock Mac"
+  fi
   require_cmd git       "apt-get install -y git"
   require_cmd tmux      "apt-get install -y tmux"
   ok "Prerequisites present."

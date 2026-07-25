@@ -85,7 +85,14 @@ refresh_mobile_bundle() {
   fi
 
   local got_sha
-  got_sha="$(sha256sum "$tmp/bundle.tar.gz" | cut -d' ' -f1)"
+  # sha256sum (Linux/coreutils) or shasum (macOS) — pick whichever is present.
+  # Same logic as install.sh's _sha256_of; kept inline here so self-update.sh
+  # stays a self-contained script with no install.sh dependency.
+  if command -v sha256sum >/dev/null 2>&1; then
+    got_sha="$(sha256sum "$tmp/bundle.tar.gz" | cut -d' ' -f1)"
+  else
+    got_sha="$(shasum -a 256 "$tmp/bundle.tar.gz" | cut -d' ' -f1)"
+  fi
   if [ "$got_sha" != "$want_sha" ]; then
     echo "⚠ self-update: mobile bundle sha256 mismatch (got $got_sha want $want_sha) — keeping existing mobile/www/"
     return 0
