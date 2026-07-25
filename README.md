@@ -76,6 +76,16 @@ curl -fsSL https://mantaui.com/install.sh | bash
 
 Prints a pairing code. Re-running upgrades in place and preserves identity.
 
+**On your Mac (Apple Silicon)** — also supported as a box OS. The installer
+auto-detects macOS, runs without sudo (no Caddy / Let's Encrypt), installs
+two launchd LaunchAgents (`com.mantaui.{server,opencode}`) under
+`~/Library/LaunchAgents/`, and serves `127.0.0.1:8787` + (if Tailscale is
+running) the tailnet URL. There is no public `<box_id>.boxes.mantaui.com`
+on macOS — reach the box from off-network via Tailscale. The Mac must be
+logged in (LaunchAgents load at GUI login); Intel Macs are not supported
+as a box — install the desktop app on those instead. Same
+`curl … | bash` invocation, same idempotency, same pairing-code output.
+
 **On your Mac**: download the app from [mantaui.com](https://mantaui.com)
 (or run from source: `npm install && npm run dev`), enter the pairing code in
 onboarding, pick providers, create your first project (a tmux session).

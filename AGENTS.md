@@ -2108,11 +2108,72 @@ curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/llms-install.md   #
 curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/downloads/Manta-latest.dmg  # desktop
 curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/releases/manta-latest-linux-x64.tar.gz   # server x64
 curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/releases/manta-latest-linux-arm64.tar.gz  # server arm64
+curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/releases/manta-latest-darwin-arm64.tar.gz  # server darwin-arm64 (Apple Silicon Mac box)
 curl -fsS https://gateway.mantaui.com/healthz    # gateway → {"ok":true}
 node /tmp/opencode/asc.mjs   # (on the box) — ASC build state for iOS (VALID = really uploaded)
 ```
 For byte-parity, `sha256sum` the live file vs the repo copy (the web workflow
 already does this and fails red on drift).
+
+## macOS box (BET-274) — design decisions, do not re-derive
+
+The installer supports macOS (Apple Silicon only) as a box OS alongside Linux.
+Don't re-litigate these — they're fixed by the BET-274 epic and a regression on
+any of them breaks the macOS path.
+
+- **Apple Silicon only.** `resolve_arch` in `scripts/install.sh` maps
+  `(uname -s=Darwin, uname -m=arm64)` → `darwin_arm64`; an Intel Mac
+  (`Darwin + x86_64`) dies immediately with a clear "Apple Silicon only"
+  message pointing at the desktop app. There is no `darwin-x64` build
+  target and there is no plan to add one.
+- **Service manager = `launchd` LaunchAgents, NOT systemd.** The two
+  services run as per-user LaunchAgents under
+  `~/Library/LaunchAgents/com.mantaui.{server,opencode}.plist`
+  (templates in `scripts/launchd/`). Loaded with `launchctl bootstrap
+  gui/$(id -u) <plist>`, restarted with
+  `launchctl kickstart -k gui/$(id -u)/<label>`. The Linux `systemd
+  --user` path is gated on `command -v systemctl`; macOS never has it,
+  so `install.sh` branches to `elif [ "$IS_MACOS" = "1" ]` for both
+  service installs. `self-update.sh` mirrors the same three-way branch
+  (`systemctl` → `launchctl` → manual warn). **LaunchAgents load at GUI
+  login and survive reboot as long as the user is logged in** — a
+  headless-never-logs-in Mac is unsupported (no `enable-linger` analog;
+  LaunchDaemon requires root and is out of scope).
+- **Loopback + Tailscale-only ingress.** The Caddy/apt/DNS/gateway-TLS
+  privileged section (install.sh 7.5 A/D/E) is gated on a single
+  `SKIP_PUBLIC_TLS` predicate, which merges the macOS case with the
+  existing tailscale case: both skip the public TLS sub-steps. **The
+  gateway-register sub-steps B/C STILL RUN on macOS** — they are
+  user-space and the gateway_token is still needed for APNs push.
+  `hostname -I` (BSD-incompatible), `ss -tlnH`, `loginctl
+  enable-linger`, and the Caddyfile `sed -i` (which is GNU-only) are
+  all inside OS-guarded blocks and macOS never reaches them. Confirmed
+  by the audit in BET-278 item #4. **Do not bypass the
+  `SKIP_PUBLIC_TLS` gate** — the macOS install dies on `:80`/`:443`
+  binding without sudo, and there's no path to making public TLS work
+  on macOS in v1.
+- **`darwin-arm64` tarball built on `macos-14` GitHub runner.** The
+  `server-tarball-deploy.yml` workflow matrix is
+  `[x64, arm64, darwin-arm64]`, with `runs-on` switching to
+  `macos-14` for the darwin leg. Cannot cross-compile: node-pty's
+  native ABI is host-tied, so the macOS build MUST run on a Mac.
+  Don't add a `darwin-x64` job — Apple Silicon Macs are the only ones
+  we ship a box for.
+- **Arch resolution single-source-of-truth.** Three files share the
+  same arch map and MUST stay in sync:
+  - `scripts/install.sh` `resolve_arch` → `linux_x64` | `linux_arm64` |
+    `darwin_arm64` (the underscore form is the manifest key).
+  - `scripts/release/pack.mjs` `resolveArch` → `{ key: "...", file: "..."
+    }`, where `file` is the hyphen form used in tarball filenames
+    AND nodejs.org's `node-v<v>-<file>.tar.gz` token
+    (`darwin-arm64`).
+  - The combined manifest (`file_darwin_arm64=` + `sha256_darwin_arm64=`
+    keys) emitted by `scripts/release/merge-manifest.mjs` and the
+    `server-v*` workflow.
+  If you rename or re-shape any of these three, do it in all three in
+  the same PR — `install.sh`'s `manifest_get "$manifest" "file_$ARCH_KEY"`
+  assumes the underscored key exists in the manifest, and the workflow's
+  matrix value is what the tarball filename uses.
 
 ## Plugins — YAML manifests (v2, BET-189)
 

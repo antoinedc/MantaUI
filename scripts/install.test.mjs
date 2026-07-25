@@ -1156,6 +1156,105 @@ verify_sha256 "${file}" "${wrongSha}"
 });
 
 // ----------------------------------------------------------------------------
+// _sha256_of — single shared helper used by verify_sha256 (install.sh) and
+// mirrored in self-update.sh. Prefers GNU `sha256sum` (Linux/coreutils);
+// falls back to BSD `shasum -a 256` (macOS, which ships shasum but NOT
+// sha256sum). Pinned by BET-278 so a macOS box doesn't blow up with a
+// cryptic "sha256sum: command not found" before the tarball even downloads.
+// ----------------------------------------------------------------------------
+
+test("_sha256_of uses sha256sum when present (Linux default)", () => {
+  // Linux CI has GNU sha256sum; this asserts the primary branch.
+  const dir = mkdtempSync(join(tmpdir(), "manta-sha256-of-"));
+  const file = join(dir, "blob");
+  writeFileSync(file, "hello world\n");
+  const expected = createHash("sha256").update(readFileSync(file)).digest("hex");
+  try {
+    const out = runBootstrap({
+      preBody: `
+echo "HASH=\$(_sha256_of "${file}")"
+`,
+    });
+    assert.match(out, new RegExp(`HASH=${expected}`));
+    assert.match(out, /BOOTSTRAP_EXIT=0/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("_sha256_of falls back to shasum -a 256 when sha256sum is absent (BET-278 macOS portability)", () => {
+  // Simulate a macOS box: shadow the `command` builtin so `command -v sha256sum`
+  // returns false, while `command -v shasum` still succeeds. Provide a shasum
+  // function that produces the BSD format `shasum` emits (`<hex>  <filename>`)
+  // — install.sh's helper pipes through `cut -d' ' -f1`, so any whitespace-
+  // separated first token works; we delegate to sha256sum behind the scenes
+  // since the test runs on Linux.
+  const dir = mkdtempSync(join(tmpdir(), "manta-sha256-of-"));
+  const file = join(dir, "blob");
+  writeFileSync(file, "hello world\n");
+  const expected = createHash("sha256").update(readFileSync(file)).digest("hex");
+  try {
+    const out = runBootstrap({
+      preBody: `
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "sha256sum" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+shasum() {
+  if [ "$1" = "-a" ] && [ "$2" = "256" ]; then
+    sha256sum "$3" | cut -d' ' -f1
+    return 0
+  fi
+  return 1
+}
+echo "HASH=\$(_sha256_of "${file}")"
+`,
+    });
+    assert.match(out, new RegExp(`HASH=${expected}`));
+    assert.match(out, /BOOTSTRAP_EXIT=0/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("_sha256_of dies (via verify_sha256) with a clear mismatch message when shasum branch is taken", () => {
+  // End-to-end: with the shasum fallback forced, verify_sha256's die path
+  // still formats the message correctly (this is what the macOS install
+  // would print on a stale manifest).
+  const dir = mkdtempSync(join(tmpdir(), "manta-sha256-of-"));
+  const file = join(dir, "blob");
+  writeFileSync(file, "hello world\n");
+  const wrongSha = "f".repeat(64);
+  try {
+    const out = runBootstrap({
+      preBody: `
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "sha256sum" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+shasum() {
+  if [ "$1" = "-a" ] && [ "$2" = "256" ]; then
+    sha256sum "$3" | cut -d' ' -f1
+    return 0
+  fi
+  return 1
+}
+verify_sha256 "${file}" "${wrongSha}"
+`,
+    });
+    assert.match(out, /checksum mismatch for/);
+    assert.match(out, new RegExp(`expected: ${wrongSha}`));
+    assert.match(out, /actual:/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ----------------------------------------------------------------------------
 // resolve_arch — map `(uname -s, uname -m)` to the manifest arch key
 // (`linux_x64` / `linux_arm64` / `darwin_arm64`). Sets the global
 // `ARCH_KEY` the manifest reader uses; dies on any (OS, arch) we don't
