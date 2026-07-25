@@ -19,7 +19,7 @@ import {
   resolveToolOutput,
   summarizeChildSession,
 } from "./chatUtils";
-import { CLAUDE_ORANGE, TaskContext, type ToolState } from "./chatShared";
+import { CLAUDE_ORANGE, MetaBadge, TaskContext, type ToolState } from "./chatShared";
 import { renderMarkdown } from "./MarkdownBody";
 import { MessageRow } from "./MessageRow";
 import {
@@ -378,15 +378,16 @@ function TaskBody({ state }: { state: ToolState }) {
           {onToggle ? (isExpanded ? "▾" : "▸") : "⎿"}
         </span>
         <div className="flex-1 min-w-0">
-          {info.description && (
-            <div className="text-text truncate">{info.description}</div>
-          )}
+          <div className="flex items-center gap-1.5">
+            {info.description && (
+              <span className="text-text truncate min-w-0">{info.description}</span>
+            )}
+            <MetaBadge title={`subagent: ${info.agent}`}>{info.agent}</MetaBadge>
+          </div>
           <div className="flex flex-wrap items-center gap-x-1 text-text-faint">
             <span style={{ color: statusColor }} className={statusPulse ? "animate-pulse" : ""}>
               ●
             </span>
-            <span>{info.agent}</span>
-            <span>·</span>
             <span>{effectiveStatus}</span>
             {summary.toolCount > 0 && (
               <>
