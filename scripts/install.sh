@@ -442,7 +442,7 @@ main() {
   OPENCODE_AGENTS="$OPENCODE_CONFIG_DIR/AGENTS.md"
   if [ -d "$OPENCODE_TOOLS_SRC" ]; then
     mkdir -p "$OPENCODE_TOOLS_DIR"
-    log "Copying manta-native opencode tools into $OPENCODE_TOOLS_DIR…"
+    log "Copying manta-native opencode tools into ${OPENCODE_TOOLS_DIR}…"
     # cp -f overwrites — tools are versioned with the tarball, so a re-run
     # naturally picks up upgrades. EXCLUDE *.test.ts: opencode loads EVERY file
     # in tools/ as a tool, and a test file imports vitest (absent under
@@ -471,7 +471,7 @@ main() {
     if [ -f "$OPENCODE_AGENTS" ] && grep -q '^## manta scheduled tasks' "$OPENCODE_AGENTS"; then
       ok "opencode AGENTS.md already contains manta guidance — skipping append."
     else
-      log "Appending manta opencode agent guidance to $OPENCODE_AGENTS…"
+      log "Appending manta opencode agent guidance to ${OPENCODE_AGENTS}…"
       {
         [ -f "$OPENCODE_AGENTS" ] && cat "$OPENCODE_AGENTS" && printf '\n'
         cat "$OPENCODE_TOOLS_SRC/AGENTS.md"
@@ -1134,7 +1134,7 @@ main() {
   #    wait for. The install just confirms the loopback server is healthy
   #    and prints the pair link.
   # ---------------------------------------------------------------------------
-  log "Waiting for the server to become healthy at $MANTA_HEALTH_URL…"
+  log "Waiting for the server to become healthy at ${MANTA_HEALTH_URL}…"
   "$NODE" -e '
     import("'"$LIB"'").then(async (m) => {
       const r = await m.waitForHealth(process.env.MANTA_HEALTH_URL, { maxAttempts: 60, intervalMs: 1000 });
