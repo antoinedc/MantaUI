@@ -13,7 +13,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { ScheduledJob, SecretMeta, SecretScope, WebhookMeta } from "../shared/types";
 import { describeCron, describeNextRun } from "./chatUtils";
-import { CLAUDE_ORANGE } from "./chatShared";
+import { CLAUDE_ORANGE, MetaBadge } from "./chatShared";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
 // scheduled prompts (created by the AI's `schedule` opencode tool) with a
@@ -186,12 +186,12 @@ export const WebhooksCard = memo(function WebhooksCard({
                       {h.label}
                     </span>
                     {h.unsigned && (
-                      <span
-                        className="shrink-0 px-1 rounded text-red-400 border border-red-500/30 text-[10px]"
+                      <MetaBadge
+                        tone="danger"
                         title="No signature required — anyone with the URL can trigger this hook"
                       >
                         unsigned
-                      </span>
+                      </MetaBadge>
                     )}
                   </div>
                   <div className="flex items-center gap-2 text-text-faint font-mono text-[11px]">
@@ -383,8 +383,7 @@ export const SecretsCard = memo(function SecretsCard({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
                   <span className="text-text font-mono truncate">{s.key}</span>
-                  <span
-                    className="shrink-0 rounded px-1 text-[10px] text-text-faint border border-border"
+                  <MetaBadge
                     title={
                       s.scope === "shared"
                         ? "Available to every session"
@@ -398,7 +397,7 @@ export const SecretsCard = memo(function SecretsCard({
                       : s.scope === "project"
                         ? `project:${s.project ?? "?"}`
                         : "session"}
-                  </span>
+                  </MetaBadge>
                 </div>
                 {s.hint && (
                   <div className="text-text-faint text-[11px] truncate" title={s.hint}>

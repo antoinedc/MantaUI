@@ -10,7 +10,7 @@
 // No React rendering lives here; only createContext (a value factory) plus
 // pure helpers, so this stays cheap to import from anywhere.
 
-import { createContext } from "react";
+import { createContext, type ReactNode } from "react";
 import type { OpencodeMessage, OpencodeModel } from "../shared/types";
 
 // Claude's bullet/spinner accent. Inlined (not in tailwind config) so we only
@@ -384,4 +384,32 @@ export function mergePromptHistory(
     out.push(item);
   }
   return out;
+}
+
+// Small inline metadata badge: the faint bordered pill that sits next to a
+// primary label to name a secondary attribute (a secret's scope, a webhook's
+// unsigned state, a subagent's agent type). One definition so the call sites
+// cannot drift apart.
+//
+// Always render it as the `shrink-0` sibling of a `truncate` primary label
+// inside a `flex items-center gap-1.5` row — that is what keeps the badge
+// visible when the primary label is too long for the row.
+export function MetaBadge({
+  children,
+  tone = "neutral",
+  title,
+}: {
+  children: ReactNode;
+  tone?: "neutral" | "danger";
+  title?: string;
+}) {
+  const toneClass =
+    tone === "danger"
+      ? "text-red-400 border-red-500/30"
+      : "text-text-faint border-border";
+  return (
+    <span className={"shrink-0 rounded border px-1 text-[10px] " + toneClass} title={title}>
+      {children}
+    </span>
+  );
 }
