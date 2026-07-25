@@ -6,6 +6,7 @@ import {
   classifyRefreshOutcome,
   isClaudeCredentialError,
   shouldAttemptRecovery,
+  shouldRefreshAhead,
 } from "./claudeAuth.mjs";
 
 // ===== parseCredentials =====
@@ -161,4 +162,71 @@ test("shouldAttemptRecovery: respects a custom cooldown", () => {
   assert.equal(shouldAttemptRecovery(1_000_000 - 30_000, 1_000_000, 20_000), true);
   // 30s ago, 60s cooldown → within cooldown → false.
   assert.equal(shouldAttemptRecovery(1_000_000 - 30_000, 1_000_000, 60_000), false);
+});
+
+// ===== shouldRefreshAhead (BET-281) =====
+
+test("shouldRefreshAhead: true when expiresAt is within the default 30 min lead", () => {
+  // now=1_000_000, expiresAt=now+10min (600_000ms) — within 30min lead → true.
+  const now = 1_000_000;
+  assert.equal(
+    shouldRefreshAhead({ expiresAt: now + 10 * 60_000, refreshTokenExpiresAt: now + 10_000_000 }, now),
+    true,
+  );
+});
+
+test("shouldRefreshAhead: true when expiresAt is already in the past", () => {
+  // Already expired — clearly within the lead window — but the refresh token
+  // is still valid so the CLI refresh can succeed.
+  const now = 1_000_000;
+  assert.equal(
+    shouldRefreshAhead({ expiresAt: now - 60_000, refreshTokenExpiresAt: now + 10_000_000 }, now),
+    true,
+  );
+});
+
+test("shouldRefreshAhead: false when expiresAt is comfortably in the future (5h away)", () => {
+  // 5h > 30min default lead → too early.
+  const now = 1_000_000;
+  assert.equal(
+    shouldRefreshAhead({ expiresAt: now + 5 * 60 * 60_000, refreshTokenExpiresAt: now + 10_000_000 }, now),
+    false,
+  );
+});
+
+test("shouldRefreshAhead: false when refreshTokenExpiresAt is in the past", () => {
+  // Within the lead window BUT the refresh token is dead → CLI refresh can't
+  // succeed, the reactive path / `claude auth login` is the only fix.
+  const now = 1_000_000;
+  assert.equal(
+    shouldRefreshAhead({ expiresAt: now + 5 * 60_000, refreshTokenExpiresAt: now - 1000 }, now),
+    false,
+  );
+});
+
+test("shouldRefreshAhead: false for null / undefined creds", () => {
+  assert.equal(shouldRefreshAhead(null, 1_000_000), false);
+  assert.equal(shouldRefreshAhead(undefined, 1_000_000), false);
+});
+
+test("shouldRefreshAhead: false when creds has no expiresAt (we have no clock to read)", () => {
+  // Defensive: without expiresAt we can't decide ahead-of-time. The reactive
+  // path (isClaudeCredentialError) still applies.
+  assert.equal(shouldRefreshAhead({}, 1_000_000), false);
+  // expiresAt non-number (string from a corrupt file) → also no.
+  assert.equal(shouldRefreshAhead({ expiresAt: "soon" }, 1_000_000), false);
+});
+
+test("shouldRefreshAhead: respects a custom leadMs", () => {
+  const now = 1_000_000;
+  // expiresAt 2h out, lead 1h → 2h > 1h, too early.
+  assert.equal(
+    shouldRefreshAhead({ expiresAt: now + 2 * 60 * 60_000, refreshTokenExpiresAt: now + 10_000_000 }, now, 60 * 60_000),
+    false,
+  );
+  // Same creds, lead 3h → within window.
+  assert.equal(
+    shouldRefreshAhead({ expiresAt: now + 2 * 60 * 60_000, refreshTokenExpiresAt: now + 10_000_000 }, now, 3 * 60 * 60_000),
+    true,
+  );
 });

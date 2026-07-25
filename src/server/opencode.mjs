@@ -19,6 +19,7 @@ import {
   classifyRefreshOutcome,
   isClaudeCredentialError,
   shouldAttemptRecovery,
+  shouldRefreshAhead,
 } from "./claudeAuth.mjs";
 
 const REMOTE_PORT = 4096;
@@ -1117,6 +1118,67 @@ function logAndReturn(result) {
     result.expiresAt ?? "-",
   );
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Proactive pre-expiry refresh poller (BET-281)
+// ---------------------------------------------------------------------------
+//
+// Today the access token is only refreshed reactively — `maybeRecoverCredentials`
+// fires when an `session.error` matches the credential-expired predicate. The
+// user eats one broken turn on every ~8h expiry window. This poller clocks
+// `~/.claude/.credentials.json` and runs the existing `refreshClaudeCredentials`
+// ahead of time, so the reactive path becomes a backup rather than the only
+// line of defense.
+//
+// Shape mirrors `startCleanupPoller` / `createCleanupSweep` in servePage.mjs:
+// factory body guarded by an `inFlight` boolean so a slow tick can't overlap
+// the next, immediate `sweep()` at startup, `setInterval` with `unref()` so
+// the timer never holds the event loop open.
+//
+// Default interval: 10 min. Default lead time (inside `shouldRefreshAhead`):
+// 30 min. With Claude tokens living ~8h, those defaults give us >= 1
+// refresh-ahead per token window while limiting the cost of an unexpected
+// loopback FS read to ~144/day. Not configurable per the issue spec.
+
+const CREDENTIAL_REFRESH_MS = 10 * 60 * 1000;
+
+export function createCredentialRefreshSweep({
+  readCreds = readCredsSnapshot,
+  refresh = refreshClaudeCredentials,
+  shouldRefresh = shouldRefreshAhead,
+  now = Date.now,
+} = {}) {
+  let inFlight = false;
+
+  async function sweep() {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const creds = readCreds();
+      if (shouldRefresh(creds, now())) {
+        try {
+          await refresh();
+        } catch {
+          // never throw — a refresh failure must not kill the timer
+        }
+      }
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  return { sweep };
+}
+
+export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_MS } = {}) {
+  const { sweep } = createCredentialRefreshSweep();
+  // Run once immediately so a fresh server boot doesn't have to wait
+  // intervalMs to discover an already-near-expiry credential.
+  sweep();
+  const timer = setInterval(sweep, intervalMs);
+  timer.unref();
+  return { stop: () => clearInterval(timer) };
 }
 
 // ---------------------------------------------------------------------------
