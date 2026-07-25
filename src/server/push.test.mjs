@@ -152,14 +152,14 @@ test("session.error MessageAbortedError → NO push (intentional abort/drain)", 
 
 test("session.error with non-abort error object → still notifies", () => {
   const p = classifyPushEvent(
-    {
-      type: "session.error",
-      properties: {
-        sessionID: "ses_err",
-        message: "real failure",
-        error: { name: "ProviderAuthError" },
-      },
+  {
+    type: "session.error",
+    properties: {
+      sessionID: "ses_err",
+      message: "real failure",
+      error: { name: "ApiError" },
     },
+  },
     NOFOCUS,
   );
   assert.equal(p?.kind, "error");

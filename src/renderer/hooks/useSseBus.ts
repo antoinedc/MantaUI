@@ -136,10 +136,6 @@ export function useSseBus(params: {
   submit: () => void;
   submitRef: React.RefObject<() => void>;
   setInput: (v: string) => void;
-  // Called (fire-and-forget) on a ProviderAuthError session.error. The async
-  // refresh-then-resend logic lives in ChatPanel (with the rest of the panel
-  // logic) — this hook only routes the event to the callback.
-  onProviderAuthError: () => void;
 }): SseBus {
   const {
     sessionId,
@@ -159,7 +155,6 @@ export function useSseBus(params: {
     submit,
     submitRef,
     setInput,
-    onProviderAuthError,
   } = params;
 
   const [running, setRunning] = useState(false);
@@ -453,15 +448,12 @@ export function useSseBus(params: {
           setRunning(false);
           return;
         }
-        // ProviderAuthError is not surfaced as a plain banner — it triggers
-        // the credential auto-refresh flow (owned by ChatPanel) instead.
-        // Skip the generic switch entirely so its `setSendError` call below
-        // doesn't race the refresh's own (better, actionable) messaging.
-        if (err?.name === "ProviderAuthError") {
-          setRunning(false);
-          onProviderAuthError();
-          return;
-        }
+        // A Claude credential error (provider-name or message-shape) now
+        // falls through to `default:` and surfaces the raw message — which is
+        // already the correct, actionable text (e.g. "Run `claude` to refresh
+        // them."). Server-side recovery runs in parallel via the opencode
+        // event pump; if it succeeds the user can re-send ↑+Enter and the
+        // next turn will work.
         let msg: string;
         switch (err?.name) {
           case "ContextOverflowError":

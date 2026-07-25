@@ -4,6 +4,8 @@ import {
   parseCredentials,
   isRefreshTokenExpired,
   classifyRefreshOutcome,
+  isClaudeCredentialError,
+  shouldAttemptRecovery,
 } from "./claudeAuth.mjs";
 
 // ===== parseCredentials =====
@@ -86,4 +88,77 @@ test("classifyRefreshOutcome: failed when credsAfter is null (file unreadable po
     classifyRefreshOutcome({ credsBefore, credsAfter: null, now }),
     "failed",
   );
+});
+
+// ===== isClaudeCredentialError (BET-280) =====
+
+test("isClaudeCredentialError: true for the live UnknownError payload from opencode-claude-auth", () => {
+  // Captured live from the box's opencode API (BET-280 context): the plugin
+  // throws a plain Error and opencode wraps it as UnknownError. The shape is
+  // exact; the message wording may drift upstream and this test should still
+  // match as long as all three substrings remain.
+  assert.equal(
+    isClaudeCredentialError({
+      name: "UnknownError",
+      data: {
+        message: "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
+      },
+    }),
+    true,
+  );
+});
+
+test("isClaudeCredentialError: true when name is ProviderAuthError (forward compatibility)", () => {
+  assert.equal(isClaudeCredentialError({ name: "ProviderAuthError" }), true);
+  // Even with no data.message at all, the name alone is enough.
+  assert.equal(isClaudeCredentialError({ name: "ProviderAuthError" }), true);
+});
+
+test("isClaudeCredentialError: false for unrelated error names with similar messages", () => {
+  assert.equal(
+    isClaudeCredentialError({
+      name: "MessageAbortedError",
+      data: { message: "Aborted" },
+    }),
+    false,
+  );
+  assert.equal(
+    isClaudeCredentialError({
+      name: "UnknownError",
+      data: { message: "Something else failed" },
+    }),
+    false,
+  );
+});
+
+test("isClaudeCredentialError: false for null / undefined / empty object / non-objects", () => {
+  assert.equal(isClaudeCredentialError(null), false);
+  assert.equal(isClaudeCredentialError(undefined), false);
+  assert.equal(isClaudeCredentialError({}), false);
+  assert.equal(isClaudeCredentialError("ProviderAuthError"), false);
+  assert.equal(isClaudeCredentialError(42), false);
+});
+
+// ===== shouldAttemptRecovery (BET-280) =====
+
+test("shouldAttemptRecovery: true when lastAttemptAt is null/undefined (never tried)", () => {
+  assert.equal(shouldAttemptRecovery(null, 1_000_000), true);
+  assert.equal(shouldAttemptRecovery(undefined, 1_000_000), true);
+});
+
+test("shouldAttemptRecovery: false when last attempt is within the cooldown window", () => {
+  // 10s ago < 60_000 default cooldown.
+  assert.equal(shouldAttemptRecovery(1_000_000 - 10_000, 1_000_000), false);
+});
+
+test("shouldAttemptRecovery: true when last attempt is older than the cooldown window", () => {
+  // 90s ago > 60_000 default cooldown.
+  assert.equal(shouldAttemptRecovery(1_000_000 - 90_000, 1_000_000), true);
+});
+
+test("shouldAttemptRecovery: respects a custom cooldown", () => {
+  // 30s ago, 20s cooldown → past cooldown → true.
+  assert.equal(shouldAttemptRecovery(1_000_000 - 30_000, 1_000_000, 20_000), true);
+  // 30s ago, 60s cooldown → within cooldown → false.
+  assert.equal(shouldAttemptRecovery(1_000_000 - 30_000, 1_000_000, 60_000), false);
 });

@@ -72,12 +72,13 @@ describe("useSseBus via ChatPanel", () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    // ProviderAuthError
+    // Unknown generic error — the credential-error path is server-driven now
+    // (BET-280) and exercised in src/server/claudeAuth.test.mjs.
     await emitAndFlush(bus, h, {
       type: "session.error",
       properties: {
         sessionID: "ses_test",
-        error: { name: "ProviderAuthError", data: { message: "Invalid token" } },
+        error: { name: "ApiError", data: { message: "Invalid token" } },
       },
     });
 
