@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.mantaui.server.plist — LaunchAgent (per-user) for the manta box server.
+  macOS equivalent of scripts/systemd/manta-server.service.
+
+  Loaded per-user via `launchctl bootstrap gui/$(id -u) plist` by
+  scripts/install.sh, mirroring the systemd `daemon-reload + enable now`
+  shape. Per-user agents run as the logged-in user with their environment,
+  matching the `systemd user` model. RunAtLoad=true + KeepAlive=true plus
+  login-time load gives reboot persistence without an explicit `enable-linger`
+  equivalent (the macOS equivalent does not exist for LaunchAgents; a
+  LaunchDaemon would be needed for a never-logs-in headless box, out of
+  scope, see BET-277 "Out of scope" section).
+
+  Bind is 127.0.0.1 on purpose: the server is NOT exposed directly. The
+  installer (scripts/install.sh) fronted it with Caddy on Linux
+  https://box_id.boxes.mantaui.com; on macOS (BET-274) the box is
+  loopback-only and off-network access requires Tailscale. Loopback bind
+  means a missing launchd load never exposes the server.
+
+  The installer substitutes the placeholder tokens and writes the result to
+  ~/Library/LaunchAgents/com.mantaui.server.plist.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mantaui.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@NODE_BIN@@</string>
+    <string>@@MANTA_HOME@@/src/server/index.mjs</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@@MANTA_HOME@@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MANTA_MOBILE_HOST</key>
+    <string>127.0.0.1</string>
+    <key>MANTA_MOBILE_PORT</key>
+    <string>@@MANTA_PORT@@</string>
+    <!-- Optional second listener bound to the Tailscale interface (BET-266).
+         Set to a Tailscale IPv4 by install.sh on the tailnet ingress path;
+         left empty on the public path so the server's tailnet listener is
+         a no-op. WireGuard encrypts the tailnet hop, so the box is
+         reachable WITHOUT TLS on this listener. -->
+    <key>MANTA_TAILNET_HOST</key>
+    <string>@@MANTA_TAILNET_HOST@@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@@AUTH_DIR@@/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>@@AUTH_DIR@@/server.log</string>
+</dict>
+</plist>
