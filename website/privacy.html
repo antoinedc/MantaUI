@@ -51,7 +51,7 @@
     <h2>What runs where</h2>
     <p>Manta UI is three surfaces:</p>
     <ul>
-      <li><b>The desktop app</b> (Electron) and <b>the phone client</b> (PWA today, native apps in flight) are thin clients — chat, terminal, and file browser over HTTPS.</li>
+      <li><b>The desktop app</b> (Electron) and <b>the phone client</b> (native iPhone app, or any browser) are thin clients — chat, terminal, and file browser over HTTPS.</li>
       <li><b>The server</b> runs on your own Linux box. It owns your <code>tmux</code> sessions, your <code>opencode</code> chat sessions, your file uploads, your schedules, your secrets, your webhooks, and your notifications. Everything lives under <code>~/.manta/</code> on that box.</li>
       <li><b>The push gateway</b> (<code>gateway.mantaui.com</code>) is the ONLY thing we still operate. It holds the Apple APNs key (which structurally cannot live on your box) and fans out native pushes on your box's behalf. Devices connect directly to your box at <code>https://&lt;box_id&gt;.boxes.mantaui.com</code> — there is no relay in the path for chat, terminal, or file traffic.</li>
     </ul>
@@ -96,12 +96,12 @@
     </ul>
 
     <h2>Open source</h2>
-    <p>Manta UI is open source. The server, push gateway, mobile web client, and desktop app are all on <a href="https://github.com/antoinedc/MantaUI">GitHub</a>. The only closed-source piece is the published iOS / Android app (which exists only because the stores require it).</p>
+    <p>Manta UI is open source. The server, push gateway, mobile web client, and desktop app are all on <a href="https://github.com/antoinedc/MantaUI">GitHub</a>. The only closed-source piece is the published iOS app (which exists only because the stores require it).</p>
 
     <h2>Your choices</h2>
     <ul>
       <li><b>Run the server yourself.</b> Every user runs their own server on their own hardware. Chat, terminal, and file traffic never crosses our infrastructure — only native APNs pushes do, and only because Apple's key model makes that structurally necessary.</li>
-      <li><b>Use the push gateway.</b> When the iOS / Android apps are open in the background, native pushes fan out through <code>gateway.mantaui.com</code>. Web Push (VAPID, for the PWA) stays box-local and does NOT touch the gateway.</li>
+      <li><b>Use the push gateway.</b> When the iOS app is open in the background, native pushes fan out through <code>gateway.mantaui.com</code>. Web Push (VAPID, for browser installs) stays box-local and does NOT touch the gateway.</li>
       <li><b>Delete your data.</b> Uninstalling the desktop or phone app removes its local config. Wiping <code>~/.manta/</code> on the box removes identity + work. Asking us to forget a box drops the gateway row.</li>
     </ul>
 
