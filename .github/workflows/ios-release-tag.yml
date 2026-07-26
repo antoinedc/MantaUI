@@ -11,10 +11,11 @@
 # This workflow is that something: on every push to main it reads the iOS
 # marketing version (CFBundleShortVersionString == MARKETING_VERSION in the
 # Xcode project) and, if no `ios-v<version>` tag exists yet, creates and pushes
-# it. Pushing the tag is what fires Xcode Cloud. So the full chain is:
+# it. Pushing the tag is what fires the Codemagic build (see the trigger job
+# below). So the full chain is:
 #
-#   merge PR → main → (this) reads version → pushes ios-v<version> → Codemagic
-#   → archive → TestFlight
+#   merge PR → main → (this) reads version → pushes ios-v<version> → trigger job
+#   → Codemagic → archive → TestFlight
 #
 # To ship a new TestFlight build: bump MARKETING_VERSION in
 # mobile/ios/App/App.xcodeproj/project.pbxproj (both Debug + Release configs),
@@ -55,6 +56,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
+    outputs:
+      pushed_tag: ${{ steps.tag.outputs.pushed_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,21 +116,35 @@ jobs:
             exit 0
           fi
 
-           git tag -a "$TAG" -m "$MSG"
-           git push origin "refs/tags/${TAG}"
-           echo "pushed_tag=${TAG}" >> "$GITHUB_OUTPUT"
-           echo "Pushed ${TAG}."
+          git tag -a "$TAG" -m "$MSG"
+          git push origin "refs/tags/${TAG}"
+          echo "pushed_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${TAG}."
 
-      # NOTE — this workflow no longer triggers Codemagic itself. Pushing the
-      # ios-v* tag above fires the dedicated `codemagic-ios-trigger.yml`
-      # workflow (on: push: tags: ios-v*), which calls the Codemagic REST API
-      # with the CODEMAGIC_API_KEY repo secret. That single workflow covers
-      # BOTH this bot-pushed tag AND any human `git push ios-v*`, so there is
-      # exactly one dependable, webhook-independent trigger path. Triggering
-      # here as well would start the build twice for a bot push.
-      #
-      # Background on why the webhook can't be trusted: a tag pushed with a
-      # workflow's GITHUB_TOKEN is withheld from webhooks by GitHub entirely
-      # (ios-v1.0.8, 2026-07-19), and even human-pushed tags occasionally miss
-      # (ios-v1.0.10, 2026-07-20). The API call in codemagic-ios-trigger.yml is
-      # the reliable substitute.
+  # Start the Codemagic build for the tag we just pushed.
+  #
+  # WHY THIS IS A `uses:` AND NOT AN INLINE curl
+  # --------------------------------------------
+  # codemagic-ios-trigger.yml already owns the "POST to Codemagic" logic for
+  # human-pushed tags. Calling it keeps ONE implementation instead of two
+  # copies that drift.
+  #
+  # WHY IT IS NEEDED AT ALL
+  # -----------------------
+  # The tag above is pushed with GITHUB_TOKEN, and GitHub does not create
+  # workflow runs for refs pushed with GITHUB_TOKEN. So the trigger workflow's
+  # own `on: push: tags:` will NOT fire for it — measured 0 runs across
+  # ios-v1.0.11…1.0.14. Codemagic's own tag webhook usually catches these
+  # (it is not subject to the Actions suppression) but it drops silently
+  # sometimes (ios-v1.0.10 produced no build at all), which is what this
+  # explicit call insures against.
+  #
+  # No double-trigger: a GITHUB_TOKEN push emits no push event, so the two
+  # entry points never both fire for the same tag.
+  trigger:
+    needs: tag
+    if: needs.tag.outputs.pushed_tag != ''
+    uses: ./.github/workflows/codemagic-ios-trigger.yml
+    with:
+      tag: ${{ needs.tag.outputs.pushed_tag }}
+    secrets: inherit

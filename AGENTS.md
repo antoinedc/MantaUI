@@ -2001,6 +2001,14 @@ when maxed, the build's fresh-key `create` 409s and it can't find a usable cert
 the ASC API (`/tmp/opencode/asc.mjs` on the box signs the JWT; a `DELETE
 /v1/certificates/<id>` frees a slot).
 
+Trigger chain: a version bump merged to `main` makes `ios-release-tag.yml`
+create `ios-v<MARKETING_VERSION>` and then CALL `codemagic-ios-trigger.yml`
+directly. The direct call is mandatory — GitHub creates no workflow run for a
+ref pushed with `GITHUB_TOKEN`, so that workflow's own tag-push trigger only
+ever covers a human `git push ios-v*`. Codemagic's own tag webhook is a third,
+unreliable path (it caught 1.0.12/1.0.13 within ~90s but dropped 1.0.10
+entirely) — treat it as a bonus, never the plan.
+
 ### Desktop (`mac-v*`) — Codemagic + self-hosted publish
 
 `codemagic.yaml` `mac-desktop`. Runs `electron-vite build` → `electron-builder
