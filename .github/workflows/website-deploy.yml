@@ -10,16 +10,12 @@
 # a laptop, which is why merged changes (e.g. BET-174's llms-install.md) silently
 # never went live. This makes deploy a one-step action: push a `web-v*` tag.
 #
-# WHAT IT DEPLOYS (all static web-root assets)
-#   website/*.html         → /var/www/mantaui/            (marketing site)
-#   website/*.png          → /var/www/mantaui/            (logo/assets)
-#   website/updates/*.json → /var/www/mantaui/updates/    (BET-225 version manifest)
-#   scripts/install.sh     → /var/www/mantaui/install.sh  (curl | bash installer)
-#   llms-install.md        → /var/www/mantaui/llms-install.md (AI install doc)
-#   docs/plugins-authoring.md
-#                          → /var/www/mantaui/llms-plugins.md (AI plugin authoring doc)
-# Then it VERIFIES each URL is 200 and byte-matches the repo — fails red if not,
-# so a stale/failed deploy can never masquerade as done.
+# WHAT IT DEPLOYS (glob-driven — adding a file to website/ deploys + verifies it)
+#   website/*.html + website/*.{png,css,txt,xml,svg,webp,jpg}
+#                                                → /var/www/mantaui/ (each ext optional)
+#   website/updates/*.json, scripts/install.sh, llms-install.md,
+#     docs/plugins-authoring.md                  → /var/www/mantaui/ + subpaths
+# Verify follows the copy — no hand-maintained file list, so no silent 404.
 #
 # RUNNER + AUTH
 #   Runs on the self-hosted manta-dev-runner (this dev box), which reaches the prod
@@ -65,12 +61,11 @@ jobs:
           echo "▸ Ensuring webroot exists"
           $SSH "$PROD_HOST" "mkdir -p $WEBROOT"
 
-          echo "▸ Copying marketing site (website/*.html, *.png)"
+          echo "▸ Copying marketing site (website/*.html + optional assets)"
           $SCP website/*.html "$PROD_HOST:$WEBROOT/"
-          # PNGs are optional — only copy if present.
-          if ls website/*.png >/dev/null 2>&1; then
-            $SCP website/*.png "$PROD_HOST:$WEBROOT/"
-          fi
+          for ext in png css txt xml svg webp jpg; do
+            ls website/*."$ext" >/dev/null 2>&1 && $SCP website/*."$ext" "$PROD_HOST:$WEBROOT/"
+          done
 
           echo "▸ Copying installer + AI install doc"
           $SCP scripts/install.sh "$PROD_HOST:$WEBROOT/install.sh"
@@ -104,9 +99,14 @@ jobs:
               fail=1
             fi
           }
-          check "" website/index.html
-          check "privacy.html" website/privacy.html
-          check "terms.html" website/terms.html
+          for f in website/*.html; do
+            base=$(basename "$f" .html)
+            if [ "$base" = "index" ]; then check "" "$f"; else check "$base" "$f"; fi
+          done
+          for f in website/*.css; do
+            [ -e "$f" ] || continue
+            check "$(basename "$f")" "$f"
+          done
           check "install.sh" scripts/install.sh
           check "llms-install.md" llms-install.md
           check "llms-plugins.md" docs/plugins-authoring.md
