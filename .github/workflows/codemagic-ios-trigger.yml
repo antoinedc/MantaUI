@@ -5,8 +5,9 @@
 # codemagic.yaml has a `triggering: { events: [tag], tag_patterns: [ios-v*] }`
 # block, but that path depends on GitHub delivering a webhook to Codemagic for
 # the tag-push event. That delivery is NOT reliable:
-#   - Tags pushed with a workflow's GITHUB_TOKEN are withheld from webhooks by
-#     GitHub entirely (verified 2026-07-19: ios-v1.0.8 bot-push never fired).
+#   - Tags pushed with a workflow's GITHUB_TOKEN never create a GitHub Actions
+#     run, so this workflow's own `push` trigger cannot fire for them
+#     (verified 2026-07-26: 0 runs across ios-v1.0.11…1.0.14).
 #   - Even human-pushed tags occasionally miss (ios-v1.0.10, 2026-07-20: the
 #     tag existed on the remote but Codemagic created no build).
 # When the webhook silently drops, the build never starts and there is no
@@ -15,17 +16,17 @@
 # This workflow removes the webhook from the critical path: on every ios-v*
 # tag push it POSTs to the Codemagic REST API to start the build explicitly,
 # and produces a red/green Action run confirming the request. It covers BOTH
-# manual `git push ios-v*` AND the bot tag pushed by ios-release-tag.yml, so
-# there is exactly ONE dependable trigger path regardless of who pushed the tag.
+# manual `git push ios-v*` AND the bot tag pushed by ios-release-tag.yml.
 #
-# DE-DUP NOTE
-# -----------
-# ios-release-tag.yml ALSO calls the Codemagic API for tags IT pushes (its
-# final step). To avoid two builds for one bot-push, that step's explicit
-# trigger has been removed in favour of this single workflow — see the PR that
-# added this file. Codemagic additionally de-dups: a second POST for the same
-# tag+commit while a build is queued/running is rejected, so even a double
-# trigger is harmless.
+# TWO ENTRY POINTS, ONE PATH
+# --------------------------
+# 1. `push` (a human running `git push origin ios-v*`).
+# 2. `workflow_call` from ios-release-tag.yml, for the tag that workflow
+#    pushes with GITHUB_TOKEN — GitHub does not create workflow runs for
+#    GITHUB_TOKEN pushes, so entry point 1 can never cover the bot case.
+# The two are mutually exclusive by construction, so a tag is never built
+# twice. Codemagic additionally rejects a second POST for the same
+# tag+commit while a build is queued/running.
 #
 # TOKEN
 # -----
@@ -38,10 +39,20 @@ on:
   push:
     tags:
       - "ios-v*"
+  # Called directly by ios-release-tag.yml for BOT-pushed tags. Required
+  # because GitHub does not create workflow runs for refs pushed with
+  # GITHUB_TOKEN, so the `push` trigger above can never fire for those —
+  # verified 0/4 runs across ios-v1.0.11…1.0.14 (2026-07-26).
+  workflow_call:
+    inputs:
+      tag:
+        description: "The ios-v* tag to build"
+        required: true
+        type: string
 
 concurrency:
   # One in-flight trigger per tag; never cancel (we want the POST to complete).
-  group: codemagic-ios-trigger-${{ github.ref_name }}
+  group: codemagic-ios-trigger-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -52,7 +63,9 @@ jobs:
       - name: Start Codemagic ios-testflight build for this tag
         env:
           CODEMAGIC_API_KEY: ${{ secrets.CODEMAGIC_API_KEY }}
-          TAG: ${{ github.ref_name }}
+          # `inputs` is empty on a push event, so this resolves to the pushed
+          # tag ref; on a workflow_call it is the tag the caller just created.
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           if [ -z "${CODEMAGIC_API_KEY:-}" ]; then
