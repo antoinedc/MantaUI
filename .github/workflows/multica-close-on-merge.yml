@@ -3,6 +3,11 @@ name: Multica Close on Merge
 on:
   pull_request_target:
     types: [closed]
+  # Safety net: a status can also change outside a PR (set by hand, or by an
+  # agent). Hourly sweep catches those without waiting for the next merge.
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
 
 permissions:
   pull-requests: write
@@ -11,6 +16,7 @@ permissions:
 jobs:
   close:
     name: Close or comment on BET issue
+    if: github.event_name == 'pull_request_target'
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
@@ -99,3 +105,38 @@ jobs:
       - name: Done
         if: always()
         run: echo "Multica close-on-merge step completed."
+
+  # ---------------------------------------------------------------------------
+  # Clear stale `blocked` statuses whose blockers have since finished.
+  #
+  # The PM agent writes `metadata.waiting_on` as a one-off snapshot when it
+  # blocks an issue; nothing re-reads it when the blockers land. Without this,
+  # an issue stays `blocked` indefinitely after its dependencies are done —
+  # observed live when BET-297 sat blocked on BET-294/BET-295 for an hour after
+  # both had merged, stalling the whole website epic until a human noticed.
+  #
+  # Runs after `close` so the just-merged issue is already `done` and counts.
+  # ---------------------------------------------------------------------------
+  unblock:
+    name: Unblock issues whose blockers are done
+    needs: [close]
+    # `needs` on a skipped job would skip this too, so accept that case
+    # explicitly: run on schedule/dispatch, or after a merge.
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' ||
+       github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.merged == true)
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Reconcile blocked issues
+        env:
+          MULTICA_TOKEN: ${{ secrets.MULTICA_TOKEN }}
+        run: node scripts/multica-unblock.mjs --verbose
+        # Housekeeping must never fail a merge pipeline.
+        continue-on-error: true

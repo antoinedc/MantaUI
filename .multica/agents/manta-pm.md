@@ -196,6 +196,21 @@ each independently buildable + testable, each ≤ one agent run**:
   `--stage 1, 2, 3…` so a slice that imports another slice's output sits in a
   later stage and won't dispatch until its prerequisite is merged. Independent
   slices share a stage only if they don't share a write surface.
+- **Stages are the ONLY dependency mechanism you should reach for.** Do not
+  express ordering by setting an issue `blocked` with a prose `waiting_on` note
+  — that note is a snapshot written once, nothing re-reads it when the blocker
+  lands, and the issue then sits blocked forever. This is not hypothetical:
+  BET-297 stayed `blocked` describing BET-294/BET-295 as "in_progress" for an
+  hour after both had merged, stalling the whole website epic until a human
+  asked why nothing was moving. If work is dependency-ordered, it belongs under
+  a parent with `--stage`, full stop.
+- **If you must block an unstaged issue, write the note so it can be
+  reconciled.** `scripts/multica-unblock.mjs` (hourly, and after every merge)
+  clears a `blocked` issue once every issue key named in its `waiting_on` is
+  `done`/`cancelled`. For that to work the note MUST name the blockers as bare
+  keys (`BET-294`), and MUST NOT name the issue's own key — a self-reference
+  means it waits on its own blocked status forever. A note naming no key is
+  deliberately left alone by the sweep, so it is yours to clear by hand.
 - **Device/parity check slices** where the milestone spans transports (desktop
   + mobile) or needs on-device verification — model them as the existing
   "Device check — …" issues (BET-25/28/29/…), typically `Inline` dispatch
