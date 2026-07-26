@@ -24,7 +24,7 @@ the pairing code, and get to work.
 ## How it works
 
 ```
- Desktop app (Electron)         Phone (PWA / app)
+ Desktop app (Electron)         Phone (native iPhone app, or any browser)
          │                              │
          └──────────── HTTPS ───────────┘
                         │
@@ -62,7 +62,7 @@ the pairing code, and get to work.
   hosted push gateway (`gateway.mantaui.com`) — which is the ONLY thing
   still operated by us (APNs structurally needs our Apple key, which
   cannot live on customer boxes). Native APNs delivery goes
-  box → gateway → APNs. Web Push (VAPID, for the PWA) stays box-local.
+  box → gateway → APNs. Web Push (VAPID, for browser installs) stays box-local.
 
 ## Quick start (human version)
 
@@ -102,7 +102,7 @@ permissions/questions/errors/done.
 | `opencode-serve` | your box, `127.0.0.1:4096`, systemd --user | chat-mode backend (opencode + claude auth plugin) |
 | Caddy | your box, systemd | TLS termination + reverse proxy on `<box_id>.boxes.mantaui.com` → 127.0.0.1:8787 |
 | desktop app (`src/main`, `src/preload`, `src/renderer`) | your Mac | thin client + OS bridges; pairing flow |
-| mobile client (`mobile/www`, built from `src/renderer`) | served by manta-server | PWA / Capacitor wrapper (same React code as desktop) |
+| mobile client (`mobile/www`, built from `src/renderer`) | served by manta-server | Native iPhone app, or any browser (same React code as desktop) |
 | `manta-gateway` (`src/gateway/`) | our infra, `gateway.mantaui.com` | hosted push fanout (APNs JWT + send) + DNS automation for `<box_id>.boxes.mantaui.com` |
 | marketing + releases (`website/`, `scripts/install.sh`) | our infra, `mantaui.com` | static site, `install.sh`, release tarballs, desktop binaries |
 
@@ -175,12 +175,13 @@ Systemd: copy `scripts/systemd/manta-server.service`, substitute the
 
 Pre-built installers (from the latest release):
 
-- macOS (arm64 + x64, unsigned): <https://mantaui.com/downloads/Manta-latest.dmg>
+- macOS (arm64 + x64, Developer ID–signed but not notarized): <https://mantaui.com/downloads/Manta-latest.dmg>
 - Linux (x64 AppImage): <https://mantaui.com/downloads/Manta-latest.AppImage>
 
-The macOS build is unsigned — first launch will be blocked by Gatekeeper.
-Right-click the `.dmg` in Finder → **Open** to bypass (or
-`xattr -d com.apple.quarantine /Applications/Manta\ UI.app` after install).
+The macOS build is signed with a Developer ID certificate but not notarized,
+so the first launch is blocked by Gatekeeper. Right-click the app in Finder
+and choose **Open** to bypass it (or run
+`xattr -dr com.apple.quarantine "/Applications/Manta UI.app"` after install).
 
 Run from source:
 
@@ -334,3 +335,7 @@ steps in each file's header are human-only (agent Hard Rule #4 forbids
 Include: macOS version + chip, remote OS + `tmux -V`, `opencode --version`,
 what you did vs. what happened, DevTools console errors. For chat-mode
 issues, `[opencode-bus]` lines in the main-process log are the most useful.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

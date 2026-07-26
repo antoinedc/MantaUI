@@ -342,7 +342,7 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
       <div class="card">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zM2 12h20"/></svg></div>
         <h3>Steer from your phone</h3>
-        <p>The same client runs as an installable PWA. Get a push when the agent needs you, answer, and let it keep going.</p>
+        <p>The same client runs as a native iPhone app, and any browser everywhere else. Get a push when the agent needs you, answer, and let it keep going.</p>
       </div>
       <div class="card">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 12l2 2 4-4M12 3l7 4v5c0 4-3 7-7 8-4-1-7-4-7-8V7z"/></svg></div>
@@ -379,7 +379,7 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
       <div class="step">
         <div class="n">STEP 01</div>
         <h3>Run the server on your box</h3>
-        <p>One command starts the Manta server next to your <span class="mono">tmux</span> + Claude Code. It reaches the internet over a named tunnel.</p>
+        <p>One command starts the Manta server next to your <span class="mono">tmux</span> + Claude Code. It then works out how devices will reach the box: over your tailnet if Tailscale is already running, otherwise through Caddy and a Let's Encrypt certificate on <span class="mono">&lt;your-box&gt;.boxes.mantaui.com</span>.</p>
       </div>
       <div class="step">
         <div class="n">STEP 02</div>
@@ -403,7 +403,7 @@ footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;c
         <h2>The whole session, in your pocket</h2>
         <p>Manta mirrors desktop and mobile over one HTTP surface. Start a long refactor at your desk, approve the risky step from the kitchen, watch it finish on the couch.</p>
         <ul class="checks">
-          <li><span class="ck">✓</span> Installable PWA — nothing to sideload</li>
+          <li><span class="ck">✓</span> Native iPhone app, or any browser — nothing to sideload</li>
           <li><span class="ck">✓</span> Web Push when the agent is <span class="mono">Awaiting approval</span></li>
           <li><span class="ck">✓</span> Desktop-active? Mobile stays quiet — no double buzz</li>
           <li><span class="ck">✓</span> Same chat, transcript, and tool output as desktop</li>
