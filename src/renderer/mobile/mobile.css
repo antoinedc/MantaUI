@@ -251,6 +251,20 @@ body,
   min-width: 0;
   row-gap: 4px;
 }
+/* Meta-footer stacking (mobile only). Desired reading order, top→bottom:
+     1. ⎇ branch
+     2. model ▾ · ctx % · stale-cache pill
+     3. bypass-permissions toggle
+   The footer's left span already wraps (rule above), but with all four chips
+   sharing one wrapping line the break point moved with the branch/model name
+   length, so the order looked unstable. Giving the branch chip a whole flex
+   line pins it. `max-width` also releases the desktop 160px clamp so the
+   branch can use the full line width before it truncates.
+   Hook class is stamped in InputArea.tsx; there is no desktop rule for it. */
+.mobile-body .manta-composer-branch {
+  flex-basis: 100%;
+  max-width: 100%;
+}
 /* The static desktop keyboard-hint span (ctrl+o · shift+⏎ newline · ⏎ send)
    was removed from ChatPanel entirely, so there's no longer a hint span to
    hide here. The footer's right-hand group now holds the ⏰ schedules button

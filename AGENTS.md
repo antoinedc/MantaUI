@@ -337,8 +337,12 @@ match nothing).
 **Reshaping reused ChatPanel/Terminal internals on mobile:** the desktop
 composer footer is one non-wrapping flex row built for a wide panel; at
 phone width its children overlap. Fix is always `.mobile`-scoped CSS in
-`mobile/mobile.css` — never edit `ChatPanel.tsx`. ChatPanel has no semantic
-class hooks (Tailwind utilities only), so target structurally: ChatPanel is
+`mobile/mobile.css` — never edit `ChatPanel.tsx`. Prefer a stable `manta-*`
+hook class on the shared element (precedent: `manta-session-toolbar`,
+`manta-stale-full`/`manta-stale-min`, `manta-loading-divider`,
+`manta-composer-branch`) — adding a class name to a shared component is a
+desktop no-op. Only fall back to a positional selector when you truly
+cannot touch the component: ChatPanel is
 the lone `.mobile-body > div` (h-full flex-col); its composer is that div's
 `> div:last-child`; footer rows are matched via `div[class*="flex"]` /
 `[class*="justify-between"]` + child position. Established rules: composer
@@ -347,7 +351,8 @@ toolbar (`SessionToolbar` — actions live in the header `⋯` sheet on mobile);
 drop the context bar (`span[class*="w-24"]`, unique to ContextBar) but keep
 the stage-colored `%`; clamp the empty textarea placeholder to one line via
 `textarea:placeholder-shown` (reverts to `pre-wrap` once typed so
-`resizeInput` still owns height). Verify on-device: `cd mobile && npm run
+`resizeInput` still owns height); branch chip gets its own footer line via
+`.manta-composer-branch`. Verify on-device: `cd mobile && npm run
 apk`, `adb install -r`, screenshot the composer.
 
 ## Desktop transport (HTTP-only)

@@ -398,8 +398,11 @@ export function InputArea({
       <div className="px-4 py-2 flex items-center justify-between gap-3">
         <span className="flex items-center gap-3 min-w-0">
           {branch && (
+            // `manta-composer-branch` is a styling hook only — it has no
+            // desktop rule. mobile.css uses it to give the branch chip its
+            // own line in the stacked mobile footer (see mobile.css).
             <span
-              className="text-text-faint shrink-0 truncate max-w-[160px]"
+              className="manta-composer-branch text-text-faint shrink-0 truncate max-w-[160px]"
               title={`Current branch: ${branch}`}
             >
               ⎇ {branch}
