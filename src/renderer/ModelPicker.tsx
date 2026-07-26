@@ -94,7 +94,7 @@ export function ModelPicker({
   };
 
   return (
-    <div ref={rootRef} className="relative min-w-0">
+    <div ref={rootRef} className="manta-model-picker relative min-w-0">
       <button
         className="truncate text-[12px] text-text-muted hover:text-text flex items-center gap-1"
         onClick={() => {
@@ -108,7 +108,7 @@ export function ModelPicker({
       </button>
       {open && (
         <div
-          className="absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded border border-border bg-bg-elev shadow-lg text-[12px]"
+          className="manta-model-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded border border-border bg-bg-elev shadow-lg text-[12px]"
         >
           <button
             onClick={() => {
