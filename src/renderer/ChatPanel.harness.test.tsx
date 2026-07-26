@@ -96,6 +96,20 @@ describe("ChatPanel render harness", () => {
     expect(h.text()).toContain("Welcome");
     expect(h.text()).toBe(before);
   });
+
+  it("stamps the manta-composer-branch hook on the footer branch chip", async () => {
+    // The default mock returns null for the branch, so the chip is not
+    // rendered; override it so the chip exists.
+    ({ bus } = installMockApi({
+      opencodeVcsBranch: () => Promise.resolve("feat/mobile-footer"),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    const chip = h.container.querySelector(".manta-composer-branch");
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toContain("feat/mobile-footer");
+  });
 });
 
 // ===== useSessionResources integration (via the mounted ChatPanel) =====
