@@ -152,11 +152,9 @@ body,
    bar + session toolbar + a physical-keyboard hint string. At phone width
    those flex children don't fit and paint over each other.
 
-   ChatPanel root is the lone .mobile-body child (h-full flex-col); its LAST
-   flex child is the composer wrapper (`shrink-0`). We reshape that subtree
-   structurally — no class hooks exist (Tailwind utilities only), so we key
-   off child position, which is stable for this single-root component. */
-.mobile-body > div > div:last-child {
+   Composer is identified via the `.manta-composer` hook class stamped on
+   the wrapper in InputArea.tsx. */
+.mobile-body .manta-composer {
   /* Composer wrapper: let its rows wrap instead of overflowing. */
   display: flex;
   flex-direction: column;
@@ -226,27 +224,24 @@ body,
   }
 }
 /* Reserve space at the right of the input row so the textarea (flex-1) stops
-   short of the mic icon — leaving the gap the user asked for. The input row is
-   the composer's `px-4 py-3 flex items-start gap-2` row; `items-start` uniquely
-   identifies it (the meta footer + trust rows use items-center). 34px icon +
-   10px right offset + a little breathing room ≈ 48px. */
-.mobile-body
-  > div
-  > div:last-child
-  > div[class*="items-start"] {
+   short of the mic icon — leaving the gap the user asked for. Hook class
+   `.manta-composer-input-row` is stamped on the input row in InputArea.tsx.
+   34px icon + 10px right offset + a little breathing room ≈ 48px. */
+.mobile-body .manta-composer-input-row {
   padding-right: 48px;
 }
 /* Every inner row of the composer (input row, meta footer, trust line) is
    a flexbox. Allow wrapping + a small row-gap so nothing collides. */
-.mobile-body > div > div:last-child > div[class*="flex"] {
+.mobile-body .manta-composer > div {
   flex-wrap: wrap;
   row-gap: 4px;
 }
 /* The meta footer row's two inner spans (left: branch/model/ctx, right:
    toolbar) are nested one level below the wrap rule above and were the
    actual overlap: their shrink-0 children painted over the model label.
-   Let them wrap and shrink. */
-.mobile-body > div > div:last-child > div[class*="justify-between"] > span {
+   Let them wrap and shrink. Hook class `.manta-composer-meta` is stamped
+   on the meta footer row in InputArea.tsx. */
+.mobile-body .manta-composer-meta > span {
   flex-wrap: wrap;
   min-width: 0;
   row-gap: 4px;
@@ -292,10 +287,11 @@ body,
 .mobile .manta-loading-divider { height: 2px; }
 
 /* Drop the dotted context-usage BAR on mobile but keep the % number.
-   ChatPanel's ContextBar renders [ <span.w-24 track> , <span.tabular-nums %> ].
-   The track is the only `w-24` element in the reused tree — hide just that;
-   the number span (still inline-styled with the stage color) stays. */
-.mobile-body span[class*="w-24"] {
+   ChatPanel's ContextBar renders [ <span.manta-ctx-track> , <span.tabular-nums %> ].
+   Hook class `.manta-ctx-track` is stamped on the track in ContextBar.tsx;
+   hide just that — the number span (still inline-styled with the stage
+   color) stays. */
+.mobile-body .manta-ctx-track {
   display: none;
 }
 
@@ -326,20 +322,22 @@ body,
    - `.break-words { overflow-wrap: anywhere }` is now global in index.css so
      unbreakable tokens (URLs, long file paths) wrap on both transports.
 
-   This keeps desktop and mobile on one code path. The `.mobile-body div[class*="min-w-[240px]"]`
+   This keeps desktop and mobile on one code path. The `.mobile-body .manta-model-dropdown`
    rule below stays because it is ModelPicker-dropdown-specific (not the
    transcript overflow bug). */
 /* ModelPicker dropdown clamp — dropdown-specific, NOT part of the
    transcript-overflow fix; it forces the dropdown's hardcoded
    `min-w-[240px]` to shrink to fit phone width when the picker is wrapped
-   into the composer row. */
-.mobile-body div[class*="min-w-[240px]"] {
+   into the composer row. Hook class `.manta-model-dropdown` is stamped on
+   the dropdown panel in ModelPicker.tsx. */
+.mobile-body .manta-model-dropdown {
   min-width: 0;
   max-width: calc(100vw - 32px);
 }
 /* ModelPicker trigger: truncate long provider/model ids instead of
-   crowding out the ctx % + stale pill. */
-.mobile-body > div > div:last-child div[class*="relative"][class*="min-w-0"] {
+   crowding out the ctx % + stale pill. Hook class `.manta-model-picker`
+   is stamped on the trigger root in ModelPicker.tsx. */
+.mobile-body .manta-model-picker {
   max-width: 40vw;
 }
 

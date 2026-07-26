@@ -239,7 +239,7 @@ export function InputArea({
   // 1px in both states so there's no row jump when recording toggles.
   const voiceActive = voiceRecording || voiceProcessing;
   return (
-    <div className="shrink-0" ref={rowRef}>
+    <div className="manta-composer shrink-0" ref={rowRef}>
       {/* Mobile push-to-talk FAB (WhatsApp-style, bottom-right above the
           composer). Hold to record, release to insert the transcript into
           the composer for review. Positioned + sized by `.mobile-ptt-fab` in
@@ -280,7 +280,7 @@ export function InputArea({
       {/* Esc to cancel); the visible feedback is the pulsing border above + */}
       {/* below this row. On mobile the mic lives in the floating PTT FAB */}
       {/* above the composer (rendered at the top of this wrapper). */}
-      <div className="px-4 py-3 flex items-start gap-2">
+      <div className="manta-composer-input-row px-4 py-3 flex items-start gap-2">
         <span
           className="select-none pt-px shrink-0"
           style={{ color: voiceActive ? "#FF7A88" : CLAUDE_ORANGE }}
@@ -395,7 +395,7 @@ export function InputArea({
       {/* Meta footer — model picker + ctx bar on the left, session ops + hints right. */}
       {/* NOTE: don't put `truncate` on this row's spans — it triggers */}
       {/* overflow:hidden which clips the model picker's absolute dropdown. */}
-      <div className="px-4 py-2 flex items-center justify-between gap-3">
+      <div className="manta-composer-meta px-4 py-2 flex items-center justify-between gap-3">
         <span className="flex items-center gap-3 min-w-0">
           {branch && (
             // `manta-composer-branch` is a styling hook only — it has no
@@ -466,7 +466,7 @@ export function InputArea({
       </div>
       {/* Trust toggle — its own line, more visible when ON. Below the footer */}
       {/* so it doesn't crowd the model/hints row. */}
-      <div className="px-4 pb-2 flex items-center text-[10px]">
+      <div className="manta-composer-trust px-4 pb-2 flex items-center text-[10px]">
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={

@@ -86,10 +86,9 @@ export function ContextBar({
       title={breakdownLines.join("\n")}
     >
       <span
-        // Keep the `w-24` class — mobile.css selects on it to hide the
-        // track on phones. Don't rename the width without updating that
-        // CSS rule.
-        className="inline-block w-24 h-3 rounded-[2px] overflow-hidden align-middle"
+        // `manta-ctx-track` is a styling hook — mobile.css hides the track
+        // (but not the % digits) on phones.
+        className="manta-ctx-track inline-block w-24 h-3 rounded-[2px] overflow-hidden align-middle"
         style={{
           backgroundColor: "#171F3A",
           backgroundImage: `radial-gradient(circle, ${dot} 1.2px, transparent 1.4px)`,
