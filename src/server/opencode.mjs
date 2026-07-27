@@ -911,6 +911,161 @@ function _normalizeProviderModel(providerID, modelId, m) {
 }
 
 // ---------------------------------------------------------------------------
+// Subscription provider auth (BET-308, BET-309)
+// ---------------------------------------------------------------------------
+//
+// Thin HTTP proxies to opencode's `/provider/auth`, `/provider/{id}/oauth/
+// authorize`, `/provider/{id}/oauth/callback`, `PUT /auth/{id}`, and
+// `DELETE /auth/{id}` endpoints. Policy (which method to pick, which
+// shape to render) lives in src/server/subscriptionProviders.mjs; this
+// file only transports the request and surfaces a structured failure
+// (`{ok:false, error, detail?}`) on a non-2xx. Error vocabulary matches
+// src/server/providers.mjs's discoverModels: "unreachable" | "unauthorized"
+// | "bad_response" — reuse rather than invent.
+//
+// `setProviderApiKey` is the one path that handles a secret: the key is
+// written to opencode's auth store box-side and NEVER echoed back, not in
+// the return value and not in any log line.
+
+/**
+ * Fetch the auth-method list for every provider (GET /provider/auth).
+ * @returns {Promise<Record<string, Array<{type:string,label?:string,prompts?:Array<unknown>}>|null>>}
+ *          raw shape — the renderer's RPC layer wraps this in the
+ *          resolveAuthMethod policy from subscriptionProviders.mjs.
+ */
+export async function listProviderAuthMethods() {
+  try {
+    const res = await ocFetch(apiUrl("/provider/auth"));
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      await discardBody(res);
+      return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
+    }
+    const data = await res.json();
+    return { ok: true, methods: data ?? {} };
+  } catch (e) {
+    return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
+  }
+}
+
+/**
+ * Start a provider's OAuth flow (POST /provider/{id}/oauth/authorize {method}).
+ * Returns the raw `{url, method, instructions}` from opencode; the caller
+ * applies describeConnectShape to pick the renderer's UI.
+ * @param {string} providerID
+ * @param {number} methodIndex   resolved via resolveAuthMethod, NEVER a literal
+ */
+export async function startProviderOauth(providerID, methodIndex) {
+  try {
+    const res = await ocFetch(apiUrl(`/provider/${encodeURIComponent(providerID)}/oauth/authorize`), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ method: methodIndex }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      await discardBody(res);
+      return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
+    }
+    const data = await res.json();
+    return {
+      ok: true,
+      url: typeof data?.url === "string" ? data.url : "",
+      method: typeof data?.method === "string" ? data.method : "auto",
+      instructions: typeof data?.instructions === "string" ? data.instructions : "",
+    };
+  } catch (e) {
+    return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
+  }
+}
+
+/**
+ * Complete a paste-back OAuth flow (POST /provider/{id}/oauth/callback {method, code}).
+ * @param {string} providerID
+ * @param {number} methodIndex
+ * @param {string} code   the user-typed code from the device / browser page
+ */
+export async function completeProviderOauth(providerID, methodIndex, code) {
+  try {
+    const res = await ocFetch(apiUrl(`/provider/${encodeURIComponent(providerID)}/oauth/callback`), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ method: methodIndex, code }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      await discardBody(res);
+      // 401 from opencode means a wrong/expired code — surface as a distinct
+      // vocabulary word so the renderer can label the input correctly.
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, error: "unauthorized", detail: detail.slice(0, 200) };
+      }
+      return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
+    }
+    await discardBody(res);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
+  }
+}
+
+/**
+ * Write an API key into opencode's auth store (PUT /auth/{id} {type:"api", key}).
+ *
+ * SECURITY: the key is NEVER echoed back to the caller and NEVER logged.
+ * `setProviderApiKey` returns `{ok:boolean}` only; a logged error must not
+ * contain the key, only the provider id.
+ * @param {string} providerID
+ * @param {string} key
+ */
+export async function setProviderApiKey(providerID, key) {
+  try {
+    const res = await ocFetch(apiUrl(`/auth/${encodeURIComponent(providerID)}`), {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "api", key }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      await discardBody(res);
+      // Provider-specific validation (e.g. Kimi 401s on a bad key) comes back
+      // as 401 — re-use "unauthorized" so the renderer can show the right copy.
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, error: "unauthorized", detail: detail.slice(0, 200) };
+      }
+      return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
+    }
+    await discardBody(res);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
+  }
+}
+
+/**
+ * Remove a provider's auth from opencode's store (DELETE /auth/{id}).
+ * Idempotent — a missing entry returns 404 from opencode, which we surface
+ * as `{ok:true}` (the user's intent is satisfied: the auth is gone).
+ * @param {string} providerID
+ */
+export async function removeProviderAuth(providerID) {
+  try {
+    const res = await ocFetch(apiUrl(`/auth/${encodeURIComponent(providerID)}`), {
+      method: "DELETE",
+    });
+    if (res.ok || res.status === 404) {
+      await discardBody(res);
+      return { ok: true };
+    }
+    const detail = await res.text().catch(() => "");
+    await discardBody(res);
+    return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
+  } catch (e) {
+    return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // VCS
 // ---------------------------------------------------------------------------
 
@@ -970,7 +1125,15 @@ export function _resetRecoveryCooldownState() {
 /** Resolve the `claude` CLI binary. manta-server's service PATH excludes the
  *  user's ~/.local/bin (where the claude installer symlinks the binary), so a
  *  bare "claude" fails to spawn. Check the known install locations first and
- *  fall back to bare "claude" (resolved via the augmented PATH) if none match. */
+ *  fall back to bare "claude" (resolved via the augmented PATH) if none match.
+ *
+ *  CLAUDE-SPECIFIC BY DESIGN: every other provider (Codex, Kimi, ...) uses
+ *  opencode's native /provider/{id}/oauth/* flow — there is no external CLI
+ *  to spawn, no credential to refresh, and the rest of this file's
+ *  subscription-provider auth proxy is provider-agnostic. Do NOT generalize
+ *  this helper; the auth-machinery it backs (`doRefresh`,
+ *  `maybeRecoverCredentials`, `startCredentialRefreshPoller`) is similarly
+ *  Claude-only and is kept that way to avoid papering over the differences. */
 function resolveClaudeBin() {
   const candidates = [
     path.join(homedir(), ".local", "bin", "claude"),

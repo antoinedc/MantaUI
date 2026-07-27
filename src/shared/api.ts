@@ -9,6 +9,8 @@ import type {
   OpencodeEvent,
   OpencodeMessage,
   OpencodeModel,
+  OpencodeProviderAuthRequest,
+  OpencodeProviderAuthResult,
   OpencodeSessionListItem,
   PermissionRequest,
   QuestionRequest,
@@ -322,6 +324,14 @@ export interface Api {
   // Auto-rename: generate a short title via a throwaway opencode session.
   // Returns the RAW model reply ("" on timeout/failure); caller sanitizes.
   opencodeGenerateTitle(input: { directory: string; instruction: string }): Promise<string>;
+
+  // Subscription provider auth (BET-308 / BET-309): a single discriminated
+  // channel that drives the connect/disconnect UI for Claude, Codex, and
+  // Kimi. Action discriminated union; see OpencodeProviderAuthRequest in
+  // src/shared/types.ts. The `key` action carries an API-key secret
+  // renderer → box; the server writes it to opencode's auth store and
+  // never echoes it back, not in the return value and not in any log line.
+  opencodeProviderAuth(req: OpencodeProviderAuthRequest): Promise<OpencodeProviderAuthResult>;
 
   // Server version (BET-180): returns the manta-server's package.json version,
   // served in-process via the `server:version` RPC channel (no HTTP round

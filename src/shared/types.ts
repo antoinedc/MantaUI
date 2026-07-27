@@ -481,6 +481,19 @@ export const IPC = {
   // then deleting it. Returns the RAW model reply (renderer sanitizes). Used
   // by ChatPanel when AppConfig.autoRenameSessions is enabled.
   opencodeGenerateTitle: "opencode:generate-title",
+  // ---- subscription provider auth (BET-308 / BET-309) ----
+  // Single discriminated channel for connecting/disconnecting the paid
+  // subscription providers (Claude via the local CLI plugin, Codex via
+  // opencode's native ChatGPT OAuth, Kimi via an API key). One channel,
+  // not five: every action shares the same renderer→server hop and the
+  // action discriminator (`status` / `start` / `code` / `key` /
+  // `disconnect`) routes to the matching opencode.mjs proxy. Policy —
+  // which method index to use, which UI to render — lives in
+  // src/server/subscriptionProviders.mjs; this channel is purely the wire.
+  // `key` carries the API-key secret renderer→box; the server writes it
+  // into opencode's auth store and never echoes it back, not in the
+  // return value and not in any log line.
+  opencodeProviderAuth: "opencode:provider-auth",
 
   // ---- voice (Groq STT + lightweight classifier) ----
   // Renderer captures audio via MediaRecorder, ships the ArrayBuffer to
@@ -1001,3 +1014,54 @@ export type VoiceClassifyResult = {
   // "none"  → both paths failed; action.kind === "unknown".
   source: "rules" | "llm" | "none";
 };
+
+// ----- Subscription provider auth (BET-308 / BET-309) -----
+//
+// The connect-card UI on Settings → Providers (and Onboarding step 2) lists
+// one row per supported provider from src/server/subscriptionProviders.mjs
+// and lets the user connect / disconnect each. `IPC.opencodeProviderAuth`
+// carries a discriminated union on `action`:
+//
+//   "status"      → list every provider + whether it's currently connected.
+//   "start"       → begin an OAuth flow for `id`, returning either a connect
+//                   shape + URL/instructions/methodIndex OR `api-key` to
+//                   indicate the renderer should switch to the key form.
+//   "code"        → submit the user-typed OAuth callback code.
+//   "key"         → submit an API key (Kimi).
+//   "disconnect"  → remove the provider's auth from opencode's store.
+//
+// "shape" on the `start` response is what the renderer keys the UI on:
+//   "oauth-auto"  — paste-back device flow (URL on user's device).
+//   "oauth-code"  — same UX, but opencode returned a short code to show inline.
+//   "api-key"     — render the password input (or the no-flow case).
+
+export type SubscriptionStatus = {
+  id: string;             // provider id from the registry
+  label: string;          // human label, e.g. "Codex"
+  plan: string;           // the plan the user is paying for, e.g. "ChatGPT Plus / Pro"
+  console: string | null;  // where to mint a key (Kimi), or null
+  docs: string;           // canonical setup doc URL
+  connected: boolean;     // true iff opencode reports this provider connected
+};
+
+export type SubscriptionConnectShape = "oauth-auto" | "oauth-code" | "api-key";
+
+export type OpencodeProviderAuthRequest =
+  | { action: "status" }
+  | { action: "start"; id: string }
+  | { action: "code"; id: string; methodIndex: number; code: string }
+  | { action: "key"; id: string; key: string }
+  | { action: "disconnect"; id: string };
+
+export type OpencodeProviderAuthResult =
+  | { action: "status"; providers: SubscriptionStatus[] }
+  | {
+      action: "start";
+      shape: SubscriptionConnectShape;
+      url?: string;
+      instructions?: string;
+      methodIndex?: number;
+    }
+  | { action: "code"; ok: boolean; error?: string }
+  | { action: "key"; ok: boolean; error?: string }
+  | { action: "disconnect"; ok: boolean; error?: string };
