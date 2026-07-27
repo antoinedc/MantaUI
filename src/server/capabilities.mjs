@@ -1,11 +1,11 @@
 // Capability job queue for the MantaUI server — the generic spine that lets any
 // MantaUI plugin register an AI-invokable capability and have a connected
-// device (the Mac, or the box itself) execute it. Plugins are YAML manifests at
-// ~/.manta/plugins/<name>.yaml on the executor machine (BET-189 Plugins v2);
-// the queue / REST surface / SSE envelopes here speak the GENERIC
-// `{capability, input, host}` envelope and are byte-identical to v1, so adding a
-// capability is authoring a manifest — never a queue change. See
-// docs/mantaui-plugins.md (v3) for the full design.
+// device (the desktop, or the box itself) execute it. Plugins are YAML
+// manifests at ~/.manta/plugins/<name>.yaml on the executor machine
+// (BET-189 Plugins v2); the queue / REST surface / SSE envelopes here speak
+// the GENERIC `{capability, input, host}` envelope and are byte-identical to
+// v1, so adding a capability is authoring a manifest — never a queue change.
+// See docs/mantaui-plugins.md (v3) for the full design.
 //
 // Shape mirrors src/server/schedule.mjs: dependency-injected
 // ({load, save, publish, notifySession}) pure-logic-with-injected-I/O, plus a
@@ -13,9 +13,9 @@
 // startSchedulePoller exactly. The atomic-write helper is shared via
 // src/server/storeUtils.mjs (one source of truth across the on-disk stores).
 //
-// Server-owned so queued jobs survive Mac-app-close, Mac sleep, and box
-// reboot — the SSE+catch-up plumbing on the executor side picks them up when
-// the Mac comes back.
+// Server-owned so queued jobs survive desktop-app-close, desktop sleep, and
+// box reboot — the SSE+catch-up plumbing on the executor side picks them up
+// when the desktop comes back.
 
 import { readFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -23,6 +23,7 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { normalizeHost } from "../shared/pluginManifest.mjs";
 import { atomicWrite } from "./storeUtils.mjs";
 
 // ---------------------------------------------------------------------------
@@ -84,8 +85,8 @@ function validateCreate({ capability, host, sessionID }) {
   if (typeof capability !== "string" || !capability.trim()) {
     return "capability is required";
   }
-  if (host !== "mac" && host !== "box") {
-    return "host must be \"mac\" or \"box\"";
+  if (normalizeHost(host) === null) {
+    return "host must be one of desktop, box";
   }
   if (typeof sessionID !== "string" || !sessionID.trim()) {
     return "sessionID is required";
@@ -100,12 +101,18 @@ export async function createCapJob(
   const err = validateCreate({ capability, host, sessionID });
   if (err) return { ok: false, error: err };
 
+  // Persist the NORMALIZED host — "mac" and "desktop" both become
+  // "desktop" on disk so the SSE payload, /api/cap list filter, and the
+  // stored row all speak one vocabulary. Legacy persisted rows
+  // (`host: "mac"` written before this rename) are normalized on read in
+  // listJobs so we don't need a schema migration.
+  const normalizedHost = normalizeHost(host);
   const jobs = await load();
   const job = {
     id: genId(),
     capability,
     input: input ?? {},
-    host,
+    host: normalizedHost,
     sessionID,
     directory: typeof directory === "string" ? directory : "",
     status: "queued",
@@ -118,7 +125,7 @@ export async function createCapJob(
   };
   jobs.push(job);
   await save(jobs);
-  publish?.({ kind: "capJob", payload: { id: job.id, capability, input: job.input, host } });
+  publish?.({ kind: "capJob", payload: { id: job.id, capability, input: job.input, host: normalizedHost } });
   return { ok: true, job };
 }
 
@@ -148,17 +155,23 @@ export async function getJob(id, { load = loadJobs } = {}) {
  * List jobs with optional AND-combined filters. Results carry `logBytes`
  * instead of `log` — this one signature serves the AI, the executor catch-up,
  * and any future UI card (one code path). Returns a copy of the stored jobs.
+ *
+ * Both sides of the host comparison are NORMALIZED so a pre-rename
+ * `host:"mac"` row on disk matches a `?host=desktop` query without any
+ * schema migration. Normalizing on read is the whole migration.
  */
 export async function listJobs(
   { sessionID, host, status } = {},
   { load = loadJobs } = {},
 ) {
+  const normalizedFilterHost = host === undefined ? undefined : normalizeHost(host);
   const jobs = await load();
   return jobs
     .filter(
       (j) =>
         (sessionID === undefined || j.sessionID === sessionID) &&
-        (host === undefined || j.host === host) &&
+        (normalizedFilterHost === undefined ||
+          normalizeHost(j.host) === normalizedFilterHost) &&
         (status === undefined || j.status === status),
     )
     .map((j) => {
@@ -332,7 +345,7 @@ export async function sweepCapJobs({
       ) {
         job._pendingTerminal = {
           status: "failed",
-          error: "timed out after 30 minutes (Mac executor lost?)",
+          error: "timed out after 30 minutes (desktop executor lost?)",
         };
         transitioned.push(job);
       } else if (
@@ -343,7 +356,7 @@ export async function sweepCapJobs({
           status: "failed",
           error:
             "expired: no executor picked this job up within 24h " +
-            "(is the Mac app running with the capability executor enabled?)",
+            "(is the desktop app running with the capability executor enabled?)",
         };
         transitioned.push(job);
       }

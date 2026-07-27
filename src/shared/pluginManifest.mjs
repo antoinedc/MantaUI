@@ -1,15 +1,15 @@
 // pluginManifest.mjs — pure YAML-manifest core for MantaUI plugins.
 //
-// Consumed by BOTH the executor (src/main/capExecutor.ts, the Mac-side runner
-// that reads manifests off disk) AND the server (src/server/plugins.mjs, the
-// in-memory registry the renderer reads). Single source of truth for what a
-// valid manifest looks like — adding a new validation rule here is reflected
-// in every consumer and every test.
+// Consumed by BOTH the executor (src/main/capExecutor.ts, the desktop-side
+// runner that reads manifests off disk) AND the server (src/server/plugins.mjs,
+// the in-memory registry the renderer reads). Single source of truth for what
+// a valid manifest looks like — adding a new validation rule here is
+// reflected in every consumer and every test.
 //
 // Design contract (BET-189 / BET-190):
 //   - Minimal deps: YAML parser + node:fs (only for resolveCwd existence
 //     check). Pure functions everywhere else, no fs / spawn / electron —
-//     testable in vitest without a Mac, no Electron needed.
+//     testable in vitest without a desktop, no Electron needed.
 //   - Every public function returns structured data. Errors are arrays of
 //     {path, message} strings the caller can display verbatim; success
 //     paths are plain JS objects/values. No exceptions thrown for expected
@@ -21,7 +21,9 @@
 // Validation rules implemented (BET-189 §"Validation rules"):
 //   - name         — `^[a-z0-9][a-z0-9-]{0,62}$` (one token, kebab-friendly)
 //   - description  — non-empty
-//   - host         — must be "mac" (else `host: only "mac" is supported`)
+//   - host         — must be one of CAP_HOSTS (else the canonical message
+//                    cites CAP_HOSTS and the legacy "mac" alias); legacy
+//                    "mac" is accepted and normalized to "desktop".
 //   - inputs[]     — `id` regex `^[a-z][a-zA-Z0-9_]*$`; each input needs a
 //                    non-empty `description`; `values` array ONLY when
 //                    `type: enum`; `default` value type-matches the declared
@@ -54,9 +56,10 @@ export const INPUT_ID_RE = /^[a-z][a-zA-Z0-9_]*$/;
 // `^\d+(s|m)$` — no decimals, no whitespace. Parsed by parseTimeout below.
 const TIMEOUT_RE = /^\d+(s|m)$/;
 
-// Hard cap on a plugin's timeout. The Mac executor's own 25-min job timeout
-// is below this on purpose (BET-183), but a plugin that runs forever would
-// still wedge a single job. Cap so a typo can't make a step run for days.
+// Hard cap on a plugin's timeout. The desktop executor's own 25-min job
+// timeout is below this on purpose (BET-183), but a plugin that runs forever
+// would still wedge a single job. Cap so a typo can't make a step run for
+// days.
 const MAX_TIMEOUT_MS = 30 * 60_000;
 
 // Whitelisted step keys. Anything else is an error so a typo like `steps[2].rnu`
@@ -85,6 +88,44 @@ const TOP_KEYS = new Set([
 // Supported input types.
 export const INPUT_TYPES = ["string", "number", "boolean", "enum"];
 
+// ---------------------------------------------------------------------------
+// CAP_HOSTS — accepted `host:` values
+//
+// `host` does NOT mean "which OS" — it means "which machine executes this
+// job". `desktop` is the user's connected desktop (whatever OS it runs);
+// `box` is the Linux box. There is exactly one desktop executor and it runs
+// whatever the user's desktop OS is. `mac` is a permanent legacy alias for
+// `desktop` (see normalizeHost JSDoc for why).
+// ---------------------------------------------------------------------------
+
+export const CAP_HOSTS = ["desktop", "box"];
+
+/**
+ * Normalize a host value from any source (job envelope, manifest, query
+ * string, a job row persisted before the rename).
+ *   undefined / null / ""  → "desktop"   (the default: run on the desktop)
+ *   "desktop"              → "desktop"
+ *   "mac"                  → "desktop"   (legacy alias — permanent, not temporary)
+ *   "box"                  → "box"
+ *   anything else          → null        (caller decides how to report it)
+ *
+ * Why `mac` is a permanent alias (not a one-release shim): two reasons, both
+ * real. Jobs are persisted to `~/.manta/cap-jobs.json`, so a queued job
+ * written before the rename must still be claimable after it (and there's
+ * no schema-version migration — normalizing on read is the whole migration).
+ * And the AI-facing tool file (`docs/opencode-tools/plugins.ts`) is COPIED
+ * into `~/.config/opencode/tools/` on the box, so a user running an older
+ * copy will keep sending `host:"mac"` until they reinstall it. Treat `mac`
+ * as a permanent alias, not a dated deprecation.
+ */
+export function normalizeHost(h) {
+  if (h === undefined || h === null || h === "") return "desktop";
+  if (h === "desktop") return "desktop";
+  if (h === "box") return "box";
+  if (h === "mac") return "desktop"; // permanent legacy alias
+  return null;
+}
+
 // Reserved env names we never let a plugin clobber. `MANTA_PLUGIN` and
 // `MANTA_JOB_ID` carry the executor's plumbing — if a user-supplied `env:`
 // could overwrite them, the executor's own context would silently leak.
@@ -108,7 +149,8 @@ const RESERVED_ENV = new Set([
  * The manifest shape is:
  *   name:          string (required, matches NAME_RE)
  *   description:   string (required, non-empty)
- *   host:          "mac" (only allowed value today)
+ *   host:          "desktop" (the parsed value is NORMALIZED — `host: mac` and
+ *                  omitted both yield `"desktop"`; `box` yields `"box"`)
  *   inputs:        Array<{id, description, type, [default], [values]}>
  *   env:           Record<string,string>
  *   timeout:       string (parsed eagerly; absent = no per-step timeout)
@@ -164,12 +206,18 @@ export function parseManifest(yamlText) {
     errors.push({ path: "description", message: "description is required" });
   }
 
-  // host — only "mac" is supported today.
-  if (raw.host !== undefined && raw.host !== "mac") {
-    errors.push({
-      path: "host",
-      message: 'host: only "mac" is supported',
-    });
+  // host — must be one of CAP_HOSTS (with "mac" as a permanent alias for
+  // "desktop"). The parsed manifest carries the NORMALIZED value, so a
+  // legacy `host: mac` (or an omitted `host:`) yields `manifest.host ===
+  // "desktop"` downstream.
+  if (raw.host !== undefined) {
+    const n = normalizeHost(raw.host);
+    if (n === null) {
+      errors.push({
+        path: "host",
+        message: `host: must be one of ${CAP_HOSTS.join(", ")} (legacy "mac" means desktop)`,
+      });
+    }
   }
 
   // inputs[]
@@ -395,7 +443,7 @@ export function parseManifest(yamlText) {
     manifest: {
       name: raw.name,
       description: raw.description,
-      host: raw.host ?? "mac",
+      host: normalizeHost(raw.host),
       inputs,
       env,
       timeoutMs: topTimeoutMs,
