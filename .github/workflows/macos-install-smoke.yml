@@ -308,8 +308,13 @@ jobs:
           cat "$RUNNER_TEMP/new-session.json"; echo
           projects="$(curl -fsS http://127.0.0.1:8787/api/projects -H "authorization: Bearer $MANTA_TOKEN")"
           printf '%s\n' "$projects"
-          printf '%s' "$projects" | grep -q '"smoke"' \
+          # tmux uniquifies the session name (`smoke` → `smoke_0`), so match the
+          # prefix rather than the exact string.
+          printf '%s' "$projects" | grep -q '"tmuxSession":"smoke' \
             || { echo "FAIL: the server cannot see the tmux session it just created (tmux missing from the launchd PATH?)"; exit 1; }
+          # Independent confirmation from outside the server: the tmux server
+          # the RPC spawned is real and reachable on the user's default socket.
+          tmux list-sessions || { echo "FAIL: no tmux server running after the RPC"; exit 1; }
           echo "ok — server-side tmux works."
 
       - name: Assert — re-running the installer preserves box identity
