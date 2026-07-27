@@ -133,6 +133,26 @@ jobs:
           done
           echo "clean."
 
+      - name: Diagnose the third-party opencode installer (non-fatal)
+        continue-on-error: true
+        run: |
+          set +e
+          # install.sh shells out to `curl -fsSL https://opencode.ai/install | bash`
+          # and can only report "opencode install failed". Split the pipeline so a
+          # failure names itself: fetch, then run, then probe the binary.
+          curl -fsSL https://opencode.ai/install -o "$RUNNER_TEMP/oc-install.sh" \
+            -w 'fetch: http=%{http_code} time=%{time_total}s size=%{size_download}\n'
+          echo "curl exit=$?"
+          ls -l "$RUNNER_TEMP/oc-install.sh"; head -3 "$RUNNER_TEMP/oc-install.sh"
+          echo "--- bash version ---"; bash --version | head -1
+          echo "--- running installer ---"
+          bash "$RUNNER_TEMP/oc-install.sh" </dev/null 2>&1 | tail -40
+          echo "installer exit=${PIPESTATUS[0]}"
+          echo "--- probe ---"
+          ls -l "$HOME/.opencode/bin" 2>&1
+          command -v opencode || echo "(not on PATH)"
+          true
+
       - name: Run the installer
         run: |
           set -euo pipefail
