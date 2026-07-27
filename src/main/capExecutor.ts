@@ -398,6 +398,11 @@ async function publishRegistry(
   // oversized body is the nastiest case — the server destroys the socket,
   // so this surfaces as a thrown network error with no status at all.
   const body = JSON.stringify(rows);
+  // Byte length, NOT body.length — manifests are full of non-ASCII (arrows,
+  // em-dashes), so the UTF-16 string length understates the bytes actually
+  // sent. This number exists to be compared against a byte limit; reporting
+  // the wrong unit here would mislead exactly when it matters most.
+  const bytes = Buffer.byteLength(body);
   try {
     const res = await fetch(
       `${c.serverUrl.replace(/\/+$/, "")}/api/plugins/registry`,
@@ -413,13 +418,13 @@ async function publishRegistry(
     if (!res.ok) {
       console.warn(
         `[plugins] registry publish REJECTED: HTTP ${res.status} ` +
-          `(${rows.length} rows, ${body.length}B) — server list is now STALE`,
+          `(${rows.length} rows, ${bytes}B) — server list is now STALE`,
       );
     }
   } catch (err) {
     console.warn(
       `[plugins] registry publish FAILED: ${err instanceof Error ? err.message : String(err)} ` +
-        `(${rows.length} rows, ${body.length}B) — server list is now STALE; ` +
+        `(${rows.length} rows, ${bytes}B) — server list is now STALE; ` +
         `a body this size may exceed the server's limit`,
     );
   }
