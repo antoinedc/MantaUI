@@ -773,6 +773,10 @@ export function App() {
               </select>
             </div>
           )}
+          {/* Trailing spacer — Windows paints min/max/close over the top-right
+              of the window; this keeps the mode dropdown from sliding under
+              them. Zero-width everywhere else. */}
+          <div className="titlebar-inset-right" />
         </div>
         <div className="flex-1 relative">
           {projects.length === 0 ? (
