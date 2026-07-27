@@ -133,25 +133,30 @@ jobs:
           done
           echo "clean."
 
-      - name: Diagnose the third-party opencode installer (non-fatal)
-        continue-on-error: true
+      - name: Pre-install opencode (works around GitHub's anonymous API rate limit)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set +e
-          # install.sh shells out to `curl -fsSL https://opencode.ai/install | bash`
-          # and can only report "opencode install failed". Split the pipeline so a
-          # failure names itself: fetch, then run, then probe the binary.
-          curl -fsSL https://opencode.ai/install -o "$RUNNER_TEMP/oc-install.sh" \
-            -w 'fetch: http=%{http_code} time=%{time_total}s size=%{size_download}\n'
-          echo "curl exit=$?"
-          ls -l "$RUNNER_TEMP/oc-install.sh"; head -3 "$RUNNER_TEMP/oc-install.sh"
-          echo "--- bash version ---"; bash --version | head -1
-          echo "--- running installer ---"
-          bash "$RUNNER_TEMP/oc-install.sh" </dev/null 2>&1 | tail -40
-          echo "installer exit=${PIPESTATUS[0]}"
-          echo "--- probe ---"
-          ls -l "$HOME/.opencode/bin" 2>&1
-          command -v opencode || echo "(not on PATH)"
-          true
+          set -euo pipefail
+          # WHY: opencode's own installer resolves "latest" through the
+          # UNAUTHENTICATED GitHub API (api.github.com/repos/anomalyco/opencode/
+          # releases/latest). GitHub-hosted runners share egress IPs and are
+          # routinely rate-limited there, so the call returns nothing and the
+          # installer dies with "Failed to fetch version information" — which
+          # install.sh can only report as "opencode install failed". Verified on
+          # this runner: the fetch of the install script itself is a clean 200 in
+          # 40ms; only the API call fails.
+          #
+          # Resolving the tag with the job's GITHUB_TOKEN and passing --version
+          # skips that API call entirely. install.sh then takes its
+          # "opencode already installed" branch, which is a legitimate real-world
+          # state (a box that already had opencode) — everything downstream of it
+          # is still exercised for real.
+          ver="$(gh api repos/anomalyco/opencode/releases/latest --jq .tag_name | sed 's/^v//')"
+          echo "pinning opencode $ver"
+          curl -fsSL https://opencode.ai/install | bash -s -- --version "$ver" </dev/null
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          "$HOME/.opencode/bin/opencode" --version
 
       - name: Run the installer
         run: |
