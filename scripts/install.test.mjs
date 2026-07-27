@@ -3179,14 +3179,14 @@ test("buildPairPageUrl with baseUrl embeds the box id in the fragment (BET-334)"
   );
 });
 
-test("formatPairingOutput uses serverUrl as the pair-page base on the tailnet path (BET-267)", () => {
+test("formatPairingOutput uses serverUrl as the pair-page base on the tailnet path (BET-267 + BET-336)", () => {
   // Headline acceptance criterion for BET-267 Branch A: when a non-public
-  // serverUrl is provided, the connect block must point at THAT base.
-  // The manta:// deep-link is dropped because the mobile/desktop resolver
-  // routes that link through `boxDirectUrl` → https://<boxId>.boxes.mantaui.com,
-  // which is unreachable on the tailnet path. The canonical
-  // boxes.mantaui.com hostname MUST NOT appear in the tailnet output
-  // (a stray one would mislead the device).
+  // serverUrl is provided, the pair-page URL must point at THAT base. The
+  // manta:// deep link (BET-336) also carries the server URL — one wire
+  // shape, one code path. The canonical boxes.mantaui.com hostname MUST
+  // NOT appear in the tailnet output (a stray one would mislead the
+  // device — and would never round-trip through parsePairPayload since
+  // `isPrivateServerUrl` rejects public addresses).
   const out = formatPairingOutput({
     pairing_code: "847291",
     box_id: HEX32,
@@ -3194,14 +3194,89 @@ test("formatPairingOutput uses serverUrl as the pair-page base on the tailnet pa
     serverUrl: "http://100.64.1.5:8787",
   });
   assert.match(out, /Pair page:     http:\/\/100\.64\.1\.5:8787\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
-  assert.doesNotMatch(out, /manta:\/\/pair/);
+  // BET-336: the deep link is present and carries the server URL.
+  assert.match(
+    out,
+    /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291&server=http%3A%2F%2F100\.64\.1\.5%3A8787/,
+  );
   assert.doesNotMatch(out, /boxes\.mantaui\.com/);
   // The footer (Pairing code / Box ID / Server URL) stays identical to
-  // the public-path shape — only the pair-page URL + dropped deep link
+  // the public-path shape — only the pair-page URL + deep-link server
   // change.
   assert.match(out, /Server URL:    http:\/\/100\.64\.1\.5:8787/);
   assert.match(out, /Pairing code:  847291/);
   assert.match(out, /Box ID:        0123456789abcdef0123456789abcdef/);
+});
+
+test("formatPairingOutput refuses a non-private serverUrl (BET-336)", () => {
+  // `buildPairLink` (called by formatPairingOutput) gates the server URL
+  // through `isPrivateServerUrl`; a non-private value throws — refuses,
+  // does not silently drop. The guard prevents a misconfigured install
+  // from shipping a link that would round-trip to null on the receiver.
+  assert.throws(
+    () =>
+      formatPairingOutput({
+        pairing_code: "847291",
+        box_id: HEX32,
+        serverUrl: "https://attacker.example.com",
+      }),
+    /private\/tailnet/,
+  );
+});
+
+test("buildPairLink throws on a non-private serverUrl (BET-336)", () => {
+  // Pin the helper-level guard so a future caller that bypasses
+  // formatPairingOutput still gets the same refusal.
+  assert.throws(
+    () =>
+      buildPairLink(HEX32, "847291", { serverUrl: "https://attacker.example.com" }),
+    /private\/tailnet/,
+  );
+  assert.throws(
+    () =>
+      buildPairLink(HEX32, "847291", { serverUrl: "http://8.8.8.8:8787" }),
+    /private\/tailnet/,
+  );
+  assert.throws(
+    () =>
+      buildPairLink(HEX32, "847291", { serverUrl: "ftp://192.168.1.1" }),
+    /private\/tailnet/,
+  );
+  assert.throws(
+    () => buildPairLink(HEX32, "847291", { serverUrl: "" }),
+    /non-empty string/,
+  );
+});
+
+test("buildPairLink round-trips with a serverUrl through parsePairPayload (BET-336, install verification)", () => {
+  // Direct mirror of the verification snippet in the issue body: print
+  // the connect block with a tailnet serverUrl, and pin that the deep
+  // link in the output is EXACTLY the wire shape parsePairPayload (the
+  // mobile deep-link parser + the desktop QR panel) accepts and
+  // round-trips to a `{ boxId, code, serverUrl }` payload. We assert
+  // the literal here — the round-trip itself is enforced by the vitest
+  // tests at src/renderer/mobile/pairPayload.test.ts (Node has no TS
+  // loader in this Node:test run).
+  const out = formatPairingOutput({
+    pairing_code: "123456",
+    box_id: "0123456789abcdef0123456789abcdef",
+    serverUrl: "http://100.64.1.5:8787",
+  });
+  // The deep link must appear with the server URL appended (url-encoded).
+  const expectedLink =
+    "manta://pair?box=0123456789abcdef0123456789abcdef" +
+    "&code=123456" +
+    "&server=" + encodeURIComponent("http://100.64.1.5:8787");
+  assert.ok(out.includes(expectedLink), `expected deep link not found in:\n${out}`);
+  // Pin the literal helper output too — the assertion above would still
+  // pass if formatPairingOutput itself somehow stripped the server
+  // param, so check the helper directly.
+  assert.equal(
+    buildPairLink("0123456789abcdef0123456789abcdef", "123456", {
+      serverUrl: "http://100.64.1.5:8787",
+    }),
+    expectedLink,
+  );
 });
 
 test("formatPairingOutput keeps the manta:// deep-link on the public path (BET-267 regression guard)", () => {

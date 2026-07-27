@@ -67,10 +67,70 @@ describe("parsePairPayload", () => {
   });
 
   describe("rejects deprecated addressing forms", () => {
-    it("rejects the serverUrl form (?server=<url>&code=)", () => {
+    it("rejects a link with a PUBLIC serverUrl (BET-336 — crafted-link guard)", () => {
+      // BET-336: a `server=` carrying a public address is the exact attack
+      // vector the private-URL gate prevents — a link that points the app
+      // at an attacker-controlled host. The parser refuses the WHOLE
+      // payload (does not silently drop the param and fall through to the
+      // public hostname).
       expect(
         parsePairPayload("manta://pair?server=http://box:8787&code=123456"),
       ).toBeNull();
+      expect(
+        parsePairPayload(
+          "manta://pair?server=https://example.com&code=123456",
+        ),
+      ).toBeNull();
+      // Public IPv4, not in any accepted range.
+      expect(
+        parsePairPayload("manta://pair?server=http://8.8.8.8:8787&code=123456"),
+      ).toBeNull();
+    });
+
+    it("rejects a link with a malformed serverUrl (BET-336)", () => {
+      // Non-http(s) scheme → refusal.
+      expect(
+        parsePairPayload(
+          "manta://pair?server=ftp://192.168.1.1&code=123456",
+        ),
+      ).toBeNull();
+      // IPv6 literal → out of scope, refusal.
+      expect(
+        parsePairPayload(
+          "manta://pair?server=http://[::1]:8787&code=123456",
+        ),
+      ).toBeNull();
+    });
+
+    it("accepts a PRIVATE serverUrl (BET-336 — Tailscale pair link)", () => {
+      // The link now carries the listener; the receiver claims against it.
+      const r = parsePairPayload(
+        "manta://pair?box=" + BOX + "&code=123456&server=http://100.64.1.5:8787",
+      );
+      expect(r).toEqual({
+        boxId: BOX,
+        code: "123456",
+        serverUrl: "http://100.64.1.5:8787",
+      });
+      // Also for a 192.168.x and a .ts.net hostname.
+      expect(
+        parsePairPayload(
+          "manta://pair?box=" + BOX + "&code=123456&server=http://192.168.1.10:8787",
+        ),
+      ).toEqual({
+        boxId: BOX,
+        code: "123456",
+        serverUrl: "http://192.168.1.10:8787",
+      });
+      expect(
+        parsePairPayload(
+          "manta://pair?box=" + BOX + "&code=123456&server=https://mybox.ts.net:8787",
+        ),
+      ).toEqual({
+        boxId: BOX,
+        code: "123456",
+        serverUrl: "https://mybox.ts.net:8787",
+      });
     });
 
     it("rejects the legacy id/server alias (?id=<url>&token=)", () => {
@@ -151,6 +211,28 @@ describe("buildPairPayload", () => {
     const out = buildPairPayload({ boxId: BOX, code: "000000" });
     expect(out).toContain(encodeURIComponent(BOX));
   });
+
+  it("appends &server=<url-encoded serverUrl> when present (BET-336)", () => {
+    expect(
+      buildPairPayload({
+        boxId: BOX,
+        code: "847291",
+        serverUrl: "http://100.64.1.5:8787",
+      }),
+    ).toBe(
+      `manta://pair?box=${encodeURIComponent(BOX)}&code=847291&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
+    );
+  });
+
+  it("omits the server param when serverUrl is absent or empty", () => {
+    // Mirrors the unchanged wire shape for the pre-BET-336 / public
+    // emitter — a regression here would break the round-trip for every
+    // existing emitter.
+    const without = buildPairPayload({ boxId: BOX, code: "847291" });
+    expect(without).not.toContain("server=");
+    const empty = buildPairPayload({ boxId: BOX, code: "847291", serverUrl: "" });
+    expect(empty).not.toContain("server=");
+  });
 });
 
 describe("round-trip", () => {
@@ -159,6 +241,10 @@ describe("round-trip", () => {
       { boxId: BOX, code: "111111" },
       { boxId: BOX, code: "000000" },
       { boxId: BOX, code: "987654" },
+      // BET-336: round-trip preserves the server URL through both directions.
+      { boxId: BOX, code: "111111", serverUrl: "http://100.64.1.5:8787" },
+      { boxId: BOX, code: "000000", serverUrl: "http://192.168.1.10:8787" },
+      { boxId: BOX, code: "987654", serverUrl: "https://mybox.ts.net" },
     ];
     for (const p of cases) {
       expect(parsePairPayload(buildPairPayload(p))).toEqual(p);

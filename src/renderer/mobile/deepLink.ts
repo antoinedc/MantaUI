@@ -2,7 +2,12 @@
 //
 // Post-BET-198, phones connect DIRECTLY to https://<box_id>.boxes.mantaui.com
 // (Caddy on the box reverse-proxies 127.0.0.1:8787). The only live pair
-// payload shape is the box form `manta://pair?box=<box_id>&code=<6-digit>`.
+// payload shape is the box form `manta://pair?box=<box_id>&code=<6-digit>`,
+// optionally with a `server=<url>` for the Tailscale path (BET-336) — when
+// present, the link-supplied URL must be a private/tailnet address (gated by
+// `isPrivateServerUrl` in parsePairPayload) and is used verbatim for both
+// the claim and the persisted listener, so a Tailscale box with no public
+// hostname can still ship a working one-click / QR pair link.
 //
 // Phase 2 of BET-177: the iOS app registers the `manta://` custom scheme (see
 // Info.plist's CFBundleURLTypes + AndroidManifest.xml's intent-filter); the
@@ -29,8 +34,11 @@
 // Dep injection keeps handlePairUrl unit-testable without DOM / fetch / the
 // Capacitor bridge — see deepLink.test.ts beside this file.
 
-import { parsePairPayload, type PairPayload } from "./pairPayload";
-import { boxDirectUrl } from "../../shared/transport.mjs";
+import { parsePairPayload } from "./pairPayload";
+import {
+  buildSetupClaimInput,
+  resolveSetupServerUrl,
+} from "./setupLogic";
 import type { ClaimOutcome } from "../../shared/claim.mjs";
 import { dlog } from "./debugLog";
 
@@ -91,11 +99,13 @@ export type DeepLinkDeps = {
     code: string;
   }) => Promise<ClaimOutcome>;
   /** Persist the resolved server URL to localStorage["manta_server"]. Called
-   *  AFTER a successful claim — the URL is the shared direct hostname
-   *  `https://<boxId>.boxes.mantaui.com` (built by `boxDirectUrl`). The
-   *  deep-link handler is the only caller that needs this — direct pairing
-   *  flows (PairingScreen / SetupScreen) persist serverUrl directly because
-   *  the user already typed it. */
+   *  AFTER a successful claim — the URL is whatever `resolveSetupServerUrl`
+   *  returned for the parsed payload: the link-supplied `serverUrl` when
+   *  present (BET-336, Tailscale path) or the shared public hostname
+   *  `https://<boxId>.boxes.mantaui.com` otherwise. The deep-link handler is
+   *  the only caller that needs this — direct pairing flows (PairingScreen /
+   *  SetupScreen) persist serverUrl directly because the user already typed
+   *  it. */
   persistServer: (serverUrl: string) => void;
 };
 
@@ -108,11 +118,14 @@ export type DeepLinkDeps = {
  * - Foreign URLs (any non-manta scheme, or a manta:// URL that fails
  *   parsePairPayload) → "ignored" — no claim is attempted, no localStorage
  *   write happens.
- * - A box-form pair URL → claimAgainst with
- *   `https://<boxId>.boxes.mantaui.com`, then persistServer with the SAME
- *   string on success. The URL shape is produced by the SHARED `boxDirectUrl`
- *   helper so the desktop (PairStep.tsx) and the mobile deep-link handler
- *   write the EXACT same string.
+ * - A box-form pair URL → claim with the SHARED
+ *   `buildSetupClaimInput({boxId, code, serverUrl: payload.serverUrl})`
+ *   helper (the same one the desktop PairStep and the mobile setup screen
+ *   use). When the payload carries a `serverUrl` (BET-336 — Tailscale pair
+ *   link), that URL is used verbatim for both the claim AND the persisted
+ *   listener so the post-claim refresh points at the same box the claim
+ *   just succeeded against. With no `serverUrl`, the helper falls through
+ *   to the public hostname (`https://<boxId>.boxes.mantaui.com`).
  */
 export async function handlePairUrl(
   raw: string,
@@ -124,10 +137,16 @@ export async function handlePairUrl(
     return "ignored";
   }
   dlog(
-    `[deeplink] parsed: box=${payload.boxId.slice(0, 8)}… (direct) code=${payload.code}`,
+    payload.serverUrl
+      ? `[deeplink] parsed: box=${payload.boxId.slice(0, 8)}… server=${payload.serverUrl} code=${payload.code}`
+      : `[deeplink] parsed: box=${payload.boxId.slice(0, 8)}… (direct) code=${payload.code}`,
   );
 
-  const claimInput = buildClaimInput(payload);
+  const claimInput = buildSetupClaimInput({
+    boxId: payload.boxId,
+    code: payload.code,
+    serverUrl: payload.serverUrl,
+  });
   let outcome: ClaimOutcome;
   try {
     outcome = await deps.authClaim(claimInput);
@@ -149,33 +168,14 @@ export async function handlePairUrl(
   // Successful claim. Persist the resolved server URL to localStorage so the
   // next serverBase() call resolves correctly and doRefresh() finds the
   // bootstrap data path. The token is persisted by authClaim itself (single
-  // write-site in httpApi.saveClientToken).
-  const serverUrl = resolveServerUrl(payload);
+  // write-site in httpApi.saveClientToken). `resolveSetupServerUrl` honours
+  // the link-supplied `serverUrl` (BET-336) and otherwise falls through to
+  // the public hostname — same call site the desktop PairStep + manual
+  // mobile setup use, so all three flows write the EXACT same string.
+  const serverUrl = resolveSetupServerUrl({
+    boxId: payload.boxId,
+    serverUrl: payload.serverUrl,
+  });
   deps.persistServer(serverUrl);
   return "paired";
-}
-
-/**
- * Build the {serverUrl, code} input for httpApi.authClaim. The box-form URL
- * is built by the shared `boxDirectUrl` helper so the claim POSTs
- * `{pairing_code}` to the box's own /auth/claim against its public hostname
- * (`https://<boxId>.boxes.mantaui.com`). The same string is persisted by
- * `persistServer` below — single source of truth for the URL shape.
- */
-function buildClaimInput(payload: PairPayload): {
-  serverUrl: string;
-  code: string;
-} {
-  return { serverUrl: boxDirectUrl(payload.boxId), code: payload.code };
-}
-
-/**
- * Resolve the server URL to persist after a successful claim. The shared
- * `boxDirectUrl` helper is the single source of truth for the box-form URL
- * shape — it builds `https://<boxId>.boxes.mantaui.com` and validates the
- * boxId (callers MUST have shape-gated by parsePairPayload already, but the
- * helper is defensive).
- */
-function resolveServerUrl(payload: PairPayload): string {
-  return boxDirectUrl(payload.boxId);
 }

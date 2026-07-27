@@ -247,4 +247,25 @@ describe("prefillFromPairLink (BET-335 deep-link prefill)", () => {
       prefillFromPairLink(`manta://pair?box=${VALID_BOX}&code=12345`),
     ).toBeNull();
   });
+
+  it("returns {boxId, code, serverUrl} for a valid link carrying a private server URL (BET-336)", () => {
+    // The Tailscale pair link carries a private/tailnet listener URL.
+    // The renderer-side prefill must surface that URL so PairStep can
+    // pre-fill the Advanced field and open it by default.
+    const link = `manta://pair?box=${VALID_BOX}&code=123456&server=${encodeURIComponent("http://100.64.1.5:8787")}`;
+    expect(prefillFromPairLink(link)).toEqual({
+      boxId: VALID_BOX,
+      code: "123456",
+      serverUrl: "http://100.64.1.5:8787",
+    });
+  });
+
+  it("returns null for a link carrying a PUBLIC server URL (BET-336, crafted-link guard)", () => {
+    // parsePairPayload refuses the whole payload when the server URL is
+    // not private; prefillFromPairLink is a thin wrapper so it must do
+    // the same — the desktop can't pre-fill a listener that the parser
+    // refused.
+    const link = `manta://pair?box=${VALID_BOX}&code=123456&server=${encodeURIComponent("https://attacker.example.com")}`;
+    expect(prefillFromPairLink(link)).toBeNull();
+  });
 });

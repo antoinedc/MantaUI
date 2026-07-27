@@ -206,13 +206,21 @@ function go(n){
   document.getElementById("kv-box").textContent=box||"—";
   document.getElementById("kv-code").textContent=code||"—";
   document.getElementById("kv-server").textContent=location.origin;
+  // BET-336 (Tailscale pair link): on a non-public origin (Tailscale IP,
+  // private hostname), append the page's own origin as `server=` so the
+  // deep link + QR point at a listener the scanning device can actually
+  // reach. On the public boxes.mantaui.com path, location.origin is a
+  // public address which the renderer refuses — appending it there would
+  // make every public link unparseable.
+  var isPublic=/\.boxes\.mantaui\.com$/.test(location.hostname);
+  var srv=isPublic?"":"&server="+encodeURIComponent(location.origin);
   if(box&&code){
-    var link="manta://pair?box="+box+"&code="+code;
+    var link="manta://pair?box="+box+"&code="+code+srv;
     document.getElementById("openlink").setAttribute("href",link);
     var dl=document.getElementById("deeplink");
     dl.setAttribute("href",link);
     dl.textContent=link;
-    document.getElementById("qr").src="/pair/qr.png?box="+box+"&code="+code;
+    document.getElementById("qr").src="/pair/qr.png?box="+box+"&code="+code+srv;
     document.getElementById("code-value").textContent=code.slice(0,3)+" "+code.slice(3);
   }else{
     document.body.classList.add("nocode");

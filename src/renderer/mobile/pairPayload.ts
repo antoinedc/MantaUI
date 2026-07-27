@@ -12,24 +12,47 @@
 //   • Deferred-deeplink https form (Branch/Firebase style):
 //       https://<host>/m/<payload>?box=<box_id>&code=<6-digit>
 //
-// The earlier direct-HTTPS `server=` form (and the ambiguous legacy `id=`
-// alias) are relay/pre-direct-era back-compat that no live emitter produces;
-// they are intentionally rejected here.
+// BET-336 (Tailscale pair link): the link MAY also carry an optional
+// `server=<url>` parameter — the box's listener URL, so a Tailscale box
+// (no public hostname) can ship a working one-click / QR pair link. The
+// server URL is gated by `isPrivateServerUrl` (../../shared/transport.mjs):
+// only loopback, RFC 1918 private, CGNAT/Tailscale (100.64/10), and
+// .ts.net MagicDNS hostnames are accepted. A link carrying a public
+// address is REFUSED outright (we return null for the whole payload,
+// never silently drop the parameter and fall back to the public hostname
+// — that fallback is exactly the "crafted link points the app at an
+// attacker's server" attack the gate prevents).
 //
-// The validation contract (32-hex boxId shape, 6-digit code) is SINGLE-SOURCED:
-// we delegate to normalizeCode (../../shared/claim.mjs) and isValidBoxToken
-// (../../shared/transport.mjs — the SAME 32-hex gate as
-// src/server/webhooks.mjs isValidToken, kept in sync there for exactly this
-// use case; the renderer cannot import from src/server/* because the box
-// server pulls Node built-ins, which Vite's renderer build externalizes
-// and the import then fails at build time).
+// The validation contract (32-hex boxId shape, 6-digit code, private
+// server URL) is SINGLE-SOURCED: we delegate to normalizeCode
+// (../../shared/claim.mjs), isValidBoxToken (../../shared/transport.mjs —
+// the SAME 32-hex gate as src/server/webhooks.mjs isValidToken, kept in
+// sync there for exactly this use case; the renderer cannot import from
+// src/server/* because the box server pulls Node built-ins, which Vite's
+// renderer build externalizes and the import then fails at build time),
+// and isPrivateServerUrl (../../shared/transport.mjs — single source of
+// truth for the ranges; every other consumer imports it from there).
 
 import { normalizeCode } from "../../shared/claim.mjs";
-import { isValidBoxToken } from "../../shared/transport.mjs";
+import {
+  isValidBoxToken,
+  isPrivateServerUrl,
+} from "../../shared/transport.mjs";
+import { normalizeServerUrl } from "./setupLogic";
 
 export type PairPayload = {
   boxId: string;
   code: string;
+  /**
+   * Optional server URL (BET-336, Tailscale path). When present, the
+   * pairing flow claims against THIS URL instead of the derived public
+   * hostname (`https://<boxId>.boxes.mantaui.com`) — so a Tailscale box
+   * (no public hostname) can ship a working one-click / QR link.
+   * Always set to the `normalizeServerUrl`-normalized form on the way
+   * out, and gated by `isPrivateServerUrl` on the way in. Absent on
+   * pre-BET-336 payloads and on any non-Tailscale emitter.
+   */
+  serverUrl?: string;
 };
 
 /**
@@ -94,6 +117,7 @@ export function parsePairPayload(raw: string): PairPayload | null {
   const q = url.searchParams;
   const rawBox = q.get("box") ?? "";
   const rawCode = q.get("code") ?? q.get("token") ?? "";
+  const rawServer = q.get("server") ?? "";
 
   const boxId = coerceBoxId(rawBox);
   if (!boxId) return null;
@@ -105,7 +129,20 @@ export function parsePairPayload(raw: string): PairPayload | null {
   if (!/^\d{6}$/.test(code)) return null;
   if ((String(rawCode).match(/\d/g) ?? []).length !== 6) return null;
 
-  return { boxId, code };
+  // BET-336 (Tailscale pair link): when the link carries a server URL, it
+  // MUST be a private / tailnet address — anything reachable from inside the
+  // user's own network. A non-private server URL means the link is asking us
+  // to point the app at an arbitrary host: we REFUSE the whole payload (not
+  // silently drop the param), so a crafted link can never smuggle an
+  // attacker-chosen address past the public-hostname default.
+  let serverUrl: string | undefined;
+  if (rawServer !== "") {
+    const normalized = normalizeServerUrl(rawServer);
+    if (normalized === null || !isPrivateServerUrl(normalized)) return null;
+    serverUrl = normalized;
+  }
+
+  return { boxId, code, serverUrl };
 }
 
 /**
@@ -116,7 +153,18 @@ export function parsePairPayload(raw: string): PairPayload | null {
  * install.sh heredoc. The boxId is URL-encoded so reserved characters
  * survive the query (32-hex has none today, but the encoder is the safe
  * default).
+ *
+ * BET-336: when the payload carries a `serverUrl` (Tailscale pair link),
+ * a `server=<url-encoded serverUrl>` query param is appended so the
+ * receiving device can claim against the private/tailnet listener instead
+ * of the derived public hostname. The current callers only feed this
+ * helper with server URLs that have already passed `isPrivateServerUrl`,
+ * so we do NOT re-validate here (the constructor is a thin encoder).
  */
 export function buildPairPayload(p: PairPayload): string {
-  return `manta://pair?box=${encodeURIComponent(p.boxId)}&code=${p.code}`;
+  const base = `manta://pair?box=${encodeURIComponent(p.boxId)}&code=${p.code}`;
+  if (p.serverUrl) {
+    return `${base}&server=${encodeURIComponent(p.serverUrl)}`;
+  }
+  return base;
 }

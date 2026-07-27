@@ -118,13 +118,23 @@ export function resolveConnectRoute(_serverBase: string): "direct" {
 }
 
 /**
- * Prefill helper for the deep-link pairing flow (BET-335).
+ * Prefill helper for the deep-link pairing flow (BET-335; extended BET-336
+ * for the optional server URL).
  *
  * PairStep lazily initializes its Box ID + code fields from this function so
  * clicking a `manta://pair?box=…&code=…` link opens the Connect screen with
  * both fields already filled — the user clicks Connect to confirm. Routing
  * through the existing screen (rather than auto-claiming) means the pair
  * page's "click Connect" copy is true.
+ *
+ * BET-336 (Tailscale pair link): when the link carries a `server=<url>`,
+ * that URL is returned as `serverUrl` so PairStep can pre-fill the Advanced
+ * "Server URL" field and open the Advanced section by default — the user
+ * sees the listener they are about to pair against BEFORE clicking Connect
+ * (the deep-link confirmation screen promises exactly this). The server URL
+ * is the SAME `isPrivateServerUrl`-gated value `parsePairPayload` already
+ * validated, so callers can pass it straight to `buildSetupClaimInput` /
+ * `resolveSetupServerUrl`.
  *
  * Pure — delegates to the canonical `parsePairPayload` parser (the same one
  * App.tsx uses to validate the deep-link URL) and returns `null` for any
@@ -135,7 +145,7 @@ export function resolveConnectRoute(_serverBase: string): "direct" {
  */
 export function prefillFromPairLink(
   raw: string | null | undefined,
-): { boxId: string; code: string } | null {
+): { boxId: string; code: string; serverUrl?: string } | null {
   if (raw == null) return null;
   const trimmed = raw.trim();
   if (!trimmed) return null;
