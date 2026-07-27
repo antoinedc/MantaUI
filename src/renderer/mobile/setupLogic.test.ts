@@ -5,6 +5,7 @@ import {
   resolveSetupServerUrl,
   resolveConnectRoute,
   normalizeServerUrl,
+  prefillFromPairLink,
 } from "./setupLogic";
 import { boxDirectUrl } from "../../shared/transport.mjs";
 
@@ -195,5 +196,55 @@ describe("resolveConnectRoute", () => {
 
   it("returns 'direct' for empty/unset base (fresh install)", () => {
     expect(resolveConnectRoute("")).toBe("direct");
+  });
+});
+
+describe("prefillFromPairLink (BET-335 deep-link prefill)", () => {
+  const validLink = `manta://pair?box=${VALID_BOX}&code=123456`;
+  const validHttps = `https://box.example.com/m/?box=${VALID_BOX}&code=123456`;
+
+  it("returns {boxId, code} for a valid box-form manta:// pair link", () => {
+    expect(prefillFromPairLink(validLink)).toEqual({
+      boxId: VALID_BOX,
+      code: "123456",
+    });
+  });
+
+  it("returns {boxId, code} for a valid https deferred-deeplink form", () => {
+    expect(prefillFromPairLink(validHttps)).toEqual({
+      boxId: VALID_BOX,
+      code: "123456",
+    });
+  });
+
+  it("trims surrounding whitespace before parsing", () => {
+    expect(prefillFromPairLink(`  ${validLink}  `)).toEqual({
+      boxId: VALID_BOX,
+      code: "123456",
+    });
+  });
+
+  it("returns null for null / undefined / empty / whitespace-only input", () => {
+    expect(prefillFromPairLink(null)).toBeNull();
+    expect(prefillFromPairLink(undefined)).toBeNull();
+    expect(prefillFromPairLink("")).toBeNull();
+    expect(prefillFromPairLink("   ")).toBeNull();
+  });
+
+  it("returns null for a foreign URL (not a pairing payload)", () => {
+    expect(prefillFromPairLink("https://example.com/foo")).toBeNull();
+    expect(prefillFromPairLink("manta://other?box=x&code=y")).toBeNull();
+  });
+
+  it("returns null for a malformed pair link (bad box / bad code)", () => {
+    expect(
+      prefillFromPairLink(`manta://pair?box=not-a-box&code=123456`),
+    ).toBeNull();
+    expect(
+      prefillFromPairLink(`manta://pair?box=${VALID_BOX}&code=abc`),
+    ).toBeNull();
+    expect(
+      prefillFromPairLink(`manta://pair?box=${VALID_BOX}&code=12345`),
+    ).toBeNull();
   });
 });

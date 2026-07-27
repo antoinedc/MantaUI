@@ -1,5 +1,6 @@
 import { isSubmittableCode } from "../../shared/claim.mjs";
 import { boxDirectUrl, isValidBoxToken } from "../../shared/transport.mjs";
+import { parsePairPayload } from "./pairPayload";
 
 export type SetupFields = {
   boxId: string;
@@ -114,4 +115,29 @@ export function resolveSetupServerUrl(input: {
  */
 export function resolveConnectRoute(_serverBase: string): "direct" {
   return "direct";
+}
+
+/**
+ * Prefill helper for the deep-link pairing flow (BET-335).
+ *
+ * PairStep lazily initializes its Box ID + code fields from this function so
+ * clicking a `manta://pair?box=…&code=…` link opens the Connect screen with
+ * both fields already filled — the user clicks Connect to confirm. Routing
+ * through the existing screen (rather than auto-claiming) means the pair
+ * page's "click Connect" copy is true.
+ *
+ * Pure — delegates to the canonical `parsePairPayload` parser (the same one
+ * App.tsx uses to validate the deep-link URL) and returns `null` for any
+ * nullish/empty/invalid input. Lives here (not in the component) because
+ * setupLogic is the project's home for pure pairing helpers and is already
+ * covered by setupLogic.test.ts — that's what makes the behaviour testable
+ * without mounting React.
+ */
+export function prefillFromPairLink(
+  raw: string | null | undefined,
+): { boxId: string; code: string } | null {
+  if (raw == null) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  return parsePairPayload(trimmed);
 }

@@ -18,7 +18,6 @@ import { chooseUpdateSkewVariant } from "./chatUtils";
 import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
 import { parsePairPayload } from "./mobile/pairPayload";
-import { claimBox } from "./pairClaim";
 import type { AvailableLauncher } from "../shared/types";
 
 // mode -> the composite-key "modeId" segment used for the PTY sessionKey and
@@ -206,16 +205,23 @@ export function App() {
     return off;
   }, []);
 
-  // Deep-link pairing (BET-240, BET-255): the OS protocol handler
+  // Deep-link pairing (BET-240, BET-335, #277): the OS protocol handler
   // (electron-builder `protocols:` + Electron `setAsDefaultProtocolClient`)
   // delivers a manta://pair?... URL via the preload's `pair:link-received`
-  // IPC. We validate with the SAME `parsePairPayload` PairStep / mobile
-  // share, then auto-claim via the SHARED `claimBox` helper (the same code
-  // path PairStep's Connect button runs). On success `finishOnboarding()`
-  // drops the shell to the normal app — the user is paired, no manual
-  // "Connect" click required. On failure we fall back to the OLD behaviour
-  // of opening onboarding at step 1 (Onboarding reads `pendingPairLink` to
-  // force step 1) so the user can retry by hand.
+  // IPC. Two outcomes:
+  //
+  //  • Malformed / legacy-shape link (#277): silently dropping leaves the
+  //    user staring at a launched-but-empty window — the OS opened us for
+  //    the manta:// scheme, so it looked like the link did nothing. Surface
+  //    the reason on the pair step via setPairLinkError and open onboarding
+  //    if it isn't already up. PairStep renders pairLinkError in the same
+  //    inline slot a manual Connect failure uses.
+  //
+  //  • Valid link (BET-335): stash the URL via setPendingPairLink so
+  //    Onboarding jumps to step 1 and PairStep prefills Box ID + code from
+  //    prefillFromPairLink. The click on Connect is the confirmation — no
+  //    silent auto-claim, the pair page's "click Connect" copy becomes
+  //    true.
   useEffect(() => {
     const pre = getMantaPreload();
     if (!pre?.onPairLink) return;
@@ -237,44 +243,14 @@ export function App() {
         if (!onboardingOpen) void st.relaunchOnboarding();
         return;
       }
-      // Auto-claim immediately. claimBox() handles the IPC, persists the
-      // credentials to config.json, mirrors them into the store, and swaps
-      // window.api to httpApi — all the same side effects PairStep does on
-      // a manual Connect. We don't await it on purpose: the listener is
-      // sync from the preload's perspective and the claim is best-effort
-      // (failures fall through to the onboarding-open fallback below).
-      void (async () => {
-        const result = await claimBox({ boxId: payload.boxId, code: payload.code });
-        if (result.ok) {
-          // Re-read config so the store carries the new boxToken, then bump
-          // the claim counter so a MOUNTED Onboarding re-derives its step.
-          //
-          // Both halves are required. `finishOnboarding()` alone only clears
-          // `onboardingForced`; it does NOT unmount the flow, because App
-          // holds it open behind `onboardingLatched` (deliberately — step 1
-          // writes a boxToken, which would otherwise tear the shell down
-          // before steps 2-4 ran). With nothing advancing the step, a
-          // SUCCESSFUL auto-claim left the user staring at the pair form
-          // with the code field focused — the "deep link opens the app but
-          // does nothing" report. The counter is what moves them forward.
-          await useStore.getState().finishOnboarding();
-          useStore.getState().notePairLinkClaimed();
-          return;
-        }
-        // Failure: open onboarding at step 1 with the URL stashed so the
-        // shell jumps to step 1, and carry the REASON so PairStep can show
-        // it inline. Without the reason the user gets an empty form and no
-        // explanation for why the link appeared to do nothing — the common
-        // case being a one-time code that already expired (~5 min TTL) or
-        // was already consumed.
-        const st = useStore.getState();
-        st.setPendingPairLink(url);
-        st.setPairLinkError(result.message);
-        const alreadyOnboarding =
-          st.onboardingForced ||
-          resolveTransportMode(st.configSnapshot()) === "onboarding";
-        if (!alreadyOnboarding) void st.relaunchOnboarding();
-      })();
+      // Valid link (BET-335): stash the URL and open onboarding at step 1.
+      // PairStep prefills Box ID + code; the user clicks Connect to claim.
+      const st = useStore.getState();
+      st.setPendingPairLink(url);
+      const alreadyOnboarding =
+        st.onboardingForced ||
+        resolveTransportMode(st.configSnapshot()) === "onboarding";
+      if (!alreadyOnboarding) void st.relaunchOnboarding();
     });
   }, []);
 
