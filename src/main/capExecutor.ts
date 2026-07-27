@@ -389,8 +389,22 @@ async function publishRegistry(
       timeoutMs: null,
     };
   });
+  // Publishing is best-effort, but it must NEVER be SILENT. A swallowed
+  // failure here is indistinguishable from "nothing changed": the server
+  // keeps serving its last good snapshot, so Settings and plugin_list show
+  // a plausible-but-frozen list while the executor happily runs plugins the
+  // server has never heard of. That exact divergence (executor: 10 plugins,
+  // server: 8) went unnoticed because both ends logged nothing. An
+  // oversized body is the nastiest case — the server destroys the socket,
+  // so this surfaces as a thrown network error with no status at all.
+  const body = JSON.stringify(rows);
+  // Byte length, NOT body.length — manifests are full of non-ASCII (arrows,
+  // em-dashes), so the UTF-16 string length understates the bytes actually
+  // sent. This number exists to be compared against a byte limit; reporting
+  // the wrong unit here would mislead exactly when it matters most.
+  const bytes = Buffer.byteLength(body);
   try {
-    await fetch(
+    const res = await fetch(
       `${c.serverUrl.replace(/\/+$/, "")}/api/plugins/registry`,
       {
         method: "PUT",
@@ -398,11 +412,21 @@ async function publishRegistry(
           ...(c.boxToken ? { authorization: `Bearer ${c.boxToken}` } : {}),
           "content-type": "application/json",
         },
-        body: JSON.stringify(rows),
+        body,
       },
     );
-  } catch {
-    /* swallow — best-effort */
+    if (!res.ok) {
+      console.warn(
+        `[plugins] registry publish REJECTED: HTTP ${res.status} ` +
+          `(${rows.length} rows, ${bytes}B) — server list is now STALE`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[plugins] registry publish FAILED: ${err instanceof Error ? err.message : String(err)} ` +
+        `(${rows.length} rows, ${bytes}B) — server list is now STALE; ` +
+        `a body this size may exceed the server's limit`,
+    );
   }
 }
 
