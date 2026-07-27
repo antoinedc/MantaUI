@@ -1,6 +1,6 @@
 // Tests for src/server/launchers.mjs + launcherRegistry.mjs (BET-138
-// refinement). Pure logic only — binExists/getProviders are injected so no
-// real process spawn or opencode HTTP call happens.
+// refinement, BET-310). Pure logic only — binExists is injected so no real
+// process spawn happens.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -28,53 +28,41 @@ describe("binExists", () => {
 });
 
 // ---------------------------------------------------------------------------
-// listAvailableLaunchers — filters on BOTH provider-connected AND bin-present
+// listAvailableLaunchers — filters on bin-present only (BET-310)
 // ---------------------------------------------------------------------------
 
 describe("listAvailableLaunchers", () => {
-  it("includes a launcher only when its bin exists AND its provider is connected", async () => {
+  it("includes a launcher when its bin exists", async () => {
     const out = await listAvailableLaunchers({
       binExists: async (bin) => bin === "claude",
-      getProviders: async () => ({ connected: ["anthropic"] }),
     });
     assert.deepEqual(out.map((l) => l.id), ["claude"]);
     assert.equal(out[0].label, "Claude Code");
   });
 
-  it("excludes a launcher when the bin is missing even if the provider is connected", async () => {
+  it("excludes a launcher when its bin is missing", async () => {
     const out = await listAvailableLaunchers({
       binExists: async () => false,
-      getProviders: async () => ({ connected: ["anthropic"] }),
     });
     assert.deepEqual(out, []);
   });
 
-  it("excludes a launcher when the provider isn't connected even if the bin exists", async () => {
+  it("returns exactly the present-launchers in registry order when only some bins resolve (BET-310: claude+codex present, kimi absent)", async () => {
     const out = await listAvailableLaunchers({
-      binExists: async () => true,
-      getProviders: async () => ({ connected: [] }),
+      binExists: async (bin) => bin === "claude" || bin === "codex",
     });
-    assert.deepEqual(out, []);
-  });
-
-  it("tolerates getProviders() rejecting — treats it as no connected providers", async () => {
-    const out = await listAvailableLaunchers({
-      binExists: async () => true,
-      getProviders: async () => { throw new Error("opencode unreachable"); },
-    });
-    assert.deepEqual(out, []);
+    assert.deepEqual(out.map((l) => l.id), ["claude", "codex"]);
   });
 
   it("returns each launcher's flag schema without the server-only `arg` field", async () => {
     const out = await listAvailableLaunchers({
       binExists: async () => true,
-      getProviders: async () => ({ connected: ["anthropic"] }),
     });
-    assert.equal(out.length, 1);
-    assert.deepEqual(out[0].flags, [
+    const claude = out.find((l) => l.id === "claude");
+    assert.deepEqual(claude.flags, [
       { key: "skipPermissions", label: "Skip all permission prompts", type: "boolean", default: true },
     ]);
-    assert.equal(out[0].flags[0].arg, undefined);
+    assert.equal(claude.flags[0].arg, undefined);
   });
 });
 

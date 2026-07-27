@@ -14,7 +14,6 @@ import {
   discoverModels,
   discoverModelsForEndpoint,
   setProviders,
-  getProviders,
   getProviderEndpoints,
   upsertAgentBlock,
   removeAgentBlock,
@@ -523,26 +522,6 @@ describe("getProviderEndpoints", () => {
   it("returns [] for a config with no providers", async () => {
     const result = await getProviderEndpoints(async () => ({}));
     assert.deepEqual(result, []);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// getProviders — handler test (mocks ocFetch)
-// ---------------------------------------------------------------------------
-
-describe("getProviders", () => {
-  // getProviders uses ocFetch from opencode.mjs, which uses a pooled http
-  // agent. We test it by mocking ocFetch via the transport mechanism.
-  // For simplicity, we just verify the function doesn't throw and returns
-  // a shape — the real integration is tested by the RPC handler test.
-
-  it("returns a shape even when opencode is unreachable", async () => {
-    // This test verifies graceful degradation. In a real test environment
-    // opencode won't be running, so getProviders should return empty shape.
-    const result = await getProviders();
-    assert.ok(result);
-    assert.ok(Array.isArray(result.all ?? []));
-    assert.ok(Array.isArray(result.connected ?? []));
   });
 });
 

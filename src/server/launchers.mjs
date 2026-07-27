@@ -1,7 +1,6 @@
 // Reports which AI CLI TUI launchers (src/server/launcherRegistry.mjs) are
 // currently available on this box, for the session-mode dropdown (BET-138
-// refinement). "Available" = the binary resolves on PATH AND (if the
-// launcher declares a `provider`) opencode reports that provider connected.
+// refinement, BET-310). "Available" = the binary resolves on PATH.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -24,19 +23,11 @@ export async function binExists(bin) {
   }
 }
 
-// getProviders() -> { all, connected, default }. `connected` is the list of
-// provider ids opencode has working auth for.
 export async function listAvailableLaunchers({
   binExists: probe = binExists,
-  getProviders,
 }) {
-  const providers = await getProviders().catch(() => ({ connected: [] }));
-  const connected = new Set(providers.connected || []);
   const out = [];
   for (const l of LAUNCHERS) {
-    // provider === null/undefined means "no provider gate" (pure-CLI launcher).
-    const providerOk = l.provider == null || connected.has(l.provider);
-    if (!providerOk) continue;
     if (!(await probe(l.bin))) continue;
     out.push({
       id: l.id,

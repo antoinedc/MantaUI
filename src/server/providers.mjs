@@ -3,7 +3,6 @@
 // Ports the pure helpers from src/main/providers.ts (parseModelsResponse,
 // upsertProviderBlock, removeProviderBlock, readProviderEndpoints,
 // findStoredApiKey, stripUrlUserinfo) and adds server-side I/O functions:
-//   getProviders      — fetch opencode's /provider endpoint (via ocFetch)
 //   discoverModels    — fetch <baseURL>/models directly (server IS the box)
 //   setProviders      — read/merge/write opencode.jsonc locally
 //
@@ -283,26 +282,6 @@ export async function getProviderEndpoints(readConfig = readRemoteConfig) {
   } catch (e) {
     console.warn("[providers] could not read provider endpoints:", e);
     return [];
-  }
-}
-
-/**
- * Fetch the provider list from opencode's /provider endpoint.
- * Returns the raw shape: { all: [...], connected: [...], default: {...} }.
- *
- * Uses native fetch directly (opencode.mjs's ocFetch is not exported).
- * The server IS on the box, so 127.0.0.1:4096 is reachable without SSH.
- */
-export async function getProviders() {
-  try {
-    const res = await fetch("http://127.0.0.1:4096/provider");
-    if (!res.ok) {
-      await res.text().catch(() => {});
-      return { all: [], connected: [], default: {} };
-    }
-    return await res.json();
-  } catch {
-    return { all: [], connected: [], default: {} };
   }
 }
 
