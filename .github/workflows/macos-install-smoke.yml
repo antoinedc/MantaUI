@@ -325,16 +325,23 @@ jobs:
           # `smoke` — i.e. the TAB that src/server/tmux.mjs uses to separate
           # format fields is not surviving this tmux. Dump the raw bytes for a
           # few candidate separators so the fix is chosen on evidence.
+          # Replay the EXACT two queries src/server/tmux.mjs runs (same formats,
+          # including the @manta-* user options) and dump the raw bytes.
           node -e '
             const { execFileSync } = require("child_process");
-            const probe = (label, sep) => {
-              const out = execFileSync("tmux", ["list-sessions", "-F", `#{session_name}${sep}#{?session_attached,1,0}`], { encoding: "utf8" });
-              console.log(label, JSON.stringify(out));
-            };
-            probe("tab   ", "\t");
-            probe("unit  ", "\u001f");
-            probe("pipe  ", "|");
-            probe("dcolon", "::");
+            const FS = "\t";
+            const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
+            const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}`;
+            for (const [label, args] of [
+              ["list-sessions", ["list-sessions", "-F", sessFmt]],
+              ["list-windows ", ["list-windows", "-a", "-F", winFmt]],
+            ]) {
+              try {
+                console.log(label, JSON.stringify(execFileSync("tmux", args, { encoding: "utf8" })));
+              } catch (e) {
+                console.log(label, "FAILED", String(e.stderr ?? e.message).trim());
+              }
+            }
           ' || true
           echo "ok — server-side tmux works."
 
