@@ -29,6 +29,7 @@ import {
   _pooledOcRequest,
   discardBody,
   getProviders,
+  getDefaultModel,
 } from "./opencode.mjs";
 
 test("apiUrl targets local opencode port 4096", () => {
@@ -749,6 +750,104 @@ test("getProviders coerces a non-array connected[] to []", async () => {
     async () => {
       const out = await getProviders();
       assert.deepEqual(out.connected, []);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// getDefaultModel — picks the first connected provider with a default model.
+//
+// BET-320 follow-up: getDefaultModel used to inline its own `GET /provider`
+// fetch alongside `getProviders()`. The two paths were byte-identical for any
+// 2xx opencode response, but a future drift in defensive handling between
+// them would be a silent bug. The refactor routes getDefaultModel through
+// getProviders() so there is exactly one fetch site for /provider.
+// ---------------------------------------------------------------------------
+
+test("getDefaultModel returns the first connected provider's default", async () => {
+  await withMockFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          connected: ["anthropic", "openai"],
+          default: { anthropic: "claude-sonnet-4-6", openai: "gpt-5" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    async () => {
+      assert.deepEqual(
+        await getDefaultModel(),
+        { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+      );
+    },
+  );
+});
+
+test("getDefaultModel returns null when no connected provider has a default", async () => {
+  await withMockFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          connected: ["anthropic", "openai"],
+          default: {},
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    async () => {
+      assert.equal(await getDefaultModel(), null);
+    },
+  );
+});
+
+test("getDefaultModel skips connected providers with no recorded default", async () => {
+  // anthropic is connected but has no default; openai does. We expect
+  // openai's model — proves we iterate, not just take the first key.
+  await withMockFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          connected: ["anthropic", "openai"],
+          default: { openai: "gpt-5" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    async () => {
+      assert.deepEqual(
+        await getDefaultModel(),
+        { providerID: "openai", modelID: "gpt-5" },
+      );
+    },
+  );
+});
+
+test("getDefaultModel returns null on a non-2xx response", async () => {
+  await withMockFetch(
+    async () => new Response("server gone", { status: 503 }),
+    async () => {
+      assert.equal(await getDefaultModel(), null);
+    },
+  );
+});
+
+test("getDefaultModel returns null on a transport throw (never re-throws)", async () => {
+  await withMockFetch(
+    async () => { throw new Error("ECONNREFUSED"); },
+    async () => {
+      assert.equal(await getDefaultModel(), null);
+    },
+  );
+});
+
+test("getDefaultModel returns null when default is missing from the payload", async () => {
+  // `default` field absent — getProviders() returns { connected, default: undefined }.
+  await withMockFetch(
+    async () =>
+      new Response(
+        JSON.stringify({ connected: ["anthropic"] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    async () => {
+      assert.equal(await getDefaultModel(), null);
     },
   );
 });
