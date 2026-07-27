@@ -1,0 +1,619 @@
+{
+  "_about": "Single source of truth for canonical URLs, Open Graph, Twitter Card and JSON-LD blocks across every website page. Regenerate website/*.html with scripts/build-website-schema.mjs after editing this file. The script is idempotent: re-runs on identical input are byte-identical.",
+  "site": {
+    "url": "https://mantaui.com",
+    "name": "Manta UI",
+    "title": "Manta UI — self-hosted Claude Code for desktop and phone",
+    "description": "Self-hosted Claude Code and opencode on a Linux box or Mac you own. Full desktop and phone clients, push notifications, real tmux underneath.",
+    "ogImage": "https://mantaui.com/og.png",
+    "twitterHandle": "@mantaui"
+  },
+  "pages": {
+    "index.html": {
+      "title": "Manta UI — self-hosted Claude Code for desktop and phone",
+      "description": "Self-hosted Claude Code and opencode on a Linux box or Mac you own. Full desktop and phone clients, push notifications, real tmux underneath.",
+      "canonical": "https://mantaui.com/",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "SoftwareApplication",
+          "name": "Manta UI",
+          "url": "https://mantaui.com/",
+          "applicationCategory": "DeveloperApplication",
+          "operatingSystem": "Linux, macOS, iOS, Web",
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          },
+          "license": "https://opensource.org/licenses/MIT",
+          "description": "Self-hosted Claude Code and opencode on a Linux box or Mac you own. Full desktop and phone clients, push notifications, real tmux underneath.",
+          "softwareHelp": {
+            "@type": "CreativeWork",
+            "url": "https://mantaui.com/llms-install.md"
+          }
+        },
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Does the agent keep running if I close my laptop?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. The server runs on your box as a system service and your agents live in real tmux sessions. Every client is disposable, so you can close all of them and the work continues. Reconnect later and the full history is still there."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Do I need Tailscale, a VPN or port forwarding?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No, and you do not have to decide either. The installer checks whether Tailscale is already running on the box. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and a Let's Encrypt certificate. Either way there is nothing to port-forward and no tunnel to keep alive, and you can force either path if you prefer."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Can I really use Claude Code from my phone?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes, and the phone app is the same app as the desktop rather than a status viewer. You get the full transcript, live command output, approvals, dictation and file uploads, in a native iPhone app or any browser."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "I already SSH into a VPS with Termius. Why switch?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "You have already solved the part most tools get wrong, which is keeping the agent alive when you walk away. What you do not get is a readable transcript instead of a terminal UI, buttons to approve a command, or a notification when the agent stops and waits for you. Manta runs on the same box and you can still SSH in alongside it."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "What does it cost?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Nothing. Manta is free and open source. You pay whoever supplies your agent, so an Anthropic subscription or an API key, and you supply the box."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does my code leave my box?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. Transcripts, uploads, secrets and configuration stay on your machine. The only outbound traffic is your agent talking to its model provider, plus a small push payload carrying the session name if you turn on phone notifications."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Which agents does it work with?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Claude Code and opencode today. Anything that runs in a terminal works in terminal mode, and the chat panel is built on opencode."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Is this an alternative to Conductor or Orca?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "It overlaps with both, on a different bet. They run agents on your Mac and give you a window onto them. Manta runs agents on a box you own and gives every device the same window, so the work outlives whatever you are holding."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "vs-orca.html": {
+      "title": "Manta UI vs Orca: an honest comparison",
+      "description": "A fair side-by-side of Manta UI and Orca (onorca.dev) on architecture, mobile, remote access, permissions, diff review, agent runtimes, and licensing.",
+      "canonical": "https://mantaui.com/vs-orca",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Manta UI vs Orca", "item": "https://mantaui.com/vs-orca"}
+          ]
+        },
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Is Manta a fork of Orca?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships two."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does Manta run on any of Orca's agent runtimes?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. Manta runs Claude Code and opencode in a real tmux session on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Can Manta and Orca share a machine?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes, on a macOS box. They use different ports and different tmux sessions, so they do not interfere. On a Linux box the same applies; the desktop piece of Orca simply has no Linux desktop binary to launch there."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Why is Orca so much more mature?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Windows and Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Which one should I pick if my work runs locally?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Orca. Manta is for when the work needs to outlive the laptop, or when you want a phone client that can approve a command. If neither matters and your editor matters most, Orca's Monaco integration is the answer."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "vs-conductor.html": {
+      "title": "Manta UI vs Conductor: an honest comparison",
+      "description": "A fair side-by-side of Manta UI and Conductor (conductor.build) on architecture, platforms, sandboxing, diff review, the paid Cloud beta, and licensing.",
+      "canonical": "https://mantaui.com/vs-conductor",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Manta UI vs Conductor", "item": "https://mantaui.com/vs-conductor"}
+          ]
+        },
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Is Manta a fork of Conductor?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. They are separate products from separate teams. Manta is MIT and solo. Conductor is closed source, YC S24, and has raised $24M. Both run Claude Code in a chat panel."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Why is Conductor macOS only?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Per Conductor's own docs: not available for Windows or Linux yet. conductor.build/docs Manta's box runs on Linux or macOS today, which is the path to running agents on a server."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does Conductor's \"Cloud\" beta do what Manta does?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "It tries to, with restrictions. Conductor Cloud is in beta, requires the Pro tier, supports GitHub only, and caps you at 10 workspaces. Manta runs on your own box, is free, supports any agent runtime that ships a CLI, and has no workspace cap."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Is Conductor more secure than Manta?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No, and Conductor says so itself: Agents run directly on your system without sandboxing and Workspace isolation is development isolation, not a security boundary. conductor.build/docs/security Manta's default is that every command shows up as a permission card you answer."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Which one should I pick if I edit heavily and run on macOS?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Conductor. Its Mac-native editor, diff review with inline comments back to the agent, and Linear/GitHub depth are the strongest parts of its product. Manta is for when the work has to outlive the laptop, or when you want a phone client."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "vs-ssh-tmux.html": {
+      "title": "Manta UI vs Termius + SSH: an honest comparison",
+      "description": "A fair side-by-side of Manta UI and the incumbent Termius-over-SSH stack for running Claude Code on your own VPS.",
+      "canonical": "https://mantaui.com/vs-ssh-tmux",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Manta UI vs SSH and tmux", "item": "https://mantaui.com/vs-ssh-tmux"}
+          ]
+        },
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Does Manta replace SSH?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. SSH still works on the same box. You can ssh into the box, attach to the same tmux session Manta is steering, and continue from the terminal."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Do I need to give up Termius?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. Termius keeps connecting to the same box. The chat panel and the phone client are the parts that change. Most people we expect to talk to run both: Termius for editor-heavy work, Manta for chat and phone."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does Manta work alongside Claude Code?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. Manta runs Claude Code in a tmux session on the box. The same session can be attached from Termius or steered from Manta's chat panel. The model provider stays the same."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Will Manta's installer break my existing SSH setup?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. The installer adds a system service (manta-server) and either opens no public port (Tailscale path) or one HTTPS port (Caddy + LE on a per-box hostname). It does not change your SSH config, your authorized keys, or your sshd settings."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Should I add Manta or stick with my current setup?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "If your current setup covers your needs, keep it. Manta is for the cases SSH does not cover: a phone app that can actually approve a command, a notification when the agent gets stuck, dictation, file upload, and tools the agent can use between turns."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "claude-code-web-ui.html": {
+      "title": "Claude Code web UI: a self-hosted client",
+      "description": "A self-hosted web UI for Claude Code that runs on your own box, with phone parity and push notifications.",
+      "canonical": "https://mantaui.com/claude-code-web-ui",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Claude Code web UI", "item": "https://mantaui.com/claude-code-web-ui"}
+          ]
+        },
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Does the web UI work in every browser?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. The browser client is a standard React app served by the box. Chrome, Safari, Firefox and Edge all work. Mobile browsers on iOS and other phones work too. There is no extension to install."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Do I need to expose the box to the internet?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. The installer detects whether Tailscale is already running and chooses a tailnet path when it can. Nothing is published to the internet in that case. If you do not run Tailscale, the installer provisions a hostname and a Let's Encrypt certificate for you, and that is the only thing that is public."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "How is this different from opening Claude Code's local dev server?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Claude Code's local dev server runs on your laptop and dies when the laptop closes. Manta's web UI is served from a server that runs on a box you own, as a system service, and the agent lives in a real tmux session there. The web UI is a client. Close every browser tab and the work continues, because the agent never lived in the tab."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does the agent keep running if I close the browser?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. The browser is a client to the box, not the place where the agent runs. Close the tab, shut the laptop, lose the connection. When you open a browser again and pair the device, the same session is there with the full history. The remote page describes the same property from the server end."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "claude-code-mobile.html": {
+      "title": "Claude Code on mobile: full parity iPhone",
+      "description": "Run Claude Code from your phone with full transcript, live tool output, dictation and one-tap approvals.",
+      "canonical": "https://mantaui.com/claude-code-mobile",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Claude Code on mobile", "item": "https://mantaui.com/claude-code-mobile"}
+          ]
+        },
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Is the phone app a viewer or a real client?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "A real client. The iPhone app is the same React code as the desktop, packaged with Capacitor. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does Manta have a phone app for other phones?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No native app beyond iOS. The browser client works on every phone and serves the same app. You can pin the box's URL to the home screen. The remote page covers the part that does not depend on a phone form factor."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Do notifications wake up the phone even when I am at my desk?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. Manta's push routing only sends to the phone when the desktop is not foreground or active. At your desk, the desktop rings. Away from it, the phone rings. Blocking asks like a permission request ring every device at once, because the agent is stuck until you answer."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Can I dictate a reply instead of typing on the phone keyboard?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. Hold the mic, speak, release. The same command classifier the desktop uses picks dictation from a spoken question. The text lands in the composer ready to send or edit."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does the phone talk to my laptop or straight to the box?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Straight to the box. The phone pairs with the box directly over HTTPS, the same way the desktop does. Your laptop does not need to be open. Closing the laptop does not drop the phone."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "claude-code-remote.html": {
+      "title": "Claude Code remote: run it on a server you own",
+      "description": "Run Claude Code on a VPS or home server. Real tmux, push notifications, and the work outlives the laptop.",
+      "canonical": "https://mantaui.com/claude-code-remote",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Claude Code remote", "item": "https://mantaui.com/claude-code-remote"}
+          ]
+        },
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Can I run Claude Code on a VPS?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. The installer runs on Debian, Ubuntu and the usual Linux suspects, with Caddy and a Let's Encrypt certificate when you need public ingress. The agent runs in a real tmux session on the box, so it outlives every device that connects to it."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Do I have to forward a port?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. If Tailscale is already running on the box, devices connect over your tailnet and nothing is published to the internet. If Tailscale is not running, the installer provisions a hostname and a certificate, which is the only public surface. You never forward a port by hand."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "What happens when I close my laptop?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you open a browser or pair your phone again, the same session is there with the full history. The mobile page covers what the phone sees when this happens."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does this work without a public DNS record?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. Pick the tailnet path at install time and the box has no public DNS, no certificate, and no open port. Devices reach it over your tailnet at a private IPv4."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Is this self-hosted Claude Code?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes, and the install script is auditable before you pipe it into bash. The repository is MIT licensed and the server runs on hardware you control. The open source page covers what that means in practice."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "open-source.html": {
+      "title": "Manta is open source and self-hosted",
+      "description": "Manta is MIT licensed, self-hosted, and has no account, no telemetry and no seat count.",
+      "canonical": "https://mantaui.com/open-source",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Open source", "item": "https://mantaui.com/open-source"}
+          ]
+        },
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Where is the source code?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "On GitHub at github.com/antoinedc/MantaUI. The server, the Electron desktop app, the React renderer, the phone client and the install script all live in the same repository."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "What is the licence?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "MIT. The full text is in the LICENSE file at the root of the repository. It is permissive: fork it, modify it, ship a derivative, keep the copyright notice."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "What stays on my box?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Everything. Transcripts, uploads, secrets, configuration, schedules, peer metadata, ingress choice. The only outbound traffic is your agent talking to its model provider, and a small push payload carrying the session name when you turn on phone notifications."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Can I run my own gateway or push provider?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. Fork the repo, point the push routing at your own gateway, edit the manifest. The push and webhook modules are designed to be replaced. The same goes for the install script, the installer, and the desktop app."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does the box phone home?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Only to your model provider and to APNs, when you have phone notifications turned on. There is no analytics SDK, no telemetry beacon, no usage ping. The pricing page covers what you actually pay for."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "pricing.html": {
+      "title": "Manta pricing: free, MIT, self-hosted",
+      "description": "Manta is free and open source. You pay your model provider and supply the box. There are no tiers and no seat count.",
+      "canonical": "https://mantaui.com/pricing",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Pricing", "item": "https://mantaui.com/pricing"}
+          ]
+        },
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "Is Manta really free?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier, no Pro feature, no in-app purchase, no upgrade prompt. You pay your model provider and you supply the box."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "What does it cost to run?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Whatever you spend on the model and whatever you spend on the box. A $5 VPS is enough to host a single agent for a single user. Most teams reuse hardware they already have, which means the marginal cost is the model spend."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Will there be paid tiers in the future?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. The product is the binary on GitHub. Anything that lands in main lands in your box when you update. There is no paid feature in the roadmap, and there are no plans to add one."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does Manta take a cut of my API spend?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. Manta does not bill you, does not see your API spend, and does not sit between you and your model provider. You give the agent your key, the agent talks to the provider directly, and the bill comes from the provider."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "What happens if I stop paying for the box?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "The server stops. The data is plain text on the disk, so a reinstall on a new box picks up where the old one left off, and a permanent shutdown is just an uninstall. There is nothing to migrate off and no vendor to call. The open source page covers the part that makes this possible."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "privacy.html": {
+      "title": "Privacy — Manta UI",
+      "description": "What Manta UI stores on your box and on the push gateway, who sees it, and how to delete it.",
+      "canonical": "https://mantaui.com/privacy",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Privacy", "item": "https://mantaui.com/privacy"}
+          ]
+        }
+      ]
+    },
+    "terms.html": {
+      "title": "Terms — Manta UI",
+      "description": "Terms of use for the Manta UI desktop client, mobile client, and operated push gateway.",
+      "canonical": "https://mantaui.com/terms",
+      "jsonLd": [
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://mantaui.com/"},
+            {"@type": "ListItem", "position": 2, "name": "Terms", "item": "https://mantaui.com/terms"}
+          ]
+        }
+      ]
+    }
+  }
+}

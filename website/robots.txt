@@ -1,0 +1,80 @@
+# robots.txt — mantaui.com
+#
+# Allow all major crawlers (including AI training crawlers, search engines, and
+# SEO/analytics tools). We do not block Ahrefs or Semrush because doing so costs
+# us our own backlink visibility for the cost of nothing.
+#
+# Content-Signal declares that this site's content is available for AI training,
+# search indexing, and AI input (RAG, summarisation). The header is supported by
+# a growing set of crawlers — see https://contentsignal.info/ for the current
+# registry. Declaring it costs nothing and removes the guesswork for the next
+# crawler's compliance check.
+#
+# Sitemap and llms indexes are referenced explicitly so every well-behaved
+# crawler can find them without re-deriving the layout.
+
+User-agent: *
+Allow: /
+
+# AI-specific user agents — explicit Allow (overrides any future deny).
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-User
+Allow: /
+
+User-agent: Anthropic-AI
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: cohere-ai
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+User-agent: Amazonbot
+Allow: /
+
+# SEO/analytics — do not block. Blocking costs backlink visibility.
+User-agent: AhrefsBot
+Allow: /
+
+User-agent: SemrushBot
+Allow: /
+
+User-agent: SemrushBot-SA
+Allow: /
+
+User-agent: MJ12bot
+Allow: /
+
+User-agent: DotBot
+Allow: /
+
+Sitemap: https://mantaui.com/sitemap.xml
+
+# GEO layer — referenced explicitly so every well-behaved crawler can locate
+# the LLM-readable indexes without guessing.
+# llms.txt: https://llmstxt.org
+# llms-full.txt: full corpus as markdown
+# /.well-known/agent-skills/: Agent Skills index (https://agentskills.io)
+
+Content-Signal: ai-train=yes, search=yes, ai-input=yes

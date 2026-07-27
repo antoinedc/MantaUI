@@ -1,0 +1,15 @@
+{
+  "_about": "Agent Skills index for https://mantaui.com. The Agent Skills format is described at https://agentskills.io — a YAML frontmatter block (name, description, license) followed by Markdown body. Each skill here is a discrete capability a coding agent can pick up at runtime.",
+  "version": "1",
+  "skills": [
+    {
+      "name": "manta",
+      "description": "Install Manta UI, a self-hosted Claude Code and opencode client, on a user-owned Linux box or Mac. Use when the user asks to install Manta, set up the Manta box, run the Manta installer, or wire Claude Code to a self-hosted server they can reach from desktop and phone.",
+      "license": "MIT",
+      "path": "/.well-known/agent-skills/manta/SKILL.md",
+      "url": "https://mantaui.com/.well-known/agent-skills/manta/SKILL.md",
+      "source": "https://github.com/antoinedc/MantaUI/blob/main/llms-install.md",
+      "canonical_url": "https://mantaui.com/.well-known/agent-skills/manta/SKILL.md"
+    }
+  ]
+}

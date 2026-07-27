@@ -27,6 +27,94 @@
 .repoc .rmeta b{color:var(--text-primary);font-weight:600}
 
 </style>
+
+<!-- BEGIN:head-meta -->
+<link rel="canonical" href="https://mantaui.com/open-source">
+<meta property="og:title" content="Manta is open source and self-hosted">
+<meta property="og:description" content="Manta is MIT licensed, self-hosted, and has no account, no telemetry and no seat count.">
+<meta property="og:url" content="https://mantaui.com/open-source">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://mantaui.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Manta UI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Manta is open source and self-hosted">
+<meta name="twitter:description" content="Manta is MIT licensed, self-hosted, and has no account, no telemetry and no seat count.">
+<meta name="twitter:image" content="https://mantaui.com/og.png">
+<meta name="twitter:site" content="@mantaui">
+<!-- END:head-meta -->
+
+<!-- BEGIN:head-schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": "https://mantaui.com/"
+    },
+    {
+      "@type": "ListItem",
+      "position": 2,
+      "name": "Open source",
+      "item": "https://mantaui.com/open-source"
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Where is the source code?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "On GitHub at github.com/antoinedc/MantaUI. The server, the Electron desktop app, the React renderer, the phone client and the install script all live in the same repository."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What is the licence?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "MIT. The full text is in the LICENSE file at the root of the repository. It is permissive: fork it, modify it, ship a derivative, keep the copyright notice."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What stays on my box?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Everything. Transcripts, uploads, secrets, configuration, schedules, peer metadata, ingress choice. The only outbound traffic is your agent talking to its model provider, and a small push payload carrying the session name when you turn on phone notifications."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I run my own gateway or push provider?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Fork the repo, point the push routing at your own gateway, edit the manifest. The push and webhook modules are designed to be replaced. The same goes for the install script, the installer, and the desktop app."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does the box phone home?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Only to your model provider and to APNs, when you have phone notifications turned on. There is no analytics SDK, no telemetry beacon, no usage ping. The pricing page covers what you actually pay for."
+      }
+    }
+  ]
+}
+</script>
+<!-- END:head-schema -->
 </head>
 <body>
 

@@ -173,6 +173,119 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 
 /* footer new layout (.fgrid, .fbot, .fbrand) — see /site.css */
 </style>
+
+<!-- BEGIN:head-meta -->
+<link rel="canonical" href="https://mantaui.com/">
+<meta property="og:title" content="Manta UI — self-hosted Claude Code for desktop and phone">
+<meta property="og:description" content="Self-hosted Claude Code and opencode on a Linux box or Mac you own. Full desktop and phone clients, push notifications, real tmux underneath.">
+<meta property="og:url" content="https://mantaui.com/">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://mantaui.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Manta UI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Manta UI — self-hosted Claude Code for desktop and phone">
+<meta name="twitter:description" content="Self-hosted Claude Code and opencode on a Linux box or Mac you own. Full desktop and phone clients, push notifications, real tmux underneath.">
+<meta name="twitter:image" content="https://mantaui.com/og.png">
+<meta name="twitter:site" content="@mantaui">
+<!-- END:head-meta -->
+
+<!-- BEGIN:head-schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Manta UI",
+  "url": "https://mantaui.com/",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS, iOS, Web",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "license": "https://opensource.org/licenses/MIT",
+  "description": "Self-hosted Claude Code and opencode on a Linux box or Mac you own. Full desktop and phone clients, push notifications, real tmux underneath.",
+  "softwareHelp": {
+    "@type": "CreativeWork",
+    "url": "https://mantaui.com/llms-install.md"
+  }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Does the agent keep running if I close my laptop?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. The server runs on your box as a system service and your agents live in real tmux sessions. Every client is disposable, so you can close all of them and the work continues. Reconnect later and the full history is still there."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Do I need Tailscale, a VPN or port forwarding?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No, and you do not have to decide either. The installer checks whether Tailscale is already running on the box. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and a Let's Encrypt certificate. Either way there is nothing to port-forward and no tunnel to keep alive, and you can force either path if you prefer."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I really use Claude Code from my phone?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes, and the phone app is the same app as the desktop rather than a status viewer. You get the full transcript, live command output, approvals, dictation and file uploads, in a native iPhone app or any browser."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "I already SSH into a VPS with Termius. Why switch?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "You have already solved the part most tools get wrong, which is keeping the agent alive when you walk away. What you do not get is a readable transcript instead of a terminal UI, buttons to approve a command, or a notification when the agent stops and waits for you. Manta runs on the same box and you can still SSH in alongside it."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What does it cost?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Nothing. Manta is free and open source. You pay whoever supplies your agent, so an Anthropic subscription or an API key, and you supply the box."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does my code leave my box?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Transcripts, uploads, secrets and configuration stay on your machine. The only outbound traffic is your agent talking to its model provider, plus a small push payload carrying the session name if you turn on phone notifications."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Which agents does it work with?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Claude Code and opencode today. Anything that runs in a terminal works in terminal mode, and the chat panel is built on opencode."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is this an alternative to Conductor or Orca?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "It overlaps with both, on a different bet. They run agents on your Mac and give you a window onto them. Manta runs agents on a box you own and gives every device the same window, so the work outlives whatever you are holding."
+      }
+    }
+  ]
+}
+</script>
+<!-- END:head-schema -->
 </head>
 <body>
 

@@ -33,6 +33,94 @@
 .arch-card .hl{color:var(--cyan-400)}.arch-card .gr{color:var(--green-500)}.arch-card .dm{color:var(--slate-500)}
 
 </style>
+
+<!-- BEGIN:head-meta -->
+<link rel="canonical" href="https://mantaui.com/vs-conductor">
+<meta property="og:title" content="Manta UI vs Conductor: an honest comparison">
+<meta property="og:description" content="A fair side-by-side of Manta UI and Conductor (conductor.build) on architecture, platforms, sandboxing, diff review, the paid Cloud beta, and licensing.">
+<meta property="og:url" content="https://mantaui.com/vs-conductor">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://mantaui.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Manta UI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Manta UI vs Conductor: an honest comparison">
+<meta name="twitter:description" content="A fair side-by-side of Manta UI and Conductor (conductor.build) on architecture, platforms, sandboxing, diff review, the paid Cloud beta, and licensing.">
+<meta name="twitter:image" content="https://mantaui.com/og.png">
+<meta name="twitter:site" content="@mantaui">
+<!-- END:head-meta -->
+
+<!-- BEGIN:head-schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": "https://mantaui.com/"
+    },
+    {
+      "@type": "ListItem",
+      "position": 2,
+      "name": "Manta UI vs Conductor",
+      "item": "https://mantaui.com/vs-conductor"
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is Manta a fork of Conductor?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. They are separate products from separate teams. Manta is MIT and solo. Conductor is closed source, YC S24, and has raised $24M. Both run Claude Code in a chat panel."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why is Conductor macOS only?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Per Conductor's own docs: not available for Windows or Linux yet. conductor.build/docs Manta's box runs on Linux or macOS today, which is the path to running agents on a server."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Conductor's \"Cloud\" beta do what Manta does?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "It tries to, with restrictions. Conductor Cloud is in beta, requires the Pro tier, supports GitHub only, and caps you at 10 workspaces. Manta runs on your own box, is free, supports any agent runtime that ships a CLI, and has no workspace cap."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is Conductor more secure than Manta?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No, and Conductor says so itself: Agents run directly on your system without sandboxing and Workspace isolation is development isolation, not a security boundary. conductor.build/docs/security Manta's default is that every command shows up as a permission card you answer."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Which one should I pick if I edit heavily and run on macOS?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Conductor. Its Mac-native editor, diff review with inline comments back to the agent, and Linear/GitHub depth are the strongest parts of its product. Manta is for when the work has to outlive the laptop, or when you want a phone client."
+      }
+    }
+  ]
+}
+</script>
+<!-- END:head-schema -->
 </head>
 <body>
 

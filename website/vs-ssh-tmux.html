@@ -33,6 +33,94 @@
 .arch-card .hl{color:var(--cyan-400)}.arch-card .gr{color:var(--green-500)}.arch-card .dm{color:var(--slate-500)}
 
 </style>
+
+<!-- BEGIN:head-meta -->
+<link rel="canonical" href="https://mantaui.com/vs-ssh-tmux">
+<meta property="og:title" content="Manta UI vs Termius + SSH: an honest comparison">
+<meta property="og:description" content="A fair side-by-side of Manta UI and the incumbent Termius-over-SSH stack for running Claude Code on your own VPS.">
+<meta property="og:url" content="https://mantaui.com/vs-ssh-tmux">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://mantaui.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Manta UI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Manta UI vs Termius + SSH: an honest comparison">
+<meta name="twitter:description" content="A fair side-by-side of Manta UI and the incumbent Termius-over-SSH stack for running Claude Code on your own VPS.">
+<meta name="twitter:image" content="https://mantaui.com/og.png">
+<meta name="twitter:site" content="@mantaui">
+<!-- END:head-meta -->
+
+<!-- BEGIN:head-schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": "https://mantaui.com/"
+    },
+    {
+      "@type": "ListItem",
+      "position": 2,
+      "name": "Manta UI vs SSH and tmux",
+      "item": "https://mantaui.com/vs-ssh-tmux"
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Does Manta replace SSH?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. SSH still works on the same box. You can ssh into the box, attach to the same tmux session Manta is steering, and continue from the terminal."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Do I need to give up Termius?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Termius keeps connecting to the same box. The chat panel and the phone client are the parts that change. Most people we expect to talk to run both: Termius for editor-heavy work, Manta for chat and phone."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Manta work alongside Claude Code?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Manta runs Claude Code in a tmux session on the box. The same session can be attached from Termius or steered from Manta's chat panel. The model provider stays the same."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Will Manta's installer break my existing SSH setup?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. The installer adds a system service (manta-server) and either opens no public port (Tailscale path) or one HTTPS port (Caddy + LE on a per-box hostname). It does not change your SSH config, your authorized keys, or your sshd settings."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Should I add Manta or stick with my current setup?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "If your current setup covers your needs, keep it. Manta is for the cases SSH does not cover: a phone app that can actually approve a command, a notification when the agent gets stuck, dictation, file upload, and tools the agent can use between turns."
+      }
+    }
+  ]
+}
+</script>
+<!-- END:head-schema -->
 </head>
 <body>
 
