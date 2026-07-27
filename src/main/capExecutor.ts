@@ -32,7 +32,7 @@
 // handler used — just driven by manifest steps + a per-step env built via
 // buildEnv().
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createBusConsumer, type BusConsumer } from "./busConsumer.js";
 import {
   parseManifest,
@@ -54,7 +54,7 @@ import {
   watch as fsWatch,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { AppConfig } from "../shared/types.js";
 
 // ---------------------------------------------------------------------------
@@ -81,9 +81,13 @@ const PLUGIN_WRITE = "plugin.write";
 // and just report no plugins).
 const PLUGINS_DIR = join(homedir(), ".manta", "plugins");
 
-// GUI-launched Electron apps don't inherit the user's shell PATH; prepend
-// Homebrew paths so npm/npx/pod are visible (otherwise spawn fails ENOENT).
-const PATH_PREFIX = "/opt/homebrew/bin:/usr/local/bin:";
+// macOS-only PATH prefix. GUI-launched Electron apps don't inherit the
+// user's shell PATH on macOS, so Homebrew binaries (npm/npx/pod) are
+// invisible to spawn() — prepend them so the spawn succeeds. On every
+// other platform we leave PATH alone: Windows uses `;` as the separator
+// (so a POSIX prefix corrupts PATH), and on Linux the prefix paths
+// usually don't exist anyway.
+const DARWIN_PATH_PREFIX = ["/opt/homebrew/bin", "/usr/local/bin"];
 
 // ---------------------------------------------------------------------------
 // Per-job context (mirrors v1's CapCtx shape so the runner reads the same)
@@ -101,12 +105,12 @@ export type CapCtx = {
   jobId: string;
   log(line: string): void;
   // Spawn helper — argv array, never a shell string. PATH is pre-patched by
-  // capExecutor so Homebrew/nvm binaries are visible to this GUI app.
+  // capExecutor via patchPath (macOS prepends Homebrew paths so this GUI
+  // app sees them; every other platform leaves PATH alone).
   // Optional `env` is layered ON TOP of the executor's PATH patch — callers
   // (the manifest runner) pass `buildEnv()`'s result so manifest `env:` and
   // `MANTA_INPUT_*` variables reach the spawned shell. The PATH patch is
-  // reapplied to the supplied env (its PATH is prepended with PATH_PREFIX)
-  // so Homebrew visibility survives.
+  // reapplied to the supplied env so Homebrew visibility survives on macOS.
   exec(
     cmd: string,
     args: string[],
@@ -810,6 +814,102 @@ async function postDone(
 // ctx.exec — argv spawn with PATH patch + capture + abort handling.
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns a copy of `baseEnv` with the platform's PATH prefix applied.
+ *
+ * On macOS the prefix is `[/opt/homebrew/bin, /usr/local/bin]`, joined
+ * with `path.delimiter` and prepended to the existing PATH — GUI-launched
+ * Electron apps don't inherit the login shell's PATH, so Homebrew
+ * binaries are invisible to spawn() without this. On every other platform
+ * the function leaves PATH byte-identical: Windows uses `;` as the
+ * separator so a POSIX prefix would corrupt PATH for every child, and
+ * even on Linux the prefix paths usually don't exist. The case matters
+ * on Windows too — Node usually surfaces the variable as `Path`, and
+ * writing a `PATH` key next to an existing `Path` key produces an env
+ * with both, which one the child sees is undefined.
+ */
+export function patchPath(
+  baseEnv: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): NodeJS.ProcessEnv {
+  if (platform !== "darwin") {
+    // No PATH write at all off macOS — see comment above.
+    return { ...baseEnv };
+  }
+  const existing = baseEnv.PATH ?? process.env.PATH ?? "";
+  return {
+    ...baseEnv,
+    PATH: [...DARWIN_PATH_PREFIX, existing].join(delimiter),
+  };
+}
+
+/**
+ * Builds the human-readable error string used at the two spawn failure
+ * sites (synchronous throw around `spawn`, and the child's `error` event).
+ * macOS keeps the existing Homebrew wording — nvm-only Node installs are
+ * invisible to GUI apps there. Other platforms get a generic "check that
+ * it is installed and on PATH" so a Windows/Linux user never gets
+ * instructed to install something via a tool that doesn't exist on
+ * their OS.
+ */
+export function spawnErrorMessage(
+  cmd: string,
+  platform: NodeJS.Platform,
+  detail: string,
+): string {
+  if (platform === "darwin") {
+    return (
+      `${cmd} not found on PATH — install it via Homebrew ` +
+      `(nvm-only node installs are not visible to GUI apps): ${detail}`
+    );
+  }
+  return `${cmd} could not be started — check that it is installed and on PATH: ${detail}`;
+}
+
+/**
+ * Abort a spawned child. On POSIX sends SIGTERM then SIGKILL after
+ * `graceMs` (today's behaviour, just extracted). On Windows Node maps
+ * `child.kill()` onto `TerminateProcess` for the direct child only —
+ * since every step spawns a shell, killing it leaves the compiler or
+ * installer it launched running forever, exactly when the executor's
+ * 25-minute job timeout fires. taskkill /T walks the whole process tree.
+ * No grace period: Windows has no graceful equivalent and inventing one
+ * would be a second code path. The spawn's outcome is ignored — the
+ * process may already be gone, and a failure here must never reject.
+ */
+export function killTree(
+  child: ChildProcess,
+  platform: NodeJS.Platform,
+  graceMs: number,
+): void {
+  if (platform === "win32") {
+    if (child.pid === undefined) return;
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+      }).on("error", () => {});
+    } catch {
+      /* already dead */
+    }
+    return;
+  }
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    /* already dead */
+  }
+  const killTimer = setTimeout(() => {
+    if (child.exitCode === null) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already dead */
+      }
+    }
+  }, graceMs);
+  killTimer.unref?.();
+}
+
 // Exported for tests — `src/main/capExecutor.test.ts` spawns a real /bin/sh
 // through makeExec to assert that opts.env reaches the child (BET-210).
 // Not part of the renderer/IPC surface; main-process-only.
@@ -817,6 +917,11 @@ export function makeExec(
   signal: AbortSignal,
   logLine: (line: string) => void,
 ): CapCtx["exec"] {
+  // Platform is read ONCE here and threaded into the three pure helpers
+  // (patchPath, spawnErrorMessage, killTree). The body below does not
+  // read process.platform — that's what lets the helpers be unit-tested
+  // for "darwin" / "linux" / "win32" from a Linux CI runner.
+  const platform = process.platform;
   return (cmd, args, opts) =>
     new Promise((resolve, reject) => {
       const cwd = opts?.cwd;
@@ -827,57 +932,29 @@ export function makeExec(
       let child: ReturnType<typeof spawn>;
       try {
         // Use the caller-supplied env (manifest + inputs) when provided; fall
-        // back to process.env. Either way, the PATH patch is re-applied so
-        // Homebrew/nvm binaries stay visible to this GUI-launched process.
+        // back to process.env. Either way, patchPath is re-applied so the
+        // spawn's PATH matches the platform's expectations (Homebrew on
+        // macOS, untouched everywhere else).
         // `buildEnv` already includes process.env + manifest env + inputs
         // + MANTA_PLUGIN/MANTA_JOB_ID, so passing it here is what makes the
         // shell see $MANTA_INPUT_* / $WORKSPACE / etc. in `run:` scripts.
         const baseEnv = opts?.env ?? process.env;
         child = spawn(cmd, args, {
           cwd,
-          env: {
-            ...baseEnv,
-            PATH: PATH_PREFIX + (baseEnv.PATH ?? process.env.PATH ?? ""),
-          },
+          env: patchPath(baseEnv, platform),
           signal,
         });
       } catch (e) {
-        reject(
-          new Error(
-            `${cmd} not found on PATH — install it via Homebrew ` +
-              `(nvm-only node installs are not visible to GUI apps): ` +
-              (e instanceof Error ? e.message : String(e)),
-          ),
-        );
+        reject(new Error(spawnErrorMessage(cmd, platform, e instanceof Error ? e.message : String(e))));
         return;
       }
 
       child.on("error", (e) => {
-        reject(
-          new Error(
-            `${cmd} not found on PATH — install it via Homebrew ` +
-              `(nvm-only node installs are not visible to GUI apps): ${e.message}`,
-          ),
-        );
+        reject(new Error(spawnErrorMessage(cmd, platform, e.message)));
       });
 
       const onAbort = () => {
-        if (child.exitCode !== null) return;
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          /* already dead */
-        }
-        const killTimer = setTimeout(() => {
-          if (child.exitCode === null) {
-            try {
-              child.kill("SIGKILL");
-            } catch {
-              /* already dead */
-            }
-          }
-        }, KILL_GRACE_MS);
-        killTimer.unref?.();
+        killTree(child, platform, KILL_GRACE_MS);
       };
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });

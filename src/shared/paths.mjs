@@ -12,6 +12,7 @@
 // separate names for now to minimize churn, but still route through here.
 
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 export const STATE_DIRNAME = ".manta";
 export const UPLOAD_DIRNAME = ".manta-uploads";
@@ -21,11 +22,14 @@ export const SECRETS_DIRNAME = ".manta-secrets";
 // Leading `~` → os.homedir(); `~/foo` → `<homedir>/foo`. Other strings pass
 // through unchanged. Single source of truth — three copies of this used to
 // live in tmux.mjs, opencode.mjs and pluginManifest.mjs.
+//
+// Uses `path.join` (not string concat) so the result uses the platform's
+// native separator — byte-identical to the old behaviour on POSIX, and
+// correctly avoids `C:\Users\x/foo` mixed separators on Windows.
 export function expandTilde(p) {
   if (typeof p !== "string" || !p) return p;
   if (p === "~") return homedir();
-  if (p.startsWith("~/") || p.startsWith("~\\")) {
-    return homedir() + p.slice(1);
-  }
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  if (p.startsWith("~\\")) return join(homedir(), p.slice(2));
   return p;
 }

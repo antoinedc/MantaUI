@@ -1,15 +1,33 @@
-// Tests for src/main/capExecutor.ts — the Mac-side plugin executor.
+// Tests for src/main/capExecutor.ts — the desktop-side plugin executor.
 //
-// BET-210 regression: ctx.exec was dropping opts.env at the spawn boundary,
-// so manifest `env:` and `MANTA_INPUT_*` never reached the `run:` shell.
-// These tests spawn a real /bin/sh through the public `makeExec` helper
-// (re-exported for testing) and assert the env actually crosses the spawn
-// boundary. No mocks — the whole point of the bug is that env must reach
-// the child process, and the only honest assertion is to look at the
-// child's own stdout.
+// Three concerns live here:
+//
+// 1. BET-210 regression: ctx.exec was dropping opts.env at the spawn
+//    boundary, so manifest `env:` and `MANTA_INPUT_*` never reached the
+//    `run:` shell. These tests spawn a real /bin/sh through the public
+//    `makeExec` helper and assert the env actually crosses the spawn
+//    boundary. No mocks — the whole point of the bug is that env must
+//    reach the child process, and the only honest assertion is to look at
+//    the child's own stdout.
+//
+// 2. BET-327: the three pure helpers that the executor reads process.platform
+//    into ONCE and threads down — `patchPath`, `spawnErrorMessage`,
+//    `killTree`. Tests assert each platform branch without spawning a real
+//    child where unnecessary; `killTree` for `linux` uses a fake child to
+//    capture the SIGTERM call without touching the real process tree.
+//
+// 3. Compile-time surface: `CapCtx.exec` opts must include `env`, and
+//    supplying it must still pass through at runtime.
 
-import { describe, it, expect } from "vitest";
-import { makeExec, type CapCtx } from "./capExecutor.js";
+import { describe, it, expect, vi } from "vitest";
+import {
+  makeExec,
+  patchPath,
+  spawnErrorMessage,
+  killTree,
+  type CapCtx,
+} from "./capExecutor.js";
+import type { ChildProcess } from "node:child_process";
 
 // Shared abort signal that never fires — tests rely on the spawn exiting
 // quickly under their own /bin/sh -c command. If it doesn't, vitest's
@@ -71,20 +89,20 @@ describe("capExecutor — makeExec env passthrough (BET-210)", () => {
     expect(r.stdout).toBe(process.env.HOME ?? "");
   });
 
-  it("re-applies the PATH prefix onto opts.env so Homebrew stays visible", async () => {
+  it("a caller-supplied PATH in opts.env reaches the child unmodified on the CI platform", async () => {
+    // CI runs on Linux, where patchPath deliberately leaves PATH alone
+    // (no Homebrew prefix, no extra key). Asserting the exact bytes here
+    // pins the "POSIX CI / Windows behavior parity" promise: what the
+    // caller put in opts.env.PATH is what the child sees, byte-identical.
     const exec = makeExec(signal, noop);
-    // Even when the caller supplies its own PATH (e.g. buildEnv() inherits
-    // process.env.PATH), the Homebrew PATH_PREFIX must still be prepended.
-    // We assert by checking that PATH starts with PATH_PREFIX; exact tail
-    // is environment-dependent.
+    const callerPath = "/usr/bin:/bin";
     const r = await exec(
       "/bin/sh",
       ["-c", "printf '%s' \"$PATH\""],
-      { env: { PATH: "/usr/bin:/bin" } },
+      { env: { PATH: callerPath } },
     );
     expect(r.code).toBe(0);
-    expect(r.stdout.startsWith("/opt/homebrew/bin:/usr/local/bin:")).toBe(true);
-    expect(r.stdout.endsWith("/usr/bin:/bin")).toBe(true);
+    expect(r.stdout).toBe(callerPath);
   });
 
   it("exposes env on the CapCtx exec opts type (compile-time + runtime)", async () => {
@@ -101,5 +119,108 @@ describe("capExecutor — makeExec env passthrough (BET-210)", () => {
       { env: { MANTA_INPUT_PROOF: "yes" } },
     );
     expect(r.stdout).toBe("yes");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// patchPath — pure, the executor's only PATH mutation. Three platforms.
+// ---------------------------------------------------------------------------
+
+describe("capExecutor — patchPath (BET-327)", () => {
+  it("prepends the Homebrew paths on darwin and preserves the original tail", () => {
+    const out = patchPath({ PATH: "/usr/bin:/bin", FOO: "bar" }, "darwin");
+    expect(out.FOO).toBe("bar");
+    // Exact prefix shape matters: Homebrew first, then /usr/local/bin,
+    // then the caller's PATH tail. Don't accept any reordering.
+    expect(out.PATH).toBe("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+  });
+
+  it("uses the platform delimiter on darwin so the resulting PATH is well-formed everywhere", () => {
+    // path.delimiter is ":" on POSIX and ";" on Windows — the helper must
+    // use it, not hardcode ":", otherwise the resulting string would be
+    // parseable only on POSIX. On the Linux CI runner we can only verify
+    // the POSIX shape here; the Windows delimiter is exercised by the
+    // typecheck (the function's body uses `delimiter`, not ":").
+    const out = patchPath({ PATH: "" }, "darwin");
+    // Both prefix entries must appear, in the canonical order, separated
+    // by the platform delimiter. On Linux the delimiter is ":".
+    expect(out.PATH ?? "").toBe("/opt/homebrew/bin:/usr/local/bin:");
+  });
+
+  it("returns the env byte-identical on linux and does not introduce a new PATH key", () => {
+    const env = { PATH: "/usr/bin:/bin", FOO: "bar" };
+    const out = patchPath(env, "linux");
+    expect(out).toEqual(env);
+    // And the input object must not be mutated.
+    expect(env).toEqual({ PATH: "/usr/bin:/bin", FOO: "bar" });
+  });
+
+  it("returns the env byte-identical on win32 and does not introduce a new PATH key", () => {
+    // Windows surfaces PATH as `Path` (case-insensitive); if patchPath
+    // wrote a new `PATH` key next to an existing `Path` key the child
+    // would see an env with BOTH and behaviour would be undefined. So
+    // on win32 we touch NOTHING.
+    const env = { Path: "C:\\Windows\\System32", FOO: "bar" } as unknown as NodeJS.ProcessEnv;
+    const out = patchPath(env, "win32");
+    expect(out).toEqual(env);
+  });
+
+  it("does not crash and does not invent an empty PATH key when baseEnv has no PATH off macOS", () => {
+    const out = patchPath({ FOO: "bar" }, "linux");
+    expect(out.FOO).toBe("bar");
+    expect(out.PATH).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// spawnErrorMessage — the one string builder shared by the sync catch and
+// the child's `error` event.
+// ---------------------------------------------------------------------------
+
+describe("capExecutor — spawnErrorMessage (BET-327)", () => {
+  it("mentions Homebrew on darwin and includes the cmd and detail", () => {
+    const msg = spawnErrorMessage("claude", "darwin", "spawn ENOENT");
+    expect(msg).toContain("Homebrew");
+    expect(msg).toContain("claude");
+    expect(msg).toContain("spawn ENOENT");
+  });
+
+  it("does NOT mention Homebrew on win32 and includes the cmd and detail", () => {
+    const msg = spawnErrorMessage("claude", "win32", "spawn ENOENT");
+    expect(msg).not.toContain("Homebrew");
+    expect(msg).toContain("claude");
+    expect(msg).toContain("spawn ENOENT");
+  });
+
+  it("does NOT mention Homebrew on linux and includes the cmd and detail", () => {
+    const msg = spawnErrorMessage("claude", "linux", "spawn ENOENT");
+    expect(msg).not.toContain("Homebrew");
+    expect(msg).toContain("claude");
+    expect(msg).toContain("spawn ENOENT");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// killTree — abort a child. POSIX branches assert SIGTERM via a fake
+// ChildProcess; the win32 branch is asserted to not throw when pid is
+// undefined (taskkill is NOT actually run, per the issue spec).
+// ---------------------------------------------------------------------------
+
+describe("capExecutor — killTree (BET-327)", () => {
+  it("sends SIGTERM on linux via child.kill", () => {
+    const kill = vi.fn();
+    const fake = { pid: 12345, kill, exitCode: null } as unknown as ChildProcess;
+    killTree(fake, "linux", 5_000);
+    expect(kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("does not throw on win32 when pid is undefined", () => {
+    // The fake child has pid: undefined — taskkill would crash if it ran,
+    // so the guard must short-circuit. We do NOT want this test to
+    // actually invoke taskkill (CI does not have it, and the issue
+    // explicitly bans running it).
+    const fake = { pid: undefined, kill: vi.fn(), exitCode: null } as unknown as ChildProcess;
+    expect(() => killTree(fake, "win32", 5_000)).not.toThrow();
+    expect(fake.kill).not.toHaveBeenCalled();
   });
 });
