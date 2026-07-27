@@ -66,6 +66,9 @@ import {
   chooseUpdateSkewVariant,
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
+  parseDeviceCode,
+  connectPhaseLabel,
+  isPollExpired,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2963,5 +2966,103 @@ describe("arrow history predicates", () => {
     expect(arrowDownNavigatesHistory({ atFirstRow: false, atLastRow: true })).toBe(true);
     expect(arrowDownNavigatesHistory({ atFirstRow: false, atLastRow: false })).toBe(false);
     expect(arrowDownNavigatesHistory({ atFirstRow: true, atLastRow: true })).toBe(true);
+  });
+});
+
+// ===== parseDeviceCode (BET-312) =====
+//
+// Pulls the device code out of opencode's OAuth instructions string. The
+// "code" anchor guards against prose like "the user has not entered a code"
+// matching its own inline "code" — only a string that explicitly presents a
+// device-code-shaped token after a "code" cue is treated as one.
+
+describe("parseDeviceCode", () => {
+  it("extracts the code from the real opencode instructions string", () => {
+    expect(parseDeviceCode("Enter code: TOQR-BUA7Z")).toBe("TOQR-BUA7Z");
+  });
+
+  it("accepts the anchor in lower-case and as a word boundary", () => {
+    expect(parseDeviceCode("enter code ABCD-EFGH")).toBe("ABCD-EFGH");
+    expect(parseDeviceCode("Visit the page and use code WXYZ-1234 to sign in")).toBe("WXYZ-1234");
+  });
+
+  it("returns null when the string has no recognisable code", () => {
+    expect(parseDeviceCode("Some prose without a code")).toBeNull();
+    expect(parseDeviceCode("Sign in to your account to continue")).toBeNull();
+  });
+
+  it("returns null for the empty string", () => {
+    expect(parseDeviceCode("")).toBeNull();
+  });
+
+  it("returns null for non-string input", () => {
+    // Defensive: a malformed payload from opencode should not crash the UI.
+    // Cast to `unknown` so the type system allows the bad input through.
+    expect(parseDeviceCode(undefined as unknown as string)).toBeNull();
+    expect(parseDeviceCode(null as unknown as string)).toBeNull();
+    expect(parseDeviceCode(42 as unknown as string)).toBeNull();
+  });
+});
+
+// ===== connectPhaseLabel (BET-312) =====
+//
+// Single source of user-facing status text. The exhaustive switch in
+// connectPhaseLabel lets TypeScript flag any missed variant; the test pins
+// the labels so a copy change forces an explicit decision.
+
+describe("connectPhaseLabel", () => {
+  it("labels every phase distinctively", () => {
+    expect(connectPhaseLabel({ kind: "starting" })).toBe("Connecting…");
+    expect(
+      connectPhaseLabel({ kind: "waiting", url: "u", instructions: "i", methodIndex: 0 }),
+    ).toBe("Waiting for sign-in");
+    expect(
+      connectPhaseLabel({
+        kind: "needsCode",
+        url: "u",
+        instructions: "i",
+        methodIndex: 0,
+      }),
+    ).toBe("Enter the code");
+    expect(connectPhaseLabel({ kind: "needsKey", consoleUrl: null })).toBe(
+      "Enter your API key",
+    );
+    expect(connectPhaseLabel({ kind: "applying", restartConfirmed: true })).toBe(
+      "Applying…",
+    );
+    expect(connectPhaseLabel({ kind: "done" })).toBe("Connected");
+    expect(connectPhaseLabel({ kind: "failed", message: "x" })).toBe("Failed");
+  });
+});
+
+// ===== isPollExpired (BET-312) =====
+//
+// Shared by the 5-minute device-code poll and the 30-second restart poll.
+// The deadline is a strict ">=" so the polling code can check on every tick
+// without worrying about a one-frame over-shoot.
+
+describe("isPollExpired", () => {
+  it("is false before the deadline", () => {
+    expect(isPollExpired(1000, 1000 + 1, 5000)).toBe(false);
+    expect(isPollExpired(1000, 1000 + 4999, 5000)).toBe(false);
+  });
+
+  it("is true at and past the deadline", () => {
+    expect(isPollExpired(1000, 1000 + 5000, 5000)).toBe(true);
+    expect(isPollExpired(1000, 1000 + 9999, 5000)).toBe(true);
+  });
+
+  it("matches the two call sites the issue calls out (5-min device poll, 30-s restart poll)", () => {
+    const start = 0;
+    // Device poll: 5 min = 300_000 ms. Right at the cap = expired.
+    expect(isPollExpired(start, start + 5 * 60 * 1000, 5 * 60 * 1000)).toBe(true);
+    // Restart poll: 30 s = 30_000 ms. Just under = not expired.
+    expect(isPollExpired(start, start + 29_999, 30_000)).toBe(false);
+  });
+
+  it("returns false for non-finite inputs (defensive against bad clocks)", () => {
+    expect(isPollExpired(NaN, 1000, 5000)).toBe(false);
+    expect(isPollExpired(1000, NaN, 5000)).toBe(false);
+    expect(isPollExpired(1000, 1000, NaN)).toBe(false);
   });
 });
