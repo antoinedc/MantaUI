@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manta UI vs Orca: an honest comparison</title>
+<meta name="description" content="A fair side-by-side of Manta UI and Orca (onorca.dev) on architecture, mobile, remote access, permissions, diff review, agent runtimes, and licensing.">
+<meta name="theme-color" content="#0B1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/site.css">
+<style>
+
+/* page-specific: hero, verdict box, architectural difference */
+.hero-comp{padding:64px 0 36px;text-align:center}
+.hero-comp .wrap{position:relative;z-index:1}
+.hero-comp h1{font-size:clamp(32px,5vw,52px);line-height:1.1;font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin:0 auto 18px;max-width:880px}
+.hero-comp .lede{font-size:clamp(15.5px,1.9vw,18px);color:var(--text-tertiary);max-width:720px;margin:0 auto;line-height:1.55}
+
+.verdict{background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:24px 26px;max-width:880px;margin:40px auto 0}
+.verdict h2{font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan-400);margin-bottom:14px}
+.verdict ul{list-style:none;display:flex;flex-direction:column;gap:13px}
+.verdict li{display:flex;gap:14px;align-items:flex-start;font-size:14.5px;color:var(--text-secondary);line-height:1.55}
+.verdict li b{color:var(--text-primary);font-weight:600}
+.verdict .vtag{flex-shrink:0;font-family:var(--font-mono);font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--cyan-400);padding:4px 9px;border-radius:var(--radius-full);background:#49D7F51F;border:1px solid #49D7F53d;text-transform:uppercase;min-width:80px;text-align:center}
+
+.arch-compare{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:28px}
+@media(max-width:780px){.arch-compare{grid-template-columns:1fr}}
+.arch-card{background:var(--surface-inset);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:18px 20px}
+.arch-card h3{font-size:14px;color:var(--text-primary);font-weight:600;margin-bottom:10px;letter-spacing:-.01em}
+.arch-card pre{font-family:var(--font-mono);font-size:11.5px;line-height:1.7;color:var(--slate-300);white-space:pre}
+.arch-card .hl{color:var(--cyan-400)}.arch-card .gr{color:var(--green-500)}.arch-card .dm{color:var(--slate-500)}
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
+      <div class="navlinks">
+        <a href="/" class="hide-sm">Home</a>
+        <a href="/#compare" class="hide-sm">Compare</a>
+        <a href="/#how" class="hide-sm">How it works</a>
+        <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<div class="hero-comp">
+  <div class="wrap">
+    <h1>Manta UI vs Orca</h1>
+    <p class="lede">Orca runs coding agents on your desktop and gives you a window onto them. Manta runs the same agents on a box you own and gives every device an equal window. Both target the same buyer. Here is the honest difference.</p>
+
+    <div class="verdict">
+      <h2>Verdict</h2>
+      <ul>
+        <li><span class="vtag">Pick Orca</span><span><b>If you want 34 agent runtimes, a Monaco-based editor with Design Mode, and you only need your laptop.</b> Orca is the more mature IDE today, and the only one of the two with a Windows or Linux desktop.</span></li>
+        <li><span class="vtag">Pick Manta</span><span><b>If your agent should keep running after you close the laptop, your phone should be able to approve a command, and you want one self-hosted box rather than a desktop app you have to keep open.</b></span></li>
+        <li><span class="vtag">Overlap</span><span>Both give you an agent chat panel, a worktree per session, and a real terminal. The trade-off is where the work lives.</span></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ============ COMPARISON TABLE ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Side by side</div>
+      <h2>What is the same, and what differs</h2>
+      <p>Rows we lose are kept in. Honest tables get quoted, rigged tables get ignored.</p>
+    </div>
+    <div class="cmp-wrap">
+      <table class="cmp">
+        <thead><tr>
+          <th style="width:32%"></th>
+          <th class="us">Manta UI</th>
+          <th>Orca</th>
+        </tr></thead>
+        <tbody>
+          <tr><td>Agents run on</td><td class="us mid">Your box (Linux or macOS)</td><td class="mid">Your desktop</td></tr>
+          <tr><td>Architecture</td><td class="us on">Box is the source of truth</td><td class="on">Desktop is the source of truth</td></tr>
+          <tr><td>Keeps running with every client closed</td><td class="us on">Yes</td><td class="off">No</td></tr>
+          <tr><td>Phone client</td><td class="us on">The full app</td><td class="mid">Read-mostly view</td></tr>
+          <tr><td>Approve a command from your phone</td><td class="us on">One tap</td><td class="mid">Limited</td></tr>
+          <tr><td>Tells you when the agent is blocked</td><td class="us on">Push to the right device</td><td class="off">No</td></tr>
+          <tr><td>Remote access</td><td class="us on">Detected and set up (Tailscale supported, not required)</td><td class="mid">Tailscale required</td></tr>
+          <tr><td>Permissions model</td><td class="us on">Explicit permission cards, yolo opt-in</td><td class="off"><code>--dangerously-skip-permissions</code> pre-filled by default</td></tr>
+          <tr><td>Sandboxing</td><td class="us on">Commands ask first; trust-a-session for speed</td><td class="off">Permission-bypass flag ships pre-checked</td></tr>
+          <tr><td>Diff review / inline annotation</td><td class="us off">No</td><td class="on">Yes</td></tr>
+          <tr><td>Built-in code editor</td><td class="us mid">Terminal + chat only</td><td class="on">Monaco with Design Mode</td></tr>
+          <tr><td>Agent runtimes supported</td><td class="us mid">2 (Claude Code, opencode)</td><td class="on">34</td></tr>
+          <tr><td>Desktop OS coverage</td><td class="us mid">macOS desktop (box runs on Linux or macOS)</td><td class="on">macOS, Windows, Linux</td></tr>
+          <tr><td>Git worktree per session</td><td class="us on">Yes</td><td class="on">Yes</td></tr>
+          <tr><td>Real tmux underneath</td><td class="us on">Yes, you can SSH in</td><td class="off">No</td></tr>
+          <tr><td>Agent scheduling, webhooks, secrets</td><td class="us on">Yes</td><td class="off">No</td></tr>
+          <tr><td>Account required</td><td class="us on">No</td><td class="mid">For mobile pairing</td></tr>
+          <tr><td>Licence</td><td class="us on">MIT</td><td class="on">MIT</td></tr>
+          <tr><td>Maturity</td><td class="us mid">New</td><td class="on">29.6k GitHub stars, YC-backed</td></tr>
+          <tr><td>Open issues</td><td class="us mid">Fewer</td><td class="mid">2,310</td></tr>
+          <tr><td>Price</td><td class="us on">Free</td><td class="on">Free</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="cmp-note">
+      Rows we lose stay in. Diff review, the built-in editor and 34 agent runtimes are the three things Orca does that Manta does not, and they are real.
+    </div>
+  </div>
+</section>
+
+<!-- ============ WHERE ORCA IS BETTER ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Where Orca is better</div>
+      <h2>The three things we would not want to fake</h2>
+      <p>Stated plainly. If any of these is what you need, Orca is the right answer.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">›</span><span><b>Agent runtime count.</b> Orca ships 34. Manta ships two today (Claude Code and opencode). If you want Cursor, Codex, Aider and the rest of the field on the same desktop, Orca is the answer.</span></li>
+      <li><span class="ck">›</span><span><b>Built-in editor.</b> Monaco with Design Mode lets you edit, preview and let the agent touch the same file. Manta gives you a terminal and a chat panel; your editor stays your editor.</span></li>
+      <li><span class="ck">›</span><span><b>Diff review and inline annotation.</b> Orca's PR/merge tail and inline comments back to the agent are the strongest part of the product. Manta has none of it.</span></li>
+      <li><span class="ck">›</span><span><b>Cross-platform desktop.</b> macOS, Windows and Linux. The Manta desktop is macOS only today; the box itself runs on Linux or macOS.</span></li>
+      <li><span class="ck">›</span><span><b>Maturity.</b> 29.6k GitHub stars, YC-backed, widely deployed. Manta is new and ships less surface.</span></li>
+    </ul>
+    <div class="quotebox">
+      Orca's own description of the mobile app: <q>The mobile app is intentionally not a full editor — it's a remote control for the desktop you already have running.</q>
+      <span class="src">onorca.dev/docs/mobile</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ WHERE MANTA IS BETTER ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Where Manta is better</div>
+      <h2>What the desktop-first model cannot give you</h2>
+      <p>The architectural difference, not a list of features we both ship.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">›</span><span><b>The agent outlives the client.</b> Close the desktop and the work keeps going. Orca's own docs say <q>Closing the desktop app drops the connection — there is no cloud relay.</q></span></li>
+      <li><span class="ck">›</span><span><b>The phone app is a real client.</b> Same code as the desktop: full transcript, approvals, live command output, dictation, file uploads. Orca calls the mobile app a remote control.</span></li>
+      <li><span class="ck">›</span><span><b>Yolo is not the default.</b> Every command shows up as a permission card. Orca ships <code>--dangerously-skip-permissions</code> pre-filled for every agent, which is a different stance than ours.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ ARCHITECTURAL DIFFERENCE ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Architecture</div>
+      <h2>Where the work actually lives</h2>
+      <p>Both products have a server process and a client. They disagree about which one is the source of truth.</p>
+    </div>
+    <div class="arch-compare">
+      <div class="arch-card">
+        <h3>Orca: the desktop is the source of truth</h3>
+<pre>   <span class="hl">Orca desktop app</span>     <span class="dm">← owns tmux, files, agents</span>
+        │      │
+   phone client   browser
+<span class="dm">  (read-mostly)   (read-mostly)
+
+  close the desktop and the
+  phone loses its session.</span></pre>
+      </div>
+      <div class="arch-card">
+        <h3>Manta: the box is the source of truth</h3>
+<pre>   <span class="hl">Linux box or Mac</span>      <span class="dm">← owns tmux, files, agents</span>
+        │      │      │
+   desktop   phone   browser
+<span class="gr">  (full app) (full)  (full)
+
+  close every client and the
+  work continues anyway.</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CAN I USE BOTH ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Coexistence</div>
+      <h2>Can I use both?</h2>
+      <p>Yes. They are not exclusive, and they do not share state.</p>
+    </div>
+    <p style="max-width:720px;margin:0 auto;text-align:center;color:var(--text-tertiary);font-size:16px;line-height:1.6">
+      Orca runs on your laptop. Manta installs on the same Mac (acting as its own box) or on a Linux box on your tailnet. They use different ports, different tmux sessions and different project files. The most common setup we expect is Orca on the laptop for editor-heavy work and Manta on a VPS for long-running tasks that have to outlive the laptop.
+    </p>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">FAQ</div>
+      <h2>What people ask before they switch</h2>
+      <p>Five questions, answered in full.</p>
+    </div>
+    <div class="faq">
+      <div class="q"><h3>Is Manta a fork of Orca?</h3><p>No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships two.</p></div>
+      <div class="q"><h3>Does Manta run on any of Orca's agent runtimes?</h3><p>No. Manta runs Claude Code and opencode in a real tmux session on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor.</p></div>
+      <div class="q"><h3>Can Manta and Orca share a machine?</h3><p>Yes, on a macOS box. They use different ports and different tmux sessions, so they do not interfere. On a Linux box the same applies; the desktop piece of Orca simply has no Linux desktop binary to launch there.</p></div>
+      <div class="q"><h3>Why is Orca so much more mature?</h3><p>Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Windows and Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly.</p></div>
+      <div class="q"><h3>Which one should I pick if my work runs locally?</h3><p>Orca. Manta is for when the work needs to outlive the laptop, or when you want a phone client that can approve a command. If neither matters and your editor matters most, Orca's Monaco integration is the answer.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="band">
+  <div class="wrap">
+    <h2>Try Manta on your own box</h2>
+    <p>Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.</p>
+    <div class="cta" style="margin-top:20px">
+      <a class="btn btn-primary" href="https://github.com/antoinedc/MantaUI">Open the repo</a>
+      <a class="btn btn-ghost" href="/">Back to the homepage</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="/#features">Features</a></li><li><a href="/#mobile">Mobile</a></li>
+        <li><a href="/#opensource">Open source</a></li>
+        <li><a href="/#how">How it works</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <li><a href="/vs-orca">vs Orca</a></li>
+        <li><a href="/vs-conductor">vs Conductor</a></li>
+        <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Use cases</h4><ul>
+        <li><a href="/#mobile">Claude Code on mobile</a></li>
+        <li><a href="/#how">Claude Code remote</a></li>
+        <li><a href="/#features">Notifications</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
+    </div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
