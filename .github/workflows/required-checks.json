@@ -1,8 +1,4 @@
 {
-  "_comment": "duplication-gate removed from required (2026-07-02): flaky at token boundaries (false 8-line self-clones not reproducible locally), blocked BET-57/PR#27, and agents cannot rerun CI. It still runs in CI as advisory; the reviewer independently checks for duplication.",
-  "required_checks": [
-    "typecheck-test",
-    "secret-scan",
-    "dep-audit"
-  ]
+  "_comment": "ONE required check (2026-07-27). secret-scan and dep-audit used to be separate jobs in security-gates.yml; they are now STEPS of typecheck-test — same detectors, same blocking behaviour, one runner slot instead of three. This repo has a single self-hosted runner, so every extra job is queue time every other open PR waits behind. duplication-gate and E2E Smoke Test still run and still go red, but are deliberately NOT required: duplication-gate was de-required 2026-07-02 (flaky at token boundaries, blocked BET-57/PR#27, and agents cannot rerun CI), and Electron+Xvfb e2e is flakier than the deterministic gates. Both are judgment signals the PM and reviewer read. THIS FILE MUST STAY IN SYNC with the main branch ruleset's required contexts (Settings -> Rules -> Rulesets -> main) — they are two separate places, and requiring a context no job produces blocks every PR forever. Change the ruleset FIRST, then this file.",
+  "required_checks": ["typecheck-test"]
 }

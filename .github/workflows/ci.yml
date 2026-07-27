@@ -1,10 +1,11 @@
 # CI — the deterministic merge gate, ported from the leasebot/tenanture setup.
 #
-# Job name `typecheck-test` is a REQUIRED check (required-checks.json + the main
-# branch ruleset). This makes the PM agent's GATE 2 tamper-proof: the gate runs
-# on the repo's self-hosted runner (manta-dev-runner on the dev box),
-# independent of whatever an implementer agent claims locally. The PM reads
-# `gh pr checks` instead of checking out PR branches.
+# Job name `typecheck-test` is THE required check — the single context in
+# required-checks.json and in the `main` branch ruleset. This makes the PM
+# agent's GATE 2 tamper-proof: the gate runs on the repo's self-hosted runner
+# (manta-dev-runner on the dev box), independent of whatever an implementer
+# agent claims locally. The PM reads `gh pr checks` instead of checking out PR
+# branches.
 #
 # ── COST DISCIPLINE (2026-07-27, mirrors tenanture TEN-618) ──────────────────
 # This repo has exactly ONE self-hosted runner, so jobs do NOT run in parallel —
@@ -13,19 +14,20 @@
 # across six jobs in three workflow files, four of them repeating the same
 # checkout and `npm ci`.
 #
-# Two fixes, both of which keep every detector and every blocking semantic:
+# Three fixes, all of which keep every detector and every blocking semantic:
 #   1. `node_modules` is CACHED on the lockfile hash, so `npm ci` runs only when
 #      the lockfile actually moves. This is where most of the time went.
 #   2. The advisory duplication report is now a STEP of this job rather than its
 #      own workflow (anti-spaghetti.yml is deleted).
+#   3. The gitleaks secret scan and the dependency audit are now STEPS of this
+#      job too (security-gates.yml is deleted). They were separate only because
+#      they were named required contexts in the branch ruleset; those contexts
+#      were dropped first, which is the mandatory ordering — a required context
+#      that no job produces blocks every PR forever.
 #
-# `secret-scan` and `dep-audit` remain separate jobs ONLY because they are named
-# required contexts in the `main` branch ruleset, which is GitHub-side config
-# this repo cannot edit from CI. Folding them in here is the obvious next step
-# and needs exactly one manual change first: drop those two contexts from the
-# ruleset, then move the steps across and delete security-gates.yml. Do the
-# ruleset edit FIRST — a required context that no job produces blocks every PR
-# forever.
+# The corollary: adding a JOB now costs every other open PR wall-clock time, so
+# prefer a step. Adding a required CONTEXT means editing GitHub-side ruleset
+# config that CI cannot reach — a deliberate speed bump.
 #
 # Scope deliberately matches AGENTS.md's documented gate:
 #   npm run typecheck && npm test   (tsc x2, vitest, node:test)
@@ -53,10 +55,14 @@ jobs:
       contents: read
       pull-requests: write # advisory duplication sticky comment (PR events only)
     steps:
-      # Full history: the advisory report diffs against the merge base.
+      # Full history: gitleaks scans all of it, and the advisory report and the
+      # dependency-change check both diff against the merge base.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Ensure origin/main is available (merge-base source)
+        run: git fetch --no-tags --depth=1 origin main 2>/dev/null || true
 
       - uses: actions/setup-node@v4
         with:
@@ -85,6 +91,51 @@ jobs:
 
       - name: Test (vitest + node:test)
         run: npm test
+
+      # ── Security gates (moved verbatim from security-gates.yml, now deleted.
+      #    Same detectors, same blocking behaviour, no extra runner slot) ────
+      #
+      # gitleaks over the full history. The allowlist in .gitleaks.toml covers
+      # ONLY the built mobile/www bundles (verified false positives); real
+      # source is fully scanned. THE reason this repo needs it: agents write
+      # most commits now, and an agent pasting a live token into code or docs
+      # must fail deterministically, not depend on reviewer attention.
+      #
+      # Version-pinned into a per-version cache path, so the binary downloads
+      # once per runner rather than on every run, and a gitleaks release can
+      # never silently change the gate's behaviour.
+      - name: Secret scan (gitleaks)
+        run: |
+          GITLEAKS_VERSION=8.24.3
+          BIN="$HOME/.cache/gitleaks/${GITLEAKS_VERSION}/gitleaks"
+          if [ ! -x "$BIN" ]; then
+            mkdir -p "$(dirname "$BIN")"
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+              | tar xz -C "$(dirname "$BIN")"
+          fi
+          "$BIN" detect --source . --config .gitleaks.toml --log-level=warn \
+            --exit-code 1 --report-format json --report-path gitleaks-report.json \
+            || { cat gitleaks-report.json; exit 1; }
+
+      # npm audit scoped to PRODUCTION deps at high+: dev toolchain advisories
+      # (the vite/electron chain) are chronic noise with breaking-change fixes;
+      # shipped-code advisories are the signal.
+      #
+      # An audit's result depends ONLY on the dependency set, not on this PR's
+      # code. Auditing a PR that doesn't touch package*.json re-measures main,
+      # which means the day a new upstream advisory lands EVERY open PR goes red
+      # at once through no fault of its own — with a backlog in flight that is a
+      # mass-block event. tenanture hit it five times (TEN-574/585/588/589/606)
+      # before splitting it this way. dep-audit-nightly.yml covers main daily,
+      # so an advisory surfaces as one red run and one fix issue instead.
+      - name: Dependency audit (only when the PR changes the dependency set)
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ] || \
+             git diff --name-only "$(git merge-base origin/main HEAD)" HEAD -- package.json package-lock.json | grep -q .; then
+            npm audit --omit=dev --audit-level=high
+          else
+            echo "package.json / package-lock.json unchanged vs merge-base — the audit would be identical to main's. Skipping (dep-audit-nightly.yml covers main)."
+          fi
 
       # ── Advisory duplication report (moved verbatim from anti-spaghetti.yml,
       #    now deleted). NON-BLOCKING by design and deliberately NOT a required
