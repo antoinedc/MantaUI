@@ -1262,6 +1262,104 @@ test("install.sh defines detect_tailscale_ip BEFORE every call site (BET-267 rev
 });
 
 // ----------------------------------------------------------------------------
+// read_box_id / wait_for_box_id — the first-boot identity race
+// ----------------------------------------------------------------------------
+//
+// The server mints the box identity asynchronously on its first start; step 7
+// only waits for the supervisor to fork it. Reading auth.json immediately
+// afterwards used to come back empty on a fresh box, which cascaded into
+// `render-caddy-vhost: --box-id <32hex> required` and a box with NO Caddy
+// vhost (and so no public TLS) that a second install run silently repaired.
+
+test("read_box_id echoes the box_id, and nothing when auth.json is missing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-readboxid-"));
+  const authFile = join(dir, "auth.json");
+  try {
+    const missing = runBootstrap({
+      preBody: `
+export MANTA_AUTH_FILE='${authFile}'
+echo "MISSING=[\$(read_box_id '${join(__dirname, "install-lib.mjs")}' "\$(command -v node)")]"
+`,
+    });
+    assert.match(missing, /MISSING=\[\]/);
+
+    writeFileSync(
+      authFile,
+      JSON.stringify({ box_id: HEX32, box_token: "11112222333344445555666677778888" }),
+    );
+    const present = runBootstrap({
+      preBody: `
+export MANTA_AUTH_FILE='${authFile}'
+echo "PRESENT=[\$(read_box_id '${join(__dirname, "install-lib.mjs")}' "\$(command -v node)")]"
+`,
+    });
+    assert.match(present, new RegExp(`PRESENT=\\[${HEX32}\\]`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wait_for_box_id keeps polling until the server mints the identity", () => {
+  // The mock answers empty twice then returns the id — the shape of a fresh
+  // box where auth.json lands a second or two after the unit is started. The
+  // call counter lives in a FILE because each read runs in its own command
+  // substitution (a subshell), so an in-memory counter would never advance.
+  const dir = mkdtempSync(join(tmpdir(), "manta-waitboxid-"));
+  const counter = join(dir, "calls");
+  try {
+    writeFileSync(counter, "0");
+    const out = runBootstrap({
+      preBody: `
+read_box_id() {
+  n=\$(( \$(cat '${counter}') + 1 )); echo "\$n" > '${counter}'
+  if [ "\$n" -ge 3 ]; then printf '${HEX32}'; fi
+}
+sleep() { :; }   # no real waiting in the test
+echo "ID=[\$(wait_for_box_id lib node 10 1)]"
+`,
+    });
+    assert.match(out, new RegExp(`ID=\\[${HEX32}\\]`));
+    assert.equal(readFileSync(counter, "utf-8").trim(), "3");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wait_for_box_id gives up with empty output + non-zero after the budget", () => {
+  // Exhaustion must stay a clean "no identity" signal (the caller warns and
+  // skips gateway registration + the vhost write) — never a hang, never a
+  // partial string that would reach render-caddy-vhost as a bad --box-id.
+  const out = runBootstrap({
+    preBody: `
+read_box_id() { printf ''; }
+sleep() { :; }
+id="\$(wait_for_box_id lib node 3 1)" && rc=0 || rc=\$?
+echo "ID=[\$id] RC=\$rc"
+`,
+  });
+  assert.match(out, /ID=\[\] RC=1/);
+});
+
+test("install.sh waits for the box id before rendering the Caddy vhost (first-run regression)", () => {
+  // Static-layout guard: the value handed to `render-caddy-vhost --box-id`
+  // must come from the POLLING read, not the one-shot one. A regression here
+  // is invisible on a re-install (auth.json already exists) and only bites the
+  // very first run on a fresh box — exactly the case nobody re-tests.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.match(
+    src,
+    /BOX_ID_FOR_GATEWAY="\$\(wait_for_box_id /,
+    "BOX_ID_FOR_GATEWAY must be populated by wait_for_box_id (bounded poll), not a single read",
+  );
+  // And the renderer must never be reachable with an empty id.
+  assert.match(
+    src,
+    /\[ -z "\$\{BOX_ID_FOR_GATEWAY:-\}" \]/,
+    "step 7.5.E must skip the Caddy vhost write when no box_id is available",
+  );
+});
+
+// ----------------------------------------------------------------------------
 // manifest_get — the bash helper install.sh uses to read key=value from the
 // release manifest BEFORE any node exists on the box.
 // ----------------------------------------------------------------------------

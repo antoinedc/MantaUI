@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code on mobile: full parity iPhone</title>
+<meta name="description" content="Run Claude Code from your phone with full transcript, live tool output, dictation and one-tap approvals.">
+<meta name="theme-color" content="#0B1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/site.css">
+<style>
+
+/* page-specific: hero, phone mockup with permission card and dictation bar */
+.hero-comp{padding:64px 0 36px;text-align:center}
+.hero-comp .wrap{position:relative;z-index:1}
+.hero-comp h1{font-size:clamp(32px,5vw,52px);line-height:1.1;font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin:0 auto 18px;max-width:880px}
+.hero-comp .lede{font-size:clamp(15.5px,1.9vw,18px);color:var(--text-tertiary);max-width:720px;margin:0 auto;line-height:1.55}
+
+.phwrap{display:flex;justify-content:center;margin:42px 0 0}
+.phone{width:284px;height:572px;border-radius:38px;border:1px solid var(--border-strong);background:var(--surface-inset);box-shadow:var(--shadow-xl);padding:14px;position:relative;overflow:hidden}
+.phone::before{content:"";position:absolute;top:12px;left:50%;transform:translateX(-50%);width:96px;height:5px;border-radius:99px;background:var(--navy-600);z-index:3}
+.phone .scr{margin-top:22px;height:calc(100% - 22px);border-radius:26px;background:var(--surface-card);border:1px solid var(--border-subtle);overflow:hidden;font-family:var(--font-mono);font-size:11px;display:flex;flex-direction:column}
+.phone .hd{padding:14px 14px 9px;color:var(--slate-50);font-family:var(--font-sans);font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-subtle)}
+.phone .hd img{width:19px;height:19px}
+.phone .hd .pn{margin-left:auto;font-family:var(--font-mono);font-size:10px;color:var(--slate-500);font-weight:500}
+.phone .trans{padding:14px;flex:1;overflow:hidden;display:flex;flex-direction:column;gap:10px;font-size:12px;line-height:1.5}
+.phone .trans .who{font-size:10px;font-weight:600;color:var(--slate-500);margin-bottom:4px}
+.phone .trans .bub{background:var(--fill-subtle);border:1px solid var(--border-subtle);border-radius:11px;padding:8px 11px;color:var(--slate-200)}
+.phone .trans .bub.usr{background:var(--surface-inset);border-color:var(--border-default);align-self:flex-end;border-radius:11px 11px 3px 11px;max-width:80%}
+.phone .trans .tool{font-size:11px;color:var(--slate-400);display:flex;gap:6px;align-items:center}
+.phone .trans .tool .pth{color:var(--cyan-400)}
+.phone .trans .tool .ok{color:var(--green-500)}
+.phone .permcard{margin:6px 12px 12px;background:var(--surface-inset);border:1px solid var(--red-500);border-radius:11px;padding:11px 12px}
+.phone .permcard .pt{font-family:var(--font-sans);font-size:12.5px;font-weight:700;color:var(--text-primary);margin-bottom:5px}
+.phone .permcard .pb{font-family:var(--font-mono);font-size:11px;color:var(--slate-300);margin-bottom:9px;line-height:1.5}
+.phone .permcard .acts{display:flex;gap:7px}
+.phone .permcard .acts span{flex:1;text-align:center;font-size:11px;font-weight:600;padding:6px 0;border-radius:7px;border:1px solid var(--border-default);color:var(--text-secondary)}
+.phone .permcard .acts span.allow{background:var(--cyan-400);color:var(--navy-950);border-color:var(--cyan-400)}
+.phone .composer{border-top:1px solid var(--border-subtle);padding:11px 12px;display:flex;align-items:center;gap:8px}
+.phone .composer .field{flex:1;height:34px;border-radius:8px;background:var(--surface-inset);border:1px solid var(--border-default);display:flex;align-items:center;padding:0 11px;font-family:var(--font-sans);font-size:12px;color:var(--slate-500)}
+.phone .composer .mic{width:34px;height:34px;border-radius:8px;background:var(--fill-subtle);border:1px solid var(--border-default);display:grid;place-items:center;color:var(--cyan-400)}
+.phone .composer .mic svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.phone .composer .send{width:34px;height:34px;border-radius:8px;background:var(--blue-500);display:grid;place-items:center;color:#fff}
+.phone .composer .send svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2}
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
+      <div class="navlinks">
+        <a href="/" class="hide-sm">Home</a>
+        <a href="/#compare" class="hide-sm">Compare</a>
+        <a href="/#how" class="hide-sm">How it works</a>
+        <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<div class="hero-comp">
+  <div class="wrap">
+    <h1>Claude Code on your phone, with full parity</h1>
+    <p class="lede">Manta's phone app is the same code as the desktop, so you get the full Claude Code transcript on your iPhone, not a status viewer. Read the diff, approve the risky command, dictate what to do next.</p>
+
+    <div class="phwrap">
+      <div class="phone">
+        <div class="scr">
+          <div class="hd"><img src="manta-logo.png" alt="">ethernal / feat-auth<span class="pn">box-fra-1</span></div>
+          <div class="trans">
+            <div class="bub usr">write tests for the new pairing flow</div>
+            <div class="who" style="margin-top:4px">Manta</div>
+            <div class="bub">Adding tests for the pairing flow now. Reading the auth module first.</div>
+            <div class="tool"><span style="color:var(--slate-500)">›</span> read <span class="pth">src/server/auth.mjs</span></div>
+            <div class="tool"><span style="color:var(--slate-500)">›</span> edit <span class="pth">src/server/auth.test.mjs</span> <span class="ok">+52 −0</span></div>
+            <div class="tool" style="color:var(--slate-500)">awaiting permission…</div>
+          </div>
+          <div class="permcard">
+            <div class="pt">Permission needed</div>
+            <div class="pb">Bash(rm -rf ./dist && npm run build)</div>
+            <div class="acts"><span>Deny</span><span class="allow">Allow</span></div>
+          </div>
+          <div class="composer">
+            <div class="field">Reply to Manta…</div>
+            <div class="mic"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0014 0M12 19v3"/></svg></div>
+            <div class="send"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 1. THE PHONE APP IS THE SAME APP ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">The client</div>
+      <h2>Same code as the desktop</h2>
+      <p>The phone app is not a viewer for the desktop. It is the desktop app, packaged for a phone, talking to the same box.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Full chat transcript.</b> Every user turn, every assistant turn, every tool call. The same scrollback you see on the desktop, on a screen that fits in your hand.</span></li>
+      <li><span class="ck">✓</span><span><b>Live command output.</b> Bash output streams at roughly four hertz, with the same context bar at the bottom.</span></li>
+      <li><span class="ck">✓</span><span><b>Permission cards with two buttons.</b> The agent waits. You tap Allow or Deny. The work moves on.</span></li>
+      <li><span class="ck">✓</span><span><b>Voice dictation with a push-to-talk button.</b> Hold it, speak, release. The classifier picks dictation from a spoken question.</span></li>
+      <li><span class="ck">✓</span><span><b>File upload from photos, files or paste.</b> Pick a screenshot, attach a log, hand it to the agent as a path on the box.</span></li>
+      <li><span class="ck">✓</span><span><b>Real tmux terminal.</b> Switch from chat to terminal in the same window, attach to the same session the chat talks to.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 2. NOTIFICATIONS THAT KNOW WHERE YOU ARE ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Notifications</div>
+      <h2>Push that knows which device to use</h2>
+      <p>A phone client that cannot approve a permission also cannot unblock an agent. The work waits until you get back to your laptop, which defeats the point of carrying it around. Manta's notifications solve that, and route by what you are doing right now.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Working at the desk, phone stays quiet.</b> If the desktop app is foreground and active, the phone does not buzz. The notification surfaces where you are.</span></li>
+      <li><span class="ck">✓</span><span><b>Stepped away, desktop gets it first.</b> The desktop rings first, the phone rings ninety seconds later. One or the other reaches you.</span></li>
+      <li><span class="ck">✓</span><span><b>Blocking asks hit every device at once.</b> A permission request, a question, an error. The agent is stuck until you say so, so every device you have rings together.</span></li>
+      <li><span class="ck">✓</span><span><b>Native iPhone, any browser elsewhere.</b> A real iOS app for push delivery. Any other phone reaches the same box in a browser, with no installation.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 3. WHERE IT WORKS ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Where it works</div>
+      <h2>Native iPhone, browser everywhere else</h2>
+      <p>The iPhone app ships in the App Store. Every other phone runs the same client in a browser at the box's per-device URL. The transcript is identical.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Native iOS app.</b> Capacitor shell around the same React client the desktop uses. Pair with a six-digit code, no account in between.</span></li>
+      <li><span class="ck">✓</span><span><b>Any browser on any other phone.</b> The browser client serves the full app. Pin it to the home screen and it behaves like a native shell.</span></li>
+      <li><span class="ck">✓</span><span><b>The same session on every device.</b> Pick up the phone, finish the thought on the laptop. Both devices show the same transcript, the same tool calls, the same approvals.</span></li>
+      <li><span class="ck">✓</span><span><b>No account required.</b> Pairing is a six-digit code your box prints. The phone never signs up, never sees an account form, never talks to anyone but your box.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">FAQ</div>
+      <h2>Questions about the phone app</h2>
+      <p>Five questions, answered in full.</p>
+    </div>
+    <div class="faq">
+      <div class="q"><h3>Is the phone app a viewer or a real client?</h3><p>A real client. The iPhone app is the same React code as the desktop, packaged with Capacitor. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop.</p></div>
+      <div class="q"><h3>Does Manta have a phone app for other phones?</h3><p>No native app beyond iOS. The browser client works on every phone and serves the same app. You can pin the box's URL to the home screen. <a href="/claude-code-remote">The remote page</a> covers the part that does not depend on a phone form factor.</p></div>
+      <div class="q"><h3>Do notifications wake up the phone even when I am at my desk?</h3><p>No. Manta's push routing only sends to the phone when the desktop is not foreground or active. At your desk, the desktop rings. Away from it, the phone rings. Blocking asks like a permission request ring every device at once, because the agent is stuck until you answer.</p></div>
+      <div class="q"><h3>Can I dictate a reply instead of typing on the phone keyboard?</h3><p>Yes. Hold the mic, speak, release. The same command classifier the desktop uses picks dictation from a spoken question. The text lands in the composer ready to send or edit.</p></div>
+      <div class="q"><h3>Does the phone talk to my laptop or straight to the box?</h3><p>Straight to the box. The phone pairs with the box directly over HTTPS, the same way the desktop does. Your laptop does not need to be open. Closing the laptop does not drop the phone.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="band">
+  <div class="wrap">
+    <h2>Put it on your own box</h2>
+    <p>Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.</p>
+    <div class="install" style="max-width:600px;margin:0 auto 14px">
+      <div class="install-cmd">
+        <code><span class="prompt">$</span> curl -fsSL <span class="url">https://mantaui.com/install.sh</span> | bash</code>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mantaui.com/install.sh | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
+      </div>
+    </div>
+    <div class="cta" style="margin-top:20px">
+      <a class="btn btn-primary" href="https://github.com/antoinedc/MantaUI">Open the repo</a>
+      <a class="btn btn-ghost" href="/">Back to the homepage</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="/#features">Features</a></li><li><a href="/#mobile">Mobile</a></li>
+        <li><a href="/#opensource">Open source</a></li>
+        <li><a href="/#how">How it works</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <li><a href="/vs-orca">vs Orca</a></li>
+        <li><a href="/vs-conductor">vs Conductor</a></li>
+        <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Use cases</h4><ul>
+        <li><a href="/claude-code-web-ui">Claude Code web UI</a></li>
+        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
+        <li><a href="/claude-code-remote">Claude Code remote</a></li>
+        <li><a href="/open-source">Open source</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
+    </div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

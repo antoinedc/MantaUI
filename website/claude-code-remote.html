@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code remote: run it on a server you own</title>
+<meta name="description" content="Run Claude Code on a VPS or home server. Real tmux, push notifications, and the work outlives the laptop.">
+<meta name="theme-color" content="#0B1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/site.css">
+<style>
+
+/* page-specific: hero, tmux + VPS mockup, ingress panel */
+.hero-comp{padding:64px 0 36px;text-align:center}
+.hero-comp .wrap{position:relative;z-index:1}
+.hero-comp h1{font-size:clamp(32px,5vw,52px);line-height:1.1;font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin:0 auto 18px;max-width:880px}
+.hero-comp .lede{font-size:clamp(15.5px,1.9vw,18px);color:var(--text-tertiary);max-width:720px;margin:0 auto;line-height:1.55}
+
+.hostmock{margin:42px auto 0;max-width:880px;background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-xl);overflow:hidden;box-shadow:var(--shadow-xl)}
+.hostmock .top{display:flex;align-items:center;gap:10px;padding:11px 14px;background:var(--surface-panel);border-bottom:1px solid var(--border-subtle);font-family:var(--font-mono);font-size:12px;color:var(--slate-400)}
+.hostmock .dots{display:flex;gap:6px;margin-right:6px}
+.hostmock .dots span{width:11px;height:11px;border-radius:50%}
+.hostmock .dots .r{background:#FF5F57}.hostmock .dots .y{background:#FEBC2E}.hostmock .dots .g{background:#28C840}
+.hostmock .top b{color:var(--slate-200);margin-right:6px}
+.hostmock .body{padding:24px 26px;display:grid;grid-template-columns:1fr 1fr;gap:24px}
+@media(max-width:780px){.hostmock .body{grid-template-columns:1fr}}
+.hostmock .arch{background:var(--surface-inset);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:18px 20px}
+.hostmock .arch h3{font-size:14px;color:var(--text-primary);font-weight:600;margin-bottom:12px;letter-spacing:-.01em}
+.hostmock .arch pre{font-family:var(--font-mono);font-size:11.5px;line-height:1.7;color:var(--slate-300);white-space:pre}
+.hostmock .arch .hl{color:var(--cyan-400)}.hostmock .arch .gr{color:var(--green-500)}.hostmock .arch .dm{color:var(--slate-500)}
+.hostmock .modes{background:var(--surface-inset);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:18px 20px;display:flex;flex-direction:column;gap:14px}
+.hostmock .modes h3{font-size:14px;color:var(--text-primary);font-weight:600;letter-spacing:-.01em}
+.hostmock .mode{display:flex;gap:12px;align-items:flex-start}
+.hostmock .mode .tag{flex-shrink:0;font-family:var(--font-mono);font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--cyan-400);padding:4px 9px;border-radius:var(--radius-full);background:#49D7F51F;border:1px solid #49D7F53d;text-transform:uppercase;margin-top:1px}
+.hostmock .mode p{margin:0;font-size:13px;color:var(--text-tertiary);line-height:1.55}
+.hostmock .mode p b{color:var(--text-primary);font-weight:600}
+.hostmock .mode p .mono{color:var(--cyan-300)}
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
+      <div class="navlinks">
+        <a href="/" class="hide-sm">Home</a>
+        <a href="/#compare" class="hide-sm">Compare</a>
+        <a href="/#how" class="hide-sm">How it works</a>
+        <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<div class="hero-comp">
+  <div class="wrap">
+    <h1>Run Claude Code on a server you control</h1>
+    <p class="lede">Manta runs Claude Code on your own VPS, home server or Mac. The agent outlives the laptop because it lives in real tmux on the box, and you reach it from any device with the same session on every one.</p>
+
+    <div class="hostmock">
+      <div class="top"><div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div><b>box-fra-1</b><span>· manta-server · systemd --user</span></div>
+      <div class="body">
+        <div class="arch">
+          <h3>The box is the source of truth</h3>
+<pre>   <span class="hl">Desktop</span>      <span class="hl">Phone</span>      <span class="hl">Browser</span>
+       │            │            │
+       └──── HTTPS ─┴──── HTTPS ─┘
+                │
+   <span class="hl">&lt;box_id&gt;.boxes.mantaui.com</span>
+   <span class="dm">or your tailnet, if Tailscale is up</span>
+                │
+        <span class="gr">YOUR BOX (VPS / Mac)</span>
+   manta-server ── <span class="dm">owns tmux, files, secrets</span>
+        ├── <span class="hl">tmux</span> ── your sessions
+        │       <span class="dm">(keep running with 0 clients)</span>
+        └── opencode ── chat + agent tools</pre>
+        </div>
+        <div class="modes">
+          <h3>How the box reaches you</h3>
+          <div class="mode">
+            <span class="tag">Auto</span>
+            <p><b>The installer detects and picks.</b> Tailnet when Tailscale is already running, public hostname otherwise. You do not choose.</p>
+          </div>
+          <div class="mode">
+            <span class="tag">Tailnet</span>
+            <p><b>HTTP at a tailnet IP.</b> Caddy, public DNS and Let's Encrypt are skipped entirely. Devices reach the box at <span class="mono">http://&lt;tailnet-ip&gt;:8787</span>.</p>
+          </div>
+          <div class="mode">
+            <span class="tag">Public</span>
+            <p><b>HTTPS at a per-box hostname.</b> <span class="mono">&lt;box_id&gt;.boxes.mantaui.com</span>, with a Let's Encrypt certificate. Caddy terminates TLS, proxies to the box.</p>
+          </div>
+          <div class="mode">
+            <span class="tag">Force</span>
+            <p><b>Either, on demand.</b> Set <span class="mono">MANTA_INGRESS=public</span> or <span class="mono">MANTA_INGRESS=tailnet</span> at install time if you want a specific path regardless of detection.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 1. SELF-HOSTED ON HARDWARE YOU OWN ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Self-hosted</div>
+      <h2>On a VPS, a home server, or a Mac you own</h2>
+      <p>Manta is the box. There is no hosted control plane, no seat count, and no account. You bring the hardware and the model provider. Everything else lives on the machine you control.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Linux VPS.</b> The installer runs on Debian, Ubuntu and the other usual suspects. Caddy and a Let's Encrypt certificate when you need public ingress.</span></li>
+      <li><span class="ck">✓</span><span><b>Home server.</b> A Mac mini, a NUC, anything with a static IP and an open port. Tailnet if you already have Tailscale up.</span></li>
+      <li><span class="ck">✓</span><span><b>A Mac you own.</b> The same server runs on macOS, with public TLS skipped because there is no need to terminate it for a laptop.</span></li>
+      <li><span class="ck">✓</span><span><b>No account required.</b> Pairing is a six-digit code the box prints. Devices exchange tokens, and that is the only credential in the loop.</span></li>
+      <li><span class="ck">✓</span><span><b>No telemetry, no hosted control plane.</b> The box talks to your model provider and to APNs for push fanout. Nothing else.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 2. AUTO-DETECTED INGRESS ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Ingress</div>
+      <h2>The installer chooses how devices reach the box</h2>
+      <p>There is one decision to make before you install: do you want a tailnet, a public hostname, or whatever the installer picks. Most people pick the third option and forget about it.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Default is auto.</b> The installer checks whether Tailscale is already running on the box with an IPv4 address. If it is, the box listens only on the tailnet and skips Caddy, public DNS and Let's Encrypt.</span></li>
+      <li><span class="ck">✓</span><span><b>Otherwise, a public hostname.</b> The installer registers <span class="mono">&lt;your-box&gt;.boxes.mantaui.com</span>, provisions the certificate, and writes the per-box Caddy vhost.</span></li>
+      <li><span class="ck">✓</span><span><b>Decision persists.</b> The chosen path is written to <span class="mono">~/.manta/ingress.json</span>, so subsequent installs on the same box do not re-decide.</span></li>
+      <li><span class="ck">✓</span><span><b>Forceable at install.</b> Set <span class="mono">MANTA_INGRESS=public</span> or <span class="mono">MANTA_INGRESS=tailnet</span> to override detection. Useful for boxes you always want reachable on the public hostname.</span></li>
+      <li><span class="ck">✓</span><span><b>Pairing works either way.</b> The six-digit code the box prints travels over whatever transport the installer chose. Devices pair once and the token rotates by signing out.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 3. SURVIVES DISCONNECTS ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Persistence</div>
+      <h2>The agent outlives every client</h2>
+      <p>The whole point of running Claude Code on a server is that the work keeps going when you are not there. Manta is built around that. Close every client, lose the network, reboot the laptop. When you come back, the session is exactly where you left it.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Real tmux underneath.</b> The server owns tmux and the agent runs in a tmux session. The chat panel talks to tmux. You can SSH in and attach to the same window, any time.</span></li>
+      <li><span class="ck">✓</span><span><b>A system service.</b> The server runs as a systemd user unit. Reboots do not kill it. There is nothing to keep alive by hand.</span></li>
+      <li><span class="ck">✓</span><span><b>A worktree per session.</b> New sessions in a git repo branch their own sibling worktree, so several agents work in parallel without standing on each other.</span></li>
+      <li><span class="ck">✓</span><span><b>Schedules between turns.</b> The agent can schedule a recurring task, wake on a webhook, and use a secret by file path. The box is a long-running environment, not a request handler.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">FAQ</div>
+      <h2>Questions about running Claude Code on a server</h2>
+      <p>Five questions, answered in full.</p>
+    </div>
+    <div class="faq">
+      <div class="q"><h3>Can I run Claude Code on a VPS?</h3><p>Yes. The installer runs on Debian, Ubuntu and the usual Linux suspects, with Caddy and a Let's Encrypt certificate when you need public ingress. The agent runs in a real tmux session on the box, so it outlives every device that connects to it.</p></div>
+      <div class="q"><h3>Do I have to forward a port?</h3><p>No. If Tailscale is already running on the box, devices connect over your tailnet and nothing is published to the internet. If Tailscale is not running, the installer provisions a hostname and a certificate, which is the only public surface. You never forward a port by hand.</p></div>
+      <div class="q"><h3>What happens when I close my laptop?</h3><p>The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you open a browser or pair your phone again, the same session is there with the full history. <a href="/claude-code-mobile">The mobile page</a> covers what the phone sees when this happens.</p></div>
+      <div class="q"><h3>Does this work without a public DNS record?</h3><p>Yes. Pick the tailnet path at install time and the box has no public DNS, no certificate, and no open port. Devices reach it over your tailnet at a private IPv4.</p></div>
+      <div class="q"><h3>Is this self-hosted Claude Code?</h3><p>Yes, and the install script is auditable before you pipe it into bash. The repository is MIT licensed and the server runs on hardware you control. <a href="/open-source">The open source page</a> covers what that means in practice.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="band">
+  <div class="wrap">
+    <h2>Put it on your own box</h2>
+    <p>Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.</p>
+    <div class="install" style="max-width:600px;margin:0 auto 14px">
+      <div class="install-cmd">
+        <code><span class="prompt">$</span> curl -fsSL <span class="url">https://mantaui.com/install.sh</span> | bash</code>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mantaui.com/install.sh | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
+      </div>
+    </div>
+    <div class="cta" style="margin-top:20px">
+      <a class="btn btn-primary" href="https://github.com/antoinedc/MantaUI">Open the repo</a>
+      <a class="btn btn-ghost" href="/">Back to the homepage</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="/#features">Features</a></li><li><a href="/#mobile">Mobile</a></li>
+        <li><a href="/#opensource">Open source</a></li>
+        <li><a href="/#how">How it works</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <li><a href="/vs-orca">vs Orca</a></li>
+        <li><a href="/vs-conductor">vs Conductor</a></li>
+        <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Use cases</h4><ul>
+        <li><a href="/claude-code-web-ui">Claude Code web UI</a></li>
+        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
+        <li><a href="/claude-code-remote">Claude Code remote</a></li>
+        <li><a href="/open-source">Open source</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
+    </div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
