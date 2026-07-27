@@ -375,7 +375,7 @@ test("tmuxSpawnEnv never overrides an explicit locale", () => {
 });
 
 test("tmuxSpawnEnv preserves the rest of the environment", () => {
-  const out = tmuxSpawnEnv({ PATH: "/opt/homebrew/bin", FOO: "bar" }, "darwin");
-  assert.equal(out.PATH, "/opt/homebrew/bin");
+  const out = tmuxSpawnEnv({ PATH: "/usr/local/sbin", FOO: "bar" }, "darwin");
+  assert.equal(out.PATH, "/usr/local/sbin");
   assert.equal(out.FOO, "bar");
 });
