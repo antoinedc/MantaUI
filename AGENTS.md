@@ -2019,12 +2019,13 @@ deploy is the tag push. If someone reports "issue X is done but not live", the
 fix is almost always "it was merged but no release tag was pushed" — check the
 live URL / TestFlight against `main`, then push the right tag.
 
-### The five release targets (each its own tag prefix)
+### The six release targets (each its own tag prefix)
 
 | Tag prefix | Target | Runner | What fires | Config |
 |---|---|---|---|---|
 | `ios-v*` | iOS app → TestFlight | Codemagic `mac_mini_m2` | build + sign + notarize `.ipa` → TestFlight | `codemagic.yaml` `ios-testflight` |
 | `mac-v*` | macOS desktop → DMG | Codemagic `mac_mini_m2` | build + Developer ID sign → DMG → publish to `mantaui.com` | `codemagic.yaml` `mac-desktop` |
+| `win-v*` | Windows desktop → NSIS installer (**artifact only, not published**) | GitHub-hosted (`windows-latest`) | build `.exe` + `latest.yml`, upload as a workflow artifact | `.github/workflows/windows-desktop-build.yml` |
 | `web-v*` | marketing site + install assets | self-hosted (`manta-dev-runner`, this box) | scp `website/` + `install.sh` + `llms-install.md` → prod webroot, verify | `.github/workflows/website-deploy.yml` |
 | `server-v*` | Linux box server tarball(s) → `mantaui.com/releases` | GitHub-hosted (`ubuntu-latest` x64 + `ubuntu-24.04-arm` matrix) + self-hosted publish (`manta-dev-runner`) | build x64 + arm64 tarballs natively, merge the two per-arch sidecars via `scripts/release/merge-manifest.mjs`, scp both tarballs + the combined manifest to prod, verify both arches (200 + sha256 drift) | `.github/workflows/server-tarball-deploy.yml` |
 | `relay-v*` | ~~relay service~~ (deprecated 2026-07; replaced by direct mode) | n/a | n/a | `.github/workflows/relay-deploy.yml` (deleted in BET-204) |
@@ -2043,6 +2044,11 @@ git tag ios-v1.0.8 && git push origin ios-v1.0.8
 
 # Desktop — bump package.json version if you want, then:
 git tag mac-v0.0.2 && git push origin mac-v0.0.2
+
+# Windows desktop (internal test build — downloads from the Actions artifact,
+# nothing reaches mantaui.com). A workflow_dispatch run does the same thing
+# from any branch, which is usually what you want:
+git tag win-v0.0.13 && git push origin win-v0.0.13
 
 # Website / install.sh / llms-install.md:
 git tag web-v2 && git push origin web-v2
@@ -2119,6 +2125,49 @@ entirely) — treat it as a bonus, never the plan.
   `electron-builder.yml` + `app.setAppUserModelId`). Icon is the navy-square
   manta mark (`assets/icon.icns` + `assets/icons/*.png`, regenerated from the
   iOS AppIcon).
+
+### Windows desktop (`win-v*`) — GitHub-hosted, artifact only
+
+`.github/workflows/windows-desktop-build.yml`, on `windows-latest`. Builds the
+NSIS installer that `electron-builder.yml`'s `win:` block has always described
+but that nothing ever built (`scripts/release/desktop.sh` passes `--mac
+--linux`, and the Codemagic desktop workflow runs on a Mac).
+
+- **The output is a workflow ARTIFACT, not a release.** Nothing is scp'd to
+  prod and the website has no Windows link. The installer is **not code-signed**
+  — an unsigned NSIS binary trips SmartScreen on every download, so publishing
+  it would be worse than offering nothing. Internal testers download it from the
+  Actions run. When an OV/EV certificate exists, add a publish job modelled on
+  `server-tarball-deploy.yml` (scp → verify 200 + sha) and only then link it.
+- **`latest.yml` is built and kept on purpose.** It is the electron-updater feed
+  file for Windows, and the workflow fails red if it is missing — so the day we
+  do publish, the update feed is already complete. Until it is uploaded to
+  `https://mantaui.com/updates/`, a Windows build's update check 404s;
+  `src/main/autoUpdate.ts` only `console.warn`s on error, so that is invisible
+  to the user.
+- **electron-builder compiles nothing, and this is load-bearing.**
+  `electron-builder.yml` sets `npmRebuild: false` and excludes `node-pty` from
+  `files`. The desktop app imports exactly three packages at runtime
+  (`electron`, `electron-updater`, `yaml`) — all pure JS; `node-pty` is a BOX
+  SERVER dependency (`src/server/pty.mjs`, run by plain node) that the desktop
+  never loads, and rebuilding it against Electron's ABI was pure waste. If a
+  native dependency is ever added to the DESKTOP, `npmRebuild` must go back to
+  `true`. Note this does NOT make the repo toolchain-free: `npm ci` still
+  installs node-pty, whose own install script downloads a prebuilt binding and
+  falls back to `node-gyp rebuild` — which is why the Codemagic mac workflow's
+  `setuptools<81` step must stay.
+- **`postinstall` is `node scripts/postinstall.mjs`.** The old inline
+  `electron-rebuild … || true; bash …` could not run under `cmd.exe`, so
+  `npm ci` failed on Windows before anything was built. The rebuild half was
+  deleted rather than ported (see the bullet above); the script's only remaining
+  job is the macOS dev-bundle rename, and it can never fail an install.
+- Icon: `assets/icon.ico`, a multi-resolution (16→256) ICO generated by
+  `scripts/gen-icons.py` from the same rounded white tile as the macOS/iOS
+  icons. Windows applies no mask of its own, so the rounding is baked into the
+  bitmap. Regenerate icons with `python3 scripts/gen-icons.py` — it rewrites
+  every platform's icons deterministically, so an unrelated asset should show
+  no diff.
+- x64 only. Windows-on-ARM emulates x64 and there is no arm64 tester.
 
 ### Website (`web-v*`) — self-hosted, static file sync
 

@@ -103,6 +103,20 @@ for s in (16,32,48,64,128,256,512):
 h = 128; w = round(im.size[0]*h/im.size[1])
 im.resize((w,h), Image.LANCZOS).save("src/renderer/assets/manta-mark-128.png")
 
+# Windows app icon (assets/icon.ico) — electron-builder's `win.icon`. Same
+# rounded white tile as macOS/iOS so the three desktop platforms look
+# identical; Windows applies no mask of its own, so the rounding has to be
+# baked into the bitmap. A single multi-resolution .ico carries every size
+# Explorer/taskbar/Alt-Tab asks for. 256 is the largest size the ICO format
+# stores as PNG-compressed; electron-builder requires at least 256.
+ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
+mac_tile(256).save(
+    "assets/icon.ico",
+    format="ICO",
+    sizes=[(s, s) for s in ICO_SIZES],
+)
+print("assets/icon.ico written")
+
 try:
     from icnsutil import IcnsFile
     import tempfile

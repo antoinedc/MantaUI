@@ -1,0 +1,126 @@
+# Windows desktop build — NSIS installer for internal testing.
+#
+# WHY THIS EXISTS
+# ---------------
+# `electron-builder.yml` has carried a `win: nsis` target for a long time but
+# nothing ever built it: `scripts/release/desktop.sh` passes `--mac --linux`,
+# and the Codemagic `mac-desktop` workflow runs on a Mac. This workflow is the
+# missing Windows leg.
+#
+# WHAT IT PRODUCES
+#   dist/desktop/Manta UI-<version>-x64.exe   — the NSIS installer
+#   dist/desktop/latest.yml                   — the electron-updater feed file
+# Both are uploaded as a workflow ARTIFACT. Nothing is published to
+# mantaui.com.
+#
+# WHY NOTHING IS PUBLISHED YET
+#   The installer is NOT code-signed (see the `win:` block in
+#   electron-builder.yml). An unsigned installer trips SmartScreen on every
+#   download, so putting it on the public download page would be worse than
+#   not offering Windows at all. Internal testers download the artifact from
+#   the Actions run instead. When an OV/EV certificate exists, add a publish
+#   job modelled on server-tarball-deploy.yml's (scp to
+#   /var/www/mantaui/{downloads,updates}, then verify the URL is 200 and
+#   sha-matches) — and only then link it from the website.
+#
+#   `latest.yml` is built and kept deliberately: it is the proof that the
+#   auto-update feed will be complete the day we do publish. Until it is
+#   uploaded to https://mantaui.com/updates/, a Windows build's update check
+#   404s, which electron-updater reports as a logged warning and nothing more
+#   (src/main/autoUpdate.ts only console.warns on error).
+#
+# BUILD HOST
+#   GitHub-hosted `windows-latest`. The repo's own runner is Linux, and
+#   electron-builder needs a real Windows host to produce and resource-edit a
+#   Windows executable without Wine. Using a GitHub-hosted runner also means
+#   this build never queues behind PRs on the single self-hosted runner.
+#
+#   electron-builder itself compiles nothing: electron-builder.yml sets
+#   `npmRebuild: false` and excludes node-pty from the package, because the
+#   desktop app imports no native module (only `electron`, `electron-updater`
+#   and `yaml`). `npm ci` DOES still install node-pty — it is a `dependencies`
+#   entry for the box server — and node-pty's own install script fetches a
+#   prebuilt binding and falls back to `node-gyp rebuild`. windows-latest ships
+#   the MSVC + Python toolchain that fallback needs. If this job ever fails
+#   during `npm ci` with a node-gyp error, that is the cause, and the fix is a
+#   node-pty prebuild, not a change here.
+#
+# TRIGGER: push a tag matching win-v* (e.g. win-v0.0.13). Also runnable
+#   manually via workflow_dispatch against any branch, which is the expected
+#   way to produce a test build.
+
+name: Windows desktop build
+
+on:
+  push:
+    tags:
+      - "win-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: windows-desktop-build
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Git Bash, present on every windows-latest image. Keeps these steps
+    # byte-identical in shape to the repo's other workflows instead of
+    # introducing a second (PowerShell) dialect for the same commands.
+    shell: bash
+
+jobs:
+  build:
+    name: build NSIS installer
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build renderer + main bundles
+        run: npm run build
+
+      - name: Build the installer
+        # --publish never: emit latest.yml next to the .exe but upload
+        # nothing. Same flag scripts/release/desktop.sh uses for mac/linux.
+        run: npx electron-builder --win --publish never
+
+      # Fail loudly rather than uploading an empty artifact. electron-builder
+      # can exit 0 having produced nothing if a target is misconfigured.
+      - name: Verify artifacts
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          EXES=( dist/desktop/*.exe )
+          if [ "${#EXES[@]}" -eq 0 ]; then
+            echo "✗ no .exe in dist/desktop/ — the win target produced nothing" >&2
+            ls -la dist/desktop/ || true
+            exit 1
+          fi
+          if [ ! -f dist/desktop/latest.yml ]; then
+            echo "✗ dist/desktop/latest.yml missing — the update feed would 404" >&2
+            exit 1
+          fi
+          for f in "${EXES[@]}"; do
+            echo "$(sha256sum "$f")"
+          done
+          cat dist/desktop/latest.yml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: manta-windows-installer
+          path: |
+            dist/desktop/*.exe
+            dist/desktop/latest.yml
+          if-no-files-found: error
+          retention-days: 30

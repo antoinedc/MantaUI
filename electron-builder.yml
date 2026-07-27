@@ -26,6 +26,21 @@ directories:
 files:
   - "out/**/*"
   - "package.json"
+  # node-pty is a `dependencies` entry for the BOX SERVER (src/server/pty.mjs).
+  # The desktop app never imports it — main/preload pull in only `electron`,
+  # `electron-updater` and `yaml`, all pure JS. Excluding it keeps a native
+  # module out of the shipped app, which is what lets `npmRebuild: false`
+  # below be safe on every platform.
+  - "!node_modules/node-pty/**/*"
+
+# No native module survives in the packaged app (see the node-pty exclusion),
+# so there is nothing for electron-rebuild to do. Skipping it removes the
+# node-gyp / MSVC / Python toolchain requirement from every desktop build
+# host — that toolchain is the single biggest source of Windows build
+# failures, and on macOS it is why the Codemagic workflow has to install
+# `setuptools<81` before `npm ci`. If a native dependency is ever added to
+# the DESKTOP (not the server), flip this back to true.
+npmRebuild: false
 
 extraMetadata:
   main: out/main/index.js
@@ -87,13 +102,25 @@ linux:
   artifactName: "${productName}-${version}-${arch}.AppImage"
 
 win:
+  icon: "assets/icon.ico"
   target:
     - target: nsis
       arch:
+        # x64 only. Windows-on-ARM runs x64 binaries under emulation, and
+        # there is no arm64 tester — a second arch would double build time
+        # for nobody.
         - x64
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+  # NOT code-signed. The build is for internal testing only; an unsigned NSIS
+  # installer trips SmartScreen ("Windows protected your PC" → More info → Run
+  # anyway) on first launch. Signing needs a paid OV/EV certificate plus a
+  # CI secret — add `win.certificateSubjectName` / Azure Trusted Signing here
+  # when public distribution happens. Until then, do NOT link the installer
+  # from the website.
 
 nsis:
   oneClick: false
+  # Per-user install (%LOCALAPPDATA%): no UAC prompt, no admin rights needed.
   perMachine: false
   allowToChangeInstallationDirectory: true
 
@@ -109,7 +136,8 @@ publish:
   provider: generic
   url: https://mantaui.com/updates
 
-# (Target selection is on the CLI — `scripts/release/desktop.sh` passes
-# `--mac --linux` so we never build the `win:` target above. There used to
-# be an `only:` block here, but `only` is a CLI-only flag in electron-builder
-# 25.x and the config schema rejects it.)
+# (Target selection is on the CLI. `scripts/release/desktop.sh` passes
+# `--mac --linux`; the Windows installer is built separately on a Windows
+# runner by .github/workflows/windows-desktop-build.yml, which passes `--win`.
+# There used to be an `only:` block here, but `only` is a CLI-only flag in
+# electron-builder 25.x and the config schema rejects it.)

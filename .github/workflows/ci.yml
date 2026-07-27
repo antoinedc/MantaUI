@@ -79,9 +79,11 @@ jobs:
           path: node_modules
           key: ${{ runner.os }}-nm-${{ hashFiles('package-lock.json') }}
 
-      # node-pty's electron-rebuild postinstall needs build tools; it is
-      # best-effort in package.json already (`|| true`), so npm ci works on the
-      # runner even if the native rebuild is skipped — tests don't spawn ptys.
+      # postinstall is `node scripts/postinstall.mjs` — cross-platform and
+      # incapable of failing an install (its only job is a macOS dev-bundle
+      # rename). No native rebuild runs here or anywhere: the desktop app
+      # imports no native module, so electron-builder.yml sets
+      # `npmRebuild: false`. Tests don't spawn ptys either.
       - name: Install dependencies
         if: steps.nm-cache.outputs.cache-hit != 'true'
         run: npm ci
