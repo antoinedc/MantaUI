@@ -42,58 +42,9 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
   color:var(--text-secondary);font-family:var(--font-sans);font-size:12.5px;font-weight:600;cursor:pointer}
 .install-hint{font-size:12px;color:var(--slate-500);margin-top:9px}
 
-/* app mockup */
-.shot{position:relative;z-index:1;max-width:960px;margin:44px auto 0;border-radius:var(--radius-xl);overflow:hidden;
-  border:1px solid var(--border-default);box-shadow:var(--shadow-xl);background:var(--surface-card)}
-.dot{width:11px;height:11px;border-radius:50%}
-.dot.r{background:#FF5F57}.dot.y{background:#FEBC2E}.dot.g{background:#28C840}
-.shot-title{margin-left:8px;font-family:var(--font-mono);font-size:12px;color:var(--slate-400)}
-.app{display:grid;grid-template-columns:52px 216px 1fr;height:452px;text-align:left}
-.rail{background:var(--surface-sunken);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;align-items:center;padding-top:14px;gap:14px}
-.rail .logo{width:26px;height:26px;object-fit:contain}
-.rail .ri{width:30px;height:30px;border-radius:8px;background:var(--fill-subtle);display:grid;place-items:center}
-.rail .ri.on{background:#12233f;box-shadow:inset 0 0 0 1px #2E6BFF66}
-.rail .ri svg{width:15px;height:15px;stroke:var(--slate-400);fill:none;stroke-width:2}
-.rail .ri.on svg{stroke:var(--cyan-400)}
-.side{background:var(--surface-panel);border-right:1px solid var(--border-subtle);padding:14px 10px;overflow:hidden}
-.side .grp{font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--slate-500);padding:8px 8px 6px}
-.side .s{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;font-size:13px;color:var(--slate-300)}
-.side .s.sel{background:var(--fill-subtle);color:var(--slate-50)}
-.side .s .sd{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-.side .s .sd.run{background:var(--cyan-400);box-shadow:0 0 0 3px rgba(73,215,245,.16)}
-.side .s .sd.idle{background:var(--slate-600)}
-.side .s .sd.wait{background:var(--amber-500)}
-.side .s .sd.perm{background:var(--red-500);box-shadow:0 0 0 3px rgba(240,80,95,.18)}
-.side .s .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-.side .s .nm b{color:var(--cyan-300);font-weight:500}
-.side .s .bang{font-family:var(--font-mono);font-size:11px;color:var(--red-500);font-weight:700}
-.side .s .sfx{font-family:var(--font-mono);font-size:10px;color:var(--slate-500)}
-.panel{background:var(--surface-app);display:flex;flex-direction:column;overflow:hidden}
-.panel .ph{height:44px;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;gap:10px;padding:0 18px;font-family:var(--font-mono);font-size:12px;color:var(--slate-400)}
-.panel .ph .pill{margin-left:auto}
-.panel .body{flex:1;overflow:hidden;padding:16px 18px;display:flex;flex-direction:column;gap:12px}
-.msg{max-width:80%}
-.msg .who{font-size:11px;font-weight:600;color:var(--slate-500);margin-bottom:5px}
-.msg.user{align-self:flex-end}
-.msg.user .bub{background:var(--fill-subtle);border:1px solid var(--border-subtle);border-radius:12px 12px 4px 12px}
-.msg .bub{padding:9px 13px;border-radius:12px;font-size:13px;line-height:1.5;color:var(--slate-200)}
-.tool{font-family:var(--font-mono);font-size:12px;color:var(--slate-400);display:flex;align-items:center;gap:8px}
-.tool .tk{color:var(--slate-500)}.tool .pth{color:var(--cyan-400)}.tool .ok{color:var(--green-500)}
-.wellrow{font-family:var(--font-mono);font-size:11.5px;background:var(--surface-inset);border:1px solid var(--border-subtle);border-radius:8px;padding:9px 12px;color:var(--slate-300)}
-.wellrow .ok{color:var(--green-500)}.wellrow .dim{color:var(--slate-500)}
-.ctxbar{display:flex;align-items:center;gap:9px;font-family:var(--font-mono);font-size:10.5px;color:var(--slate-500);padding:0 18px 8px}
-.ctxtrack{width:92px;height:5px;border-radius:99px;background:var(--surface-raised);overflow:hidden;display:flex}
-.ctxtrack i{display:block;height:100%}
-.composer{border-top:1px solid var(--border-subtle);padding:11px 16px;display:flex;align-items:center;gap:10px}
-.composer .field{flex:1;height:34px;border-radius:8px;background:var(--surface-inset);border:1px solid var(--border-default);
-  display:flex;align-items:center;padding:0 12px;font-size:13px;color:var(--slate-500)}
-.composer .send{width:34px;height:34px;border-radius:8px;background:var(--blue-500);display:grid;place-items:center}
-.composer .send svg{width:15px;height:15px;stroke:#fff;fill:none;stroke-width:2}
-.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:var(--radius-full);font-size:11px;font-weight:600;font-family:var(--font-sans)}
-.pill-run{background:#49D7F51F;color:var(--cyan-400)}
-.ping{width:7px;height:7px;border-radius:50%;background:var(--cyan-400);animation:ping 1.6s var(--ease-out) infinite}
-@keyframes ping{0%{box-shadow:0 0 0 0 rgba(73,215,245,.5)}70%{box-shadow:0 0 0 7px rgba(73,215,245,0)}100%{box-shadow:0 0 0 0 rgba(73,215,245,0)}}
-@media(max-width:820px){.app{grid-template-columns:52px 1fr;height:400px}.side{display:none}}
+/* app mockup — screenshots from scripts/shots.mjs (BET-303) */
+.hero-shot{position:relative;z-index:1;display:block;width:100%;max-width:960px;height:auto;margin:44px auto 0;border-radius:var(--radius-xl);
+  border:1px solid var(--border-default);box-shadow:var(--shadow-xl)}
 
 /* sections (section, .sec-head, .sunk) live in /site.css */
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
@@ -118,16 +69,12 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 /* .checks, .quotebox, .q (FAQ) — see /site.css */
 
 /* phone */
-.phone{justify-self:center;width:272px;height:552px;border-radius:36px;border:1px solid var(--border-strong);background:var(--surface-inset);
-  box-shadow:var(--shadow-xl);padding:13px;position:relative;overflow:hidden}
+.phone{justify-self:center;position:relative;width:272px;height:552px;border-radius:36px;border:1px solid var(--border-strong);background:var(--surface-inset);
+  box-shadow:var(--shadow-xl);padding:13px;overflow:hidden}
 .phone::before{content:"";position:absolute;top:11px;left:50%;transform:translateX(-50%);width:92px;height:5px;border-radius:99px;background:var(--navy-600);z-index:3}
 .phone .scr{margin-top:20px;height:calc(100% - 20px);border-radius:24px;background:var(--surface-card);border:1px solid var(--border-subtle);overflow:hidden;font-family:var(--font-mono);font-size:11px;position:relative}
-.phone .hd{padding:15px 14px 9px;color:var(--slate-50);font-family:var(--font-sans);font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:8px}
-.phone .hd img{width:19px;height:19px}
-.phone .row{padding:11px 14px;border-bottom:1px solid var(--border-subtle);display:flex;justify-content:space-between;align-items:center;color:var(--slate-300);gap:8px}
-.phone .row .st{font-size:10px;flex-shrink:0}
-.phone .row .st.run{color:var(--cyan-400)}.phone .row .st.idle{color:var(--slate-500)}.phone .row .st.wait{color:var(--amber-500)}
-.phone .row .st.perm{color:var(--red-500);font-weight:700}
+.phone-shot{justify-self:center;display:block;width:auto;max-width:272px;height:auto;border-radius:36px;border:1px solid var(--border-strong);
+  box-shadow:var(--shadow-xl);background:var(--surface-inset)}
 .lockshot{position:absolute;inset:0;background:linear-gradient(160deg,#0d1530,#1a1240 60%,#0a0f22);display:flex;flex-direction:column;align-items:center;padding-top:44px}
 .lockshot .time{font-family:var(--font-sans);font-size:52px;font-weight:300;color:#fff;letter-spacing:-.02em;line-height:1}
 .lockshot .date{font-family:var(--font-sans);font-size:12.5px;color:#ffffffb0;margin-top:4px}
@@ -224,51 +171,13 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
     </div>
     <div class="meta">Free. No signup. Runs on hardware you already own.</div>
 
-    <div class="shot">
-      <div class="shot-bar">
-        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-        <span class="shot-title">Manta UI</span>
-      </div>
-      <div class="app">
-        <div class="rail">
-          <img src="manta-logo.png" alt="" class="logo">
-          <div class="ri on"><svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8"/></svg></div>
-          <div class="ri"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></div>
-          <div class="ri"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3m9-9h-3M6 12H3"/></svg></div>
-        </div>
-        <div class="side">
-          <div class="grp">Ethernal</div>
-          <div class="s sel"><span class="sd run"></span><span class="nm">feat/<b>auth</b></span></div>
-          <div class="s"><span class="sd perm"></span><span class="nm">refactor/<b>db</b></span><span class="bang">!</span></div>
-          <div class="s"><span class="sd idle"></span><span class="nm">main</span></div>
-          <div class="grp">Marketing</div>
-          <div class="s"><span class="sd wait"></span><span class="nm">hero-<b>copy</b></span><span class="sfx">?</span></div>
-          <div class="s"><span class="sd run"></span><span class="nm">landing</span><span class="sfx">2</span></div>
-          <div class="grp">Infra</div>
-          <div class="s"><span class="sd idle"></span><span class="nm">deploy</span></div>
-        </div>
-        <div class="panel">
-          <div class="ph">ethernal / <span style="color:var(--cyan-300)">feat/auth</span> · <span class="mono">box-fra-1</span>
-            <span class="pill pill-run"><span class="ping"></span>Running</span></div>
-          <div class="body">
-            <div class="msg user"><div class="who">You</div><div class="bub">add a device-code pairing flow to the auth module</div></div>
-            <div class="msg agent"><div class="who">Manta</div><div class="bub">Reading the current auth module before I change anything.</div></div>
-            <div class="tool"><span class="tk">›</span> read <span class="pth">src/server/auth.mjs</span></div>
-            <div class="tool"><span class="tk">›</span> edit <span class="pth">src/server/auth.mjs</span> <span class="ok">+38 −4</span></div>
-            <div class="wellrow"><span class="dim">$</span> npm test &nbsp; <span class="ok">✓ 41 passed</span> <span class="dim">· 2.1s</span></div>
-          </div>
-          <div class="ctxbar">
-            <span>ctx</span>
-            <span class="ctxtrack"><i style="width:34%;background:var(--cyan-400)"></i><i style="width:11%;background:#f59e0b"></i><i style="width:28%;background:#0ea5a4"></i></span>
-            <span>73% · 146k/200k</span>
-          </div>
-          <div class="composer">
-            <div class="field">Reply to Manta…</div>
-            <div class="send"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <img
+      src="shot-hero.webp"
+      alt="Manta UI desktop app showing the sidebar with mixed session states and a chat panel mid-turn with a tool call and live command output"
+      width="2880" height="1800"
+      loading="eager"
+      class="hero-shot"
+    >
   </div>
 </div>
 
@@ -470,18 +379,13 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
           A phone client that cannot approve a permission also cannot unblock an agent. The work still waits until you get back to your laptop, which defeats the point of carrying it around.
         </div>
       </div>
-      <div class="phone">
-        <div class="scr">
-          <div class="hd"><img src="manta-logo.png" alt="">Sessions</div>
-          <div class="row"><span>ethernal / <span style="color:var(--cyan-300)">feat-auth</span></span><span class="st run">Running</span></div>
-          <div class="row"><span>ethernal / <span style="color:var(--cyan-300)">refactor-db</span></span><span class="st perm">Approve</span></div>
-          <div class="row"><span>ethernal / main</span><span class="st idle">Idle</span></div>
-          <div class="row"><span>marketing / <span style="color:var(--cyan-300)">hero</span></span><span class="st wait">Question</span></div>
-          <div class="row"><span>marketing / landing</span><span class="st run">Running</span></div>
-          <div class="row"><span>infra / deploy</span><span class="st idle">Done</span></div>
-          <div class="row"><span>notes / scratch</span><span class="st idle">Idle</span></div>
-        </div>
-      </div>
+      <img
+        src="shot-phone-list.webp"
+        alt="Manta UI phone session list with mixed session statuses"
+        width="786" height="1704"
+        loading="lazy"
+        class="phone-shot"
+      >
     </div></div>
   </div>
 </section>
