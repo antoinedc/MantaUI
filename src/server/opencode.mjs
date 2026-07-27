@@ -1169,10 +1169,10 @@ function resolveClaudeBin() {
   // `~/.local/bin` is the resolver's concern — that's where the official
   // `claude` CLI installer places its symlink. `/usr/local/bin` is a
   // generic POSIX fallback for hand-installed copies. We deliberately do
-  // NOT include a macOS-only entry (e.g. /opt/homebrew/bin/claude): the
-  // PATH patch below already prepends the macOS Homebrew prefix to
-  // `augmentedPath`, so a `claude` binary in either Homebrew location is
-  // visible to the spawned child without us probing each one here.
+  // NOT include a macOS-only Homebrew candidate here: the PATH patch
+  // below already prepends the macOS Homebrew prefix, so a Homebrew-
+  // installed claude is visible to the spawned child without us probing
+  // each Homebrew location explicitly.
   const candidates = [
     path.join(homedir(), ".local", "bin", "claude"),
     "/usr/local/bin/claude",
