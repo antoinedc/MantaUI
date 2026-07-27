@@ -105,6 +105,27 @@ type State = {
   // by Onboarding (to force step 1) and PairStep (to prefill the paste field).
   // Cleared once consumed. Not persisted — purely transient routing state.
   pendingPairLink: string | null;
+  // Deep-link pairing: monotonic counter bumped by App.tsx after a manta://
+  // link auto-claim SUCCEEDS and the config re-read has landed.
+  //
+  // Why a counter and not a boolean: Onboarding must re-derive its step from
+  // the FRESH config every time a link lands, including a second link in the
+  // same session. A counter changes identity on every claim; a boolean would
+  // latch true and the second link would be a no-op.
+  //
+  // This exists because a successful auto-claim used to leave the shell
+  // pinned on the onboarding flow at step 1. `finishOnboarding()` clears
+  // `onboardingForced` and re-reads config, but App keeps the flow MOUNTED
+  // behind a local latch (so steps 2-4 stay reachable after step 1 writes a
+  // boxToken). Nothing advanced the step, so a successful pairing rendered
+  // as an untouched pair form with the code field focused — indistinguishable
+  // from "the deep link did nothing".
+  pairLinkClaims: number;
+  // Deep-link pairing: why the last auto-claim failed, surfaced inline by
+  // PairStep. The auto-claim runs with no visible UI, so without this the
+  // failure reason (wrong/expired code, unreachable box, malformed link) was
+  // computed and then discarded — the user saw a blank form and no cause.
+  pairLinkError: string | null;
   chatAutoAllow: boolean;
   // Auto-rename chat-mode windows from the conversation (opt-in). See
   // AppConfig.autoRenameSessions.
@@ -174,6 +195,16 @@ type State = {
   // updateDownloaded event). Guarded — the mobile httpApi shim's
   // onAutoUpdate* are no-ops, so this is desktop-only.
   updatePrompt: { version: string; releaseName?: string } | null;
+  // A TERMINAL auto-update failure (integrity / permission). Set from main's
+  // autoUpdate:error IPC, which only fires for failures the user must act on
+  // — transient network errors are filtered server-side of the bridge.
+  //
+  // This exists because updater errors were previously swallowed into a
+  // console.warn. When the published update feed's checksum stopped matching
+  // the published binary, every launch failed verification in silence and the
+  // app simply never updated — across two releases, diagnosed only when a
+  // shipped fix was reported as missing.
+  updateError: { message: string; raw: string } | null;
   // Single global server-update prompt (BET-225 stage 3). Set when the box's
   // server-update poller (src/server/serverUpdate.mjs) publishes a
   // `serverUpdateAvailable` bus event after polling its version manifest.
@@ -285,6 +316,7 @@ type State = {
   setScreenshotToast: (t: ScreenshotToast | null) => void;
   setAgentFileToast: (t: AgentFileReady | null) => void;
   setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
+  setUpdateError: (p: { message: string; raw: string } | null) => void;
   setServerUpdatePrompt: (
     p: { version: string; notesUrl?: string | null } | null,
   ) => void;
@@ -292,6 +324,12 @@ type State = {
   // null to consume (PairStep clears on use); App.tsx writes the URL when
   // the preload's pair:link-received IPC fires.
   setPendingPairLink: (url: string | null) => void;
+  // Record a SUCCESSFUL deep-link auto-claim. Call AFTER the config re-read
+  // (finishOnboarding) so any listener that re-derives from config sees the
+  // post-pairing state. Also clears any stale pendingPairLink/pairLinkError
+  // left by an earlier failed attempt.
+  notePairLinkClaimed: () => void;
+  setPairLinkError: (message: string | null) => void;
   setConnectionState: (s: ConnectionState) => void;
 };
 
@@ -303,6 +341,8 @@ export const useStore = create<State>((set, get) => ({
   onboardingSkipped: false,
   onboardingForced: false,
   pendingPairLink: null,
+  pairLinkClaims: 0,
+  pairLinkError: null,
   chatAutoAllow: false,
   autoRenameSessions: false,
   allowAgentPush: false,
@@ -325,6 +365,7 @@ export const useStore = create<State>((set, get) => ({
   screenshotToast: null,
   agentFileToast: null,
   updatePrompt: null,
+  updateError: null,
   serverUpdatePrompt: null,
   connectionState: { state: "idle" },
   backgroundSyncing: false,
@@ -420,6 +461,15 @@ export const useStore = create<State>((set, get) => ({
 
   setPendingPairLink: (url) => set({ pendingPairLink: url }),
 
+  notePairLinkClaimed: () =>
+    set((s) => ({
+      pairLinkClaims: s.pairLinkClaims + 1,
+      pendingPairLink: null,
+      pairLinkError: null,
+    })),
+
+  setPairLinkError: (message) => set({ pairLinkError: message }),
+
   finishOnboarding: async () => {
     // Drop the force flag and re-read config so the app transitions to the
     // normal shell without an app restart (picks up boxToken/projects the
@@ -478,6 +528,7 @@ export const useStore = create<State>((set, get) => ({
   setScreenshotToast: (t) => set({ screenshotToast: t }),
   setAgentFileToast: (t) => set({ agentFileToast: t }),
   setUpdatePrompt: (p) => set({ updatePrompt: p }),
+  setUpdateError: (p) => set({ updateError: p }),
   setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
   setConnectionState: (s) => set({ connectionState: s }),
 

@@ -4,6 +4,7 @@
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
+import type { SubscriptionStatus } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
 // shared/versionCompare.mjs so both src/server/*.mjs and the renderer share
@@ -2105,4 +2106,157 @@ export function arrowUpNavigatesHistory(row: CaretRow): boolean {
 // True when ArrowDown should navigate prompt history (caret on last visual row).
 export function arrowDownNavigatesHistory(row: CaretRow): boolean {
   return row.atLastRow;
+}
+
+// ===== Subscription provider connect flow (BET-312) =====
+//
+// Pure helpers for the ConnectProvider state machine. The component itself
+// lives in src/renderer/ConnectProvider.tsx; these helpers are the testable
+// bits it composes from. Kept here (rather than inlined in the component) so
+// every "what does state X mean?" / "has the poll expired yet?" decision
+// pins against a unit test instead of an integration one. The renderer's
+// existing test suite is pure-only; adding DOM-testing infra would be out of
+// scope for this epic.
+
+// State machine phases the connect card can be in. Mirrors the
+// `idle -> starting -> (waiting | needsCode | needsKey) -> applying -> done |
+// failed` transition graph from BET-312 exactly; adding a state would mean
+// the design has drifted and needs revisiting.
+export type ConnectPhase =
+  | { kind: "starting" }
+  | { kind: "waiting"; url: string; instructions: string; methodIndex: number }
+  | {
+      kind: "needsCode";
+      url: string;
+      instructions: string;
+      methodIndex: number;
+      inputError?: string;
+    }
+  | { kind: "needsKey"; consoleUrl: string | null; inputError?: string }
+  | { kind: "applying"; restartConfirmed: boolean }
+  | { kind: "done" }
+  | { kind: "failed"; message: string };
+
+/**
+ * Pull the device code out of an opencode OAuth instructions string, e.g.
+ * `"Enter code: TOQR-BUA7Z"` → `"TOQR-BUA7Z"`. Returns null when the string
+ * has no recognisable code (no "code" anchor or no code-shaped token after
+ * it), in which case the UI shows `instructions` verbatim with no copy
+ * button. Empty / non-string input → null.
+ *
+ * The match is anchored to a `code:` / `code ` cue (case-insensitive) so a
+ * sentence like "the user has not entered a code" does not pick up its
+ * inline "code" as a token.
+ */
+export function parseDeviceCode(instructions: string): string | null {
+  if (typeof instructions !== "string" || instructions.length === 0) return null;
+  const m = instructions.match(/\bcode[:\s]+([A-Z0-9]+-[A-Z0-9]+)/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * Single source of user-facing status text for every phase of the connect
+ * flow. Centralised so no string is duplicated across branches and so a
+ * future i18n pass replaces one place, not five.
+ */
+export function connectPhaseLabel(state: ConnectPhase): string {
+  switch (state.kind) {
+    case "starting":
+      return "Connecting…";
+    case "waiting":
+      return "Waiting for sign-in";
+    case "needsCode":
+      return "Enter the code";
+    case "needsKey":
+      return "Enter your API key";
+    case "applying":
+      return "Applying…";
+    case "done":
+      return "Connected";
+    case "failed":
+      return "Failed";
+  }
+}
+
+/**
+ * Pure deadline predicate shared by both the 5-minute device-code poll and
+ * the 30-second restart poll. `now >= startedAt + limitMs` means the cap
+ * has elapsed. NaN-safe: any non-finite input returns false so a poll that
+ * started without a clock (tests, SSR) cannot spuriously expire.
+ */
+export function isPollExpired(
+  startedAt: number,
+  now: number,
+  limitMs: number,
+): boolean {
+  if (
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(now) ||
+    !Number.isFinite(limitMs)
+  ) {
+    return false;
+  }
+  return now - startedAt >= limitMs;
+}
+
+// ===== Terminal keyboard shortcuts (BET-333) =====
+//
+// Inside a terminal, plain Ctrl on Windows / Linux is the application's own
+// modifier (it must reach the process — SIGINT, readline forward-char, etc.).
+// Treating Ctrl as equivalent to Cmd swallows Ctrl+C whenever text is
+// selected, so a running process can never be interrupted. The fix is the
+// every-other-terminal convention: on macOS the trigger is Cmd alone, on
+// every other platform the trigger is Ctrl+Shift. Plain Ctrl falls straight
+// through to the PTY.
+//
+// `terminalShortcut(ev, isMac)` is the pure matcher. Returns which terminal-
+// emulator action the keydown maps to (or null = "not ours, let it through").
+// The four actions map to the same four bodies xterm.js's custom key handler
+// already runs today (selection copy, clipboard paste, window.prompt find,
+// term.clear scrollback).
+//
+// `isMac` is passed in rather than read from `navigator` so the function is
+// testable in isolation and so all platform gating in the renderer reads
+// `src/renderer/platform.ts` (the only place `navigator.platform` is touched).
+export type TerminalShortcut = "copy" | "paste" | "find" | "clear" | null;
+
+export function terminalShortcut(
+  ev: {
+    key: string;
+    metaKey: boolean;
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+  },
+  isMac: boolean,
+): TerminalShortcut {
+  const macTrigger = isMac
+    ? ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey
+    : ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey;
+  if (!macTrigger) return null;
+  switch (ev.key.toLowerCase()) {
+    case "c":
+      return "copy";
+    case "v":
+      return "paste";
+    case "f":
+      return "find";
+    case "k":
+      return "clear";
+    default:
+      return null;
+  }
+}
+
+// ===== Subscription provider status (BET-314) =====
+//
+// Single source of truth for the connected/not-connected label the
+// SubscriptionsCard renders next to each row. The renderer never invents
+// its own copy here — the connect-card description ("● connected") is the
+// whole UX, and pinning the strings in chatUtils.ts keeps a future i18n /
+// copy pass touching one place. Returns "connected" / "not connected" with
+// no extra ornament (no leading dot, no uppercase — the row already draws
+// the dot separately and styles the casing).
+export function describeSubscriptionStatus(s: SubscriptionStatus): string {
+  return s.connected ? "connected" : "not connected";
 }

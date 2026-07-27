@@ -21,10 +21,13 @@
 
   Bind is 127.0.0.1 on purpose: the chat backend is NOT exposed directly.
   Everything reaches it through manta-server auth-gated reverse proxy,
-  which itself is loopback-only. The chat service needs Anthropic OAuth
-  (the `opencode-claude-auth@latest` plugin seeded by install.sh step C),
-  which it picks up from the user `~/.claude/.credentials.json`, the only
-  auth prerequisite the installer assumes.
+  which itself is loopback-only. The chat service needs at least one
+  provider in `connected[]` (Claude via the `opencode-claude-auth@latest`
+  plugin seeded by install.sh step C, or Codex/Kimi via `opencode auth
+  login -p <id>` / `PUT /auth/<id>`); install.sh's per-provider detection
+  summary (BET-313) prints which providers are reachable at the tail of
+  the install. Claude picks up its auth from `~/.claude/.credentials.json`,
+  which the installer treats as a hint — not a hard prerequisite.
 
   The installer substitutes the placeholder tokens and writes the result to
   ~/Library/LaunchAgents/com.mantaui.opencode.plist.
@@ -42,6 +45,16 @@
     <string>--hostname</string>
     <string>127.0.0.1</string>
   </array>
+  <!-- launchd hands an agent PATH=/usr/bin:/bin:/usr/sbin:/sbin — it does NOT
+       inherit a login shell's PATH. Without this key, everything opencode
+       shells out to that lives in Homebrew (ripgrep, node, the provider CLIs)
+       is invisible to it even though the same command works in Terminal.
+       install.sh substitutes the resolved list; see launchd_agent_path(). -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@@AGENT_PATH@@</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

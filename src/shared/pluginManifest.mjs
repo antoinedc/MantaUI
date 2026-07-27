@@ -1,15 +1,15 @@
 // pluginManifest.mjs — pure YAML-manifest core for MantaUI plugins.
 //
-// Consumed by BOTH the executor (src/main/capExecutor.ts, the Mac-side runner
-// that reads manifests off disk) AND the server (src/server/plugins.mjs, the
-// in-memory registry the renderer reads). Single source of truth for what a
-// valid manifest looks like — adding a new validation rule here is reflected
-// in every consumer and every test.
+// Consumed by BOTH the executor (src/main/capExecutor.ts, the desktop-side
+// runner that reads manifests off disk) AND the server (src/server/plugins.mjs,
+// the in-memory registry the renderer reads). Single source of truth for what
+// a valid manifest looks like — adding a new validation rule here is
+// reflected in every consumer and every test.
 //
 // Design contract (BET-189 / BET-190):
 //   - Minimal deps: YAML parser + node:fs (only for resolveCwd existence
 //     check). Pure functions everywhere else, no fs / spawn / electron —
-//     testable in vitest without a Mac, no Electron needed.
+//     testable in vitest without a desktop, no Electron needed.
 //   - Every public function returns structured data. Errors are arrays of
 //     {path, message} strings the caller can display verbatim; success
 //     paths are plain JS objects/values. No exceptions thrown for expected
@@ -21,7 +21,9 @@
 // Validation rules implemented (BET-189 §"Validation rules"):
 //   - name         — `^[a-z0-9][a-z0-9-]{0,62}$` (one token, kebab-friendly)
 //   - description  — non-empty
-//   - host         — must be "mac" (else `host: only "mac" is supported`)
+//   - host         — must be one of CAP_HOSTS (else the canonical message
+//                    cites CAP_HOSTS and the legacy "mac" alias); legacy
+//                    "mac" is accepted and normalized to "desktop".
 //   - inputs[]     — `id` regex `^[a-z][a-zA-Z0-9_]*$`; each input needs a
 //                    non-empty `description`; `values` array ONLY when
 //                    `type: enum`; `default` value type-matches the declared
@@ -35,6 +37,7 @@
 
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { expandTilde } from "./paths.mjs";
 
 // ---------------------------------------------------------------------------
@@ -54,9 +57,10 @@ export const INPUT_ID_RE = /^[a-z][a-zA-Z0-9_]*$/;
 // `^\d+(s|m)$` — no decimals, no whitespace. Parsed by parseTimeout below.
 const TIMEOUT_RE = /^\d+(s|m)$/;
 
-// Hard cap on a plugin's timeout. The Mac executor's own 25-min job timeout
-// is below this on purpose (BET-183), but a plugin that runs forever would
-// still wedge a single job. Cap so a typo can't make a step run for days.
+// Hard cap on a plugin's timeout. The desktop executor's own 25-min job
+// timeout is below this on purpose (BET-183), but a plugin that runs forever
+// would still wedge a single job. Cap so a typo can't make a step run for
+// days.
 const MAX_TIMEOUT_MS = 30 * 60_000;
 
 // Whitelisted step keys. Anything else is an error so a typo like `steps[2].rnu`
@@ -69,6 +73,7 @@ const STEP_KEYS = new Set([
   "timeout",
   "if",
   "continue_on_error",
+  "shell",
 ]);
 
 // Top-level whitelisted keys.
@@ -80,10 +85,158 @@ const TOP_KEYS = new Set([
   "env",
   "timeout",
   "steps",
+  "shell",
 ]);
 
 // Supported input types.
 export const INPUT_TYPES = ["string", "number", "boolean", "enum"];
+
+// ---------------------------------------------------------------------------
+// CAP_HOSTS — accepted `host:` values
+//
+// `host` does NOT mean "which OS" — it means "which machine executes this
+// job". `desktop` is the user's connected desktop (whatever OS it runs);
+// `box` is the Linux box. There is exactly one desktop executor and it runs
+// whatever the user's desktop OS is. `mac` is a permanent legacy alias for
+// `desktop` (see normalizeHost JSDoc for why).
+// ---------------------------------------------------------------------------
+
+export const CAP_HOSTS = ["desktop", "box"];
+
+/**
+ * Normalize a host value from any source (job envelope, manifest, query
+ * string, a job row persisted before the rename).
+ *   undefined / null / ""  → "desktop"   (the default: run on the desktop)
+ *   "desktop"              → "desktop"
+ *   "mac"                  → "desktop"   (legacy alias — permanent, not temporary)
+ *   "box"                  → "box"
+ *   anything else          → null        (caller decides how to report it)
+ *
+ * Why `mac` is a permanent alias (not a one-release shim): two reasons, both
+ * real. Jobs are persisted to `~/.manta/cap-jobs.json`, so a queued job
+ * written before the rename must still be claimable after it (and there's
+ * no schema-version migration — normalizing on read is the whole migration).
+ * And the AI-facing tool file (`docs/opencode-tools/plugins.ts`) is COPIED
+ * into `~/.config/opencode/tools/` on the box, so a user running an older
+ * copy will keep sending `host:"mac"` until they reinstall it. Treat `mac`
+ * as a permanent alias, not a dated deprecation.
+ */
+export function normalizeHost(h) {
+  if (h === undefined || h === null || h === "") return "desktop";
+  if (h === "desktop") return "desktop";
+  if (h === "box") return "box";
+  if (h === "mac") return "desktop"; // permanent legacy alias
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// SHELLS — accepted `shell:` values (BET-326)
+//
+// The runner needs an explicit shell choice because `/bin/sh` does not exist
+// on Windows. Exactly two values: `sh` (POSIX shell, Git Bash on Windows)
+// and `powershell` (Windows PowerShell 5.1). No `bash`, no `cmd`, no `zsh`,
+// no `pwsh` — adding a third value is a new code path with no user.
+// ---------------------------------------------------------------------------
+
+export const SHELLS = ["sh", "powershell"];
+
+// Git Bash candidates, in this order — first existing path wins. Built with
+// `path.join` (never string concat) so platform-specific separators land
+// correctly on Windows. The candidate list is a constant — re-ordering it
+// silently changes the resolution priority, so it lives here as the single
+// source of truth (and `resolveShellInvocation` consumes it verbatim).
+const GIT_BASH_ROOT_KEYS = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"];
+function gitBashCandidate(env, rootKey) {
+  const root = env[rootKey];
+  if (typeof root !== "string" || root.length === 0) return null;
+  return join(root, "Git", "bin", "bash.exe");
+}
+
+/**
+ * Per-platform default shell. win32 → "powershell" (always present on
+ * Windows); anything else → "sh" (POSIX). Pure: takes the platform as an
+ * argument so the executor reads `process.platform` once and passes it
+ * down.
+ */
+export function defaultShell(platform) {
+  return platform === "win32" ? "powershell" : "sh";
+}
+
+/**
+ * Resolve the shell for a step. Order: step.shell ?? manifest.shell ??
+ * defaultShell(platform). Step-level overrides manifest-level which
+ * overrides the platform default. Missing on all three → platform default.
+ */
+export function effectiveShell(manifest, step, platform) {
+  return (
+    step?.shell ?? manifest?.shell ?? defaultShell(platform)
+  );
+}
+
+/**
+ * Turn a shell name into something spawnable on the given platform.
+ *
+ *   sh, non-win32       → {command: "/bin/sh", argsPrefix: ["-c"]}
+ *   sh, win32           → first existing Git-Bash candidate → same shape
+ *   sh, win32, none     → {error: install-Git-for-Windows message}
+ *   powershell, win32   → {command: "powershell.exe", argsPrefix: [-NoProfile, -NonInteractive, -Command]}
+ *   powershell, non-win32 → {error: PowerShell-only-on-Windows message}
+ *
+ * `io` is injected (env, exists) so the helper stays pure and testable
+ * from a Linux CI runner. The executor passes `{env: process.env,
+ * exists: existsSync}`.
+ */
+export function resolveShellInvocation(shell, platform, io) {
+  const env = io?.env ?? {};
+  const exists = io?.exists ?? (() => false);
+
+  if (shell === "sh") {
+    if (platform !== "win32") {
+      return { command: "/bin/sh", argsPrefix: ["-c"] };
+    }
+    for (const key of GIT_BASH_ROOT_KEYS) {
+      const p = gitBashCandidate(env, key);
+      if (p && exists(p)) {
+        return { command: p, argsPrefix: ["-c"] };
+      }
+    }
+    return {
+      error:
+        'shell "sh" needs a POSIX shell. Install Git for Windows ' +
+        "(https://git-scm.com/download/win), or set `shell: powershell` " +
+        "in the manifest.",
+    };
+  }
+
+  if (shell === "powershell") {
+    if (platform !== "win32") {
+      return { error: 'shell "powershell" is only available on Windows.' };
+    }
+    return {
+      command: "powershell.exe",
+      argsPrefix: ["-NoProfile", "-NonInteractive", "-Command"],
+    };
+  }
+
+  // Defensive: parseManifest rejects unknown values, so this branch is
+  // unreachable in normal flow. Keeping it as an error makes the function
+  // total (every input → a result, never undefined).
+  return { error: `shell: unknown value "${shell}"` };
+}
+
+/**
+ * Shell-specific wrapping of a step's `run:` body. The runner decides
+ * step success purely from the exit code, and PowerShell does not reliably
+ * propagate a failing command's exit code — so powershell runs are wrapped
+ * to set `$ErrorActionPreference='Stop'` and surface `$LASTEXITCODE` on
+ * exit. POSIX `sh` needs no wrapping; the input is returned unchanged.
+ */
+export function wrapScript(shell, script) {
+  if (shell === "powershell") {
+    return `$ErrorActionPreference='Stop'; ${script} ; exit $LASTEXITCODE `;
+  }
+  return script;
+}
 
 // Reserved env names we never let a plugin clobber. `MANTA_PLUGIN` and
 // `MANTA_JOB_ID` carry the executor's plumbing — if a user-supplied `env:`
@@ -108,7 +261,8 @@ const RESERVED_ENV = new Set([
  * The manifest shape is:
  *   name:          string (required, matches NAME_RE)
  *   description:   string (required, non-empty)
- *   host:          "mac" (only allowed value today)
+ *   host:          "desktop" (the parsed value is NORMALIZED — `host: mac` and
+ *                  omitted both yield `"desktop"`; `box` yields `"box"`)
  *   inputs:        Array<{id, description, type, [default], [values]}>
  *   env:           Record<string,string>
  *   timeout:       string (parsed eagerly; absent = no per-step timeout)
@@ -164,12 +318,31 @@ export function parseManifest(yamlText) {
     errors.push({ path: "description", message: "description is required" });
   }
 
-  // host — only "mac" is supported today.
-  if (raw.host !== undefined && raw.host !== "mac") {
-    errors.push({
-      path: "host",
-      message: 'host: only "mac" is supported',
-    });
+  // host — must be one of CAP_HOSTS (with "mac" as a permanent alias for
+  // "desktop"). The parsed manifest carries the NORMALIZED value, so a
+  // legacy `host: mac` (or an omitted `host:`) yields `manifest.host ===
+  // "desktop"` downstream.
+  if (raw.host !== undefined) {
+    const n = normalizeHost(raw.host);
+    if (n === null) {
+      errors.push({
+        path: "host",
+        message: `host: must be one of ${CAP_HOSTS.join(", ")} (legacy "mac" means desktop)`,
+      });
+    }
+  }
+
+  // shell (top-level). Validation is platform-independent — a Windows-
+  // targeted manifest must parse cleanly on the Linux server (which serves
+  // the registry to Settings). Platform availability is the executor's
+  // concern (resolveShellInvocation), not the parser's.
+  if (raw.shell !== undefined) {
+    if (typeof raw.shell !== "string" || !SHELLS.includes(raw.shell)) {
+      errors.push({
+        path: "shell",
+        message: `shell: must be one of ${SHELLS.join(", ")}`,
+      });
+    }
   }
 
   // inputs[]
@@ -314,6 +487,16 @@ export function parseManifest(yamlText) {
         if (typeof step.run !== "string" || !step.run.trim()) {
           errors.push({ path: `${base}.run`, message: "run is required" });
         }
+        // step.shell — per-step override of the manifest-level default.
+        // Same platform-independent validation as the top-level field.
+        if (step.shell !== undefined) {
+          if (typeof step.shell !== "string" || !SHELLS.includes(step.shell)) {
+            errors.push({
+              path: `${base}.shell`,
+              message: `shell: must be one of ${SHELLS.join(", ")}`,
+            });
+          }
+        }
         // step.timeout
         if (step.timeout !== undefined) {
           const t = parseTimeout(step.timeout);
@@ -395,10 +578,13 @@ export function parseManifest(yamlText) {
     manifest: {
       name: raw.name,
       description: raw.description,
-      host: raw.host ?? "mac",
+      host: normalizeHost(raw.host),
       inputs,
       env,
       timeoutMs: topTimeoutMs,
+      // shell is preserved verbatim from raw (no platform default — see
+      // SHELLS doc above). Absent in the YAML → undefined here.
+      shell: typeof raw.shell === "string" ? raw.shell : undefined,
       steps,
     },
     errors: undefined,

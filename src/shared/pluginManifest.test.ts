@@ -19,6 +19,13 @@ import {
   resolveCwd,
   validateSuppliedInputs,
   parseTimeout,
+  normalizeHost,
+  defaultShell,
+  effectiveShell,
+  resolveShellInvocation,
+  wrapScript,
+  SHELLS,
+  CAP_HOSTS,
   NAME_RE,
   INPUT_ID_RE,
   INPUT_TYPES,
@@ -69,7 +76,7 @@ describe("parseManifest — top-level", () => {
     const yaml = `
 name: foo
 description: hi
-host: mac
+host: desktop
 steps: [{ run: "echo hi" }]
 stranger: 1
 `;
@@ -84,7 +91,7 @@ stranger: 1
     const yaml = `
 name: lint-and-build
 description: Lint then build a Node project
-host: mac
+host: desktop
 inputs:
   - id: project
     description: project path
@@ -105,7 +112,7 @@ steps:
     const m = okManifest(r);
     expect(m.name).toBe("lint-and-build");
     expect(m.description).toBe("Lint then build a Node project");
-    expect(m.host).toBe("mac");
+    expect(m.host).toBe("desktop");
     expect(m.inputs).toEqual([
       {
         id: "project",
@@ -167,26 +174,95 @@ steps: [{run: "echo"}]
     });
   });
 
-  it("rejects host !== 'mac' with the canonical message", () => {
+  it("rejects an unknown host with the canonical message", () => {
     const r = parseManifest(`
 name: foo
 description: x
-host: linux
+host: windows
 steps: [{run: "echo"}]
 `);
     expect(r.errors).toContainEqual({
       path: "host",
-      message: 'host: only "mac" is supported',
+      message: 'host: must be one of desktop, box (legacy "mac" means desktop)',
     });
   });
 
-  it("defaults host to 'mac' when omitted", () => {
+  it("accepts host: desktop and yields manifest.host === 'desktop'", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+host: desktop
+steps: [{run: "echo"}]
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).host).toBe("desktop");
+  });
+
+  it("accepts host: mac (legacy alias) and normalizes to 'desktop'", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+host: mac
+steps: [{run: "echo"}]
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).host).toBe("desktop");
+  });
+
+  it("accepts host: box and yields manifest.host === 'box'", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+host: box
+steps: [{run: "echo"}]
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).host).toBe("box");
+  });
+
+  it("defaults host to 'desktop' when omitted", () => {
     const r = parseManifest(`
 name: foo
 description: x
 steps: [{run: "echo"}]
 `);
-    expect(okManifest(r).host).toBe("mac");
+    expect(okManifest(r).host).toBe("desktop");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeHost — pure mapper used by both the queue and the manifest parser
+// ---------------------------------------------------------------------------
+
+describe("normalizeHost", () => {
+  it("returns 'desktop' for undefined / null / ''", () => {
+    expect(normalizeHost(undefined)).toBe("desktop");
+    expect(normalizeHost(null)).toBe("desktop");
+    expect(normalizeHost("")).toBe("desktop");
+  });
+
+  it("returns 'desktop' for 'desktop'", () => {
+    expect(normalizeHost("desktop")).toBe("desktop");
+  });
+
+  it("returns 'desktop' for legacy 'mac'", () => {
+    expect(normalizeHost("mac")).toBe("desktop");
+  });
+
+  it("returns 'box' for 'box'", () => {
+    expect(normalizeHost("box")).toBe("box");
+  });
+
+  it("returns null for any unknown value", () => {
+    expect(normalizeHost("linux")).toBeNull();
+    expect(normalizeHost("windows")).toBeNull();
+    expect(normalizeHost("foo")).toBeNull();
+    expect(normalizeHost(123)).toBeNull();
+    expect(normalizeHost({})).toBeNull();
+  });
+
+  it("CAP_HOSTS contains exactly the canonical values", () => {
+    expect(CAP_HOSTS).toEqual(["desktop", "box"]);
   });
 });
 
@@ -614,7 +690,7 @@ describe("buildEnv", () => {
   const minimal = {
     name: "demo",
     description: "x",
-    host: "mac" as const,
+    host: "desktop" as const,
     inputs: [
       { id: "foo", description: "x", type: "string" as const, default: "def-foo" },
       { id: "bar", description: "x", type: "boolean" as const },
@@ -730,7 +806,7 @@ describe("validateSuppliedInputs", () => {
   const manifest = {
     name: "x",
     description: "x",
-    host: "mac" as const,
+    host: "desktop" as const,
     inputs: [
       { id: "foo", description: "x", type: "string" as const },
       { id: "bar", description: "x", type: "number" as const },
@@ -787,7 +863,7 @@ describe("validateManifest", () => {
     const obj = {
       name: "demo",
       description: "x",
-      host: "mac",
+      host: "desktop",
       steps: [{ run: "echo" }],
     };
     expect(validateManifest(obj).errors).toEqual([]);
@@ -804,5 +880,298 @@ describe("validateManifest", () => {
 describe("INPUT_TYPES", () => {
   it("contains the four canonical types", () => {
     expect(INPUT_TYPES).toEqual(["string", "number", "boolean", "enum"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SHELLS / shell resolution (BET-326)
+// ---------------------------------------------------------------------------
+
+describe("SHELLS", () => {
+  it("is exactly the two accepted values, in this order", () => {
+    expect(SHELLS).toEqual(["sh", "powershell"]);
+  });
+});
+
+describe("defaultShell", () => {
+  it("returns 'powershell' for win32", () => {
+    expect(defaultShell("win32")).toBe("powershell");
+  });
+
+  it("returns 'sh' for darwin / linux / anything else", () => {
+    expect(defaultShell("darwin")).toBe("sh");
+    expect(defaultShell("linux")).toBe("sh");
+    expect(defaultShell("freebsd")).toBe("sh");
+  });
+});
+
+describe("effectiveShell", () => {
+  it("step.shell overrides manifest.shell", () => {
+    expect(effectiveShell({ shell: "sh" }, { shell: "powershell" }, "linux")).toBe(
+      "powershell",
+    );
+  });
+
+  it("manifest.shell overrides the platform default", () => {
+    expect(effectiveShell({ shell: "powershell" }, {}, "darwin")).toBe(
+      "powershell",
+    );
+  });
+
+  it("falls back to defaultShell when neither is set", () => {
+    expect(effectiveShell({}, {}, "win32")).toBe("powershell");
+    expect(effectiveShell({}, {}, "linux")).toBe("sh");
+  });
+
+  it("falls back to defaultShell when both manifest and step are absent", () => {
+    expect(effectiveShell(undefined, undefined, "darwin")).toBe("sh");
+    expect(effectiveShell(null, null, "win32")).toBe("powershell");
+  });
+});
+
+describe("resolveShellInvocation", () => {
+  // Build the Git-Bash candidate paths via the same `path.join` the
+  // production code uses — the test must match the platform-specific
+  // separator (forward-slash on Linux CI, backslash on Windows).
+  const programFiles = "C:\\Program Files";
+  const programFilesX86 = "C:\\Program Files (x86)";
+  const localAppData = "C:\\Users\\me\\AppData\\Local";
+  const bashInProgramFiles = join(programFiles, "Git", "bin", "bash.exe");
+  const bashInLocalAppData = join(localAppData, "Git", "bin", "bash.exe");
+
+  it("returns /bin/sh on non-win32 for shell: sh", () => {
+    expect(resolveShellInvocation("sh", "darwin", { env: {}, exists: () => true })).toEqual({
+      command: "/bin/sh",
+      argsPrefix: ["-c"],
+    });
+    expect(resolveShellInvocation("sh", "linux", { env: {}, exists: () => true })).toEqual({
+      command: "/bin/sh",
+      argsPrefix: ["-c"],
+    });
+  });
+
+  it("on win32 shell: sh picks the first existing Git-Bash candidate", () => {
+    const env = {
+      ProgramFiles: programFiles,
+      "ProgramFiles(x86)": programFilesX86,
+      LOCALAPPDATA: localAppData,
+    };
+    // Candidate 1 (ProgramFiles) exists → wins.
+    const r = resolveShellInvocation("sh", "win32", {
+      env,
+      exists: (p) => p === bashInProgramFiles,
+    });
+    expect(r).toEqual({
+      command: bashInProgramFiles,
+      argsPrefix: ["-c"],
+    });
+  });
+
+  it("on win32 shell: sh walks the candidate list — 3rd wins when only it exists", () => {
+    const env = {
+      ProgramFiles: programFiles,
+      "ProgramFiles(x86)": programFilesX86,
+      LOCALAPPDATA: localAppData,
+    };
+    const r = resolveShellInvocation("sh", "win32", {
+      env,
+      exists: (p) => p === bashInLocalAppData,
+    });
+    expect(r).toEqual({
+      command: bashInLocalAppData,
+      argsPrefix: ["-c"],
+    });
+  });
+
+  it("on win32 shell: sh skips candidates whose env var is missing/empty", () => {
+    // ProgramFiles is missing → candidate 1 skipped. ProgramFiles(x86) is
+    // empty → candidate 2 skipped. LOCALAPPDATA → candidate 3.
+    const env = { LOCALAPPDATA: localAppData };
+    const r = resolveShellInvocation("sh", "win32", {
+      env,
+      exists: (p) => p === bashInLocalAppData,
+    });
+    if ("error" in r) throw new Error("expected success path");
+    expect(r.command).toBe(bashInLocalAppData);
+  });
+
+  it("on win32 shell: sh returns the install-Git-for-Windows error when none exist", () => {
+    const env = {
+      ProgramFiles: programFiles,
+      "ProgramFiles(x86)": programFilesX86,
+      LOCALAPPDATA: localAppData,
+    };
+    const r = resolveShellInvocation("sh", "win32", {
+      env,
+      exists: () => false,
+    });
+    expect("error" in r).toBe(true);
+    expect((r as { error: string }).error).toMatch(/Git for Windows/);
+    expect((r as { error: string }).error).toMatch(/shell: powershell/);
+  });
+
+  it("on win32 shell: powershell returns powershell.exe + flags", () => {
+    expect(
+      resolveShellInvocation("powershell", "win32", { env: {}, exists: () => true }),
+    ).toEqual({
+      command: "powershell.exe",
+      argsPrefix: ["-NoProfile", "-NonInteractive", "-Command"],
+    });
+  });
+
+  it("on non-win32 shell: powershell returns the only-on-Windows error", () => {
+    const r = resolveShellInvocation("powershell", "linux", {
+      env: {},
+      exists: () => true,
+    });
+    expect("error" in r).toBe(true);
+    expect((r as { error: string }).error).toMatch(/only available on Windows/);
+  });
+});
+
+describe("wrapScript", () => {
+  it("returns the input unchanged for shell: sh", () => {
+    const body = "echo hello\n";
+    expect(wrapScript("sh", body)).toBe(body);
+  });
+
+  it("prepends $ErrorActionPreference='Stop' and appends `; exit $LASTEXITCODE ` for shell: powershell", () => {
+    const body = "Write-Host hi";
+    expect(wrapScript("powershell", body)).toBe(
+      `$ErrorActionPreference='Stop'; ${body} ; exit $LASTEXITCODE `,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseManifest — shell (BET-326)
+// ---------------------------------------------------------------------------
+
+describe("parseManifest — shell", () => {
+  it("accepts shell: sh at the top level", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+shell: sh
+steps: [{run: "echo"}]
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).shell).toBe("sh");
+  });
+
+  it("accepts shell: powershell at the top level", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+shell: powershell
+steps: [{run: "Write-Host hi"}]
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).shell).toBe("powershell");
+  });
+
+  it("accepts shell: sh at the per-step level", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+steps:
+  - run: "echo"
+    shell: sh
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).steps[0].shell).toBe("sh");
+  });
+
+  it("accepts shell: powershell at the per-step level", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+steps:
+  - run: "Write-Host hi"
+    shell: powershell
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).steps[0].shell).toBe("powershell");
+  });
+
+  it("rejects shell: bash at the top level", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+shell: bash
+steps: [{run: "echo"}]
+`);
+    expect(r.errors).toContainEqual({
+      path: "shell",
+      message: "shell: must be one of sh, powershell",
+    });
+  });
+
+  it("rejects shell: bash at the per-step level", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+steps:
+  - run: "echo"
+    shell: bash
+`);
+    expect(r.errors).toContainEqual({
+      path: "steps[0].shell",
+      message: "shell: must be one of sh, powershell",
+    });
+  });
+
+  it("rejects shell: cmd at both levels", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+shell: cmd
+steps:
+  - run: "echo"
+    shell: cmd
+`);
+    expect(r.errors).toContainEqual({
+      path: "shell",
+      message: "shell: must be one of sh, powershell",
+    });
+    expect(r.errors).toContainEqual({
+      path: "steps[0].shell",
+      message: "shell: must be one of sh, powershell",
+    });
+  });
+
+  it("rejects a non-string shell at the top level", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+shell: 42
+steps: [{run: "echo"}]
+`);
+    expect(r.errors?.some((e) => /shell/.test(e.path))).toBe(true);
+  });
+
+  it("leaves shell absent (not defaulted) when omitted", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+steps: [{run: "echo"}]
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).shell).toBeUndefined();
+    expect(okManifest(r).steps[0].shell).toBeUndefined();
+  });
+
+  it("does not reject shell: powershell when parsed on a non-win32 build", () => {
+    // Validation is platform-independent — a Windows-targeted manifest
+    // must parse cleanly on the Linux server (registry serves Settings).
+    // Platform availability is resolveShellInvocation's concern, not the
+    // parser's.
+    const r = parseManifest(`
+name: foo
+description: x
+shell: powershell
+steps: [{run: "Write-Host hi"}]
+`);
+    expect(r.errors).toBeUndefined();
   });
 });

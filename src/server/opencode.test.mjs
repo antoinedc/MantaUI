@@ -28,6 +28,7 @@ import {
   _getOcAgent,
   _pooledOcRequest,
   discardBody,
+  getProviders,
 } from "./opencode.mjs";
 
 test("apiUrl targets local opencode port 4096", () => {
@@ -686,6 +687,70 @@ test("discardBody swallows errors on an already-consumed body", async () => {
   await res.text(); // consume it
   await discardBody(res); // cancelling a used body would throw — must be swallowed
   assert.ok(true);
+});
+
+// ---------------------------------------------------------------------------
+// getProviders — live provider state from opencode's GET /provider
+// (BET-309 follow-up: BET-318). Feeds the `opencode:provider-auth` `status`
+// action. Must never throw — transport failures degrade to
+// `{ connected: [] }` so the caller's `connected[]` reads stay safe.
+// ---------------------------------------------------------------------------
+
+test("getProviders returns {connected:[...]} for a 200 with a populated connected[]", async () => {
+  await withMockFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          connected: ["anthropic", "openai"],
+          all: [{ id: "anthropic" }, { id: "openai" }, { id: "deepseek" }],
+          default: { anthropic: "claude-sonnet-4-6", openai: "gpt-5" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    async () => {
+      const out = await getProviders();
+      assert.deepEqual(out.connected, ["anthropic", "openai"]);
+      assert.equal(out.all.length, 3);
+      assert.equal(out.default.anthropic, "claude-sonnet-4-6");
+    },
+  );
+});
+
+test("getProviders returns {connected:[]} on a non-2xx response", async () => {
+  await withMockFetch(
+    async () => new Response("server gone", { status: 503 }),
+    async () => {
+      const out = await getProviders();
+      assert.deepEqual(out.connected, []);
+    },
+  );
+});
+
+test("getProviders returns {connected:[]} on a transport throw", async () => {
+  await withMockFetch(
+    async () => { throw new Error("ECONNREFUSED"); },
+    async () => {
+      const out = await getProviders();
+      assert.deepEqual(out.connected, []);
+    },
+  );
+});
+
+test("getProviders coerces a non-array connected[] to []", async () => {
+  // Defensive: opencode has been observed to return shapes that drift over
+  // versions; the renderer's `connected.includes(id)` check must not break
+  // when the server returns e.g. `{connected: "anthropic"}`.
+  await withMockFetch(
+    async () =>
+      new Response(
+        JSON.stringify({ connected: "anthropic", all: null, default: null }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    async () => {
+      const out = await getProviders();
+      assert.deepEqual(out.connected, []);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

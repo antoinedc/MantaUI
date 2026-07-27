@@ -430,7 +430,7 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     "opencode:provider-auth": async (req) => {
       const action = req?.action;
       if (action === "status") {
-        const { connected } = await providers.getProviders();
+        const { connected } = await oc.getProviders();
         return {
           action: "status",
           providers: subscriptionProviders.subscriptionStatuses(connected),

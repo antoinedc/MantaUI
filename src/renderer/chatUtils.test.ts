@@ -66,6 +66,11 @@ import {
   chooseUpdateSkewVariant,
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
+  parseDeviceCode,
+  connectPhaseLabel,
+  isPollExpired,
+  describeSubscriptionStatus,
+  terminalShortcut,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -2963,5 +2968,302 @@ describe("arrow history predicates", () => {
     expect(arrowDownNavigatesHistory({ atFirstRow: false, atLastRow: true })).toBe(true);
     expect(arrowDownNavigatesHistory({ atFirstRow: false, atLastRow: false })).toBe(false);
     expect(arrowDownNavigatesHistory({ atFirstRow: true, atLastRow: true })).toBe(true);
+  });
+});
+
+// ===== parseDeviceCode (BET-312) =====
+//
+// Pulls the device code out of opencode's OAuth instructions string. The
+// "code" anchor guards against prose like "the user has not entered a code"
+// matching its own inline "code" — only a string that explicitly presents a
+// device-code-shaped token after a "code" cue is treated as one.
+
+describe("parseDeviceCode", () => {
+  it("extracts the code from the real opencode instructions string", () => {
+    expect(parseDeviceCode("Enter code: TOQR-BUA7Z")).toBe("TOQR-BUA7Z");
+  });
+
+  it("accepts the anchor in lower-case and as a word boundary", () => {
+    expect(parseDeviceCode("enter code ABCD-EFGH")).toBe("ABCD-EFGH");
+    expect(parseDeviceCode("Visit the page and use code WXYZ-1234 to sign in")).toBe("WXYZ-1234");
+  });
+
+  it("returns null when the string has no recognisable code", () => {
+    expect(parseDeviceCode("Some prose without a code")).toBeNull();
+    expect(parseDeviceCode("Sign in to your account to continue")).toBeNull();
+  });
+
+  it("returns null for the empty string", () => {
+    expect(parseDeviceCode("")).toBeNull();
+  });
+
+  it("returns null for non-string input", () => {
+    // Defensive: a malformed payload from opencode should not crash the UI.
+    // Cast to `unknown` so the type system allows the bad input through.
+    expect(parseDeviceCode(undefined as unknown as string)).toBeNull();
+    expect(parseDeviceCode(null as unknown as string)).toBeNull();
+    expect(parseDeviceCode(42 as unknown as string)).toBeNull();
+  });
+});
+
+// ===== connectPhaseLabel (BET-312) =====
+//
+// Single source of user-facing status text. The exhaustive switch in
+// connectPhaseLabel lets TypeScript flag any missed variant; the test pins
+// the labels so a copy change forces an explicit decision.
+
+describe("connectPhaseLabel", () => {
+  it("labels every phase distinctively", () => {
+    expect(connectPhaseLabel({ kind: "starting" })).toBe("Connecting…");
+    expect(
+      connectPhaseLabel({ kind: "waiting", url: "u", instructions: "i", methodIndex: 0 }),
+    ).toBe("Waiting for sign-in");
+    expect(
+      connectPhaseLabel({
+        kind: "needsCode",
+        url: "u",
+        instructions: "i",
+        methodIndex: 0,
+      }),
+    ).toBe("Enter the code");
+    expect(connectPhaseLabel({ kind: "needsKey", consoleUrl: null })).toBe(
+      "Enter your API key",
+    );
+    expect(connectPhaseLabel({ kind: "applying", restartConfirmed: true })).toBe(
+      "Applying…",
+    );
+    expect(connectPhaseLabel({ kind: "done" })).toBe("Connected");
+    expect(connectPhaseLabel({ kind: "failed", message: "x" })).toBe("Failed");
+  });
+});
+
+// ===== isPollExpired (BET-312) =====
+//
+// Shared by the 5-minute device-code poll and the 30-second restart poll.
+// The deadline is a strict ">=" so the polling code can check on every tick
+// without worrying about a one-frame over-shoot.
+
+describe("isPollExpired", () => {
+  it("is false before the deadline", () => {
+    expect(isPollExpired(1000, 1000 + 1, 5000)).toBe(false);
+    expect(isPollExpired(1000, 1000 + 4999, 5000)).toBe(false);
+  });
+
+  it("is true at and past the deadline", () => {
+    expect(isPollExpired(1000, 1000 + 5000, 5000)).toBe(true);
+    expect(isPollExpired(1000, 1000 + 9999, 5000)).toBe(true);
+  });
+
+  it("matches the two call sites the issue calls out (5-min device poll, 30-s restart poll)", () => {
+    const start = 0;
+    // Device poll: 5 min = 300_000 ms. Right at the cap = expired.
+    expect(isPollExpired(start, start + 5 * 60 * 1000, 5 * 60 * 1000)).toBe(true);
+    // Restart poll: 30 s = 30_000 ms. Just under = not expired.
+    expect(isPollExpired(start, start + 29_999, 30_000)).toBe(false);
+  });
+
+  it("returns false for non-finite inputs (defensive against bad clocks)", () => {
+    expect(isPollExpired(NaN, 1000, 5000)).toBe(false);
+    expect(isPollExpired(1000, NaN, 5000)).toBe(false);
+    expect(isPollExpired(1000, 1000, NaN)).toBe(false);
+  });
+});
+
+// ===== describeSubscriptionStatus (BET-314) =====
+//
+// SubscriptionsCard renders "connected" / "not connected" next to each row.
+// The string is the entire UX (no badge, no chip), so a future copy tweak
+// should land here, not inline in the JSX. Two tests, both exhaustive over
+// the boolean — anything else (a third value, mixed casing) is a regression.
+
+describe("describeSubscriptionStatus", () => {
+  it("returns 'connected' when status.connected is true", () => {
+    expect(
+      describeSubscriptionStatus({
+        id: "anthropic",
+        label: "Claude",
+        plan: "Claude Pro / Max",
+        console: null,
+        docs: "https://claude.com/pricing",
+        connected: true,
+      }),
+    ).toBe("connected");
+  });
+
+  it("returns 'not connected' when status.connected is false", () => {
+    expect(
+      describeSubscriptionStatus({
+        id: "openai",
+        label: "Codex",
+        plan: "ChatGPT Plus / Pro",
+        console: null,
+        docs: "https://openai.com/chatgpt/pricing",
+        connected: false,
+      }),
+    ).toBe("not connected");
+  });
+});
+
+// ===== terminalShortcut (BET-333) =====
+//
+// Pure matcher behind Terminal.tsx's keydown handler. macOS triggers off Cmd
+// alone; every other platform triggers off Ctrl+Shift. The upper-case trap:
+// when Shift is held, browsers report `ev.key` as the shifted form ("C"), so
+// the switch must lowercase before comparing.
+
+const NO_MODS = { metaKey: false, ctrlKey: false, shiftKey: false, altKey: false };
+
+describe("terminalShortcut", () => {
+  describe("macOS (isMac: true)", () => {
+    it("maps Cmd+C → copy", () => {
+      expect(
+        terminalShortcut({ key: "c", ...NO_MODS, metaKey: true }, true),
+      ).toBe("copy");
+    });
+
+    it("maps Cmd+V → paste", () => {
+      expect(
+        terminalShortcut({ key: "v", ...NO_MODS, metaKey: true }, true),
+      ).toBe("paste");
+    });
+
+    it("maps Cmd+F → find", () => {
+      expect(
+        terminalShortcut({ key: "f", ...NO_MODS, metaKey: true }, true),
+      ).toBe("find");
+    });
+
+    it("maps Cmd+K → clear", () => {
+      expect(
+        terminalShortcut({ key: "k", ...NO_MODS, metaKey: true }, true),
+      ).toBe("clear");
+    });
+
+    it("plain Ctrl+C → null (Mac user's Ctrl+C must reach the process)", () => {
+      expect(
+        terminalShortcut({ key: "c", ...NO_MODS, ctrlKey: true }, true),
+      ).toBeNull();
+    });
+
+    it("Cmd+Shift+K → null (Cmd+Shift combos are not our shortcuts)", () => {
+      expect(
+        terminalShortcut(
+          { key: "K", metaKey: true, ctrlKey: false, shiftKey: true, altKey: false },
+          true,
+        ),
+      ).toBeNull();
+    });
+  });
+
+  describe("non-macOS (isMac: false)", () => {
+    it("Ctrl+Shift+C with key:'C' → copy (regression test for the uppercase trap)", () => {
+      expect(
+        terminalShortcut(
+          { key: "C", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBe("copy");
+    });
+
+    it("Ctrl+Shift+V → paste", () => {
+      expect(
+        terminalShortcut(
+          { key: "V", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBe("paste");
+    });
+
+    it("Ctrl+Shift+F → find", () => {
+      expect(
+        terminalShortcut(
+          { key: "F", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBe("find");
+    });
+
+    it("Ctrl+Shift+K → clear", () => {
+      expect(
+        terminalShortcut(
+          { key: "K", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBe("clear");
+    });
+
+    it("plain Ctrl+C → null (the actual bug being fixed)", () => {
+      expect(
+        terminalShortcut(
+          { key: "c", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("plain Ctrl+K → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "k", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("plain Ctrl+F → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "f", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("plain Ctrl+V → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "v", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("Cmd+C → null (some keyboards send Meta instead of Ctrl on Win/Linux)", () => {
+      expect(
+        terminalShortcut(
+          { key: "c", metaKey: true, ctrlKey: false, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("Ctrl+Shift+Alt+C → null (alt modifier disqualifies the trigger)", () => {
+      expect(
+        terminalShortcut(
+          { key: "c", metaKey: false, ctrlKey: true, shiftKey: true, altKey: true },
+          false,
+        ),
+      ).toBeNull();
+    });
+  });
+
+  describe("trigger held with an unrelated key", () => {
+    it("macOS Cmd+X → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "x", metaKey: true, ctrlKey: false, shiftKey: false, altKey: false },
+          true,
+        ),
+      ).toBeNull();
+    });
+
+    it("non-macOS Ctrl+Shift+X → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "x", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
   });
 });

@@ -204,7 +204,7 @@ Tell the user, in this order:
    3-step wizard that walks them through downloading the desktop app,
    connecting it, and (optionally) installing the mobile app:
 
-   - **Linux box:** [Open this link to connect your devices](https://<box_id>.boxes.mantaui.com/pair#code=<code>)
+   - **Linux box:** [Open this link to connect your devices](https://<box_id>.boxes.mantaui.com/pair#box=<box_id>&code=<code>)
    - **macOS box:** the installer prints the tailnet URL (or the loopback
      URL if no Tailscale) in the same pair block — use that. There is no
      public `<box_id>.boxes.mantaui.com` on macOS.

@@ -6,6 +6,8 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { getMantaPreload } from "./preloadAccess";
+import { IS_MAC } from "./platform";
+import { terminalShortcut } from "./chatUtils";
 
 /**
  * Handle an OSC 52 escape sequence: decode the base64 payload and write the
@@ -266,34 +268,34 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
         return false;
       }
 
-      const meta = ev.metaKey || ev.ctrlKey;
-      if (!meta) return true;
-
-      if (ev.key === "c") {
-        const sel = term.getSelection();
-        if (sel) {
-          navigator.clipboard.writeText(sel).catch(() => {});
+      // macOS: Cmd+C/V/F/K. Everywhere else: Ctrl+Shift+C/V/F/K. Plain Ctrl
+      // on Windows/Linux is the application modifier and must reach the
+      // process — see terminalShortcut's doc in chatUtils.ts.
+      switch (terminalShortcut(ev, IS_MAC)) {
+        case "copy": {
+          const sel = term.getSelection();
+          if (sel) {
+            navigator.clipboard.writeText(sel).catch(() => {});
+            return false;
+          }
+          return true;
+        }
+        case "paste":
+          navigator.clipboard.readText().then((t) => {
+            if (t) window.api.ptyWrite(sessionKey, t);
+          });
+          return false;
+        case "find": {
+          const q = window.prompt("Find:");
+          if (q) search.findNext(q);
           return false;
         }
-        return true;
+        case "clear":
+          term.clear();
+          return false;
+        default:
+          return true;
       }
-      if (ev.key === "v") {
-        navigator.clipboard.readText().then((t) => {
-          if (t) window.api.ptyWrite(sessionKey, t);
-        });
-        return false;
-      }
-      if (ev.key === "f") {
-        const q = window.prompt("Find:");
-        if (q) search.findNext(q);
-        return false;
-      }
-      // Cmd+K = clear xterm scrollback
-      if (ev.key === "k" && !ev.shiftKey) {
-        term.clear();
-        return false;
-      }
-      return true;
     });
 
     return () => {

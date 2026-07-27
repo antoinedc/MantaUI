@@ -11,6 +11,8 @@ export type PluginInputRow = {
   values?: string[];
 };
 
+export type Shell = "sh" | "powershell";
+
 export type PluginStep = {
   name?: string;
   run: string;
@@ -19,23 +21,31 @@ export type PluginStep = {
   timeout?: string;
   if?: string;
   continue_on_error?: boolean;
+  shell?: Shell;
 };
 
 export type PluginManifest = {
   name: string;
   description: string;
-  host: "mac";
+  host: "desktop" | "box";
   inputs: PluginInputRow[];
   env: Record<string, string>;
   timeoutMs: number | null;
+  shell?: Shell;
   steps: PluginStep[];
 };
 
 export type PluginManifestError = { path: string; message: string };
 
+export type ShellInvocation =
+  | { command: string; argsPrefix: string[] }
+  | { error: string };
+
 export const NAME_RE: RegExp;
 export const INPUT_ID_RE: RegExp;
 export const INPUT_TYPES: readonly string[];
+export const CAP_HOSTS: readonly string[];
+export const SHELLS: readonly Shell[];
 export const PATH_PATCH: string;
 
 export function parseManifest(
@@ -70,3 +80,17 @@ export function validateSuppliedInputs(
 ): { errors: PluginManifestError[] };
 
 export function parseTimeout(s: string): number | { error: string };
+export function normalizeHost(h: unknown): "desktop" | "box" | null;
+
+export function defaultShell(platform: string): Shell;
+export function effectiveShell(
+  manifest: Pick<PluginManifest, "shell"> | null | undefined,
+  step: Pick<PluginStep, "shell"> | null | undefined,
+  platform: string,
+): Shell;
+export function resolveShellInvocation(
+  shell: Shell,
+  platform: string,
+  io: { env?: Record<string, string | undefined>; exists?: (p: string) => boolean },
+): ShellInvocation;
+export function wrapScript(shell: Shell, script: string): string;

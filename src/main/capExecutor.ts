@@ -1,17 +1,17 @@
-// capExecutor.ts — the Mac-side executor for MantaUI plugins.
+// capExecutor.ts — the desktop-side executor for MantaUI plugins.
 //
 // Subscribes to manta-server's SSE bus, picks up `{kind:"capJob"}` envelopes
-// targeting `host:"mac"`, and runs the matching plugin's manifest. Plugin
-// manifests live as YAML files in ~/.manta/plugins/ (the Mac-side mirror of
-// the AI's authoring surface); this module owns the in-memory map of parsed
-// manifests and the per-step runner.
+// targeting `host:"desktop"`, and runs the matching plugin's manifest. Plugin
+// manifests live as YAML files in ~/.manta/plugins/ (the desktop-side mirror
+// of the AI's authoring surface); this module owns the in-memory map of
+// parsed manifests and the per-step runner.
 //
 // Lifecycle invariants (per docs/mantuani-plugins.md §"src/main/capExecutor.ts"):
 //   • enabled-gate at start: `pluginsEnabled !== true` → no-op stop.
 //     Toggling takes effect on next app launch (Settings UI says so).
 //   • SSE catch-up: on every onConnect (initial + reconnect), GET
-//     /api/cap?host=mac&status=queued and enqueue. SSE has no replay, so
-//     an offline/asleep Mac must claim what it missed.
+//     /api/cap?host=desktop&status=queued and enqueue. SSE has no replay,
+//     so an offline/asleep desktop must claim what it missed.
 //   • Serial + dedup: FIFO + Set<string> of ever-enqueued ids. Same job
 //     WILL arrive via both SSE and catch-up; the Set drops duplicates.
 //   • One job at a time: a single promise chain. Two parallel xcodebuilds
@@ -40,6 +40,10 @@ import {
   resolveCwd,
   validateSuppliedInputs,
   evalIf,
+  normalizeHost,
+  effectiveShell,
+  resolveShellInvocation,
+  wrapScript,
   type PluginManifest,
 } from "../shared/pluginManifest.mjs";
 import {
@@ -57,8 +61,9 @@ import type { AppConfig } from "../shared/types.js";
 // Constants (single source of truth — see docs/mantuani-plugins.md §Constants)
 // ---------------------------------------------------------------------------
 
-// Mac-side per-job abort. < the server's 30 min so the Mac fails first and
-// reports properly instead of leaving a stale `running` for the server sweep.
+// Desktop-side per-job abort. < the server's 30 min so the desktop fails
+// first and reports properly instead of leaving a stale `running` for the
+// server sweep.
 const EXECUTOR_JOB_TIMEOUT_MS = 25 * 60_000;
 // Executor log-batch flush cadence.
 const LOG_FLUSH_MS = 1_000;
@@ -206,12 +211,12 @@ export function startCapExecutor(
     // queued job was indistinguishable from "nothing to claim" and was
     // undiagnosable from logs. SSE has no replay, so this on-connect
     // GET is the ONLY path that can recover jobs the AI queued while
-    // the Mac was offline/asleep. Reusing the dedup Set keeps double-
+    // the desktop was offline/asleep. Reusing the dedup Set keeps double-
     // delivery (SSE envelope + this list) safe.
     let res: Response;
     try {
       res = await fetch(
-        `${c.serverUrl.replace(/\/+$/, "")}/api/cap?host=mac&status=queued`,
+        `${c.serverUrl.replace(/\/+$/, "")}/api/cap?host=desktop&status=queued`,
         {
           headers: c.boxToken
             ? { authorization: `Bearer ${c.boxToken}` }
@@ -248,7 +253,11 @@ export function startCapExecutor(
     const p = env.payload as
       | { id?: unknown; capability?: unknown; host?: unknown }
       | undefined;
-    if (!p || p.host !== "mac") return;
+    if (!p) return;
+    // Normalize on read so a legacy `host: "mac"` envelope (from an older
+    // installed tool file or a row written before the rename) still
+    // routes to the desktop executor.
+    if (normalizeHost(p.host) !== "desktop") return;
     if (typeof p.id !== "string" || typeof p.capability !== "string") return;
     enqueue(p.id, p.capability);
   }
@@ -645,7 +654,19 @@ function makeManifestHandler(manifest: PluginManifest) {
         ? withStepTimeout(controllerSignalOf(ctx), stepTimeoutMs)
         : null;
       try {
-        const res = await ctx.exec("/bin/sh", ["-c", step.run], {
+        // Shell resolution is the one place we read process.platform
+        // (BET-326 — exactly one read per step, passed down to the pure
+        // helpers). The shared module resolves the rest.
+        const platform = process.platform;
+        const shell = effectiveShell(manifest, step, platform);
+        const inv = resolveShellInvocation(shell, platform, {
+          env: process.env,
+          exists: existsSync,
+        });
+        if ("error" in inv) {
+          throw new Error(inv.error);
+        }
+        const res = await ctx.exec(inv.command, [...inv.argsPrefix, wrapScript(shell, step.run)], {
           cwd: cwdResolved,
           quiet: false,
           env,

@@ -46,6 +46,16 @@
          reachable WITHOUT TLS on this listener. -->
     <key>MANTA_TAILNET_HOST</key>
     <string>@@MANTA_TAILNET_HOST@@</string>
+    <!-- LOAD-BEARING. launchd hands an agent PATH=/usr/bin:/bin:/usr/sbin:/sbin
+         — it does NOT inherit a login shell's PATH, so a Homebrew `tmux`
+         (/opt/homebrew/bin, the only way a Mac gets tmux) is invisible to the
+         server. Symptom without this key: the box pairs fine, then every
+         workspace/session action fails — `tmux:new-session` 500s with ENOENT
+         and `listProjects` swallows the error and reports an empty box. Found
+         by the macOS install smoke workflow; install.sh substitutes the
+         resolved list, see launchd_agent_path(). -->
+    <key>PATH</key>
+    <string>@@AGENT_PATH@@</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

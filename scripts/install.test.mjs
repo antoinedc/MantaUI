@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,9 @@ import {
   readOsReleaseIds,
   classifyDistro,
   renderSystemdUnit,
+  fetchConnectedProviders,
+  formatProviderDetection,
+  DEFAULT_PROVIDERS,
   OPENCODE_CLAUDE_AUTH_PLUGIN,
   DEFAULT_PORT,
   DEFAULT_RELEASE_HOST,
@@ -459,7 +462,7 @@ test("formatPairingOutput produces a stable human block", () => {
   assert.match(out, /Expires:       2026-07-03 12:34:56 UTC/);
   // BET-239: Pair page URL surfaces under step 2 (above the manta:// link),
   // indented the same 7 spaces as the link itself.
-  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   // BET-241 Branch A footer: greppable one-time note at the very end of the block.
   assert.match(out, /\(one-time — mint a fresh one any time with `manta pair`\)/);
 });
@@ -571,11 +574,11 @@ test("buildPairLink produces the canonical box-form pair link (BET-177 §2.4)", 
 // never reaches server logs. Shares buildPairLink's validation rules so a
 // future drift in box/code shape fails BOTH helpers in lockstep.
 
-test("buildPairPageUrl emits the canonical https://<box>.boxes.mantaui.com/pair#code= shape", () => {
+test("buildPairPageUrl emits the canonical https://<box>.boxes.mantaui.com/pair#box=&code= shape", () => {
   const url = buildPairPageUrl(HEX32, "847291");
   assert.equal(
     url,
-    "https://0123456789abcdef0123456789abcdef.boxes.mantaui.com/pair#code=847291",
+    "https://0123456789abcdef0123456789abcdef.boxes.mantaui.com/pair#box=0123456789abcdef0123456789abcdef&code=847291",
   );
 });
 
@@ -622,7 +625,7 @@ test("formatPairingOutput includes the pair link + QR", () => {
   assert.match(out, /2\. Pair it — click this link, or paste it into the app's Connect screen/);
   // BET-239: Pair page URL surfaces under step 2 (above the manta:// link),
   // indented the same 7 spaces as the link itself.
-  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   // Stubbed QR rows are indented to match the surrounding 2-space indent.
   // We use a literal newline+two-spaces prefix in the regex (no \s — `s`
   // is .includes-sensitive and we want the exact byte sequence the formatter
@@ -649,7 +652,7 @@ test("formatPairingOutput falls back to the text-only block when qrRender throws
   // thing missing — BET-239 added the Pair page URL alongside the manta://
   // link; BET-241 moved the manta:// URL into step 2 of the numbered block).
   assert.match(out, /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
-  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   assert.match(out, /3\. iPhone \(optional\) — scan the QR below with your camera/);
   // QR block chars (qrcode-terminal draws U+2588 FULL BLOCK + U+2584 LOWER
   // HALF BLOCK) are absent. We assert on the QR's STUB marker rather than
@@ -840,6 +843,243 @@ test("mergeOpencodeConfig is null/undefined safe (treated as empty)", () => {
 });
 
 // ----------------------------------------------------------------------------
+// fetchConnectedProviders / formatProviderDetection / DEFAULT_PROVIDERS
+// (BET-313) — the install-time per-provider detection summary. Pure helpers
+// that install.sh composes at the tail of a successful install. Pure tests
+// here (no shell, no fetch mocking beyond the lib's injectable `fetchFn`).
+// ----------------------------------------------------------------------------
+
+test("DEFAULT_PROVIDERS lists the three BET-308 providers in display order", () => {
+  // The IDs MUST match opencode's /provider endpoint contract. A regression
+  // that re-orders or renames them silently makes `connected[]` matching
+  // miss in production. Hints use `opencode auth login -p <id>` — verified
+  // non-interactive invocation against opencode 1.15.12.
+  assert.equal(DEFAULT_PROVIDERS.length, 3);
+  assert.deepEqual(
+    DEFAULT_PROVIDERS.map((p) => p.id),
+    ["anthropic", "openai", "kimi-for-coding"],
+  );
+  assert.deepEqual(
+    DEFAULT_PROVIDERS.map((p) => p.label),
+    ["Claude", "Codex", "Kimi"],
+  );
+  for (const p of DEFAULT_PROVIDERS) {
+    assert.match(p.hint, new RegExp(`opencode auth login -p ${p.id.replace(/-/g, "\\-")}`));
+  }
+  // The table is frozen — a future caller mutating it would silently change
+  // detection for every box.
+  assert.equal(Object.isFrozen(DEFAULT_PROVIDERS), true);
+});
+
+test("fetchConnectedProviders returns the connected IDs from a 2xx response", async () => {
+  const fakeFetch = async () => ({
+    status: 200,
+    json: async () => ({
+      all: [{ id: "anthropic" }, { id: "openai" }, { id: "kimi-for-coding" }],
+      connected: ["anthropic", "openai"],
+      default: {},
+    }),
+  });
+  const ids = await fetchConnectedProviders({ fetchFn: fakeFetch });
+  assert.deepEqual(ids, ["anthropic", "openai"]);
+});
+
+test("fetchConnectedProviders returns [] on network error (opencode down)", async () => {
+  const fakeFetch = async () => {
+    throw new Error("ECONNREFUSED");
+  };
+  const ids = await fetchConnectedProviders({ fetchFn: fakeFetch });
+  assert.deepEqual(ids, []);
+});
+
+test("fetchConnectedProviders returns [] on a non-2xx status (auth gate 401)", async () => {
+  const fakeFetch = async () => ({ status: 401, json: async () => ({}) });
+  const ids = await fetchConnectedProviders({ fetchFn: fakeFetch });
+  assert.deepEqual(ids, []);
+});
+
+test("fetchConnectedProviders returns [] on a malformed JSON body", async () => {
+  const fakeFetch = async () => ({
+    status: 200,
+    json: async () => {
+      throw new SyntaxError("unexpected token");
+    },
+  });
+  const ids = await fetchConnectedProviders({ fetchFn: fakeFetch });
+  assert.deepEqual(ids, []);
+});
+
+test("fetchConnectedProviders returns [] when `connected` is missing or non-array", async () => {
+  const fakeFetch = async () => ({
+    status: 200,
+    json: async () => ({ all: [], default: {} }),
+  });
+  const ids = await fetchConnectedProviders({ fetchFn: fakeFetch });
+  assert.deepEqual(ids, []);
+});
+
+test("fetchConnectedProviders filters non-string entries from `connected[]`", async () => {
+  const fakeFetch = async () => ({
+    status: 200,
+    json: async () => ({ connected: ["anthropic", null, 42, "", "openai"] }),
+  });
+  const ids = await fetchConnectedProviders({ fetchFn: fakeFetch });
+  assert.deepEqual(ids, ["anthropic", "openai"]);
+});
+
+test("fetchConnectedProviders returns [] when no fetchFn is injected", async () => {
+  // No fetchFn, no globalThis.fetch — defensive default for tests that
+  // import this lib in a Node env without undici.
+  const originalFetch = globalThis.fetch;
+  try {
+    delete globalThis.fetch;
+    const ids = await fetchConnectedProviders();
+    assert.deepEqual(ids, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("formatProviderDetection: zero connected → three warns + guidance + CLI row", () => {
+  const { rows, showGuidance } = formatProviderDetection({
+    connected: [],
+    hasClaudeCredentials: false,
+    clis: { claude: false, codex: false, kimi: false },
+  });
+  assert.equal(showGuidance, true);
+  assert.equal(rows.length, 4); // 3 providers + 1 cli row
+  assert.deepEqual(
+    rows.slice(0, 3).map((r) => ({ status: r.status, kind: r.kind, label: r.label })),
+    [
+      { status: "warn", kind: "provider", label: "Claude" },
+      { status: "warn", kind: "provider", label: "Codex" },
+      { status: "warn", kind: "provider", label: "Kimi" },
+    ],
+  );
+  for (const r of rows.slice(0, 3)) {
+    assert.match(r.suffix, /^not connected — connect from MantaUI, or: opencode auth login -p /);
+  }
+  assert.equal(rows[3].kind, "cli");
+  assert.deepEqual(
+    rows[3].slots.map((s) => ({ id: s.id, detected: s.detected })),
+    [
+      { id: "claude", detected: false },
+      { id: "codex", detected: false },
+      { id: "kimi", detected: false },
+    ],
+  );
+});
+
+test("formatProviderDetection: Claude connected via connected[] → ok + no guidance", () => {
+  const { rows, showGuidance } = formatProviderDetection({
+    connected: ["anthropic"],
+    hasClaudeCredentials: false, // cred file irrelevant when opencode reported it
+    clis: { claude: true, codex: false, kimi: false },
+  });
+  assert.equal(showGuidance, false);
+  assert.equal(rows[0].status, "ok");
+  assert.equal(rows[0].label, "Claude");
+  assert.equal(rows[0].suffix, "connected");
+  assert.equal(rows[1].status, "warn");
+  assert.equal(rows[2].status, "warn");
+});
+
+test("formatProviderDetection: Claude connected via local cred file (opencode didn't answer)", () => {
+  // The fallback path — install.sh probes ~/.claude/.credentials.json when
+  // opencode's /provider didn't return (network error, opencode down). The
+  // Claude row MUST be ok so the user sees "Claude connected" instead of
+  // a stray warn after we already know the file is present.
+  const { rows, showGuidance } = formatProviderDetection({
+    connected: [],
+    hasClaudeCredentials: true,
+    clis: { claude: false, codex: false, kimi: false },
+  });
+  assert.equal(showGuidance, false, "Claude cred file present → not zero connected → no guidance");
+  assert.equal(rows[0].status, "ok");
+  assert.equal(rows[0].label, "Claude");
+  assert.equal(rows[0].suffix, "connected");
+});
+
+test("formatProviderDetection: all three connected → three ok rows + no guidance", () => {
+  const { rows, showGuidance } = formatProviderDetection({
+    connected: ["anthropic", "openai", "kimi-for-coding"],
+    hasClaudeCredentials: true,
+    clis: { claude: true, codex: true, kimi: true },
+  });
+  assert.equal(showGuidance, false);
+  for (const r of rows.slice(0, 3)) {
+    assert.equal(r.status, "ok");
+    assert.equal(r.suffix, "connected");
+  }
+  for (const s of rows[3].slots) {
+    assert.equal(s.detected, true);
+  }
+});
+
+test("formatProviderDetection: Codex-only connected → still no guidance (any connected)", () => {
+  // The guidance message is ONLY true when zero providers are connected.
+  // Even when Claude isn't, having Codex means the user can chat.
+  const { rows, showGuidance } = formatProviderDetection({
+    connected: ["openai"],
+    hasClaudeCredentials: false,
+    clis: { claude: false, codex: true, kimi: false },
+  });
+  assert.equal(showGuidance, false);
+  assert.equal(rows[1].status, "ok");
+  assert.equal(rows[1].label, "Codex");
+});
+
+test("formatProviderDetection: clis object is reflected verbatim in the CLI row", () => {
+  // The CLI row carries three slots in fixed order; install.sh maps each
+  // to "CLI detected" or "CLI not found" based on `detected`. A regression
+  // that drops a slot would make one launcher silently un-probed.
+  const { rows } = formatProviderDetection({
+    connected: [],
+    hasClaudeCredentials: false,
+    clis: { claude: true, codex: false, kimi: true },
+  });
+  assert.equal(rows[3].kind, "cli");
+  assert.equal(rows[3].slots.length, 3);
+  assert.deepEqual(
+    rows[3].slots.map((s) => s.id),
+    ["claude", "codex", "kimi"],
+  );
+  assert.deepEqual(
+    rows[3].slots.map((s) => s.detected),
+    [true, false, true],
+  );
+});
+
+test("formatProviderDetection: missing clis object is treated as all-not-detected", () => {
+  // Defensive: install.sh always populates clis, but the lib shouldn't
+  // crash if a future caller forgets. Without clis, every slot is
+  // detected=false → "CLI not found" — matches what `command -v` would
+  // report on PATH with nothing installed.
+  const { rows } = formatProviderDetection({
+    connected: [],
+    hasClaudeCredentials: false,
+  });
+  for (const s of rows[3].slots) {
+    assert.equal(s.detected, false);
+  }
+});
+
+test("formatProviderDetection: accepts a custom providers[] (test seam)", () => {
+  // The providers[] override exists so future tests can pin a provider
+  // table without redefining the lib's constant. A regression that
+  // ignores the override would silently fall back to DEFAULT_PROVIDERS.
+  const { rows } = formatProviderDetection({
+    connected: ["custom-a"],
+    hasClaudeCredentials: false,
+    clis: { claude: false, codex: false, kimi: false },
+    providers: [{ id: "custom-a", label: "CustomA", hint: "opencode auth login -p custom-a" }],
+  });
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].status, "ok");
+  assert.equal(rows[0].label, "CustomA");
+});
+
+// ----------------------------------------------------------------------------
 // renderSystemdUnit — placeholder substitution used by install.sh
 // ----------------------------------------------------------------------------
 
@@ -1018,6 +1258,104 @@ test("install.sh defines detect_tailscale_ip BEFORE every call site (BET-267 rev
   assert.ok(
     defLine < firstCallLine,
     `detect_tailscale_ip() must be defined BEFORE its call site: def at line ${defLine}, first call at line ${firstCallLine}. Bash does not forward-reference function definitions within the same function — defining the helper after its call sites silently fails with "command not found".`,
+  );
+});
+
+// ----------------------------------------------------------------------------
+// read_box_id / wait_for_box_id — the first-boot identity race
+// ----------------------------------------------------------------------------
+//
+// The server mints the box identity asynchronously on its first start; step 7
+// only waits for the supervisor to fork it. Reading auth.json immediately
+// afterwards used to come back empty on a fresh box, which cascaded into
+// `render-caddy-vhost: --box-id <32hex> required` and a box with NO Caddy
+// vhost (and so no public TLS) that a second install run silently repaired.
+
+test("read_box_id echoes the box_id, and nothing when auth.json is missing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-readboxid-"));
+  const authFile = join(dir, "auth.json");
+  try {
+    const missing = runBootstrap({
+      preBody: `
+export MANTA_AUTH_FILE='${authFile}'
+echo "MISSING=[\$(read_box_id '${join(__dirname, "install-lib.mjs")}' "\$(command -v node)")]"
+`,
+    });
+    assert.match(missing, /MISSING=\[\]/);
+
+    writeFileSync(
+      authFile,
+      JSON.stringify({ box_id: HEX32, box_token: "11112222333344445555666677778888" }),
+    );
+    const present = runBootstrap({
+      preBody: `
+export MANTA_AUTH_FILE='${authFile}'
+echo "PRESENT=[\$(read_box_id '${join(__dirname, "install-lib.mjs")}' "\$(command -v node)")]"
+`,
+    });
+    assert.match(present, new RegExp(`PRESENT=\\[${HEX32}\\]`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wait_for_box_id keeps polling until the server mints the identity", () => {
+  // The mock answers empty twice then returns the id — the shape of a fresh
+  // box where auth.json lands a second or two after the unit is started. The
+  // call counter lives in a FILE because each read runs in its own command
+  // substitution (a subshell), so an in-memory counter would never advance.
+  const dir = mkdtempSync(join(tmpdir(), "manta-waitboxid-"));
+  const counter = join(dir, "calls");
+  try {
+    writeFileSync(counter, "0");
+    const out = runBootstrap({
+      preBody: `
+read_box_id() {
+  n=\$(( \$(cat '${counter}') + 1 )); echo "\$n" > '${counter}'
+  if [ "\$n" -ge 3 ]; then printf '${HEX32}'; fi
+}
+sleep() { :; }   # no real waiting in the test
+echo "ID=[\$(wait_for_box_id lib node 10 1)]"
+`,
+    });
+    assert.match(out, new RegExp(`ID=\\[${HEX32}\\]`));
+    assert.equal(readFileSync(counter, "utf-8").trim(), "3");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wait_for_box_id gives up with empty output + non-zero after the budget", () => {
+  // Exhaustion must stay a clean "no identity" signal (the caller warns and
+  // skips gateway registration + the vhost write) — never a hang, never a
+  // partial string that would reach render-caddy-vhost as a bad --box-id.
+  const out = runBootstrap({
+    preBody: `
+read_box_id() { printf ''; }
+sleep() { :; }
+id="\$(wait_for_box_id lib node 3 1)" && rc=0 || rc=\$?
+echo "ID=[\$id] RC=\$rc"
+`,
+  });
+  assert.match(out, /ID=\[\] RC=1/);
+});
+
+test("install.sh waits for the box id before rendering the Caddy vhost (first-run regression)", () => {
+  // Static-layout guard: the value handed to `render-caddy-vhost --box-id`
+  // must come from the POLLING read, not the one-shot one. A regression here
+  // is invisible on a re-install (auth.json already exists) and only bites the
+  // very first run on a fresh box — exactly the case nobody re-tests.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.match(
+    src,
+    /BOX_ID_FOR_GATEWAY="\$\(wait_for_box_id /,
+    "BOX_ID_FOR_GATEWAY must be populated by wait_for_box_id (bounded poll), not a single read",
+  );
+  // And the renderer must never be reachable with an empty id.
+  assert.match(
+    src,
+    /\[ -z "\$\{BOX_ID_FOR_GATEWAY:-\}" \]/,
+    "step 7.5.E must skip the Caddy vhost write when no box_id is available",
   );
 });
 
@@ -1967,6 +2305,77 @@ test("render-caddy-vhost CLI subcommand rejects a non-hex boxId", () => {
   }
 });
 
+test("format-provider-detection CLI subcommand emits JSON {rows, showGuidance} (BET-313)", () => {
+  // install.sh pipes newline-separated connected[] ids to this subcommand
+  // (the shell's convenience wire shape) and reads the JSON back to drive
+  // the print loop. The pure function is covered above; this test pins
+  // the wire shape so a regression that re-serializes differently doesn't
+  // silently break install.sh's parser.
+  let stdout = "";
+  let stderr = "";
+  try {
+    const result = execSync(
+      `node ${join(__dirname, "install-lib.mjs")} format-provider-detection ` +
+        `--has-claude-creds 1 --cli-claude 1 --cli-codex 0 --cli-kimi 0`,
+      {
+        input: "anthropic\n",
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    stdout = result;
+  } catch (e) {
+    stdout = e.stdout ?? "";
+    stderr = e.stderr ?? "";
+    assert.fail(`format-provider-detection should exit 0; got error: ${stderr || e.message}`);
+  }
+  const parsed = JSON.parse(stdout);
+  assert.equal(parsed.showGuidance, false);
+  assert.equal(parsed.rows.length, 4);
+  assert.equal(parsed.rows[0].status, "ok");
+  assert.equal(parsed.rows[0].label, "Claude");
+  assert.equal(parsed.rows[0].suffix, "connected");
+  assert.equal(parsed.rows[1].status, "warn");
+  assert.equal(parsed.rows[1].label, "Codex");
+  assert.match(parsed.rows[1].suffix, /opencode auth login -p openai/);
+  assert.equal(parsed.rows[3].kind, "cli");
+  assert.equal(parsed.rows[3].slots[0].detected, true);
+  assert.equal(parsed.rows[3].slots[1].detected, false);
+});
+
+test("format-provider-detection CLI subcommand also accepts a JSON array via stdin", () => {
+  // The subcommand accepts EITHER a newline-separated list (the shell's
+  // convenience shape) OR a strict JSON array. install.sh uses the former;
+  // a future caller (tests, an MCP server) might use the latter.
+  const out = execSync(
+    `node ${join(__dirname, "install-lib.mjs")} format-provider-detection ` +
+      `--has-claude-creds 0 --cli-claude 0 --cli-codex 0 --cli-kimi 0`,
+    {
+      input: '["openai", "kimi-for-coding"]',
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.rows[0].status, "warn"); // Claude
+  assert.equal(parsed.rows[1].status, "ok"); // Codex (openai)
+  assert.equal(parsed.rows[2].status, "ok"); // Kimi (kimi-for-coding)
+  assert.equal(parsed.showGuidance, false);
+});
+
+test("format-provider-detection CLI subcommand: zero connected → showGuidance=true", () => {
+  const out = execSync(
+    `node ${join(__dirname, "install-lib.mjs")} format-provider-detection ` +
+      `--has-claude-creds 0 --cli-claude 0 --cli-codex 0 --cli-kimi 0`,
+    { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], input: "" },
+  );
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.showGuidance, true);
+  assert.equal(parsed.rows[0].status, "warn");
+  assert.equal(parsed.rows[1].status, "warn");
+  assert.equal(parsed.rows[2].status, "warn");
+});
+
 test("wait-for-dns CLI subcommand resolves on the first try (issue acceptance — successful path)", async () => {
   // We can't shell out and inject a fake lookupFn through the CLI, so we
   // exercise the CLI's flag-parsing + DNS plumbing with a real DNS lookup
@@ -2662,16 +3071,26 @@ test("write-ingress CLI subcommand persists tailscale mode with derived serverUr
   }
 });
 
+// assertWriteIngressPublic — shared inner block for the two
+// `write-ingress --mode public` tests below. The shape is identical
+// (execSync the lib CLI, JSON.parse the written file, deepEqual) but the
+// ingress-file path differs (flat dir vs nested). Extracted so the
+// duplication-gate (jscpd min-tokens 70) doesn't flag the two tests
+// as a 14-line clone. Returns the parsed JSON so each caller can assert
+// on whatever shape they care about.
+function runWriteIngressPublic(ingressFile) {
+  execSync(
+    `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
+      `--file ${ingressFile} --mode public`,
+    { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+  );
+  return JSON.parse(readFileSync(ingressFile, "utf-8"));
+}
+
 test("write-ingress CLI subcommand persists public mode", () => {
   const dir = mkdtempSync(join(tmpdir(), "manta-write-ingress-public-"));
-  const ingressFile = join(dir, "ingress.json");
   try {
-    execSync(
-      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
-        `--file ${ingressFile} --mode public`,
-      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
-    );
-    const written = JSON.parse(readFileSync(ingressFile, "utf-8"));
+    const written = runWriteIngressPublic(join(dir, "ingress.json"));
     assert.deepEqual(written, { mode: "public" });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2709,14 +3128,8 @@ test("write-ingress CLI subcommand creates the parent dir if it does not exist",
   // first install. The lib uses mkdirSync({ recursive: true }), so the
   // nested parent dir + the file land in one atomic write.
   const dir = mkdtempSync(join(tmpdir(), "manta-write-ingress-nested-"));
-  const ingressFile = join(dir, "nested", "deeper", "ingress.json");
   try {
-    execSync(
-      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
-        `--file ${ingressFile} --mode public`,
-      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
-    );
-    const written = JSON.parse(readFileSync(ingressFile, "utf-8"));
+    const written = runWriteIngressPublic(join(dir, "nested", "deeper", "ingress.json"));
     assert.deepEqual(written, { mode: "public" });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2727,10 +3140,12 @@ test("buildPairPageUrl accepts an explicit baseUrl (BET-267 tailnet path)", () =
   // When the install sets INGRESS_MODE=tailscale it passes the tailnet
   // serverUrl as `baseUrl` so the pair page points at the box's Tailscale
   // listener instead of <boxId>.boxes.mantaui.com (which would be
-  // unreachable on the tailnet path). The fragment (#code=) is preserved
-  // so the pair page still derives box_id from the request's host header.
+  // unreachable on the tailnet path). The fragment carries BOTH the
+  // box id and the code so the pair page can render them regardless of
+  // the request's host header (BET-334 — tailnet hostnames are IPs, not
+  // 32-hex box ids).
   const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "http://100.64.1.5:8787" });
-  assert.equal(url, "http://100.64.1.5:8787/pair#code=847291");
+  assert.equal(url, "http://100.64.1.5:8787/pair#box=0123456789abcdef0123456789abcdef&code=847291");
 });
 
 test("buildPairPageUrl strips a trailing slash from baseUrl", () => {
@@ -2739,7 +3154,7 @@ test("buildPairPageUrl strips a trailing slash from baseUrl", () => {
   // env var override), the helper must not produce a doubled slash in
   // the final URL.
   const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "http://100.64.1.5:8787/" });
-  assert.equal(url, "http://100.64.1.5:8787/pair#code=847291");
+  assert.equal(url, "http://100.64.1.5:8787/pair#box=0123456789abcdef0123456789abcdef&code=847291");
 });
 
 test("buildPairPageUrl falls back to the canonical host when baseUrl is empty", () => {
@@ -2747,7 +3162,21 @@ test("buildPairPageUrl falls back to the canonical host when baseUrl is empty", 
   // path's wire shape (regression guard against a future caller passing
   // an unset env var through to the option).
   const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "" });
-  assert.equal(url, `https://${HEX32}.boxes.mantaui.com/pair#code=847291`);
+  assert.equal(url, `https://${HEX32}.boxes.mantaui.com/pair#box=${HEX32}&code=847291`);
+});
+
+test("buildPairPageUrl with baseUrl embeds the box id in the fragment (BET-334)", () => {
+  // Regression for BET-334: on the Tailscale path the install hands the
+  // tailnet listener URL to `baseUrl`, so the pair page is reached over an
+  // IP (e.g. http://100.64.1.5:8787) — the host header is NOT a 32-hex
+  // box id. The fragment MUST carry the box id so the page can render the
+  // BOX ID row and skip the `nocode` class (which disables the "Open in
+  // Manta" button). The test that would have caught the original bug.
+  const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "http://100.64.1.5:8787" });
+  assert.match(
+    url,
+    /^http:\/\/100\.64\.1\.5:8787\/pair#box=0123456789abcdef0123456789abcdef&code=847291$/,
+  );
 });
 
 test("formatPairingOutput uses serverUrl as the pair-page base on the tailnet path (BET-267)", () => {
@@ -2764,7 +3193,7 @@ test("formatPairingOutput uses serverUrl as the pair-page base on the tailnet pa
     expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
     serverUrl: "http://100.64.1.5:8787",
   });
-  assert.match(out, /Pair page:     http:\/\/100\.64\.1\.5:8787\/pair#code=847291/);
+  assert.match(out, /Pair page:     http:\/\/100\.64\.1\.5:8787\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   assert.doesNotMatch(out, /manta:\/\/pair/);
   assert.doesNotMatch(out, /boxes\.mantaui\.com/);
   // The footer (Pairing code / Box ID / Server URL) stays identical to
@@ -2786,7 +3215,7 @@ test("formatPairingOutput keeps the manta:// deep-link on the public path (BET-2
     box_id: HEX32,
     expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
   });
-  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   assert.match(out, /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
 });
 
@@ -3035,32 +3464,440 @@ fi
 });
 
 test("install.sh claude-credentials warn: restart hint branches on IS_MACOS (BET-277)", () => {
-  // When ~/.claude/.credentials.json is missing on a Mac, the install
-  // must point the operator at `launchctl kickstart -k` for the
-  // opencode agent, NOT `systemctl --user restart opencode-serve` (which
-  // doesn't exist on macOS).
-  const out = runMain({
-    preBody: `
-IS_MACOS=1
-HOME=/Users/tester
-if [ -f "\$HOME/.claude/.credentials.json" ]; then
-  echo "CREDS=present"
-else
-  echo "CREDS=missing"
-  if [ "\$IS_MACOS" = "1" ]; then
-    echo "RESTART_HINT=launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
-  else
-    echo "RESTART_HINT=systemctl --user restart opencode-serve"
-  fi
-fi
-`,
-  });
-  assert.match(out, /CREDS=missing/);
-  assert.match(out, /RESTART_HINT=launchctl kickstart -k gui\/\d+\/com\.mantaui\.opencode/);
-  assert.doesNotMatch(out, /systemctl --user restart opencode-serve/);
+  // Retired by BET-313: install.sh no longer has a single-Claude "is the
+  // creds file missing?" block at the tail — the per-provider detection
+  // summary replaces it. The macOS-vs-Linux restart-hint branching is
+  // preserved inside the new `no providers connected` guidance message
+  // (covered below). The old test is kept as a placeholder so the gap in
+  // the line numbers is obvious to the next reader.
+  assert.ok(true, "BET-277 single-Claude check was retired by BET-313; restart-hint branching now lives inside the new guidance message and is pinned in the print_provider_detection_summary tests below.");
 });
 
-test("install.sh install_launchd_agent: plist substitution replaces all six placeholders (BET-277)", () => {
+// ----------------------------------------------------------------------------
+// print_provider_detection_summary — the BET-313 helper that runs at the very
+// tail of a successful install. Three providers + three CLIs; warns never
+// dies; guidance only when zero providers connected.
+// ----------------------------------------------------------------------------
+//
+// Strategy: each test creates a tiny stub lib (a temp .mjs that exports the
+// format-provider-detection signature + a fetchConnectedProviders stub) and
+// points the helper at it. The real install-lib.mjs is NOT used here — the
+// shell's job is to wire the four signals through to the format helper, so
+// we pin the shell side end-to-end with controlled inputs.
+
+const NODE_BIN_FOR_TESTS = "node"; // the test runner already lives in node; just resolve "node" through PATH
+
+// runBootstrapStderr — like runBootstrap but returns BOTH stdout AND stderr
+// as a single combined string (the BET-313 detection block emits `warn` to
+// stderr via the existing warn() helper; we need both streams to assert on
+// it). Uses spawnSync directly (runAndCapture's execSync path swallows
+// stderr on a zero exit). Accepts an `env` override so tests can strip
+// PATH before invoking the helper (the runner ships with `claude` on PATH
+// and the helper probes it).
+function runBootstrapStderr({ preBody = "", func = ":", env } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-bootstrap-err-"));
+  const script = join(dir, "test.sh");
+  writeFileSync(
+    script,
+    `#!/usr/bin/env bash
+set +e
+export MANTA_INSTALL_TEST_MODE=1
+source '${INSTALL_SH}'
+${preBody}
+${func}
+exit 0
+`,
+    { mode: 0o755 },
+  );
+  try {
+    const result = spawnSync("bash", [script], {
+      env: env ?? { ...process.env, PATH: process.env.PATH },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    });
+    return (result.stdout ?? "") + (result.stderr ?? "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// NODE_DIR_FOR_TESTS — directory that contains the `node` binary the
+// test runner uses. Used to build a PATH that still lets the helper find
+// `node` (it spawns a child node process) while stripping the test runner's
+// own bin dirs (so `command -v claude` doesn't accidentally return true).
+const NODE_DIR_FOR_TESTS = dirname(process.execPath);
+
+// stripAnsi — remove ANSI CSI sequences (\x1B[...m and similar) from a
+// string. Used by the BET-313 shell tests so regex assertions can match
+// against raw glyphs (`✓`, `!`) without the colour wrap around them. The
+// matcher is the smallest thing that handles the colour codes ok()/warn()
+// emit; it's intentionally local to the BET-313 block.
+function stripAnsi(s) {
+  return String(s).replace(/\x1B\[[0-9;]*m/g, "");
+}
+
+// runBootstrapStderrEmptyPath — runBootstrapStderr variant that strips
+// everything from PATH except the dir holding the test runner's `node`
+// binary AND the standard system dirs that bash / cat / mkdir / etc.
+// live in. The helper spawns child node processes, so node must remain on
+// PATH; the claude/codex/kimi CLIs must NOT be (so the CLI-row assertions
+// are deterministic across runners). On CI (setup-node installs Node 20
+// into a non-standard path), stripping PATH to just the node dir leaves
+// bash ENOENT inside spawnSync — so we union in the system dirs the
+// runner inherited at start. Each system dir is OPT-IN: only added when
+// it actually exists on this box, so the test never hardcodes a path
+// that doesn't resolve.
+function runBootstrapStderrEmptyPath({ preBody = "", func = ":" } = {}) {
+  // Collect every dir the runner inherited that contains a system binary
+  // the generated bash script needs (bash, mkdir, cat, ...). Dedupe +
+  // filter to existing dirs only — empty dirs would be silently dropped
+  // by bash's PATH lookup, but a missing dir on a non-Linux runner is a
+  // real footgun. POSIX-only stat check (mirrors what /usr/bin/env uses).
+  const inherited = (process.env.PATH ?? "").split(":").filter(Boolean);
+  const probeBin = (dir, name) => {
+    try {
+      // readdirSync is faster than a stat per file (one syscall per
+      // directory, not per directory+name). Throws on ENOENT → skip.
+      return readdirSync(dir).includes(name);
+    } catch {
+      return false;
+    }
+  };
+  const sysDirs = inherited.filter((d) => probeBin(d, "bash"));
+  return runBootstrapStderr({
+    preBody,
+    func,
+    env: {
+      ...process.env,
+      PATH: [NODE_DIR_FOR_TESTS, ...sysDirs].join(":"),
+    },
+  });
+}
+// the real install-lib.mjs's CLI subcommand dispatch + a controlled
+// `fetchConnectedProviders` stub. The stub re-uses the real
+// `formatProviderDetection` (so the JSON wire shape is identical and the
+// shell's parser pins the same contract) but adds a CLI handler for
+// `format-provider-detection` that reads --has-claude-creds / --cli-*
+// flags + newline-separated ids from stdin, exactly mirroring the real
+// subcommand's wire shape. Returns the absolute path.
+function mkFakeLib({ dir, connectedIds = [] } = {}) {
+  const fakeLib = join(dir, "fake-lib.mjs");
+  const idsJson = JSON.stringify(connectedIds);
+  const realLibPath = join(__dirname, "install-lib.mjs").replace(/\\/g, "\\\\");
+  writeFileSync(
+    fakeLib,
+    [
+      "// Stub install-lib for shell-side tests of print_provider_detection_summary.",
+      "// The CLI subcommand handler is a verbatim copy of the real",
+      "// install-lib.mjs's format-provider-detection arm — the shape must",
+      "// match so the shell side's parser sees the same JSON.",
+      `import { formatProviderDetection, DEFAULT_PROVIDERS } from "${realLibPath}";`,
+      `export async function fetchConnectedProviders() { return ${idsJson}; }`,
+      "export { formatProviderDetection, DEFAULT_PROVIDERS };",
+      "",
+      "const __isDirect = process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop());",
+      "if (__isDirect) {",
+      "  const [, , cmd, ...rest] = process.argv;",
+      "  if (cmd === 'format-provider-detection') {",
+      "    const STRING_FLAGS = new Set(['has-claude-creds', 'cli-claude', 'cli-codex', 'cli-kimi']);",
+      "    const flags = {};",
+      "    for (let i = 0; i < rest.length; i++) {",
+      "      const tok = rest[i];",
+      "      if (typeof tok === 'string' && tok.startsWith('--')) {",
+      "        const key = tok.slice(2);",
+      "        if (STRING_FLAGS.has(key)) {",
+      "          flags[key] = rest[i + 1];",
+      "          i += 1;",
+      "        }",
+      "      }",
+      "    }",
+      "    const stdinChunks = [];",
+      "    process.stdin.on('data', (c) => stdinChunks.push(c));",
+      "    process.stdin.on('end', () => {",
+      "      const raw = Buffer.concat(stdinChunks).toString('utf-8').trim();",
+      "      let connected = [];",
+      "      if (raw.startsWith('[')) {",
+      "        try { const p = JSON.parse(raw); if (Array.isArray(p)) connected = p; } catch {}",
+      "      }",
+      "      if (connected.length === 0) {",
+      "        connected = raw.split('\\n').map((s) => s.trim()).filter((s) => s.length > 0);",
+      "      }",
+      "      const out = formatProviderDetection({",
+      "        connected,",
+      "        hasClaudeCredentials: flags['has-claude-creds'] === '1',",
+      "        clis: {",
+      "          claude: flags['cli-claude'] === '1',",
+      "          codex: flags['cli-codex'] === '1',",
+      "          kimi: flags['cli-kimi'] === '1',",
+      "        },",
+      "      });",
+      "      process.stdout.write(JSON.stringify(out) + '\\n');",
+      "    });",
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  return fakeLib;
+}
+
+test("install.sh print_provider_detection_summary: zero connected → three warns + guidance + CLI row (BET-313)", () => {
+  // The headline acceptance criterion: an empty box with NOTHING connected
+  // gets three provider warns AND the "reject requests" guidance, plus the
+  // three CLI slots. The shell's warn() helper writes to stderr (the
+  // runBootstrap success path swallows it), so we use the stderr-aware
+  // variant — asserts on the COMBINED stream.
+  //
+  // The CLI-row assertions depend on the test runner's PATH not silently
+  // surfacing a `claude` or `codex` binary. We strip PATH to a known-empty
+  // dir before invoking the helper so `command -v` reliably reports "not
+  // found" for all three CLIs. PATH is restored by the harness.
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-zero-"));
+  try {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const fakeLib = mkFakeLib({ dir, connectedIds: [] });
+    const out = runBootstrapStderrEmptyPath({
+      preBody: `
+print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 0
+`,
+    });
+    // Three provider rows, all warns, all referencing the right hints.
+    assert.match(out, /Claude not connected — connect from MantaUI, or: opencode auth login -p anthropic/);
+    assert.match(out, /Codex not connected — connect from MantaUI, or: opencode auth login -p openai/);
+    assert.match(out, /Kimi not connected — connect from MantaUI, or: opencode auth login -p kimi-for-coding/);
+    // No ok rows for the providers.
+    assert.doesNotMatch(out, /✓ Claude connected/);
+    assert.doesNotMatch(out, /✓ Codex connected/);
+    assert.doesNotMatch(out, /✓ Kimi connected/);
+    // Guidance only fires when zero providers are connected (this case).
+    assert.match(out, /no providers connected — chat will start but reject requests/);
+    // CLI slots — none of the CLIs are on PATH in the test runner's PATH
+    // by default, so all three should be "not found".
+    assert.match(out, /claude CLI not found/);
+    assert.match(out, /codex CLI not found/);
+    assert.match(out, /kimi CLI not found/);
+    // Linux branch of the restart hint.
+    assert.match(out, /systemctl --user restart opencode-serve/);
+    // macOS branch must NOT appear in the Linux case.
+    assert.doesNotMatch(out, /launchctl kickstart/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install.sh print_provider_detection_summary: Claude connected only → no guidance (BET-313)", () => {
+  // The bug being fixed: the prior single-Claude check printed the
+  // "reject requests" guidance WHILE Claude was already authenticated
+  // (the guidance is only true when no provider is connected). Pin
+  // the fix. PATH is stripped so CLI assertions don't depend on the
+  // runner's environment.
+  //
+  // ok()/warn() prefix their output with ANSI colour codes (\\x1B[32m for
+  // ok, \\x1B[33m for warn). The regex strips the colour so the assertion
+  // matches both raw bytes and colour-wrapped output.
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-claude-"));
+  try {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const fakeLib = mkFakeLib({ dir, connectedIds: ["anthropic"] });
+    const out = runBootstrapStderrEmptyPath({
+      preBody: `
+print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 0
+`,
+    });
+    assert.match(stripAnsi(out), /✓ Claude connected/);
+    assert.match(out, /Codex not connected/);
+    assert.match(out, /Kimi not connected/);
+    // No guidance message — Claude is connected, chat WILL authenticate.
+    assert.doesNotMatch(out, /no providers connected/);
+    assert.doesNotMatch(out, /chat will start but reject requests/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install.sh print_provider_detection_summary: all three connected → three ok rows + no guidance (BET-313)", () => {
+  // The "fully configured" re-run case the issue calls out: a previously-
+  // installed box re-runs the install and prints three ok rows, no
+  // guidance, no warns. A regression that drops a row would fail here.
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-all-"));
+  try {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const fakeLib = mkFakeLib({
+      dir,
+      connectedIds: ["anthropic", "openai", "kimi-for-coding"],
+    });
+    const out = runBootstrapStderrEmptyPath({
+      preBody: `
+print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 0
+`,
+    });
+    assert.match(stripAnsi(out), /✓ Claude connected/);
+    assert.match(stripAnsi(out), /✓ Codex connected/);
+    assert.match(stripAnsi(out), /✓ Kimi connected/);
+    assert.doesNotMatch(stripAnsi(out), /not connected/);
+    assert.doesNotMatch(stripAnsi(out), /no providers connected/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install.sh print_provider_detection_summary: macOS restart hint branches on IS_MACOS (BET-313)", () => {
+  // The guidance message's restart hint must follow IS_MACOS exactly the
+  // way the old BET-277 check did: launchctl on Mac, systemctl elsewhere.
+  // A regression that drops the branch would brick every macOS box's
+  // guidance. PATH stripped so the assertion doesn't depend on the runner.
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-macos-"));
+  try {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const fakeLib = mkFakeLib({ dir, connectedIds: [] });
+    const out = runBootstrapStderrEmptyPath({
+      preBody: `
+print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 1
+`,
+    });
+    assert.match(out, /launchctl kickstart -k gui\/\$\(id -u\)\/com\.mantaui\.opencode/);
+    assert.doesNotMatch(out, /systemctl --user restart opencode-serve/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install.sh print_provider_detection_summary: Claude cred file fallback when opencode didn't answer (BET-313)", () => {
+  // The fallback: when opencode isn't running yet (or /provider didn't
+  // answer), install.sh still detects Claude via the local
+  // ~/.claude/.credentials.json probe — same fallback semantics the lib
+  // encodes in formatProviderDetection's hasClaudeCredentials branch.
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-creds-fallback-"));
+  try {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(home, ".claude", ".credentials.json"), "{}");
+    const fakeLib = mkFakeLib({ dir, connectedIds: [] }); // opencode probe empty
+    const out = runBootstrapStderrEmptyPath({
+      preBody: `
+print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 0
+`,
+    });
+    // Claude shows as connected via the cred file fallback.
+    assert.match(stripAnsi(out), /✓ Claude connected/);
+    // Codex and Kimi are still not connected → warn rows present.
+    assert.match(out, /Codex not connected/);
+    assert.match(out, /Kimi not connected/);
+    // Because Claude IS connected, the guidance must NOT fire.
+    assert.doesNotMatch(out, /no providers connected/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install.sh print_provider_detection_summary: CLI probes follow command -v on PATH (BET-313)", () => {
+  // The CLI row must reflect `command -v claude/codex/kimi` through the
+  // same shell. We stub `command` to claim claude + codex are present
+  // and kimi is not; pin the output.
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-cli-probe-"));
+  try {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const fakeLib = mkFakeLib({ dir, connectedIds: ["anthropic"] });
+    const out = runBootstrapStderrEmptyPath({
+      preBody: `
+# Shadow command -v: claude + codex found, kimi not.
+# install.sh only calls \`command -v <name>\`, so the stub matches on the
+# second positional arg. Passing through \`command\` without -v (or with a
+# name we don't override) falls back to the real builtin.
+command() {
+  case "$1" in
+    -v)
+      case "$2" in
+        claude|codex) echo "/usr/local/bin/$2"; return 0 ;;
+        kimi) return 1 ;;
+        *) builtin command "$@" ;;
+      esac
+      ;;
+    *) builtin command "$@" ;;
+  esac
+}
+export -f command
+print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 0
+`,
+    });
+    assert.match(stripAnsi(out), /✓ claude CLI detected/);
+    assert.match(stripAnsi(out), /✓ codex CLI detected/);
+    assert.match(out, /kimi CLI not found/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// launchd_agent_path — the PATH written into both LaunchAgent plists.
+//
+// WHY IT MATTERS: launchd does not give an agent a login-shell PATH, it gives
+// `/usr/bin:/bin:/usr/sbin:/sbin`. macOS ships no tmux, so tmux always comes
+// from Homebrew — invisible to manta-server without this. The box then pairs
+// happily and fails every session action (`tmux:new-session` 500s, and
+// `listProjects` swallows its error so the UI just shows an empty box). Caught
+// by the macOS install smoke workflow on a real runner.
+test("install.sh launchd_agent_path: always covers both Homebrew prefixes + system dirs", () => {
+  const out = runBootstrap({
+    preBody: `
+command() {
+  case "$1" in
+    -v) case "$2" in tmux) echo "/opt/homebrew/bin/tmux"; return 0 ;; *) builtin command "$@" ;; esac ;;
+    *) builtin command "$@" ;;
+  esac
+}
+`,
+    func: "launchd_agent_path; echo",
+  });
+  assert.match(out, /\/opt\/homebrew\/bin/);
+  assert.match(out, /\/usr\/local\/bin/);
+  assert.match(out, /\/usr\/bin/);
+  assert.match(out, /\/usr\/sbin/);
+  // Already-covered dir must not be duplicated.
+  assert.equal(out.match(/\/opt\/homebrew\/bin/g).length, 1);
+});
+
+test("install.sh launchd_agent_path: prepends a tmux dir the defaults don't cover", () => {
+  // MacPorts / a hand-built tmux lives outside both Homebrew prefixes. The
+  // prereq check already proved that copy exists, so trust it.
+  const out = runBootstrap({
+    preBody: `
+command() {
+  case "$1" in
+    -v) case "$2" in tmux) echo "/opt/local/bin/tmux"; return 0 ;; *) builtin command "$@" ;; esac ;;
+    *) builtin command "$@" ;;
+  esac
+}
+`,
+    func: "launchd_agent_path; echo",
+  });
+  assert.match(out, /^\/opt\/local\/bin:\/opt\/homebrew\/bin:/m);
+});
+
+test("install.sh launchd_agent_path: no tmux on PATH still yields a usable PATH", () => {
+  // Defensive: the prereq check dies before this runs, but an empty or
+  // half-built PATH string would render an unloadable plist.
+  const out = runBootstrap({
+    preBody: `
+command() {
+  case "$1" in
+    -v) case "$2" in tmux) return 1 ;; *) builtin command "$@" ;; esac ;;
+    *) builtin command "$@" ;;
+  esac
+}
+`,
+    func: "launchd_agent_path; echo",
+  });
+  assert.match(out, /^\/opt\/homebrew\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin$/m);
+});
+
+test("install.sh install_launchd_agent: plist substitution replaces every placeholder (BET-277)", () => {
   // Pure substitution test — pin the six placeholder replacements that
   // install_launchd_agent performs against the real plist templates.
   // Use the SERVER plist because it carries BOTH @@NODE_BIN@@ (in
@@ -3090,6 +3927,7 @@ sed \\
   -e "s|@@MANTA_TAILNET_HOST@@|\${TAILNET_IP:-}|g" \\
   -e "s|@@OPENCODE_BIN@@|\${OPENCODE_BIN:-}|g" \\
   -e "s|@@AUTH_DIR@@|\$AUTH_DIR|g" \\
+  -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
   "\$SERVER_PLIST_SRC" > "${rendered}"
 echo "SUBST_DONE=1"
 `,
@@ -3108,6 +3946,11 @@ echo "SUBST_DONE=1"
     assert.match(text, /<string>8787<\/string>/);
     assert.match(text, /<string>100\.64\.1\.5<\/string>/);
     assert.match(text, /\/tmp\/fake-manta-home\/\.manta\/server\.log/);
+    // PATH must be materialised: launchd hands an agent only
+    // /usr/bin:/bin:/usr/sbin:/sbin, so a Homebrew tmux is invisible to
+    // manta-server and every tmux call fails on a real Mac box.
+    assert.match(text, /<key>PATH<\/key>/);
+    assert.match(text, /\/opt\/homebrew\/bin/);
     // RunAtLoad + KeepAlive must remain true (drive reboot persistence).
     assert.match(text, /<key>RunAtLoad<\/key>\s*<true\/>/);
     assert.match(text, /<key>KeepAlive<\/key>\s*<true\/>/);
@@ -3151,6 +3994,7 @@ sed \\
   -e "s|@@MANTA_TAILNET_HOST@@|\${TAILNET_IP:-}|g" \\
   -e "s|@@OPENCODE_BIN@@|\${OPENCODE_BIN:-}|g" \\
   -e "s|@@AUTH_DIR@@|\$AUTH_DIR|g" \\
+  -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
   "\$OC_PLIST_SRC" > "${rendered}"
 echo "EMPTY_SUBST_DONE=1"
 `,

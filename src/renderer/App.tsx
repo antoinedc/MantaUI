@@ -15,9 +15,9 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import { chooseUpdateSkewVariant } from "./chatUtils";
+import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
 import { parsePairPayload } from "./mobile/pairPayload";
-import { claimBox } from "./pairClaim";
 import type { AvailableLauncher } from "../shared/types";
 
 // mode -> the composite-key "modeId" segment used for the PTY sessionKey and
@@ -43,6 +43,8 @@ export function App() {
     configSnapshot,
     updatePrompt,
     setUpdatePrompt,
+    updateError,
+    setUpdateError,
     serverUpdatePrompt,
     setServerUpdatePrompt,
     connectionState,
@@ -203,50 +205,52 @@ export function App() {
     return off;
   }, []);
 
-  // Deep-link pairing (BET-240, BET-255): the OS protocol handler
+  // Deep-link pairing (BET-240, BET-335, #277): the OS protocol handler
   // (electron-builder `protocols:` + Electron `setAsDefaultProtocolClient`)
   // delivers a manta://pair?... URL via the preload's `pair:link-received`
-  // IPC. We validate with the SAME `parsePairPayload` PairStep / mobile
-  // share, then auto-claim via the SHARED `claimBox` helper (the same code
-  // path PairStep's Connect button runs). On success `finishOnboarding()`
-  // drops the shell to the normal app — the user is paired, no manual
-  // "Connect" click required. On failure we fall back to the OLD behaviour
-  // of opening onboarding at step 1 (Onboarding reads `pendingPairLink` to
-  // force step 1) so the user can retry by hand.
+  // IPC. Two outcomes:
+  //
+  //  • Malformed / legacy-shape link (#277): silently dropping leaves the
+  //    user staring at a launched-but-empty window — the OS opened us for
+  //    the manta:// scheme, so it looked like the link did nothing. Surface
+  //    the reason on the pair step via setPairLinkError and open onboarding
+  //    if it isn't already up. PairStep renders pairLinkError in the same
+  //    inline slot a manual Connect failure uses.
+  //
+  //  • Valid link (BET-335): stash the URL via setPendingPairLink so
+  //    Onboarding jumps to step 1 and PairStep prefills Box ID + code from
+  //    prefillFromPairLink. The click on Connect is the confirmation — no
+  //    silent auto-claim, the pair page's "click Connect" copy becomes
+  //    true.
   useEffect(() => {
     const pre = getMantaPreload();
     if (!pre?.onPairLink) return;
     return pre.onPairLink((url) => {
       const payload = parsePairPayload(url);
-      if (!payload) return; // not a valid pair link — ignore
-      // Auto-claim immediately. claimBox() handles the IPC, persists the
-      // credentials to config.json, mirrors them into the store, and swaps
-      // window.api to httpApi — all the same side effects PairStep does on
-      // a manual Connect. We don't await it on purpose: the listener is
-      // sync from the preload's perspective and the claim is best-effort
-      // (failures fall through to the onboarding-open fallback below).
-      void (async () => {
-        const result = await claimBox({ boxId: payload.boxId, code: payload.code });
-        if (result.ok) {
-          // Drop out of onboarding: clears `onboardingForced` + re-reads
-          // config so the app renders the normal shell with the new
-          // boxToken. Works whether we were already in the normal shell
-          // (just a config refresh) or in onboarding (the new boxToken
-          // flips resolveTransportMode to "http" on the re-read).
-          await useStore.getState().finishOnboarding();
-          return;
-        }
-        // Failure: open onboarding at step 1 with the URL stashed so the
-        // shell jumps to step 1 (PairStep shows empty fields for the user
-        // to retry by hand — the URL gives the shell enough signal to land
-        // on the pair step even from a paired/normal config).
+      if (!payload) {
+        // Malformed / legacy-shape link (e.g. an old box still minting the
+        // `id=`/`token=` form). The OS still LAUNCHED us for the manta://
+        // scheme, so silently returning looks exactly like a broken app —
+        // the window comes to front and nothing else happens. Surface the
+        // reason on the pair step, opening the flow if it isn't already up.
         const st = useStore.getState();
-        st.setPendingPairLink(url);
-        const alreadyOnboarding =
+        st.setPairLinkError(
+          "That pairing link isn't valid. Generate a fresh one on your box (run `manta pair`) and open the new link.",
+        );
+        const onboardingOpen =
           st.onboardingForced ||
           resolveTransportMode(st.configSnapshot()) === "onboarding";
-        if (!alreadyOnboarding) void st.relaunchOnboarding();
-      })();
+        if (!onboardingOpen) void st.relaunchOnboarding();
+        return;
+      }
+      // Valid link (BET-335): stash the URL and open onboarding at step 1.
+      // PairStep prefills Box ID + code; the user clicks Connect to claim.
+      const st = useStore.getState();
+      st.setPendingPairLink(url);
+      const alreadyOnboarding =
+        st.onboardingForced ||
+        resolveTransportMode(st.configSnapshot()) === "onboarding";
+      if (!alreadyOnboarding) void st.relaunchOnboarding();
     });
   }, []);
 
@@ -277,6 +281,20 @@ export function App() {
         version: info.version,
         releaseName: info.releaseName,
       });
+    });
+    return off;
+  }, []);
+
+  // Terminal auto-update failure. Main only forwards failures the user has to
+  // ACT on (integrity / permission — see shared/updateError.mjs); transient
+  // network errors never arrive here, so this banner can't nag about a flaky
+  // connection. Before this existed every updater error went to console.warn
+  // and nowhere else, which is how a broken release feed silently stopped all
+  // desktop updates for two versions.
+  useEffect(() => {
+    if (!window.api.onAutoUpdateError) return;
+    const off = window.api.onAutoUpdateError((info) => {
+      useStore.getState().setUpdateError(info);
     });
     return off;
   }, []);
@@ -656,6 +674,23 @@ export function App() {
             onDismiss={() => setUpdatePrompt(null)}
           />
         )}
+        {/* Terminal auto-update failure. An update exists but this install
+            cannot take it (checksum/signature mismatch, or the bundle can't
+            be replaced), so the only way forward is a manual download —
+            hence the action opens the downloads page rather than retrying an
+            install that is guaranteed to fail again. Dismissible: the user
+            may not want to deal with it right now, and it re-arms on the
+            next failed check. */}
+        {!showOnboarding && updateError && (
+          <UpdateBar
+            text={updateError.message}
+            actionLabel="Download"
+            onAction={() => {
+              void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg");
+            }}
+            onDismiss={() => setUpdateError(null)}
+          />
+        )}
         {/* Server-update prompt (BET-225 stage 3 Part A): shown when the
             box's server-update poller sees a newer manifest version. Same
             UpdateBar component as the desktop auto-update above; the action
@@ -773,12 +808,16 @@ export function App() {
               </select>
             </div>
           )}
+          {/* Trailing spacer — Windows paints min/max/close over the top-right
+              of the window; this keeps the mode dropdown from sliding under
+              them. Zero-width everywhere else. */}
+          <div className="titlebar-inset-right" />
         </div>
         <div className="flex-1 relative">
           {projects.length === 0 ? (
             <div className="h-full flex items-center justify-center text-text-faint text-sm">
               {serverUrl || boxId
-                ? "Create a project (⌘N) to start."
+                ? `Create a project (${MOD_KEY}N) to start.`
                 : "Open Settings to connect to your box."}
             </div>
           ) : (

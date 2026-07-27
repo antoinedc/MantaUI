@@ -1,42 +1,48 @@
 import { useCallback, useEffect, useState } from "react";
-import type { OpencodeModel, ProviderEndpoint } from "../shared/types";
+import type { SubscriptionStatus } from "../shared/types";
 import {
-  ANTHROPIC_ID,
-  OPENAI_ID,
-  OPENAI_BASE_URL,
   canContinueProviders,
-  connectedProviderIds,
   customDraftError,
-  openaiKeyError,
   type ProviderDraft,
 } from "./providersStepLogic";
-import { PlusIcon, StepFooter } from "./onboardingUi";
+import { ConnectProvider } from "./ConnectProvider";
+import { StepFooter } from "./onboardingUi";
 
 // ProvidersStep.tsx — Step 2 (Providers) of the desktop onboarding shell
-// (BET-49-T4). Mounts into Onboarding.tsx's step-2 slot.
+// (BET-49-T4, BET-315). Mounts into Onboarding.tsx's step-2 slot.
 //
-// Shows three cards per docs/onboarding/mockup.html — Anthropic / OpenAI /
-// Custom — reflecting LIVE connected state:
-//   • "connected" is derived from opencode's own served-model list
-//     (window.api.opencodeModels()), which main builds from GET /provider
-//     filtered by `connected[]` (opencode.ts:listModels). We deliberately do
-//     NOT call /api/model (it embeds apiKey) — reused audit point.
-//   • Anthropic connects via the box's Claude-auth plugin; when it isn't
-//     connected we show a "requires setup on the box" pointer. Driving the
-//     device-login flow from the desktop is EXPLICITLY OUT OF SCOPE (parent
-//     BET-49 "Anthropic OAuth addendum") — we do not improvise it here.
-//   • OpenAI / Custom are added through the EXISTING providers.ts write path
-//     (window.api.opencodeSetProviders → setProviders/upsertProviderBlock).
-//     No new provider-fetch code paths.
+// Registry-driven (BET-315): one row per provider declared in
+// src/server/subscriptionProviders.mjs. Rows come from the `status` action
+// (the same source the Settings → Subscriptions card consumes, BET-314) — no
+// provider id, label, or plan is hardcoded here. The hardcoded Anthropic /
+// OpenAI / Custom cards and the deferred-Anthropic-sign-in hint block are
+// gone; in-app Anthropic sign-in is now shipped via the shared
+// <ConnectProvider> (BET-312), so Claude is just another row whose Connect
+// button starts the OAuth flow.
 //
-// After a successful add we restart opencode (opencodeRestart) so `/provider`
-// re-auths and the new provider shows as connected + surfaces its models to
-// Step 3 — otherwise the just-added key wouldn't count toward the ≥1-connected
-// Continue gate.
+// Each row's Connect button delegates to <ConnectProvider> with
+// `confirmRestart={false}` — no sessions exist during onboarding, so the
+// opencode restart that every connect ends on is free, and a confirm bar
+// would be noise. Disconnect (and the destructive-confirm pattern from
+// Settings) are deliberately NOT exposed here; BET-315's "Do not" list
+// is explicit on that point. Settings handles reconnects later.
 //
-// This component owns its OWN footer (Back + Continue), like PairStep, because
-// Continue must be gated on ≥1 connected provider — the shell's generic footer
-// can't express that. The shell suppresses its footer for this step.
+// Below the subscription rows sits a demoted custom-endpoint form: just a
+// text link ("Use your own API endpoint instead") that reveals the existing
+// add-a-custom-provider form. The form's validation (customDraftError) is
+// unchanged; only its prominence moves.
+//
+// Continue is gated on ≥1 connected provider via `canContinueProviders`,
+// fed by the `status` action — so a subscription connected seconds ago
+// counts immediately (BET-315 deliverable 3). The gate is still correct:
+// the same source that drives the badges drives the Step 3 model list, so
+// a provider counted as connected here is one whose models appear in
+// Step 3.
+//
+// This component owns its OWN footer (Back + Continue), like PairStep,
+// because Continue must be gated on ≥1 connected provider — the shell's
+// generic footer can't express that. The shell suppresses its footer for
+// this step.
 //
 // Props:
 //   onBack     — go to the previous step (Pair).
@@ -46,8 +52,6 @@ const ACCENT = "#5A88FF";
 const DANGER = "#FF7A88";
 const SUCCESS = "#22C79A";
 
-type AddForm = null | "openai" | "custom";
-
 export function ProvidersStep({
   onBack,
   onContinue,
@@ -55,288 +59,225 @@ export function ProvidersStep({
   onBack: () => void;
   onContinue: () => void;
 }) {
-  const [models, setModels] = useState<OpencodeModel[] | null>(null);
-  const [endpoints, setEndpoints] = useState<ProviderEndpoint[]>([]);
+  const [statuses, setStatuses] = useState<SubscriptionStatus[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Exactly one row can be mid-mutation at a time. Registry id (anthropic /
+  // openai / kimi-for-coding); null when idle.
+  const [connectingId, setConnectingId] = useState<string | null>(null);
+  // Custom-endpoint form is collapsed behind a link by default.
+  const [showCustom, setShowCustom] = useState(false);
 
-  // Reload the live connected picture (served models + configured endpoints).
-  // opencodeModels drives the connected badges + the Continue gate; endpoints
-  // tells us whether an OpenAI block already exists so the card reflects it.
-  const load = useCallback(async () => {
+  // Refresh the live connected picture from the registry-backed `status`
+  // action. The same call drives Settings → SubscriptionsCard (BET-314),
+  // so an opencode restart triggered by either surface is visible to the
+  // other after its next refresh.
+  const refresh = useCallback(async () => {
     setLoadError(null);
-    // Guard method existence (BET-254): if window.api was never swapped to the
-    // httpApi client (e.g. a regression that skips installHttpTransport after
-    // pairing), opencodeModels is `undefined` and calling it throws a
-    // synchronous TypeError that bypasses `.catch(...)` and hangs the step.
-    // Surface the missing method via the existing error state instead.
-    const models$ =
-      typeof window.api.opencodeModels === "function"
-        ? window.api.opencodeModels()
-        : Promise.reject(new Error("transport not ready"));
-    const eps$ =
-      typeof window.api.opencodeGetProviders === "function"
-        ? window.api.opencodeGetProviders()
-        : Promise.resolve([] as ProviderEndpoint[]);
-    const [m, eps] = await Promise.all([
-      models$.catch(() => {
-        setLoadError("Couldn't reach the box to check providers.");
-        return [] as OpencodeModel[];
-      }),
-      eps$.catch(() => [] as ProviderEndpoint[]),
-    ]);
-    setModels(m);
-    setEndpoints(eps);
+    // Guard method existence (BET-254): if window.api was never swapped to
+    // the httpApi client (regression), opencodeProviderAuth is undefined and
+    // calling it throws a synchronous TypeError that bypasses .catch and
+    // hangs the step. Surface the missing method via the existing error
+    // state instead.
+    if (typeof window.api.opencodeProviderAuth !== "function") {
+      setLoadError("Couldn't reach the box to check providers.");
+      setStatuses([]);
+      return;
+    }
+    try {
+      const res = await window.api.opencodeProviderAuth({ action: "status" });
+      if (res.action !== "status") {
+        setLoadError("Unexpected response from the box.");
+        setStatuses([]);
+        return;
+      }
+      setStatuses(res.providers);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+      setStatuses([]);
+    }
   }, []);
-  useEffect(() => {
-    void load();
-  }, [load]);
 
-  const connected = connectedProviderIds(models ?? []);
-  const canContinue = canContinueProviders(models ?? []);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const canContinue = canContinueProviders(statuses ?? []);
+
+  // ConnectProvider fires `onDone(true)` on success; close the inline card
+  // and refetch so the row flips to connected (and the Continue gate opens).
+  const onConnectDone = useCallback(
+    (_ok: boolean) => {
+      setConnectingId(null);
+      void refresh();
+    },
+    [refresh],
+  );
+
+  // Custom-form write path. The shared saveProviderAndRestart pattern from
+  // the prior implementation is reproduced inline here because the only
+  // remaining consumer is the custom form itself — pulling it back into a
+  // shared helper would re-introduce a second call site for a one-call
+  // function. Restart failure is non-fatal to the config write but still
+  // surfaced (the card won't flip until a manual restart).
+  const submitCustom = async (
+    draft: ProviderDraft,
+    onDone: () => Promise<void>,
+  ): Promise<string | null> => {
+    try {
+      const res = await window.api.opencodeSetProviders({
+        upsert: [
+          {
+            id: draft.id.trim(),
+            name: draft.name.trim() || draft.id.trim(),
+            baseURL: draft.baseURL.trim(),
+            apiKey: draft.apiKey,
+            enabledModels: [],
+          },
+        ],
+      });
+      if (!res.ok) return res.error ?? "Couldn't save the provider.";
+      try {
+        await window.api.opencodeRestart();
+      } catch (e) {
+        return `Provider saved, but restarting opencode failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`;
+      }
+      await onDone();
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  };
 
   return (
     <div>
       <h2 className="text-2xl font-semibold tracking-tight text-text mb-1.5">
-        Choose your providers
+        Connect your subscriptions
       </h2>
-      <p className="text-sm text-text-muted leading-relaxed mb-8 max-w-md">
-        Select the AI providers you want to use. You can add more later.
+      <p className="text-sm text-text-muted leading-relaxed mb-6 max-w-md">
+        Sign in with a subscription you already pay for. You can add more later.
       </p>
 
       {loadError && (
         <div role="alert" className="text-sm mb-4" style={{ color: DANGER }}>
           {loadError}{" "}
-          <button onClick={() => void load()} className="underline hover:no-underline">
+          <button
+            onClick={() => void refresh()}
+            className="underline hover:no-underline"
+          >
             Retry
           </button>
         </div>
       )}
 
-      {/* Provider cards row (Anthropic / OpenAI / Custom). */}
-      <ProviderCards
-        loading={models === null}
-        connected={connected}
-        openaiConfigured={endpoints.some((e) => e.id === OPENAI_ID)}
-        onReload={load}
-      />
+      {/* Subscriptions — one row per provider from the registry. */}
+      <div className="space-y-2">
+        {(statuses ?? []).map((s) => {
+          const isConnecting = connectingId === s.id;
+          const anyConnecting = connectingId !== null;
+          return (
+            <div key={s.id} className="border border-border rounded p-2.5 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-text truncate">
+                    <span className="font-medium">{s.label}</span>
+                    <span className="text-text-faint"> · {s.plan}</span>
+                  </div>
+                  <div className="text-[11px] text-text-faint flex items-center gap-1.5 mt-0.5">
+                    <span
+                      aria-hidden
+                      className={`inline-block w-1.5 h-1.5 rounded-full ${
+                        s.connected ? "bg-green-400" : "bg-text-faint"
+                      }`}
+                    />
+                    <span>{s.connected ? "connected" : "not connected"}</span>
+                  </div>
+                </div>
+                {isConnecting ? null : s.connected ? (
+                  <span
+                    className="text-[11px] font-medium"
+                    style={{ color: SUCCESS }}
+                  >
+                    ✓
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => setConnectingId(s.id)}
+                    disabled={anyConnecting}
+                    className="px-2.5 py-1.5 text-xs bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                  >
+                    Connect
+                  </button>
+                )}
+              </div>
+              {isConnecting && (
+                <ConnectProvider
+                  id={s.id}
+                  label={s.label}
+                  onDone={onConnectDone}
+                  onCancel={() => setConnectingId(null)}
+                />
+              )}
+            </div>
+          );
+        })}
+        {statuses !== null && statuses.length === 0 && (
+          <div className="text-sm text-text-faint">
+            No providers available.
+          </div>
+        )}
+      </div>
+
+      {/* Custom endpoint — demoted to a secondary link that reveals the form. */}
+      <div className="mt-6">
+        <button
+          onClick={() => setShowCustom((v) => !v)}
+          className="text-xs text-text-muted underline decoration-dotted hover:text-text"
+        >
+          {showCustom ? "Hide custom endpoint" : "Use your own API endpoint instead"}
+        </button>
+        {showCustom && (
+          <div className="mt-3">
+            <CustomForm
+              onDone={async () => {
+                setShowCustom(false);
+                await refresh();
+              }}
+              submit={submitCustom}
+            />
+          </div>
+        )}
+      </div>
 
       {/* Footer: Back (left) + Continue (right). Continue gated on ≥1 connected. */}
-      <StepFooter onBack={onBack} onContinue={onContinue} continueDisabled={!canContinue} />
-    </div>
-  );
-}
-
-function ProviderCards({
-  loading,
-  connected,
-  openaiConfigured,
-  onReload,
-}: {
-  loading: boolean;
-  connected: Set<string>;
-  openaiConfigured: boolean;
-  onReload: () => Promise<void>;
-}) {
-  const [form, setForm] = useState<AddForm>(null);
-
-  return (
-    <div className="space-y-3">
-      <div className="flex gap-2.5">
-        <ProviderCard
-          letter="A"
-          name="Anthropic"
-          connected={connected.has(ANTHROPIC_ID)}
-          statusConnected="Connected"
-          statusDisconnected="Requires setup on the box"
-          loading={loading}
-          onClick={undefined}
-        />
-        <ProviderCard
-          letter="O"
-          name="OpenAI"
-          connected={connected.has(OPENAI_ID)}
-          statusConnected="Connected"
-          statusDisconnected={openaiConfigured ? "Key added — restart pending" : "Add API key"}
-          loading={loading}
-          onClick={() => setForm((f) => (f === "openai" ? null : "openai"))}
-          active={form === "openai"}
-        />
-        <ProviderCard
-          plus
-          name="Custom"
-          connected={false}
-          statusConnected="Add provider"
-          statusDisconnected="Add provider"
-          loading={loading}
-          onClick={() => setForm((f) => (f === "custom" ? null : "custom"))}
-          active={form === "custom"}
-        />
-      </div>
-
-      {/* Anthropic-not-connected pointer (device-login flow is out of scope). */}
-      {!loading && !connected.has(ANTHROPIC_ID) && (
-        <div className="rounded-md border border-border bg-bg-soft px-3 py-2.5 text-xs text-text-muted leading-relaxed">
-          Anthropic isn't connected yet. Sign in to Claude on the box (e.g.{" "}
-          <code className="rounded bg-bg px-1.5 py-0.5 text-[11px] text-text-muted">
-            opencode auth login
-          </code>
-          ), then reopen this step. In-app Anthropic sign-in is coming soon.
-        </div>
-      )}
-
-      {form === "openai" && (
-        <OpenAiForm
-          onDone={async () => {
-            setForm(null);
-            await onReload();
-          }}
-        />
-      )}
-      {form === "custom" && (
-        <CustomForm
-          onDone={async () => {
-            setForm(null);
-            await onReload();
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-function ProviderCard({
-  letter,
-  plus,
-  name,
-  connected,
-  statusConnected,
-  statusDisconnected,
-  loading,
-  onClick,
-  active,
-}: {
-  letter?: string;
-  plus?: boolean;
-  name: string;
-  connected: boolean;
-  statusConnected: string;
-  statusDisconnected: string;
-  loading: boolean;
-  onClick?: () => void;
-  active?: boolean;
-}) {
-  const clickable = onClick !== undefined;
-  const status = loading ? "Checking…" : connected ? statusConnected : statusDisconnected;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={!clickable}
-      className="flex-1 flex flex-col items-center gap-3 rounded-md border p-4 text-center transition-colors disabled:cursor-default"
-      style={{
-        borderColor: connected || active ? ACCENT : "#253055",
-        background: connected || active ? "#171F3A" : "transparent",
-        boxShadow: connected || active ? `0 0 0 3px rgba(124,156,255,0.15)` : undefined,
-      }}
-    >
-      <div
-        className="w-10 h-10 rounded flex items-center justify-center text-base font-bold"
-        style={{
-          background: connected ? ACCENT : "#12182F",
-          border: `1.5px solid ${connected ? ACCENT : "#253055"}`,
-          color: connected ? "#0B1020" : "#A7B1C4",
-        }}
-      >
-        {plus ? <PlusIcon /> : letter}
-      </div>
-      <div>
-        <div className="text-[13px] font-semibold text-text">{name}</div>
-        <div
-          className="text-[11px] mt-0.5"
-          style={{ color: connected ? SUCCESS : "#5C6578" }}
-        >
-          {status}
-        </div>
-      </div>
-    </button>
-  );
-}
-
-// Shared write path for both add-provider forms: upsert via the existing
-// setProviders code path, then restart opencode so /provider re-auths and the
-// card flips to connected (+ the new models reach Step 3). Returns an error
-// string to surface, or null on success (after which it calls onDone). Keeping
-// this single orchestration means OpenAiForm/CustomForm differ only in
-// validation + payload — no duplicated try/catch/restart plumbing.
-async function saveProviderAndRestart(
-  provider: { id: string; name: string; baseURL: string; apiKey: string; enabledModels: string[] },
-  labels: { saveFailed: string; restartFailedPrefix: string },
-  onDone: () => Promise<void>,
-): Promise<string | null> {
-  try {
-    const res = await window.api.opencodeSetProviders({ upsert: [provider] });
-    if (!res.ok) return res.error ?? labels.saveFailed;
-    // Restart failure is non-fatal to the config write, but surface it (the
-    // card just won't flip until a manual restart).
-    try {
-      await window.api.opencodeRestart();
-    } catch (e) {
-      return `${labels.restartFailedPrefix}: ${e instanceof Error ? e.message : String(e)}`;
-    }
-    await onDone();
-    return null;
-  } catch (e) {
-    return e instanceof Error ? e.message : String(e);
-  }
-}
-
-// OpenAI: only a key is needed (baseURL pinned to OPENAI_BASE_URL). Writes via
-// the existing setProviders path, then restarts opencode so the key auths and
-// the card flips to connected.
-function OpenAiForm({ onDone }: { onDone: () => Promise<void> }) {
-  const [apiKey, setApiKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async () => {
-    const keyErr = openaiKeyError(apiKey);
-    if (keyErr) {
-      setError(keyErr);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    const err = await saveProviderAndRestart(
-      { id: OPENAI_ID, name: "OpenAI", baseURL: OPENAI_BASE_URL, apiKey: apiKey.trim(), enabledModels: [] },
-      { saveFailed: "Couldn't save the OpenAI key.", restartFailedPrefix: "Key saved, but restarting opencode failed" },
-      onDone,
-    );
-    if (err) setError(err);
-    setBusy(false);
-  };
-
-  return (
-    <CardForm title="Connect OpenAI" error={error}>
-      <PasswordInput
-        label="API key"
-        placeholder="sk-…"
-        value={apiKey}
-        disabled={busy}
-        onChange={(v) => {
-          setApiKey(v);
-          setError(null);
-        }}
+      <StepFooter
+        onBack={onBack}
+        onContinue={onContinue}
+        continueDisabled={!canContinue}
       />
-      <FormSubmit busy={busy} disabled={!apiKey.trim()} onClick={submit}>
-        {busy ? "Connecting…" : "Connect"}
-      </FormSubmit>
-    </CardForm>
+    </div>
   );
 }
 
-// Custom: id/name/baseURL/apiKey — same setProviders code path as OpenAI.
-function CustomForm({ onDone }: { onDone: () => Promise<void> }) {
-  const [draft, setDraft] = useState<ProviderDraft>({ id: "", name: "", baseURL: "", apiKey: "" });
+// Custom endpoint add form. Same validation + write path as before — only
+// its prominence in the step has changed. Kept as a local component so the
+// step file remains the single owner of the add-a-custom-provider UX
+// during onboarding; Settings' ProvidersCard handles the post-onboarding
+// case separately.
+function CustomForm({
+  onDone,
+  submit,
+}: {
+  onDone: () => Promise<void>;
+  submit: (draft: ProviderDraft, onDone: () => Promise<void>) => Promise<string | null>;
+}) {
+  const [draft, setDraft] = useState<ProviderDraft>({
+    id: "",
+    name: "",
+    baseURL: "",
+    apiKey: "",
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -345,7 +286,7 @@ function CustomForm({ onDone }: { onDone: () => Promise<void> }) {
     setError(null);
   };
 
-  const submit = async () => {
+  const onSubmit = async () => {
     const draftErr = customDraftError(draft);
     if (draftErr) {
       setError(draftErr);
@@ -353,92 +294,68 @@ function CustomForm({ onDone }: { onDone: () => Promise<void> }) {
     }
     setBusy(true);
     setError(null);
-    const err = await saveProviderAndRestart(
-      {
-        id: draft.id.trim(),
-        name: draft.name.trim() || draft.id.trim(),
-        baseURL: draft.baseURL.trim(),
-        apiKey: draft.apiKey,
-        enabledModels: [],
-      },
-      { saveFailed: "Couldn't save the provider.", restartFailedPrefix: "Provider saved, but restarting opencode failed" },
-      onDone,
-    );
+    const err = await submit(draft, onDone);
     if (err) setError(err);
     setBusy(false);
   };
 
   return (
-    <CardForm title="Add a custom provider" error={error}>
-      <TextInput label="Provider id" placeholder="e.g. groq" value={draft.id} disabled={busy} onChange={(v) => set({ id: v })} />
-      <TextInput label="Name (optional)" placeholder="e.g. Groq" value={draft.name} disabled={busy} onChange={(v) => set({ name: v })} />
-      <TextInput label="Base URL" placeholder="https://api.groq.com/openai/v1" value={draft.baseURL} disabled={busy} onChange={(v) => set({ baseURL: v })} />
-      <PasswordInput label="API key (optional)" placeholder="key" value={draft.apiKey} disabled={busy} onChange={(v) => set({ apiKey: v })} />
-      <FormSubmit busy={busy} disabled={!draft.id.trim() || !draft.baseURL.trim()} onClick={submit}>
-        {busy ? "Adding…" : "Add provider"}
-      </FormSubmit>
-    </CardForm>
-  );
-}
-
-// ── Small shared form primitives (local to this step; not exported) ──────────
-
-function CardForm({
-  title,
-  error,
-  children,
-}: {
-  title: string;
-  error: string | null;
-  children: React.ReactNode;
-}) {
-  return (
     <div className="rounded-md border border-border bg-bg-soft p-3 space-y-2.5">
-      <div className="text-[11px] uppercase tracking-wider text-text-faint">{title}</div>
-      {children}
+      <div className="text-[11px] uppercase tracking-wider text-text-faint">
+        Add a custom provider
+      </div>
+      <CustomInput
+        label="Provider id"
+        placeholder="e.g. groq"
+        value={draft.id}
+        disabled={busy}
+        onChange={(v) => set({ id: v })}
+      />
+      <CustomInput
+        label="Name (optional)"
+        placeholder="e.g. Groq"
+        value={draft.name}
+        disabled={busy}
+        onChange={(v) => set({ name: v })}
+      />
+      <CustomInput
+        label="Base URL"
+        placeholder="https://api.groq.com/openai/v1"
+        value={draft.baseURL}
+        disabled={busy}
+        onChange={(v) => set({ baseURL: v })}
+      />
+      <CustomInput
+        label="API key (optional)"
+        placeholder="key"
+        value={draft.apiKey}
+        type="password"
+        disabled={busy}
+        onChange={(v) => set({ apiKey: v })}
+      />
       {error && (
         <div role="alert" className="text-xs" style={{ color: DANGER }}>
           {error}
         </div>
       )}
+      <button
+        type="button"
+        onClick={() => void onSubmit()}
+        disabled={busy || !draft.id.trim() || !draft.baseURL.trim()}
+        className="inline-flex items-center gap-2 px-3.5 py-2 rounded-md text-sm font-medium text-bg transition-opacity disabled:opacity-40"
+        style={{ background: ACCENT }}
+      >
+        {busy ? "Adding…" : "Add provider"}
+      </button>
     </div>
   );
 }
 
-function TextInput({
-  label,
-  placeholder,
-  value,
-  disabled,
-  onChange,
-}: {
+function CustomInput(props: {
   label: string;
   placeholder: string;
   value: string;
-  disabled: boolean;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-[11px] text-text-muted">{label}</span>
-      <input
-        type="text"
-        autoComplete="off"
-        spellCheck={false}
-        placeholder={placeholder}
-        value={value}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded bg-bg border border-border px-2.5 py-2 text-sm text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
-      />
-    </label>
-  );
-}
-
-function PasswordInput(props: {
-  label: string;
-  placeholder: string;
-  value: string;
+  type?: "text" | "password";
   disabled: boolean;
   onChange: (v: string) => void;
 }) {
@@ -446,8 +363,9 @@ function PasswordInput(props: {
     <label className="flex flex-col gap-1">
       <span className="text-[11px] text-text-muted">{props.label}</span>
       <input
-        type="password"
+        type={props.type ?? "text"}
         autoComplete="off"
+        spellCheck={false}
         placeholder={props.placeholder}
         value={props.value}
         disabled={props.disabled}
@@ -457,29 +375,3 @@ function PasswordInput(props: {
     </label>
   );
 }
-
-function FormSubmit({
-  busy,
-  disabled,
-  onClick,
-  children,
-}: {
-  busy: boolean;
-  disabled: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={busy || disabled}
-      className="inline-flex items-center gap-2 px-3.5 py-2 rounded-md text-sm font-medium text-bg transition-opacity disabled:opacity-40"
-      style={{ background: ACCENT }}
-    >
-      {children}
-    </button>
-  );
-}
-
-

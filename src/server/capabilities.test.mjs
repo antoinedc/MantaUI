@@ -59,25 +59,25 @@ const LOG_TAIL_BYTES = 16 * 1024;
 test("createCapJob accepts a valid envelope and publishes capJob", async () => {
   const h = harness();
   const r = await createCapJob(
-    { capability: "ios.build", input: { foo: 1 }, host: "mac", sessionID: "ses_abc" },
+    { capability: "ios.build", input: { foo: 1 }, host: "desktop", sessionID: "ses_abc" },
     h.deps,
   );
   assert.equal(r.ok, true);
   assert.equal(r.job.status, "queued");
   assert.equal(r.job.capability, "ios.build");
-  assert.equal(r.job.host, "mac");
+  assert.equal(r.job.host, "desktop");
   assert.equal(r.job.input.foo, 1);
   assert.equal(h.published.length, 1);
   assert.equal(h.published[0].kind, "capJob");
   assert.equal(h.published[0].payload.id, r.job.id);
   assert.equal(h.published[0].payload.capability, "ios.build");
-  assert.equal(h.published[0].payload.host, "mac");
+  assert.equal(h.published[0].payload.host, "desktop");
 });
 
 test("createCapJob rejects empty capability", async () => {
   const h = harness();
   const r = await createCapJob(
-    { capability: "", host: "mac", sessionID: "ses" },
+    { capability: "", host: "desktop", sessionID: "ses" },
     h.deps,
   );
   assert.equal(r.ok, false);
@@ -97,18 +97,33 @@ test("createCapJob rejects bad host", async () => {
 test("createCapJob rejects missing sessionID", async () => {
   const h = harness();
   const r = await createCapJob(
-    { capability: "ios.build", host: "mac", sessionID: "" },
+    { capability: "ios.build", host: "desktop", sessionID: "" },
     h.deps,
   );
   assert.equal(r.ok, false);
   assert.match(r.error, /sessionID/i);
 });
 
+test("createCapJob normalizes legacy host:'mac' to host:'desktop' on the persisted row + SSE payload", async () => {
+  const h = harness();
+  const r = await createCapJob(
+    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses_abc" },
+    h.deps,
+  );
+  assert.equal(r.ok, true);
+  // Stored as the canonical "desktop" — everything downstream (SSE
+  // payload, /api/cap list filter, the persisted store) speaks one
+  // vocabulary.
+  assert.equal(r.job.host, "desktop");
+  assert.equal(h.published.length, 1);
+  assert.equal(h.published[0].payload.host, "desktop");
+});
+
 test("createCapJob does NOT validate input (queue is capability-agnostic)", async () => {
   const h = harness();
   // Anything goes in `input` — the tool owns the shape.
   const r = await createCapJob(
-    { capability: "ios.build", input: { nested: { whatever: null } }, host: "mac", sessionID: "ses" },
+    { capability: "ios.build", input: { nested: { whatever: null } }, host: "desktop", sessionID: "ses" },
     h.deps,
   );
   assert.equal(r.ok, true);
@@ -122,7 +137,7 @@ test("createCapJob does NOT validate input (queue is capability-agnostic)", asyn
 test("lifecycle: create → start → appendLog×N → done, with timestamps and events", async () => {
   const h = harness();
   const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses_abc" },
+    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses_abc" },
     h.deps,
   );
   assert.equal(created.ok, true);
@@ -166,7 +181,7 @@ test("getJob tails log to LOG_TAIL_BYTES and reports total logBytes", async () =
     id: "a1b2c3d4",
     capability: "ios.build",
     input: {},
-    host: "mac",
+    host: "desktop",
     sessionID: "ses_abc",
     directory: "",
     status: "running",
@@ -199,7 +214,7 @@ test("getJob does not mutate the stored job", async () => {
     id: "deadbeef",
     capability: "ios.build",
     input: {},
-    host: "mac",
+    host: "desktop",
     sessionID: "ses_abc",
     directory: "",
     status: "running",
@@ -223,7 +238,7 @@ test("getJob does not mutate the stored job", async () => {
 test("appendLog ring-buffers: total joined length stays ≤ LOG_CAP_BYTES, oldest dropped first", async () => {
   const h = harness();
   const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses" },
+    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
     h.deps,
   );
   await startJob(created.job.id, h.deps);
@@ -244,7 +259,7 @@ test("appendLog ring-buffers: total joined length stays ≤ LOG_CAP_BYTES, oldes
 test("appendLog returns {ok:false} for a queued job", async () => {
   const h = harness();
   const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses" },
+    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
     h.deps,
   );
   const r = await appendLog(created.job.id, "nope", h.deps);
@@ -256,7 +271,7 @@ test("appendLog returns {ok:false} for a queued job", async () => {
 test("appendLog returns {ok:false} for a terminal job (no resurrection)", async () => {
   const h = harness();
   const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses" },
+    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
     h.deps,
   );
   await startJob(created.job.id, h.deps);
@@ -281,7 +296,7 @@ test("appendLog returns {ok:false} for a missing job", async () => {
 test("startJob transitions queued → running and stamps startedAt", async () => {
   const h = harness();
   const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses" },
+    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
     h.deps,
   );
   const r = await startJob(created.job.id, h.deps);
@@ -293,7 +308,7 @@ test("startJob transitions queued → running and stamps startedAt", async () =>
 test("startJob returns {ok:false, status} when called twice (SSE+catch-up dedup)", async () => {
   const h = harness();
   const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses" },
+    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
     h.deps,
   );
   await startJob(created.job.id, h.deps);
@@ -306,7 +321,7 @@ test("startJob returns {ok:false, status} when called twice (SSE+catch-up dedup)
 test("startJob returns {ok:false} for a terminal job", async () => {
   const h = harness();
   const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses" },
+    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
     h.deps,
   );
   await startJob(created.job.id, h.deps);
@@ -330,7 +345,7 @@ test("startJob returns {ok:false, error:'not found'} for missing id", async () =
 test("completeJob is idempotent: second call returns alreadyTerminal:true with no extra publish/notify", async () => {
   const h = harness();
   const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses" },
+    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
     h.deps,
   );
   await startJob(created.job.id, h.deps);
@@ -351,7 +366,7 @@ test("completeJob is idempotent: second call returns alreadyTerminal:true with n
 test("completeJob rejects an invalid status string", async () => {
   const h = harness();
   const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "mac", sessionID: "ses" },
+    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
     h.deps,
   );
   await startJob(created.job.id, h.deps);
@@ -375,7 +390,7 @@ test("listJobs returns no-log summary (logBytes replaces log)", async () => {
   const h = harness([
     {
       id: "a1",
-      capability: "ios.build", input: {}, host: "mac", sessionID: "ses_a",
+      capability: "ios.build", input: {}, host: "desktop", sessionID: "ses_a",
       directory: "", status: "done", createdAt: 0, startedAt: 0, finishedAt: 0,
       log: ["one", "two", "three"], result: null, error: null,
     },
@@ -388,10 +403,10 @@ test("listJobs returns no-log summary (logBytes replaces log)", async () => {
 
 test("listJobs filters by sessionID, host, status — all AND-combined", async () => {
   const seeded = [
-    { id: "a1", capability: "ios.build", input: {}, host: "mac", sessionID: "ses_a", directory: "", status: "queued",  createdAt: 0, startedAt: null, finishedAt: null, log: [], result: null, error: null },
-    { id: "a2", capability: "ios.build", input: {}, host: "mac", sessionID: "ses_b", directory: "", status: "queued",  createdAt: 0, startedAt: null, finishedAt: null, log: [], result: null, error: null },
+    { id: "a1", capability: "ios.build", input: {}, host: "desktop", sessionID: "ses_a", directory: "", status: "queued",  createdAt: 0, startedAt: null, finishedAt: null, log: [], result: null, error: null },
+    { id: "a2", capability: "ios.build", input: {}, host: "desktop", sessionID: "ses_b", directory: "", status: "queued",  createdAt: 0, startedAt: null, finishedAt: null, log: [], result: null, error: null },
     { id: "a3", capability: "ios.build", input: {}, host: "box", sessionID: "ses_a", directory: "", status: "running", createdAt: 0, startedAt: 0,  finishedAt: null, log: [], result: null, error: null },
-    { id: "a4", capability: "ios.build", input: {}, host: "mac", sessionID: "ses_a", directory: "", status: "done",    createdAt: 0, startedAt: 0,  finishedAt: 0,    log: [], result: null, error: null },
+    { id: "a4", capability: "ios.build", input: {}, host: "desktop", sessionID: "ses_a", directory: "", status: "done",    createdAt: 0, startedAt: 0,  finishedAt: 0,    log: [], result: null, error: null },
   ];
   const h = harness(seeded);
 
@@ -406,17 +421,45 @@ test("listJobs filters by sessionID, host, status — all AND-combined", async (
   assert.equal(byStatus[0].id, "a4");
 
   // Combined (AND)
-  const combined = await listJobs({ sessionID: "ses_a", host: "mac", status: "queued" }, h.deps);
+  const combined = await listJobs({ sessionID: "ses_a", host: "desktop", status: "queued" }, h.deps);
   assert.equal(combined.length, 1);
   assert.equal(combined[0].id, "a1");
 });
 
 test("listJobs with no filters returns every job", async () => {
   const seeded = [
-    { id: "a1", capability: "ios.build", input: {}, host: "mac", sessionID: "ses_a", directory: "", status: "queued", createdAt: 0, startedAt: null, finishedAt: null, log: [], result: null, error: null },
+    { id: "a1", capability: "ios.build", input: {}, host: "desktop", sessionID: "ses_a", directory: "", status: "queued", createdAt: 0, startedAt: null, finishedAt: null, log: [], result: null, error: null },
     { id: "a2", capability: "ios.build", input: {}, host: "box", sessionID: "ses_b", directory: "", status: "done",  createdAt: 0, startedAt: 0,    finishedAt: 0,    log: [], result: null, error: null },
   ];
   const h = harness(seeded);
+  const all = await listJobs({}, h.deps);
+  assert.equal(all.length, 2);
+});
+
+test("listJobs normalizes both filter and stored host — a pre-rename 'mac' row matches ?host=desktop", async () => {
+  // Construct a row with the literal legacy host value, as if it had been
+  // persisted before the rename. The executor catch-up uses
+  // /api/cap?host=desktop, so without normalization it would miss these
+  // jobs and leave them stranded. Normalizing on read is the whole
+  // migration — no store rewrite, no schema version.
+  const seeded = [
+    { id: "legacy", capability: "ios.build", input: {}, host: "mac", sessionID: "ses_a", directory: "", status: "queued", createdAt: 0, startedAt: null, finishedAt: null, log: [], result: null, error: null },
+    { id: "box1",   capability: "ios.build", input: {}, host: "box", sessionID: "ses_a", directory: "", status: "queued", createdAt: 0, startedAt: null, finishedAt: null, log: [], result: null, error: null },
+  ];
+  const h = harness(seeded);
+  const byDesktop = await listJobs({ host: "desktop" }, h.deps);
+  assert.equal(byDesktop.length, 1);
+  assert.equal(byDesktop[0].id, "legacy");
+  const byBox = await listJobs({ host: "box" }, h.deps);
+  assert.equal(byBox.length, 1);
+  assert.equal(byBox[0].id, "box1");
+  // Combined AND still works.
+  const combined = await listJobs(
+    { host: "desktop", sessionID: "ses_a" },
+    h.deps,
+  );
+  assert.equal(combined.length, 1);
+  assert.equal(combined[0].id, "legacy");
   const all = await listJobs({}, h.deps);
   assert.equal(all.length, 2);
 });
@@ -429,14 +472,14 @@ test("sweep fails out a stale running job (startedAt > RUNNING_TIMEOUT_MS ago) a
   const h = harness();
   // Job started just inside the timeout → still running.
   const inside = {
-    id: "insider", capability: "ios.build", input: {}, host: "mac",
+    id: "insider", capability: "ios.build", input: {}, host: "desktop",
     sessionID: "ses_a", directory: "", status: "running",
     createdAt: 0, startedAt: T0 - RUNNING_TIMEOUT_MS + 1000, finishedAt: null,
     log: [], result: null, error: null,
   };
   // Job started well past the timeout → should fail.
   const stale = {
-    id: "stale", capability: "ios.build", input: {}, host: "mac",
+    id: "stale", capability: "ios.build", input: {}, host: "desktop",
     sessionID: "ses_a", directory: "", status: "running",
     createdAt: 0, startedAt: T0 - RUNNING_TIMEOUT_MS - 1000, finishedAt: null,
     log: [], result: null, error: null,
@@ -466,7 +509,7 @@ test("sweep fails out a stale running job (startedAt > RUNNING_TIMEOUT_MS ago) a
 test("sweep fails out an ancient queued job (createdAt > QUEUED_EXPIRY_MS ago)", async () => {
   const h = harness();
   const stale = {
-    id: "ancient", capability: "ios.build", input: {}, host: "mac",
+    id: "ancient", capability: "ios.build", input: {}, host: "desktop",
     sessionID: "ses_a", directory: "", status: "queued",
     createdAt: T0 - QUEUED_EXPIRY_MS - 1000, startedAt: null, finishedAt: null,
     log: [], result: null, error: null,
@@ -484,13 +527,13 @@ test("sweep retention: prunes terminal jobs older than TERMINAL_RETENTION_MS", a
   const h = harness();
   const TERM = 7 * 24 * 60 * 60_000;
   const old = {
-    id: "old", capability: "ios.build", input: {}, host: "mac",
+    id: "old", capability: "ios.build", input: {}, host: "desktop",
     sessionID: "ses_a", directory: "", status: "done",
     createdAt: 0, startedAt: 0, finishedAt: T0 - TERM - 1000,
     log: [], result: null, error: null,
   };
   const fresh = {
-    id: "fresh", capability: "ios.build", input: {}, host: "mac",
+    id: "fresh", capability: "ios.build", input: {}, host: "desktop",
     sessionID: "ses_a", directory: "", status: "done",
     createdAt: 0, startedAt: 0, finishedAt: T0 - 1000,
     log: [], result: null, error: null,
@@ -508,7 +551,7 @@ test("sweep retention: enforces MAX_TERMINAL_JOBS by dropping the oldest", async
   // is offset from T0 so the test doesn't depend on the wall clock.
   for (let i = 0; i < 55; i++) {
     h.jobs.push({
-      id: `j${i}`, capability: "ios.build", input: {}, host: "mac",
+      id: `j${i}`, capability: "ios.build", input: {}, host: "desktop",
       sessionID: "ses_a", directory: "", status: "done",
       createdAt: 0, startedAt: 0, finishedAt: T0 - 1000 + i, // j0 oldest, j54 newest
       log: [], result: null, error: null,
@@ -527,7 +570,7 @@ test("sweep retention: enforces MAX_TERMINAL_JOBS by dropping the oldest", async
 test("sweep leaves a fresh running job untouched", async () => {
   const h = harness();
   const fresh = {
-    id: "fresh", capability: "ios.build", input: {}, host: "mac",
+    id: "fresh", capability: "ios.build", input: {}, host: "desktop",
     sessionID: "ses_a", directory: "", status: "running",
     createdAt: T0, startedAt: T0, finishedAt: null,
     log: ["hello"], result: null, error: null,
@@ -547,7 +590,7 @@ test("sweep leaves a fresh running job untouched", async () => {
 test("sweep no-change pass does not save", async () => {
   const h = harness();
   const fresh = {
-    id: "fresh", capability: "ios.build", input: {}, host: "mac",
+    id: "fresh", capability: "ios.build", input: {}, host: "desktop",
     sessionID: "ses_a", directory: "", status: "running",
     createdAt: T0, startedAt: T0, finishedAt: null,
     log: [], result: null, error: null,

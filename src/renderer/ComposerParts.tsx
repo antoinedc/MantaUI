@@ -8,6 +8,7 @@
 import { useRef } from "react";
 import type { VoiceMode, VoicePhase } from "./voice";
 import { CLAUDE_ORANGE, type Attachment, type TypeaheadRow } from "./chatShared";
+import { ALT_KEY } from "./platform";
 
 // SessionToolbar — footer affordances. fork / compact / delete moved out of the
 // footer (they live in the header ⋯ menu); only the ⏰ schedules toggle remains
@@ -274,7 +275,7 @@ export function MicButton({
           : "release · dictate"
       : floating
         ? "hold to talk"
-        : "hold to speak (⌥ = command)";
+        : `hold to speak (${ALT_KEY} = command)`;
 
   // Floating PTT FAB: round bubble, bottom-right (positioned by the
   // `.mobile-ptt-fab` rule in mobile.css — visual/layout lives there per the

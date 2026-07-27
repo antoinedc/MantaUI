@@ -315,6 +315,15 @@ export function stripJsoncLineComments(text) {
 // installer's version tag — we use the official opencode plugin registry
 // (no version pinning in v1; the install is the source of truth for what
 // version is "current").
+//
+// Why this stays SINGULAR (not a list-shaped API): of the providers tracked
+// by BET-308 (Claude, Codex, Kimi), only Claude needs an opencode plugin at
+// all. Codex and Kimi are NATIVE to opencode — their auth methods are
+// reachable via `opencode auth login -p <id>` (Codex) or `PUT /auth/<id>`
+// (Kimi) without any runtime plugin installation. Generalizing this into a
+// multi-plugin list would be a list-shaped API with exactly one element
+// forever; the constant stays as-is. Runtime plugin installation is out of
+// scope epic-wide.
 export const OPENCODE_CLAUDE_AUTH_PLUGIN = "opencode-claude-auth@latest";
 
 /**
@@ -359,6 +368,138 @@ export function mergeOpencodeConfig(existingText) {
   const next = { ...cfg, plugin: plugins };
   const text = JSON.stringify(next, null, 2) + "\n";
   return { text, corrupt, plugin: plugins };
+}
+
+// ---------------------------------------------------------------------------
+// Per-provider detection summary (BET-313) — install-time replacement for
+// the prior single-Claude "credentials.json missing" check. install.sh
+// prints one row per provider (Claude / Codex / Kimi) + one CLI row
+// (claude / codex / kimi on PATH). Warns (never dies) for each missing
+// provider; only prints "chat will start but reject requests" guidance
+// when zero providers are connected.
+//
+// Three providers are in scope (BET-308); the IDs match opencode's
+// /provider endpoint contract (anthropic, openai, kimi-for-coding).
+// `opencode auth login -p <id>` is the verified non-interactive
+// invocation that skips opencode's interactive provider picker
+// (verified live against opencode 1.15.12).
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_PROVIDERS = Object.freeze([
+  Object.freeze({
+    id: "anthropic",
+    label: "Claude",
+    hint: "connect from MantaUI, or: opencode auth login -p anthropic",
+  }),
+  Object.freeze({
+    id: "openai",
+    label: "Codex",
+    hint: "connect from MantaUI, or: opencode auth login -p openai",
+  }),
+  Object.freeze({
+    id: "kimi-for-coding",
+    label: "Kimi",
+    hint: "connect from MantaUI, or: opencode auth login -p kimi-for-coding",
+  }),
+]);
+
+// Probe opencode at http://127.0.0.1:4096/provider and return the provider
+// IDs in `connected[]`. Returns [] on any failure (network error,
+// opencode down, malformed response, non-2xx status) — install.sh treats
+// absence as "not detected". The connected[] list is the AUTHORITATIVE
+// signal per the BET-308 epic finding; the local-creds fallback in
+// formatProviderDetection only applies to Claude (which has a
+// user-readable file the shell can probe) and only fires when the
+// opencode probe already failed.
+//
+// Pure-ish: only the injected `fetchFn` touches the network. Caller picks
+// the timeout via the `fetchFn` it injects (install.sh uses
+// AbortSignal.timeout via the lib's standard waitForHealth-shaped wrapper
+// for the same 5s ceiling opencode gets at first boot).
+export async function fetchConnectedProviders({
+  url = "http://127.0.0.1:4096/provider",
+  fetchFn = globalThis.fetch,
+} = {}) {
+  if (typeof fetchFn !== "function") return [];
+  let res;
+  try {
+    res = await fetchFn(url, { method: "GET" });
+  } catch {
+    return [];
+  }
+  if (!res || typeof res.status !== "number") return [];
+  if (res.status < 200 || res.status >= 300) return [];
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    return [];
+  }
+  const list = body && Array.isArray(body.connected) ? body.connected : [];
+  return list.filter((id) => typeof id === "string" && id.length > 0);
+}
+
+// Format the per-provider detection summary that install.sh prints at the
+// very end of a successful install. Pure string-builder — install.sh
+// probes `command -v claude/codex/kimi` and `~/.claude/.credentials.json`
+// itself (the shell owns the file system), then hands the boolean summary
+// to this function. Tested in node:test for the four canonical states
+// (zero connected, Claude via opencode, Claude via cred file, all three).
+//
+// @param {object} input
+// @param {Set<string>|string[]} input.connected   opencode `connected[]`
+// @param {boolean}              input.hasClaudeCredentials
+//   Whether ~/.claude/.credentials.json exists on this box. The fallback
+//   fires only when the opencode probe didn't report `anthropic` in
+//   connected[] — opencode is authoritative, the file is a best-effort
+//   when opencode didn't answer.
+// @param {{claude:boolean, codex:boolean, kimi:boolean}} input.clis
+//   Whether each CLI is on PATH (probe via `command -v` in the shell).
+// @param {Array<{id,label,hint}>} [input.providers]
+//   Override the default provider table. Tests pin the default.
+//
+// @returns {object}
+//   rows        — ready-to-print rows; install.sh emits each via `ok` or
+//                 `warn` based on `status`. Two shapes:
+//                   { status:"ok"|"warn", kind:"provider", label, suffix }
+//                   { status:"info",     kind:"cli",     slots:[{id,detected}] }
+//   showGuidance — true iff zero providers are connected (the only case
+//                  where "chat will start but reject requests" is true).
+export function formatProviderDetection({
+  connected,
+  hasClaudeCredentials,
+  clis,
+  providers = DEFAULT_PROVIDERS,
+} = {}) {
+  const ids = new Set(connected ?? []);
+  const rows = [];
+  let anyConnected = false;
+  for (const p of providers) {
+    // First hit wins: opencode's connected[] trumps the local cred file
+    // (the file-based probe is Claude-only and is a fallback for the case
+    // where opencode didn't answer the /provider probe at all).
+    let isConnected = ids.has(p.id);
+    if (!isConnected && p.id === "anthropic" && hasClaudeCredentials === true) {
+      isConnected = true;
+    }
+    if (isConnected) anyConnected = true;
+    rows.push({
+      status: isConnected ? "ok" : "warn",
+      kind: "provider",
+      label: p.label,
+      suffix: isConnected ? "connected" : `not connected — ${p.hint}`,
+    });
+  }
+  rows.push({
+    status: "info",
+    kind: "cli",
+    slots: [
+      { id: "claude", detected: !!(clis && clis.claude) },
+      { id: "codex", detected: !!(clis && clis.codex) },
+      { id: "kimi", detected: !!(clis && clis.kimi) },
+    ],
+  });
+  return { rows, showGuidance: !anyConnected };
 }
 
 // ---------------------------------------------------------------------------
@@ -903,16 +1044,18 @@ export function buildPairLink(boxId, code) {
 }
 
 /**
- * Pair-page URL — the ONE link a fresh install reports. Fragment carries the
- * code so it never reaches server logs; the page derives the box id from its
- * own hostname. Shares buildPairLink's validation rules.
+ * Pair-page URL — the ONE link a fresh install reports. The fragment carries
+ * BOTH the code and the box id so neither reaches server logs and the page
+ * stays usable on non-public boxes (where the hostname is e.g. a tailnet IP
+ * and the hostname-fallback can't recover the box id). The page also still
+ * accepts a hostname-derived box id for old links sitting in terminal
+ * scrollback; the fragment wins when both are present. Shares buildPairLink's
+ * validation rules.
  *
  * `options.baseUrl` (BET-267): when the box is reached over a non-public
- * ingress (currently Tailscale), the pair-page URL must use THAT base, not the
- * canonical `<boxId>.boxes.mantaui.com`. The fragment (#code=) is preserved
- * so the page still gets the code from the URL fragment and the box id from
- * the host header. The boxId regex check is skipped in that mode — the page
- * derives the box id from the request's host header, not from the URL path.
+ * ingress (currently Tailscale), the pair-page URL must use THAT base, not
+ * the canonical `<boxId>.boxes.mantaui.com`. The fragment (`#box=&code=`) is
+ * emitted in both branches — one wire shape from one code path.
  */
 export function buildPairPageUrl(boxId, code, { baseUrl } = {}) {
   if (!/^[0-9a-f]{32}$/.test(boxId ?? "")) {
@@ -923,9 +1066,9 @@ export function buildPairPageUrl(boxId, code, { baseUrl } = {}) {
   }
   if (typeof baseUrl === "string" && baseUrl !== "") {
     const trimmed = baseUrl.replace(/\/+$/, "");
-    return `${trimmed}/pair#code=${code}`;
+    return `${trimmed}/pair#box=${boxId}&code=${code}`;
   }
-  return `https://${boxId}.boxes.mantaui.com/pair#code=${code}`;
+  return `https://${boxId}.boxes.mantaui.com/pair#box=${boxId}&code=${code}`;
 }
 
 // Lazy-default QR renderer: requires `qrcode-terminal` at call time, not at
@@ -1024,6 +1167,51 @@ async function cliMain(argv) {
     const { text, corrupt } = mergeOpencodeConfig(raw);
     if (corrupt) process.stderr.write("corrupt=1\n");
     process.stdout.write(text);
+    return 0;
+  }
+  if (cmd === "format-provider-detection") {
+    // node install-lib.mjs format-provider-detection --has-claude-creds 0|1
+    //   --cli-claude 0|1 --cli-codex 0|1 --cli-kimi 0|1 [--connected id,id,…]
+    // Reads a JSON `{connected:[ids]}` from stdin (newline-separated id list
+    // is also accepted for the shell's convenience — install.sh pipes the
+    // opencode /provider probe result, one id per line). Builds the
+    // per-provider + CLI summary via formatProviderDetection() and writes
+    // the JSON `{rows, showGuidance}` to stdout. install.sh consumes that
+    // JSON to print the user-facing detection block. Exit 0 always —
+    // detection never dies the install (BET-313: a missing provider is
+    // not an installation failure).
+    const stdinChunks = [];
+    for await (const c of process.stdin) stdinChunks.push(c);
+    const raw = Buffer.concat(stdinChunks).toString("utf-8").trim();
+    let connected = [];
+    if (raw.length > 0) {
+      // Accept either strict JSON array OR a newline-separated id list.
+      // JSON wins when both look plausible.
+      if (raw.startsWith("[")) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) connected = parsed;
+        } catch {
+          // fall through to newline split
+        }
+      }
+      if (connected.length === 0) {
+        connected = raw
+          .split("\n")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+      }
+    }
+    const result = formatProviderDetection({
+      connected,
+      hasClaudeCredentials: flags["has-claude-creds"] === "1",
+      clis: {
+        claude: flags["cli-claude"] === "1",
+        codex: flags["cli-codex"] === "1",
+        kimi: flags["cli-kimi"] === "1",
+      },
+    });
+    process.stdout.write(JSON.stringify(result) + "\n");
     return 0;
   }
   if (cmd === "render-systemd-unit") {
@@ -1284,7 +1472,7 @@ async function cliMain(argv) {
   }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-gateway|wait-for-dns|render-caddy-vhost|detect-distro|render-systemd-unit|parse-tailscale-status|write-ingress> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--tailnet-ip IP] [--placeholder K=V]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|format-provider-detection|merge-gateway|wait-for-dns|render-caddy-vhost|detect-distro|render-systemd-unit|parse-tailscale-status|write-ingress> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--tailnet-ip IP] [--has-claude-creds 0|1] [--cli-claude 0|1] [--cli-codex 0|1] [--cli-kimi 0|1] [--placeholder K=V]\n",
   );
   return 2;
 }
@@ -1309,6 +1497,11 @@ function parseFlags(args) {
     "mode",
     "os-release",
     "tailnet-ip",
+    "has-claude-creds",
+    "cli-claude",
+    "cli-codex",
+    "cli-kimi",
+    "connected",
   ]);
   for (let i = 0; i < args.length; i++) {
     const tok = args[i];

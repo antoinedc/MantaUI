@@ -123,6 +123,36 @@ resolve_arch() {
   esac
 }
 
+# launchd_agent_path — the PATH a MantaUI LaunchAgent must run with.
+#
+# launchd does NOT give an agent the user's login-shell PATH; it hands out a
+# bare `/usr/bin:/bin:/usr/sbin:/sbin`. Every tool the box actually depends on
+# that a Mac gets from Homebrew (tmux above all — macOS ships no tmux) is
+# therefore invisible to manta-server and opencode even though the very same
+# command works in Terminal. The failure is silent and confusing: the box
+# installs, pairs, and answers HTTP, but `tmux:new-session` 500s with ENOENT
+# and `listProjects` swallows its error and reports an empty box.
+#
+# We emit both Homebrew prefixes (Apple Silicon + Intel) plus the standard
+# system dirs, and prepend the directory `tmux` was actually resolved from
+# when it lives somewhere else entirely (MacPorts, /usr/local/opt, a
+# hand-built binary) — the prereq check already proved that copy exists.
+# Same class of fix as the macOS PATH handling in the desktop plugin
+# executor (see AGENTS.md, "macOS PATH gotcha").
+launchd_agent_path() {
+  local base="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  local tmux_bin tmux_dir
+  tmux_bin="$(command -v tmux 2>/dev/null || true)"
+  if [ -n "$tmux_bin" ]; then
+    tmux_dir="$(dirname "$tmux_bin")"
+    case ":$base:" in
+      *":$tmux_dir:"*) ;;
+      *) base="$tmux_dir:$base" ;;
+    esac
+  fi
+  printf '%s' "$base"
+}
+
 # _sha256_of echoes the sha256 hex of $1. Prefers GNU sha256sum (Linux ships
 # it via coreutils); falls back to BSD `shasum -a 256` on macOS, which ships
 # shasum by default but NOT sha256sum. Single shared helper so the prereq
@@ -144,11 +174,193 @@ verify_sha256() {
       (corrupt download or stale manifest — re-run; if it persists, report it)"
 }
 
+# print_provider_detection_summary <lib-path> <node-path> <home-path> [is_macos]
+# Probe opencode's `connected[]` + the local Claude credentials file + the
+# claude/codex/kimi CLIs on PATH, then print the per-provider detection
+# block at the tail of a successful install (BET-313).
+#
+# Warns (never dies) for each missing provider; only prints the "chat will
+# start but reject requests" guidance when ZERO providers are connected.
+# Also probes the claude / codex / kimi CLIs on PATH so the user can see
+# why a launcher slot in MantaUI's session-mode dropdown is or is not
+# offered. The restart hint (systemctl vs launchctl) inside the guidance
+# block follows IS_MACOS.
+#
+# Extracted as a top-level function (defined alongside the other testable
+# helpers) so unit tests in scripts/install.test.mjs can call it via
+# runBootstrap — both the runMain flag-parser and the install body itself
+# go through this one entry point, so the tests pin the actual install
+# behavior rather than a replicated copy of it.
+print_provider_detection_summary() {
+  local lib="$1" node_bin="$2" home_path="$3" macos="${4:-0}"
+
+  log "Checking provider connections…"
+
+  # Probe opencode for connected[]. Pure: fetchConnectedProviders returns
+  # [] on any failure (network error, opencode down, malformed response,
+  # non-2xx status). install.sh treats absence as "not detected" — the
+  # formatProviderDetection fallback for Claude then checks the local
+  # cred file. We pipe the newline-separated ids to format-provider-
+  # detection; the subcommand also accepts a JSON array via stdin.
+  local connected_ids
+  connected_ids="$("$node_bin" -e '
+    import("'"$lib"'").then(async (m) => {
+      const ids = await m.fetchConnectedProviders();
+      process.stdout.write(ids.join("\n"));
+    }).catch(() => process.stdout.write(""));
+  ' 2>/dev/null || true)"
+
+  # Probe local credential files. Only Claude has one — opencode's native
+  # Codex/Kimi auth lives inside opencode's auth store, not on the shell.
+  local has_claude_creds=0
+  [ -f "$home_path/.claude/.credentials.json" ] && has_claude_creds=1
+
+  # Probe CLIs via command -v through the same shell — never install any.
+  local cli_claude=0 cli_codex=0 cli_kimi=0
+  command -v claude >/dev/null 2>&1 && cli_claude=1
+  command -v codex  >/dev/null 2>&1 && cli_codex=1
+  command -v kimi   >/dev/null 2>&1 && cli_kimi=1
+
+  local detection_json
+  detection_json="$(printf '%s\n' "$connected_ids" | "$node_bin" "$lib" format-provider-detection \
+    --has-claude-creds "$has_claude_creds" \
+    --cli-claude "$cli_claude" \
+    --cli-codex  "$cli_codex"  \
+    --cli-kimi   "$cli_kimi" 2>/tmp/manta-detect.err)" \
+    || detection_json=""
+
+  if [ -z "$detection_json" ]; then
+    # format-provider-detection failed unexpectedly (would only happen if
+    # the lib crashed). Don't die — emit a single generic warn so the
+    # user still sees SOMETHING, and move on. install.sh never blocks on
+    # detection (BET-313: a missing provider is not an installation
+    # failure).
+    warn "could not build provider detection summary (see /tmp/manta-detect.err) — assuming no providers connected."
+    warn "Run \`claude\` on this box to sign in, then:"
+    if [ "$macos" = "1" ]; then
+      warn "  launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
+    else
+      warn "  systemctl --user restart opencode-serve"
+    fi
+    return 0
+  fi
+
+  # Print each row. Three provider rows (status-driven ok/warn) + one CLI
+  # row with three slots (status-driven ✓ detected / ○ not found).
+  local show_guidance
+  show_guidance="$(printf '%s' "$detection_json" | "$node_bin" -e '
+    let s = ""; process.stdin.on("data", (c) => { s += c; });
+    process.stdin.on("end", () => {
+      try { process.stdout.write(JSON.parse(s).showGuidance ? "1" : "0"); }
+      catch { process.stdout.write("0"); }
+    });
+  ' 2>/dev/null || echo 1)"
+
+  "$node_bin" -e '
+    let s = ""; process.stdin.on("data", (c) => { s += c; });
+    process.stdin.on("end", () => {
+      let parsed;
+      try { parsed = JSON.parse(s); } catch { process.exit(2); }
+      for (const r of parsed.rows) {
+        if (r.kind === "provider") {
+          process.stdout.write("ROW\t" + r.status + "\t" + r.label + "\t" + r.suffix + "\n");
+        } else if (r.kind === "cli") {
+          for (const slot of r.slots) {
+            process.stdout.write("CLI\t" + slot.id + "\t" + (slot.detected ? "1" : "0") + "\n");
+          }
+        }
+      }
+    });
+  ' <<<"$detection_json" 2>/dev/null | while IFS=$'\t' read -r kind a b c; do
+    case "$kind" in
+      ROW)
+        if [ "$a" = "ok" ]; then ok "$b $c"
+        else warn "$b $c"
+        fi
+        ;;
+      CLI)
+        if [ "$b" = "1" ]; then
+          ok "$a CLI detected"
+        else
+          warn "$a CLI not found"
+        fi
+        ;;
+    esac
+  done
+
+  if [ "$show_guidance" = "1" ]; then
+    warn "no providers connected — chat will start but reject requests until you authenticate."
+    warn "Connect any of Claude, Codex, or Kimi from the MantaUI app, or run \`claude\` (or the equivalent) once on this box to sign in, then:"
+    if [ "$macos" = "1" ]; then
+      warn "  launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
+    else
+      warn "  systemctl --user restart opencode-serve"
+    fi
+  fi
+}
+
+# read_box_id <lib-path> <node-path>
+# Echo the 32-hex box_id out of $MANTA_AUTH_FILE, or nothing when the file is
+# missing / half-written / corrupt. Single source of truth for the inline
+# `node -e readBoxIdentity` read — used by step 7.5 (gateway register needs
+# box_id) and step 8 (the trailing pairing block prints box_id + pair-link).
+# Without this helper the two reads drifted in subtle ways — see install.test's
+# strict duplication-gate catching the 6-line clone (BET-205).
+#
+# Errors go to /dev/null; the empty fallback lets the caller branch (e.g. warn
+# + skip on no box_id).
+read_box_id() {
+  "$2" -e '
+    import("'"$1"'").then((m) => {
+      const id = m.readBoxIdentity(process.env.MANTA_AUTH_FILE);
+      process.stdout.write(id?.box_id ?? "");
+    }).catch(() => process.stdout.write(""));
+  ' 2>/dev/null || true
+}
+
+# wait_for_box_id <lib-path> <node-path> [max-attempts] [interval-seconds]
+# Poll read_box_id until the identity shows up. Echoes the box_id (exit 0) or
+# nothing (exit 1) once the budget is spent.
+#
+# WHY THE WAIT (regression guard): the box identity is minted by the SERVER on
+# its first start (ensureAuth runs before it binds the port), and step 7 only
+# waits for the supervisor to fork the process — not for it to finish booting.
+# On a fresh box the identity read therefore RACED the mint and came back
+# empty, which cascaded: gateway registration was skipped, and step 7.5.E then
+# invoked `render-caddy-vhost` with an empty --box-id, which fails with
+#   render-caddy-vhost: --box-id <32hex> required
+# so the Caddy vhost was never written. The install still printed a pairing
+# code, so the box LOOKED installed while having no public TLS at all — and a
+# second run of the installer (by which time the identity existed) silently
+# "fixed" it. Polling here is what makes the first run sufficient.
+wait_for_box_id() {
+  local lib="$1" node_bin="$2" attempts="${3:-60}" interval="${4:-1}"
+  local id="" i=1
+  while [ "$i" -le "$attempts" ]; do
+    id="$(read_box_id "$lib" "$node_bin")"
+    if [ -n "$id" ]; then
+      if [ "$i" -gt 1 ]; then
+        printf 'box identity appeared after %s attempt(s)\n' "$i" >&2
+      fi
+      printf '%s' "$id"
+      return 0
+    fi
+    if [ "$i" = "1" ] && [ "$attempts" -gt 1 ]; then
+      printf 'waiting for the server to mint the box identity…\n' >&2
+    fi
+    i=$((i + 1))
+    if [ "$i" -le "$attempts" ]; then sleep "$interval"; fi
+  done
+  return 1
+}
+
 # Test mode: when sourced by scripts/install.test.mjs with MANTA_INSTALL_TEST_MODE=1,
 # only the bash helpers (log/ok/warn/die + manifest_get + _sha256_of +
-# verify_sha256 + resolve_arch) are loaded. The actual install does NOT run.
-# Lets the unit tests exercise the helpers with mocked `uname`/etc. without
-# hitting the network. See scripts/install.test.mjs.
+# verify_sha256 + resolve_arch + launchd_agent_path +
+# print_provider_detection_summary + read_box_id / wait_for_box_id) are
+# loaded. The actual install does NOT run. Lets the unit tests exercise
+# the helpers with mocked `uname`/etc. without hitting the network. See
+# scripts/install.test.mjs.
 if [ "${MANTA_INSTALL_TEST_MODE:-0}" = "1" ]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -400,16 +612,27 @@ main() {
     # non-interactive shells (which is how install.sh runs) don't source
     # .bashrc, so the binary isn't on PATH in the current shell — we add
     # it explicitly. The fallback covers the documented path.
-    # NOTE: </dev/null on the inner installer is load-bearing. install.sh is
-    # itself run as `curl -fsSL … | bash`, so the OUTER bash reads THIS script
-    # from stdin (the pipe). The opencode installer is `curl … | bash` too, and
-    # its bash inherits the parent's stdin. If the opencode installer reads
-    # stdin at all (a prompt / read / cat), it drains the rest of install.sh's
-    # bytes and the OUTER bash then hits EOF right here and exits 0 — no error,
-    # the install silently stops "after opencode install". Redirecting the
-    # inner installer's stdin to /dev/null keeps our script's stdin intact.
-    curl -fsSL https://opencode.ai/install | bash </dev/null \
+    # NOTE: download-then-run is load-bearing, do NOT collapse this back into
+    # `curl … | bash`. Two constraints collide:
+    #  (a) install.sh is itself run as `curl -fsSL … | bash`, so the OUTER bash
+    #      reads THIS script from stdin (the pipe). A child that reads stdin
+    #      (a prompt / read / cat) drains the rest of install.sh's bytes and the
+    #      outer bash then hits EOF here and exits 0 — no error, the install
+    #      silently stops "after opencode install". So the child's stdin must
+    #      be /dev/null.
+    #  (b) But `curl … | bash </dev/null` DOES NOT WORK: bash reads its SCRIPT
+    #      from stdin, and the redirect replaces the pipe with /dev/null — bash
+    #      sees an empty script, runs nothing, exits 0, and curl dies writing to
+    #      the closed pipe (`curl: (23) Failure writing output to destination`),
+    #      which pipefail turns into a spurious "opencode install failed".
+    # Writing the installer to a file satisfies both: script from the file,
+    # stdin from /dev/null.
+    _oc_installer="$WORK/opencode-install.sh"
+    curl -fsSL https://opencode.ai/install -o "$_oc_installer" \
+      || die "opencode installer download failed — install manually: https://opencode.ai"
+    bash "$_oc_installer" </dev/null \
       || die "opencode install failed — install manually: https://opencode.ai"
+    rm -f "$_oc_installer"
     # Refresh PATH from .bashrc if the installer wrote there, then also
     # probe the well-known install location as a safety net.
     if [ -f "$HOME/.bashrc" ]; then
@@ -523,15 +746,46 @@ main() {
       -e "s|@@MANTA_TAILNET_HOST@@|${TAILNET_IP:-}|g" \
       -e "s|@@OPENCODE_BIN@@|${OPENCODE_BIN:-}|g" \
       -e "s|@@AUTH_DIR@@|$AUTH_DIR|g" \
+      -e "s|@@AGENT_PATH@@|$(launchd_agent_path)|g" \
       "$src" > "$dest"
     local uid; uid="$(id -u)"
     # bootout first (ignore failure if not loaded), then bootstrap for a clean
     # reload that picks up template changes on re-run.
     launchctl bootout "gui/$uid/$label" 2>/dev/null || true
-    if ! launchctl bootstrap "gui/$uid" "$dest" 2>/dev/null; then
-      # Older macOS where `bootstrap` isn't available.
-      launchctl load -w "$dest" 2>/dev/null \
-        || warn "launchctl could not load $label — check: launchctl print gui/$uid/$label"
+
+    # `bootout` is ASYNCHRONOUS: launchctl returns as soon as the request is
+    # accepted, while launchd is still tearing the job down. Bootstrapping the
+    # same label during that window fails with "Input/output error" (5) — and
+    # because the original code silenced that failure, the RE-INSTALL path
+    # ended with NO agent loaded at all: the box came back with a dead
+    # opencode-serve and the install died at the health-wait. Wait for the
+    # label to actually disappear (up to ~10s) before bootstrapping, then
+    # retry a few times — launchd can still be busy on a slow machine.
+    local waited=0
+    while [ "$waited" -lt 50 ] && launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
+      sleep 0.2
+      waited=$((waited + 1))
+    done
+
+    local attempt=1 boot_err=""
+    while [ "$attempt" -le 5 ]; do
+      if boot_err="$(launchctl bootstrap "gui/$uid" "$dest" 2>&1)"; then
+        break
+      fi
+      sleep 1
+      attempt=$((attempt + 1))
+    done
+
+    # Verify by observation, not by exit code: `bootstrap` can report failure
+    # for a job that did load (and vice-versa). Only fall back to the
+    # deprecated `load -w` (older macOS, no `bootstrap`) when the label really
+    # isn't there, and surface the reason instead of swallowing it.
+    if ! launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+      launchctl load -w "$dest" 2>/dev/null || true
+      if ! launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+        warn "launchctl could not load $label${boot_err:+ ($boot_err)}"
+        warn "  check: launchctl print gui/\$(id -u)/$label"
+      fi
     fi
     launchctl kickstart -k "gui/$uid/$label" 2>/dev/null || true
   }
@@ -649,8 +903,8 @@ main() {
   #
   # HOISTED ABOVE the mode-resolution block (BET-267 review fix): bash does
   # NOT forward-reference function definitions within the same function, so
-  # defining this AFTER its call sites (the original placement, near
-  # read_box_id_for_gateway) silently failed with
+  # defining this AFTER its call sites (the original placement, near the
+  # box-identity read) silently failed with
   # `detect_tailscale_ip: command not found` and the auto branch fell through
   # to public mode even when Tailscale was running. Moving the definition
   # above the call sites is the minimal fix; `bash -n` parses but does not
@@ -754,22 +1008,9 @@ main() {
       || warn "launchctl kickstart com.mantaui.server failed — restart manually"
   fi
 
-  # Single source of truth for the inline `node -e readBoxIdentity`
-  # read. Used by step 7.5 (gateway register needs box_id) and step 8
-  # (the trailing-pairing heredoc prints box_id + pair-link). Without
-  # this helper the two reads drifted in subtle ways — see install.test's
-  # strict duplication-gate catching the 6-line clone (BET-205).
-  # Reads MANTA_AUTH_FILE; returns the 32-hex box_id or empty on a
-  # missing/corrupt auth.json. Errors go to stderr; the empty fallback
-  # lets the caller branch (e.g. warn + skip on no box_id).
-  read_box_id_for_gateway() {
-    "$NODE" -e '
-      import("'"$LIB"'").then((m) => {
-        const id = m.readBoxIdentity(process.env.MANTA_AUTH_FILE);
-        process.stdout.write(id?.box_id ?? "");
-      }).catch(() => process.stdout.write(""));
-    ' 2>/dev/null || true
-  }
+  # The identity read + its bounded first-boot wait are top-level helpers
+  # (read_box_id / wait_for_box_id, defined above main so install.test.mjs
+  # can exercise them) — main just calls them.
 
   # ===========================================================================
   # 7.5. PRIVILEGED SECTION — Caddy + DNS + gateway registration (BET-205 WP5).
@@ -928,10 +1169,16 @@ main() {
   # failure (PRIVILEGED_SECTION_SKIP=1) where the rest of the section is
   # being skipped.
   if [ "$PRIVILEGED_SECTION_SKIP" = "0" ]; then
-    BOX_ID_FOR_GATEWAY="$(read_box_id_for_gateway)"
+    # The server mints the identity asynchronously on its first start, so on a
+    # fresh box this read races the mint — poll for up to ~60s rather than
+    # taking the first empty answer as final (see wait_for_box_id's comment for
+    # the failure this caused). Dry-run never waits: one probe and move on.
+    BOX_ID_WAIT_ATTEMPTS=60
+    if [ "$DRY_RUN" = "1" ]; then BOX_ID_WAIT_ATTEMPTS=1; fi
+    BOX_ID_FOR_GATEWAY="$(wait_for_box_id "$LIB" "$NODE" "$BOX_ID_WAIT_ATTEMPTS" 1 || true)"
 
     if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
-      warn "no box_id in $MANTA_AUTH_FILE yet — skipping gateway registration."
+      warn "no box_id in $MANTA_AUTH_FILE after waiting — skipping gateway registration."
       warn "  start the manta-server at least once ($(supervisor_hint restart server)) and re-run."
     else
       GATEWAY_BASE="${MANTA_GATEWAY_BASE:-https://gateway.mantaui.com}"
@@ -1136,6 +1383,18 @@ main() {
       # skip the vhost write entirely (cert issuance would fail against an
       # unresolvable name). DRY_RUN never times out, so this is a no-op there.
       CADDY_E_SKIP="${DNS_TIMED_OUT:-0}"
+      # Second seed: no box_id ⇒ nothing to name the vhost after. Without this
+      # guard the renderer below was invoked with an empty --box-id and failed
+      # ("render-caddy-vhost: --box-id <32hex> required") — noisy in the
+      # conf.d path and FATAL in the inline path (a failed command
+      # substitution under `set -e` kills the install before the pair code is
+      # printed). wait_for_box_id above makes this unreachable in practice;
+      # keep it as the belt to that braces.
+      if [ "$DRY_RUN" != "1" ] && [ -z "${BOX_ID_FOR_GATEWAY:-}" ]; then
+        warn "no box_id available — skipping the Caddy vhost write (nothing to point the hostname at)."
+        warn "  re-run the installer once the server has minted an identity ($(supervisor_hint status server))."
+        CADDY_E_SKIP=1
+      fi
       CADDY_DIR_D="/etc/caddy/Caddyfile.d"
       if [ "$DRY_RUN" = "1" ]; then
         dry_log "would render Caddy vhost (box_id=$BOX_ID_FOR_GATEWAY, port=$MANTA_PORT)"
@@ -1148,19 +1407,38 @@ main() {
       else
         if [ -d "$CADDY_DIR_D" ]; then
           # Caddyfile.d exists → write the snippet as a separate file.
+          # Render to a temp file FIRST, then install(1) it atomically. A
+          # direct `render | sudo tee` truncates the destination BEFORE the
+          # renderer's exit status is known, so a failed re-run replaces a
+          # working vhost with an empty file. Same staging rationale as the
+          # apt .list write above.
+          _caddy_snippet_tmp="$(mktemp)"
           if ! "$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode snippet \
-              | sudo -n tee "$CADDY_DIR_D/manta.caddy" >/dev/null 2>/tmp/manta-caddy-tee.err; then
-            warn "failed to write $CADDY_DIR_D/manta.caddy (sudo tee failed — see /tmp/manta-caddy-tee.err)"
+              > "$_caddy_snippet_tmp" 2>/tmp/manta-caddy-render.err; then
+            warn "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err)"
+            warn "  the rest of the install will proceed; re-run to write the Caddy vhost."
+            CADDY_E_SKIP=1
+          elif ! sudo -n install -m 0644 "$_caddy_snippet_tmp" "$CADDY_DIR_D/manta.caddy" 2>/tmp/manta-caddy-tee.err; then
+            warn "failed to write $CADDY_DIR_D/manta.caddy (sudo install failed — see /tmp/manta-caddy-tee.err)"
             warn "  the rest of the install will proceed; re-run after fixing sudo to write the Caddy vhost."
             CADDY_E_SKIP=1
           fi
+          rm -f "$_caddy_snippet_tmp"
         else
           # conf.d missing → append a marker-bracketed block to the main
           # Caddyfile. A re-run overwrites the same block (between the
           # markers), so we never accumulate duplicate vhosts.
-          SNIPPET="$("$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode inline)"
+          # `|| true` + the empty check below: a bare command substitution that
+          # fails would abort the whole install under `set -e`, before the pair
+          # code is ever printed. A Caddyfile we couldn't render is a warn, not
+          # a fatal.
+          SNIPPET="$("$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode inline 2>/tmp/manta-caddy-render.err || true)"
           CADDYFILE="/etc/caddy/Caddyfile"
-          if [ -f "$CADDYFILE" ]; then
+          if [ -z "$SNIPPET" ]; then
+            warn "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err)"
+            warn "  the rest of the install will proceed; re-run to write the Caddy vhost."
+            CADDY_E_SKIP=1
+          elif [ -f "$CADDYFILE" ]; then
             if grep -q '^# >>> manta >>>' "$CADDYFILE"; then
               # Replace the existing block (between the markers) with the
               # freshly-rendered one. sed -i is intentionally GNU-only —
@@ -1347,23 +1625,17 @@ Run 'manta pair' to mint a fresh pairing code (if 'manta' isn't found, open a ne
 shell so ~/.local/bin is on PATH, or run: "$NODE" "$MANTA_HOME/scripts/manta-pair.mjs").
 EOF
 
-  # --- Final claude credentials check (warn — not die — per BET-153 step F).
-  # The only auth prerequisite we assume is the user has run/authed `claude`
-  # on this box at least once, producing ~/.claude/.credentials.json.
-  # opencode-serve reads that on first start; without it the chat backend
-  # starts but rejects all chat requests with a 401 until the user
-  # authenticates.
-  if [ -f "$HOME/.claude/.credentials.json" ]; then
-    ok "claude credentials detected — chat backend will authenticate on first request."
-  else
-    warn "no \$HOME/.claude/.credentials.json — chat will start but reject requests until you authenticate."
-    warn "Run \`claude\` once on this box to sign in, then:"
-    if [ "$IS_MACOS" = "1" ]; then
-      warn "  launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
-    else
-      warn "  systemctl --user restart opencode-serve"
-    fi
-  fi
+  # --- Final per-provider detection summary (BET-313). --------------------
+  # Replaces the prior single-Claude credentials check. Warns (never dies)
+  # for each missing provider; only prints the "chat will start but reject
+  # requests" guidance when ZERO providers are connected. Also probes the
+  # claude / codex / kimi CLIs on PATH so the user can see why a launcher
+  # slot in MantaUI's session-mode dropdown is or is not offered.
+  #
+  # The helper is defined alongside the other testable helpers at the top
+  # of install.sh (so unit tests in scripts/install.test.mjs can call it
+  # via runBootstrap). The install body stays a thin orchestrator.
+  print_provider_detection_summary "$LIB" "$NODE" "$HOME" "$IS_MACOS"
 
   # The connect block prints LAST so it's what the user sees at rest.
   printf '%s\n' "$PAIR_BLOCK"

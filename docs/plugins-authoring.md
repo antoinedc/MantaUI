@@ -2,7 +2,7 @@
 
 You are an AI coding agent authoring MantaUI plugins. A plugin is one YAML
 file at `~/.manta/plugins/<name>.yaml` on the **machine the user wants to
-drive** (today: only the connected Mac — `host:"mac"`). The user can also
+drive** (today: `host:"desktop"` — the connected desktop). The user can also
 author plugins by hand in any editor; both paths go through the same
 validator and the same runner.
 
@@ -31,12 +31,14 @@ log tail.
 A plugin is one YAML file:
 
 - **Where:** `~/.manta/plugins/<name>.yaml` on the machine the plugin should
-  run on (today: the user's Mac).
+  run on (today: the user's connected desktop).
 - **What it is:** a name, a description, an optional input schema, an
   optional env map, and one or more shell commands (steps) to run in order.
 - **What it does:** when the user or AI invokes `plugin_run("<name>", inputs)`,
   the executor on the machine validates the inputs against the schema, then
-  runs the steps sequentially in `/bin/sh`, with each step's stdout/stderr
+  runs the steps sequentially in the resolved shell (per-platform default:
+  `sh` on macOS/Linux, `powershell` on Windows — overridable per-manifest or
+  per-step via the `shell:` key, see §2), with each step's stdout/stderr
   streamed into the originating chat as a job log. When the run finishes
   (success, failure, or 30-minute sweep timeout), the executor reports back
   through the server and a completion turn is injected into the chat session
@@ -54,8 +56,8 @@ A plugin is **NOT**:
   repo's commit history).
 - A custom executor. All plugins run on the same executor process the box's
   manta-server already knows about — there is exactly one
-  `src/main/capExecutor.ts` running on the Mac, and every plugin run goes
-  through it.
+  `src/main/capExecutor.ts` running on the desktop, and every plugin run
+  goes through it.
 - A "run arbitrary command" capability. The runner refuses to dispatch any
   capability that is not a valid installed manifest, and refuses any unknown
   input key at validation time.
@@ -77,11 +79,12 @@ unknown top-level key is a validation error — typos fail loudly.
 | --- | --- | --- | --- |
 | `name` | string | yes | `^[a-z0-9][a-z0-9-]{0,63}$`. Must equal the filename minus `.yaml`. The `plugin.` namespace is reserved for built-in capabilities and is impossible by the regex (no dots). |
 | `description` | string | yes | Non-empty. One sentence: what the plugin does and when to reach for it. Shown in `plugin_list` and surfaced to the model when picking a tool to call. |
-| `host` | string | yes | Must be `"mac"`. v2 accepts ONLY `mac`; any other value produces `host: only "mac" is supported`. |
+| `host` | string | yes | Must be `"desktop"` (the user's connected desktop) or `"box"` (the Linux box). `host: mac` is accepted as a permanent legacy alias for `desktop`. Any other value produces `host: must be one of desktop, box (legacy "mac" means desktop)`. |
+| `shell` | string | no | Must be `"sh"` or `"powershell"`. Default is per-platform: `win32` → `"powershell"`, everything else → `"sh"`. Used as the default for every step that doesn't override it; per-step `shell:` overrides the top-level value. Validation is platform-independent — a Windows-targeted manifest parses cleanly on Linux (the registry serves Settings cross-platform); platform availability is decided at run time by the executor. On Windows, `shell: sh` resolves to the `bash.exe` shipped with Git for Windows; if Git for Windows is absent the step fails with the actionable message in §6, never a silent fallback to PowerShell. |
 | `timeout` | string | no | `^\d+(s|m)$` (e.g. `30s`, `5m`, `30m`). Parsed value must be ≤ 30 minutes. Missing → no per-step cap. Why the cap: the server sweep fails any `running` job at 30 minutes; a longer manifest timeout would be killed anyway. |
 | `inputs` | array of input objects | no | Each object carries an `id:` field (`^[a-z][a-zA-Z0-9_]*$`). Order is preserved and surfaced to the tool schema verbatim — model-side prompt construction sees them. Optional; missing → plugin takes no inputs. See "Input object" below. |
 | `env` | map of `string → string` | no | Plugin-scoped environment variables injected into every step. Reserved names: `MANTA_PLUGIN`, `MANTA_JOB_ID` (the runner injects these itself — user-supplied values are silently ignored). Values with a leading `~` are expanded against `os.homedir()`. |
-| `steps` | list of step objects | yes | Required, min 1. Run sequentially in `/bin/sh -c`. See "Step object" below. |
+| `steps` | list of step objects | yes | Required, min 1. Run sequentially in the resolved shell (`sh -c` or `powershell -Command`). See "Step object" below. |
 
 ### Input object
 
@@ -99,7 +102,8 @@ unknown top-level key is a validation error — typos fail loudly.
 | Key | Type | Required | Description / validation |
 | --- | --- | --- | --- |
 | `name` | string | no | Free-form label for logs and the result. Defaults to the first 30 chars of `run`. |
-| `run` | string | yes | Shell string passed to `/bin/sh -c`. May use the plugin's `env:` map values, `MANTA_INPUT_<ID>` (uppercased input id) for each supplied input, `MANTA_PLUGIN=<name>`, and `MANTA_JOB_ID=<id>`. **Do NOT interpolate input values into `run` directly** — see §3. |
+| `run` | string | yes | Shell string passed to the resolved shell as a single argument. May use the plugin's `env:` map values, `MANTA_INPUT_<ID>` (uppercased input id) for each supplied input, `MANTA_PLUGIN=<name>`, and `MANTA_JOB_ID=<id>`. **Do NOT interpolate input values into `run` directly** — see §3. |
+| `shell` | string | no | Must be `"sh"` or `"powershell"`. Overrides the manifest-level `shell:` for this step only. Same resolution rules as the top-level `shell:` (default per platform; on Windows, `shell: sh` requires Git for Windows). |
 | `cwd` | string | no | Working directory for the step. `$KEY` / `${KEY}` substitutions resolve from the plugin's `env:` map; a leading `~` expands against the user's home. Non-existent dir → step fails with `cwd: <path> does not exist`. |
 | `if` | string | no | One of the three grammar forms — see §4. Anything else → validation error. |
 | `continue_on_error` | boolean | no | Default `false`. When `true`, a non-zero exit from this step logs the failure but the job continues to the next step. |
@@ -128,8 +132,9 @@ steps:
 Why this rule exists: the inputs field is typed data. The runner has already
 validated them against the schema. If a value with spaces or shell
 metacharacters lands in a string-concatenated `run:`, a typo or a hostile
-filename can break the command or worse. The env-var route lets `/bin/sh`
-quote-escape naturally without any extra shell-quoting logic in the runner.
+filename can break the command or worse. The env-var route lets the
+resolved shell quote-escape naturally without any extra shell-quoting logic
+in the runner.
 
 The runner also exposes the plugin's `env:` map (`REPO=~/projects/foo` in
 the `env:` block becomes `$REPO` in `run:`) and the two plumbing vars
@@ -194,7 +199,7 @@ cases. Each shows the schema conventions in context.
 ```yaml
 name: ios-manta
 description: Build the MantaUI iOS app and launch it in the iOS Simulator.
-host: mac
+host: desktop
 timeout: 30m
 
 inputs:
@@ -252,7 +257,7 @@ steps:
 ```yaml
 name: xcode-hello
 description: Build and launch a plain Xcode Swift app in the iOS Simulator.
-host: mac
+host: desktop
 timeout: 20m
 
 inputs:
@@ -298,7 +303,8 @@ flow that does not need Xcode at all.
 ```yaml
 name: repo-cleanup
 description: Run a maintenance script and prune merged branches.
-host: mac
+host: desktop
+shell: sh
 timeout: 10m
 
 inputs:
@@ -341,7 +347,7 @@ and re-run.
 | `name: must match ^[a-z0-9][a-z0-9-]{0,63}$` | Name has uppercase, underscores, dots, or starts with a hyphen. | Use kebab-case (`my-plugin`); rename the file too. |
 | `name: must equal filename "<stem>"` | Filename and `name:` disagree. | Pick one (the filename) and put it in `name:`. |
 | `description: required` | Empty or missing `description:`. | Add a one-sentence description. |
-| `host: only "mac" is supported` | `host:` is not `mac` (likely `box` or a typo). | Change to `host: mac`. Other hosts are not implemented in v2. |
+| `host: must be one of desktop, box (legacy "mac" means desktop)` | `host:` is neither `desktop` nor `box` (likely a typo like `linux`/`windows`). | Change to `host: desktop` (or `host: box`). `host: mac` is also accepted as a permanent alias for `desktop`. |
 | `inputs.<id>: type required` | An input has no `type:`. | Add `type: string` / `number` / `boolean` / `enum`. |
 | `inputs.<id>: description required` | An input is missing `description:`. | Add a one-sentence description. |
 | `inputs.<id>: values required for enum` | `type: enum` but no `values:`. | Add a non-empty `values:` list. |
@@ -357,6 +363,9 @@ and re-run.
 | `timeout: must be ≤ 30m` | Manifest timeout exceeds 30 min. | Lower the timeout. The server sweep kills at 30m anyway. |
 | `YAML parse error: <yaml detail>` | The file is not parseable YAML. | Fix the YAML syntax (indentation, quoting). |
 | `cwd: <path> does not exist` | Step `cwd:` (after `$KEY` / `~` expansion) does not resolve. | Use a path the executor can see (the Mac's filesystem). |
+| `shell: must be one of sh, powershell` | `shell:` (top-level or per-step) is not one of the two accepted values (likely a typo like `bash` / `cmd` / `pwsh`). | Change `shell:` to `sh` or `powershell`. The two values are the entire point — a third value is a new code path with no user. |
+| `shell "sh" needs a POSIX shell. Install Git for Windows …` | `shell: sh` was used on Windows but Git for Windows is not installed (none of `ProgramFiles\Git\bin\bash.exe`, `ProgramFiles(x86)\Git\bin\bash.exe`, or `LOCALAPPDATA\Programs\Git\bin\bash.exe` exists). | Install Git for Windows (https://git-scm.com/download/win), or change the manifest to `shell: powershell`. There is no silent fallback — the step fails clearly. |
+| `shell "powershell" is only available on Windows.` | `shell: powershell` was used on macOS or Linux. | Drop the per-step / per-manifest `shell: powershell` on non-Windows, or change it to `shell: sh`. |
 
 ## 7. The author / test loop
 
@@ -391,9 +400,9 @@ Mac with the plugins toggle on.
 The plugin system is simple on purpose. These are the facts that don't
 change between plugins:
 
-- **One executor per Mac.** Every plugin run on a given Mac goes through
-  the same `src/main/capExecutor.ts` process the box's manta-server is
-  already connected to via SSE.
+- **One executor per desktop.** Every plugin run on a given desktop goes
+  through the same `src/main/capExecutor.ts` process the box's
+  manta-server is already connected to via SSE.
 - **Serial execution.** Steps in a single plugin run sequentially.
   Distinct plugin invocations are also serialized at the executor — only
   one job runs at a time. Two parallel xcodebuilds would corrupt the

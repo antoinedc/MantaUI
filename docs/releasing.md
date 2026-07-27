@@ -22,7 +22,10 @@ In order. No decisions, no extra steps:
      key=value manifest `install.sh` fetches at runtime.
 3. (Mac only, on a Mac) `bash scripts/release/desktop.sh` produces
    `dist/desktop/*.dmg` and the `latest-*.yml` updater feeds. Linux
-   builds run on any host.
+   builds run on any host. The Windows installer is NOT built here —
+   it needs a Windows host and is produced by the
+   `windows-desktop-build.yml` workflow as an artifact only (see
+   `AGENTS.md` "Windows desktop (`win-v*`)").
 4. `bash scripts/release/publish.sh` uploads both per-arch tarballs
    plus the combined manifest, restarts `manta-server` on prod,
    HEAD-checks every URL, tags `v<version>`. Idempotent: re-publishing

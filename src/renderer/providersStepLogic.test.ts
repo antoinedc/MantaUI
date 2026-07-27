@@ -1,17 +1,12 @@
 import { describe, it, expect } from "vitest";
-import type { OpencodeModel } from "../shared/types";
+import type { OpencodeModel, SubscriptionStatus } from "../shared/types";
 import {
-  connectedProviderIds,
-  isProviderConnected,
   canContinueProviders,
   customDraftError,
-  openaiKeyError,
   modelDisplayName,
   formatContextWindow,
   sortModelsForPicker,
   canContinueModel,
-  ANTHROPIC_ID,
-  OPENAI_ID,
 } from "./providersStepLogic";
 
 const model = (over: Partial<OpencodeModel>): OpencodeModel => ({
@@ -21,41 +16,28 @@ const model = (over: Partial<OpencodeModel>): OpencodeModel => ({
   ...over,
 });
 
-describe("connectedProviderIds", () => {
-  it("collects the distinct providerIDs of served models", () => {
-    const ids = connectedProviderIds([
-      model({ id: "claude-sonnet-4-6", providerID: "anthropic" }),
-      model({ id: "claude-opus-4-7", providerID: "anthropic" }),
-      model({ id: "gpt-4o", providerID: "openai" }),
-    ]);
-    expect([...ids].sort()).toEqual(["anthropic", "openai"]);
-  });
-
-  it("is empty for no models (nothing connected)", () => {
-    expect(connectedProviderIds([]).size).toBe(0);
-  });
-
-  it("ignores models with an empty providerID", () => {
-    expect(connectedProviderIds([model({ providerID: "" })]).size).toBe(0);
-  });
-});
-
-describe("isProviderConnected", () => {
-  const models = [model({ providerID: ANTHROPIC_ID })];
-  it("true when the provider serves a model", () => {
-    expect(isProviderConnected(models, ANTHROPIC_ID)).toBe(true);
-  });
-  it("false when it does not", () => {
-    expect(isProviderConnected(models, OPENAI_ID)).toBe(false);
-  });
+const status = (over: Partial<SubscriptionStatus>): SubscriptionStatus => ({
+  id: "anthropic",
+  label: "Claude",
+  plan: "Claude Pro / Max",
+  console: null,
+  docs: "https://example.com",
+  connected: false,
+  ...over,
 });
 
 describe("canContinueProviders", () => {
   it("false with zero connected providers", () => {
+    expect(canContinueProviders([status({ connected: false })])).toBe(false);
     expect(canContinueProviders([])).toBe(false);
   });
-  it("true with at least one", () => {
-    expect(canContinueProviders([model({ providerID: "anthropic" })])).toBe(true);
+  it("true with at least one connected", () => {
+    expect(
+      canContinueProviders([
+        status({ id: "anthropic", connected: false }),
+        status({ id: "openai", connected: true }),
+      ]),
+    ).toBe(true);
   });
 });
 
@@ -77,15 +59,6 @@ describe("customDraftError", () => {
   });
   it("null when valid (key optional)", () => {
     expect(customDraftError({ id: "x", name: "X", baseURL: "https://api.x.com/v1", apiKey: "" })).toBeNull();
-  });
-});
-
-describe("openaiKeyError", () => {
-  it("requires a key", () => {
-    expect(openaiKeyError("   ")).toMatch(/api key is required/i);
-  });
-  it("null when present", () => {
-    expect(openaiKeyError("sk-abc")).toBeNull();
   });
 });
 

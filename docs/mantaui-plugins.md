@@ -1,7 +1,7 @@
 # MantaUI plugins — design spec (v3, BET-189)
 
 Status: **ACTIVE / shipped.** First plugin: any user-authored YAML manifest
-under `~/.manta/plugins/` on the connected Mac (typically `ios-<app>` —
+under `~/.manta/plugins/` on the connected desktop (typically `ios-<app>` —
 iOS build + Simulator launch). The plugin system is the production surface;
 the v1 TypeScript-handler model (BET-183/184/185) and its `ios_build` tool
 are deleted.
@@ -18,21 +18,26 @@ the TypeScript handler layer is GONE (no more `HANDLERS` map,
 folder-scans + fs.watch-hot-reloads the dir, parses every `*.yaml` through
 the shared `src/shared/pluginManifest.mjs` module (single source of truth
 for parse + validate + if-eval + input→env + cwd substitution + timeout
-parse), and dispatches a matching capability by running its steps
-sequentially as `exec("/bin/sh", ["-c", step.run], …)`. The first
+parse + shell resolution), and dispatches a matching capability by running
+its steps sequentially under the resolved shell
+(`effectiveShell(manifest, step, process.platform)` → `resolveShellInvocation`
+→ `wrapScript` → `exec(command, argsPrefix, …)`). ⟨v3 BET-326⟩ the
+executor no longer hardcodes `/bin/sh`; the shell is an explicit, validated
+manifest key with two values (`sh`, `powershell`) and a per-platform
+default (`win32` → `powershell`, else `sh`). The first
 hard-coded capability is the `plugin.write` built-in — it lets the AI
 author/edit manifests via `plugin_save`. Everything else is a manifest
 lookup. Server spine (`src/server/capabilities.mjs` + REST + bus envelopes
-+ sweeper) is **byte-identical to v2**. `host` accepts ONLY `"mac"` —
-`box` is not implemented in v3.
++ sweeper) is **byte-identical to v2**. `host` accepts `"desktop"` and
+`"box"`; `host: mac` is a permanent legacy alias for `"desktop"`.
 
 ## What this is
 
 A **plugin system** that lets MantaUI gain new capabilities the AI can invoke
-on the machine the user wants to drive (today: the connected Mac —
-`host:"mac"`). The motivating case: run iOS compilation + Simulator
-launch on the local Mac so we stop burning Codemagic minutes — but shaped so
-the iOS plugin is just **plugin #1**, not a bespoke feature.
+on the machine the user wants to drive (today: the connected desktop —
+`host:"desktop"`). The motivating case: run iOS compilation + Simulator
+launch on the local desktop so we stop burning Codemagic minutes — but shaped
+so the iOS plugin is just **plugin #1**, not a bespoke feature.
 
 The critical requirement: **a plugin is data, not code.** Installing a plugin
 is dropping one YAML file in `~/.manta/plugins/` on the executor machine —
@@ -64,7 +69,7 @@ capabilities without touching MantaUI source.
 - **Manifest** — the YAML file itself. Schema reference lives in
   `docs/plugins-authoring.md` §2.
 - **Executor machine** — the runtime that scans the plugin folder, runs
-  matching capabilities, and hot-reloads. v3: only the connected Mac.
+  matching capabilities, and hot-reloads. v3: only the connected desktop.
 - **Capability** — the string a plugin's manifest exposes to the queue.
   Always equal to the plugin's `name:` (which the executor enforces ==
   filename stem). Dotted namespaces are impossible by the manifest name
@@ -92,14 +97,14 @@ capabilities without touching MantaUI source.
   │          POST /api/cap/:id/start   executor claims the job   │
   │          POST /api/cap/:id/log     executor streams stdout   │
   │          POST /api/cap/:id/done    executor reports result   │
-  │   bus:   publish {kind:"capJob"} on create → SSE to Mac      │
+  │   bus:   publish {kind:"capJob"} on create → SSE to desktop  │
   │   sweep: startCapSweeper — timeouts, expiry, retention       │
   │   done:  inject completion turn into originating session     │
   └──────────────────────────────────────────────────────────────┘
-        ▲ AI invokes                          ▲ Mac executes / reports
+        ▲ AI invokes                          ▲ Desktop executes / reports
         │                                     │
   ┌─────┴──────────┐                  ┌────────┴─────────────────┐
-  │ Layer 2 — AI   │  plugin_* tools  │ Layer 3 — MAC EXECUTOR   │
+  │ Layer 2 — AI   │  plugin_* tools  │ Layer 3 — DESKTOP EXECUTOR│
   │ docs/opencode- │ → POST /api/cap  │ src/main/capExecutor.ts  │
   │ tools/plugins. │                  │   • fs.watch ~/.manta/   │
   │ ts (6 exports) │                  │     plugins/ (500ms deb) │
@@ -136,11 +141,12 @@ stay unchanged.
 | `QUEUED_EXPIRY_MS` | `24 * 60 * 60_000` | `capabilities.mjs` | `queued` older than this → `failed` |
 | `TERMINAL_RETENTION_MS` | `7 * 24 * 60 * 60_000` | `capabilities.mjs` | terminal jobs older than this → pruned |
 | `MAX_TERMINAL_JOBS` | `50` | `capabilities.mjs` | keep at most this many terminal jobs (drop oldest) |
-| `EXECUTOR_JOB_TIMEOUT_MS` | `25 * 60_000` | `capExecutor.ts` | Mac-side per-job abort (< server's 30 min so the Mac fails first and reports properly) |
+| `EXECUTOR_JOB_TIMEOUT_MS` | `25 * 60_000` | `capExecutor.ts` | Desktop-side per-job abort (< server's 30 min so the desktop fails first and reports properly) |
 | `LOG_FLUSH_MS` | `1_000` | `capExecutor.ts` | executor log-batch flush cadence |
 | `EXEC_STDOUT_CAP_BYTES` | `2 * 1024 * 1024` | `capExecutor.ts` | cap on captured stdout returned by `exec` |
 | `KILL_GRACE_MS` | `5_000` | `capExecutor.ts` | SIGTERM → SIGKILL grace on abort |
-| `PLUGIN_HOST` | `"mac"` | `pluginManifest.mjs` | only accepted `host:` value in v3 |
+| `CAP_HOSTS` | `["desktop","box"]` | `pluginManifest.mjs` | accepted `host:` values; `host: mac` is a permanent legacy alias for `"desktop"` |
+| `SHELLS` | `["sh","powershell"]` | `pluginManifest.mjs` | accepted `shell:` values; the runner resolves `sh` to `/bin/sh` on POSIX or Git Bash on Windows, and `powershell` to `powershell.exe -NoProfile -NonInteractive -Command` on Windows only |
 | `PLUGIN_WRITE` | `"plugin.write"` | `capExecutor.ts` | the one built-in capability name |
 
 ---
@@ -177,8 +183,8 @@ auto-loaded for every project/session/model.
 | --- | --- | --- |
 | `plugin_list()` | — | `GET /api/plugins/registry`. Returns a bullet list: name, description, input summary, `valid` / `INVALID: <error>`. Empty registry → explain the machine may be offline or have no plugins, point to `plugin_docs`. |
 | `plugin_get(name)` | `name: string` | Lookup in the cached (or freshly-fetched) registry → the manifest's current YAML source. Unknown name → error listing known names. |
-| `plugin_save(name, yaml)` | `name: string, yaml: string` | `POST /api/cap {capability:"plugin.write", host:"mac", input:{name, yaml}, sessionID, directory}` then poll `GET /api/cap/<id>` every 500ms for ≤15s. Done → "saved and valid". Failed → the validation errors verbatim. Still queued after 15s → "queued; the machine appears offline — it will apply when it reconnects". |
-| `plugin_run(name, inputs?)` | `name: string, inputs?: Record<string,unknown>` | First `GET /api/plugins/registry`: unknown name → error listing known names (fast client-side fail — the queue stays generic and is NOT taught about plugins); invalid manifest → error with its validation message. Else `POST /api/cap {capability:<name>, host:"mac", input:<inputs>, sessionID, directory}` → return job id + "completion turn will arrive automatically, do not poll". |
+| `plugin_save(name, yaml)` | `name: string, yaml: string` | `POST /api/cap {capability:"plugin.write", host:"desktop", input:{name, yaml}, sessionID, directory}` then poll `GET /api/cap/<id>` every 500ms for ≤15s. Done → "saved and valid". Failed → the validation errors verbatim. Still queued after 15s → "queued; the machine appears offline — it will apply when it reconnects". |
+| `plugin_run(name, inputs?)` | `name: string, inputs?: Record<string,unknown>` | First `GET /api/plugins/registry`: unknown name → error listing known names (fast client-side fail — the queue stays generic and is NOT taught about plugins); invalid manifest → error with its validation message. Else `POST /api/cap {capability:<name>, host:"desktop", input:<inputs>, sessionID, directory}` → return job id + "completion turn will arrive automatically, do not poll". |
 | `plugin_status(id)` | `id: string` | Identical to today's `ios_build_status` semantics (rename + generic copy). |
 | `plugin_docs()` | — | `GET /api/plugins/docs` → the full authoring guide (`docs/plugins-authoring.md` served verbatim). |
 
@@ -204,7 +210,7 @@ systemctl --user restart opencode-serve
 
 ---
 
-## Layer 3 — Mac executor (`src/main/capExecutor.ts`)
+## Layer 3 — Desktop executor (`src/main/capExecutor.ts`)
 
 The runner is replaced with a manifest runner. There is NO `HANDLERS` map,
 NO `CapHandler`/`CapCtx`-consumer indirection, and NO per-plugin
@@ -233,9 +239,18 @@ NO `CapHandler`/`CapCtx`-consumer indirection, and NO per-plugin
    - Found + valid → build the per-step env via the shared module's
      `buildEnv(manifest, suppliedInputs, {jobId})` (the executor patches
      in PATH via `exec`'s existing helper), arm an
-     `AbortController` with `EXECUTOR_JOB_TIMEOUT_MS`, run each step
-     sequentially as `exec("/bin/sh", ["-c", step.run], {cwd, quiet})`
-     (with `cwd` resolved via `resolveCwd(step.cwd, env)`), honoring
+     `AbortController` with `EXECUTOR_JOB_TIMEOUT_MS`, and for each step
+     resolve the shell via `effectiveShell(manifest, step, process.platform)`
+     + `resolveShellInvocation(shell, process.platform, {env, exists})`
+     from the shared module (the executor is the only place allowed to
+     read `process.platform`; the helpers stay pure so Windows behaviour
+     can be tested from Linux CI). The script body is wrapped via
+     `wrapScript(shell, step.run)` (PowerShell runs are wrapped to set
+     `$ErrorActionPreference='Stop'` and propagate `$LASTEXITCODE`,
+     because PowerShell does not reliably propagate a failing command's
+     exit code). Each step runs as
+     `exec(inv.command, [...inv.argsPrefix, wrappedScript], {cwd, quiet})`,
+     with `cwd` resolved via `resolveCwd(step.cwd, env)`, honoring
      `continue_on_error` and `if:` via `evalIf`, and streaming each
      step's stdout/stderr to `ctx.log`. Step exit ≠ 0 → job fails at
      that step.
@@ -264,12 +279,15 @@ state.
 Single source of truth for what a valid manifest looks like. Imported by
 BOTH the executor (TS) and the server (mjs). Pure functions everywhere,
 no `electron`/`node:fs` deps beyond YAML parsing + `resolveCwd`'s
-existence check. Adding a new validation rule here is reflected in every
-consumer and every test. Exports:
+existence check + `resolveShellInvocation`'s injected `exists`. Adding a
+new validation rule here is reflected in every consumer and every test.
+Exports:
 
 - `parseManifest(yamlText): { manifest, errors[] }` — returns a manifest
   OR keyed errors (`steps[2].run: required` style). Unknown keys →
-  `unknown key "<key>"`.
+  `unknown key "<key>"`. The `shell:` key is validated at top-level and
+  per-step (`must be one of sh, powershell`); platform availability is
+  the executor's concern, not the parser's.
 - `validateManifest(parsed): { errors[] }` — all schema rules from
   BET-189 §"Validation rules" plus the v3 grammar limits.
 - `evalIf(expr, inputs): boolean | { error }` — exactly three forms,
@@ -285,6 +303,13 @@ consumer and every test. Exports:
   with no default.
 - `parseTimeout(s): number | { error }` — `^\d+(s|m)$`; cap
   `MAX_TIMEOUT_MS`.
+- `defaultShell(platform)` / `effectiveShell(manifest, step, platform)` /
+  `resolveShellInvocation(shell, platform, io)` / `wrapScript(shell, script)`
+  — shell resolution (BET-326). Exactly two shell names (`SHELLS =
+  ["sh", "powershell"]`); per-platform default; the Git-Bash candidate
+  list (`ProgramFiles`, `ProgramFiles(x86)`, `LOCALAPPDATA`) is walked in
+  order on Windows; `io.exists` is injected so the resolution is testable
+  from Linux CI without a real Windows filesystem.
 
 Tests: `src/shared/pluginManifest.test.ts` (vitest) covers every
 validator path, evalIf truthy/falsey, buildEnv ordering + bool
@@ -337,11 +362,11 @@ unit-tested).
 
 ## Trust & security
 
-- **`pluginsEnabled` gate.** The Mac executor runs whatever the manifests
-  under `~/.manta/plugins/` say — bigger trust boundary than
+- **`pluginsEnabled` gate.** The desktop executor runs whatever the
+  manifests under `~/.manta/plugins/` say — bigger trust boundary than
   `allowAgentPush`'s "write to Downloads". Default OFF; explicit opt-in
   in Settings with the warning above.
-- **Manifest allowlist by folder membership.** The Mac only runs
+- **Manifest allowlist by folder membership.** The desktop only runs
   capabilities whose manifests parse cleanly AND are physically under
   `~/.manta/plugins/` (the executor is the source of truth — a job
   with an unknown capability name is reported `failed`, never shelled
@@ -358,14 +383,14 @@ unit-tested).
   crosses a shell boundary except via the env-var route (the user's
   manifest is user-controlled, not job-input-controlled).
 - **Auth.** Every `/api/cap*` route and `/api/plugins/*` is behind the
-  M1 Bearer gate. The AI tools and the Mac executor both authenticate
+  M1 Bearer gate. The AI tools and the desktop executor both authenticate
   with the box token they already hold.
 - **Log capping.** `appendLog` ring-buffers to `LOG_CAP_BYTES`; `getJob`
-  returns at most `LOG_TAIL_BYTES` — a runaway build can neither fill
-  the disk nor blow the AI's context.
+  returns at most `LOG_TAIL_BYTES` — a runaway build can neither fill the
+  disk nor blow the AI's context.
 - **No zombie jobs.** Server sweep fails out stale `running` (30 min)
   and never-claimed `queued` (24h) jobs and notifies the originating
-  session, so a crashed Mac can't leave the AI waiting forever.
+  session, so a crashed desktop can't leave the AI waiting forever.
 
 ---
 
@@ -401,7 +426,7 @@ nothing.
 | AI tool surface             | one `ios_build` tool              | six generic `plugin_*` tools |
 | Hot reload                  | restart required                  | `fs.watch` + no restart |
 | Trust gate                  | `capExecutorEnabled` toggle       | `pluginsEnabled` toggle (same intent) |
-| Executor location           | `host:"mac"` field                | `host:"mac"` field (only accepted value in v3) |
+| Executor location           | `host:"mac"` field                | `host:"desktop"` field (`host: mac` accepted as a permanent alias) |
 | Result routing              | completion turn into session      | unchanged            |
 | Spine (`capabilities.mjs`)  | generic                          | byte-identical       |
 
