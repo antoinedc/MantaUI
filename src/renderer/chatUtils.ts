@@ -4,6 +4,7 @@
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
+import type { SubscriptionStatus } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
 // shared/versionCompare.mjs so both src/server/*.mjs and the renderer share
@@ -2196,4 +2197,17 @@ export function isPollExpired(
     return false;
   }
   return now - startedAt >= limitMs;
+}
+
+// ===== Subscription provider status (BET-314) =====
+//
+// Single source of truth for the connected/not-connected label the
+// SubscriptionsCard renders next to each row. The renderer never invents
+// its own copy here — the connect-card description ("● connected") is the
+// whole UX, and pinning the strings in chatUtils.ts keeps a future i18n /
+// copy pass touching one place. Returns "connected" / "not connected" with
+// no extra ornament (no leading dot, no uppercase — the row already draws
+// the dot separately and styles the casing).
+export function describeSubscriptionStatus(s: SubscriptionStatus): string {
+  return s.connected ? "connected" : "not connected";
 }
