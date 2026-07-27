@@ -3,181 +3,223 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Manta UI — drive Claude Code from anywhere</title>
-<meta name="description" content="Manta UI is a desktop and mobile client for driving remote Claude Code sessions over HTTPS. Your agents run on your box; you steer from anywhere.">
-<meta name="theme-color" content="#0B1020">
+<title>Manta UI — self-hosted Claude Code for desktop and phone</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/site.css">
-<style>
-/* ambient glow behind hero */
+<style>/* Page-specific styles. Shared tokens, reset, nav, footer base, and
+   prefers-reduced-motion live in /site.css. */
+
+
+/* hero */
 .aura{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0}
 .aura::before{content:"";position:absolute;top:-260px;left:50%;transform:translateX(-50%);width:900px;height:640px;
   background:radial-gradient(ellipse at center,rgba(46,107,255,.28),rgba(73,215,245,.10) 40%,transparent 70%);filter:blur(12px)}
-
-/* hero */
-.hero{position:relative;padding:48px 0 72px;text-align:center}
+.hero{position:relative;padding:56px 0 76px;text-align:center}
 .hero .wrap{position:relative;z-index:1}
-.hero-mark{width:112px;height:112px;object-fit:contain;margin:0 auto 28px;display:block;filter:drop-shadow(0 12px 40px rgba(46,107,255,.45))}
-h1{font-size:clamp(34px,5.4vw,60px);line-height:1.08;font-weight:800;letter-spacing:-.03em;color:var(--text-primary);max-width:820px;margin:0 auto 22px}
+h1{font-size:clamp(32px,5vw,56px);line-height:1.09;font-weight:800;letter-spacing:-.03em;color:var(--text-primary);max-width:900px;margin:0 auto 22px}
 h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
-.sub{font-size:clamp(16px,2.2vw,20px);color:var(--text-tertiary);max-width:600px;margin:0 auto 34px;line-height:1.55}
-.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:16px}
+.sub{font-size:clamp(16px,2.1vw,19px);color:var(--text-tertiary);max-width:680px;margin:0 auto 26px;line-height:1.55}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin:16px 0}
 .cta .btn{height:44px;padding:0 22px;font-size:15px}
 .meta{font-size:13px;color:var(--slate-500)}
-.meta .mono{color:var(--slate-400)}
 
-/* install command */
-.install{max-width:560px;margin:0 auto 18px}
-.install-label{font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--slate-500);margin-bottom:10px}
-.install-cmd{display:flex;align-items:center;gap:12px;background:var(--surface-inset);border:1px solid var(--border-default);
-  border-radius:var(--radius-md);padding:12px 12px 12px 16px;box-shadow:var(--shadow-md);transition:border-color .15s var(--ease-out),box-shadow .15s var(--ease-out)}
-.install-cmd:hover{border-color:var(--blue-500);box-shadow:0 0 0 1px rgba(46,107,255,.35),0 0 22px rgba(46,107,255,.18)}
-.install-cmd code{flex:1;text-align:left;font-family:var(--font-mono);font-size:14px;color:var(--slate-200);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.install-cmd .prompt{color:var(--cyan-400);margin-right:8px;user-select:none}
-.install-cmd .url{color:var(--cyan-300)}
+/* install */
+.install{max-width:600px;margin:0 auto 14px}
+.install-tabs{display:inline-flex;gap:4px;margin-bottom:12px;padding:4px;border-radius:9px;background:var(--fill-subtle);border:1px solid var(--border-default)}
+.install-tab{appearance:none;border:0;background:transparent;color:var(--text-secondary);font-family:var(--font-sans);font-size:13px;font-weight:600;
+  padding:7px 16px;border-radius:6px;cursor:pointer;transition:all .12s var(--ease-out)}
+.install-tab[aria-selected="true"]{background:var(--surface-inset);color:var(--text-primary)}
+.install-panel{display:none}.install-panel.active{display:block}
+.install-cmd,.agent-cmd{display:flex;align-items:center;gap:12px;background:var(--surface-inset);border:1px solid var(--border-default);
+  border-radius:var(--radius-md);padding:13px 12px 13px 16px;box-shadow:var(--shadow-md);text-align:left}
+.agent-cmd{align-items:flex-start}
+.install-cmd code{flex:1;text-align:left;font-family:var(--font-mono);font-size:13.5px;color:var(--slate-200);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.agent-cmd p{flex:1;margin:0;font-family:var(--font-mono);font-size:12.5px;line-height:1.55;color:var(--slate-200)}
+.prompt{color:var(--cyan-400);margin-right:8px}.url{color:var(--cyan-300)}
 .copy-btn{flex-shrink:0;height:30px;padding:0 14px;border-radius:6px;border:1px solid var(--border-strong);background:var(--fill-subtle);
-  color:var(--text-secondary);font-family:var(--font-sans);font-size:12.5px;font-weight:600;cursor:pointer;transition:all .12s var(--ease-out)}
-.copy-btn:hover{background:var(--fill-subtle-hover);color:var(--text-primary);border-color:var(--blue-500)}
-.copy-btn:active{transform:translateY(.5px)}
-@media(max-width:560px){.install-cmd code{font-size:12.5px}}
+  color:var(--text-secondary);font-family:var(--font-sans);font-size:12.5px;font-weight:600;cursor:pointer}
+.install-hint{font-size:12px;color:var(--slate-500);margin-top:9px}
 
-/* install tabs — "Coding agent" / "Manual" */
-.install-tabs{display:inline-flex;gap:4px;margin-bottom:12px;padding:4px;border-radius:9px;
-  background:var(--fill-subtle);border:1px solid var(--border-default)}
-.install-tab{appearance:none;border:0;background:transparent;color:var(--text-secondary);
-  font-family:var(--font-sans);font-size:13px;font-weight:600;padding:7px 16px;border-radius:6px;cursor:pointer;
-  transition:all .12s var(--ease-out)}
-.install-tab:hover{color:var(--text-primary)}
-.install-tab[aria-selected="true"]{background:var(--surface-inset);color:var(--text-primary);
-  box-shadow:0 1px 2px rgba(0,0,0,.25)}
-.install-panel{display:none}
-.install-panel.active{display:block}
-.agent-cmd{display:flex;align-items:flex-start;gap:12px;background:var(--surface-inset);border:1px solid var(--border-default);
-  border-radius:var(--radius-md);padding:14px 12px 14px 16px;box-shadow:var(--shadow-md);text-align:left;
-  transition:border-color .15s var(--ease-out),box-shadow .15s var(--ease-out)}
-.agent-cmd:hover{border-color:var(--blue-500);box-shadow:0 0 0 1px rgba(46,107,255,.35),0 0 22px rgba(46,107,255,.18)}
-.agent-cmd p{flex:1;margin:0;font-family:var(--font-mono);font-size:13px;line-height:1.55;color:var(--slate-200)}
-.agent-cmd .url{color:var(--cyan-300)}
-.install-hint{font-size:12px;color:var(--slate-500);margin-top:9px;text-align:center}
-@media(max-width:560px){.agent-cmd p{font-size:12px}}
-
-/* app screenshot mockup */
-.shot{position:relative;z-index:1;max-width:920px;margin:56px auto 0;border-radius:var(--radius-xl);overflow:hidden;
+/* app mockup */
+.shot{position:relative;z-index:1;max-width:960px;margin:44px auto 0;border-radius:var(--radius-xl);overflow:hidden;
   border:1px solid var(--border-default);box-shadow:var(--shadow-xl);background:var(--surface-card)}
-.shot-bar{display:flex;align-items:center;gap:8px;height:40px;padding:0 14px;background:var(--surface-panel);border-bottom:1px solid var(--border-subtle)}
+.dot{width:11px;height:11px;border-radius:50%}
+.dot.r{background:#FF5F57}.dot.y{background:#FEBC2E}.dot.g{background:#28C840}
 .shot-title{margin-left:8px;font-family:var(--font-mono);font-size:12px;color:var(--slate-400)}
-.app{display:grid;grid-template-columns:52px 210px 1fr;height:440px;text-align:left}
+.app{display:grid;grid-template-columns:52px 216px 1fr;height:452px;text-align:left}
 .rail{background:var(--surface-sunken);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;align-items:center;padding-top:14px;gap:14px}
 .rail .logo{width:26px;height:26px;object-fit:contain}
 .rail .ri{width:30px;height:30px;border-radius:8px;background:var(--fill-subtle);display:grid;place-items:center}
 .rail .ri.on{background:#12233f;box-shadow:inset 0 0 0 1px #2E6BFF66}
-.rail .ri svg{width:15px;height:15px;stroke:var(--slate-400)}
+.rail .ri svg{width:15px;height:15px;stroke:var(--slate-400);fill:none;stroke-width:2}
 .rail .ri.on svg{stroke:var(--cyan-400)}
 .side{background:var(--surface-panel);border-right:1px solid var(--border-subtle);padding:14px 10px;overflow:hidden}
 .side .grp{font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--slate-500);padding:8px 8px 6px}
-.side .s{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;font-size:13px;color:var(--slate-300);font-family:var(--font-sans)}
+.side .s{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;font-size:13px;color:var(--slate-300)}
 .side .s.sel{background:var(--fill-subtle);color:var(--slate-50)}
 .side .s .sd{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .side .s .sd.run{background:var(--cyan-400);box-shadow:0 0 0 3px rgba(73,215,245,.16)}
 .side .s .sd.idle{background:var(--slate-600)}
 .side .s .sd.wait{background:var(--amber-500)}
-.side .s .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side .s .sd.perm{background:var(--red-500);box-shadow:0 0 0 3px rgba(240,80,95,.18)}
+.side .s .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .side .s .nm b{color:var(--cyan-300);font-weight:500}
+.side .s .bang{font-family:var(--font-mono);font-size:11px;color:var(--red-500);font-weight:700}
+.side .s .sfx{font-family:var(--font-mono);font-size:10px;color:var(--slate-500)}
 .panel{background:var(--surface-app);display:flex;flex-direction:column;overflow:hidden}
-.panel .ph{height:46px;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;gap:10px;padding:0 18px;font-family:var(--font-mono);font-size:12px;color:var(--slate-400)}
+.panel .ph{height:44px;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;gap:10px;padding:0 18px;font-family:var(--font-mono);font-size:12px;color:var(--slate-400)}
 .panel .ph .pill{margin-left:auto}
-.panel .body{flex:1;overflow:hidden;padding:18px;display:flex;flex-direction:column;gap:14px}
-.msg{max-width:78%}
-.msg .who{font-size:11px;font-weight:600;color:var(--slate-500);margin-bottom:5px;letter-spacing:.02em}
-.msg.user{align-self:flex-end;text-align:left}
-.msg.user .bub{background:var(--fill-subtle);border:1px solid var(--border-subtle);color:var(--slate-100,#eef2f8);border-radius:12px 12px 4px 12px}
-.msg .bub{padding:10px 14px;border-radius:12px;font-size:13.5px;line-height:1.5;color:var(--slate-200)}
-.msg.agent .bub{color:var(--slate-200)}
+.panel .body{flex:1;overflow:hidden;padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:80%}
+.msg .who{font-size:11px;font-weight:600;color:var(--slate-500);margin-bottom:5px}
+.msg.user{align-self:flex-end}
+.msg.user .bub{background:var(--fill-subtle);border:1px solid var(--border-subtle);border-radius:12px 12px 4px 12px}
+.msg .bub{padding:9px 13px;border-radius:12px;font-size:13px;line-height:1.5;color:var(--slate-200)}
 .tool{font-family:var(--font-mono);font-size:12px;color:var(--slate-400);display:flex;align-items:center;gap:8px}
-.tool .tk{color:var(--slate-500)}
-.tool .pth{color:var(--cyan-400)}
-.tool .ok{color:var(--green-500)}
-.wellrow{font-family:var(--font-mono);font-size:12px;background:var(--surface-inset);border:1px solid var(--border-subtle);border-radius:8px;padding:10px 12px;color:var(--slate-300)}
-.wellrow .ok{color:var(--green-500)}
-.wellrow .dim{color:var(--slate-500)}
-.composer{border-top:1px solid var(--border-subtle);padding:12px 16px;display:flex;align-items:center;gap:10px}
-.composer .field{flex:1;height:36px;border-radius:8px;background:var(--surface-inset);border:1px solid var(--border-default);
-  display:flex;align-items:center;padding:0 12px;font-size:13px;color:var(--slate-500);font-family:var(--font-sans)}
-.composer .send{width:36px;height:36px;border-radius:8px;background:var(--blue-500);display:grid;place-items:center;flex-shrink:0}
-.composer .send svg{width:16px;height:16px;stroke:#fff}
-@media(max-width:760px){.app{grid-template-columns:52px 1fr;height:400px}.side{display:none}}
-
-/* terminal mock */
-.demo{position:relative;z-index:1;max-width:860px;margin:56px auto 0;border-radius:var(--radius-xl);overflow:hidden;
-  border:1px solid var(--border-default);box-shadow:var(--shadow-xl);background:var(--surface-card)}
-.demo-bar{display:flex;align-items:center;gap:8px;height:40px;padding:0 14px;background:var(--surface-panel);border-bottom:1px solid var(--border-subtle)}
-.dot{width:11px;height:11px;border-radius:50%}
-.dot.r{background:#FF5F57}.dot.y{background:#FEBC2E}.dot.g{background:#28C840}
-.demo-title{margin-left:8px;font-family:var(--font-mono);font-size:12px;color:var(--slate-400)}
-.demo-title .live{color:var(--cyan-400)}
-.demo-body{padding:22px;background:var(--surface-inset);font-family:var(--font-mono);font-size:13px;line-height:1.7;text-align:left;color:var(--slate-300)}
-.demo-body .u{color:var(--slate-50)}
-.demo-body .a{color:var(--cyan-300)}
-.demo-body .dim{color:var(--slate-500)}
-.demo-body .ok{color:var(--green-500)}
-.demo-body .path{color:var(--cyan-400)}
+.tool .tk{color:var(--slate-500)}.tool .pth{color:var(--cyan-400)}.tool .ok{color:var(--green-500)}
+.wellrow{font-family:var(--font-mono);font-size:11.5px;background:var(--surface-inset);border:1px solid var(--border-subtle);border-radius:8px;padding:9px 12px;color:var(--slate-300)}
+.wellrow .ok{color:var(--green-500)}.wellrow .dim{color:var(--slate-500)}
+.ctxbar{display:flex;align-items:center;gap:9px;font-family:var(--font-mono);font-size:10.5px;color:var(--slate-500);padding:0 18px 8px}
+.ctxtrack{width:92px;height:5px;border-radius:99px;background:var(--surface-raised);overflow:hidden;display:flex}
+.ctxtrack i{display:block;height:100%}
+.composer{border-top:1px solid var(--border-subtle);padding:11px 16px;display:flex;align-items:center;gap:10px}
+.composer .field{flex:1;height:34px;border-radius:8px;background:var(--surface-inset);border:1px solid var(--border-default);
+  display:flex;align-items:center;padding:0 12px;font-size:13px;color:var(--slate-500)}
+.composer .send{width:34px;height:34px;border-radius:8px;background:var(--blue-500);display:grid;place-items:center}
+.composer .send svg{width:15px;height:15px;stroke:#fff;fill:none;stroke-width:2}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:var(--radius-full);font-size:11px;font-weight:600;font-family:var(--font-sans)}
 .pill-run{background:#49D7F51F;color:var(--cyan-400)}
-.ping{width:7px;height:7px;border-radius:50%;background:var(--cyan-400);box-shadow:0 0 0 0 rgba(73,215,245,.6);animation:ping 1.6s var(--ease-out) infinite}
+.ping{width:7px;height:7px;border-radius:50%;background:var(--cyan-400);animation:ping 1.6s var(--ease-out) infinite}
 @keyframes ping{0%{box-shadow:0 0 0 0 rgba(73,215,245,.5)}70%{box-shadow:0 0 0 7px rgba(73,215,245,0)}100%{box-shadow:0 0 0 0 rgba(73,215,245,0)}}
+@media(max-width:820px){.app{grid-template-columns:52px 1fr;height:400px}.side{display:none}}
 
-/* section */
-section{position:relative;padding:80px 0}
-.sec-head{text-align:center;max-width:640px;margin:0 auto 52px}
-.sec-head h2{font-size:clamp(26px,3.4vw,38px);font-weight:800;letter-spacing:-.025em;color:var(--text-primary);margin:14px 0 12px;line-height:1.15}
-.sec-head p{color:var(--text-tertiary);font-size:17px}
+/* sections */
+section{position:relative;padding:78px 0}
+.sec-head{text-align:center;max-width:700px;margin:0 auto 48px}
+.sec-head h2{font-size:clamp(26px,3.3vw,37px);font-weight:800;letter-spacing:-.025em;color:var(--text-primary);margin:14px 0 12px;line-height:1.15}
+.sec-head p{color:var(--text-tertiary);font-size:16.5px}
+.sunk{background:var(--surface-sunken);border-top:1px solid var(--border-subtle);border-bottom:1px solid var(--border-subtle)}
 
-/* feature grid */
+/* grid */
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-@media(max-width:860px){.grid{grid-template-columns:1fr}}
-.card{background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:24px;
-  transition:transform .18s var(--ease-out),border-color .18s var(--ease-out),box-shadow .18s var(--ease-out)}
-.card:hover{transform:translateY(-2px);border-color:var(--border-strong);box-shadow:var(--shadow-md)}
-.card .ic{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;margin-bottom:16px;
-  background:var(--gradient-brand-soft,#12233f);border:1px solid #2E6BFF3d}
-.card .ic svg{width:20px;height:20px;stroke:var(--cyan-400)}
-.card h3{color:var(--text-primary);font-size:17px;font-weight:600;margin-bottom:8px;letter-spacing:-.01em}
-.card p{font-size:14px;color:var(--text-tertiary);line-height:1.55}
-.card p code{font-family:var(--font-mono);font-size:12.5px;color:var(--cyan-300);background:#0E1B33;padding:1px 5px;border-radius:4px}
+.grid.two{grid-template-columns:repeat(2,1fr)}
+@media(max-width:880px){.grid,.grid.two{grid-template-columns:1fr}}
+.card{background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:22px;
+  transition:transform .18s var(--ease-out),border-color .18s var(--ease-out)}
+.card:hover{transform:translateY(-2px);border-color:var(--border-strong)}
+.card .ic{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;margin-bottom:14px;background:#12233f;border:1px solid #2E6BFF3d}
+.card .ic svg{width:18px;height:18px;stroke:var(--cyan-400);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.card h3{color:var(--text-primary);font-size:16.5px;font-weight:600;margin-bottom:7px;letter-spacing:-.01em}
+.card p{font-size:13.8px;color:var(--text-tertiary);line-height:1.55}
+.card p code,.card p .mono{font-family:var(--font-mono);font-size:12.3px;color:var(--cyan-300)}
+.card .vs{margin-top:10px;font-size:12px;color:var(--slate-500);border-top:1px solid var(--border-subtle);padding-top:9px;line-height:1.45}
 
-/* how it works */
-.flow{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;counter-reset:step}
-@media(max-width:860px){.flow{grid-template-columns:1fr}}
-.step{background:var(--surface-panel);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);padding:24px;position:relative}
+/* laptop band */
+.laptop-band{position:relative;overflow:hidden}
+.laptop-band .inner{display:grid;grid-template-columns:1fr 300px;gap:40px;align-items:center}
+@media(max-width:900px){.laptop-band .inner{grid-template-columns:1fr}}
+.bigclaim{font-size:clamp(24px,3vw,34px);font-weight:800;letter-spacing:-.025em;color:var(--text-primary);line-height:1.18;margin-bottom:16px}
+.bigclaim em{font-style:normal;color:var(--cyan-400)}
+.checks{list-style:none;display:flex;flex-direction:column;gap:11px;margin-top:18px}
+.checks li{display:flex;gap:11px;align-items:flex-start;font-size:14.5px;color:var(--text-secondary)}
+.checks .ck{color:var(--cyan-400);font-family:var(--font-mono);flex-shrink:0}
+.quotebox{margin-top:22px;background:var(--surface-inset);border:1px solid var(--border-default);border-left:3px solid var(--violet-400);
+  border-radius:var(--radius-md);padding:14px 16px;font-size:13.5px;color:var(--slate-300);line-height:1.6}
+.quotebox q{color:var(--slate-100,#e8edf5);font-style:italic}
+.quotebox .src{display:block;margin-top:8px;font-size:11.5px;color:var(--slate-500);font-family:var(--font-mono)}
+
+/* phone */
+.phone{justify-self:center;width:272px;height:552px;border-radius:36px;border:1px solid var(--border-strong);background:var(--surface-inset);
+  box-shadow:var(--shadow-xl);padding:13px;position:relative;overflow:hidden}
+.phone::before{content:"";position:absolute;top:11px;left:50%;transform:translateX(-50%);width:92px;height:5px;border-radius:99px;background:var(--navy-600);z-index:3}
+.phone .scr{margin-top:20px;height:calc(100% - 20px);border-radius:24px;background:var(--surface-card);border:1px solid var(--border-subtle);overflow:hidden;font-family:var(--font-mono);font-size:11px;position:relative}
+.phone .hd{padding:15px 14px 9px;color:var(--slate-50);font-family:var(--font-sans);font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:8px}
+.phone .hd img{width:19px;height:19px}
+.phone .row{padding:11px 14px;border-bottom:1px solid var(--border-subtle);display:flex;justify-content:space-between;align-items:center;color:var(--slate-300);gap:8px}
+.phone .row .st{font-size:10px;flex-shrink:0}
+.phone .row .st.run{color:var(--cyan-400)}.phone .row .st.idle{color:var(--slate-500)}.phone .row .st.wait{color:var(--amber-500)}
+.phone .row .st.perm{color:var(--red-500);font-weight:700}
+.lockshot{position:absolute;inset:0;background:linear-gradient(160deg,#0d1530,#1a1240 60%,#0a0f22);display:flex;flex-direction:column;align-items:center;padding-top:44px}
+.lockshot .time{font-family:var(--font-sans);font-size:52px;font-weight:300;color:#fff;letter-spacing:-.02em;line-height:1}
+.lockshot .date{font-family:var(--font-sans);font-size:12.5px;color:#ffffffb0;margin-top:4px}
+.notif{margin:36px 10px 0;background:rgba(255,255,255,.13);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.16);
+  border-radius:16px;padding:11px 12px;width:calc(100% - 20px);text-align:left;font-family:var(--font-sans)}
+.notif .nh{display:flex;align-items:center;gap:7px;margin-bottom:4px}
+.notif .nh img{width:15px;height:15px;border-radius:4px}
+.notif .nh .app{font-size:10.5px;color:#ffffffb5;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+.notif .nh .ago{margin-left:auto;font-size:10.5px;color:#ffffff8a}
+.notif .nt{font-size:13px;font-weight:700;color:#fff;margin-bottom:2px}
+.notif .nb{font-size:12.3px;color:#ffffffd8;line-height:1.35}
+.notif .acts{display:flex;gap:7px;margin-top:9px}
+.notif .acts span{flex:1;text-align:center;font-size:11px;font-weight:600;padding:5px 0;border-radius:8px;background:rgba(255,255,255,.16);color:#fff}
+
+/* flow */
+.flow{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media(max-width:880px){.flow{grid-template-columns:1fr}}
+.step{background:var(--surface-panel);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);padding:22px}
 .step .n{font-family:var(--font-mono);font-size:12px;color:var(--cyan-400);font-weight:600;letter-spacing:.08em}
 .step h3{color:var(--text-primary);font-size:16px;margin:10px 0 8px;font-weight:600}
-.step p{font-size:14px;color:var(--text-tertiary)}
+.step p{font-size:13.8px;color:var(--text-tertiary)}
+.step p .mono{color:var(--cyan-300);font-size:12.3px}
+.arch{margin-top:34px;background:var(--surface-inset);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:22px;overflow-x:auto}
+.arch pre{font-family:var(--font-mono);font-size:11.5px;line-height:1.65;color:var(--slate-300);white-space:pre}
+.arch pre .hl{color:var(--cyan-400)}.arch pre .gr{color:var(--green-500)}.arch pre .dm{color:var(--slate-500)}
 
-/* split */
-.split{display:grid;grid-template-columns:1.1fr 1fr;gap:48px;align-items:center}
-@media(max-width:860px){.split{grid-template-columns:1fr;gap:32px}}
-.split h2{font-size:clamp(24px,3vw,34px);font-weight:800;letter-spacing:-.025em;color:var(--text-primary);margin-bottom:16px;line-height:1.15}
-.split p{color:var(--text-tertiary);font-size:16px;margin-bottom:20px}
-.checks{list-style:none;display:flex;flex-direction:column;gap:12px}
-.checks li{display:flex;gap:11px;align-items:flex-start;font-size:15px;color:var(--text-secondary)}
-.checks .ck{color:var(--cyan-400);font-family:var(--font-mono);flex-shrink:0}
-.phone{justify-self:center;width:260px;height:520px;border-radius:34px;border:1px solid var(--border-strong);background:var(--surface-inset);
-  box-shadow:var(--shadow-xl);padding:14px;position:relative;overflow:hidden}
-.phone::before{content:"";position:absolute;top:12px;left:50%;transform:translateX(-50%);width:90px;height:5px;border-radius:99px;background:var(--navy-600)}
-.phone .scr{margin-top:22px;height:calc(100% - 22px);border-radius:22px;background:var(--surface-card);border:1px solid var(--border-subtle);overflow:hidden;font-family:var(--font-mono);font-size:11px}
-.phone .row{padding:12px 14px;border-bottom:1px solid var(--border-subtle);display:flex;justify-content:space-between;align-items:center;color:var(--slate-300)}
-.phone .row .st{font-size:10px}
-.phone .row .st.run{color:var(--cyan-400)}
-.phone .row .st.idle{color:var(--slate-500)}
-.phone .hd{padding:16px 14px 10px;color:var(--slate-50);font-family:var(--font-sans);font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px}
-.phone .hd img{width:20px;height:20px}
+/* comparison */
+.cmp{width:100%;min-width:760px;border-collapse:separate;border-spacing:0;font-size:13px;background:var(--surface-card);
+  border:1px solid var(--border-default);border-radius:var(--radius-lg);overflow:hidden}
+.cmp th,.cmp td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--border-subtle);white-space:nowrap}
+.cmp tbody tr:hover td{background:#ffffff06}
+.cmp tbody tr:hover td.us{background:#122040}
+.cmp thead th{background:var(--surface-panel);font-size:12.5px;font-weight:700;color:var(--text-primary)}
+.cmp thead th.us{color:var(--cyan-300);background:#0f1c36}
+.cmp td.us{background:#0d1830}
+.cmp tbody tr:last-child td{border-bottom:0}
+.cmp tfoot td{border-bottom:0;border-top:1px solid var(--border-default);background:var(--surface-panel);font-size:12.5px;padding-top:13px;padding-bottom:13px}
+.cmp tfoot td.us{background:#0f1c36}
+.cmp td:first-child{color:var(--slate-300);font-weight:500}
+.cmp .on{color:var(--text-primary);font-weight:600}
+.cmp .off{color:var(--slate-600)}
+.cmp .mid{color:var(--slate-400)}
+.cmp-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.cmp-note{margin-top:14px;font-size:12.5px;color:var(--slate-500);text-align:center}
 
-/* cta band */
+/* open source */
+.osgrid{display:grid;grid-template-columns:1.15fr 1fr;gap:40px;align-items:center}
+@media(max-width:900px){.osgrid{grid-template-columns:1fr}}
+.oslist{list-style:none;display:flex;flex-direction:column;gap:13px}
+.oslist li{display:flex;gap:12px;align-items:flex-start;font-size:14.5px;color:var(--text-secondary)}
+.oslist .ck{color:var(--cyan-400);font-family:var(--font-mono);flex-shrink:0}
+.repo{background:var(--surface-inset);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:20px}
+.repo .rh{display:flex;align-items:center;gap:9px;font-family:var(--font-mono);font-size:13.5px;color:var(--slate-200);margin-bottom:12px}
+.repo .rh svg{width:16px;height:16px;stroke:var(--slate-400);fill:none;stroke-width:1.8}
+.repo .rd{font-size:13px;color:var(--slate-400);line-height:1.5;margin-bottom:14px}
+.repo .rmeta{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--slate-500);font-family:var(--font-mono);border-top:1px solid var(--border-subtle);padding-top:12px}
+.repo .rmeta b{color:var(--slate-300);font-weight:600}
+
+/* faq */
+.faq{max-width:800px;margin:0 auto}
+.q{border-bottom:1px solid var(--border-subtle);padding:17px 0}
+.q h3{font-size:15.5px;color:var(--text-primary);font-weight:600;margin-bottom:7px}
+.q p{font-size:14px;color:var(--text-tertiary);line-height:1.6}
+
+/* cta */
 .band{text-align:center;background:var(--surface-panel);border-top:1px solid var(--border-subtle);border-bottom:1px solid var(--border-subtle)}
-.band h2{font-size:clamp(26px,3.4vw,40px);font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin-bottom:14px}
-.band p{color:var(--text-tertiary);font-size:17px;margin-bottom:28px}
+.band h2{font-size:clamp(26px,3.3vw,38px);font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin-bottom:14px}
+.band p{color:var(--text-tertiary);font-size:16.5px;margin-bottom:26px}
+
+/* footer (new layout) */
+.fgrid{display:grid;grid-template-columns:1.4fr repeat(4,1fr);gap:32px;margin-bottom:34px}
+@media(max-width:880px){.fgrid{grid-template-columns:1fr 1fr}}
+.fgrid h4{font-size:11.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--slate-400);margin-bottom:13px}
+.fgrid ul{list-style:none;display:flex;flex-direction:column;gap:9px}
+.fgrid ul a{color:var(--slate-400);font-size:13.5px}
+.fgrid ul a:hover{color:var(--text-primary)}
+.fbot{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;border-top:1px solid var(--border-subtle);padding-top:22px}
+.fbrand{display:flex;align-items:center;gap:9px;color:var(--text-secondary);font-weight:600}
+.fbrand img{width:23px;height:23px}
 </style>
 </head>
 <body>
@@ -188,43 +230,51 @@ section{position:relative;padding:80px 0}
       <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
       <div class="navlinks">
         <a href="#features" class="hide-sm">Features</a>
+        <a href="#compare" class="hide-sm">Compare</a>
         <a href="#how" class="hide-sm">How it works</a>
-        <a href="#mobile" class="hide-sm">Mobile</a>
+        <!-- TODO: /docs -->
+        <a href="#" class="hide-sm">Docs</a>
+        <!-- TODO: /pricing -->
+        <a href="#" class="hide-sm">Pricing</a>
         <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
       </div>
     </nav>
   </div>
 </header>
 
+<!-- ============ 1. HERO ============ -->
 <div class="hero">
   <div class="aura"></div>
   <div class="wrap">
-    <h1>Drive Claude Code <span class="grad">from anywhere</span></h1>
-    <p class="sub">A desktop and mobile client for your remote Claude Code sessions. No signup, one-command install — pair once and steer, approve, and ship from your laptop or your phone.</p>
-    <div class="install">
+    <h1>Your agents keep working<br><span class="grad">after you close the laptop</span></h1>
+    <p class="sub">Manta runs Claude Code and opencode in real tmux on a Linux box or Mac you own. The desktop app and the phone app are both full clients. Close either one and the work carries on.</p>
+
+    <div class="install" style="margin-top:34px">
       <div class="install-tabs" role="tablist">
         <button class="install-tab" role="tab" aria-selected="true" aria-controls="panel-agent" onclick="mantaTab(this,'panel-agent')">Coding agent</button>
         <button class="install-tab" role="tab" aria-selected="false" aria-controls="panel-manual" onclick="mantaTab(this,'panel-manual')">Manual</button>
       </div>
       <div class="install-panel active" id="panel-agent" role="tabpanel">
         <div class="agent-cmd">
-          <p id="agent-prompt">Install MantaUI on this server — a desktop &amp; mobile client for remote Claude Code sessions. Follow the setup instructions at <span class="url">https://mantaui.com/llms-install.md</span></p>
+          <p id="agent-prompt">Set up this box as a Manta UI server, a self-hosted Claude Code client for desktop and mobile. Follow <span class="url">https://mantaui.com/llms-install.md</span> exactly.</p>
           <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('agent-prompt').textContent);this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
         </div>
-        <div class="install-hint">Paste into Claude Code, Cursor, or any coding agent on your box.</div>
+        <div class="install-hint">Paste this into Claude Code, opencode or Cursor on the box you want to use.</div>
       </div>
       <div class="install-panel" id="panel-manual" role="tabpanel">
         <div class="install-cmd">
           <code><span class="prompt">$</span> curl -fsSL <span class="url">https://mantaui.com/install.sh</span> | bash</code>
           <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mantaui.com/install.sh | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
         </div>
-        <div class="install-hint">Run on your server (Linux/macOS). Pair a device once, then you're in.</div>
+        <div class="install-hint">Runs on Linux or macOS. No Node install, no compiler, no sudo. Prints a pairing code when it finishes.</div>
       </div>
     </div>
+
     <div class="cta">
       <a class="btn btn-primary" href="https://mantaui.com/downloads/Manta-latest.dmg">Download for macOS</a>
+      <a class="btn btn-ghost" href="#compare">See how it compares</a>
     </div>
-    <div class="meta">macOS build is signed — first launch: right-click the app → Open. Free &amp; <a href="https://github.com/antoinedc/MantaUI">open source</a>.</div>
+    <div class="meta">Free. No signup. Runs on hardware you already own.</div>
 
     <div class="shot">
       <div class="shot-bar">
@@ -232,38 +282,41 @@ section{position:relative;padding:80px 0}
         <span class="shot-title">Manta UI</span>
       </div>
       <div class="app">
-        <!-- icon rail -->
         <div class="rail">
           <img src="manta-logo.png" alt="" class="logo">
-          <div class="ri on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg></div>
-          <div class="ri"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></div>
-          <div class="ri"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3m9-9h-3M6 12H3"/></svg></div>
+          <div class="ri on"><svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8"/></svg></div>
+          <div class="ri"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></div>
+          <div class="ri"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3m9-9h-3M6 12H3"/></svg></div>
         </div>
-        <!-- session sidebar -->
         <div class="side">
           <div class="grp">Ethernal</div>
           <div class="s sel"><span class="sd run"></span><span class="nm">feat/<b>auth</b></span></div>
+          <div class="s"><span class="sd perm"></span><span class="nm">refactor/<b>db</b></span><span class="bang">!</span></div>
           <div class="s"><span class="sd idle"></span><span class="nm">main</span></div>
           <div class="grp">Marketing</div>
-          <div class="s"><span class="sd wait"></span><span class="nm">hero-<b>copy</b></span></div>
-          <div class="s"><span class="sd idle"></span><span class="nm">landing</span></div>
+          <div class="s"><span class="sd wait"></span><span class="nm">hero-<b>copy</b></span><span class="sfx">?</span></div>
+          <div class="s"><span class="sd run"></span><span class="nm">landing</span><span class="sfx">2</span></div>
           <div class="grp">Infra</div>
           <div class="s"><span class="sd idle"></span><span class="nm">deploy</span></div>
         </div>
-        <!-- chat panel -->
         <div class="panel">
-          <div class="ph">ethernal / <span style="color:var(--cyan-300)">feat/auth</span> · <span class="mono">vps-fra-1</span>
+          <div class="ph">ethernal / <span style="color:var(--cyan-300)">feat/auth</span> · <span class="mono">box-fra-1</span>
             <span class="pill pill-run"><span class="ping"></span>Running</span></div>
           <div class="body">
             <div class="msg user"><div class="who">You</div><div class="bub">add a device-code pairing flow to the auth module</div></div>
-            <div class="msg agent"><div class="who">Manta</div><div class="bub">I'll add the device flow. Let me look at the current auth module first.</div></div>
+            <div class="msg agent"><div class="who">Manta</div><div class="bub">Reading the current auth module before I change anything.</div></div>
             <div class="tool"><span class="tk">›</span> read <span class="pth">src/server/auth.mjs</span></div>
             <div class="tool"><span class="tk">›</span> edit <span class="pth">src/server/auth.mjs</span> <span class="ok">+38 −4</span></div>
             <div class="wellrow"><span class="dim">$</span> npm test &nbsp; <span class="ok">✓ 41 passed</span> <span class="dim">· 2.1s</span></div>
           </div>
+          <div class="ctxbar">
+            <span>ctx</span>
+            <span class="ctxtrack"><i style="width:34%;background:var(--cyan-400)"></i><i style="width:11%;background:#f59e0b"></i><i style="width:28%;background:#0ea5a4"></i></span>
+            <span>73% · 146k/200k</span>
+          </div>
           <div class="composer">
             <div class="field">Reply to Manta…</div>
-            <div class="send"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+            <div class="send"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
           </div>
         </div>
       </div>
@@ -271,107 +324,325 @@ section{position:relative;padding:80px 0}
   </div>
 </div>
 
-<section id="features">
+<!-- ============ 2. CLOSE THE LAPTOP ============ -->
+<section class="laptop-band sunk">
   <div class="wrap">
-    <div class="sec-head">
-      <div class="eyebrow">Built for real work</div>
-      <h2>Everything the agent does, in front of you</h2>
-      <p>Full transcript, live tool output, and one-tap approvals — the same session whether you're at your desk or away.</p>
-    </div>
-    <div class="grid">
-      <div class="card">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg></div>
-        <h3>Chat &amp; terminal, one window</h3>
-        <p>A native chat panel over your opencode session, plus the real <code>tmux</code> terminal underneath. Switch per window, never lose scrollback.</p>
-      </div>
-      <div class="card">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zM2 12h20"/></svg></div>
-        <h3>Steer from your phone</h3>
-        <p>The same client runs as a native iPhone app, and any browser everywhere else. Get a push when the agent needs you, answer, and let it keep going.</p>
-      </div>
-      <div class="card">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9 12l2 2 4-4M12 3l7 4v5c0 4-3 7-7 8-4-1-7-4-7-8V7z"/></svg></div>
-        <h3>Approvals, not surprises</h3>
-        <p>Every permission and question surfaces as a card. <span class="mono">Approve</span>, <span class="mono">Deny</span>, or type a clarification — or trust the session and let it run.</p>
-      </div>
-      <div class="card">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 4h16v12H4zM8 20h8M12 16v4"/></svg></div>
-        <h3>Live tool output</h3>
-        <p>Watch bash stdout tail in real time, see diffs as they land, and track token &amp; context usage per turn — no waiting for the whole turn to finish.</p>
-      </div>
-      <div class="card">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 1v6m0 10v6M4.2 4.2l4.3 4.3m7 7l4.3 4.3M1 12h6m10 0h6"/></svg></div>
-        <h3>Subagents &amp; schedules</h3>
-        <p>See spawned subagents inline. Ask the agent to check back in <code>5m</code> or every weekday at <code>9am</code> — it schedules itself.</p>
-      </div>
-      <div class="card">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 15a3 3 0 100-6 3 3 0 000 6zM12 1v3m0 16v3m8-11h3M1 12h3"/></svg></div>
-        <h3>Voice, files &amp; secrets</h3>
-        <p>Push-to-talk dictation, drag-drop uploads, and a secret store that hands the agent a credential by reference — the value never enters the transcript.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="how" style="background:var(--surface-sunken);border-top:1px solid var(--border-subtle);border-bottom:1px solid var(--border-subtle)">
-  <div class="wrap">
-    <div class="sec-head">
-      <div class="eyebrow">Setup</div>
-      <h2>Paired in under a minute</h2>
-      <p>No SSH keys, no tunnels to babysit. The server runs on your box; you pair a device once.</p>
-    </div>
-    <div class="flow">
-      <div class="step">
-        <div class="n">STEP 01</div>
-        <h3>Run the server on your box</h3>
-        <p>One command starts the Manta server next to your <span class="mono">tmux</span> + Claude Code. It then works out how devices will reach the box: over your tailnet if Tailscale is already running, otherwise through Caddy and a Let's Encrypt certificate on <span class="mono">&lt;your-box&gt;.boxes.mantaui.com</span>.</p>
-      </div>
-      <div class="step">
-        <div class="n">STEP 02</div>
-        <h3>Pair with a code</h3>
-        <p>Open the app, enter the <span class="mono">6-digit</span> code from the box. The device gets a token; every call is authed over HTTPS.</p>
-      </div>
-      <div class="step">
-        <div class="n">STEP 03</div>
-        <h3>Start a session</h3>
-        <p>Open a project, spin up a session, and start pairing with your agent — from desktop or phone, same state.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="mobile">
-  <div class="wrap">
-    <div class="split">
+    <div class="inner">
       <div>
-        <div class="eyebrow">Not tied to your desk</div>
-        <h2>The whole session, in your pocket</h2>
-        <p>Manta mirrors desktop and mobile over one HTTP surface. Start a long refactor at your desk, approve the risky step from the kitchen, watch it finish on the couch.</p>
+        <div class="eyebrow">The difference</div>
+        <h2 class="bigclaim">Shut the lid and the work <em>carries on</em></h2>
+        <p style="color:var(--text-tertiary);font-size:16px">Manta's server runs on your box as a system service. Your agents live in real tmux windows. The desktop app and the phone app are clients, so you can close every one of them and nothing stops.</p>
         <ul class="checks">
-          <li><span class="ck">✓</span> Native iPhone app, or any browser — nothing to sideload</li>
-          <li><span class="ck">✓</span> Web Push when the agent is <span class="mono">Awaiting approval</span></li>
-          <li><span class="ck">✓</span> Desktop-active? Mobile stays quiet — no double buzz</li>
-          <li><span class="ck">✓</span> Same chat, transcript, and tool output as desktop</li>
+          <li><span class="ck">✓</span> Agents keep working with no client connected</li>
+          <li><span class="ck">✓</span> Reconnect from any device and the full history is there</li>
+          <li><span class="ck">✓</span> Survives a reboot, because it is a system service</li>
+          <li><span class="ck">✓</span> Your phone buzzes when the agent needs a decision</li>
         </ul>
+        <div class="quotebox">
+          Orca's own docs: <q>Closing the desktop app drops the connection. There is no cloud relay.</q><br><br>
+          Conductor sells this as their paid beta: <q>close your laptop during a task and the agent keeps going.</q>
+          <span class="src">quoted verbatim, linked and dated on /vs/orca and /vs/conductor</span>
+        </div>
       </div>
       <div class="phone">
         <div class="scr">
-          <div class="hd"><img src="manta-logo.png" alt="">Sessions</div>
-          <div class="row"><span>ethernal / <span style="color:var(--cyan-300)">feat-auth</span></span><span class="st run">Running</span></div>
-          <div class="row"><span>ethernal / main</span><span class="st idle">Idle</span></div>
-          <div class="row"><span>marketing / <span style="color:var(--cyan-300)">hero</span></span><span class="st run" style="color:var(--amber-500)">Awaiting</span></div>
-          <div class="row"><span>infra / deploy</span><span class="st idle">Done</span></div>
-          <div class="row"><span>notes / scratch</span><span class="st idle">Idle</span></div>
+          <div class="lockshot">
+            <div class="time">9:41</div>
+            <div class="date">Tuesday, 14 October</div>
+            <div class="notif">
+              <div class="nh">
+                <img src="manta-logo.png" alt="">
+                <span class="app">Manta</span><span class="ago">now</span>
+              </div>
+              <div class="nt">ethernal / feat-auth</div>
+              <div class="nb">Permission needed: Bash(rm -rf ./dist)</div>
+              <div class="acts"><span>Deny</span><span>Allow</span></div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 </section>
 
-<section id="download" class="band">
+<!-- ============ 3. FEATURES ============ -->
+<section id="features">
   <div class="wrap">
-    <h2>Your agents. Your box. Your call.</h2>
-    <p>Open source. Runs on hardware you already own.</p>
+    <div class="sec-head">
+      <div class="eyebrow">What you get</div>
+      <h2>Everything the agent does, on every device</h2>
+      <p>The desktop app and the phone app run the same code, so the transcript, the tool output and the approval buttons are identical on both.</p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8"/></svg></div>
+        <h3>Real tmux underneath</h3>
+        <p>A chat panel and a real <code>tmux</code> terminal for every window. Your box stays a normal tmux server, so you can still SSH in and attach to the same session.</p>
+        <div class="vs">Orca and Conductor each run their own process model. Neither leaves the box usable without their app.</div>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18.5h2"/></svg></div>
+        <h3>The phone app is the same app</h3>
+        <p>Same code as the desktop: full transcript, live command output, approvals, dictation and file uploads. A native iPhone app, and any browser everywhere else.</p>
+        <div class="vs">Orca calls its mobile app "read-mostly" and "intentionally not a full editor". Conductor has no phone app.</div>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg></div>
+        <h3>Notifications that know where you are</h3>
+        <p>Working at your desk? Your phone stays quiet. Away from it? The desktop gets it first and your phone 90 seconds later. Anything blocking reaches every device at once.</p>
+        <div class="vs">Neither competitor routes notifications at all.</div>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3l7 4v5c0 4-3 7-7 8-4-1-7-4-7-8V7z"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <h3>You approve what runs</h3>
+        <p>Permissions and questions arrive as cards you answer with one tap. Allow, deny, or write a clarification. Trust a whole session when you want it to move faster.</p>
+        <div class="vs">Orca ships <span class="mono">--dangerously-skip-permissions</span> pre-filled. Conductor's docs say agents run without sandboxing.</div>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+        <h3>A worktree per session</h3>
+        <p>New sessions in a git repo branch their own sibling worktree, so several agents work in parallel without standing on each other. Close the session and Manta offers to remove the worktree, asking first if anything is uncommitted.</p>
+        <div class="vs">Command output also streams live, and a context bar splits fresh tokens from cached ones so a cold cache does not surprise you.</div>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7L12.2 19"/></svg></div>
+        <h3>It works out how to reach you</h3>
+        <p>The installer checks whether Tailscale is already running. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and an HTTPS certificate. You do not pick.</p>
+        <div class="vs">Orca requires Tailscale and tells you not to expose its port to the internet. Here a tailnet is one of two supported paths, not a prerequisite.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 4. AGENT TOOLS ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Nobody else does this</div>
+      <h2>The agent can reach you between turns</h2>
+      <p>Manta gives the agent a few tools of its own. It can put work on a timer, wake up when something happens outside, or ask for your attention on whichever device you are using.</p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+        <h3>Schedule</h3>
+        <p>Ask it to check the deploy every five minutes. The prompt re-runs in this session on a cron, on the server, whether or not you are connected.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9z"/></svg></div>
+        <h3>Webhooks</h3>
+        <p>Hand your CI a signed URL. The session wakes up when the build finishes, instead of burning tokens asking whether it is done yet.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></div>
+        <h3>Secrets</h3>
+        <p>The agent gets a file path, never the value. Your token goes into the command at run time and never appears in the transcript.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 11-5.8-1.6"/></svg></div>
+        <h3>Notify</h3>
+        <p>Ask to be told when the migration finishes. Manta picks the device based on where you have actually been active.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.9"/></svg></div>
+        <h3>Peers</h3>
+        <p>Agents in the same workspace can see and message each other, so one can warn another before touching a file it is editing.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 010 18 14 14 0 010-18z"/></svg></div>
+        <h3>Serve page</h3>
+        <p>The agent publishes a preview to a URL you can open on any device, with no file transfer in between.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 5. HOW IT WORKS ============ -->
+<section id="how">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Setup</div>
+      <h2>Paired in under a minute</h2>
+      <p>No SSH keys to distribute and no tunnel to keep alive. The server installs on your box, works out how to make itself reachable, and you pair each device once.</p>
+    </div>
+    <div class="flow">
+      <div class="step">
+        <div class="n">STEP 01</div>
+        <h3>Install on your box</h3>
+        <p>One command. It ships its own Node runtime, so there is no compiler and no package manager involved. It then works out how devices will reach the box: over your tailnet if Tailscale is already running, otherwise through Caddy and a Let's Encrypt certificate on <span class="mono">&lt;your-box&gt;.boxes.mantaui.com</span>.</p>
+      </div>
+      <div class="step">
+        <div class="n">STEP 02</div>
+        <h3>Pair a device</h3>
+        <p>Type in the six-digit code the installer printed. The device gets a token, and every call after that is authenticated over HTTPS.</p>
+      </div>
+      <div class="step">
+        <div class="n">STEP 03</div>
+        <h3>Start working</h3>
+        <p>Create a project and open a session. Install the phone app, pair it with a second code, and the same sessions are there.</p>
+      </div>
+    </div>
+    <div class="arch">
+<pre>   Desktop app                Phone app                  Browser
+        │                          │                         │
+        └──────────────────  HTTPS  ────────────────────────┘
+                                │
+   <span class="hl">&lt;box_id&gt;.boxes.mantaui.com</span>   <span class="dm">or</span>   <span class="hl">your box on the tailnet</span>
+   <span class="dm">Caddy + Let's Encrypt                  if Tailscale is already running
+
+        the installer detects which one applies and sets it up</span>
+                                │
+                       <span class="gr">YOUR LINUX BOX OR MAC</span>
+              manta-server  <span class="dm">──</span> owns tmux, files, config, secrets
+                ├── <span class="hl">tmux</span> <span class="dm">──</span> your sessions  <span class="dm">(keep running with 0 clients)</span>
+                └── opencode <span class="dm">──</span> chat mode and agent tools</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 6. MOBILE ============ -->
+<section class="sunk" id="mobile">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Away from your desk</div>
+      <h2>The whole session on your phone</h2>
+      <p>Reading a terminal UI on a phone keyboard is miserable. This is the actual client: read the diff, approve the risky command, dictate what to do next.</p>
+    </div>
+    <div class="laptop-band"><div class="inner">
+      <div>
+        <ul class="checks">
+          <li><span class="ck">✓</span> A native iPhone app, and any browser everywhere else</li>
+          <li><span class="ck">✓</span> Full transcript, live command output and inline diffs</li>
+          <li><span class="ck">✓</span> Answer permissions and questions with one tap</li>
+          <li><span class="ck">✓</span> Dictate a reply instead of typing it</li>
+          <li><span class="ck">✓</span> Push for permissions, questions, errors and finished work</li>
+          <li><span class="ck">✓</span> Talks straight to your box, with no account in between</li>
+        </ul>
+        <div class="quotebox" style="border-left-color:var(--cyan-400)">
+          A phone client that cannot approve a permission also cannot unblock an agent. The work still waits until you get back to your laptop, which defeats the point of carrying it around.
+        </div>
+      </div>
+      <div class="phone">
+        <div class="scr">
+          <div class="hd"><img src="manta-logo.png" alt="">Sessions</div>
+          <div class="row"><span>ethernal / <span style="color:var(--cyan-300)">feat-auth</span></span><span class="st run">Running</span></div>
+          <div class="row"><span>ethernal / <span style="color:var(--cyan-300)">refactor-db</span></span><span class="st perm">Approve</span></div>
+          <div class="row"><span>ethernal / main</span><span class="st idle">Idle</span></div>
+          <div class="row"><span>marketing / <span style="color:var(--cyan-300)">hero</span></span><span class="st wait">Question</span></div>
+          <div class="row"><span>marketing / landing</span><span class="st run">Running</span></div>
+          <div class="row"><span>infra / deploy</span><span class="st idle">Done</span></div>
+          <div class="row"><span>notes / scratch</span><span class="st idle">Idle</span></div>
+        </div>
+      </div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ 7. COMPARISON ============ -->
+<section id="compare">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Honest comparison</div>
+      <h2>How Manta compares</h2>
+      <p>Orca and Conductor run agents on your laptop. Termius over SSH runs them on a VPS already, which is most of the way there. These are the axes we chose to compete on. The full picture, including what the others do better, is on each comparison page.</p>
+    </div>
+    <div class="cmp-wrap">
+      <table class="cmp">
+        <thead><tr>
+          <th style="width:28%"></th>
+          <th class="us">Manta UI</th>
+          <th>Orca</th>
+          <th>Conductor</th>
+          <th>Termius + SSH</th>
+        </tr></thead>
+        <tbody>
+          <tr><td>Agents run on</td><td class="us mid">Your VPS</td><td class="mid">Your desktop</td><td class="mid">Your Mac</td><td class="mid">Your VPS</td></tr>
+          <tr><td>Keeps running with every client closed</td><td class="us on">Yes</td><td class="off">No</td><td class="mid">Paid beta</td><td class="on">Yes</td></tr>
+          <tr><td>Phone client</td><td class="us on">The full app</td><td class="mid">Read-mostly</td><td class="off">None</td><td class="mid">Terminal only</td></tr>
+          <tr><td>Approve a command from your phone</td><td class="us on">One tap</td><td class="mid">Limited</td><td class="off">No</td><td class="mid">Type into the TUI</td></tr>
+          <tr><td>Tells you when the agent is blocked</td><td class="us on">Push</td><td class="off">No</td><td class="off">No</td><td class="off">No</td></tr>
+          <tr><td>Remote access</td><td class="us on">Detected and set up</td><td class="mid">Tailscale required</td><td class="mid">Cloud beta</td><td class="mid">SSH keys by hand</td></tr>
+          <tr><td>Git worktree per session</td><td class="us on">Yes</td><td class="on">Yes</td><td class="on">Yes</td><td class="mid">By hand</td></tr>
+          <tr><td>Agent scheduling, webhooks, secrets</td><td class="us on">Yes</td><td class="off">No</td><td class="off">No</td><td class="off">No</td></tr>
+          <tr><td>Real tmux underneath</td><td class="us on">Yes</td><td class="off">No</td><td class="off">No</td><td class="on">Yes</td></tr>
+          <tr><td>Account required</td><td class="us on">No</td><td class="mid">For mobile</td><td class="mid">Yes</td><td class="mid">To sync</td></tr>
+          <tr><td>Licence</td><td class="us on">MIT</td><td class="on">MIT</td><td class="mid">Proprietary</td><td class="mid">Proprietary</td></tr>
+          <tr><td>Price</td><td class="us on">Free</td><td class="on">Free</td><td class="mid">Free, plus Pro</td><td class="mid">Free, plus paid</td></tr>
+        </tbody>
+        <tfoot><tr>
+          <td></td>
+          <td class="us"></td>
+          <!-- TODO: /vs-orca -->
+          <td><a href="#">Full comparison →</a></td>
+          <!-- TODO: /vs-conductor -->
+          <td><a href="#">Full comparison →</a></td>
+          <!-- TODO: /vs-ssh-tmux -->
+          <td><a href="#">Full comparison →</a></td>
+        </tr></tfoot>
+      </table>
+    </div>
+    <div class="cmp-note">
+      If you already run Claude Code on a VPS and reach it with Termius, you have solved the hard part. What Manta adds is a readable transcript instead of a TUI, one-tap approvals, and a notification the moment the agent gets stuck.<br>
+      Orca and Conductor each do things Manta does not, including diff review and a built-in editor, and Orca supports far more agent runtimes. Each comparison page lays that out in full. Sourced from public docs, dated and linked.
+    </div>
+  </div>
+</section>
+
+<!-- ============ 8. OPEN SOURCE ============ -->
+<section class="sunk" id="opensource">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Open source</div>
+      <h2>Yours to run, read and fork</h2>
+      <p>Being open source is table stakes here, because Orca is MIT too. The combination is what differs: open source, self-hosted, no account, and a server that outlives whichever client you happen to be holding.</p>
+    </div>
+    <div class="osgrid">
+      <div>
+        <ul class="oslist">
+          <li><span class="ck">✓</span><span>Runs on hardware you own. There is no hosted control plane, no workspace limit and no seat count.</span></li>
+          <li><span class="ck">✓</span><span>Your code stays on the box. The only thing that leaves is your agent talking to its model provider.</span></li>
+          <li><span class="ck">✓</span><span>Nothing to sign up for. Pairing is a six-digit code your own machine generates.</span></li>
+          <li><span class="ck">✓</span><span>Read <a href="/install.sh">install.sh</a> before you pipe it into bash. We would rather you did.</span></li>
+          <li><span class="ck">✓</span><span>MIT licensed. Fork it, run your own gateway, write your own client.</span></li>
+        </ul>
+      </div>
+      <div class="repo">
+        <div class="rh"><svg viewBox="0 0 24 24"><path d="M21 16V8l-9-5-9 5v8l9 5 9-5z"/><path d="M3.3 7.3L12 12l8.7-4.7M12 12v9.5"/></svg> antoinedc / MantaUI</div>
+        <div class="rd">Open-source, self-hosted Claude Code and opencode client. Agents run in real tmux on your own Linux box or Mac, and you drive them from desktop, phone or browser over HTTPS.</div>
+        <div class="rmeta">
+          <span><b>MIT</b> licence</span><span><b>TypeScript</b></span><span>Issues open</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 9. FAQ ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">FAQ</div>
+      <h2>Questions people actually ask</h2>
+      <p>Each answer is written to be quotable on its own, and each one maps to a page we want to rank for.</p>
+    </div>
+    <div class="faq">
+      <div class="q"><h3>Does the agent keep running if I close my laptop?</h3><p>Yes. The server runs on your box as a system service and your agents live in real tmux sessions. Every client is disposable, so you can close all of them and the work continues. Reconnect later and the full history is still there.</p></div>
+      <div class="q"><h3>Do I need Tailscale, a VPN or port forwarding?</h3><p>No, and you do not have to decide either. The installer checks whether Tailscale is already running on the box. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and a Let's Encrypt certificate. Either way there is nothing to port-forward and no tunnel to keep alive, and you can force either path if you prefer.</p></div>
+      <div class="q"><h3>Can I really use Claude Code from my phone?</h3><p>Yes, and the phone app is the same app as the desktop rather than a status viewer. You get the full transcript, live command output, approvals, dictation and file uploads, in a native iPhone app or any browser.</p></div>
+      <div class="q"><h3>I already SSH into a VPS with Termius. Why switch?</h3><p>You have already solved the part most tools get wrong, which is keeping the agent alive when you walk away. What you do not get is a readable transcript instead of a terminal UI, buttons to approve a command, or a notification when the agent stops and waits for you. Manta runs on the same box and you can still SSH in alongside it.</p></div>
+      <div class="q"><h3>What does it cost?</h3><p>Nothing. Manta is free and open source. You pay whoever supplies your agent, so an Anthropic subscription or an API key, and you supply the box.</p></div>
+      <div class="q"><h3>Does my code leave my box?</h3><p>No. Transcripts, uploads, secrets and configuration stay on your machine. The only outbound traffic is your agent talking to its model provider, plus a small push payload carrying the session name if you turn on phone notifications.</p></div>
+      <div class="q"><h3>Which agents does it work with?</h3><p>Claude Code and opencode today. Anything that runs in a terminal works in terminal mode, and the chat panel is built on opencode.</p></div>
+      <div class="q"><h3>Is this an alternative to Conductor or Orca?</h3><p>It overlaps with both, on a different bet. They run agents on your Mac and give you a window onto them. Manta runs agents on a box you own and gives every device the same window, so the work outlives whatever you are holding.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 10. CTA ============ -->
+<section class="band">
+  <div class="wrap">
+    <h2>Put it on your own box</h2>
+    <p>Free, no signup, and it runs on hardware you already have.</p>
     <div class="install" style="margin-bottom:0">
       <div class="install-cmd">
         <code><span class="prompt">$</span> curl -fsSL <span class="url">https://mantaui.com/install.sh</span> | bash</code>
@@ -380,31 +651,67 @@ section{position:relative;padding:80px 0}
     </div>
     <div class="cta" style="margin-top:20px">
       <a class="btn btn-primary" href="https://mantaui.com/downloads/Manta-latest.dmg">Download for macOS</a>
+      <!-- TODO: /docs -->
+      <a class="btn btn-ghost" href="#">Read the docs</a>
     </div>
   </div>
 </section>
 
+<!-- ============ 11. FOOTER ============ -->
 <footer>
-  <div class="wrap foot">
-    <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b style="font-weight:800">UI</b></span></div>
-    <div class="foot-links">
-      <a href="#features">Features</a>
-      <a href="#how">Setup</a>
-      <a href="/privacy">Privacy</a>
-      <a href="/terms">Terms</a>
-      <a href="https://github.com/antoinedc/MantaUI">GitHub</a>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="#features">Features</a></li><li><a href="#mobile">Mobile</a></li>
+        <!-- TODO: /pricing -->
+        <li><a href="#">Pricing</a></li>
+        <!-- TODO: /changelog -->
+        <li><a href="#">Changelog</a></li>
+        <!-- TODO: /download -->
+        <li><a href="#">Download</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <!-- TODO: /vs-orca -->
+        <li><a href="#">vs Orca</a></li>
+        <!-- TODO: /vs-conductor -->
+        <li><a href="#">vs Conductor</a></li>
+        <!-- TODO: /vs-ssh-tmux -->
+        <li><a href="#">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Use cases</h4><ul>
+        <!-- TODO: /claude-code-web -->
+        <li><a href="#">Claude Code web UI</a></li>
+        <!-- TODO: /claude-code-mobile -->
+        <li><a href="#">Claude Code on mobile</a></li>
+        <!-- TODO: /claude-code-remote -->
+        <li><a href="#">Claude Code remote</a></li>
+        <!-- TODO: /notifications -->
+        <li><a href="#">Notifications</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <!-- TODO: /docs -->
+        <li><a href="#">Docs</a></li>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <!-- TODO: /security -->
+        <li><a href="#">Security</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
     </div>
-    <div>Built for people who pair with agents.</div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
   </div>
 </footer>
 
-  <script>
-    function mantaTab(btn, panelId){
-      var tabs = btn.parentNode.querySelectorAll('.install-tab');
-      for (var i=0;i<tabs.length;i++){ tabs[i].setAttribute('aria-selected', tabs[i]===btn ? 'true':'false'); }
-      var panels = document.querySelectorAll('.install-panel');
-      for (var j=0;j<panels.length;j++){ panels[j].classList.toggle('active', panels[j].id===panelId); }
-    }
-  </script>
+<script>
+  function mantaTab(btn, panelId){
+    var tabs = btn.parentNode.querySelectorAll('.install-tab');
+    for (var i=0;i<tabs.length;i++) tabs[i].setAttribute('aria-selected', tabs[i]===btn?'true':'false');
+    var panels = document.querySelectorAll('.install-panel');
+    for (var j=0;j<panels.length;j++) panels[j].classList.toggle('active', panels[j].id===panelId);
+  }
+</script>
 </body>
 </html>
