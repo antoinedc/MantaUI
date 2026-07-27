@@ -17,10 +17,13 @@
 #
 # Bind is 127.0.0.1 on purpose: the chat backend is NOT exposed directly.
 # Everything reaches it through manta-server's auth-gated reverse proxy,
-# which itself is loopback-only. The chat service needs Anthropic OAuth
-# (the `opencode-claude-auth@latest` plugin seeded by install.sh step C),
-# which it picks up from the user's `~/.claude/.credentials.json` — the
-# only auth prerequisite the installer assumes.
+# which itself is loopback-only. The chat service needs at least one
+# provider in `connected[]` (Claude via the `opencode-claude-auth@latest`
+# plugin seeded by install.sh step C, or Codex/Kimi via `opencode auth
+# login -p <id>` / `PUT /auth/<id>`); install.sh's per-provider detection
+# summary (BET-313) prints which providers are reachable at the tail of
+# the install. Claude picks up its auth from `~/.claude/.credentials.json`,
+# which the installer treats as a hint — not a hard prerequisite.
 
 [Unit]
 Description=opencode server (manta chat backend)
