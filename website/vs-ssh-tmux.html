@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manta UI vs Termius + SSH: an honest comparison</title>
+<meta name="description" content="A fair side-by-side of Manta UI and the incumbent Termius-over-SSH stack for running Claude Code on your own VPS.">
+<meta name="theme-color" content="#0B1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/site.css">
+<style>
+
+/* page-specific: hero, verdict box, architectural difference */
+.hero-comp{padding:64px 0 36px;text-align:center}
+.hero-comp .wrap{position:relative;z-index:1}
+.hero-comp h1{font-size:clamp(32px,5vw,52px);line-height:1.1;font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin:0 auto 18px;max-width:880px}
+.hero-comp .lede{font-size:clamp(15.5px,1.9vw,18px);color:var(--text-tertiary);max-width:720px;margin:0 auto;line-height:1.55}
+
+.verdict{background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:24px 26px;max-width:880px;margin:40px auto 0}
+.verdict h2{font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan-400);margin-bottom:14px}
+.verdict ul{list-style:none;display:flex;flex-direction:column;gap:13px}
+.verdict li{display:flex;gap:14px;align-items:flex-start;font-size:14.5px;color:var(--text-secondary);line-height:1.55}
+.verdict li b{color:var(--text-primary);font-weight:600}
+.verdict .vtag{flex-shrink:0;font-family:var(--font-mono);font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--cyan-400);padding:4px 9px;border-radius:var(--radius-full);background:#49D7F51F;border:1px solid #49D7F53d;text-transform:uppercase;min-width:80px;text-align:center}
+
+.arch-compare{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:28px}
+@media(max-width:780px){.arch-compare{grid-template-columns:1fr}}
+.arch-card{background:var(--surface-inset);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:18px 20px}
+.arch-card h3{font-size:14px;color:var(--text-primary);font-weight:600;margin-bottom:10px;letter-spacing:-.01em}
+.arch-card pre{font-family:var(--font-mono);font-size:11.5px;line-height:1.7;color:var(--slate-300);white-space:pre}
+.arch-card .hl{color:var(--cyan-400)}.arch-card .gr{color:var(--green-500)}.arch-card .dm{color:var(--slate-500)}
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
+      <div class="navlinks">
+        <a href="/" class="hide-sm">Home</a>
+        <a href="/#compare" class="hide-sm">Compare</a>
+        <a href="/#how" class="hide-sm">How it works</a>
+        <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<div class="hero-comp">
+  <div class="wrap">
+    <h1>Manta UI vs Termius + SSH</h1>
+    <p class="lede">If you already run Claude Code on a VPS and reach it with Termius, you have already solved the part most tools get wrong, which is keeping the agent alive when you walk away. Manta runs on the same box beside Termius. Here is the honest difference.</p>
+
+    <div class="verdict">
+      <h2>Verdict</h2>
+      <ul>
+        <li><span class="vtag">Keep SSH</span><span><b>If Termius, iTerm or Blink already gets you a tmux window on the box, your agent runs there, and the only thing you wish was different is smaller.</b> You are using a battle-tested stack that costs nothing and runs anywhere.</span></li>
+        <li><span class="vtag">Add Manta</span><span><b>For the parts SSH does not cover.</b> A readable transcript on a phone instead of a terminal UI on a phone keyboard, one-tap approvals instead of typing into a TUI, a push the moment the agent blocks, dictation, file upload, and tools the agent can use to act between turns.</span></li>
+        <li><span class="vtag">Overlap</span><span>Both share the box, the tmux session and the SSH transport. Manta adds a UI layer and a server process. Termius stays.</span></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ============ COMPARISON TABLE ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Side by side</div>
+      <h2>What is the same, and what differs</h2>
+      <p>The Termius + SSH column describes the common incumbent stack. Rows we lose stay in.</p>
+    </div>
+    <div class="cmp-wrap">
+      <table class="cmp">
+        <thead><tr>
+          <th style="width:32%"></th>
+          <th>Termius + SSH</th>
+          <th class="us">Manta UI</th>
+        </tr></thead>
+        <tbody>
+          <tr><td>Agents run on</td><td class="mid">Your VPS</td><td class="us mid">Your VPS (same box)</td></tr>
+          <tr><td>Architecture</td><td class="mid">Terminal + tmux on the box</td><td class="us on">Server + clients, real tmux underneath</td></tr>
+          <tr><td>Keeps running with every client closed</td><td class="on">Yes, that is the point of tmux</td><td class="us on">Yes</td></tr>
+          <tr><td>Phone client</td><td class="mid">Termius app shows terminal</td><td class="us on">The full app, with a transcript</td></tr>
+          <tr><td>Approve a command from your phone</td><td class="mid">Type into the TUI</td><td class="us on">One tap</td></tr>
+          <tr><td>Tells you when the agent is blocked</td><td class="off">No. You go and look</td><td class="us on">Push to the right device</td></tr>
+          <tr><td>Remote access</td><td class="mid">SSH keys, by hand</td><td class="us on">Detected and set up (Tailscale or public hostname)</td></tr>
+          <tr><td>Platforms (the box)</td><td class="on">Anywhere SSH runs</td><td class="us mid">Linux or macOS</td></tr>
+          <tr><td>Permissions model</td><td class="mid">Approve at the terminal</td><td class="us on">Permission cards in the chat panel</td></tr>
+          <tr><td>Diff review / inline annotation</td><td class="mid">Your normal git host</td><td class="us off">No</td></tr>
+          <tr><td>Built-in code editor</td><td class="on">Your editor over SSH</td><td class="us mid">Terminal + chat only</td></tr>
+          <tr><td>Agent runtimes supported</td><td class="on">Anything that runs in a terminal</td><td class="us mid">2 (Claude Code, opencode)</td></tr>
+          <tr><td>Git worktree per session</td><td class="mid">By hand</td><td class="us on">Yes</td></tr>
+          <tr><td>Real tmux underneath</td><td class="on">Yes</td><td class="us on">Yes</td></tr>
+          <tr><td>Agent scheduling, webhooks, secrets</td><td class="off">No</td><td class="us on">Yes</td></tr>
+          <tr><td>Account required</td><td class="mid">Termius sync is account-bound; SSH itself is not</td><td class="us on">No</td></tr>
+          <tr><td>Licence</td><td class="mid">Termius: proprietary. Claude Code: proprietary</td><td class="us on">MIT</td></tr>
+          <tr><td>Maturity</td><td class="on">Both are mature and widely deployed</td><td class="us mid">Manta is new</td></tr>
+          <tr><td>Price</td><td class="mid">Termius has a free tier and a paid plan. Claude Code is API cost</td><td class="us on">Free. You still pay Claude</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="cmp-note">
+      The Termius + SSH stack already keeps the agent alive. The cost is that the only way to interact with it from a phone is through a terminal UI.
+    </div>
+  </div>
+</section>
+
+<!-- ============ WHERE TERMIUS + SSH IS BETTER ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Where Termius + SSH is better</div>
+      <h2>The incumbent gets a lot right</h2>
+      <p>Conceding first and plainly. The hard part is already solved.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">›</span><span><b>It keeps the agent alive.</b> That is the hard part, and tmux has done it for two decades. Closing the lid never stops the work.</span></li>
+      <li><span class="ck">›</span><span><b>It is mature.</b> Termius, iTerm, Blink, the GNOME terminal, Windows Terminal, and PuTTY all do this. Whichever you use is well-understood by the people who maintain it.</span></li>
+      <li><span class="ck">›</span><span><b>It runs anywhere SSH runs.</b> Every desktop OS, every phone, every tablet. If SSH works there, your agent works there.</span></li>
+      <li><span class="ck">›</span><span><b>It costs nothing extra.</b> OpenSSH is on every Unix box. Termius has a free tier. Adding Claude Code is just an API key.</span></li>
+      <li><span class="ck">›</span><span><b>You already know how it works.</b> There is nothing to learn. The same key, the same config, the same muscle memory.</span></li>
+      <li><span class="ck">›</span><span><b>It is general purpose.</b> SSH gets you to anything on the box. Edit a file, run a deploy, check a log. The agent is one of many things you do there.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ WHERE MANTA IS BETTER ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Where Manta is better</div>
+      <h2>The five things SSH does not give you</h2>
+      <p>Specific. None of these attack the SSH stack; they are things the stack is the wrong shape for.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">›</span><span><b>A real phone client.</b> A readable transcript instead of a terminal UI, one-tap approvals instead of typing into a TUI, dictation, and file upload. Reading an agent's terminal output on a phone keyboard is miserable; this is the actual client.</span></li>
+      <li><span class="ck">›</span><span><b>A push the moment the agent is blocked.</b> Today, you have to go and look. Manta's phone app wakes up when the agent needs a decision, with the same routing it has on desktop.</span></li>
+      <li><span class="ck">›</span><span><b>Tools the agent can use between turns.</b> Schedules, webhooks, secrets by reference, notify, peers. The agent extends its own capabilities. SSH gives the agent the terminal; Manta gives it those tools too.</span></li>
+    </ul>
+    <div class="quotebox">
+      Reading a terminal UI on a phone keyboard is miserable. This is the actual client.
+    </div>
+  </div>
+</section>
+
+<!-- ============ ARCHITECTURAL DIFFERENCE ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Architecture</div>
+      <h2>The same box, one extra process</h2>
+      <p>Manta installs a server on the same box. SSH still works. tmux still works. The agent still lives in tmux.</p>
+    </div>
+    <div class="arch-compare">
+      <div class="arch-card">
+        <h3>Termius + SSH: terminal + tmux</h3>
+<pre>   <span class="hl">Your VPS</span>          <span class="dm">← owns the work</span>
+   <span class="dm">  ├── tmux ── agent sessions</span>
+   <span class="dm">  └── sshd ── termius, iTerm, etc.</span>
+
+        │              │
+   termius (phone)   termius (desktop)
+<span class="dm">
+  the only way to interact
+  with the agent is through
+  a terminal window.</span></pre>
+      </div>
+      <div class="arch-card">
+        <h3>Manta: server + clients, tmux still underneath</h3>
+<pre>   <span class="hl">Your VPS</span>          <span class="dm">← owns the work</span>
+   <span class="gr">  ├── manta-server ── chat, schedules, secrets</span>
+   <span class="dm">  ├── tmux ── agent sessions (same)</span>
+   <span class="dm">  └── sshd ── still there</span>
+
+        │      │      │
+   desktop   phone   browser
+<span class="gr">  (full app) (full)  (full)
+
+  termius, ssh, tmux all
+  still work.</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CAN I USE BOTH ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Coexistence</div>
+      <h2>Can I use both?</h2>
+      <p>Yes. This is the page's whole point.</p>
+    </div>
+    <p style="max-width:720px;margin:0 auto;text-align:center;color:var(--text-tertiary);font-size:16px;line-height:1.6">
+      Manta installs on the same box and does not take SSH away. The same tmux session that Termius attaches to is the one Manta's chat panel talks to. SSH still works, tmux still works, Termius still works. The chat panel and the phone client are the parts that change. Most setups we expect are exactly that: Termius for terminal-heavy work, Manta for chat and phone.
+    </p>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">FAQ</div>
+      <h2>What people ask before they add Manta</h2>
+      <p>Five questions, answered in full.</p>
+    </div>
+    <div class="faq">
+      <div class="q"><h3>Does Manta replace SSH?</h3><p>No. SSH still works on the same box. You can ssh into the box, attach to the same tmux session Manta is steering, and continue from the terminal.</p></div>
+      <div class="q"><h3>Do I need to give up Termius?</h3><p>No. Termius keeps connecting to the same box. The chat panel and the phone client are the parts that change. Most people we expect to talk to run both: Termius for editor-heavy work, Manta for chat and phone.</p></div>
+      <div class="q"><h3>Does Manta work alongside Claude Code?</h3><p>Yes. Manta runs Claude Code in a tmux session on the box. The same session can be attached from Termius or steered from Manta's chat panel. The model provider stays the same.</p></div>
+      <div class="q"><h3>Will Manta's installer break my existing SSH setup?</h3><p>No. The installer adds a system service (manta-server) and either opens no public port (Tailscale path) or one HTTPS port (Caddy + LE on a per-box hostname). It does not change your SSH config, your authorized keys, or your sshd settings.</p></div>
+      <div class="q"><h3>Should I add Manta or stick with my current setup?</h3><p>If your current setup covers your needs, keep it. Manta is for the cases SSH does not cover: a phone app that can actually approve a command, a notification when the agent gets stuck, dictation, file upload, and tools the agent can use between turns.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="band">
+  <div class="wrap">
+    <h2>Install Manta on the same box</h2>
+    <p>One curl command. SSH and tmux keep working alongside it.</p>
+    <div class="cta" style="margin-top:20px">
+      <a class="btn btn-primary" href="https://github.com/antoinedc/MantaUI">Open the repo</a>
+      <a class="btn btn-ghost" href="/">Back to the homepage</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="/#features">Features</a></li><li><a href="/#mobile">Mobile</a></li>
+        <li><a href="/#opensource">Open source</a></li>
+        <li><a href="/#how">How it works</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <li><a href="/vs-orca">vs Orca</a></li>
+        <li><a href="/vs-conductor">vs Conductor</a></li>
+        <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Use cases</h4><ul>
+        <li><a href="/#mobile">Claude Code on mobile</a></li>
+        <li><a href="/#how">Claude Code remote</a></li>
+        <li><a href="/#features">Notifications</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
+    </div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

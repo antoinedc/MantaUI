@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manta UI vs Conductor: an honest comparison</title>
+<meta name="description" content="A fair side-by-side of Manta UI and Conductor (conductor.build) on architecture, platforms, sandboxing, diff review, the paid Cloud beta, and licensing.">
+<meta name="theme-color" content="#0B1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/site.css">
+<style>
+
+/* page-specific: hero, verdict box, architectural difference */
+.hero-comp{padding:64px 0 36px;text-align:center}
+.hero-comp .wrap{position:relative;z-index:1}
+.hero-comp h1{font-size:clamp(32px,5vw,52px);line-height:1.1;font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin:0 auto 18px;max-width:880px}
+.hero-comp .lede{font-size:clamp(15.5px,1.9vw,18px);color:var(--text-tertiary);max-width:720px;margin:0 auto;line-height:1.55}
+
+.verdict{background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:24px 26px;max-width:880px;margin:40px auto 0}
+.verdict h2{font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan-400);margin-bottom:14px}
+.verdict ul{list-style:none;display:flex;flex-direction:column;gap:13px}
+.verdict li{display:flex;gap:14px;align-items:flex-start;font-size:14.5px;color:var(--text-secondary);line-height:1.55}
+.verdict li b{color:var(--text-primary);font-weight:600}
+.verdict .vtag{flex-shrink:0;font-family:var(--font-mono);font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--cyan-400);padding:4px 9px;border-radius:var(--radius-full);background:#49D7F51F;border:1px solid #49D7F53d;text-transform:uppercase;min-width:80px;text-align:center}
+
+.arch-compare{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:28px}
+@media(max-width:780px){.arch-compare{grid-template-columns:1fr}}
+.arch-card{background:var(--surface-inset);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:18px 20px}
+.arch-card h3{font-size:14px;color:var(--text-primary);font-weight:600;margin-bottom:10px;letter-spacing:-.01em}
+.arch-card pre{font-family:var(--font-mono);font-size:11.5px;line-height:1.7;color:var(--slate-300);white-space:pre}
+.arch-card .hl{color:var(--cyan-400)}.arch-card .gr{color:var(--green-500)}.arch-card .dm{color:var(--slate-500)}
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
+      <div class="navlinks">
+        <a href="/" class="hide-sm">Home</a>
+        <a href="/#compare" class="hide-sm">Compare</a>
+        <a href="/#how" class="hide-sm">How it works</a>
+        <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<div class="hero-comp">
+  <div class="wrap">
+    <h1>Manta UI vs Conductor</h1>
+    <p class="lede">Conductor runs coding agents on your Mac and gives you a polished Mac app to steer them. Manta runs the same agents on a box you own and gives every device the same window. Both target someone who wants parallel agents. Here is the honest difference.</p>
+
+    <div class="verdict">
+      <h2>Verdict</h2>
+      <ul>
+        <li><span class="vtag">Pick Conductor</span><span><b>If you live on macOS, want a polished Mac-native IDE with diff review and inline comments back to the agent, and the lack of a phone app is fine.</b> Conductor's Mac app, diff review and PR/merge tail are the strongest parts of the product.</span></li>
+        <li><span class="vtag">Pick Manta</span><span><b>If you want agents on a Linux box that outlives the laptop, a phone app that can approve a command, and self-hosted open source with no seat count.</b></span></li>
+        <li><span class="vtag">Overlap</span><span>Both run Claude Code in chat panels with a worktree per session. The trade-off is where the work lives and what happens when you close the lid.</span></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ============ COMPARISON TABLE ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Side by side</div>
+      <h2>What is the same, and what differs</h2>
+      <p>Conductor is the better-known Mac app. Manta is the box that outlives the laptop. Here is the row-by-row.</p>
+    </div>
+    <div class="cmp-wrap">
+      <table class="cmp">
+        <thead><tr>
+          <th style="width:32%"></th>
+          <th class="us">Manta UI</th>
+          <th>Conductor</th>
+        </tr></thead>
+        <tbody>
+          <tr><td>Agents run on</td><td class="us mid">Your box (Linux or macOS)</td><td class="mid">Your Mac</td></tr>
+          <tr><td>Architecture</td><td class="us on">Box is the source of truth</td><td class="on">Mac is the source of truth</td></tr>
+          <tr><td>Keeps running with every client closed</td><td class="us on">Yes (default, free)</td><td class="mid">Conductor Cloud, paid beta</td></tr>
+          <tr><td>Phone client</td><td class="us on">The full app</td><td class="off">None shipped</td></tr>
+          <tr><td>Approve a command from your phone</td><td class="us on">One tap</td><td class="off">No</td></tr>
+          <tr><td>Tells you when the agent is blocked</td><td class="us on">Push to the right device</td><td class="off">No</td></tr>
+          <tr><td>Remote access</td><td class="us on">Detected and set up</td><td class="mid">Conductor Cloud (beta, Pro, GitHub-only, 10-workspace cap)</td></tr>
+          <tr><td>Platforms</td><td class="us mid">Linux or macOS box, macOS desktop, iPhone app, browser</td><td class="mid">macOS only. <q>not available for Windows or Linux yet.</q> <span class="src">conductor.build/docs</span></td></tr>
+          <tr><td>Permissions model</td><td class="us on">Explicit permission cards, yolo opt-in</td><td class="off">Agents run without sandboxing</td></tr>
+          <tr><td>Sandboxing</td><td class="us on">Commands ask first</td><td class="off">Workspace isolation is development isolation, not a security boundary</td></tr>
+          <tr><td>Diff review / inline annotation</td><td class="us off">No</td><td class="on">Yes, with inline comments back to the agent</td></tr>
+          <tr><td>Built-in code editor</td><td class="us mid">Terminal + chat only</td><td class="on">Mac-native, polished</td></tr>
+          <tr><td>Agent runtimes supported</td><td class="us mid">2 (Claude Code, opencode)</td><td class="mid">2 (Claude Code)</td></tr>
+          <tr><td>Git worktree per session</td><td class="us on">Yes</td><td class="on">Yes</td></tr>
+          <tr><td>Real tmux underneath</td><td class="us on">Yes, you can SSH in</td><td class="off">No</td></tr>
+          <tr><td>Agent scheduling, webhooks, secrets</td><td class="us on">Yes</td><td class="off">No</td></tr>
+          <tr><td>Linear / GitHub integration depth</td><td class="us mid">Basic</td><td class="on">Deep</td></tr>
+          <tr><td>CONDUCTOR_PORT style dev port routing</td><td class="us off">No</td><td class="on">Yes</td></tr>
+          <tr><td>Account required</td><td class="us on">No</td><td class="mid">Yes</td></tr>
+          <tr><td>Licence</td><td class="us on">MIT</td><td class="mid">Proprietary, closed source</td></tr>
+          <tr><td>Funding</td><td class="us mid">Solo</td><td class="on">Melty Labs, YC S24, $24M raised</td></tr>
+          <tr><td>Maturity</td><td class="us mid">New</td><td class="on">More mature, polished</td></tr>
+          <tr><td>Price</td><td class="us on">Free</td><td class="mid">Free, plus Pro tier (no published prices)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="cmp-note">
+      Conductor is the better Mac IDE. Manta is the box that outlives it. The trade-off is not subtle.
+    </div>
+  </div>
+</section>
+
+<!-- ============ WHERE CONDUCTOR IS BETTER ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Where Conductor is better</div>
+      <h2>The five things we concede plainly</h2>
+      <p>Conductor's strongest surface is the editor and the diff review. We are not pretending otherwise.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">›</span><span><b>Diff review with inline comments back to the agent.</b> Review a change, leave a comment, and the agent reads it. Manta has none of this.</span></li>
+      <li><span class="ck">›</span><span><b>The PR/merge/checks tail.</b> The whole pipeline is in the same window. Manta leaves you to do that in your normal git host.</span></li>
+      <li><span class="ck">›</span><span><b>Linear and GitHub depth.</b> Conductor's first-party integration with both is real. Manta does not match it.</span></li>
+      <li><span class="ck">›</span><span><b>CONDUCTOR_PORT-style dev port routing.</b> Routing and exposing a local dev server is built in. Manta has a public-page tool for the agent, not a per-process port system.</span></li>
+      <li><span class="ck">›</span><span><b>Polish and funding.</b> Conductor is YC S24 and has raised $24M. The Mac app looks the part. Manta is solo and rougher.</span></li>
+    </ul>
+    <div class="quotebox">
+      Conductor on its own security stance: <q>Agents run directly on your system without sandboxing.</q> And on the related boundary: <q>Workspace isolation is development isolation, not a security boundary.</q>
+      <span class="src">conductor.build/docs/security</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ WHERE MANTA IS BETTER ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Where Manta is better</div>
+      <h2>The architectural difference</h2>
+      <p>Conductor sells the same outcome Manta gives you by default, but only as a paid beta.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">›</span><span><b>The agent outlives the laptop for free.</b> Conductor pitches <q>close your laptop during a task and the agent keeps going</q> as the reason to buy Conductor Cloud. <span class="src">conductor.build/cloud</span> Manta does that by default, on your own box, with no Pro tier.</span></li>
+      <li><span class="ck">›</span><span><b>A phone app that can actually approve a command.</b> Conductor ships no phone app at all. Manta's phone app is the same code as the desktop: full transcript, live output, dictation, upload, and one-tap approvals.</span></li>
+      <li><span class="ck">›</span><span><b>Self-hosted, MIT, no Pro tier.</b> Conductor is closed source, Pro-gated, GitHub-only and capped at 10 workspaces on Cloud. Manta is MIT, runs on any hardware you own, and has no workspace cap.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ ARCHITECTURAL DIFFERENCE ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Architecture</div>
+      <h2>Where the work actually lives</h2>
+      <p>Conductor's Mac app is the source of truth. Manta's box is. The shape of the failure modes follows from that.</p>
+    </div>
+    <div class="arch-compare">
+      <div class="arch-card">
+        <h3>Conductor: the Mac app is the source of truth</h3>
+<pre>   <span class="hl">Conductor Mac app</span>   <span class="dm">← owns agents, files, diffs</span>
+        │
+   Conductor Cloud (paid beta)
+   <span class="dm">  GitHub-only, 10-workspace cap</span>
+   <span class="dm">  no phone app, no browser client</span>
+<span class="dm">
+  close the Mac and the agents
+  stop, unless you are paying
+  for Cloud.</span></pre>
+      </div>
+      <div class="arch-card">
+        <h3>Manta: the box is the source of truth</h3>
+<pre>   <span class="hl">Linux box or Mac</span>      <span class="dm">← owns tmux, files, agents</span>
+        │      │      │
+   desktop   phone   browser
+<span class="gr">  (full app) (full)  (full)
+
+  close every client and the
+  work continues, on free,
+  open source, MIT.</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CAN I USE BOTH ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Coexistence</div>
+      <h2>Can I use both?</h2>
+      <p>Yes. They do not share state, and they target different surfaces.</p>
+    </div>
+    <p style="max-width:720px;margin:0 auto;text-align:center;color:var(--text-tertiary);font-size:16px;line-height:1.6">
+      Conductor runs on your Mac for editor-heavy work with diff review. Manta installs on the same Mac (acting as its own box) or on a Linux VPS for long-running tasks that have to outlive the laptop. They use different ports, different tmux sessions and different project files. The Conductor Mac app does not talk to the Manta box; the Manta box does not read the Conductor workspace.
+    </p>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">FAQ</div>
+      <h2>What people ask before they switch</h2>
+      <p>Five questions, answered in full.</p>
+    </div>
+    <div class="faq">
+      <div class="q"><h3>Is Manta a fork of Conductor?</h3><p>No. They are separate products from separate teams. Manta is MIT and solo. Conductor is closed source, YC S24, and has raised $24M. Both run Claude Code in a chat panel.</p></div>
+      <div class="q"><h3>Why is Conductor macOS only?</h3><p>Per Conductor's own docs: <q>not available for Windows or Linux yet.</q> <span class="src">conductor.build/docs</span> Manta's box runs on Linux or macOS today, which is the path to running agents on a server.</p></div>
+      <div class="q"><h3>Does Conductor's "Cloud" beta do what Manta does?</h3><p>It tries to, with restrictions. Conductor Cloud is in beta, requires the Pro tier, supports GitHub only, and caps you at 10 workspaces. Manta runs on your own box, is free, supports any agent runtime that ships a CLI, and has no workspace cap.</p></div>
+      <div class="q"><h3>Is Conductor more secure than Manta?</h3><p>No, and Conductor says so itself: <q>Agents run directly on your system without sandboxing</q> and <q>Workspace isolation is development isolation, not a security boundary.</q> <span class="src">conductor.build/docs/security</span> Manta's default is that every command shows up as a permission card you answer.</p></div>
+      <div class="q"><h3>Which one should I pick if I edit heavily and run on macOS?</h3><p>Conductor. Its Mac-native editor, diff review with inline comments back to the agent, and Linear/GitHub depth are the strongest parts of its product. Manta is for when the work has to outlive the laptop, or when you want a phone client.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="band">
+  <div class="wrap">
+    <h2>Try Manta on your own box</h2>
+    <p>Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.</p>
+    <div class="cta" style="margin-top:20px">
+      <a class="btn btn-primary" href="https://github.com/antoinedc/MantaUI">Open the repo</a>
+      <a class="btn btn-ghost" href="/">Back to the homepage</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="/#features">Features</a></li><li><a href="/#mobile">Mobile</a></li>
+        <li><a href="/#opensource">Open source</a></li>
+        <li><a href="/#how">How it works</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <li><a href="/vs-orca">vs Orca</a></li>
+        <li><a href="/vs-conductor">vs Conductor</a></li>
+        <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Use cases</h4><ul>
+        <li><a href="/#mobile">Claude Code on mobile</a></li>
+        <li><a href="/#how">Claude Code remote</a></li>
+        <li><a href="/#features">Notifications</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
+    </div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
