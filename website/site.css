@@ -118,4 +118,4 @@ section{position:relative;padding:78px 0}
 .fbrand{display:flex;align-items:center;gap:9px;color:var(--text-secondary);font-weight:600}
 .fbrand img{width:23px;height:23px}
 
-@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto}.hero-video{display:none}}

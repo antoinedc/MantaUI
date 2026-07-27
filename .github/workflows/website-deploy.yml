@@ -11,7 +11,7 @@
 # never went live. This makes deploy a one-step action: push a `web-v*` tag.
 #
 # WHAT IT DEPLOYS (glob-driven — adding a file to website/ deploys + verifies it)
-#   website/*.html + website/*.{png,css,txt,xml,svg,webp,jpg}
+#   website/*.html + website/*.{png,css,txt,xml,svg,webp,jpg,mp4,webm}
 #                                                → /var/www/mantaui/ (each ext optional)
 #   website/updates/*.json, scripts/install.sh, llms-install.md,
 #     docs/plugins-authoring.md                  → /var/www/mantaui/ + subpaths
@@ -63,7 +63,7 @@ jobs:
 
           echo "▸ Copying marketing site (website/*.html + optional assets)"
           $SCP website/*.html "$PROD_HOST:$WEBROOT/"
-          for ext in png css txt xml svg webp jpg; do
+          for ext in png css txt xml svg webp jpg mp4 webm; do
             ls website/*."$ext" >/dev/null 2>&1 && $SCP website/*."$ext" "$PROD_HOST:$WEBROOT/"
           done
 
@@ -104,6 +104,13 @@ jobs:
             if [ "$base" = "index" ]; then check "" "$f"; else check "$base" "$f"; fi
           done
           for f in website/*.css; do
+            [ -e "$f" ] || continue
+            check "$(basename "$f")" "$f"
+          done
+          # Hero video artefacts (BET-304 stage 1). The webp is also covered by
+          # the *.webp copy glob above (no duplicate rule needed), but listed
+          # explicitly here so the verify step confirms the poster is live.
+          for f in website/hero.mp4 website/hero.webm website/hero-poster.webp; do
             [ -e "$f" ] || continue
             check "$(basename "$f")" "$f"
           done
