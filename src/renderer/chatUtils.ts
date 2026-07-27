@@ -2106,3 +2106,94 @@ export function arrowUpNavigatesHistory(row: CaretRow): boolean {
 export function arrowDownNavigatesHistory(row: CaretRow): boolean {
   return row.atLastRow;
 }
+
+// ===== Subscription provider connect flow (BET-312) =====
+//
+// Pure helpers for the ConnectProvider state machine. The component itself
+// lives in src/renderer/ConnectProvider.tsx; these helpers are the testable
+// bits it composes from. Kept here (rather than inlined in the component) so
+// every "what does state X mean?" / "has the poll expired yet?" decision
+// pins against a unit test instead of an integration one. The renderer's
+// existing test suite is pure-only; adding DOM-testing infra would be out of
+// scope for this epic.
+
+// State machine phases the connect card can be in. Mirrors the
+// `idle -> starting -> (waiting | needsCode | needsKey) -> applying -> done |
+// failed` transition graph from BET-312 exactly; adding a state would mean
+// the design has drifted and needs revisiting.
+export type ConnectPhase =
+  | { kind: "starting" }
+  | { kind: "waiting"; url: string; instructions: string; methodIndex: number }
+  | {
+      kind: "needsCode";
+      url: string;
+      instructions: string;
+      methodIndex: number;
+      inputError?: string;
+    }
+  | { kind: "needsKey"; consoleUrl: string | null; inputError?: string }
+  | { kind: "applying"; restartConfirmed: boolean }
+  | { kind: "done" }
+  | { kind: "failed"; message: string };
+
+/**
+ * Pull the device code out of an opencode OAuth instructions string, e.g.
+ * `"Enter code: TOQR-BUA7Z"` → `"TOQR-BUA7Z"`. Returns null when the string
+ * has no recognisable code (no "code" anchor or no code-shaped token after
+ * it), in which case the UI shows `instructions` verbatim with no copy
+ * button. Empty / non-string input → null.
+ *
+ * The match is anchored to a `code:` / `code ` cue (case-insensitive) so a
+ * sentence like "the user has not entered a code" does not pick up its
+ * inline "code" as a token.
+ */
+export function parseDeviceCode(instructions: string): string | null {
+  if (typeof instructions !== "string" || instructions.length === 0) return null;
+  const m = instructions.match(/\bcode[:\s]+([A-Z0-9]+-[A-Z0-9]+)/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * Single source of user-facing status text for every phase of the connect
+ * flow. Centralised so no string is duplicated across branches and so a
+ * future i18n pass replaces one place, not five.
+ */
+export function connectPhaseLabel(state: ConnectPhase): string {
+  switch (state.kind) {
+    case "starting":
+      return "Connecting…";
+    case "waiting":
+      return "Waiting for sign-in";
+    case "needsCode":
+      return "Enter the code";
+    case "needsKey":
+      return "Enter your API key";
+    case "applying":
+      return "Applying…";
+    case "done":
+      return "Connected";
+    case "failed":
+      return "Failed";
+  }
+}
+
+/**
+ * Pure deadline predicate shared by both the 5-minute device-code poll and
+ * the 30-second restart poll. `now >= startedAt + limitMs` means the cap
+ * has elapsed. NaN-safe: any non-finite input returns false so a poll that
+ * started without a clock (tests, SSR) cannot spuriously expire.
+ */
+export function isPollExpired(
+  startedAt: number,
+  now: number,
+  limitMs: number,
+): boolean {
+  if (
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(now) ||
+    !Number.isFinite(limitMs)
+  ) {
+    return false;
+  }
+  return now - startedAt >= limitMs;
+}
