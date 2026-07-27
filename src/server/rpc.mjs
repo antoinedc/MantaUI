@@ -15,6 +15,7 @@ import {
 import { resolveWorkspace } from "./peers.mjs";
 import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
+import * as subscriptionProviders from "./subscriptionProviders.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
@@ -412,6 +413,98 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // IPC.opencodeGenerateTitle. Returns the RAW model reply (caller sanitizes).
     "opencode:generate-title": ({ directory, instruction }) =>
       oc.generateSessionTitle({ directory, instruction }),
+
+    // ---- subscription provider auth (BET-308 / BET-309) ----
+    // Single discriminated channel: status / start / code / key / disconnect.
+    //   "status"      → GET /provider + subscriptionStatuses()
+    //   "start"       → GET /provider/auth + resolveAuthMethod + startProviderOauth
+    //                   (returns api-key shape when nothing resolved — Kimi
+    //                    path has no OAuth methods to resolve to)
+    //   "code"        → POST /provider/{id}/oauth/callback
+    //   "key"         → PUT /auth/{id} {type:"api", key} (Kimi)
+    //   "disconnect"  → DELETE /auth/{id}
+    // Policy lives in src/server/subscriptionProviders.mjs; this handler is
+    // the wire. The `key` action carries an API-key secret renderer → box
+    // and the server returns {ok} only — never the key itself, not in the
+    // return value and not in any log line.
+    "opencode:provider-auth": async (req) => {
+      const action = req?.action;
+      if (action === "status") {
+        const { connected } = await providers.getProviders();
+        return {
+          action: "status",
+          providers: subscriptionProviders.subscriptionStatuses(connected),
+        };
+      }
+      if (action === "start") {
+        const id = String(req?.id ?? "");
+        const entry = subscriptionProviders.findSubscriptionProvider(id);
+        if (!entry) {
+          return { action: "start", shape: "api-key" };
+        }
+        const auth = await oc.listProviderAuthMethods();
+        const methods =
+          auth?.ok && auth.methods && typeof auth.methods === "object"
+            ? auth.methods[id]
+            : null;
+        const resolved = subscriptionProviders.resolveAuthMethod(entry, methods);
+        if (!resolved) {
+          // No OAuth / no usable method → the renderer switches to the
+          // API-key form (Kimi path). Mirrors the "use the generic API-key
+          // path" contract in resolveAuthMethod's docstring.
+          return { action: "start", shape: "api-key" };
+        }
+        const oauth = await oc.startProviderOauth(id, resolved.index);
+        if (!oauth?.ok) {
+          return {
+            action: "start",
+            shape: "api-key",
+          };
+        }
+        const shape = subscriptionProviders.describeConnectShape(
+          resolved,
+          oauth.method,
+        );
+        return {
+          action: "start",
+          shape,
+          url: oauth.url || undefined,
+          instructions: oauth.instructions || undefined,
+          methodIndex: resolved.index,
+        };
+      }
+      if (action === "code") {
+        const id = String(req?.id ?? "");
+        const methodIndex = Number(req?.methodIndex ?? -1);
+        const code = String(req?.code ?? "");
+        if (!Number.isInteger(methodIndex) || methodIndex < 0 || !code) {
+          return { action: "code", ok: false, error: "bad_response" };
+        }
+        const r = await oc.completeProviderOauth(id, methodIndex, code);
+        return { action: "code", ok: !!r?.ok, error: r?.ok ? undefined : r?.error };
+      }
+      if (action === "key") {
+        const id = String(req?.id ?? "");
+        const key = String(req?.key ?? "");
+        if (!key) {
+          return { action: "key", ok: false, error: "bad_response" };
+        }
+        const r = await oc.setProviderApiKey(id, key);
+        return { action: "key", ok: !!r?.ok, error: r?.ok ? undefined : r?.error };
+      }
+      if (action === "disconnect") {
+        const id = String(req?.id ?? "");
+        const r = await oc.removeProviderAuth(id);
+        return {
+          action: "disconnect",
+          ok: !!r?.ok,
+          error: r?.ok ? undefined : r?.error,
+        };
+      }
+      // Unknown action — surface as a generic failure so the renderer's
+      // typed result narrows correctly without throwing across the wire.
+      return { action: "status", providers: [] };
+    },
 
     // ---- scheduled prompts (manta-server owned; in-process on mobile) ----
     // Mirror of desktop IPC.scheduleList / scheduleDelete. The store + firing

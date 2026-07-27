@@ -4,6 +4,8 @@ import {
   type AuthPairResult,
   type DesktopNotifyPayload,
   type OpencodeEvent,
+  type OpencodeProviderAuthRequest,
+  type OpencodeProviderAuthResult,
   type PluginRegistryRow,
   type PtyEvent,
   type ServerUpdateAvailablePayload,
@@ -920,6 +922,15 @@ export const httpApi: Api = {
 
   // -- auto-rename: throwaway-session title generation --
   opencodeGenerateTitle: (input) => rpc(IPC.opencodeGenerateTitle, input),
+
+  // -- subscription provider auth (BET-308 / BET-309) --
+  // Single discriminated channel — the renderer picks the action shape and
+  // the server picks the opencode method index (resolved via
+  // resolveAuthMethod in src/server/subscriptionProviders.mjs; never a
+  // literal). The `key` action carries the API-key secret renderer → box;
+  // the server writes it to opencode's auth store and never echoes it back.
+  opencodeProviderAuth: (req: OpencodeProviderAuthRequest) =>
+    rpc<OpencodeProviderAuthResult>(IPC.opencodeProviderAuth, req),
 
   // -- server version (BET-180) --
   // Returns the manta-server's package.json version. In-process via the

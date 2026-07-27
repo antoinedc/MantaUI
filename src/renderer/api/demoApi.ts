@@ -143,6 +143,29 @@ const getClientVersion = (): Promise<{ version: string }> =>
 const getServerVersion = (): Promise<{ version: string; minClient: string }> =>
   Promise.resolve({ version: "0.0.13", minClient: "0.0.0" });
 
+// Subscription provider auth (BET-308 / BET-309). Demo returns the three
+// disconnected rows so the connect-card UI still renders the registry
+// correctly; the `start` / `code` / `key` / `disconnect` actions are
+// unimplemented and resolve to a status payload (the Proxy fallback would
+// also work, but routing non-status requests through here keeps the
+// explicit-method list honest about demo coverage). Matches the real
+// httpApi's status shape so any future consumer that mounts the card in
+// demo mode gets the same row layout.
+const opencodeProviderAuth = (req: unknown): Promise<{ action: "status"; providers: Array<{ id: string; label: string; plan: string; console: string | null; docs: string; connected: boolean }> }> => {
+  // Status is the only meaningful action in demo mode — everything else
+  // (start / code / key / disconnect) would need a fake opencode server
+  // behind it, which is out of scope for the demo fixture.
+  void req;
+  return Promise.resolve({
+    action: "status",
+    providers: [
+      { id: "anthropic", label: "Claude", plan: "Claude Pro / Max", console: null, docs: "https://claude.com/pricing", connected: true },
+      { id: "openai", label: "Codex", plan: "ChatGPT Plus / Pro", console: null, docs: "https://openai.com/chatgpt/pricing", connected: false },
+      { id: "kimi-for-coding", label: "Kimi", plan: "Kimi For Coding", console: "https://www.kimi.com/code/console", docs: "https://www.kimi.com/code/docs/en/third-party-tools/opencode.html", connected: false },
+    ],
+  });
+};
+
 // ===========================================================================
 // `demoApi` — the explicit methods exposed by name. Everything else falls
 // through the Proxy in the `unknown` handler.
@@ -165,6 +188,7 @@ const explicitMethods = {
   launchersList,
   getClientVersion,
   getServerVersion,
+  opencodeProviderAuth,
 } as const;
 
 // ===========================================================================
