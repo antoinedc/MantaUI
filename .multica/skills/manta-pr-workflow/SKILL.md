@@ -107,6 +107,20 @@ The standard implementer workflow for the MANTA agents.
     `done` or `in_review` yourself** — the reviewer handles the status
     transition based on review outcome.
 
+    **The reassign is the ONLY thing that starts the next stage. Ending a
+    run with the issue still assigned to you kills the pipeline dead.**
+    Multica dispatches on assignment; nothing polls on your behalf. An issue
+    left on yourself reads perfectly healthy — work done, PR green, status
+    sensible — while literally nothing will ever touch it again. Precedent:
+    on 2026-07-27 BET-297 was finished at 00:30 with a green PR, set
+    `in_review`, and left assigned to `manta-dev`. No reviewer run, no PM
+    run, seven hours dead, and five downstream issues sat `blocked` behind
+    it until a human asked why the board had stopped. `scripts/multica-
+    unstick.mjs` now sweeps every 15 minutes and re-fires a dropped
+    hand-off, but it is a BACKSTOP, not your exit: it costs half an hour of
+    wall clock and stamps `unstick_*` metadata on the issue recording the
+    miss. Reassign yourself, every time, as the last action of the run.
+
 11. **Stamp `loop_history` metadata.** Before reassigning to reviewer,
     record this attempt:
 

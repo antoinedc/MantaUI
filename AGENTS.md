@@ -2369,6 +2369,76 @@ multica runtime list
 
 Full CLI cheat sheet: `/home/dev/projects/shared/multica/setup.md`
 
+### Board self-healing — two cron sweeps, one failure mode
+
+**Multica agents are event-triggered: a run starts when an issue is ASSIGNED to
+an agent. Nothing polls on their behalf.** Every "the board is stuck again"
+report so far traces back to that one fact — some transition was supposed to
+fire and didn't, and no amount of correct-looking status will make it fire
+later. Two deterministic CI sweeps close the loop. Neither is an agent, so
+neither can itself go quiet:
+
+| Sweep | Cadence | Fixes |
+|---|---|---|
+| `scripts/multica-unblock.mjs` (in `multica-close-on-merge.yml`) | hourly + after every merge | a `blocked` issue whose named blockers are all `done` → `todo` |
+| `scripts/multica-unstick.mjs` (`multica-unstick.yml`) | every 15 min | an agent-assigned `todo`/`in_progress`/`in_review` issue with nothing in flight and a terminal (or missing) run → re-dispatched to whoever owes the next move |
+
+The two are complementary and never act on the same issue: unblock owns
+`blocked` and changes STATUS; unstick owns the live statuses and changes
+ASSIGNMENT. Unstick's routing mirrors the pipeline — implementer → reviewer,
+reviewer → PM, stalled PM → re-run — and it refuses to act on human-assigned
+issues, on anything with a run in flight, or twice on one issue inside two
+hours. All the judgement is the pure `decideUnstick` / `screenIssue` pair,
+unit-tested in `scripts/multica-unstick.test.mjs`.
+
+**Why `todo` is in unstick's scope — the two sweeps would otherwise drop the
+work between them.** A STATUS change dispatches nothing (only an assignment or a
+comment does), so when unblock flips a `blocked` issue to `todo` it fixes the
+label and starts nobody. The `todo` rule re-fires that issue's existing
+assignment ~30 minutes later, which is what actually restarts the epic.
+
+**These are backstops, not the mechanism.** Agents are still required to hand
+off explicitly (`.multica/skills/manta-pr-workflow/SKILL.md` step 10); the sweep
+costs 15-30 min of wall clock. A rising rate of unsticks (grep the workflow runs,
+or the `unstick_*` metadata on issues) means an agent is systematically dropping
+hand-offs — fix the agent, don't lean on the sweep.
+
+**GOTCHA — a comment on an agent-assigned issue DISPATCHES A RUN** (`kind:
+"comment"` in the task-run's attribution; verified live 2026-07-27). That is why
+unstick records its ledger in `unstick_last` / `unstick_action` /
+`unstick_reason` METADATA rather than the audit comment it originally posted:
+after a reassign the comment queued a second run of the agent it had just woken,
+and before a reassign it would wake the stalled agent being routed away from.
+Metadata writes are inert. Anything automated that touches an agent-assigned
+issue must account for this — a "harmless status comment" is an agent run.
+
+**`manta-ops` is NOT part of this.** It's an agent driven by a Multica autopilot
+that has been paused since 2026-07-21, so every recovery path its instructions
+describe (`manta-pm.md` cases D and E) currently routes to nobody. The CI
+sweeps exist precisely so board liveness doesn't depend on an agent being
+switched on.
+
+**Useful Multica REST endpoints** (all `Bearer $MULTICA_TOKEN`; the OpenAPI
+surface is undocumented, so these were mapped by proxying the CLI):
+
+```
+GET  /api/issues?workspace_id=&status=&limit=      → {issues:[…]}
+GET  /api/issues/BET-N                             → issue (id, status, assignee_id, metadata)
+GET  /api/issues/BET-N/task-runs?workspace_id=     → [run…]  (NOT /runs)
+GET  /api/issues/BET-N/pull-requests?workspace_id= → {pull_requests:[…]}  (state: draft|open|merged|closed)
+PUT  /api/issues/BET-N?workspace_id=               → {status} or {assignee_id, assignee_type}
+POST /api/issues/<uuid>/rerun?workspace_id=        → re-fire the current assignment
+PUT  /api/issues/<uuid>/metadata/<key>?workspace_id= → {value}
+POST /api/issues/BET-N/comments?workspace_id=      → {workspace_id, content}
+```
+
+Two traps that cost real debugging time: the comments route needs `workspace_id`
+on the QUERY STRING (a body-only workspace 400s) and its field is **`content`**,
+not `body` — the close-on-merge workflow shipped with both wrong plus a missing
+`MULTICA_TOKEN` env, so its "closed without merge" comment had never once
+posted. And `metadata` is not writable through a `PUT /issues/<key>` (it returns
+200 and silently discards it) — use the dedicated per-key route above.
+
 ## Open work (as of 2026-05-18)
 
 - **Open subagent as its own chat-mode window.** Phase 1 ships read-only

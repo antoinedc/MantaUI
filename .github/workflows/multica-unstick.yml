@@ -1,0 +1,61 @@
+name: Multica Unstick
+
+# Re-dispatch issues whose hand-off was dropped.
+#
+# WHY THIS EXISTS
+# ---------------
+# Multica agents are event-triggered: a run starts when an issue is ASSIGNED to
+# them. Nothing polls on their behalf. So when an agent finishes but forgets to
+# reassign — leaves the issue on itself — the issue sits forever in a state that
+# reads healthy while nothing will ever touch it again.
+#
+# Observed live 2026-07-27: BET-297's implementer finished at 00:30, pushed a
+# green PR, set the issue `in_review`, and left itself as assignee. No reviewer
+# run, no PM run, 7 hours dead — and five downstream issues sat `blocked` behind
+# it, so the whole website epic stopped until a human noticed.
+#
+# The companion sweep in `multica-close-on-merge.yml` clears stale `blocked`
+# statuses (the symptom). This one re-fires the dropped hand-off (the cause).
+#
+# WHY SCHEDULED: the stall lives entirely on the Multica platform. No GitHub
+# event fires for it, so a periodic scan is the only way a workflow can see it.
+# Every 15 minutes; most runs are a no-op costing one API call.
+#
+# Failure policy: housekeeping must never break a pipeline. The script logs and
+# exits 0 on per-issue failures; the job itself is continue-on-error.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report what would be unstuck without acting"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two overlapping sweeps could double-assign the same issue.
+  group: multica-unstick
+  cancel-in-progress: false
+
+jobs:
+  unstick:
+    name: Re-dispatch dropped hand-offs
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Reconcile live issues
+        env:
+          MULTICA_TOKEN: ${{ secrets.MULTICA_TOKEN }}
+        run: |
+          node scripts/multica-unstick.mjs --verbose \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+        continue-on-error: true
