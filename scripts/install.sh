@@ -526,16 +526,27 @@ main() {
     # non-interactive shells (which is how install.sh runs) don't source
     # .bashrc, so the binary isn't on PATH in the current shell — we add
     # it explicitly. The fallback covers the documented path.
-    # NOTE: </dev/null on the inner installer is load-bearing. install.sh is
-    # itself run as `curl -fsSL … | bash`, so the OUTER bash reads THIS script
-    # from stdin (the pipe). The opencode installer is `curl … | bash` too, and
-    # its bash inherits the parent's stdin. If the opencode installer reads
-    # stdin at all (a prompt / read / cat), it drains the rest of install.sh's
-    # bytes and the OUTER bash then hits EOF right here and exits 0 — no error,
-    # the install silently stops "after opencode install". Redirecting the
-    # inner installer's stdin to /dev/null keeps our script's stdin intact.
-    curl -fsSL https://opencode.ai/install | bash </dev/null \
+    # NOTE: download-then-run is load-bearing, do NOT collapse this back into
+    # `curl … | bash`. Two constraints collide:
+    #  (a) install.sh is itself run as `curl -fsSL … | bash`, so the OUTER bash
+    #      reads THIS script from stdin (the pipe). A child that reads stdin
+    #      (a prompt / read / cat) drains the rest of install.sh's bytes and the
+    #      outer bash then hits EOF here and exits 0 — no error, the install
+    #      silently stops "after opencode install". So the child's stdin must
+    #      be /dev/null.
+    #  (b) But `curl … | bash </dev/null` DOES NOT WORK: bash reads its SCRIPT
+    #      from stdin, and the redirect replaces the pipe with /dev/null — bash
+    #      sees an empty script, runs nothing, exits 0, and curl dies writing to
+    #      the closed pipe (`curl: (23) Failure writing output to destination`),
+    #      which pipefail turns into a spurious "opencode install failed".
+    # Writing the installer to a file satisfies both: script from the file,
+    # stdin from /dev/null.
+    _oc_installer="$WORK/opencode-install.sh"
+    curl -fsSL https://opencode.ai/install -o "$_oc_installer" \
+      || die "opencode installer download failed — install manually: https://opencode.ai"
+    bash "$_oc_installer" </dev/null \
       || die "opencode install failed — install manually: https://opencode.ai"
+    rm -f "$_oc_installer"
     # Refresh PATH from .bashrc if the installer wrote there, then also
     # probe the well-known install location as a safety net.
     if [ -f "$HOME/.bashrc" ]; then
