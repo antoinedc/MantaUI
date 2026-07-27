@@ -35,7 +35,7 @@
 
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { expandTilde } from "./paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Regex / constants
@@ -573,17 +573,6 @@ export function buildEnv(manifest, suppliedInputs, opts) {
 function stringifyEnvValue(v) {
   if (typeof v === "boolean") return v ? "true" : "false";
   return String(v);
-}
-
-// Leading `~` → `os.homedir()`; `~/foo` → `<homedir>/foo`. Other strings
-// pass through unchanged.
-export function expandTilde(p) {
-  if (typeof p !== "string" || !p) return p;
-  if (p === "~") return homedir();
-  if (p.startsWith("~/") || p.startsWith("~\\")) {
-    return homedir() + p.slice(1);
-  }
-  return p;
 }
 
 // ---------------------------------------------------------------------------

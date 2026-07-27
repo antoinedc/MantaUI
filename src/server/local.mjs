@@ -12,7 +12,7 @@ import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { STATE_DIRNAME, expandTilde } from "../shared/paths.mjs";
 import { deriveWorktree, isWorktreeDirtyError } from "../shared/worktree.mjs";
 
 // ============================================================
@@ -272,11 +272,22 @@ export async function gitRemoveWorktree({ path: wtPath, force }) {
 // preload: ipcRenderer.invoke(IPC.fsListDirs, partial) → args[0] = partial
 
 export async function fsListDirs(partial) {
-  let lookup = (partial ?? "").trim();
-  if (!lookup) return [];
-  // Expand leading ~ to $HOME
-  if (lookup === "~") lookup = homedir() + "/";
-  else if (lookup.startsWith("~/")) lookup = homedir() + lookup.slice(1);
+  const raw = (partial ?? "").trim();
+  if (!raw) return [];
+  // Remember whether the caller asked in tilde-form so the returned paths
+  // match the form they typed. Without this, typing `~/pro` returned
+  // absolute `/home/dev/projects`, which the renderer's `m.startsWith(value)`
+  // filter (Sidebar.tsx / MobileCreateSheet.tsx) rejected — autocomplete went
+  // dead for every `~` path.
+  const isTilde = raw === "~" || raw.startsWith("~/");
+  // Expand leading ~ to $HOME — `expandTilde` lives in src/shared/paths.mjs
+  // and is the single source of truth.
+  let lookup = isTilde ? expandTilde(raw) : raw;
+  // Special case: a bare `~` must list the HOME directory's children, NOT
+  // `/home`'s. The general split would yield parent=`/home/`, prefix=`dev`
+  // and start listing `/home`'s entries. Force a trailing slash so the
+  // parent/prefix split lands on `homedir() + "/"` and the prefix is empty.
+  if (raw === "~") lookup = homedir() + "/";
 
   // Split into parent dir + typed prefix to filter with.
   const m = /^(.*\/)([^/]*)$/.exec(lookup);
@@ -290,11 +301,18 @@ export async function fsListDirs(partial) {
     return [];
   }
 
+  const home = homedir();
   return entries
     .filter((e) => e.isDirectory() && (!prefix || e.name.startsWith(prefix)))
     .sort((a, b) => a.name.localeCompare(b.name))
     .slice(0, 20)
-    .map((e) => parent + e.name);
+    .map((e) => {
+      const abs = parent + e.name;
+      // Translate back to tilde-form if the input was tilde-form, so the
+      // renderer's `startsWith(value)` filter and the ghost-text suggestion
+      // both work.
+      return isTilde && abs.startsWith(home) ? "~" + abs.slice(home.length) : abs;
+    });
 }
 
 // ============================================================

@@ -291,7 +291,6 @@ export const IPC = {
   configUpdate: "config:update",
 
   // Project metadata (local-only)
-  projectMetaUpsert: "project:meta:upsert",
   projectMetaDelete: "project:meta:delete",
 
   // tmux operations on the remote

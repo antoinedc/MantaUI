@@ -572,7 +572,6 @@ export const httpApi: Api = {
   configUpdate: (patch) => rpc(IPC.configUpdate, patch),
 
   // -- project metadata --
-  projectMetaUpsert: (meta) => rpc(IPC.projectMetaUpsert, meta),
   projectMetaDelete: (tmuxSession) => rpc(IPC.projectMetaDelete, tmuxSession),
 
   // -- tmux operations --

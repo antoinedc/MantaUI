@@ -176,14 +176,6 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
           windowName: "default",
           chatMode: true,
         });
-        // Persist defaultCwd for the new project so future `tmux:new-window`
-        // calls inherit it (resolveProjectCwd in rpc.mjs reads this). Without
-        // this, the server falls back to ~, which defeats the project's
-        // intended workspace path. Mirror of desktop tmuxNewSession path
-        // (src/main/index.ts) which writes ProjectMeta on creation.
-        await window.api
-          .projectMetaUpsert({ tmuxSession: projectName, defaultCwd: path })
-          .catch(() => {});
         await refresh();
         setActive(projectName);
         onCreated(projectName, null);
@@ -229,10 +221,6 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
           chatMode: true,
         });
       }
-      // Same project-meta write as the auto/single path above.
-      await window.api
-        .projectMetaUpsert({ tmuxSession: projectName, defaultCwd: path })
-        .catch(() => {});
       await refresh();
       setActive(projectName);
       onCreated(projectName, null);
