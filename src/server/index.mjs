@@ -1048,7 +1048,17 @@ const handleRequest = async (req, res) => {
   if (path === "/api/plugins/registry") {
     try {
       if (req.method === "PUT") {
-        const body = await readJsonBody(req);
+        // NOT the default 64KB cap. This body carries the FULL YAML of
+        // EVERY installed manifest, so it scales with plugin count (~7.5KB
+        // per row in practice) — 64KB silently capped the registry at ~8
+        // plugins. Worse, exceeding a readBody limit destroys the socket,
+        // so the executor's PUT failed as a network error it could not see
+        // and the registry FROZE at the last payload that happened to fit
+        // (real incident: adding a 9th plugin stopped every subsequent
+        // publish, and both sides logged nothing). 2MB ≈ 260 plugins; the
+        // route is Bearer-authenticated, so this is a sizing bound, not a
+        // trust boundary.
+        const body = await readJsonBody(req, 2 * 1024 * 1024);
         const size = pluginsPutRegistry(body);
         respondJson(res, 200, { count: size });
         return;
