@@ -9,6 +9,7 @@ import { initRendererLogging } from "./log";
 import type { Api } from "../shared/api";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { installHttpTransport, setWindowApi } from "./transportInstall";
+import { pickDemoLayout } from "./demoLayout";
 
 // Demo mode (BET-302): `?demo` in the URL swaps the real httpApi for a
 // fixture-backed transport and skips pairing / config / credential logic
@@ -23,6 +24,14 @@ import { installHttpTransport, setWindowApi } from "./transportInstall";
 // installHttpTransport flows below. setWindowApi is the same seam
 // transportInstall.ts exposes; no parallel install path is added (per the
 // ticket's "use the existing seam" rule).
+//
+// Shell override (BET-302 review): `?demo` alone used to always render
+// <MobileApp/> in a browser because the only branch was `isMobile =
+// !preload`, and a browser never has an Electron preload. The override
+// (`?demo&desktop` / `?demo&mobile`) is applied ONLY inside bootDemo() so
+// BET-303's desktop hero is reachable from `?demo` in a browser. The real
+// boot path's isMobile derivation is unchanged — that's production
+// transport selection.
 //
 // Reading config requires the preload's async configGet(), so entry is async.
 // We render the desktop <App/> only after the transport is chosen, so no
@@ -47,15 +56,25 @@ async function bootDemo(): Promise<void> {
   // the fixture + transportInstall.setWindowApi(demoApi) install.
   const { demoApi } = await import("./api/demoApi");
   setWindowApi(demoApi);
+  // Shell override: `?demo&desktop` / `?demo&mobile` force a layout
+  // independent of preload presence. Without an override we fall back to
+  // isMobile (the production transport-selection flag). The override is
+  // applied ONLY here — the real boot path below keeps its isMobile-based
+  // selection unchanged so production transport selection is not perturbed.
+  const layout = pickDemoLayout(
+    new URLSearchParams(window.location.search),
+  );
+  const renderDesktop = layout === "desktop" || (layout === null && !isMobile);
   // Initialize renderer logging AFTER window.api is wired so configGet
   // works. The demo branch makes logging a no-op (no real token), but we
   // still call it for parity with the real boot path so future log-target
-  // side effects don't diverge.
-  void initRendererLogging(isMobile ? "mobile" : "desktop");
+  // side effects don't diverge. Tag follows the rendered shell so logs and
+  // UI agree.
+  void initRendererLogging(renderDesktop ? "desktop" : "mobile");
   // Same React render as the real paths — the demoApi satisfies the Api
   // contract, so App / MobileApp render identically against the fixture.
   ReactDOM.createRoot(document.getElementById("root")!).render(
-    <React.StrictMode>{isMobile ? <MobileApp /> : <App />}</React.StrictMode>,
+    <React.StrictMode>{renderDesktop ? <App /> : <MobileApp />}</React.StrictMode>,
   );
 }
 
