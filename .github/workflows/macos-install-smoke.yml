@@ -321,6 +321,21 @@ jobs:
           # window or whether `list-windows -a` is what's misbehaving here.
           echo "--- tmux list-windows -a ---"; tmux list-windows -a || true
           tmux -V
+          # The API reports the session as `smoke_0` while tmux itself calls it
+          # `smoke` — i.e. the TAB that src/server/tmux.mjs uses to separate
+          # format fields is not surviving this tmux. Dump the raw bytes for a
+          # few candidate separators so the fix is chosen on evidence.
+          node -e '
+            const { execFileSync } = require("child_process");
+            const probe = (label, sep) => {
+              const out = execFileSync("tmux", ["list-sessions", "-F", `#{session_name}${sep}#{?session_attached,1,0}`], { encoding: "utf8" });
+              console.log(label, JSON.stringify(out));
+            };
+            probe("tab   ", "\t");
+            probe("unit  ", "\u001f");
+            probe("pipe  ", "|");
+            probe("dcolon", "::");
+          ' || true
           echo "ok — server-side tmux works."
 
       - name: Assert — re-running the installer preserves box identity
