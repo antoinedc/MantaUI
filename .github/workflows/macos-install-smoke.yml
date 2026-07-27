@@ -308,10 +308,22 @@ jobs:
           cat "$RUNNER_TEMP/new-session.json"; echo
           projects="$(curl -fsS http://127.0.0.1:8787/api/projects -H "authorization: Bearer $MANTA_TOKEN")"
           printf '%s\n' "$projects"
-          # tmux uniquifies the session name (`smoke` → `smoke_0`), so match the
-          # prefix rather than the exact string.
-          printf '%s' "$projects" | grep -q '"tmuxSession":"smoke' \
-            || { echo "FAIL: the server cannot see the tmux session it just created (tmux missing from the launchd PATH?)"; exit 1; }
+          # The name must come back EXACTLY as created and the session must have
+          # its window. Both were wrong before the locale fix: a service gets no
+          # locale from launchd, tmux then replaced the TAB field separator in
+          # its -F output with `_`, so the session was reported as `smoke_0`
+          # (name + attached flag glued together) and every window line was
+          # orphaned and dropped. Anything less than an exact match here would
+          # let that regression back in.
+          printf '%s' "$projects" | python3 -c '
+          import json, sys
+          projects = json.load(sys.stdin)
+          names = [p["tmuxSession"] for p in projects]
+          assert names == ["smoke"], f"expected exactly the session we created, got {names}"
+          wins = projects[0]["windows"]
+          assert len(wins) >= 1, "session reported with no windows"
+          print("session", names[0], "with", len(wins), "window(s):", [w["name"] for w in wins])
+          ' || { echo "FAIL: the server sees a corrupted view of tmux"; exit 1; }
           # Independent confirmation from outside the server: the tmux server
           # the RPC spawned is real and reachable on the user's default socket.
           tmux list-sessions || { echo "FAIL: no tmux server running after the RPC"; exit 1; }
