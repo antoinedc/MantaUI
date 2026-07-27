@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manta is open source and self-hosted</title>
+<meta name="description" content="Manta is MIT licensed, self-hosted, and has no account, no telemetry and no seat count.">
+<meta name="theme-color" content="#0B1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/site.css">
+<style>
+
+/* page-specific: hero, license card, install audit panel */
+.hero-comp{padding:64px 0 36px;text-align:center}
+.hero-comp .wrap{position:relative;z-index:1}
+.hero-comp h1{font-size:clamp(32px,5vw,52px);line-height:1.1;font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin:0 auto 18px;max-width:880px}
+.hero-comp .lede{font-size:clamp(15.5px,1.9vw,18px);color:var(--text-tertiary);max-width:720px;margin:0 auto;line-height:1.55}
+
+.repoc{margin:42px auto 0;max-width:760px;background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-xl);padding:24px 26px;box-shadow:var(--shadow-xl)}
+.repoc .rh{display:flex;align-items:center;gap:10px;font-family:var(--font-mono);font-size:14px;color:var(--slate-200);margin-bottom:14px;font-weight:600}
+.repoc .rh svg{width:18px;height:18px;stroke:var(--slate-400);fill:none;stroke-width:1.8}
+.repoc .rd{font-size:14px;color:var(--text-secondary);line-height:1.55;margin-bottom:18px}
+.repoc .rd b{color:var(--text-primary);font-weight:600}
+.repoc .rmeta{display:flex;gap:18px;flex-wrap:wrap;font-family:var(--font-mono);font-size:12px;color:var(--slate-400);border-top:1px solid var(--border-subtle);padding-top:14px}
+.repoc .rmeta b{color:var(--text-primary);font-weight:600}
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
+      <div class="navlinks">
+        <a href="/" class="hide-sm">Home</a>
+        <a href="/#compare" class="hide-sm">Compare</a>
+        <a href="/#how" class="hide-sm">How it works</a>
+        <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<div class="hero-comp">
+  <div class="wrap">
+    <h1>Open source and self-hosted</h1>
+    <p class="lede">Manta is MIT licensed and self-hosted. No account, no telemetry, no vendor, no hosted control plane. You can read every line of the server, the desktop client and the install script before you pipe it into bash. We would rather you did.</p>
+
+    <div class="repoc">
+      <div class="rh"><svg viewBox="0 0 24 24"><path d="M21 16V8l-9-5-9 5v8l9 5 9-5z"/><path d="M3.3 7.3L12 12l8.7-4.7M12 12v9.5"/></svg>antoinedc / MantaUI</div>
+      <div class="rd">Open-source, self-hosted Claude Code and opencode client. Agents run in real tmux on your own Linux box or Mac, and you drive them from desktop, phone or browser over HTTPS.</div>
+      <div class="rmeta">
+        <span><b>MIT</b> licence</span><span><b>TypeScript</b></span><span><b>Node</b> on the box</span><span><b>Electron</b> desktop</span><span><b>React</b> renderer</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 1. WHAT OPEN SOURCE MEANS HERE ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Licence</div>
+      <h2>MIT, with a working install script you can read</h2>
+      <p>Open source in this product is not a marketing line. The repo carries a working <a href="https://github.com/antoinedc/MantaUI/blob/main/LICENSE">MIT licence</a>, the install script is in the repository, and every line of the server, the desktop app and the phone client is on GitHub.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>MIT licensed.</b> Permissive, friction-free, matches Orca. Fork it, run your own gateway, write your own client, ship a derivative.</span></li>
+      <li><span class="ck">✓</span><span><b>The install script is in the repo.</b> Read <a href="https://github.com/antoinedc/MantaUI/blob/main/install.sh">install.sh</a> before you pipe it into bash. It is roughly two hundred lines of plain bash, with a checksum-verified download.</span></li>
+      <li><span class="ck">✓</span><span><b>The server is open source.</b> Express, the tmux and opencode proxies, push, schedules, webhooks, secrets, peer sessions. Every line.</span></li>
+      <li><span class="ck">✓</span><span><b>The desktop app is open source.</b> Electron, xterm.js, React. The renderer is a normal npm package. Build it from source if you prefer.</span></li>
+      <li><span class="ck">✓</span><span><b>The phone app is open source.</b> Capacitor shell around the same React client. The native bits are minimal glue.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 2. SELF-HOSTED, NO ACCOUNT, NO TELEMETRY ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Self-hosted</div>
+      <h2>No account, no telemetry, no seat count</h2>
+      <p>The product runs on hardware you own. There is no hosted control plane to sign up for, no usage telemetry leaving the box, and no seat count to grow into a bill.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Nothing to sign up for.</b> Pairing is a six-digit code your box generates. Devices exchange tokens, and that is the only credential in the loop.</span></li>
+      <li><span class="ck">✓</span><span><b>No telemetry.</b> The box talks to your model provider and to APNs for push fanout. Nothing else. The repo carries no analytics SDK.</span></li>
+      <li><span class="ck">✓</span><span><b>Your code stays on your box.</b> Transcripts, uploads, secrets and configuration live on your machine. The only outbound traffic is your agent talking to its model provider.</span></li>
+      <li><span class="ck">✓</span><span><b>No hosted control plane.</b> There is no workspace limit, no seat count, no Pro tier. The product is one binary plus a directory of state.</span></li>
+      <li><span class="ck">✓</span><span><b>You can fork the box.</b> Want a different default model, a different push provider, a different default port. Fork the repo, edit the manifest, run the install.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 3. READ THE INSTALL SCRIPT ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Auditability</div>
+      <h2>The install is auditable end to end</h2>
+      <p>The single sharpest difference between an open source product and a "self-hosted" one is whether the install can be read before it runs. Manta's can.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Source on GitHub.</b> Every commit, every change, every reviewer. The repo is the source of truth for what ships.</span></li>
+      <li><span class="ck">✓</span><span><b>Checksum-verified download.</b> The manifest on the website lists a sha256 for each tarball. The script refuses to run if the bytes do not match.</span></li>
+      <li><span class="ck">✓</span><span><b>No silent install of unrelated packages.</b> The privileged section installs Caddy and registers a hostname. Both are visible, both are reversible, both leave a trail.</span></li>
+      <li><span class="ck">✓</span><span><b>Reproducible from the manifest.</b> A clean box, the manifest, and a known tarball reproduce the same install every time.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">FAQ</div>
+      <h2>Questions about the licence and the install</h2>
+      <p>Five questions, answered in full.</p>
+    </div>
+    <div class="faq">
+      <div class="q"><h3>Where is the source code?</h3><p>On GitHub at <a href="https://github.com/antoinedc/MantaUI">github.com/antoinedc/MantaUI</a>. The server, the Electron desktop app, the React renderer, the phone client and the install script all live in the same repository.</p></div>
+      <div class="q"><h3>What is the licence?</h3><p>MIT. The full text is in the <a href="https://github.com/antoinedc/MantaUI/blob/main/LICENSE">LICENSE</a> file at the root of the repository. It is permissive: fork it, modify it, ship a derivative, keep the copyright notice.</p></div>
+      <div class="q"><h3>What stays on my box?</h3><p>Everything. Transcripts, uploads, secrets, configuration, schedules, peer metadata, ingress choice. The only outbound traffic is your agent talking to its model provider, and a small push payload carrying the session name when you turn on phone notifications.</p></div>
+      <div class="q"><h3>Can I run my own gateway or push provider?</h3><p>Yes. Fork the repo, point the push routing at your own gateway, edit the manifest. The push and webhook modules are designed to be replaced. The same goes for the install script, the installer, and the desktop app.</p></div>
+      <div class="q"><h3>Does the box phone home?</h3><p>Only to your model provider and to APNs, when you have phone notifications turned on. There is no analytics SDK, no telemetry beacon, no usage ping. <a href="/pricing">The pricing page</a> covers what you actually pay for.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="band">
+  <div class="wrap">
+    <h2>Put it on your own box</h2>
+    <p>Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.</p>
+    <div class="install" style="max-width:600px;margin:0 auto 14px">
+      <div class="install-cmd">
+        <code><span class="prompt">$</span> curl -fsSL <span class="url">https://mantaui.com/install.sh</span> | bash</code>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mantaui.com/install.sh | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
+      </div>
+    </div>
+    <div class="cta" style="margin-top:20px">
+      <a class="btn btn-primary" href="https://github.com/antoinedc/MantaUI">Open the repo</a>
+      <a class="btn btn-ghost" href="/">Back to the homepage</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="/#features">Features</a></li><li><a href="/#mobile">Mobile</a></li>
+        <li><a href="/#opensource">Open source</a></li>
+        <li><a href="/#how">How it works</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <li><a href="/vs-orca">vs Orca</a></li>
+        <li><a href="/vs-conductor">vs Conductor</a></li>
+        <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Use cases</h4><ul>
+        <li><a href="/claude-code-web-ui">Claude Code web UI</a></li>
+        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
+        <li><a href="/claude-code-remote">Claude Code remote</a></li>
+        <li><a href="/open-source">Open source</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
+    </div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
