@@ -2199,6 +2199,55 @@ export function isPollExpired(
   return now - startedAt >= limitMs;
 }
 
+// ===== Terminal keyboard shortcuts (BET-333) =====
+//
+// Inside a terminal, plain Ctrl on Windows / Linux is the application's own
+// modifier (it must reach the process — SIGINT, readline forward-char, etc.).
+// Treating Ctrl as equivalent to Cmd swallows Ctrl+C whenever text is
+// selected, so a running process can never be interrupted. The fix is the
+// every-other-terminal convention: on macOS the trigger is Cmd alone, on
+// every other platform the trigger is Ctrl+Shift. Plain Ctrl falls straight
+// through to the PTY.
+//
+// `terminalShortcut(ev, isMac)` is the pure matcher. Returns which terminal-
+// emulator action the keydown maps to (or null = "not ours, let it through").
+// The four actions map to the same four bodies xterm.js's custom key handler
+// already runs today (selection copy, clipboard paste, window.prompt find,
+// term.clear scrollback).
+//
+// `isMac` is passed in rather than read from `navigator` so the function is
+// testable in isolation and so all platform gating in the renderer reads
+// `src/renderer/platform.ts` (the only place `navigator.platform` is touched).
+export type TerminalShortcut = "copy" | "paste" | "find" | "clear" | null;
+
+export function terminalShortcut(
+  ev: {
+    key: string;
+    metaKey: boolean;
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+  },
+  isMac: boolean,
+): TerminalShortcut {
+  const macTrigger = isMac
+    ? ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey
+    : ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey;
+  if (!macTrigger) return null;
+  switch (ev.key.toLowerCase()) {
+    case "c":
+      return "copy";
+    case "v":
+      return "paste";
+    case "f":
+      return "find";
+    case "k":
+      return "clear";
+    default:
+      return null;
+  }
+}
+
 // ===== Subscription provider status (BET-314) =====
 //
 // Single source of truth for the connected/not-connected label the

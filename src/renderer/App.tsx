@@ -15,6 +15,7 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import { chooseUpdateSkewVariant } from "./chatUtils";
+import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
 import { parsePairPayload } from "./mobile/pairPayload";
 import { claimBox } from "./pairClaim";
@@ -840,7 +841,7 @@ export function App() {
           {projects.length === 0 ? (
             <div className="h-full flex items-center justify-center text-text-faint text-sm">
               {serverUrl || boxId
-                ? "Create a project (⌘N) to start."
+                ? `Create a project (${MOD_KEY}N) to start.`
                 : "Open Settings to connect to your box."}
             </div>
           ) : (

@@ -70,6 +70,7 @@ import {
   connectPhaseLabel,
   isPollExpired,
   describeSubscriptionStatus,
+  terminalShortcut,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -3100,5 +3101,169 @@ describe("describeSubscriptionStatus", () => {
         connected: false,
       }),
     ).toBe("not connected");
+  });
+});
+
+// ===== terminalShortcut (BET-333) =====
+//
+// Pure matcher behind Terminal.tsx's keydown handler. macOS triggers off Cmd
+// alone; every other platform triggers off Ctrl+Shift. The upper-case trap:
+// when Shift is held, browsers report `ev.key` as the shifted form ("C"), so
+// the switch must lowercase before comparing.
+
+const NO_MODS = { metaKey: false, ctrlKey: false, shiftKey: false, altKey: false };
+
+describe("terminalShortcut", () => {
+  describe("macOS (isMac: true)", () => {
+    it("maps Cmd+C → copy", () => {
+      expect(
+        terminalShortcut({ key: "c", ...NO_MODS, metaKey: true }, true),
+      ).toBe("copy");
+    });
+
+    it("maps Cmd+V → paste", () => {
+      expect(
+        terminalShortcut({ key: "v", ...NO_MODS, metaKey: true }, true),
+      ).toBe("paste");
+    });
+
+    it("maps Cmd+F → find", () => {
+      expect(
+        terminalShortcut({ key: "f", ...NO_MODS, metaKey: true }, true),
+      ).toBe("find");
+    });
+
+    it("maps Cmd+K → clear", () => {
+      expect(
+        terminalShortcut({ key: "k", ...NO_MODS, metaKey: true }, true),
+      ).toBe("clear");
+    });
+
+    it("plain Ctrl+C → null (Mac user's Ctrl+C must reach the process)", () => {
+      expect(
+        terminalShortcut({ key: "c", ...NO_MODS, ctrlKey: true }, true),
+      ).toBeNull();
+    });
+
+    it("Cmd+Shift+K → null (Cmd+Shift combos are not our shortcuts)", () => {
+      expect(
+        terminalShortcut(
+          { key: "K", metaKey: true, ctrlKey: false, shiftKey: true, altKey: false },
+          true,
+        ),
+      ).toBeNull();
+    });
+  });
+
+  describe("non-macOS (isMac: false)", () => {
+    it("Ctrl+Shift+C with key:'C' → copy (regression test for the uppercase trap)", () => {
+      expect(
+        terminalShortcut(
+          { key: "C", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBe("copy");
+    });
+
+    it("Ctrl+Shift+V → paste", () => {
+      expect(
+        terminalShortcut(
+          { key: "V", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBe("paste");
+    });
+
+    it("Ctrl+Shift+F → find", () => {
+      expect(
+        terminalShortcut(
+          { key: "F", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBe("find");
+    });
+
+    it("Ctrl+Shift+K → clear", () => {
+      expect(
+        terminalShortcut(
+          { key: "K", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBe("clear");
+    });
+
+    it("plain Ctrl+C → null (the actual bug being fixed)", () => {
+      expect(
+        terminalShortcut(
+          { key: "c", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("plain Ctrl+K → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "k", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("plain Ctrl+F → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "f", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("plain Ctrl+V → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "v", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("Cmd+C → null (some keyboards send Meta instead of Ctrl on Win/Linux)", () => {
+      expect(
+        terminalShortcut(
+          { key: "c", metaKey: true, ctrlKey: false, shiftKey: false, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
+
+    it("Ctrl+Shift+Alt+C → null (alt modifier disqualifies the trigger)", () => {
+      expect(
+        terminalShortcut(
+          { key: "c", metaKey: false, ctrlKey: true, shiftKey: true, altKey: true },
+          false,
+        ),
+      ).toBeNull();
+    });
+  });
+
+  describe("trigger held with an unrelated key", () => {
+    it("macOS Cmd+X → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "x", metaKey: true, ctrlKey: false, shiftKey: false, altKey: false },
+          true,
+        ),
+      ).toBeNull();
+    });
+
+    it("non-macOS Ctrl+Shift+X → null", () => {
+      expect(
+        terminalShortcut(
+          { key: "x", metaKey: false, ctrlKey: true, shiftKey: true, altKey: false },
+          false,
+        ),
+      ).toBeNull();
+    });
   });
 });
