@@ -7,6 +7,11 @@ export const UPLOAD_DIRNAME: string;
 export const OUTBOX_DIRNAME: string;
 export const SECRETS_DIRNAME: string;
 
+// macOS-only PATH prefix used by `patchPath`. Single source of truth for
+// the desktop plugin runner (src/main/capExecutor.ts) and the box server's
+// Claude credential refresh (src/server/opencode.mjs).
+export const DARWIN_PATH_PREFIX: readonly string[];
+
 // Leading `~` → os.homedir(); `~/foo` → `<homedir>/foo`. Other strings pass
 // through unchanged. Pure: passes through anything that isn't a non-empty
 // string starting with `~`.
@@ -15,3 +20,11 @@ export function expandTilde(p: null): null;
 export function expandTilde(p: undefined): undefined;
 export function expandTilde(p: number): number;
 export function expandTilde(p: unknown): unknown;
+
+// Returns a copy of `baseEnv` with the macOS Homebrew PATH prefix
+// prepended. On every non-darwin platform the env is returned
+// byte-identical (no new `PATH` key written when one was missing).
+export function patchPath(
+  baseEnv: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): NodeJS.ProcessEnv;

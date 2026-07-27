@@ -12,7 +12,7 @@ import { homedir, tmpdir } from "node:os";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import http from "node:http";
-import { expandTilde } from "../shared/paths.mjs";
+import { expandTilde, patchPath } from "../shared/paths.mjs";
 import {
   CREDENTIALS_PATH,
   parseCredentials,
@@ -1166,9 +1166,15 @@ export function _resetRecoveryCooldownState() {
  *  `maybeRecoverCredentials`, `startCredentialRefreshPoller`) is similarly
  *  Claude-only and is kept that way to avoid papering over the differences. */
 function resolveClaudeBin() {
+  // `~/.local/bin` is the resolver's concern — that's where the official
+  // `claude` CLI installer places its symlink. `/usr/local/bin` is a
+  // generic POSIX fallback for hand-installed copies. We deliberately do
+  // NOT include a macOS-only entry (e.g. /opt/homebrew/bin/claude): the
+  // PATH patch below already prepends the macOS Homebrew prefix to
+  // `augmentedPath`, so a `claude` binary in either Homebrew location is
+  // visible to the spawned child without us probing each one here.
   const candidates = [
     path.join(homedir(), ".local", "bin", "claude"),
-    "/opt/homebrew/bin/claude",
     "/usr/local/bin/claude",
   ];
   for (const c of candidates) {
@@ -1269,19 +1275,24 @@ async function doRefresh() {
   // A bare cpSpawn("claude") therefore ENOENTs, the refresh reports "failed",
   // and the auto-refresh card never clears. Resolve the binary explicitly and
   // augment PATH so the child (and any tool it re-execs) can find it.
+  //
+  // PATH augmentation is platform-aware: `patchPath` prepends the macOS
+  // Homebrew prefix on darwin and leaves PATH byte-identical on every
+  // other platform. We still need to prepend `~/.local/bin` here because
+  // that's the resolver's concern, not the platform helper's — `patchPath`
+  // doesn't know about Claude-specific install locations.
   const claudeBin = resolveClaudeBin();
-  const augmentedPath = [
-    path.join(homedir(), ".local", "bin"),
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    process.env.PATH ?? "",
-  ]
-    .filter(Boolean)
-    .join(":");
+  const baseEnv = {
+    ...process.env,
+    PATH: [path.join(homedir(), ".local", "bin"), process.env.PATH ?? ""]
+      .filter(Boolean)
+      .join(path.delimiter),
+    TERM: "dumb",
+  };
   await new Promise((resolve) => {
     const proc = cpSpawn(claudeBin, ["-p", ".", "--model", "haiku"], {
       cwd: tmpdir(),
-      env: { ...process.env, TERM: "dumb", PATH: augmentedPath },
+      env: patchPath(baseEnv, process.platform),
       stdio: "ignore",
       timeout: 60_000,
     });

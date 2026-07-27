@@ -10,11 +10,14 @@
 //    reach the child process, and the only honest assertion is to look at
 //    the child's own stdout.
 //
-// 2. BET-327: the three pure helpers that the executor reads process.platform
-//    into ONCE and threads down — `patchPath`, `spawnErrorMessage`,
-//    `killTree`. Tests assert each platform branch without spawning a real
-//    child where unnecessary; `killTree` for `linux` uses a fake child to
+// 2. BET-327: the two pure helpers that the executor reads process.platform
+//    into ONCE and threads down — `spawnErrorMessage` and `killTree`.
+//    Tests assert each platform branch without spawning a real child
+//    where unnecessary; `killTree` for `linux` uses a fake child to
 //    capture the SIGTERM call without touching the real process tree.
+//    The third helper from BET-327, `patchPath`, was promoted to
+//    `src/shared/paths.mjs` in BET-339 (shared with the box server's
+//    Claude credential refresh) and now lives in `paths.test.ts`.
 //
 // 3. Compile-time surface: `CapCtx.exec` opts must include `env`, and
 //    supplying it must still pass through at runtime.
@@ -22,7 +25,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   makeExec,
-  patchPath,
   spawnErrorMessage,
   killTree,
   type CapCtx,
@@ -119,56 +121,6 @@ describe("capExecutor — makeExec env passthrough (BET-210)", () => {
       { env: { MANTA_INPUT_PROOF: "yes" } },
     );
     expect(r.stdout).toBe("yes");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// patchPath — pure, the executor's only PATH mutation. Three platforms.
-// ---------------------------------------------------------------------------
-
-describe("capExecutor — patchPath (BET-327)", () => {
-  it("prepends the Homebrew paths on darwin and preserves the original tail", () => {
-    const out = patchPath({ PATH: "/usr/bin:/bin", FOO: "bar" }, "darwin");
-    expect(out.FOO).toBe("bar");
-    // Exact prefix shape matters: Homebrew first, then /usr/local/bin,
-    // then the caller's PATH tail. Don't accept any reordering.
-    expect(out.PATH).toBe("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
-  });
-
-  it("uses the platform delimiter on darwin so the resulting PATH is well-formed everywhere", () => {
-    // path.delimiter is ":" on POSIX and ";" on Windows — the helper must
-    // use it, not hardcode ":", otherwise the resulting string would be
-    // parseable only on POSIX. On the Linux CI runner we can only verify
-    // the POSIX shape here; the Windows delimiter is exercised by the
-    // typecheck (the function's body uses `delimiter`, not ":").
-    const out = patchPath({ PATH: "" }, "darwin");
-    // Both prefix entries must appear, in the canonical order, separated
-    // by the platform delimiter. On Linux the delimiter is ":".
-    expect(out.PATH ?? "").toBe("/opt/homebrew/bin:/usr/local/bin:");
-  });
-
-  it("returns the env byte-identical on linux and does not introduce a new PATH key", () => {
-    const env = { PATH: "/usr/bin:/bin", FOO: "bar" };
-    const out = patchPath(env, "linux");
-    expect(out).toEqual(env);
-    // And the input object must not be mutated.
-    expect(env).toEqual({ PATH: "/usr/bin:/bin", FOO: "bar" });
-  });
-
-  it("returns the env byte-identical on win32 and does not introduce a new PATH key", () => {
-    // Windows surfaces PATH as `Path` (case-insensitive); if patchPath
-    // wrote a new `PATH` key next to an existing `Path` key the child
-    // would see an env with BOTH and behaviour would be undefined. So
-    // on win32 we touch NOTHING.
-    const env = { Path: "C:\\Windows\\System32", FOO: "bar" } as unknown as NodeJS.ProcessEnv;
-    const out = patchPath(env, "win32");
-    expect(out).toEqual(env);
-  });
-
-  it("does not crash and does not invent an empty PATH key when baseEnv has no PATH off macOS", () => {
-    const out = patchPath({ FOO: "bar" }, "linux");
-    expect(out.FOO).toBe("bar");
-    expect(out.PATH).toBeUndefined();
   });
 });
 

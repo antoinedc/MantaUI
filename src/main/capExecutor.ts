@@ -46,6 +46,7 @@ import {
   wrapScript,
   type PluginManifest,
 } from "../shared/pluginManifest.mjs";
+import { patchPath } from "../shared/paths.mjs";
 import {
   existsSync,
   mkdirSync,
@@ -54,7 +55,7 @@ import {
   watch as fsWatch,
 } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import type { AppConfig } from "../shared/types.js";
 
 // ---------------------------------------------------------------------------
@@ -80,14 +81,6 @@ const PLUGIN_WRITE = "plugin.write";
 // throws — a read-only filesystem would still allow the executor to come up
 // and just report no plugins).
 const PLUGINS_DIR = join(homedir(), ".manta", "plugins");
-
-// macOS-only PATH prefix. GUI-launched Electron apps don't inherit the
-// user's shell PATH on macOS, so Homebrew binaries (npm/npx/pod) are
-// invisible to spawn() — prepend them so the spawn succeeds. On every
-// other platform we leave PATH alone: Windows uses `;` as the separator
-// (so a POSIX prefix corrupts PATH), and on Linux the prefix paths
-// usually don't exist anyway.
-const DARWIN_PATH_PREFIX = ["/opt/homebrew/bin", "/usr/local/bin"];
 
 // ---------------------------------------------------------------------------
 // Per-job context (mirrors v1's CapCtx shape so the runner reads the same)
@@ -813,35 +806,6 @@ async function postDone(
 // ---------------------------------------------------------------------------
 // ctx.exec — argv spawn with PATH patch + capture + abort handling.
 // ---------------------------------------------------------------------------
-
-/**
- * Returns a copy of `baseEnv` with the platform's PATH prefix applied.
- *
- * On macOS the prefix is `[/opt/homebrew/bin, /usr/local/bin]`, joined
- * with `path.delimiter` and prepended to the existing PATH — GUI-launched
- * Electron apps don't inherit the login shell's PATH, so Homebrew
- * binaries are invisible to spawn() without this. On every other platform
- * the function leaves PATH byte-identical: Windows uses `;` as the
- * separator so a POSIX prefix would corrupt PATH for every child, and
- * even on Linux the prefix paths usually don't exist. The case matters
- * on Windows too — Node usually surfaces the variable as `Path`, and
- * writing a `PATH` key next to an existing `Path` key produces an env
- * with both, which one the child sees is undefined.
- */
-export function patchPath(
-  baseEnv: NodeJS.ProcessEnv,
-  platform: NodeJS.Platform,
-): NodeJS.ProcessEnv {
-  if (platform !== "darwin") {
-    // No PATH write at all off macOS — see comment above.
-    return { ...baseEnv };
-  }
-  const existing = baseEnv.PATH ?? process.env.PATH ?? "";
-  return {
-    ...baseEnv,
-    PATH: [...DARWIN_PATH_PREFIX, existing].join(delimiter),
-  };
-}
 
 /**
  * Builds the human-readable error string used at the two spawn failure
