@@ -143,10 +143,11 @@ footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28
         <div class="dbody">
           <p>Make sure Manta is installed and running, then click this link:</p>
           <p><a class="deeplink" id="deeplink" href="#">…</a></p>
-          <p style="margin-top:12px">Or enter these on Manta's Connect screen:</p>
+          <p style="margin-top:12px">Or enter these on Manta's Connect screen (Server URL goes under "Advanced"):</p>
           <div class="kv">
             <div><div class="k">Box ID</div><div class="v" id="kv-box">—</div></div>
             <div><div class="k">Pairing code</div><div class="v" id="kv-code">—</div></div>
+            <div><div class="k">Server URL</div><div class="v" id="kv-server">—</div></div>
           </div>
         </div>
       </details>
@@ -204,6 +205,7 @@ function go(n){
   document.getElementById("confirm-short").textContent=short;
   document.getElementById("kv-box").textContent=box||"—";
   document.getElementById("kv-code").textContent=code||"—";
+  document.getElementById("kv-server").textContent=location.origin;
   if(box&&code){
     var link="manta://pair?box="+box+"&code="+code;
     document.getElementById("openlink").setAttribute("href",link);
