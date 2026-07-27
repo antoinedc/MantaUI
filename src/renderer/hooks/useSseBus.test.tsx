@@ -86,6 +86,75 @@ describe("useSseBus via ChatPanel", () => {
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 
+  it("renders the auth-error banner with [Reconnect] on Claude credential failure (BET-316)", async () => {
+    // Pin the active model's providerID to "anthropic" so authErrorAdvice
+    // has an authoritative provider to attribute to. The localStorage-backed
+    // per-session override would otherwise win — clear it so the store's
+    // defaultModel is what useSseBus sees.
+    localStorage.clear();
+    resetStore({
+      defaultModel: { providerID: "anthropic", modelID: "claude-opus-4-7" },
+    });
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    // Emit the real upstream Claude credential-error payload (BET-280):
+    // opencode wraps the plugin's throw as ApiError with this message.
+    await emitAndFlush(bus, h, {
+      type: "session.error",
+      properties: {
+        sessionID: "ses_test",
+        error: {
+          name: "ApiError",
+          data: {
+            message:
+              "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
+          },
+        },
+      },
+    });
+
+    // Banner shows the new copy and renders the [Reconnect] button. Note we
+    // check `contains` rather than exact equality because the banner sits
+    // alongside the textarea (and other UI) in the rendered DOM.
+    const text = h.text();
+    expect(text).toContain("Claude needs to be reconnected.");
+    expect(text).toContain("Reconnect");
+  });
+
+  it("falls through to the raw-message path when providerID is unknown (BET-316)", async () => {
+    // No active model — useSseBus receives providerID: null. authErrorAdvice
+    // returns null and the existing switch/default branch surfaces the raw
+    // message verbatim (preceded by the "API error:" prefix the switch
+    // applies to ApiError). No [Reconnect] button should appear.
+    localStorage.clear();
+    resetStore({ defaultModel: null });
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await emitAndFlush(bus, h, {
+      type: "session.error",
+      properties: {
+        sessionID: "ses_test",
+        error: {
+          name: "ApiError",
+          data: {
+            message:
+              "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
+          },
+        },
+      },
+    });
+
+    const text = h.text();
+    // Raw upstream text lands in the banner — the user sees the actionable
+    // "Run `claude`" message rather than a misattributed provider label.
+    // (The existing switch prefixes ApiError with "API error: "; the rest of
+    // the message is intact.)
+    expect(text).toContain("Run `claude`");
+    expect(text).not.toContain("Reconnect");
+  });
+
   it("routes child-session events to scheduleChildRefetch when expanded", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();

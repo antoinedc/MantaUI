@@ -71,6 +71,8 @@ import {
   isPollExpired,
   describeSubscriptionStatus,
   terminalShortcut,
+  authErrorAdvice,
+  AUTH_PROVIDER_LABELS,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -3265,5 +3267,136 @@ describe("terminalShortcut", () => {
         ),
       ).toBeNull();
     });
+  });
+});
+// ===== authErrorAdvice (BET-316) =====
+//
+// Maps a `session.error` event to the reconnect-banner copy. The contract
+// is: non-null only when the error is recognisably a credential failure on
+// one of the three providers in the subscription registry. Anything else
+// (context overflow, network blip, generic 5xx) returns null and falls
+// through to the existing raw-message path — a wrong attribution is worse
+// than no attribution.
+//
+// Tested cases (one assertion per scenario in the issue):
+//   - Claude credential error  → anthropic + "Claude"
+//   - Codex auth failure       → openai + "Codex"
+//   - Kimi auth failure        → kimi-for-coding + "Kimi"
+//   - Unrelated errors         → null (at least two negative cases — the
+//                                 false-positive cases are the ones that
+//                                 matter for this helper)
+
+describe("authErrorAdvice", () => {
+  it("attributes a Claude credential error to anthropic with label 'Claude'", () => {
+    // The real upstream message — verified against the deployed opencode
+    // build (see BET-280 / claudeAuth.mjs comment). `ApiError` is the typed
+    // name opencode normalizes to today; `ProviderAuthError` was the legacy
+    // name pre-BET-280. Both paths must work.
+    expect(
+      authErrorAdvice(
+        "ApiError",
+        "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
+        "anthropic",
+      ),
+    ).toEqual({ providerID: "anthropic", label: "Claude" });
+    expect(
+      authErrorAdvice("ProviderAuthError", undefined, "anthropic"),
+    ).toEqual({ providerID: "anthropic", label: "Claude" });
+  });
+
+  it("attributes a Codex auth failure to openai with label 'Codex'", () => {
+    expect(
+      authErrorAdvice("ApiError", "Authentication failed: invalid token", "openai"),
+    ).toEqual({ providerID: "openai", label: "Codex" });
+    expect(
+      authErrorAdvice("ApiError", "Unauthorized: API key not valid", "openai"),
+    ).toEqual({ providerID: "openai", label: "Codex" });
+  });
+
+  it("attributes a Kimi auth failure to kimi-for-coding with label 'Kimi'", () => {
+    expect(
+      authErrorAdvice(
+        "ApiError",
+        "API key expired — please renew in the console",
+        "kimi-for-coding",
+      ),
+    ).toEqual({ providerID: "kimi-for-coding", label: "Kimi" });
+    expect(
+      authErrorAdvice("ApiError", "token expired", "kimi-for-coding"),
+    ).toEqual({ providerID: "kimi-for-coding", label: "Kimi" });
+  });
+
+  it("returns null for an unrelated context-overflow error", () => {
+    // ContextOverflowError / MessageOutputLengthError etc. are handled by
+    // the existing switch in useSseBus.ts; authErrorAdvice must not steal
+    // them. Both an explicit name + safe message and a default name +
+    // credential-shaped message that lacks a known provider are tested.
+    expect(
+      authErrorAdvice("ContextOverflowError", "context window exceeded", "anthropic"),
+    ).toBeNull();
+    // Same credentials-shaped message but for an unrelated provider — must
+    // NOT promote to a banner; the user is on something the registry does
+    // not own, so we cannot reliably attribute.
+    expect(
+      authErrorAdvice("ApiError", "credentials expired", "some-other-provider"),
+    ).toBeNull();
+  });
+
+  it("returns null for an unrelated tool / network error", () => {
+    expect(
+      authErrorAdvice("ApiError", "rate limit exceeded", "anthropic"),
+    ).toBeNull();
+    expect(authErrorAdvice("ApiError", "internal server error", "openai")).toBeNull();
+    // Network-style errors carry no auth tokens and are not ApiError.
+    expect(authErrorAdvice(undefined, "Network request failed", "anthropic")).toBeNull();
+    expect(authErrorAdvice(undefined, "ECONNRESET", "anthropic")).toBeNull();
+  });
+
+  it("returns null when providerID is missing (no active model known)", () => {
+    // Without a providerID we cannot attribute with confidence — fall
+    // through to the raw-message path. Both null and undefined must be
+    // tolerated (defensive against malformed event payloads).
+    expect(
+      authErrorAdvice("ApiError", "credentials expired", null),
+    ).toBeNull();
+    expect(
+      authErrorAdvice("ApiError", "credentials expired", undefined),
+    ).toBeNull();
+    expect(authErrorAdvice("ApiError", "credentials expired", "")).toBeNull();
+  });
+
+  it("returns null for non-string / nullish inputs (defensive parsing)", () => {
+    // Defensive: a malformed event from upstream must not crash the UI.
+    // Cast through `unknown` so the type system allows the bad inputs.
+    expect(
+      authErrorAdvice(
+        null as unknown as string,
+        null as unknown as string,
+        null as unknown as string,
+      ),
+    ).toBeNull();
+    expect(
+      authErrorAdvice(
+        undefined as unknown as string,
+        "credentials expired",
+        "anthropic",
+      ),
+    ).toBeNull();
+  });
+
+  it("exposes a tight label registry (exactly the three providers)", () => {
+    // Guards against a silent drift between this renderer-side table and
+    // SUBSCRIPTION_PROVIDERS in src/server/subscriptionProviders.mjs. Both
+    // files must agree on the three providers (anthropic / openai /
+    // kimi-for-coding). Adding a fourth here is intentional and rare;
+    // adding an unknown key (a typo) is the regression this catches.
+    expect(Object.keys(AUTH_PROVIDER_LABELS).sort()).toEqual([
+      "anthropic",
+      "kimi-for-coding",
+      "openai",
+    ]);
+    expect(AUTH_PROVIDER_LABELS.anthropic).toBe("Claude");
+    expect(AUTH_PROVIDER_LABELS.openai).toBe("Codex");
+    expect(AUTH_PROVIDER_LABELS["kimi-for-coding"]).toBe("Kimi");
   });
 });

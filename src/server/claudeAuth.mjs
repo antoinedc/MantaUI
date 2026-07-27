@@ -87,6 +87,15 @@ export function classifyRefreshOutcome({ credsBefore, credsAfter, now }) {
  * True when an `error`-shaped payload (typically `evt.properties.error` from a
  * `session.error` event) reports an expired/unavailable Claude credential.
  *
+ * INTENTIONALLY CLAUDE-ONLY — DO NOT GENERALIZE. Codex (`openai`) and Kimi
+ * (`kimi-for-coding`) tokens are minted and refreshed by opencode itself, so
+ * their failures surface through opencode's own error path (BET-316). Only
+ * Claude's tokens come from an external CLI (`claude`) and need the
+ * server-side auto-refresh this predicate gates. "Helpfully" extending this
+ * predicate to cover Codex/Kimi would mean manta spawns `claude` to fix
+ * problems the plugin cannot solve — every revert on this file has been
+ * exactly that generalization, so this comment is here to break the cycle.
+ *
  * Returns true if EITHER:
  *   1. `err.name === "ProviderAuthError"` — kept for forward compatibility if
  *      opencode ever starts emitting that name again (it currently does NOT —

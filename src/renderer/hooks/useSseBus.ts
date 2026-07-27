@@ -64,6 +64,7 @@ import {
   collectChildSessionIds,
   applyQuestionEvent,
   hydrateQuestion,
+  authErrorAdvice,
   type PendingDelta,
 } from "../chatUtils";
 import type { TokenUsage } from "../chatShared";
@@ -74,6 +75,20 @@ export type SseBus = {
   setRunning: React.Dispatch<React.SetStateAction<boolean>>;
   sendError: string | null;
   setSendError: React.Dispatch<React.SetStateAction<string | null>>;
+  // Provider label when the current sendError is an auth-failure banner
+  // (BET-316). When non-null, ChatPanel renders a single [Reconnect] button
+  // alongside the dismiss ×; clicking it dispatches `manta-open-subscriptions`
+  // and clears BOTH sendError and authReconnect. Always null for any
+  // non-auth error (context overflow, network blip, etc.) so the banner
+  // is unchanged.
+  authReconnect: string | null;
+  // Dispatch the `manta-open-subscriptions` window CustomEvent and clear
+  // the banner. Mirrors the `manta-open-schedules` / `-secrets` / `-webhooks`
+  // bridge precedent from useSessionResources.ts (BET-63) — the listener
+  // that reacts to the event lives on whichever component owns the
+  // Subscriptions card (BET-314). Until that ships the dispatch is a no-op
+  // visible to the user.
+  openAuthReconnect: () => void;
   messageQueue: string[];
   setMessageQueue: React.Dispatch<React.SetStateAction<string[]>>;
   permissions: PermissionRequest[];
@@ -133,6 +148,14 @@ export function useSseBus(params: {
   scheduleFlush: () => void;
   oldestPendingAt: React.MutableRefObject<number | null>;
   FLUSH_MAX_AGE_MS: number;
+  // The session's active model's providerID (e.g. "anthropic", "openai",
+  // "kimi-for-coding"). Drives the auth-error banner copy (BET-316) — when
+  // a session.error is recognisably a credential failure on one of the
+  // three subscription providers, the banner shows "<Label> needs to be
+  // reconnected." with a single [Reconnect] button. Null when no model is
+  // active (initial load, no default chosen, etc.) — the banner then falls
+  // through to the raw-message path.
+  providerID: string | null;
   submit: () => void;
   submitRef: React.RefObject<() => void>;
   setInput: (v: string) => void;
@@ -152,6 +175,7 @@ export function useSseBus(params: {
     flushPendingDeltas,
     scheduleFlush,
     oldestPendingAt,
+    providerID,
     submit,
     submitRef,
     setInput,
@@ -159,6 +183,11 @@ export function useSseBus(params: {
 
   const [running, setRunning] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  // Provider label when `sendError` is an auth-failure banner (BET-316). When
+  // non-null, ChatPanel renders a single [Reconnect] button that dispatches
+  // `manta-open-subscriptions`. Tied 1:1 with `sendError`: cleared together
+  // by openAuthReconnect and by the dismiss × button in ChatPanel.
+  const [authReconnect, setAuthReconnect] = useState<string | null>(null);
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
   const messageQueueRef = useRef<string[]>([]);
   useEffect(() => {
@@ -237,6 +266,20 @@ export function useSseBus(params: {
       .catch(() => { /* non-fatal */ })
       .then(() => rejectAllPendingQuestions());
   }, [sessionId, rejectAllPendingQuestions]);
+
+  // Open the Settings → AI → Subscriptions card from outside ChatPanel's
+  // component tree (BET-316). Follows the `manta-open-schedules` /
+  // `-secrets` / `-webhooks` precedent from useSessionResources.ts: the
+  // listener lives on whichever component owns the Subscriptions card
+  // (BET-314). Until that ships the dispatch is a benign no-op. Clearing
+  // the banner pair here keeps state consistent with the dismiss × button.
+  const openAuthReconnect = useCallback(() => {
+    window.dispatchEvent(
+      new CustomEvent("manta-open-subscriptions", { detail: { sessionId } }),
+    );
+    setSendError(null);
+    setAuthReconnect(null);
+  }, [sessionId]);
 
   const refreshPermissions = useCallback(async () => {
     try {
@@ -448,12 +491,21 @@ export function useSseBus(params: {
           setRunning(false);
           return;
         }
-        // A Claude credential error (provider-name or message-shape) now
-        // falls through to `default:` and surfaces the raw message — which is
-        // already the correct, actionable text (e.g. "Run `claude` to refresh
-        // them."). Server-side recovery runs in parallel via the opencode
-        // event pump; if it succeeds the user can re-send ↑+Enter and the
-        // next turn will work.
+        // Auth-error banner (BET-316). For one of the three subscription
+        // providers, replace the raw message (which often ends with "Run
+        // `claude` to refresh them." for Claude, or arrives with no context
+        // for Codex/Kimi) with a single reconnect nudge. Server-side recovery
+        // (maybeRecoverCredentials + the 10-min pre-expiry poller) keeps
+        // running in parallel for Claude specifically — this banner is
+        // additive, not a replacement. For everything else the existing
+        // switch/default branch handles the message and we fall through.
+        const auth = authErrorAdvice(err?.name, raw, providerID);
+        if (auth) {
+          setSendError(`${auth.label} needs to be reconnected.`);
+          setAuthReconnect(auth.label);
+          setRunning(false);
+          return;
+        }
         let msg: string;
         switch (err?.name) {
           case "ContextOverflowError":
@@ -472,6 +524,7 @@ export function useSseBus(params: {
             msg = raw;
         }
         setSendError(msg);
+        setAuthReconnect(null);
         setRunning(false);
       }
 
@@ -664,6 +717,8 @@ export function useSseBus(params: {
     setRunning,
     sendError,
     setSendError,
+    authReconnect,
+    openAuthReconnect,
     messageQueue,
     setMessageQueue,
     permissions,
