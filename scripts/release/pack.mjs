@@ -51,7 +51,7 @@
 // tests, dev configs, .git — none of it runs on the box.
 
 import { mkdir, rm, writeFile, cp, readFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -253,6 +253,31 @@ async function runPrebuiltDeps(stageDir) {
   // stronger than any file check — it proves the exact binary the box will run
   // can load this binding (right ABI, executable bit intact, prebuild or
   // compile, we don't care which).
+  // Repair node-pty's prebuilt `spawn-helper` before probing.
+  //
+  // On Unix, node-pty EXECS a small `spawn-helper` binary that sits next to the
+  // binding it loaded. npm does not preserve the executable bit for files that
+  // aren't declared as package `bin` entries, node-pty ships this one inside
+  // `prebuilds/`, and nothing in its install scripts chmods it — so as
+  // installed, the darwin prebuild is mode 0644 and every attempt to open a
+  // terminal on the box would fail with EACCES. (Linux is unaffected: it has no
+  // prebuild, so node-gyp compiles the helper and marks it executable.)
+  // We restore the bit here, on the tree that is about to be tarred; the probe
+  // below then re-asserts it, so if upstream ever changes this we fail loudly
+  // instead of shipping a box with no terminals.
+  for (const dir of ["build/Release", "build/Debug", "prebuilds"]) {
+    const base = join(stageDir, "node_modules", "node-pty", dir);
+    if (!existsSync(base)) continue;
+    const found = spawnSync("sh", ["-c", `find ${base} -name spawn-helper -type f`], {
+      encoding: "utf8",
+    });
+    for (const helper of (found.stdout ?? "").split("\n").filter(Boolean)) {
+      if (statSync(helper).mode & 0o111) continue;
+      chmodSync(helper, 0o755);
+      log(`restored the executable bit on ${helper.slice(stageDir.length + 1)} (npm drops it)`);
+    }
+  }
+
   const probe = spawnSync(
     join(stageDir, "runtime", "node", "bin", "node"),
     [
