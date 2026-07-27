@@ -25,8 +25,10 @@
 //     src/, scripts/, mobile/www/,   the allowlisted box surface
 //     package.json, package-lock.json
 //     node_modules/                  prebuilt production deps (--omit=dev),
-//                                    with node-pty's binding already compiled
-//                                    against the vendored node's ABI
+//                                    with node-pty's native binding already in
+//                                    place — COMPILED against the vendored
+//                                    node's ABI on Linux, or taken from the
+//                                    prebuilds node-pty ships for darwin/win32
 //     docs/opencode-tools/           manta-native opencode tool bundle
 //     RELEASE.json                   { name, version, built_at, includes,
 //                                      node, arch }
@@ -234,26 +236,55 @@ async function runPrebuiltDeps(stageDir) {
   });
   if (r.status !== 0) die("vendored npm ci failed");
 
-  // Sanity: node-pty's compiled .node file must be present after `npm ci`.
-  // Without it, the server's PTY surfaces throw at runtime on the box.
-  const releaseDir = join(stageDir, "node_modules", "node-pty", "build", "Release");
-  if (!existsSync(releaseDir)) {
+  // Sanity: the box must be able to LOAD node-pty's native binding, because
+  // every terminal surface on the box dies without it.
+  //
+  // This deliberately checks loadability, not the presence of a particular
+  // file. node-pty does not always compile: since 1.1.0 it SHIPS prebuilt
+  // bindings for darwin and win32 in `prebuilds/<platform>-<arch>/`, and its
+  // install script (`node scripts/prebuild.js || node-gyp rebuild`) skips the
+  // compile entirely when a prebuild for the current platform exists — its
+  // post-install step then deletes `build/Release` outright. Linux has no
+  // prebuild, so it still compiles. The old check asserted `build/Release`
+  // existed and so was structurally unsatisfiable on macOS: the darwin-arm64
+  // release leg failed on a perfectly good tree while the Linux legs passed.
+  //
+  // Requiring the module through the VENDORED node is both simpler and
+  // stronger than any file check — it proves the exact binary the box will run
+  // can load this binding (right ABI, executable bit intact, prebuild or
+  // compile, we don't care which).
+  const probe = spawnSync(
+    join(stageDir, "runtime", "node", "bin", "node"),
+    [
+      "-e",
+      "const pty = require('node-pty');" +
+        "if (typeof pty.spawn !== 'function') throw new Error('node-pty loaded without spawn()');" +
+        // node-pty resolves its binding from build/Release, build/Debug, then
+        // prebuilds/<platform>-<arch> — report which one won, so a release log
+        // says whether this arch shipped a compile or a prebuild.
+        "const fs = require('node:fs'), path = require('node:path');" +
+        "const root = path.dirname(require.resolve('node-pty/package.json'));" +
+        "const dirs = ['build/Release', 'build/Debug', `prebuilds/${process.platform}-${process.arch}`];" +
+        "const found = dirs.find((d) => fs.existsSync(path.join(root, d, 'pty.node')));" +
+        // On Unix node-pty forks a `spawn-helper` binary that sits next to
+        // pty.node. It is useless without its executable bit, and a lost mode
+        // bit would only surface as "the box opens no terminals" long after
+        // release — so check it here, where the tree is still on disk.
+        "const helper = found && path.join(root, found, 'spawn-helper');" +
+        "if (helper && fs.existsSync(helper) && !(fs.statSync(helper).mode & 0o111)) {" +
+        "  throw new Error(`spawn-helper is not executable: ${helper}`);" +
+        "}" +
+        "console.log(found ?? 'unknown location');",
+    ],
+    { cwd: stageDir, encoding: "utf8" },
+  );
+  if (probe.status !== 0) {
     die(
-      `node-pty build/Release missing — expected ${releaseDir} (npm ci did not run node-pty's install script?)`,
+      `node-pty does not load under the vendored Node — the box would have no terminals.\n` +
+        `${(probe.stderr || probe.stdout || "").trim()}`,
     );
   }
-  // Glob for at least one *.node file. existsSync on the dir is necessary
-  // but not sufficient (the dir can exist with no binary). We use a tiny
-  // shell glob rather than pulling in glob/fast-glob just for this check.
-  const gl = spawnSync("sh", ["-c", `ls -1 ${releaseDir}/*.node 2>/dev/null | head -n1`], {
-    encoding: "utf8",
-  });
-  if (gl.status !== 0 || !gl.stdout || gl.stdout.trim() === "") {
-    die(
-      `node-pty compiled .node missing under ${releaseDir} — node-pty's install script did not produce a native binding`,
-    );
-  }
-  ok(`production deps installed; node-pty binding present (${gl.stdout.trim()}).`);
+  ok(`production deps installed; node-pty loads (binding from ${probe.stdout.trim()}).`);
 }
 
 async function main() {
