@@ -326,6 +326,55 @@ workflows:
             xcrun stapler validate "$dmg" || { echo "  ⚠ stapler validate failed for $dmg"; FAIL=1; }
           done
           [ "$FAIL" = "0" ] || { echo "DMG verification failed."; exit 1; }
+      - name: Restamp the update feed to match the stapled DMG
+        script: |
+          # MUST run after stapling and before publish.
+          #
+          # electron-builder wrote latest-mac.yml (the electron-updater feed)
+          # back in the build step, recording the DMG's sha512 + size AT THAT
+          # MOMENT. The "Sign + notarize + staple" step above then rewrote the
+          # DMG in place — stapling embeds the notarization ticket, growing it
+          # ~11KB and changing its hash. The feed was never regenerated, so it
+          # described a pre-staple file that exists nowhere.
+          #
+          # electron-updater downloads the published DMG, verifies it against
+          # the feed's sha512, mismatches, and refuses to install. Auto-update
+          # was dead in EVERY notarized release (0.0.13 and 0.0.14 both shipped
+          # this way) — and silently, because src/main/autoUpdate.ts only
+          # console.warn()s on updater errors, so nobody saw a failure. Users
+          # simply never received an update.
+          set -e
+          node scripts/release/restamp-update-feed.mjs dist/desktop/latest-mac.yml
+      - name: Verify the feed validates against the artifacts
+        script: |
+          # Belt-and-braces: recompute each artifact's digest and diff it
+          # against the feed we are about to publish. This is the check that
+          # would have caught the broken feed at build time instead of leaving
+          # it to be discovered from a user's "it never updates" report.
+          set -e
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const crypto = require("node:crypto");
+            const YAML = require("yaml");
+            const feedPath = "dist/desktop/latest-mac.yml";
+            const feed = YAML.parse(fs.readFileSync(feedPath, "utf-8"));
+            let bad = 0;
+            for (const f of feed.files ?? []) {
+              const p = path.join(path.dirname(feedPath), f.url);
+              const buf = fs.readFileSync(p);
+              const sha = crypto.createHash("sha512").update(buf).digest("base64");
+              const ok = sha === f.sha512 && buf.length === f.size;
+              console.log((ok ? "  OK  " : "  BAD ") + f.url);
+              if (!ok) {
+                console.log("       feed:   sha512=" + f.sha512 + " size=" + f.size);
+                console.log("       actual: sha512=" + sha + " size=" + buf.length);
+                bad++;
+              }
+            }
+            if (bad) { console.error("Update feed does not match the artifacts — electron-updater would reject these."); process.exit(1); }
+            console.log("Update feed matches every artifact.");
+          '
       - name: Publish to mantaui.com (optional)
         script: |
           # Skips cleanly if no deploy key is configured, so the workflow still

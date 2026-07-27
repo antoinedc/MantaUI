@@ -43,6 +43,8 @@ export function App() {
     configSnapshot,
     updatePrompt,
     setUpdatePrompt,
+    updateError,
+    setUpdateError,
     serverUpdatePrompt,
     setServerUpdatePrompt,
     connectionState,
@@ -302,6 +304,20 @@ export function App() {
         version: info.version,
         releaseName: info.releaseName,
       });
+    });
+    return off;
+  }, []);
+
+  // Terminal auto-update failure. Main only forwards failures the user has to
+  // ACT on (integrity / permission — see shared/updateError.mjs); transient
+  // network errors never arrive here, so this banner can't nag about a flaky
+  // connection. Before this existed every updater error went to console.warn
+  // and nowhere else, which is how a broken release feed silently stopped all
+  // desktop updates for two versions.
+  useEffect(() => {
+    if (!window.api.onAutoUpdateError) return;
+    const off = window.api.onAutoUpdateError((info) => {
+      useStore.getState().setUpdateError(info);
     });
     return off;
   }, []);
@@ -679,6 +695,23 @@ export function App() {
               void window.api.autoUpdateInstall();
             }}
             onDismiss={() => setUpdatePrompt(null)}
+          />
+        )}
+        {/* Terminal auto-update failure. An update exists but this install
+            cannot take it (checksum/signature mismatch, or the bundle can't
+            be replaced), so the only way forward is a manual download —
+            hence the action opens the downloads page rather than retrying an
+            install that is guaranteed to fail again. Dismissible: the user
+            may not want to deal with it right now, and it re-arms on the
+            next failed check. */}
+        {!showOnboarding && updateError && (
+          <UpdateBar
+            text={updateError.message}
+            actionLabel="Download"
+            onAction={() => {
+              void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg");
+            }}
+            onDismiss={() => setUpdateError(null)}
           />
         )}
         {/* Server-update prompt (BET-225 stage 3 Part A): shown when the

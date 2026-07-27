@@ -308,3 +308,63 @@ describe("onDesktopNotify", () => {
     unsub2();
   });
 });
+
+// ---------------------------------------------------------------------------
+// auto-update delegation — the stubs used to swallow the whole updater UX
+// ---------------------------------------------------------------------------
+
+describe("httpApi auto-update delegation", () => {
+  function withPreload(preload: unknown): void {
+    vi.stubGlobal("window", {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      __mantaPreload: preload,
+    });
+  }
+
+  it("REGRESSION: forwards onAutoUpdateDownloaded to the preload instead of no-op'ing", () => {
+    // These entries were hardcoded `() => () => {}` and commented "desktop-
+    // only; no-op in http/mobile mode". Desktop has been permanently in http
+    // mode since the SSH transport was removed, so window.api IS httpApi on
+    // every paired desktop — main downloaded updates and fired autoUpdate:*
+    // IPC at a stub. The "Restart to update" banner could never appear.
+    const off = vi.fn();
+    const onAutoUpdateDownloaded = vi.fn(() => off);
+    withPreload({ onAutoUpdateDownloaded });
+
+    const cb = vi.fn();
+    const result = httpApi.onAutoUpdateDownloaded(cb);
+
+    expect(onAutoUpdateDownloaded).toHaveBeenCalledWith(cb);
+    expect(result).toBe(off);
+  });
+
+  it("forwards onAutoUpdateError to the preload", () => {
+    const off = vi.fn();
+    const onAutoUpdateError = vi.fn(() => off);
+    withPreload({ onAutoUpdateError });
+
+    const cb = vi.fn();
+    expect(httpApi.onAutoUpdateError(cb)).toBe(off);
+    expect(onAutoUpdateError).toHaveBeenCalledWith(cb);
+  });
+
+  it("REGRESSION: autoUpdateInstall actually reaches the preload (it used to resolve and do nothing)", async () => {
+    const autoUpdateInstall = vi.fn(async () => {});
+    withPreload({ autoUpdateInstall });
+
+    await httpApi.autoUpdateInstall();
+    expect(autoUpdateInstall).toHaveBeenCalled();
+  });
+
+  it("stays a safe no-op on mobile/web where there is no preload", async () => {
+    withPreload(undefined);
+
+    // Must not throw — mobile has no updater at all.
+    await httpApi.autoUpdateInstall();
+    await httpApi.autoUpdateDownload();
+    const off = httpApi.onAutoUpdateError(vi.fn());
+    expect(typeof off).toBe("function");
+    off();
+  });
+});

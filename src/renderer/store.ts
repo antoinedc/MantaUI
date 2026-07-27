@@ -195,6 +195,16 @@ type State = {
   // updateDownloaded event). Guarded — the mobile httpApi shim's
   // onAutoUpdate* are no-ops, so this is desktop-only.
   updatePrompt: { version: string; releaseName?: string } | null;
+  // A TERMINAL auto-update failure (integrity / permission). Set from main's
+  // autoUpdate:error IPC, which only fires for failures the user must act on
+  // — transient network errors are filtered server-side of the bridge.
+  //
+  // This exists because updater errors were previously swallowed into a
+  // console.warn. When the published update feed's checksum stopped matching
+  // the published binary, every launch failed verification in silence and the
+  // app simply never updated — across two releases, diagnosed only when a
+  // shipped fix was reported as missing.
+  updateError: { message: string; raw: string } | null;
   // Single global server-update prompt (BET-225 stage 3). Set when the box's
   // server-update poller (src/server/serverUpdate.mjs) publishes a
   // `serverUpdateAvailable` bus event after polling its version manifest.
@@ -306,6 +316,7 @@ type State = {
   setScreenshotToast: (t: ScreenshotToast | null) => void;
   setAgentFileToast: (t: AgentFileReady | null) => void;
   setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
+  setUpdateError: (p: { message: string; raw: string } | null) => void;
   setServerUpdatePrompt: (
     p: { version: string; notesUrl?: string | null } | null,
   ) => void;
@@ -354,6 +365,7 @@ export const useStore = create<State>((set, get) => ({
   screenshotToast: null,
   agentFileToast: null,
   updatePrompt: null,
+  updateError: null,
   serverUpdatePrompt: null,
   connectionState: { state: "idle" },
   backgroundSyncing: false,
@@ -516,6 +528,7 @@ export const useStore = create<State>((set, get) => ({
   setScreenshotToast: (t) => set({ screenshotToast: t }),
   setAgentFileToast: (t) => set({ agentFileToast: t }),
   setUpdatePrompt: (p) => set({ updatePrompt: p }),
+  setUpdateError: (p) => set({ updateError: p }),
   setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
   setConnectionState: (s) => set({ connectionState: s }),
 
