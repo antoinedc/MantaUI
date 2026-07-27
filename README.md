@@ -1,341 +1,259 @@
 <img src="docs/brand/manta-logo.png" alt="Manta" width="72" />
 
-# Manta UI
+# Manta
 
-Drive `claude` / [opencode](https://opencode.ai) coding sessions running on
-your own Linux box, from a desktop app or your phone — terminal and native
-chat, over plain HTTPS. The box stays a stock tmux server; closing Manta
-leaves your work running, reopening re-attaches.
+Drive [Claude Code](https://docs.claude.com/en/docs/claude-code) and
+[opencode](https://opencode.ai) running on your own Linux box or Mac.
+Real tmux, real terminal, native chat panel, and a remote iPhone app or
+any browser. Self-hosted, open source, MIT licensed.
 
-## AI-assisted setup
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platforms: Linux · macOS · iOS · Web](https://img.shields.io/badge/Platforms-Linux%20·%20macOS%20·%20iOS%20·%20Web-lightgrey.svg)](#install)
+[![Built with Electron](https://img.shields.io/badge/Electron-Desktop-9feaf9.svg)](https://www.electronjs.org)
+[![Docs](https://img.shields.io/badge/Docs-AGENTS.md-blueviolet.svg)](AGENTS.md)
 
-Setting up with an AI agent (claude code, opencode, cursor, …)? Paste this
-into an agent that can reach the box:
+![Hero screenshot: desktop sidebar with three projects, live chat panel mid-turn](docs/brand/manta-lockup.png)
+
+## Install
+
+Paste this into an agent that can reach the box (Claude Code, opencode,
+Cursor, …):
 
 ```
-Set up a Linux box as a Manta UI box server.
+Set up a Linux box as a Manta box server.
 Fetch https://mantaui.com/llms-install.md and follow it exactly.
 Ask me its interview questions before running anything.
 ```
 
-Then install the desktop app from [mantaui.com](https://mantaui.com), enter
-the pairing code, and get to work.
-
-## How it works
-
-```
- Desktop app (Electron)         Phone (native iPhone app, or any browser)
-         │                              │
-         └──────────── HTTPS ───────────┘
-                        │
-         ┌──────────────┴────────────────┐
-         │ https://<box_id>.boxes.mantaui.com   │   ← the box serves its
-         │ (Caddy fronts the box's loopback     │      own public hostname
-         │  127.0.0.1:8787, no relay)           │      via DNS + LE cert
-         └──────────────┬────────────────┘
-                        │
-                YOUR LINUX BOX
-      manta-server (:8787, loopback)  ── owns tmux, files, config,
-        ├── tmux ── your sessions        schedules, secrets, webhooks, push
-        └── opencode-serve (:4096) ───── chat mode + AI tools
-                       │
-                       └── HTTPS POST ──▶ gateway.mantaui.com
-                                              (hosted push gateway —
-                                               signs Apple JWT and
-                                               delivers APNs)
-```
-
-- **The server IS the box.** Everything — sessions, transcripts, uploads,
-  schedules, secrets — lives on the Linux box in `~/.manta*`. The desktop and
-  phone are thin clients over the same `/rpc` + `/events` (SSE) HTTP surface;
-  the desktop only adds OS bridges (clipboard, screenshot, file peek).
-- **Auth**: every data route requires `Authorization: Bearer <box_token>`.
-  Devices obtain it once via a 6-digit, one-time, 5-minute pairing code
-  (minted loopback-only on the box: `curl -s 127.0.0.1:8787/auth/pair`).
-  Box identity persists in `~/.manta/auth.json` — never regenerate it.
-- **Two window types** per tmux window: a raw **terminal** (xterm.js attached
-  over a WebSocket PTY) or a **chat panel** (opencode session; recognized by
-  the `@manta-session-id` tmux user-option). They coexist freely.
-- **Connectivity**: direct HTTPS is the only mode. The installer writes
-  `<box_id>.boxes.mantaui.com` into the DNS zone, provisions a Let's
-  Encrypt cert through Caddy on the box, and registers the box with the
-  hosted push gateway (`gateway.mantaui.com`) — which is the ONLY thing
-  still operated by us (APNs structurally needs our Apple key, which
-  cannot live on customer boxes). Native APNs delivery goes
-  box → gateway → APNs. Web Push (VAPID, for browser installs) stays box-local.
-
-## Quick start (human version)
-
-**On your Linux box** (needs `tmux`; chat mode also needs a working claude
-login; needs outbound HTTPS to `gateway.mantaui.com:443` and inbound TCP
-80+443 for the installer's Caddy + Let's Encrypt):
+The agent runs the installer and prints the 6-digit pairing code.
+Or run it yourself:
 
 ```bash
 curl -fsSL https://mantaui.com/install.sh | bash
 ```
 
-Prints a pairing code. Re-running upgrades in place and preserves identity.
+The installer downloads a self-contained tarball (vendored Node
+runtime, prebuilt native bindings), writes systemd --user units
+(Linux) or launchd LaunchAgents (macOS Apple Silicon), registers with
+the push gateway, provisions a Let's Encrypt cert on
+`<box_id>.boxes.mantaui.com`, and prints the 6-digit pairing code.
+Linux needs `tmux` and `git` plus inbound TCP 80 + 443 open; macOS
+boxes skip Caddy and Let's Encrypt and reach the tailnet or loopback.
 
-**On your Mac (Apple Silicon)** — also supported as a box OS. The installer
-auto-detects macOS, runs without sudo (no Caddy / Let's Encrypt), installs
-two launchd LaunchAgents (`com.mantaui.{server,opencode}`) under
-`~/Library/LaunchAgents/`, and serves `127.0.0.1:8787` + (if Tailscale is
-running) the tailnet URL. There is no public `<box_id>.boxes.mantaui.com`
-on macOS — reach the box from off-network via Tailscale. The Mac must be
-logged in (LaunchAgents load at GUI login); Intel Macs are not supported
-as a box — install the desktop app on those instead. Same
-`curl … | bash` invocation, same idempotency, same pairing-code output.
-
-**On your Mac**: download the app from [mantaui.com](https://mantaui.com)
-(or run from source: `npm install && npm run dev`), enter the pairing code in
-onboarding, pick providers, create your first project (a tmux session).
-
-**On your phone**: open `https://<box_id>.boxes.mantaui.com`, add to home
-screen, pair with a fresh code. Native push (APNs) lands via the gateway for
-permissions/questions/errors/done.
-
-## Components & where they run
-
-| Component | Where | What |
-|---|---|---|
-| `manta-server` (`src/server/`) | your box, `127.0.0.1:8787`, systemd --user | THE server: tmux CRUD, PTY WS, opencode proxy, config, schedules, secrets, webhooks, serve-page, Web Push, APNs fanout via gateway, auth |
-| `opencode-serve` | your box, `127.0.0.1:4096`, systemd --user | chat-mode backend (opencode + claude auth plugin) |
-| Caddy | your box, systemd | TLS termination + reverse proxy on `<box_id>.boxes.mantaui.com` → 127.0.0.1:8787 |
-| desktop app (`src/main`, `src/preload`, `src/renderer`) | your Mac | thin client + OS bridges; pairing flow |
-| mobile client (`mobile/www`, built from `src/renderer`) | served by manta-server | Native iPhone app, or any browser (same React code as desktop) |
-| `manta-gateway` (`src/gateway/`) | our infra, `gateway.mantaui.com` | hosted push fanout (APNs JWT + send) + DNS automation for `<box_id>.boxes.mantaui.com` |
-| marketing + releases (`website/`, `scripts/install.sh`) | our infra, `mantaui.com` | static site, `install.sh`, release tarballs, desktop binaries |
-
-### State on the box
-
-- `~/.manta/` — identity (`auth.json`), `config.json`, schedules, secrets
-  store, webhooks, VAPID keys, served pages
-- `~/.manta-uploads/<session>/<batch>/` — attachments (hourly auto-clean)
-- `~/.manta-outbox/` — agent→you file handoff (one-shot mailbox)
-- `~/.manta-secrets/` — materialized secret files (0600), used by reference
-- `~/.config/opencode/` — opencode config, the manta AI tools, agent guidance
-- `~/.tmux.conf.pre-manta` — backup if you opted into the tmux config setup
-
-### Ports (all loopback on the box)
-
-| Port | Service |
-|---|---|
-| 8787 | manta-server (HTTP + WS + SSE) |
-| 4096 | opencode-serve |
-| 20080 | serve-page file server (behind `*.pages.<domain>` vhost) |
-| 20081 | (gateway only — not on customer boxes) |
-
-## Installer reference
-
-The installer downloads a self-contained tarball that ships a vendored Node
-runtime + prebuilt production `node_modules` (node-pty's native binding
-already compiled). The box only needs `curl`, `tar`, `sha256sum`, `tmux`,
-and `git` — no Node preinstall, no compilers, no `sudo`, no package-manager
-calls. (Every launch-gate E2E failure previously came from the installer
-silently trying to `apt install nodejs` and friends; v2 removes that
-seam entirely.)
-
-What the installer does: fetch a key=value manifest over HTTPS → read
-`file_linux_x64` + `sha256_linux_x64` from it → download the tarball →
-sha256-verify → extract → atomic swap into `~/manta` → install + configure
-Caddy → register the box with the push gateway → write systemd units
-pointing at the vendored node → start → poll DNS until
-`<box_id>.boxes.mantaui.com` resolves → print a pairing code.
-
-Overrides (env):
-
-| Var | Default | Purpose |
-|-----|---------|---------|
-| `MANTA_TARBALL_URL` | (built from manifest) | full tarball URL — local testing / mirror (skips manifest fetch + sha256 check, with a warn) |
-| `MANTA_RELEASE_HOST` | `https://mantaui.com` | host for the manifest + tarball |
-| `MANTA_HOME` | `~/manta` | where the code is unpacked |
-| `MANTA_VERSION` | `latest` | manifest version to fetch (e.g. `0.0.1`) |
-| `MANTA_MOBILE_PORT` | `8787` | server port |
-| `MANTA_GATEWAY_BASE` | `https://gateway.mantaui.com` | push gateway base (override ONLY for tests / dev boxes) |
-
-Manage: `systemctl --user {status,restart} manta-server`, logs
-`journalctl --user -u manta-server -f`. Fresh pairing code: `npm run pair`
-from `~/manta` (each new code supersedes the last).
-
-### Manual install (no tarball)
+To install from git:
 
 ```bash
 git clone git@github.com:antoinedc/MantaUI.git ~/manta
 cd ~/manta && npm install && npm run build:mobile
-npm run mobile     # server on 0.0.0.0:8787 (MANTA_MOBILE_HOST/PORT override)
+npm run mobile     # server on 0.0.0.0:8787
 npm run pair       # mint a pairing code
 ```
 
-Systemd: copy `scripts/systemd/manta-server.service`, substitute the
-`@@MANTA_HOME@@` / `@@NODE_BIN@@` / `@@MANTA_PORT@@` placeholders into
-`~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl
---user enable --now manta-server` and `loginctl enable-linger $USER`.
+Download the desktop app from
+[mantaui.com](https://mantaui.com/downloads/Manta-latest.dmg) (macOS
+arm64 + x64, Developer ID signed but not notarized; right-click in
+Finder and choose **Open** to bypass Gatekeeper the first time).
+Linux: `Manta-latest.AppImage`. Open the app, paste the pairing code,
+pick providers, create your first project.
 
-## Desktop development
+For the phone: native iPhone app, or any browser, same React code as
+the desktop. Open `https://<box_id>.boxes.mantaui.com`, add to home
+screen, pair with a fresh code. Native push (APNs) lands via the
+hosted gateway.
 
-Pre-built installers (from the latest release):
+## Features
 
-- macOS (arm64 + x64, Developer ID–signed but not notarized): <https://mantaui.com/downloads/Manta-latest.dmg>
-- Linux (x64 AppImage): <https://mantaui.com/downloads/Manta-latest.AppImage>
+- **The agent keeps running without you.** Real tmux on your box.
+  Close every client; the session, scrollback, and work continue.
+- **The phone is the same app.** Full transcript, live tool output,
+  permission cards, voice, file upload.
+- **The installer decides how you reach the box.** Probes
+  `tailscale status`; if Tailscale is up it uses the tailnet and
+  skips Caddy, public DNS, and Let's Encrypt. Otherwise it provisions
+  a per-box hostname on `<box_id>.boxes.mantaui.com` with a Let's
+  Encrypt cert.
+- **The agent can act between turns.** Schedules itself, gets woken
+  by webhooks, sends notifications, references secrets, and messages
+  sibling sessions.
 
-The macOS build is signed with a Developer ID certificate but not notarized,
-so the first launch is blocked by Gatekeeper. Right-click the app in Finder
-and choose **Open** to bypass it (or run
-`xattr -dr com.apple.quarantine "/Applications/Manta UI.app"` after install).
+### Sessions and terminal
 
-Run from source:
+- Persistent tmux sessions that survive every client disconnecting
+- A real terminal and a chat panel per tmux window, switchable
+- Git worktree per session, optional removal on close
+
+### Chat and review
+
+- Permission and question cards the agent waits on
+- Live command output, inline diffs, per-turn context bar with cache
+  breakdown
+- Inline subagent rendering in the transcript
+- Model picker with per-session persistence and a global default
+
+### Phone app and notifications
+
+- Auto-detected ingress (tailnet or Caddy plus Let's Encrypt)
+- A native iPhone app, and any browser everywhere else, both full
+  clients
+- Push notifications with cross-device routing and 90-second
+  desktop-first escalation
+
+### Agent-native tools
+
+- `schedule`, `webhook`, `notify`, `secrets`, `peers`, `serve-page`,
+  installed from `docs/opencode-tools/`. The agent calls them like any
+  other opencode tool.
+
+### Files and voice
+
+- Drag-drop upload, screenshot auto-detect, agent-to-you outbox
+- Voice push-to-talk for dictation and command mode
+
+### Security
+
+- Every request authenticated with a 128-bit `box_token` bearer
+  secret, paired via a 6-digit, one-time, 5-minute code
+- Secrets-by-reference: values never enter the transcript
+- No telemetry; the box only dials out for APNs
+
+## How it works
+
+```
+ Desktop app (Electron)         Phone (native iPhone app, or any browser)
+          │                              │
+          └──────────── HTTPS ───────────┘
+                         │
+          ┌──────────────┴────────────────┐
+          │ https://<box_id>.boxes.mantaui.com   │   the box serves its
+          │ Caddy fronts the box's loopback      │   own public hostname
+          │ 127.0.0.1:8787, no relay             │   via DNS + LE cert
+          └──────────────┬──────────────────────┘
+                         │
+                 YOUR LINUX BOX (or Mac)
+       manta-server (:8787)  owns tmux, files, config,
+         ├── tmux               your sessions
+         └── opencode-serve (:4096) chat mode + agent tools
+                         │
+                         └── HTTPS POST ──▶ gateway.mantaui.com
+                                              hosted push gateway,
+                                              signs Apple JWT, delivers
+                                              APNs (Web Push box-local)
+```
+
+**The server is the box.** Sessions, transcripts, uploads, schedules,
+and secrets all live on the Linux box or Mac in `~/.manta*`. The
+desktop and phone are thin clients over `/rpc` plus `/events` (SSE);
+the desktop only adds OS bridges (clipboard, screenshot, file peek).
+
+**Auth.** Every data route requires `Authorization: Bearer
+<box_token>`. Devices obtain it once via a 6-digit, one-time,
+5-minute pairing code minted loopback-only on the box
+(`curl -s 127.0.0.1:8787/auth/pair`). Box identity persists in
+`~/.manta/auth.json`; never regenerate it.
+
+**Two window types** per tmux window: a raw **terminal** (xterm.js
+attached over a WebSocket PTY) or a **chat panel** (opencode session).
+They coexist freely.
+
+## Technical details
+
+Transport: `/rpc` (JSON-over-HTTPS) for requests, `/events`
+(Server-Sent Events) for streaming, WebSocket for terminal PTYs. No
+long-poll, no relay hop.
+
+State on the box: `~/.manta/` (identity, config, schedules, secrets,
+webhooks, VAPID keys, served pages); `~/.manta-uploads/<session>/<batch>/`
+(attachments, hourly auto-clean); `~/.manta-outbox/` (agent-to-you
+file handoffs); `~/.manta-secrets/` (materialized secret files at 0600,
+used by reference); `~/.config/opencode/` (opencode config and the
+manta agent tools).
+
+Ports (all loopback on the box): 8787 manta-server; 4096
+opencode-serve; 20080 serve-page (behind `*.pages.<domain>` vhost);
+20081 hosted push gateway (not on customer boxes).
+
+Components: `manta-server` (`src/server/`) runs at `127.0.0.1:8787`
+and owns tmux CRUD, PTY WebSocket, opencode proxy, auth, schedules,
+secrets, webhooks, serve-page, Web Push, APNs fanout via gateway.
+`opencode-serve` runs at `127.0.0.1:4096` as the chat backend. Caddy
+terminates TLS and reverse-proxies
+`<box_id>.boxes.mantaui.com` to `127.0.0.1:8787`. The desktop app
+(`src/main`, `src/preload`, `src/renderer`) is a thin client plus OS
+bridges. The mobile client (`mobile/www`) is a native iPhone app or
+any browser, same React code as desktop. `manta-gateway`
+(`src/gateway/`) runs on our infra for hosted push fanout and DNS
+automation.
+
+Installer: downloads a self-contained tarball that ships a vendored
+Node runtime plus prebuilt production `node_modules`. The box only
+needs `curl`, `tar`, `sha256sum`, `tmux`, and `git`; no Node
+preinstall, no compilers, no package-manager calls. Override
+`MANTA_TARBALL_URL` for local testing or a mirror (skips the manifest
+fetch and sha256 check with a warning). Manage with
+`systemctl --user {status,restart} manta-server`; logs at
+`journalctl --user -u manta-server -f`. Mint a fresh pairing code with
+`npm run pair` from `~/manta`; each new code supersedes the last.
+
+## AI tools on the box
+
+Chat sessions get manta-native opencode tools from
+`docs/opencode-tools/`:
+
+- **`schedule`** cron'd prompts into the same session.
+- **`serve-page`** publish an HTML page to a public URL.
+- **`peers`** see and message sibling agent sessions in the workspace.
+- **`notify`** desktop and mobile notifications with cross-device
+  routing.
+- **`secrets`** reference credentials by name; values never enter the
+  transcript.
+- **`webhook`** external systems wake the session by POST.
+
+Install or update: copy to `~/.config/opencode/tools/` (real copies,
+not symlinks) and restart `opencode-serve`.
+
+## Development
 
 ```bash
 npm install
 npm run typecheck
-npm test              # vitest (renderer) + node:test (server/gateway/scripts)
-npm run dev           # main-process/preload changes need full restart, not HMR
+npm test              # vitest (renderer) plus node:test (server, gateway, scripts)
+npm run dev           # main-process and preload changes need a full restart, not HMR
+npm run build:mobile  # rebuild mobile bundle after renderer changes
 ```
 
-Onboarding accepts a pair link (`manta://pair?box=<box_id>&code=<code>`)
-or the box's direct URL + code. The desktop app pastes the link from
-`scripts/install.sh` output and resolves it to
-`https://<box_id>.boxes.mantaui.com`.
+See `AGENTS.md` for the full architecture, IPC contract, and release
+pipeline.
 
-## Keybindings
+Keybindings: ⌘N new project · ⌘T new session · ⌘1..9 jump to nth ·
+⌥⌘↑/⌥⌘↓ prev/next · ⌘, settings · ⌘C/⌘V copy/paste in terminal ·
+⌘F search scrollback · ⌘K clear scrollback · Shift+Enter newline in
+claude TUI.
 
-| Key | Action |
-|-----|--------|
-| ⌘N | New project |
-| ⌘T | New session in active project |
-| ⌘1..9 | Jump to nth (project, window) in sidebar |
-| ⌥⌘↑ / ⌥⌘↓ | Step prev/next session |
-| ⌘, | Settings |
-| ⌘C / ⌘V | Copy / paste (terminal) |
-| ⌘F | Search scrollback (terminal) |
-| ⌘K | Clear scrollback (terminal) |
-| Shift+Enter | Newline in claude TUI (matches iTerm2) |
+## Comparison
 
-## AI tools on the box
+| | Manta | Orca | Conductor | Termius plus SSH |
+|---|---|---|---|---|
+| License | MIT | MIT | Proprietary | Proprietary |
+| Agents run on | Your VPS or Mac | Your Mac | Your Mac | Your VPS |
+| Mobile parity | Full client | Read-mostly | No phone app | SSH terminal |
+| Push routing | Desktop-first with escalation | None | None | None |
+| Permissions | Explicit cards | yolo pre-filled | No sandboxing | Manual |
+| Schedule, webhook, secrets, peers | Yes | No | No | No |
+| Self-hosted | Yes (on your box) | Tailscale required | No | N/A |
 
-Chat sessions get manta-native opencode tools (installed from
-`docs/opencode-tools/`): **schedule** (cron'd prompts into the same session),
-**serve-page** (publish an HTML page to a public URL), **peers**
-(see/message sibling agent sessions), **notify** (desktop/mobile
-notifications with smart routing), **secrets** (use credentials by reference —
-values never enter the transcript), **webhook** (external systems wake the
-session by POST). Install/update = copy to `~/.config/opencode/tools/`
-(real copies, not symlinks) + restart `opencode-serve`.
+Where Orca and Conductor genuinely beat Manta: 30-agent fan-out,
+embedded browser, Monaco editor, diff review, cross-platform desktop,
+Conductor's PR and merge tail. Full pages: [vs Orca](https://mantaui.com/vs-orca), [vs Conductor](https://mantaui.com/vs-conductor), [vs Termius plus SSH](https://mantaui.com/vs-ssh-tmux).
 
-## Releases (maintainer runbook)
+## Contributing
 
-In order. No decisions, no extra steps:
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-1. Bump `package.json` version.
-2. Build the box-server tarballs (one invocation per arch; requires BOTH
-   arches before `publish.sh` will proceed):
-   - `node scripts/release/pack.mjs --arch x64` — produces
-     `dist/manta-<version>-linux-x64.tar.gz` (the self-contained
-     tarball) AND `dist/manta-<version>-linux-x64.txt` (the per-arch
-     key=value manifest sidecar).
-   - `node scripts/release/pack.mjs --arch arm64` — same two outputs
-     with `linux-arm64` in the filename. Run on a native arm64 host
-     (the arm64 `node-pty` binding cannot be cross-compiled; the
-     `server-tarball-deploy.yml` workflow builds both arches in a
-     matrix on a `server-v<version>` tag — see `AGENTS.md` "Release &
-     CD pipeline").
-   - `node scripts/release/merge-manifest.mjs \
-       dist/manta-<version>-linux-x64.txt \
-       dist/manta-<version>-linux-arm64.txt \
-       --out dist/manta-<version>.txt` — assembles the combined
-     key=value manifest `install.sh` fetches at runtime.
-3. (Mac only, on a Mac) `bash scripts/release/desktop.sh` — produces
-   `dist/desktop/*.dmg` and the `latest-*.yml` updater feeds. Linux
-   builds run on any host.
-4. `bash scripts/release/publish.sh` — uploads both per-arch tarballs
-   + the combined manifest, restarts `manta-server` on prod,
-   HEAD-checks every URL, tags `v<version>`. Idempotent: re-publishing
-   the same version is a safe no-op. Override the target with
-   `MANTA_PROD_HOST=...` for staging.
+## Security
 
-Done.
-
-**Rollback:** the atomic pointer is `manta-latest.txt` (the combined
-manifest), not a tarball — `publish.sh` uploads every release's
-per-arch tarballs (`manta-<version>-linux-x64.tar.gz` +
-`manta-<version>-linux-arm64.tar.gz`) into `/var/www/mantaui/releases/`
-and never deletes the previous release's files, so reversing the
-manifest pointer is all that's needed to restore an older release on
-the box:
-
-```
-ssh $MANTA_PROD_HOST 'cd /var/www/mantaui/releases \\
-    && cp -f manta-<prev-version>.txt manta-latest.txt \\
-    && git -C /opt/manta checkout v<prev-version> \\
-    && systemctl restart manta-server'
-```
-
-If `manta-<prev-version>.txt` is missing on the prod box, recover it
-by re-merging the previous release's per-arch sidecars (still served
-under their versioned filenames) on any host that has
-`scripts/release/merge-manifest.mjs`:
-
-```
-scp $MANTA_PROD_HOST:/var/www/mantaui/releases/manta-<prev-version>-{linux-x64,linux-arm64}.txt .
-node scripts/release/merge-manifest.mjs \
-    manta-<prev-version>-linux-x64.txt \
-    manta-<prev-version>-linux-arm64.txt \
-    --out manta-<prev-version>.txt
-scp manta-<prev-version>.txt $MANTA_PROD_HOST:/var/www/mantaui/releases/
-```
-
-## Production infra (ours)
-
-- **mantaui.com** (Hetzner "manta" box): Caddy → static site + `/install.sh`
-  + `/releases/*`. Deploy = scp static files into `/var/www/mantaui/`.
-- **gateway.mantaui.com** (same Hetzner box, separate Caddy vhost →
-  loopback `:20081`): the hosted push gateway. `systemd manta-gateway`.
-  Deploy = `git -C /opt/manta pull` + `systemctl restart manta-gateway`;
-  static files re-read per request.
-- **app.mantaui.com**: the maintainer box's own tunnel (each user brings
-  their own host).
-- DNS on Cloudflare (apex/www/gateway DNS-only → Caddy does TLS; per-box
-  `<box_id>.boxes.mantaui.com` A records managed by the gateway via OVH's
-  API; wildcard `*.pages.<domain>` via DNS-01).
-
-### Prod box ops
-
-Ops scripts + configs are committed under `scripts/prod/` so the box is
-rebuildable from git. None of these touch application code; the install
-steps in each file's header are human-only (agent Hard Rule #4 forbids
-`ssh root@...`).
-
-- **Monitoring** (`scripts/prod/healthcheck.mjs`, scheduled every 10 min
-  on the dev box via `schedule_create`): off-site probes of `mantaui.com`,
-  `gateway.mantaui.com/healthz` (200 = healthy), `app.mantaui.com`, and
-  `/install.sh`, plus the per-arch tarball drift check: HEAD the tarballs
-  the live `manta-latest.txt` manifest declares (`file_linux_x64=`,
-  `file_linux_arm64=`) AND sha256-verify each against the manifest's
-  `sha256_linux_x64` / `sha256_linux_arm64`. Same loop publish.sh runs at
-  verify-time, pushed out off-site so it catches tarballs that drift from
-  the manifest AFTER publish (BET-171 F4 class, BET-264 two-arch). On
-  failure the opencode turn calls `notify` urgent:true naming the failing
-  URL.
-- **Log caps** (`scripts/prod/systemd-journald.conf`,
-  `scripts/prod/caddy-logrotate`): journald capped at 500M; Caddy access
-  logs (only if they exist on the box — check first) rotated daily with
-  14 generations.
-- **Patches** (`scripts/prod/50unattended-upgrades`): security origin
-  only; updates left to a human reboot window.
-- **Brute-force** (`scripts/prod/jail.local`): sshd jail only — no HTTP
-  jail (Caddy/the box server have their own rate limits).
-
-## Known gaps
-
-- macOS-first; Linux/Windows desktop builds untested.
-- `npm run dev` requires full restart for main-process/preload changes.
-
-## Reporting issues
-
-Include: macOS version + chip, remote OS + `tmux -V`, `opencode --version`,
-what you did vs. what happened, DevTools console errors. For chat-mode
-issues, `[opencode-bus]` lines in the main-process log are the most useful.
+See [SECURITY.md](SECURITY.md) for vulnerability reports.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE). Maintainers see [docs/releasing.md](docs/releasing.md) for release procedure, rollback, and prod box ops
+
