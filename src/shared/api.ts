@@ -13,7 +13,6 @@ import type {
   PermissionRequest,
   QuestionRequest,
   Project,
-  ProjectMeta,
   ScheduledJob,
   SecretMeta,
   SecretInput,
@@ -65,7 +64,6 @@ export interface Api {
   configGet(): Promise<AppConfig>;
   configUpdate(patch: Partial<AppConfig>): Promise<AppConfig>;
 
-  projectMetaUpsert(meta: ProjectMeta): Promise<AppConfig>;
   projectMetaDelete(tmuxSession: string): Promise<AppConfig>;
 
   // tmux operations on the remote

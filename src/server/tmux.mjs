@@ -1,21 +1,9 @@
 import { spawn as cpSpawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { homedir } from "node:os";
+import { expandTilde } from "../shared/paths.mjs";
 
 const FS = "\t";
-
-// Expand a leading ~ against this process's $HOME. The mobile server runs ON
-// the box, so a `~/projects/x` cwd is a real local path here. Without this a
-// literal mkdir("~/projects/x") would create a directory named "~" — the same
-// tilde-corruption chokepoint documented for opencode session.create. Mirrors
-// expandTilde in src/server/opencode.mjs (kept local — that one isn't exported).
-export function expandTildePath(p) {
-  if (typeof p !== "string" || !p.startsWith("~")) return p;
-  const home = homedir();
-  if (p === "~") return home;
-  if (p.startsWith("~/")) return home + "/" + p.slice(2);
-  return p; // ~user form — leave for the shell, not ours to guess
-}
 
 function spawnRun(cmd, args) {
   return new Promise((resolve, reject) => {
@@ -112,8 +100,9 @@ export function isMissingSessionError(err, sessionName) {
 // new-window paths stay aligned. `oc` is the src/server/opencode.mjs
 // namespace, injected by the rpc handler (kept as a param so tmux.mjs stays
 // dependency-injected + unit-testable). opencode is LOCAL to this box.
-// `oc.createSession` expands a leading `~` itself (see expandTilde in
-// opencode.mjs), so the tilde-corruption chokepoint is already covered there.
+// `cwd` is required to be an absolute directory — callers (newSession /
+// newWindow / newWindowGetIndex) flow through `resolveCwdOrThrow` first, which
+// expands `~` and rejects a missing dir. The BET-307 tmux-side chokepoint.
 async function maybeCreateChatSession(oc, chatMode, cwd, title) {
   if (!chatMode) return null;
   if (!oc || typeof oc.createSession !== "function") {
@@ -123,17 +112,50 @@ async function maybeCreateChatSession(oc, chatMode, cwd, title) {
   return sess.id;
 }
 
+// THE single place a caller-supplied cwd becomes a real directory handed to
+// tmux or opencode. tmux's `-c` does NOT expand `~`, and for a missing dir it
+// silently falls back to $HOME with exit code 0 — which is how every project
+// created with the UI's default `~` path ended up in the home directory.
+// Expand here and fail loudly instead of landing somewhere the user did not
+// ask for. Exported for unit tests in src/server/tmux.test.mjs.
+export function resolveCwdOrThrow(cwd) {
+  const dir = expandTilde(cwd ?? ".");
+  if (!existsSync(dir)) {
+    throw new Error(`working directory does not exist: ${dir}`);
+  }
+  return dir;
+}
+
+// Create a session and return the index of its initial window. `cwd` MUST be
+// an absolute path — callers run it through `resolveCwdOrThrow` first.
+async function newSessionGetIndex(name, cwd, windowName, chatMode) {
+  const { stdout } = await run("tmux", [
+    "new-session", "-d", "-s", name, "-c", cwd,
+    "-P", "-F", "#{window_index}",
+    ...(windowName ? ["-n", windowName] : []),
+    ...(chatMode ? ["sh", "-c", CHAT_HOLDER_CMD] : []),
+  ]);
+  const idx = Number(stdout.trim());
+  return Number.isFinite(idx) ? idx : 0;
+}
+
 // Create the tmux window with an explicit index-returning form. For chat-mode
 // we launch the holder pane (`sleep infinity`) instead of the default shell so
 // the pane is inert under manta's overlaid ChatPanel; for non-chat we launch the
-// default shell (no trailing command).
-async function newWindowGetIndexInternal(sessionName, windowName, cwd, chatMode) {
+// default shell (no trailing command). `cwd` MUST be an absolute path — callers
+// run it through `resolveCwdOrThrow` first.
+//
+// `chatMode` defaults to false (fork-session is the 3-arg caller from
+// src/server/rpc.mjs and never wanted chatMode). Exported so rpc handlers can
+// create windows directly (fork-session stamp path) without going through
+// newWindow + restampSessionId.
+export async function newWindowGetIndex(sessionName, windowName, cwd, chatMode = false) {
   const { stdout } = await run("tmux", [
     "new-window",
     "-t", sessionName,
     "-n", windowName,
     "-P", "-F", "#{window_index}",
-    ...(cwd ? ["-c", cwd] : []),
+    "-c", cwd,
     ...(chatMode ? ["sh", "-c", CHAT_HOLDER_CMD] : []),
   ]);
   const idx = Number(stdout.trim());
@@ -141,18 +163,6 @@ async function newWindowGetIndexInternal(sessionName, windowName, cwd, chatMode)
     throw new Error(`tmux new-window returned unexpected index: ${JSON.stringify(stdout.trim())}`);
   }
   return idx;
-}
-
-// Create a session and return the index of its initial window.
-async function newSessionGetIndex(name, cwd, windowName, chatMode) {
-  const { stdout } = await run("tmux", [
-    "new-session", "-d", "-s", name, "-c", cwd ?? ".",
-    "-P", "-F", "#{window_index}",
-    ...(windowName ? ["-n", windowName] : []),
-    ...(chatMode ? ["sh", "-c", CHAT_HOLDER_CMD] : []),
-  ]);
-  const idx = Number(stdout.trim());
-  return Number.isFinite(idx) ? idx : 0;
 }
 
 // @param {object} input
@@ -169,34 +179,40 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, o
   // must run FIRST. mkdir failure (e.g. permission denied) rejects here so the
   // caller renders an inline error. The Sidebar path leaves createDir unset.
   if (createDir && cwd) {
-    await mkdir(expandTildePath(cwd), { recursive: true });
+    await mkdir(expandTilde(cwd), { recursive: true });
   }
+  // THE tmux-side chokepoint: expand `~` and fail loudly for a missing dir
+  // BEFORE we create an opencode session (chatMode) or call tmux.
+  const dir = resolveCwdOrThrow(cwd);
   // Chat-mode: create the opencode session BEFORE the tmux window so we can
   // stamp @manta-session-id on it. Without the stamp the renderer sees
   // opencodeSessionId === null and renders Terminal instead of ChatPanel —
   // this was the BET-113 regression.
   const sid = await maybeCreateChatSession(
-    oc, chatMode, cwd ?? ".", `${name} / ${windowName ?? "default"}`,
+    oc, chatMode, dir, `${name} / ${windowName ?? "default"}`,
   );
-  const idx = await newSessionGetIndex(name, cwd, windowName, !!chatMode);
+  const idx = await newSessionGetIndex(name, dir, windowName, !!chatMode);
   await applySessionSurvivability(name);
   if (sid) await restampSessionId(name, idx, sid);
   return listProjects();
 }
 export async function newWindow({ sessionName, windowName, cwd, chatMode, worktreePath, oc }) {
+  // THE tmux-side chokepoint. Resolves before we opencode-create or tmux-call,
+  // so a bad cwd throws before we orphan an opencode session.
+  const dir = resolveCwdOrThrow(cwd);
   const sid = await maybeCreateChatSession(
-    oc, chatMode, cwd ?? ".", `${sessionName} / ${windowName}`,
+    oc, chatMode, dir, `${sessionName} / ${windowName}`,
   );
   let idx;
   try {
-    idx = await newWindowGetIndexInternal(sessionName, windowName, cwd, !!chatMode);
+    idx = await newWindowGetIndex(sessionName, windowName, dir, !!chatMode);
   } catch (err) {
     // Auto-heal: the project's tmux session vanished between calls
     // (server restart, manual kill, etc.). Recreate it with this window
     // as the first window. We do NOT recreate the opencode session — `sid`
     // is already resolved and reusable as the stamp.
     if (!isMissingSessionError(err, sessionName)) throw err;
-    idx = await newSessionGetIndex(sessionName, cwd, windowName, !!chatMode);
+    idx = await newSessionGetIndex(sessionName, dir, windowName, !!chatMode);
     await applySessionSurvivability(sessionName);
   }
   if (sid) await restampSessionId(sessionName, idx, sid);
@@ -206,31 +222,6 @@ export async function newWindow({ sessionName, windowName, cwd, chatMode, worktr
   // never collide.
   if (worktreePath) await stampWorktreePath(sessionName, idx, worktreePath);
   return listProjects();
-}
-
-/**
- * Create a new tmux window and return its index (integer).
- * Used by fork/clear composites which need to stamp @manta-session-id on the
- * new window immediately after creation.
- *
- * @param {string} sessionName
- * @param {string} windowName
- * @param {string} [cwd]
- * @returns {Promise<number>} index of the newly created window
- */
-export async function newWindowGetIndex(sessionName, windowName, cwd) {
-  const { stdout } = await run("tmux", [
-    "new-window",
-    "-t", sessionName,
-    "-n", windowName,
-    "-P", "-F", "#{window_index}",
-    ...(cwd ? ["-c", cwd] : []),
-  ]);
-  const idx = Number(stdout.trim());
-  if (!Number.isFinite(idx)) {
-    throw new Error(`tmux new-window returned unexpected index: ${JSON.stringify(stdout.trim())}`);
-  }
-  return idx;
 }
 
 export async function renameSession({ oldName, newName }) {

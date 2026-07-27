@@ -822,15 +822,31 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
     metadata forever. Expansion is therefore mandatory at the **single
     creation chokepoint**, NOT in `resolveProjectCwd`: `createSession`
     (`src/server/opencode.mjs`) expands a leading `~` itself via `expandTilde`
-    against the server process's own `$HOME` — the renderer (desktop + mobile)
-    reaches it the same way over `/rpc`. `forkSession` is unaffected — it
-    inherits the parent's directory from opencode and passes no cwd. The
-    new-window chat-holder path (`tmux.mjs:maybeCreateChatSession`) also
-    expands before `createSession`; that earlier expansion is now redundant but
-    harmless. Regression tests:
+    (from `src/shared/paths.mjs`) against the server process's own `$HOME` —
+    the renderer (desktop + mobile) reaches it the same way over `/rpc`.
+    `forkSession` is unaffected — it inherits the parent's directory from
+    opencode and passes no cwd. Regression tests:
     `createSession expands a leading ~ …` in `src/server/opencode.test.mjs`
     (red/green verified). Do NOT "simplify" by moving expansion back into a
     caller — the chokepoint is what makes the corruption unreachable.
+  - **GOTCHA — tmux does NOT expand `~` either; it silently falls back to
+    `$HOME`.** `tmux new-window -c '~/foo'` and `tmux new-session -c '~/foo'`
+    BOTH accept the literal tilde but resolve it against the tmux server's
+    own cwd (typically `$HOME`) and exit code 0 — silently landing every
+    project created with the UI's default `~` cwd in the home directory.
+    This is the BET-307 tmux-side chokepoint: `tmux.mjs`'s
+    `resolveCwdOrThrow` is the single place a caller-supplied cwd becomes a
+    real directory handed to tmux or opencode. It expands `~` via the
+    shared `expandTilde` (now living in `src/shared/paths.mjs` — three
+    copies used to live in `tmux.mjs`, `opencode.mjs` and `pluginManifest.mjs`,
+    all deleted) and rejects a missing directory with a loud error before
+    any tmux call (and before any orphan opencode session is created in
+    chatMode). Applied at exactly three sites: `newSession`, `newWindow`,
+    and the exported `newWindowGetIndex` (which `rpc.mjs:363` calls
+    directly for fork-session). Regression test: `resolveCwdOrThrow` cases
+    in `src/server/tmux.test.mjs` + the `node -e` e2e in BET-307. Do NOT
+    "simplify" by passing the cwd through unchanged — the chokepoint is
+    what makes the silent `$HOME` fallback unreachable.
 - **Queued message drain — abort at the next step boundary, then submit on
   idle.** When the user submits while `running` is true, the text gets pushed
   to `messageQueue` and the input clears. MantaUI does NOT wait for the whole

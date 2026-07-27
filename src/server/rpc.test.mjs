@@ -16,7 +16,14 @@ test("dispatch throws a descriptive error for unknown channel", async () => {
 // Minimal stubs for buildHandlers — only the namespaces touched by the cwd
 // resolution tests need real behavior; everything else can be a no-op.
 function makeDeps(projects, liveProjects = []) {
-  const calls = { newWindow: [], newSession: [], newWindowGetIndex: [], createSession: [], forkSession: [] };
+  const calls = {
+    newWindow: [],
+    newSession: [],
+    newWindowGetIndex: [],
+    createSession: [],
+    forkSession: [],
+    projectMetaUpsert: [],
+  };
   return {
     calls,
     deps: {
@@ -24,8 +31,12 @@ function makeDeps(projects, liveProjects = []) {
         listProjects: async () => liveProjects,
         newWindow: async (i) => { calls.newWindow.push(i); return []; },
         newSession: async (i) => { calls.newSession.push(i); return []; },
-        newWindowGetIndex: async (sessionName, windowName, cwd) => {
-          calls.newWindowGetIndex.push({ sessionName, windowName, cwd });
+        newWindowGetIndex: async (sessionName, windowName, cwd, chatMode) => {
+          // BET-307: tmux.newWindowGetIndex now takes an optional 4th chatMode
+          // arg (default false). Mirror the production arity so callers and
+          // tests stay aligned. Old 3-arg call → chatMode is undefined →
+          // production default false; behaviour is byte-identical.
+          calls.newWindowGetIndex.push({ sessionName, windowName, cwd, chatMode });
           return 1;
         },
         restampSessionId: async () => {},
@@ -36,7 +47,18 @@ function makeDeps(projects, liveProjects = []) {
       },
       pty: {},
       bus: {},
-      local: { configGet: async () => ({ projects }) },
+      local: {
+        configGet: async () => ({ projects }),
+        // BET-307: server-side projectMetaUpsert fires from tmux:new-session
+        // — desktop + onboarding + mobile all go through one path now. This
+        // mock records the calls so the test below can assert the absolute
+        // defaultCwd was persisted.
+        projectMetaUpsert: async (meta) => {
+          calls.projectMetaUpsert.push(meta);
+          return { projects: [...projects.filter((p) => p.tmuxSession !== meta.tmuxSession), meta] };
+        },
+        projectMetaDelete: async () => ({ projects }),
+      },
       push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
     },
   };
@@ -246,4 +268,86 @@ test("auth:pair returns { ok:false, error } when authEngine.pair() throws", asyn
   const handlers = buildHandlers(deps);
   const result = await dispatch(handlers, "auth:pair", []);
   assert.deepEqual(result, { ok: false, error: "rate limited" });
+});
+
+// ---- BET-307: server-side projectMetaUpsert on tmux:new-session ----------
+//
+// The whole defect-D chain (desktop never records the project's folder;
+// mobile does it twice) collapsed to a single server-side write inside the
+// tmux:new-session handler. The renderer never has to remember to do it —
+// and the persisted path is the EXPANDED absolute cwd, never the raw
+// `~`-prefixed form the UI defaults to.
+
+test("tmux:new-session persists the EXPANDED absolute cwd via projectMetaUpsert", async () => {
+  const { deps, calls } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  await handlers["tmux:new-session"]({
+    name: "newproj",
+    cwd: "~/projects/newproj",
+    windowName: "default",
+    chatMode: true,
+  });
+  // Exactly one upsert, with the expanded absolute path.
+  assert.equal(calls.projectMetaUpsert.length, 1, "one projectMetaUpsert call");
+  const upserted = calls.projectMetaUpsert[0];
+  assert.equal(upserted.tmuxSession, "newproj");
+  assert.match(
+    upserted.defaultCwd,
+    /^\/home\/[^/]+\/projects\/newproj$/,
+    `expanded absolute cwd, got ${upserted.defaultCwd}`,
+  );
+  assert.ok(!upserted.defaultCwd.startsWith("~"), "no leading tilde in persisted cwd");
+});
+
+test("tmux:new-session passes the resolved cwd to tmux.newSession", async () => {
+  const { deps, calls } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  await handlers["tmux:new-session"]({
+    name: "newproj",
+    cwd: "~/projects/newproj",
+    windowName: "default",
+    chatMode: true,
+  });
+  // The handler resolves via resolveProjectCwd → falls through to the
+  // passed cwd (no stored meta, no live tmux yet) — passed verbatim to
+  // tmux.newSession. The tmux-side chokepoint (resolveCwdOrThrow) is
+  // responsible for expanding `~` and rejecting missing dirs from there.
+  const last = calls.newSession.at(-1);
+  assert.equal(last.cwd, "~/projects/newproj", "raw tilde forwarded to tmux layer");
+});
+
+test("tmux:new-session swallows projectMetaUpsert failures (best-effort)", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.projectMetaUpsert = async () => { throw new Error("disk full"); };
+  const handlers = buildHandlers(deps);
+  // Must NOT throw — the rpc handler wraps with `.catch(() => {})` so a
+  // config-write failure never fails project creation. Matches how the
+  // old mobile sheet did it.
+  const result = await handlers["tmux:new-session"]({
+    name: "newproj",
+    cwd: "/home/dev/projects/newproj",
+    windowName: "default",
+    chatMode: true,
+  });
+  assert.deepEqual(result, [], "tmux.newSession result returned (no throw)");
+});
+
+// BET-307: opencode:fork-session still works after the newWindowGetIndex
+// rename. The mock above now records a 4-arg call; assert it gets the
+// resolved absolute cwd (same as before).
+test("opencode:fork-session creates the new tmux window in the resolved defaultCwd", async () => {
+  const { deps, calls } = makeDeps([{ tmuxSession: "better-ui", defaultCwd: "/home/dev/projects/better-ui" }]);
+  const handlers = buildHandlers(deps);
+  await handlers["opencode:fork-session"]({
+    sessionId: "ses_old",
+    sessionName: "better-ui",
+    windowName: "fork-1",
+    cwd: "",
+  });
+  const call = calls.newWindowGetIndex.at(-1);
+  assert.equal(call.cwd, "/home/dev/projects/better-ui", "resolved cwd forwarded");
+  assert.equal(call.sessionName, "better-ui");
+  assert.equal(call.windowName, "fork-1");
+  // chatMode defaults to false (the new signature's optional 4th arg).
+  assert.equal(call.chatMode, undefined, "3-arg call leaves chatMode undefined → defaults to false in tmux.mjs");
 });

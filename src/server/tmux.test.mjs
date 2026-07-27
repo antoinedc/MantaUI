@@ -1,10 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   parseSessions,
   isMissingSessionError,
   newWindow,
   newSession,
+  newWindowGetIndex,
+  resolveCwdOrThrow,
   _setRun,
   CHAT_HOLDER_CMD,
 } from "./tmux.mjs";
@@ -132,20 +137,24 @@ test("isMissingSessionError returns false for non-Error inputs", () => {
 test("newWindow chatMode:true creates an opencode session AND stamps @manta-session-id", async () => {
   const cmds = installFakeTmux();
   const oc = fakeOc("ses_abc");
+  // BET-307: resolveCwdOrThrow rejects a missing dir — use a real tmp dir
+  // so the test is hermetic and runs in any cwd.
+  const cwd = await mkdtemp(join(tmpdir(), "tmux-nw-chat-"));
   try {
     await newWindow({
       sessionName: "better-ui",
       windowName: "chat",
-      cwd: "/home/dev/projects/better-ui",
+      cwd,
       chatMode: true,
       oc,
     });
   } finally {
     _setRun(null);
+    await rm(cwd, { recursive: true, force: true });
   }
   // (1) opencode session created in the window's cwd.
   assert.equal(oc.created.length, 1, "one opencode session created");
-  assert.equal(oc.created[0].directory, "/home/dev/projects/better-ui");
+  assert.equal(oc.created[0].directory, cwd);
   // (2) holder pane launched (sleep infinity) rather than the default shell.
   const newWin = cmds.find((c) => c.args.includes("new-window"));
   assert.ok(newWin, "new-window issued");
@@ -159,16 +168,18 @@ test("newWindow chatMode:true creates an opencode session AND stamps @manta-sess
 test("newWindow chatMode:false stays a plain window — no session, no stamp, no holder", async () => {
   const cmds = installFakeTmux();
   const oc = fakeOc();
+  const cwd = await mkdtemp(join(tmpdir(), "tmux-nw-plain-"));
   try {
     await newWindow({
       sessionName: "better-ui",
       windowName: "term",
-      cwd: "/home/dev/projects/better-ui",
+      cwd,
       chatMode: false,
       oc,
     });
   } finally {
     _setRun(null);
+    await rm(cwd, { recursive: true, force: true });
   }
   assert.equal(oc.created.length, 0, "no opencode session created for a plain window");
   assert.equal(findSetSid(cmds), undefined, "no @manta-session-id stamp for a plain window");
@@ -180,19 +191,21 @@ test("newWindow chatMode:false stays a plain window — no session, no stamp, no
 test("newSession chatMode:true creates an opencode session AND stamps @manta-session-id", async () => {
   const cmds = installFakeTmux();
   const oc = fakeOc("ses_sess1");
+  const cwd = await mkdtemp(join(tmpdir(), "tmux-ns-chat-"));
   try {
     await newSession({
       name: "newproj",
-      cwd: "/home/dev/projects/newproj",
+      cwd,
       windowName: "chat",
       chatMode: true,
       oc,
     });
   } finally {
     _setRun(null);
+    await rm(cwd, { recursive: true, force: true });
   }
   assert.equal(oc.created.length, 1, "one opencode session created");
-  assert.equal(oc.created[0].directory, "/home/dev/projects/newproj");
+  assert.equal(oc.created[0].directory, cwd);
   const newSess = cmds.find((c) => c.args.includes("new-session"));
   assert.ok(newSess, "new-session issued");
   assert.ok(newSess.args.includes(CHAT_HOLDER_CMD), "holder cmd passed to new-session");
@@ -204,16 +217,18 @@ test("newSession chatMode:true creates an opencode session AND stamps @manta-ses
 test("newSession chatMode:false stays a plain session — no session create, no stamp", async () => {
   const cmds = installFakeTmux();
   const oc = fakeOc();
+  const cwd = await mkdtemp(join(tmpdir(), "tmux-ns-plain-"));
   try {
     await newSession({
       name: "newproj",
-      cwd: "/home/dev/projects/newproj",
+      cwd,
       windowName: "main",
       chatMode: false,
       oc,
     });
   } finally {
     _setRun(null);
+    await rm(cwd, { recursive: true, force: true });
   }
   assert.equal(oc.created.length, 0, "no opencode session for a plain session");
   assert.equal(findSetSid(cmds), undefined, "no @manta-session-id stamp for a plain session");
@@ -226,6 +241,115 @@ test("newWindow chatMode:true throws when no opencode client is injected", async
       () => newWindow({ sessionName: "s", windowName: "chat", cwd: "/tmp", chatMode: true }),
       /chat mode requires an opencode client/,
     );
+  } finally {
+    _setRun(null);
+  }
+});
+
+// ---- BET-307: resolveCwdOrThrow — the tmux-side chokepoint ---------------
+//
+// tmux's `-c` does NOT expand `~` and silently falls back to $HOME for a
+// missing directory (exit code 0), which is how every project created with
+// the UI's default `~` cwd ended up in the home directory. resolveCwdOrThrow
+// is the single boundary that turns a caller-supplied cwd into a real
+// directory handed to tmux or opencode.
+
+test("resolveCwdOrThrow: '~' resolves to os.homedir()", () => {
+  const out = resolveCwdOrThrow("~");
+  assert.ok(out.length > 0, "expanded to a non-empty path");
+  // Resolve ~ via node so we can compare on platforms where homedir() differs
+  // from what we typed (e.g. macOS = /Users/dev, Linux = /home/dev).
+  assert.ok(out === process.env.HOME || out === join(process.env.HOME ?? "", ""),
+    "expands to process env HOME");
+});
+
+test("resolveCwdOrThrow: '~/<existing dir>' resolves under os.homedir()", async () => {
+  // Create a real subdir under whatever HOME is so the `~/sub` form expands
+  // to a path that actually exists. os.homedir() === process.env.HOME on every
+  // supported platform — that's the contract the function relies on.
+  const home = process.env.HOME;
+  assert.ok(home, "HOME is set in the test env");
+  const root = await mkdtemp(join(home, ".tmux-rcot-"));
+  try {
+    const out = resolveCwdOrThrow(join("~", root.slice(home.length + 1)));
+    assert.equal(out, root, "expanded `~/...` to the existing dir");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveCwdOrThrow: undefined resolves to '.' (current working dir)", () => {
+  const out = resolveCwdOrThrow(undefined);
+  assert.equal(out, ".", "returns the literal '.' which existsSync accepts as the current dir");
+});
+
+test("resolveCwdOrThrow: a non-existent directory throws with the EXPANDED path", () => {
+  assert.throws(
+    () => resolveCwdOrThrow("/home/dev/does-not-exist-and-never-was"),
+    (err) => {
+      assert.ok(err instanceof Error, "throws an Error");
+      assert.match(err.message, /working directory does not exist/);
+      // The error message must carry the *expanded* path (here it was
+      // already absolute so no tilde — but the assertion is the same).
+      assert.match(err.message, /\/home\/dev\/does-not-exist-and-never-was/);
+      return true;
+    },
+  );
+});
+
+test("resolveCwdOrThrow: a non-existent tilde-form path throws with the EXPANDED path", () => {
+  assert.throws(
+    () => resolveCwdOrThrow("~/does-not-exist-here"),
+    (err) => {
+      // Crucial: the message must NOT contain the literal `~/...` (the
+      // user-friendly form) — it must carry the real absolute path so
+      // the caller can see exactly what was missing.
+      assert.match(err.message, /working directory does not exist/);
+      assert.doesNotMatch(err.message, /^~|\s~/, "expanded away the tilde");
+      return true;
+    },
+  );
+});
+
+test("resolveCwdOrThrow: an absolute existing path passes through unchanged", async () => {
+  const tmp = await mkdtemp(join(tmpdir(), "tmux-rcot-abs-"));
+  try {
+    const out = resolveCwdOrThrow(tmp);
+    assert.equal(out, tmp, "absolute existing dir returned as-is");
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// BET-307: collapse confirmed — the exported newWindowGetIndex now also
+// accepts chatMode (default false). The 3-arg fork-session call from
+// src/server/rpc.mjs:363 still receives `chatMode = false`, byte-identical
+// to the previous (separate) implementation. The fake here tracks arity so
+// a future change that drops the 3-arg call would surface in the test.
+
+test("newWindowGetIndex (4-arg, chatMode:true) issues the holder pane", async () => {
+  const cmds = installFakeTmux();
+  try {
+    const idx = await newWindowGetIndex("s", "chat", "/tmp", true);
+    assert.equal(idx, 0, "fake new-window returns 0");
+    const newWin = cmds.find((c) => c.args.includes("new-window"));
+    assert.ok(newWin, "new-window issued");
+    assert.ok(newWin.args.includes(CHAT_HOLDER_CMD), "holder cmd passed when chatMode:true");
+    assert.ok(newWin.args.includes("/tmp"), "-c /tmp passed");
+  } finally {
+    _setRun(null);
+  }
+});
+
+test("newWindowGetIndex (3-arg, default chatMode) stays a plain window", async () => {
+  const cmds = installFakeTmux();
+  try {
+    const idx = await newWindowGetIndex("s", "term", "/tmp");
+    assert.equal(idx, 0);
+    const newWin = cmds.find((c) => c.args.includes("new-window"));
+    assert.ok(newWin, "new-window issued");
+    assert.ok(!newWin.args.includes(CHAT_HOLDER_CMD), "no holder cmd for default chatMode");
+    assert.ok(newWin.args.includes("/tmp"), "-c /tmp passed");
   } finally {
     _setRun(null);
   }

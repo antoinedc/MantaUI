@@ -4,6 +4,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
+import { expandTilde } from "../shared/paths.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
 import {
@@ -103,9 +104,6 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // preload: ipcRenderer.invoke(IPC.configUpdate, patch)  → args[0] = patch (Partial<AppConfig>)
     "config:update": (patch) => local.configUpdate(patch),
 
-    // preload: ipcRenderer.invoke(IPC.projectMetaUpsert, meta)  → args[0] = meta (ProjectMeta)
-    "project:meta:upsert": (meta) => local.projectMetaUpsert(meta),
-
     // preload: ipcRenderer.invoke(IPC.projectMetaDelete, tmuxSession)  → args[0] = tmuxSession (string)
     "project:meta:delete": (tmuxSession) => local.projectMetaDelete(tmuxSession),
 
@@ -198,8 +196,23 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // Resolve cwd first (createSession requires an absolute-ish dir; the tilde
     // is expanded inside oc.createSession). For new-session the project meta
     // doesn't exist yet, so resolveProjectCwd falls back to the passed cwd.
-    "tmux:new-session": async (i) =>
-      tmux.newSession({ ...i, cwd: await resolveProjectCwd(i.name, i.cwd), oc }),
+    // BET-307: persist the workspace's resolved absolute cwd server-side so
+    // future `tmux:new-window` / `opencode:clear-session` calls inherit it
+    // from config rather than reading it back off the (potentially drifted)
+    // live tmux pane. Best-effort (.catch) — a config-write failure never
+    // fails project creation. Absolute — a stored `~` path is what this
+    // issue is about.
+    "tmux:new-session": async (i) => {
+      const cwd = await resolveProjectCwd(i.name, i.cwd);
+      const projects = await tmux.newSession({ ...i, cwd, oc });
+      await local
+        .projectMetaUpsert({
+          tmuxSession: i.name,
+          defaultCwd: expandTilde(cwd),
+        })
+        .catch(() => {});
+      return projects;
+    },
     // Resolve cwd: prefer explicit cwd in input, then fall back to the
     // project's stored defaultCwd (set when the workspace was created).
     // Without this, new chat windows opened in a workspace silently inherit

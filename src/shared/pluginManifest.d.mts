@@ -70,5 +70,3 @@ export function validateSuppliedInputs(
 ): { errors: PluginManifestError[] };
 
 export function parseTimeout(s: string): number | { error: string };
-
-export function expandTilde(p: string): string;

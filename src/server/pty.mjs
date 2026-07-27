@@ -17,7 +17,7 @@
 // expects (via onPtyEvent / IPC.ptyEvent).
 
 import { spawn as ptySpawnNative } from "node-pty";
-import { expandTilde } from "./opencode.mjs";
+import { expandTilde } from "../shared/paths.mjs";
 import { findLauncher } from "./launcherRegistry.mjs";
 
 // Single-quote a token so it survives a `$SHELL -lc "<cmd>"` re-parse intact.

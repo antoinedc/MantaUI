@@ -12,6 +12,7 @@ import { homedir, tmpdir } from "node:os";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import { expandTilde } from "../shared/paths.mjs";
 import {
   CREDENTIALS_PATH,
   parseCredentials,
@@ -437,16 +438,9 @@ export function _onSessionDirectoryAdded(fn) {
 // opencode requires an ABSOLUTE directory: given `~/projects/x` it resolves
 // the tilde against its own server cwd ($HOME), persisting the corrupt
 // `/home/dev/~/projects/x`. resolveProjectCwd-fed callers (/clear) pass tilde
-// paths. The server runs ON the opencode host, so a literal `~` / `~/...`
-// expands against this process's own $HOME.
-export function expandTilde(p) {
-  if (typeof p !== "string" || !p.startsWith("~")) return p;
-  const home = homedir();
-  if (p === "~") return home;
-  if (p.startsWith("~/")) return home + "/" + p.slice(2);
-  return p; // ~user form — leave for the shell/opencode, not ours to guess
-}
-
+// paths. The server runs ON the opencode host, so `expandTilde` from
+// src/shared/paths.mjs expands against this process's own $HOME before
+// opencode sees the path.
 export async function createSession({ directory, title = "" }) {
   const absDir = expandTilde(directory);
   const url = `/session?directory=${encodeURIComponent(absDir)}`;
