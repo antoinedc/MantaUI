@@ -218,7 +218,22 @@ export function App() {
     if (!pre?.onPairLink) return;
     return pre.onPairLink((url) => {
       const payload = parsePairPayload(url);
-      if (!payload) return; // not a valid pair link — ignore
+      if (!payload) {
+        // Malformed / legacy-shape link (e.g. an old box still minting the
+        // `id=`/`token=` form). The OS still LAUNCHED us for the manta://
+        // scheme, so silently returning looks exactly like a broken app —
+        // the window comes to front and nothing else happens. Surface the
+        // reason on the pair step, opening the flow if it isn't already up.
+        const st = useStore.getState();
+        st.setPairLinkError(
+          "That pairing link isn't valid. Generate a fresh one on your box (run `manta pair`) and open the new link.",
+        );
+        const onboardingOpen =
+          st.onboardingForced ||
+          resolveTransportMode(st.configSnapshot()) === "onboarding";
+        if (!onboardingOpen) void st.relaunchOnboarding();
+        return;
+      }
       // Auto-claim immediately. claimBox() handles the IPC, persists the
       // credentials to config.json, mirrors them into the store, and swaps
       // window.api to httpApi — all the same side effects PairStep does on
@@ -228,20 +243,30 @@ export function App() {
       void (async () => {
         const result = await claimBox({ boxId: payload.boxId, code: payload.code });
         if (result.ok) {
-          // Drop out of onboarding: clears `onboardingForced` + re-reads
-          // config so the app renders the normal shell with the new
-          // boxToken. Works whether we were already in the normal shell
-          // (just a config refresh) or in onboarding (the new boxToken
-          // flips resolveTransportMode to "http" on the re-read).
+          // Re-read config so the store carries the new boxToken, then bump
+          // the claim counter so a MOUNTED Onboarding re-derives its step.
+          //
+          // Both halves are required. `finishOnboarding()` alone only clears
+          // `onboardingForced`; it does NOT unmount the flow, because App
+          // holds it open behind `onboardingLatched` (deliberately — step 1
+          // writes a boxToken, which would otherwise tear the shell down
+          // before steps 2-4 ran). With nothing advancing the step, a
+          // SUCCESSFUL auto-claim left the user staring at the pair form
+          // with the code field focused — the "deep link opens the app but
+          // does nothing" report. The counter is what moves them forward.
           await useStore.getState().finishOnboarding();
+          useStore.getState().notePairLinkClaimed();
           return;
         }
         // Failure: open onboarding at step 1 with the URL stashed so the
-        // shell jumps to step 1 (PairStep shows empty fields for the user
-        // to retry by hand — the URL gives the shell enough signal to land
-        // on the pair step even from a paired/normal config).
+        // shell jumps to step 1, and carry the REASON so PairStep can show
+        // it inline. Without the reason the user gets an empty form and no
+        // explanation for why the link appeared to do nothing — the common
+        // case being a one-time code that already expired (~5 min TTL) or
+        // was already consumed.
         const st = useStore.getState();
         st.setPendingPairLink(url);
+        st.setPairLinkError(result.message);
         const alreadyOnboarding =
           st.onboardingForced ||
           resolveTransportMode(st.configSnapshot()) === "onboarding";

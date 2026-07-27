@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ONBOARDING_STEPS,
   STEP_LABELS,
@@ -126,6 +126,26 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   useEffect(() => {
     if (pendingPairLink) setPos(1);
   }, [pendingPairLink]);
+
+  // Deep-link pairing: a manta:// link that SUCCEEDS must move the flow off
+  // step 1. App keeps this shell mounted through a latch after pairing (so
+  // steps 2-4 stay reachable), so without this the user sat on the pair form
+  // with the code field focused even though they were already paired — the
+  // "the link opens the app but does nothing" bug.
+  //
+  // Re-derive from the freshly re-read config rather than calling goNext():
+  // a re-pair from an already-configured box should land on the first step
+  // that's still incomplete, not blindly on step 2.
+  //
+  // The ref pins the mount-time value so this only fires on a claim that
+  // happens WHILE mounted. Firing on mount would clobber the step-1 forcing
+  // that `pendingPairLink` does for a FAILED link on an already-paired box.
+  const pairLinkClaims = useStore((s) => s.pairLinkClaims);
+  const claimsAtMount = useRef(pairLinkClaims);
+  useEffect(() => {
+    if (pairLinkClaims === claimsAtMount.current) return;
+    setPos(resolveInitialStep(useStore.getState().configSnapshot()));
+  }, [pairLinkClaims]);
 
   const goNext = () => setPos((p) => nextPosition(p));
   const goBack = () => setPos((p) => prevPosition(p));

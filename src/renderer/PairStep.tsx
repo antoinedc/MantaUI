@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { normalizeCode } from "../shared/claim.mjs";
 import { canConnectSetup, normalizeServerUrl } from "./mobile/setupLogic";
 import { isValidBoxToken } from "../shared/transport.mjs";
 import { claimBox } from "./pairClaim";
+import { useStore } from "./store";
 
 // PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2,
 // BET-255, BET-268).
@@ -64,6 +65,23 @@ export function PairStep({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
+
+  // Deep-link failure reason. The manta:// auto-claim in App.tsx runs with no
+  // UI of its own, so when it fails it parks the classified message here and
+  // routes the user to this step. Rendering it in the SAME inline slot a
+  // manual Connect failure uses means the user sees "code expired" /
+  // "couldn't reach your box" instead of a blank form that looks like the
+  // link did nothing at all.
+  //
+  // Consume-on-read (clear the store field) so an identical second failure
+  // still changes the value and re-fires this effect.
+  const pairLinkError = useStore((s) => s.pairLinkError);
+  useEffect(() => {
+    if (!pairLinkError) return;
+    setError(pairLinkError);
+    useStore.getState().setPairLinkError(null);
+    codeRef.current?.focus();
+  }, [pairLinkError]);
 
   // Server URL is only "bad" when the user typed something non-empty that
   // doesn't match `^https?://` — empty stays the default path (no inline
