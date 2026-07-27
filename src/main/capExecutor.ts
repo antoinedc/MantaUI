@@ -41,6 +41,9 @@ import {
   validateSuppliedInputs,
   evalIf,
   normalizeHost,
+  effectiveShell,
+  resolveShellInvocation,
+  wrapScript,
   type PluginManifest,
 } from "../shared/pluginManifest.mjs";
 import {
@@ -651,7 +654,19 @@ function makeManifestHandler(manifest: PluginManifest) {
         ? withStepTimeout(controllerSignalOf(ctx), stepTimeoutMs)
         : null;
       try {
-        const res = await ctx.exec("/bin/sh", ["-c", step.run], {
+        // Shell resolution is the one place we read process.platform
+        // (BET-326 — exactly one read per step, passed down to the pure
+        // helpers). The shared module resolves the rest.
+        const platform = process.platform;
+        const shell = effectiveShell(manifest, step, platform);
+        const inv = resolveShellInvocation(shell, platform, {
+          env: process.env,
+          exists: existsSync,
+        });
+        if ("error" in inv) {
+          throw new Error(inv.error);
+        }
+        const res = await ctx.exec(inv.command, [...inv.argsPrefix, wrapScript(shell, step.run)], {
           cwd: cwdResolved,
           quiet: false,
           env,

@@ -18,8 +18,13 @@ the TypeScript handler layer is GONE (no more `HANDLERS` map,
 folder-scans + fs.watch-hot-reloads the dir, parses every `*.yaml` through
 the shared `src/shared/pluginManifest.mjs` module (single source of truth
 for parse + validate + if-eval + input→env + cwd substitution + timeout
-parse), and dispatches a matching capability by running its steps
-sequentially as `exec("/bin/sh", ["-c", step.run], …)`. The first
+parse + shell resolution), and dispatches a matching capability by running
+its steps sequentially under the resolved shell
+(`effectiveShell(manifest, step, process.platform)` → `resolveShellInvocation`
+→ `wrapScript` → `exec(command, argsPrefix, …)`). ⟨v3 BET-326⟩ the
+executor no longer hardcodes `/bin/sh`; the shell is an explicit, validated
+manifest key with two values (`sh`, `powershell`) and a per-platform
+default (`win32` → `powershell`, else `sh`). The first
 hard-coded capability is the `plugin.write` built-in — it lets the AI
 author/edit manifests via `plugin_save`. Everything else is a manifest
 lookup. Server spine (`src/server/capabilities.mjs` + REST + bus envelopes
@@ -141,6 +146,7 @@ stay unchanged.
 | `EXEC_STDOUT_CAP_BYTES` | `2 * 1024 * 1024` | `capExecutor.ts` | cap on captured stdout returned by `exec` |
 | `KILL_GRACE_MS` | `5_000` | `capExecutor.ts` | SIGTERM → SIGKILL grace on abort |
 | `CAP_HOSTS` | `["desktop","box"]` | `pluginManifest.mjs` | accepted `host:` values; `host: mac` is a permanent legacy alias for `"desktop"` |
+| `SHELLS` | `["sh","powershell"]` | `pluginManifest.mjs` | accepted `shell:` values; the runner resolves `sh` to `/bin/sh` on POSIX or Git Bash on Windows, and `powershell` to `powershell.exe -NoProfile -NonInteractive -Command` on Windows only |
 | `PLUGIN_WRITE` | `"plugin.write"` | `capExecutor.ts` | the one built-in capability name |
 
 ---
@@ -233,9 +239,18 @@ NO `CapHandler`/`CapCtx`-consumer indirection, and NO per-plugin
    - Found + valid → build the per-step env via the shared module's
      `buildEnv(manifest, suppliedInputs, {jobId})` (the executor patches
      in PATH via `exec`'s existing helper), arm an
-     `AbortController` with `EXECUTOR_JOB_TIMEOUT_MS`, run each step
-     sequentially as `exec("/bin/sh", ["-c", step.run], {cwd, quiet})`
-     (with `cwd` resolved via `resolveCwd(step.cwd, env)`), honoring
+     `AbortController` with `EXECUTOR_JOB_TIMEOUT_MS`, and for each step
+     resolve the shell via `effectiveShell(manifest, step, process.platform)`
+     + `resolveShellInvocation(shell, process.platform, {env, exists})`
+     from the shared module (the executor is the only place allowed to
+     read `process.platform`; the helpers stay pure so Windows behaviour
+     can be tested from Linux CI). The script body is wrapped via
+     `wrapScript(shell, step.run)` (PowerShell runs are wrapped to set
+     `$ErrorActionPreference='Stop'` and propagate `$LASTEXITCODE`,
+     because PowerShell does not reliably propagate a failing command's
+     exit code). Each step runs as
+     `exec(inv.command, [...inv.argsPrefix, wrappedScript], {cwd, quiet})`,
+     with `cwd` resolved via `resolveCwd(step.cwd, env)`, honoring
      `continue_on_error` and `if:` via `evalIf`, and streaming each
      step's stdout/stderr to `ctx.log`. Step exit ≠ 0 → job fails at
      that step.
@@ -264,12 +279,15 @@ state.
 Single source of truth for what a valid manifest looks like. Imported by
 BOTH the executor (TS) and the server (mjs). Pure functions everywhere,
 no `electron`/`node:fs` deps beyond YAML parsing + `resolveCwd`'s
-existence check. Adding a new validation rule here is reflected in every
-consumer and every test. Exports:
+existence check + `resolveShellInvocation`'s injected `exists`. Adding a
+new validation rule here is reflected in every consumer and every test.
+Exports:
 
 - `parseManifest(yamlText): { manifest, errors[] }` — returns a manifest
   OR keyed errors (`steps[2].run: required` style). Unknown keys →
-  `unknown key "<key>"`.
+  `unknown key "<key>"`. The `shell:` key is validated at top-level and
+  per-step (`must be one of sh, powershell`); platform availability is
+  the executor's concern, not the parser's.
 - `validateManifest(parsed): { errors[] }` — all schema rules from
   BET-189 §"Validation rules" plus the v3 grammar limits.
 - `evalIf(expr, inputs): boolean | { error }` — exactly three forms,
@@ -285,6 +303,13 @@ consumer and every test. Exports:
   with no default.
 - `parseTimeout(s): number | { error }` — `^\d+(s|m)$`; cap
   `MAX_TIMEOUT_MS`.
+- `defaultShell(platform)` / `effectiveShell(manifest, step, platform)` /
+  `resolveShellInvocation(shell, platform, io)` / `wrapScript(shell, script)`
+  — shell resolution (BET-326). Exactly two shell names (`SHELLS =
+  ["sh", "powershell"]`); per-platform default; the Git-Bash candidate
+  list (`ProgramFiles`, `ProgramFiles(x86)`, `LOCALAPPDATA`) is walked in
+  order on Windows; `io.exists` is injected so the resolution is testable
+  from Linux CI without a real Windows filesystem.
 
 Tests: `src/shared/pluginManifest.test.ts` (vitest) covers every
 validator path, evalIf truthy/falsey, buildEnv ordering + bool
