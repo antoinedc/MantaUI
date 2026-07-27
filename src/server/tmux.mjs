@@ -5,9 +5,36 @@ import { expandTilde } from "../shared/paths.mjs";
 
 const FS = "\t";
 
+/**
+ * The environment tmux must be invoked with.
+ *
+ * tmux sanitises "unprintable" bytes in `-F` output when it is running under a
+ * non-UTF-8 locale: our TAB field separator comes back as `_`. Services get NO
+ * locale from their supervisor — launchd passes none at all, and a systemd
+ * --user unit only has what the unit file declares — so every tmux query made
+ * by the box server was silently mangled: `list-sessions` yielded
+ * `"<name>_<attachedFlag>"` as the session NAME, and every window line failed
+ * to match a known session and was dropped. The visible symptom is a workspace
+ * with a corrupted name and zero windows, which is what the macOS box did.
+ *
+ * Fixing it here (rather than in a plist / unit file) makes it independent of
+ * how the server was started — including the nohup fallback and any
+ * hand-rolled supervisor — and it is the only place tmux is ever spawned.
+ * An explicit locale from the environment always wins; we only supply a
+ * default when there is none. macOS has no `C.UTF-8`, so it gets the
+ * always-present `en_US.UTF-8`.
+ *
+ * Exported for testing.
+ */
+export function tmuxSpawnEnv(env = process.env, platform = process.platform) {
+  const existing = env.LC_ALL || env.LANG;
+  if (existing) return { ...env };
+  return { ...env, LC_ALL: platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8" };
+}
+
 function spawnRun(cmd, args) {
   return new Promise((resolve, reject) => {
-    const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: tmuxSpawnEnv() });
     let stdout = "", stderr = "";
     p.stdout.on("data", (b) => (stdout += b.toString()));
     p.stderr.on("data", (b) => (stderr += b.toString()));

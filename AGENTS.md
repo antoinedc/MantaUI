@@ -168,6 +168,45 @@ is cached on the lockfile hash and Playwright browsers on the same key, so
 that was the bulk of the waste. **Before adding a job, ask whether it can be a
 step instead** — on one runner a job costs every other open PR wall-clock time.
 
+**The one exception to "no extra jobs": `macos-install-smoke.yml`.** It runs on a
+GitHub-hosted `macos-14` (Apple Silicon) runner, so it costs the self-hosted
+runner nothing and blocks nobody. It installs the box END-TO-END the way a user
+does (`curl mantaui.com/install.sh | bash`) and asserts the macOS-only path
+actually works: LaunchAgents load and stay alive, manta-server + opencode answer
+on loopback, the tail prints a 6-digit pairing code, no `systemctl` advice is
+ever printed (BET-277), `manta pair` mints a fresh code, `/auth/claim` exchanges
+it for a real box token, that token drives a tmux RPC (which catches the launchd
+PATH trap — launchd agents do NOT inherit a login-shell PATH, so a Homebrew-only
+`tmux` is invisible to the server), and a re-install preserves the box identity.
+Triggers: manual, weekly cron, and PRs that touch `scripts/install*.{sh,mjs}` /
+`scripts/launchd/**` (those run the BRANCH copy of the script, deployed from the
+PR's own commit — install.sh resets `$MANTA_HOME` to `origin/main`, so without
+that a PR's server/plist changes would never be the ones under test). Gateway
+registration is stubbed to a dead loopback port for the INSTALLER, but the
+server re-registers itself on boot, so each run still leaves one throwaway
+`<box_id>.boxes.mantaui.com` A record on the prod zone.
+
+**Two environment traps this workflow found, both of which made a macOS box
+look installed-and-paired while being unusable.** Neither is reachable from a
+unit test; if you touch service definitions or tmux invocation, keep them in
+mind:
+
+- **A service gets no PATH.** launchd hands an agent
+  `/usr/bin:/bin:/usr/sbin:/sbin`; it does NOT inherit a login shell's PATH.
+  macOS ships no tmux, so tmux is always a Homebrew binary and was invisible to
+  manta-server — `tmux:new-session` 500'd with ENOENT while `listProjects`
+  swallowed the error and reported an empty box. Both plists now carry a PATH
+  rendered by `launchd_agent_path` in install.sh.
+- **A service gets no LOCALE, and tmux mangles its own output without one.**
+  Under a non-UTF-8 locale tmux sanitises "unprintable" bytes in `-F` output,
+  so the TAB field separator `src/server/tmux.mjs` relies on came back as `_`:
+  `list-sessions` reported the session name as `<name>_<attachedFlag>` and every
+  window line then failed to match a session and was silently dropped. Fixed at
+  the single tmux spawn point (`tmuxSpawnEnv`) rather than in a plist/unit, so
+  it holds under launchd, systemd, the nohup fallback and any hand-rolled
+  supervisor. **Linux was latently exposed too** — the systemd unit declares no
+  locale either; it only escaped because the box runs tmux 3.4.
+
 **`main` is governed by ONE system: the ruleset** (Settings → Rules → Rulesets →
 "main"). The legacy per-branch protection rule was deleted 2026-07-27 because
 GitHub enforces the UNION of both, so having two overlapping configs meant an

@@ -45,6 +45,16 @@
     <string>--hostname</string>
     <string>127.0.0.1</string>
   </array>
+  <!-- launchd hands an agent PATH=/usr/bin:/bin:/usr/sbin:/sbin — it does NOT
+       inherit a login shell's PATH. Without this key, everything opencode
+       shells out to that lives in Homebrew (ripgrep, node, the provider CLIs)
+       is invisible to it even though the same command works in Terminal.
+       install.sh substitutes the resolved list; see launchd_agent_path(). -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@@AGENT_PATH@@</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

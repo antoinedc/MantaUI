@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseSessions,
+  tmuxSpawnEnv,
   isMissingSessionError,
   newWindow,
   newSession,
@@ -353,4 +354,28 @@ test("newWindowGetIndex (3-arg, default chatMode) stays a plain window", async (
   } finally {
     _setRun(null);
   }
+});
+
+// tmux sanitises unprintable bytes in `-F` output under a non-UTF-8 locale,
+// turning the TAB field separator into `_` — which corrupted every session
+// name and dropped every window. Services inherit no locale from launchd (and
+// only what the unit declares from systemd), so tmux must be given one.
+test("tmuxSpawnEnv supplies a UTF-8 locale when the supervisor gave none", () => {
+  assert.equal(tmuxSpawnEnv({ PATH: "/usr/bin" }, "linux").LC_ALL, "C.UTF-8");
+  // macOS has no C.UTF-8; en_US.UTF-8 always exists there.
+  assert.equal(tmuxSpawnEnv({ PATH: "/usr/bin" }, "darwin").LC_ALL, "en_US.UTF-8");
+});
+
+test("tmuxSpawnEnv never overrides an explicit locale", () => {
+  assert.equal(tmuxSpawnEnv({ LC_ALL: "fr_FR.UTF-8" }, "darwin").LC_ALL, "fr_FR.UTF-8");
+  // LANG alone is enough for tmux — don't add LC_ALL on top of it.
+  const withLang = tmuxSpawnEnv({ LANG: "de_DE.UTF-8" }, "linux");
+  assert.equal(withLang.LANG, "de_DE.UTF-8");
+  assert.equal(withLang.LC_ALL, undefined);
+});
+
+test("tmuxSpawnEnv preserves the rest of the environment", () => {
+  const out = tmuxSpawnEnv({ PATH: "/opt/homebrew/bin", FOO: "bar" }, "darwin");
+  assert.equal(out.PATH, "/opt/homebrew/bin");
+  assert.equal(out.FOO, "bar");
 });

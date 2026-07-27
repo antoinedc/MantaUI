@@ -1,0 +1,385 @@
+# macOS install smoke — prove `install.sh` really works on an Apple Silicon box.
+#
+# WHY THIS EXISTS
+# ---------------
+# BET-274/276/277 added macOS as a supported BOX OS (loopback-only, LaunchAgents
+# instead of systemd, no Caddy/apt/DNS). Every part of that path is untestable
+# from the Linux dev box: `launchctl bootstrap gui/$(id -u)`, the plist render,
+# the darwin-arm64 tarball's native node-pty binding, `shasum` instead of
+# `sha256sum`, and the "installer never prints a systemctl command on macOS"
+# rule. This workflow runs the REAL installer end-to-end on a GitHub-hosted
+# macos-14 (Apple Silicon) runner and asserts it reaches the pairing code —
+# then proves the code is live by claiming it and driving one authenticated RPC.
+#
+# RUNNER CHOICE: GitHub-hosted `macos-14` (arm64), NOT the self-hosted runner
+# and NOT Codemagic. It costs zero wall-clock on `manta-dev-runner` (the single
+# self-hosted box every PR queues behind — see AGENTS.md "CI runs on ONE
+# runner"), and the repo already builds the darwin-arm64 tarball on macos-14 in
+# server-tarball-deploy.yml, so the image is known-good for this stack.
+#
+# NOT A REQUIRED CHECK. It is manual (workflow_dispatch) + a weekly cron. It
+# does real network I/O (mantaui.com, github.com, opencode.ai) and takes ~10
+# min, so it is deliberately not wired into the PR gate.
+#
+# GATEWAY REGISTRATION. `gateway=skip` (the default) points the INSTALLER's
+# MANTA_GATEWAY_BASE at a dead loopback port so its own registration POST fails
+# fast and takes the documented degraded path. Be aware this does NOT stop the
+# registration entirely: manta-server ALSO registers itself on boot against the
+# built-in gateway URL, and the LaunchAgent plist passes it no override — so a
+# run does leave one throwaway `<box_id>.boxes.mantaui.com` A record behind on
+# the prod zone. Harmless (it points at a dead runner IP) but worth knowing
+# before scheduling this hourly.
+#
+# WHAT A GREEN RUN PROVES
+#   1. Prereq detection works with BSD tooling (shasum, no coreutils).
+#   2. The darwin-arm64 tarball downloads, sha256-verifies and extracts.
+#   3. opencode installs and comes up on 127.0.0.1:4096.
+#   4. Both LaunchAgents load into the GUI domain and keep their process alive.
+#   5. manta-server answers /auth/status on 127.0.0.1:8787.
+#   6. The install tail prints a 6-digit pairing code (the last screen a user
+#      sees) and NEVER prints a systemctl command.
+#   7. `manta pair` (the ~/.local/bin shim) mints a FRESH code…
+#   8. …which /auth/claim exchanges for a real box_token…
+#   9. …that authenticates a tmux RPC — i.e. the server can actually reach the
+#      `tmux` binary from its launchd environment (launchd does NOT inherit a
+#      login shell PATH, so a Homebrew-only tmux is a genuine failure mode).
+#  10. Re-running the installer preserves the box identity (box_id unchanged).
+
+name: macOS install smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      installer:
+        description: "Which install.sh to run"
+        type: choice
+        default: published
+        options:
+          - published # curl https://mantaui.com/install.sh | bash  (the real user path)
+          - branch # bash scripts/install.sh from this checkout
+      version:
+        description: "MANTA_VERSION to install (manifest key)"
+        type: string
+        default: latest
+      gateway:
+        description: "Gateway registration (real = publishes a prod DNS record)"
+        type: choice
+        default: skip
+        options:
+          - skip
+          - real
+  schedule:
+    # Mondays 06:00 UTC — catches drift in install.sh, the darwin tarball, or
+    # the macos-14 image without anyone remembering to run it.
+    - cron: "0 6 * * 1"
+  pull_request:
+    # Only for PRs that touch the install path itself. Runs the BRANCH copy of
+    # install.sh (see the `installer` resolution below) so a change to the
+    # macOS branch is proven on a real Mac before it merges. GitHub-hosted, so
+    # it never queues behind the self-hosted runner; not a required check.
+    paths:
+      - "scripts/install.sh"
+      - "scripts/install-lib.mjs"
+      - "scripts/launchd/**"
+      - "scripts/manta-pair.mjs"
+      - ".github/workflows/macos-install-smoke.yml"
+
+concurrency:
+  group: macos-install-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: install on macOS (Apple Silicon)
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    env:
+      # `inputs.*` is empty on the cron / pull_request triggers. A PR that
+      # touches the installer must test THAT PR's script (branch); everything
+      # else defaults to the published one users actually curl.
+      INSTALLER: ${{ inputs.installer || (github.event_name == 'pull_request' && 'branch' || 'published') }}
+      MANTA_VERSION: ${{ inputs.version || 'latest' }}
+      # Dead loopback port = fast ECONNREFUSED = installer warns + continues.
+      MANTA_GATEWAY_BASE: ${{ inputs.gateway == 'real' && 'https://gateway.mantaui.com' || 'http://127.0.0.1:9' }}
+      LOG: ${{ github.workspace }}/install.log
+
+    steps:
+      - name: Preflight — this must be an Apple Silicon Mac
+        run: |
+          set -euo pipefail
+          echo "uname: $(uname -s) $(uname -m)"
+          [ "$(uname -s)" = "Darwin" ] || { echo "not macOS"; exit 1; }
+          [ "$(uname -m)" = "arm64" ] || { echo "not Apple Silicon — the installer refuses Intel Macs by design"; exit 1; }
+          echo "shasum: $(command -v shasum)"
+          echo "sha256sum: $(command -v sha256sum || echo '(absent — expected on a stock Mac)')"
+
+      # Full history: the branch-mode step below publishes HEAD into a local
+      # bare repo, and git refuses to push out of a shallow clone.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Point the deploy at this PR's code (branch mode only)
+        if: env.INSTALLER == 'branch'
+        run: |
+          set -euo pipefail
+          # install.sh re-creates $MANTA_HOME as a git checkout and does
+          # `fetch origin main && reset --hard origin/main` (step 4b) so
+          # self-update.sh has something to pull. Left alone, that would deploy
+          # `main`'s server code even though we are testing a PR — the branch's
+          # install.sh would run, but every file it deploys (src/server/**, the
+          # launchd templates) would come from main. Publishing HEAD as `main`
+          # in a local bare repo makes the deploy the PR's code, so a change to
+          # a plist or to the server is actually exercised on the Mac.
+          # (node_modules + runtime/ still come from the released tarball —
+          # untracked paths survive `reset --hard`.)
+          git init --bare -q "$RUNNER_TEMP/manta.git"
+          git push -q "$RUNNER_TEMP/manta.git" "HEAD:refs/heads/main"
+          echo "MANTA_REPO_URL=file://$RUNNER_TEMP/manta.git" >> "$GITHUB_ENV"
+          echo "deploy source: this PR ($(git rev-parse --short HEAD))"
+
+      - name: Install box prerequisites (tmux)
+        run: |
+          set -euo pipefail
+          # install.sh checks for tmux + git + curl + tar + shasum and never
+          # installs them. git/curl/tar/shasum ship with macOS + the image;
+          # tmux does not on a stock Mac, so a real user brew-installs it too.
+          command -v tmux >/dev/null 2>&1 || brew install tmux
+          tmux -V
+          git --version
+
+      - name: Assert a clean slate (no prior box identity)
+        run: |
+          set -euo pipefail
+          for p in "$HOME/.manta" "$HOME/manta" "$HOME/Library/LaunchAgents/com.mantaui.server.plist"; do
+            if [ -e "$p" ]; then echo "unexpected leftover: $p"; exit 1; fi
+          done
+          echo "clean."
+
+      - name: Pre-install opencode (works around GitHub's anonymous API rate limit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # WHY: opencode's own installer resolves "latest" through the
+          # UNAUTHENTICATED GitHub API (api.github.com/repos/anomalyco/opencode/
+          # releases/latest). GitHub-hosted runners share egress IPs and are
+          # routinely rate-limited there, so the call returns nothing and the
+          # installer dies with "Failed to fetch version information" — which
+          # install.sh can only report as "opencode install failed". Verified on
+          # this runner: the fetch of the install script itself is a clean 200 in
+          # 40ms; only the API call fails.
+          #
+          # Resolving the tag with the job's GITHUB_TOKEN and passing --version
+          # skips that API call entirely. install.sh then takes its
+          # "opencode already installed" branch, which is a legitimate real-world
+          # state (a box that already had opencode) — everything downstream of it
+          # is still exercised for real.
+          ver="$(gh api repos/anomalyco/opencode/releases/latest --jq .tag_name | sed 's/^v//')"
+          echo "pinning opencode $ver"
+          # Script from a FILE, stdin from /dev/null — `curl … | bash -s -- …
+          # </dev/null` starves bash of its own script (the same trap install.sh
+          # itself hit).
+          curl -fsSL https://opencode.ai/install -o "$RUNNER_TEMP/oc-install.sh"
+          bash "$RUNNER_TEMP/oc-install.sh" --version "$ver" </dev/null
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          "$HOME/.opencode/bin/opencode" --version
+
+      - name: Run the installer
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          echo "installer=$INSTALLER version=$MANTA_VERSION gateway_base=$MANTA_GATEWAY_BASE"
+          if [ "$INSTALLER" = "branch" ]; then
+            bash scripts/install.sh 2>&1 | tee "$LOG"
+          else
+            # Exactly the documented user path — install.sh is read from the
+            # pipe, so this also covers the "inner curl|bash must not eat our
+            # stdin" hazard the script guards against.
+            curl -fsSL https://mantaui.com/install.sh | bash 2>&1 | tee "$LOG"
+          fi
+
+      - name: Assert — macOS branch taken, no systemctl advice
+        run: |
+          set -euo pipefail
+          grep -q "macOS detected" "$LOG" \
+            || { echo "installer did not take the macOS branch"; exit 1; }
+          # BET-277 acceptance criterion: the installer never prints a
+          # systemctl command on macOS.
+          if grep -n "systemctl" "$LOG"; then
+            echo "FAIL: systemctl advice printed on a macOS box (see lines above)"
+            exit 1
+          fi
+          echo "ok."
+
+      - name: Assert — the install tail printed a pairing code
+        run: |
+          set -euo pipefail
+          grep -Eq '^ *Pairing code: +[0-9]{6}$' "$LOG" \
+            || { echo "FAIL: no 6-digit pairing code in the install output"; tail -40 "$LOG"; exit 1; }
+          grep -q "Manta server is running" "$LOG" \
+            || { echo "FAIL: connect block missing"; exit 1; }
+          echo "pairing block present:"
+          grep -E '^ *(Pairing code|Box ID|Server URL):' "$LOG"
+
+      - name: Assert — both LaunchAgents are loaded and alive
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          for label in com.mantaui.server com.mantaui.opencode; do
+            plist="$HOME/Library/LaunchAgents/$label.plist"
+            [ -f "$plist" ] || { echo "FAIL: missing $plist"; exit 1; }
+            launchctl print "gui/$uid/$label" > "$RUNNER_TEMP/$label.print.txt" \
+              || { echo "FAIL: $label is not loaded in the gui domain"; exit 1; }
+            # A loaded-but-crashlooping agent has no pid. KeepAlive=true means a
+            # healthy agent always has one.
+            grep -Eq '^[[:space:]]*pid = [0-9]+' "$RUNNER_TEMP/$label.print.txt" \
+              || { echo "FAIL: $label has no running pid"; sed -n '1,40p' "$RUNNER_TEMP/$label.print.txt"; exit 1; }
+            echo "$label: $(grep -E '^[[:space:]]*(pid|state) = ' "$RUNNER_TEMP/$label.print.txt" | tr -d '\n')"
+          done
+
+      - name: Assert — servers answer on loopback
+        run: |
+          set -euo pipefail
+          # ANY HTTP status means the listener is up — /auth/status answers 401
+          # to an unauthenticated caller, which is correct behaviour for a box
+          # that has not been paired yet. Only "000" (no response) is a failure.
+          # This mirrors waitForHealth's acceptAnyStatus contract.
+          mcode="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/auth/status || true)"
+          [ -n "$mcode" ] && [ "$mcode" != "000" ] \
+            || { echo "FAIL: manta-server not listening on 8787"; exit 1; }
+          ocode="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4096/ || true)"
+          [ -n "$ocode" ] && [ "$ocode" != "000" ] \
+            || { echo "FAIL: opencode-serve not listening on 4096"; exit 1; }
+          echo "manta-server http=$mcode; opencode http=$ocode"
+
+      - name: Assert — restarting the agent brings the server back
+        run: |
+          set -euo pipefail
+          # Closest CI-safe proxy for reboot survival: kick the agent and prove
+          # KeepAlive + RunAtLoad put it back on the port.
+          launchctl kickstart -k "gui/$(id -u)/com.mantaui.server"
+          for i in $(seq 1 30); do
+            # Any status (incl. the unpaired 401) = the listener is back.
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/auth/status || true)" != "000" ]; then
+              echo "server back after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "FAIL: server did not come back after kickstart"
+          exit 1
+
+      - name: Assert — `manta pair` mints a fresh, claimable code
+        run: |
+          set -euo pipefail
+          [ -x "$HOME/.local/bin/manta" ] || { echo "FAIL: manta shim not installed"; exit 1; }
+          PATH="$HOME/.local/bin:$PATH"
+          out="$(manta pair)"
+          echo "$out" | grep -E '^ *(Pairing code|Box ID):'
+          code="$(printf '%s\n' "$out" | sed -nE 's/^ *Pairing code: +([0-9]{6})$/\1/p' | head -n1)"
+          [ -n "$code" ] || { echo "FAIL: could not parse a code out of \`manta pair\`"; printf '%s\n' "$out"; exit 1; }
+
+          # Claim it the way a device does. A working claim is the real proof
+          # the pairing flow is functional, not just that a number was printed.
+          claim="$(curl -fsS -X POST http://127.0.0.1:8787/auth/claim \
+            -H 'content-type: application/json' \
+            --data "{\"pairing_code\":\"$code\"}")" \
+            || { echo "FAIL: /auth/claim rejected the freshly minted code"; exit 1; }
+          token="$(printf '%s' "$claim" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("box_token",""))')"
+          box="$(printf '%s' "$claim" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("box_id",""))')"
+          [ -n "$token" ] && [ -n "$box" ] || { echo "FAIL: claim returned no token/box_id"; exit 1; }
+          echo "claimed box_id=$box (token length ${#token})"
+          echo "MANTA_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Assert — the box token drives a real tmux RPC
+        run: |
+          set -euo pipefail
+          # Exercises the server's OWN environment: launchd agents do not
+          # inherit a login-shell PATH, so a Homebrew-only `tmux` that works in
+          # this step's shell can still be invisible to the server process.
+          # Creating a session and seeing it listed back is the honest check.
+          curl -fsS -X POST http://127.0.0.1:8787/rpc/tmux:new-session \
+            -H "authorization: Bearer $MANTA_TOKEN" \
+            -H 'content-type: application/json' \
+            --data "{\"args\":[{\"name\":\"smoke\",\"cwd\":\"$HOME\"}]}" \
+            -o "$RUNNER_TEMP/new-session.json" \
+            || { echo "FAIL: tmux:new-session RPC failed"; exit 1; }
+          cat "$RUNNER_TEMP/new-session.json"; echo
+          projects="$(curl -fsS http://127.0.0.1:8787/api/projects -H "authorization: Bearer $MANTA_TOKEN")"
+          printf '%s\n' "$projects"
+          # The name must come back EXACTLY as created and the session must have
+          # its window. Both were wrong before the locale fix: a service gets no
+          # locale from launchd, tmux then replaced the TAB field separator in
+          # its -F output with `_`, so the session was reported as `smoke_0`
+          # (name + attached flag glued together) and every window line was
+          # orphaned and dropped. Anything less than an exact match here would
+          # let that regression back in.
+          printf '%s' "$projects" | python3 -c '
+          import json, sys
+          projects = json.load(sys.stdin)
+          names = [p["tmuxSession"] for p in projects]
+          assert names == ["smoke"], f"expected exactly the session we created, got {names}"
+          wins = projects[0]["windows"]
+          assert len(wins) >= 1, "session reported with no windows"
+          print("session", names[0], "with", len(wins), "window(s):", [w["name"] for w in wins])
+          ' || { echo "FAIL: the server sees a corrupted view of tmux"; exit 1; }
+          # Independent confirmation from outside the server: the tmux server
+          # the RPC spawned is real and reachable on the user's default socket.
+          tmux list-sessions || { echo "FAIL: no tmux server running after the RPC"; exit 1; }
+          # FYI, not an assertion: the API reports the new session with an EMPTY
+          # windows array (so `defaultCwd` falls back to "~"). Print the raw
+          # window list so a future run can say whether tmux really created no
+          # window or whether `list-windows -a` is what's misbehaving here.
+          # Context for whoever debugs the next failure here: tmux's own view,
+          # to compare against what the server reported above.
+          echo "--- tmux list-windows -a ---"; tmux list-windows -a || true
+          tmux -V
+          echo "ok — server-side tmux works."
+
+      - name: Assert — re-running the installer preserves box identity
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          before="$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.manta/auth.json")))["box_id"])')"
+          if [ "$INSTALLER" = "branch" ]; then
+            bash scripts/install.sh 2>&1 | tee "$GITHUB_WORKSPACE/install2.log"
+          else
+            curl -fsSL https://mantaui.com/install.sh | bash 2>&1 | tee "$GITHUB_WORKSPACE/install2.log"
+          fi
+          after="$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.manta/auth.json")))["box_id"])')"
+          [ "$before" = "$after" ] || { echo "FAIL: box_id changed on re-install ($before -> $after)"; exit 1; }
+          grep -q "preserving it" "$GITHUB_WORKSPACE/install2.log" \
+            || { echo "FAIL: re-install did not report a preserved identity"; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/auth/status || true)" != "000" ] \
+            || { echo "FAIL: server not listening after re-install"; exit 1; }
+          echo "identity preserved: $after"
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          set +e
+          d="$RUNNER_TEMP/diag"; mkdir -p "$d"
+          # NOTE: ~/.manta/auth.json is deliberately NOT collected — it holds
+          # the box_token.
+          cp "$LOG" "$d/" 2>/dev/null
+          cp "$GITHUB_WORKSPACE/install2.log" "$d/" 2>/dev/null
+          cp "$HOME/.manta/server.log" "$d/" 2>/dev/null
+          cp "$HOME/.manta/opencode.log" "$d/" 2>/dev/null
+          cp "$HOME/.manta/ingress.json" "$d/" 2>/dev/null
+          cp "$RUNNER_TEMP"/com.mantaui.*.print.txt "$d/" 2>/dev/null
+          for label in com.mantaui.server com.mantaui.opencode; do
+            launchctl print "gui/$(id -u)/$label" > "$d/$label.final.txt" 2>&1
+            cp "$HOME/Library/LaunchAgents/$label.plist" "$d/" 2>/dev/null
+          done
+          ls -la "$HOME/manta" > "$d/manta-home.txt" 2>&1
+          tmux list-sessions > "$d/tmux.txt" 2>&1
+          true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-install-smoke-diagnostics
+          path: ${{ runner.temp }}/diag
+          if-no-files-found: warn
+          retention-days: 14

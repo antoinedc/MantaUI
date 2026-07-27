@@ -3835,7 +3835,69 @@ print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 
   }
 });
 
-test("install.sh install_launchd_agent: plist substitution replaces all six placeholders (BET-277)", () => {
+// launchd_agent_path — the PATH written into both LaunchAgent plists.
+//
+// WHY IT MATTERS: launchd does not give an agent a login-shell PATH, it gives
+// `/usr/bin:/bin:/usr/sbin:/sbin`. macOS ships no tmux, so tmux always comes
+// from Homebrew — invisible to manta-server without this. The box then pairs
+// happily and fails every session action (`tmux:new-session` 500s, and
+// `listProjects` swallows its error so the UI just shows an empty box). Caught
+// by the macOS install smoke workflow on a real runner.
+test("install.sh launchd_agent_path: always covers both Homebrew prefixes + system dirs", () => {
+  const out = runBootstrap({
+    preBody: `
+command() {
+  case "$1" in
+    -v) case "$2" in tmux) echo "/opt/homebrew/bin/tmux"; return 0 ;; *) builtin command "$@" ;; esac ;;
+    *) builtin command "$@" ;;
+  esac
+}
+`,
+    func: "launchd_agent_path; echo",
+  });
+  assert.match(out, /\/opt\/homebrew\/bin/);
+  assert.match(out, /\/usr\/local\/bin/);
+  assert.match(out, /\/usr\/bin/);
+  assert.match(out, /\/usr\/sbin/);
+  // Already-covered dir must not be duplicated.
+  assert.equal(out.match(/\/opt\/homebrew\/bin/g).length, 1);
+});
+
+test("install.sh launchd_agent_path: prepends a tmux dir the defaults don't cover", () => {
+  // MacPorts / a hand-built tmux lives outside both Homebrew prefixes. The
+  // prereq check already proved that copy exists, so trust it.
+  const out = runBootstrap({
+    preBody: `
+command() {
+  case "$1" in
+    -v) case "$2" in tmux) echo "/opt/local/bin/tmux"; return 0 ;; *) builtin command "$@" ;; esac ;;
+    *) builtin command "$@" ;;
+  esac
+}
+`,
+    func: "launchd_agent_path; echo",
+  });
+  assert.match(out, /^\/opt\/local\/bin:\/opt\/homebrew\/bin:/m);
+});
+
+test("install.sh launchd_agent_path: no tmux on PATH still yields a usable PATH", () => {
+  // Defensive: the prereq check dies before this runs, but an empty or
+  // half-built PATH string would render an unloadable plist.
+  const out = runBootstrap({
+    preBody: `
+command() {
+  case "$1" in
+    -v) case "$2" in tmux) return 1 ;; *) builtin command "$@" ;; esac ;;
+    *) builtin command "$@" ;;
+  esac
+}
+`,
+    func: "launchd_agent_path; echo",
+  });
+  assert.match(out, /^\/opt\/homebrew\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin$/m);
+});
+
+test("install.sh install_launchd_agent: plist substitution replaces every placeholder (BET-277)", () => {
   // Pure substitution test — pin the six placeholder replacements that
   // install_launchd_agent performs against the real plist templates.
   // Use the SERVER plist because it carries BOTH @@NODE_BIN@@ (in
@@ -3865,6 +3927,7 @@ sed \\
   -e "s|@@MANTA_TAILNET_HOST@@|\${TAILNET_IP:-}|g" \\
   -e "s|@@OPENCODE_BIN@@|\${OPENCODE_BIN:-}|g" \\
   -e "s|@@AUTH_DIR@@|\$AUTH_DIR|g" \\
+  -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
   "\$SERVER_PLIST_SRC" > "${rendered}"
 echo "SUBST_DONE=1"
 `,
@@ -3883,6 +3946,11 @@ echo "SUBST_DONE=1"
     assert.match(text, /<string>8787<\/string>/);
     assert.match(text, /<string>100\.64\.1\.5<\/string>/);
     assert.match(text, /\/tmp\/fake-manta-home\/\.manta\/server\.log/);
+    // PATH must be materialised: launchd hands an agent only
+    // /usr/bin:/bin:/usr/sbin:/sbin, so a Homebrew tmux is invisible to
+    // manta-server and every tmux call fails on a real Mac box.
+    assert.match(text, /<key>PATH<\/key>/);
+    assert.match(text, /\/opt\/homebrew\/bin/);
     // RunAtLoad + KeepAlive must remain true (drive reboot persistence).
     assert.match(text, /<key>RunAtLoad<\/key>\s*<true\/>/);
     assert.match(text, /<key>KeepAlive<\/key>\s*<true\/>/);
@@ -3926,6 +3994,7 @@ sed \\
   -e "s|@@MANTA_TAILNET_HOST@@|\${TAILNET_IP:-}|g" \\
   -e "s|@@OPENCODE_BIN@@|\${OPENCODE_BIN:-}|g" \\
   -e "s|@@AUTH_DIR@@|\$AUTH_DIR|g" \\
+  -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
   "\$OC_PLIST_SRC" > "${rendered}"
 echo "EMPTY_SUBST_DONE=1"
 `,
