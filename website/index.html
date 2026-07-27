@@ -42,9 +42,11 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
   color:var(--text-secondary);font-family:var(--font-sans);font-size:12.5px;font-weight:600;cursor:pointer}
 .install-hint{font-size:12px;color:var(--slate-500);margin-top:9px}
 
-/* app mockup — screenshots from scripts/shots.mjs (BET-303) */
-.hero-shot{position:relative;z-index:1;display:block;width:100%;max-width:960px;height:auto;margin:44px auto 0;border-radius:var(--radius-xl);
-  border:1px solid var(--border-default);box-shadow:var(--shadow-xl)}
+/* app mockup — hero video (BET-304 stage 1, Remotion). The rest of the page's
+   visuals come from screenshots rendered by scripts/shots.mjs (BET-303); the
+   hero is animated. */
+.hero-video{position:relative;z-index:1;display:block;width:100%;max-width:960px;height:auto;margin:44px auto 0;border-radius:var(--radius-xl);
+  border:1px solid var(--border-default);box-shadow:var(--shadow-xl);background:var(--surface-card)}
 
 /* sections (section, .sec-head, .sunk) live in /site.css */
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
@@ -171,13 +173,10 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
     </div>
     <div class="meta">Free. No signup. Runs on hardware you already own.</div>
 
-    <img
-      src="shot-hero.webp"
-      alt="Manta UI desktop app showing the sidebar with mixed session states and a chat panel mid-turn with a tool call and live command output"
-      width="2880" height="1800"
-      loading="eager"
-      class="hero-shot"
-    >
+    <video class="hero-video" autoplay muted loop playsinline preload="metadata" poster="hero-poster.webp">
+      <source src="hero.webm" type="video/webm">
+      <source src="hero.mp4" type="video/mp4">
+    </video>
   </div>
 </div>
 

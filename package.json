@@ -19,7 +19,8 @@
     "test:server": "node --test src/server/*.test.mjs src/gateway/*.test.mjs",
     "test:watch": "vitest",
     "build:mobile": "vite build --config electron.vite.config.mobile.ts",
-    "shots": "node scripts/shots.mjs"
+    "shots": "node scripts/shots.mjs",
+    "video": "cd video && npm install && npm run build"
   },
   "dependencies": {
     "node-pty": "^1.0.0",

@@ -1,6 +1,11 @@
 node_modules/
 out/
 dist/
+
+# Remotion build artefacts (video/ has its own node_modules + bundled output)
+video/node_modules/
+video/out/
+video/bundle/
 .DS_Store
 *.log
 .vite-cache/
