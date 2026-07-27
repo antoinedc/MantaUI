@@ -2,7 +2,7 @@
 
 You are an AI coding agent authoring MantaUI plugins. A plugin is one YAML
 file at `~/.manta/plugins/<name>.yaml` on the **machine the user wants to
-drive** (today: only the connected Mac — `host:"mac"`). The user can also
+drive** (today: `host:"desktop"` — the connected desktop). The user can also
 author plugins by hand in any editor; both paths go through the same
 validator and the same runner.
 
@@ -31,7 +31,7 @@ log tail.
 A plugin is one YAML file:
 
 - **Where:** `~/.manta/plugins/<name>.yaml` on the machine the plugin should
-  run on (today: the user's Mac).
+  run on (today: the user's connected desktop).
 - **What it is:** a name, a description, an optional input schema, an
   optional env map, and one or more shell commands (steps) to run in order.
 - **What it does:** when the user or AI invokes `plugin_run("<name>", inputs)`,
@@ -54,8 +54,8 @@ A plugin is **NOT**:
   repo's commit history).
 - A custom executor. All plugins run on the same executor process the box's
   manta-server already knows about — there is exactly one
-  `src/main/capExecutor.ts` running on the Mac, and every plugin run goes
-  through it.
+  `src/main/capExecutor.ts` running on the desktop, and every plugin run
+  goes through it.
 - A "run arbitrary command" capability. The runner refuses to dispatch any
   capability that is not a valid installed manifest, and refuses any unknown
   input key at validation time.
@@ -77,7 +77,7 @@ unknown top-level key is a validation error — typos fail loudly.
 | --- | --- | --- | --- |
 | `name` | string | yes | `^[a-z0-9][a-z0-9-]{0,63}$`. Must equal the filename minus `.yaml`. The `plugin.` namespace is reserved for built-in capabilities and is impossible by the regex (no dots). |
 | `description` | string | yes | Non-empty. One sentence: what the plugin does and when to reach for it. Shown in `plugin_list` and surfaced to the model when picking a tool to call. |
-| `host` | string | yes | Must be `"mac"`. v2 accepts ONLY `mac`; any other value produces `host: only "mac" is supported`. |
+| `host` | string | yes | Must be `"desktop"` (the user's connected desktop) or `"box"` (the Linux box). `host: mac` is accepted as a permanent legacy alias for `desktop`. Any other value produces `host: must be one of desktop, box (legacy "mac" means desktop)`. |
 | `timeout` | string | no | `^\d+(s|m)$` (e.g. `30s`, `5m`, `30m`). Parsed value must be ≤ 30 minutes. Missing → no per-step cap. Why the cap: the server sweep fails any `running` job at 30 minutes; a longer manifest timeout would be killed anyway. |
 | `inputs` | array of input objects | no | Each object carries an `id:` field (`^[a-z][a-zA-Z0-9_]*$`). Order is preserved and surfaced to the tool schema verbatim — model-side prompt construction sees them. Optional; missing → plugin takes no inputs. See "Input object" below. |
 | `env` | map of `string → string` | no | Plugin-scoped environment variables injected into every step. Reserved names: `MANTA_PLUGIN`, `MANTA_JOB_ID` (the runner injects these itself — user-supplied values are silently ignored). Values with a leading `~` are expanded against `os.homedir()`. |
@@ -194,7 +194,7 @@ cases. Each shows the schema conventions in context.
 ```yaml
 name: ios-manta
 description: Build the MantaUI iOS app and launch it in the iOS Simulator.
-host: mac
+host: desktop
 timeout: 30m
 
 inputs:
@@ -252,7 +252,7 @@ steps:
 ```yaml
 name: xcode-hello
 description: Build and launch a plain Xcode Swift app in the iOS Simulator.
-host: mac
+host: desktop
 timeout: 20m
 
 inputs:
@@ -298,7 +298,7 @@ flow that does not need Xcode at all.
 ```yaml
 name: repo-cleanup
 description: Run a maintenance script and prune merged branches.
-host: mac
+host: desktop
 timeout: 10m
 
 inputs:
@@ -341,7 +341,7 @@ and re-run.
 | `name: must match ^[a-z0-9][a-z0-9-]{0,63}$` | Name has uppercase, underscores, dots, or starts with a hyphen. | Use kebab-case (`my-plugin`); rename the file too. |
 | `name: must equal filename "<stem>"` | Filename and `name:` disagree. | Pick one (the filename) and put it in `name:`. |
 | `description: required` | Empty or missing `description:`. | Add a one-sentence description. |
-| `host: only "mac" is supported` | `host:` is not `mac` (likely `box` or a typo). | Change to `host: mac`. Other hosts are not implemented in v2. |
+| `host: must be one of desktop, box (legacy "mac" means desktop)` | `host:` is neither `desktop` nor `box` (likely a typo like `linux`/`windows`). | Change to `host: desktop` (or `host: box`). `host: mac` is also accepted as a permanent alias for `desktop`. |
 | `inputs.<id>: type required` | An input has no `type:`. | Add `type: string` / `number` / `boolean` / `enum`. |
 | `inputs.<id>: description required` | An input is missing `description:`. | Add a one-sentence description. |
 | `inputs.<id>: values required for enum` | `type: enum` but no `values:`. | Add a non-empty `values:` list. |
@@ -391,9 +391,9 @@ Mac with the plugins toggle on.
 The plugin system is simple on purpose. These are the facts that don't
 change between plugins:
 
-- **One executor per Mac.** Every plugin run on a given Mac goes through
-  the same `src/main/capExecutor.ts` process the box's manta-server is
-  already connected to via SSE.
+- **One executor per desktop.** Every plugin run on a given desktop goes
+  through the same `src/main/capExecutor.ts` process the box's
+  manta-server is already connected to via SSE.
 - **Serial execution.** Steps in a single plugin run sequentially.
   Distinct plugin invocations are also serialized at the executor — only
   one job runs at a time. Two parallel xcodebuilds would corrupt the

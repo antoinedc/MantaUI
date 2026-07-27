@@ -19,6 +19,8 @@ import {
   resolveCwd,
   validateSuppliedInputs,
   parseTimeout,
+  normalizeHost,
+  CAP_HOSTS,
   NAME_RE,
   INPUT_ID_RE,
   INPUT_TYPES,
@@ -69,7 +71,7 @@ describe("parseManifest — top-level", () => {
     const yaml = `
 name: foo
 description: hi
-host: mac
+host: desktop
 steps: [{ run: "echo hi" }]
 stranger: 1
 `;
@@ -84,7 +86,7 @@ stranger: 1
     const yaml = `
 name: lint-and-build
 description: Lint then build a Node project
-host: mac
+host: desktop
 inputs:
   - id: project
     description: project path
@@ -105,7 +107,7 @@ steps:
     const m = okManifest(r);
     expect(m.name).toBe("lint-and-build");
     expect(m.description).toBe("Lint then build a Node project");
-    expect(m.host).toBe("mac");
+    expect(m.host).toBe("desktop");
     expect(m.inputs).toEqual([
       {
         id: "project",
@@ -167,26 +169,95 @@ steps: [{run: "echo"}]
     });
   });
 
-  it("rejects host !== 'mac' with the canonical message", () => {
+  it("rejects an unknown host with the canonical message", () => {
     const r = parseManifest(`
 name: foo
 description: x
-host: linux
+host: windows
 steps: [{run: "echo"}]
 `);
     expect(r.errors).toContainEqual({
       path: "host",
-      message: 'host: only "mac" is supported',
+      message: 'host: must be one of desktop, box (legacy "mac" means desktop)',
     });
   });
 
-  it("defaults host to 'mac' when omitted", () => {
+  it("accepts host: desktop and yields manifest.host === 'desktop'", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+host: desktop
+steps: [{run: "echo"}]
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).host).toBe("desktop");
+  });
+
+  it("accepts host: mac (legacy alias) and normalizes to 'desktop'", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+host: mac
+steps: [{run: "echo"}]
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).host).toBe("desktop");
+  });
+
+  it("accepts host: box and yields manifest.host === 'box'", () => {
+    const r = parseManifest(`
+name: foo
+description: x
+host: box
+steps: [{run: "echo"}]
+`);
+    expect(r.errors).toBeUndefined();
+    expect(okManifest(r).host).toBe("box");
+  });
+
+  it("defaults host to 'desktop' when omitted", () => {
     const r = parseManifest(`
 name: foo
 description: x
 steps: [{run: "echo"}]
 `);
-    expect(okManifest(r).host).toBe("mac");
+    expect(okManifest(r).host).toBe("desktop");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeHost — pure mapper used by both the queue and the manifest parser
+// ---------------------------------------------------------------------------
+
+describe("normalizeHost", () => {
+  it("returns 'desktop' for undefined / null / ''", () => {
+    expect(normalizeHost(undefined)).toBe("desktop");
+    expect(normalizeHost(null)).toBe("desktop");
+    expect(normalizeHost("")).toBe("desktop");
+  });
+
+  it("returns 'desktop' for 'desktop'", () => {
+    expect(normalizeHost("desktop")).toBe("desktop");
+  });
+
+  it("returns 'desktop' for legacy 'mac'", () => {
+    expect(normalizeHost("mac")).toBe("desktop");
+  });
+
+  it("returns 'box' for 'box'", () => {
+    expect(normalizeHost("box")).toBe("box");
+  });
+
+  it("returns null for any unknown value", () => {
+    expect(normalizeHost("linux")).toBeNull();
+    expect(normalizeHost("windows")).toBeNull();
+    expect(normalizeHost("foo")).toBeNull();
+    expect(normalizeHost(123)).toBeNull();
+    expect(normalizeHost({})).toBeNull();
+  });
+
+  it("CAP_HOSTS contains exactly the canonical values", () => {
+    expect(CAP_HOSTS).toEqual(["desktop", "box"]);
   });
 });
 
@@ -614,7 +685,7 @@ describe("buildEnv", () => {
   const minimal = {
     name: "demo",
     description: "x",
-    host: "mac" as const,
+    host: "desktop" as const,
     inputs: [
       { id: "foo", description: "x", type: "string" as const, default: "def-foo" },
       { id: "bar", description: "x", type: "boolean" as const },
@@ -730,7 +801,7 @@ describe("validateSuppliedInputs", () => {
   const manifest = {
     name: "x",
     description: "x",
-    host: "mac" as const,
+    host: "desktop" as const,
     inputs: [
       { id: "foo", description: "x", type: "string" as const },
       { id: "bar", description: "x", type: "number" as const },
@@ -787,7 +858,7 @@ describe("validateManifest", () => {
     const obj = {
       name: "demo",
       description: "x",
-      host: "mac",
+      host: "desktop",
       steps: [{ run: "echo" }],
     };
     expect(validateManifest(obj).errors).toEqual([]);

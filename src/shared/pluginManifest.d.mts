@@ -24,7 +24,7 @@ export type PluginStep = {
 export type PluginManifest = {
   name: string;
   description: string;
-  host: "mac";
+  host: "desktop" | "box";
   inputs: PluginInputRow[];
   env: Record<string, string>;
   timeoutMs: number | null;
@@ -36,6 +36,7 @@ export type PluginManifestError = { path: string; message: string };
 export const NAME_RE: RegExp;
 export const INPUT_ID_RE: RegExp;
 export const INPUT_TYPES: readonly string[];
+export const CAP_HOSTS: readonly string[];
 export const PATH_PATCH: string;
 
 export function parseManifest(
@@ -70,3 +71,4 @@ export function validateSuppliedInputs(
 ): { errors: PluginManifestError[] };
 
 export function parseTimeout(s: string): number | { error: string };
+export function normalizeHost(h: unknown): "desktop" | "box" | null;

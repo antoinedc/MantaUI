@@ -17,16 +17,17 @@
 // injected back into this session when the Mac executor finishes.
 //
 // A "plugin" is a YAML manifest at ~/.manta/plugins/<name>.yaml on the
-// machine the user wants to drive (today: only host:"mac" — the connected
-// Mac). The user (or the AI, via plugin_save) authors manifests; the Mac
-// executor scans the folder on startup + on every fs.watch burst and runs
-// matching capabilities. See docs/plugins-authoring.md for the full schema
-// and the eight-section authoring guide reachable via plugin_docs().
+// machine the user wants to drive (today: host:"desktop" — the connected
+// desktop). The user (or the AI, via plugin_save) authors manifests; the
+// desktop executor scans the folder on startup + on every fs.watch burst
+// and runs matching capabilities. See docs/plugins-authoring.md for the
+// full schema and the eight-section authoring guide reachable via
+// plugin_docs().
 //
 // Replaces docs/opencode-tools/ios-build.ts (BET-189/BET-190/BET-191): the
 // queue speaks the GENERIC {capability, input, host} envelope; the ONLY
-// plugin-specific bits here are the names "plugin.*" and host:"mac". The
-// old `ios_build` tool is gone — install `plugin_run("ios-<app>", ...)`
+// plugin-specific bits here are the names "plugin.*" and host:"desktop".
+// The old `ios_build` tool is gone — install `plugin_run("ios-<app>", ...)`
 // against an authored ios-capacitor manifest instead.
 
 import { tool } from "@opencode-ai/plugin";
@@ -209,7 +210,7 @@ export const plugin_save = tool({
   async execute(args, context) {
     const r = await call("POST", "/api/cap", {
       capability: "plugin.write",
-      host: "mac",
+      host: "desktop",
       input: { name: args.name, yaml: args.yaml },
       sessionID: context.sessionID,
       directory: context.directory,
@@ -274,7 +275,7 @@ export const plugin_run = tool({
     }
     const r = await call("POST", "/api/cap", {
       capability: args.name,
-      host: "mac",
+      host: "desktop",
       input: args.inputs ?? {},
       sessionID: context.sessionID,
       directory: context.directory,
