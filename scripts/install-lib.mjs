@@ -1044,16 +1044,18 @@ export function buildPairLink(boxId, code) {
 }
 
 /**
- * Pair-page URL — the ONE link a fresh install reports. Fragment carries the
- * code so it never reaches server logs; the page derives the box id from its
- * own hostname. Shares buildPairLink's validation rules.
+ * Pair-page URL — the ONE link a fresh install reports. The fragment carries
+ * BOTH the code and the box id so neither reaches server logs and the page
+ * stays usable on non-public boxes (where the hostname is e.g. a tailnet IP
+ * and the hostname-fallback can't recover the box id). The page also still
+ * accepts a hostname-derived box id for old links sitting in terminal
+ * scrollback; the fragment wins when both are present. Shares buildPairLink's
+ * validation rules.
  *
  * `options.baseUrl` (BET-267): when the box is reached over a non-public
- * ingress (currently Tailscale), the pair-page URL must use THAT base, not the
- * canonical `<boxId>.boxes.mantaui.com`. The fragment (#code=) is preserved
- * so the page still gets the code from the URL fragment and the box id from
- * the host header. The boxId regex check is skipped in that mode — the page
- * derives the box id from the request's host header, not from the URL path.
+ * ingress (currently Tailscale), the pair-page URL must use THAT base, not
+ * the canonical `<boxId>.boxes.mantaui.com`. The fragment (`#box=&code=`) is
+ * emitted in both branches — one wire shape from one code path.
  */
 export function buildPairPageUrl(boxId, code, { baseUrl } = {}) {
   if (!/^[0-9a-f]{32}$/.test(boxId ?? "")) {
@@ -1064,9 +1066,9 @@ export function buildPairPageUrl(boxId, code, { baseUrl } = {}) {
   }
   if (typeof baseUrl === "string" && baseUrl !== "") {
     const trimmed = baseUrl.replace(/\/+$/, "");
-    return `${trimmed}/pair#code=${code}`;
+    return `${trimmed}/pair#box=${boxId}&code=${code}`;
   }
-  return `https://${boxId}.boxes.mantaui.com/pair#code=${code}`;
+  return `https://${boxId}.boxes.mantaui.com/pair#box=${boxId}&code=${code}`;
 }
 
 // Lazy-default QR renderer: requires `qrcode-terminal` at call time, not at

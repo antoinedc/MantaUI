@@ -462,7 +462,7 @@ test("formatPairingOutput produces a stable human block", () => {
   assert.match(out, /Expires:       2026-07-03 12:34:56 UTC/);
   // BET-239: Pair page URL surfaces under step 2 (above the manta:// link),
   // indented the same 7 spaces as the link itself.
-  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   // BET-241 Branch A footer: greppable one-time note at the very end of the block.
   assert.match(out, /\(one-time — mint a fresh one any time with `manta pair`\)/);
 });
@@ -574,11 +574,11 @@ test("buildPairLink produces the canonical box-form pair link (BET-177 §2.4)", 
 // never reaches server logs. Shares buildPairLink's validation rules so a
 // future drift in box/code shape fails BOTH helpers in lockstep.
 
-test("buildPairPageUrl emits the canonical https://<box>.boxes.mantaui.com/pair#code= shape", () => {
+test("buildPairPageUrl emits the canonical https://<box>.boxes.mantaui.com/pair#box=&code= shape", () => {
   const url = buildPairPageUrl(HEX32, "847291");
   assert.equal(
     url,
-    "https://0123456789abcdef0123456789abcdef.boxes.mantaui.com/pair#code=847291",
+    "https://0123456789abcdef0123456789abcdef.boxes.mantaui.com/pair#box=0123456789abcdef0123456789abcdef&code=847291",
   );
 });
 
@@ -625,7 +625,7 @@ test("formatPairingOutput includes the pair link + QR", () => {
   assert.match(out, /2\. Pair it — click this link, or paste it into the app's Connect screen/);
   // BET-239: Pair page URL surfaces under step 2 (above the manta:// link),
   // indented the same 7 spaces as the link itself.
-  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   // Stubbed QR rows are indented to match the surrounding 2-space indent.
   // We use a literal newline+two-spaces prefix in the regex (no \s — `s`
   // is .includes-sensitive and we want the exact byte sequence the formatter
@@ -652,7 +652,7 @@ test("formatPairingOutput falls back to the text-only block when qrRender throws
   // thing missing — BET-239 added the Pair page URL alongside the manta://
   // link; BET-241 moved the manta:// URL into step 2 of the numbered block).
   assert.match(out, /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
-  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   assert.match(out, /3\. iPhone \(optional\) — scan the QR below with your camera/);
   // QR block chars (qrcode-terminal draws U+2588 FULL BLOCK + U+2584 LOWER
   // HALF BLOCK) are absent. We assert on the QR's STUB marker rather than
@@ -3140,10 +3140,12 @@ test("buildPairPageUrl accepts an explicit baseUrl (BET-267 tailnet path)", () =
   // When the install sets INGRESS_MODE=tailscale it passes the tailnet
   // serverUrl as `baseUrl` so the pair page points at the box's Tailscale
   // listener instead of <boxId>.boxes.mantaui.com (which would be
-  // unreachable on the tailnet path). The fragment (#code=) is preserved
-  // so the pair page still derives box_id from the request's host header.
+  // unreachable on the tailnet path). The fragment carries BOTH the
+  // box id and the code so the pair page can render them regardless of
+  // the request's host header (BET-334 — tailnet hostnames are IPs, not
+  // 32-hex box ids).
   const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "http://100.64.1.5:8787" });
-  assert.equal(url, "http://100.64.1.5:8787/pair#code=847291");
+  assert.equal(url, "http://100.64.1.5:8787/pair#box=0123456789abcdef0123456789abcdef&code=847291");
 });
 
 test("buildPairPageUrl strips a trailing slash from baseUrl", () => {
@@ -3152,7 +3154,7 @@ test("buildPairPageUrl strips a trailing slash from baseUrl", () => {
   // env var override), the helper must not produce a doubled slash in
   // the final URL.
   const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "http://100.64.1.5:8787/" });
-  assert.equal(url, "http://100.64.1.5:8787/pair#code=847291");
+  assert.equal(url, "http://100.64.1.5:8787/pair#box=0123456789abcdef0123456789abcdef&code=847291");
 });
 
 test("buildPairPageUrl falls back to the canonical host when baseUrl is empty", () => {
@@ -3160,7 +3162,21 @@ test("buildPairPageUrl falls back to the canonical host when baseUrl is empty", 
   // path's wire shape (regression guard against a future caller passing
   // an unset env var through to the option).
   const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "" });
-  assert.equal(url, `https://${HEX32}.boxes.mantaui.com/pair#code=847291`);
+  assert.equal(url, `https://${HEX32}.boxes.mantaui.com/pair#box=${HEX32}&code=847291`);
+});
+
+test("buildPairPageUrl with baseUrl embeds the box id in the fragment (BET-334)", () => {
+  // Regression for BET-334: on the Tailscale path the install hands the
+  // tailnet listener URL to `baseUrl`, so the pair page is reached over an
+  // IP (e.g. http://100.64.1.5:8787) — the host header is NOT a 32-hex
+  // box id. The fragment MUST carry the box id so the page can render the
+  // BOX ID row and skip the `nocode` class (which disables the "Open in
+  // Manta" button). The test that would have caught the original bug.
+  const url = buildPairPageUrl(HEX32, "847291", { baseUrl: "http://100.64.1.5:8787" });
+  assert.match(
+    url,
+    /^http:\/\/100\.64\.1\.5:8787\/pair#box=0123456789abcdef0123456789abcdef&code=847291$/,
+  );
 });
 
 test("formatPairingOutput uses serverUrl as the pair-page base on the tailnet path (BET-267)", () => {
@@ -3177,7 +3193,7 @@ test("formatPairingOutput uses serverUrl as the pair-page base on the tailnet pa
     expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
     serverUrl: "http://100.64.1.5:8787",
   });
-  assert.match(out, /Pair page:     http:\/\/100\.64\.1\.5:8787\/pair#code=847291/);
+  assert.match(out, /Pair page:     http:\/\/100\.64\.1\.5:8787\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   assert.doesNotMatch(out, /manta:\/\/pair/);
   assert.doesNotMatch(out, /boxes\.mantaui\.com/);
   // The footer (Pairing code / Box ID / Server URL) stays identical to
@@ -3199,7 +3215,7 @@ test("formatPairingOutput keeps the manta:// deep-link on the public path (BET-2
     box_id: HEX32,
     expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
   });
-  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#code=847291/);
+  assert.match(out, /Pair page:     https:\/\/0123456789abcdef0123456789abcdef\.boxes\.mantaui\.com\/pair#box=0123456789abcdef0123456789abcdef&code=847291/);
   assert.match(out, /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291/);
 });
 
