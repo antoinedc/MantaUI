@@ -526,14 +526,12 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     //   → args[0] = sessionKey
     "pty:kill": (sessionKey) => pty.kill(sessionKey),
 
-    // ---- launcher availability (BET-138 refinement) ----
+    // ---- launcher availability (BET-138 refinement, BET-310) ----
     // IPC.launchersList = "launchers:list" — which AI CLI TUIs (see
     // src/server/launcherRegistry.mjs) are available on this box right now:
-    // binary on PATH AND (if the launcher declares one) opencode reports its
-    // provider connected. Cheap; the renderer fetches on active-session
-    // change, no polling.
-    "launchers:list": () =>
-      launchers.listAvailableLaunchers({ getProviders: providers.getProviders }),
+    // binary on PATH. Cheap; the renderer fetches on active-session change,
+    // no polling.
+    "launchers:list": () => launchers.listAvailableLaunchers(),
   };
 }
 

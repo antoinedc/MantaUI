@@ -6,8 +6,6 @@
 //          migration.
 // label    dropdown label.
 // bin      binary probed with `command -v` for availability.
-// provider opencode provider id that must be `connected` for availability, or
-//          null for a pure-CLI launcher with no opencode auth gate.
 // flags    flag schema: [{ key, label, type:"boolean", default, arg }]. `arg`
 //          is the CLI flag emitted when a boolean flag is truthy.
 // buildArgs(values) -> string[] argv (excluding the bin itself).
@@ -17,7 +15,6 @@ export const LAUNCHERS = [
     id: "claude",
     label: "Claude Code",
     bin: "claude",
-    provider: "anthropic",
     flags: [
       {
         key: "skipPermissions",
@@ -35,8 +32,20 @@ export const LAUNCHERS = [
       return args;
     },
   },
-  // Future example (do NOT add in v1 — illustration only):
-  // { id: "codex", label: "Codex", bin: "codex", provider: "openai", flags: [], buildArgs: () => [] },
+  {
+    id: "codex",
+    label: "Codex",
+    bin: "codex",
+    flags: [],
+    buildArgs: () => [],
+  },
+  {
+    id: "kimi",
+    label: "Kimi Code",
+    bin: "kimi",
+    flags: [],
+    buildArgs: () => [],
+  },
 ];
 
 export function findLauncher(id) {
