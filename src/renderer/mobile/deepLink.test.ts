@@ -148,6 +148,21 @@ describe("handlePairUrl — box form (direct hostname, BET-198)", () => {
     expect(deps.persistCalls).toEqual([boxDirectUrl(BOX)]);
   });
 
+  it("claims + persists the link-supplied serverUrl verbatim (BET-336, Tailscale path)", async () => {
+    // The deep link carries a `server=` parameter (Tailscale path).
+    // `parsePairPayload` has already gated it through `isPrivateServerUrl`
+    // so the value reaching `handlePairUrl` is always a private/tailnet
+    // URL. Both the claim AND the persist must use that URL verbatim —
+    // never fall through to the public boxDirectUrl.
+    const SERVER = "http://100.64.1.5:8787";
+    const link = `manta://pair?box=${BOX}&code=847291&server=${encodeURIComponent(SERVER)}`;
+    const deps = makeDeps();
+    const out = await handlePairUrl(link, deps);
+    expect(out).toBe("paired");
+    expect(deps.authClaimCalls).toEqual([{ serverUrl: SERVER, code: "847291" }]);
+    expect(deps.persistCalls).toEqual([SERVER]);
+  });
+
   it("returns 'failed' when authClaim rejects with a classified failure (no persist)", async () => {
     const deps = makeDeps({
       authClaim: async () => failOutcome(),

@@ -106,6 +106,64 @@ test("validatePairQrQuery rejects non-string fields", () => {
 });
 
 // ---------------------------------------------------------------------------
+// validatePairQrQuery — server= param (BET-336, Tailscale pair link)
+// ---------------------------------------------------------------------------
+
+test("validatePairQrQuery without a server param returns the unchanged payload (BET-336, public path)", () => {
+  // Pre-BET-336 wire shape — must stay unchanged so existing QR consumers
+  // keep working.
+  const r = validatePairQrQuery({ box: HEX32, code: "847291" });
+  assert.equal(r.ok, true);
+  assert.equal(r.payload, `manta://pair?box=${HEX32}&code=847291`);
+  assert.equal(r.payload.includes("server="), false);
+});
+
+test("validatePairQrQuery appends &server=<encoded> for a private URL (BET-336, tailscale path)", () => {
+  const r = validatePairQrQuery({
+    box: HEX32,
+    code: "847291",
+    server: "http://100.64.1.5:8787",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(
+    r.payload,
+    `manta://pair?box=${HEX32}&code=847291&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
+  );
+});
+
+test("validatePairQrQuery accepts .ts.net and 192.168.x servers (BET-336, accepted families)", () => {
+  const r1 = validatePairQrQuery({
+    box: HEX32,
+    code: "847291",
+    server: "https://mybox.ts.net",
+  });
+  assert.equal(r1.ok, true);
+  assert.equal(
+    r1.payload,
+    `manta://pair?box=${HEX32}&code=847291&server=${encodeURIComponent("https://mybox.ts.net")}`,
+  );
+  const r2 = validatePairQrQuery({
+    box: HEX32,
+    code: "847291",
+    server: "http://192.168.1.10:8787",
+  });
+  assert.equal(r2.ok, true);
+});
+
+test("validatePairQrQuery rejects a PUBLIC server URL (BET-336, crafted-link guard)", () => {
+  // The whole payload must be refused — NOT silently dropped and emitted
+  // without &server= (that fallback would make the link resolve to a
+  // public host, which is exactly the attack vector the gate prevents).
+  const r = validatePairQrQuery({
+    box: HEX32,
+    code: "847291",
+    server: "https://attacker.example.com",
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /private\/tailnet/);
+});
+
+// ---------------------------------------------------------------------------
 // renderPairQr — produces a valid PNG buffer
 // ---------------------------------------------------------------------------
 

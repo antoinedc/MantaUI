@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { STATE_DIRNAME } from "../src/shared/paths.mjs";
 import { loadAuth } from "../src/server/auth.mjs";
+import { isPrivateServerUrl } from "../src/shared/transport.mjs";
 
 // `qrcode-terminal` is CommonJS; we keep this module ESM. The local
 // `createRequire` shim is sync (no top-level await) and resolves the lib
@@ -942,32 +943,32 @@ export function formatPairingOutput(
     lines.push("");
     lines.push("  2. Pair it — click this link, or paste it into the app's Connect screen");
     // BET-267: when a non-public serverUrl is provided (tailscale path), the
-    // pair-page URL and the QR must point at THAT base. We also drop the
-    // `manta://pair?…` deep-link line: the resolver on the mobile/desktop side
-    // routes that link through `boxDirectUrl` → `https://<boxId>.boxes.mantaui.com`,
-    // which is unreachable on the tailscale path. The pair-page URL is the
-    // single source of truth for the connect block in tailscale mode.
+    // pair-page URL must point at THAT base. The pair-page URL is what the
+    // user opens in a browser; the deep link / QR below carry the listener
+    // verbatim for one-click.
+    //
+    // BET-336: the deep link now also carries the server URL when one was
+    // supplied (gated by `isPrivateServerUrl` inside `buildPairLink`, so a
+    // crafted install can't smuggle a public address past this function).
+    // ONE wire shape — no more manta:///pair-page fork.
     const useServerUrl = typeof serverUrl === "string" && serverUrl !== "";
+    const pairLinkOpts = useServerUrl ? { serverUrl } : {};
+    const pairLink = buildPairLink(box_id, pairing_code, pairLinkOpts);
     const pairPageUrl = buildPairPageUrl(box_id, pairing_code, {
       baseUrl: useServerUrl ? serverUrl : undefined,
     });
     lines.push(`       Pair page:     ${pairPageUrl}`);
-    if (!useServerUrl) {
-      // Public path keeps the manta:// deep link for one-tap mobile pairing.
-      const pairLink = buildPairLink(box_id, pairing_code);
-      lines.push(`       ${pairLink}`);
-    }
+    lines.push(`       ${pairLink}`);
     lines.push("");
     lines.push("  3. iPhone (optional) — scan the QR below with your camera");
     lines.push(`       App download: ${IOS_APP_URL}  (App Store link coming soon)`);
     lines.push("");
-    // QR encodes the pair-page URL when a serverUrl is in play (the QR has to
-    // open a URL the scanning device can actually reach), the manta:// link
-    // otherwise (preserves the old wire shape for the public install).
-    const qrPayload = useServerUrl ? pairPageUrl : buildPairLink(box_id, pairing_code);
+    // BET-336: the QR encodes the SAME deep link the user can paste — the
+    // one-tap path. The link itself already points at the right listener
+    // (with `&server=` on the tailscale path), so no separate conditional.
     let qr;
     try {
-      qr = qrRender(qrPayload);
+      qr = qrRender(pairLink);
     } catch {
       // qrcode-terminal missing / broken (e.g. a dev's stripped node_modules) —
       // degrade to text-only rather than crash the install. The QR is a
@@ -1029,16 +1030,35 @@ export function formatPairingOutput(
  * round-trips this against the renderer's `parsePairPayload` via subprocess
  * to enforce the contract.
  *
+ * BET-336 (Tailscale pair link): when an optional `serverUrl` is supplied
+ * it is appended as `&server=<url-encoded>` so the receiving device can
+ * claim against the private/tailnet listener instead of the derived
+ * public hostname. The supplied server URL MUST pass
+ * `isPrivateServerUrl` (the same single-source-of-truth gate the
+ * renderer-side parser uses); a non-private value throws — refusing is
+ * the intended behaviour, not silently dropping the param.
+ *
  * Cross-reference: keep in sync with src/renderer/mobile/pairPayload.ts
  * `buildPairPayload` (box-form branch). If the canonical shape changes,
  * BOTH helpers must change in lockstep — the test catches drift.
  */
-export function buildPairLink(boxId, code) {
+export function buildPairLink(boxId, code, { serverUrl } = {}) {
   if (typeof boxId !== "string" || !/^[0-9a-f]{32}$/.test(boxId)) {
     throw new Error("buildPairLink: boxId must be a 32-hex token");
   }
   if (!/^[0-9]{6}$/.test(String(code ?? ""))) {
     throw new Error("buildPairLink: code must be 6 digits");
+  }
+  if (serverUrl !== undefined) {
+    if (typeof serverUrl !== "string" || serverUrl === "") {
+      throw new Error("buildPairLink: serverUrl must be a non-empty string");
+    }
+    if (!isPrivateServerUrl(serverUrl)) {
+      throw new Error(
+        "buildPairLink: serverUrl must be a private/tailnet http(s) URL",
+      );
+    }
+    return `manta://pair?box=${encodeURIComponent(boxId)}&code=${code}&server=${encodeURIComponent(serverUrl)}`;
   }
   return `manta://pair?box=${encodeURIComponent(boxId)}&code=${code}`;
 }

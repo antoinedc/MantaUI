@@ -10,7 +10,7 @@ import { claimBox } from "./pairClaim";
 import { useStore } from "./store";
 
 // PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2,
-// BET-255, BET-268, BET-335).
+// BET-255, BET-268, BET-335, BET-336).
 //
 // Mounts into Onboarding.tsx's step-1 slot. Owns the pairing form:
 //   • a Box ID input (32-hex box id)
@@ -65,19 +65,24 @@ export function PairStep({
   onPaired: () => void;
   onSkip: () => void;
 }) {
-  // Deep-link prefill (BET-335): if App.tsx stashed a valid `manta://pair?…`
-  // URL into `pendingPairLink` before this step mounted, seed both fields
-  // from it. Lazy init via `useState(() => …)` so we read the store ONCE at
-  // mount — the user can then edit the fields freely without our re-reading
-  // the stashed URL on every keystroke. `prefillFromPairLink` returns null
-  // for any nullish/empty/invalid input (foreign URL, bad box, bad code),
-  // which falls through to empty fields — the same default the form already
+  // Deep-link prefill (BET-335; extended BET-336 for the server URL): if
+  // App.tsx stashed a valid `manta://pair?…` URL into `pendingPairLink`
+  // before this step mounted, seed the fields from it. Lazy init via
+  // `useState(() => …)` so we read the store ONCE at mount — the user can
+  // then edit the fields freely without our re-reading the stashed URL on
+  // every keystroke. `prefillFromPairLink` returns null for any
+  // nullish/empty/invalid input (foreign URL, bad box, bad code), which
+  // falls through to empty fields — the same default the form already
   // used for a non-deep-link open.
   const prefill = prefillFromPairLink(useStore.getState().pendingPairLink);
   const [boxId, setBoxId] = useState(() => prefill?.boxId ?? "");
   const [code, setCode] = useState(() => prefill?.code ?? "");
-  const [serverUrl, setServerUrl] = useState("");
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [serverUrl, setServerUrl] = useState(() => prefill?.serverUrl ?? "");
+  // BET-336: when the link supplied a server URL (Tailscale / private
+  // listener), open the Advanced section by default so the user can SEE
+  // the address they're about to pair against before clicking Connect —
+  // the deep-link confirmation screen promised exactly this visibility.
+  const [advancedOpen, setAdvancedOpen] = useState(() => Boolean(prefill?.serverUrl));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);

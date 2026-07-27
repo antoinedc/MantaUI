@@ -106,6 +106,92 @@ export function desktopHttpClientSeed(config) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Private-network server-URL gate (BET-336 — Tailscale pair-link carry).
+// ---------------------------------------------------------------------------
+//
+// The pairing link `manta://pair?box=&code=&server=` may carry the box's
+// listener URL so a Tailscale box (no public hostname) can ship a
+// one-click / QR pair link. The risk: a crafted link could point the app at
+// an attacker's server. Mitigation: the link-supplied URL must be a
+// PRIVATE / tailnet address — anything reachable from inside the user's own
+// network, where an attacker already has better options than a pair link.
+// This is consistent with how these boxes already work: plain HTTP inside
+// the WireGuard tunnel, where the network IS the trust boundary.
+//
+// Accepted host families (single source of truth — every consumer in
+// parsePairPayload, pair.html, pairPage.mjs, and scripts/install-lib.mjs
+// imports THIS function; do not copy the ranges elsewhere or the rule will
+// silently drift):
+//   • localhost
+//   • IPv4 in 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (RFC 1918 private)
+//   • IPv4 in 100.64.0.0/10 (CGNAT — the range Tailscale allocates from)
+//   • IPv4 in 127.0.0.0/8 (loopback, in case the box is the same machine)
+//   • hostnames ending in .ts.net (Tailscale MagicDNS)
+//
+// Explicitly REJECTED:
+//   • any other IPv4 (public addresses — they have a real public hostname
+//     path, never need this link-supplied override)
+//   • all IPv6 literals (out of scope — rejecting them is the intended
+//     behaviour, not an oversight)
+//   • non-http(s) schemes (file://, ftp://, ws://, …)
+//   • unparseable input, non-string input, bare hosts with no scheme
+//
+// Returns true only when the input parses as an http(s) URL AND its host
+// is in one of the accepted families above. Pure; no I/O.
+//
+// IPv4 ranges are checked by parsing the dotted-quad ourselves (four
+// integer octets, each 0–255) — no dependency, no library; mirrors the
+// hand-rolled shape-gates elsewhere in this file (isValidBoxToken).
+export function isPrivateServerUrl(raw) {
+  if (typeof raw !== "string" || raw === "") return false;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const host = url.hostname;
+  if (host === "") return false;
+  if (host === "localhost") return true;
+  if (host.endsWith(".ts.net")) return true;
+  return isPrivateIPv4(host);
+}
+
+// True iff `host` is a dotted-quad IPv4 in one of the accepted ranges.
+// Returns false for IPv6 literals, hostnames, and dotted-quads outside the
+// private/CGNAT/loopback ranges. Public IPv4 → false (those have their own
+// boxes.mantaui.com hostname path; the link-supplied override must never
+// reach them).
+function isPrivateIPv4(host) {
+  const parts = host.split(".");
+  if (parts.length !== 4) return false;
+  const octets = new Array(4);
+  for (let i = 0; i < 4; i++) {
+    const p = parts[i];
+    if (p.length === 0 || p.length > 3) return false;
+    // No leading zeros — "01" is not a valid IPv4 octet per WHATWG URL
+    // parser semantics and we want consistent rejection.
+    if (p.length > 1 && p[0] === "0") return false;
+    const n = Number(p);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return false;
+    octets[i] = n;
+  }
+  const [a, b] = octets;
+  // 10.0.0.0/8
+  if (a === 10) return true;
+  // 127.0.0.0/8 (loopback)
+  if (a === 127) return true;
+  // 172.16.0.0/12 (172.16 – 172.31)
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  // 192.168.0.0/16
+  if (a === 192 && b === 168) return true;
+  // 100.64.0.0/10 (CGNAT — Tailscale allocates from here)
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
 // Validate + normalize the JSON body of a successful POST /auth/claim response.
 // The server returns { ok, box_token, box_id } (see src/server/auth.mjs claim()).
 // We only trust it once BOTH tokens match the 32-hex shape — a wrong shape means

@@ -37,6 +37,17 @@ export function resolveTransportMode(
 // Validate + normalize the JSON body of a POST /auth/claim response.
 export function parseClaimResponse(json: unknown): ClaimResult;
 
+// True iff `raw` is an http(s) URL whose host is a private / tailnet
+// address — `localhost`, IPv4 in 10/8, 172.16/12, 192.168/16, 100.64/10
+// (Tailscale CGNAT), 127/8, or any `.ts.net` hostname. Accepts ONLY this
+// set on purpose — a pairing link may carry the box's listener URL, but
+// the URL must point at the user's own network (where an attacker has
+// better options than a pair link). Public IPv4, all IPv6 literals, and
+// non-http(s) schemes are explicitly rejected. Single source of truth —
+// every consumer in pairPayload / pair.html / pairPage.mjs / install-lib
+// imports THIS function. See transport.mjs for the rule + ranges.
+export function isPrivateServerUrl(raw: unknown): raw is string;
+
 // Which client the DESKTOP should install as window.api (BET-58):
 //   "http"    — paired config → the httpApi server client (keep preload for
 //               Electron-local affordances under window.__mantaPreload)
