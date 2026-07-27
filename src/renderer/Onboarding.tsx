@@ -185,15 +185,16 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             ) : pos === 2 ? (
               // Step 2 (Providers) owns its footer (Back + gated Continue).
               <ProvidersStep onBack={goBack} onContinue={goNext} />
-            ) : pos === 3 ? (
-              // Step 3 (Model) owns its footer (Back + gated Continue).
-              <ModelStep onBack={goBack} onContinue={goNext} />
             ) : (
               // Step 4 (First project) owns its footer (Back + gated Create
               // project). onCreated advances to the success screen.
               <FirstProjectStep onBack={goBack} onCreated={goNext} />
             )}
           </div>
+          {/* ModelStep stays mounted across Step 3 ↔ Step 4 so a return to
+              Step 3 fires the `active` refetch (BET-315). The component
+              returns null while inactive. */}
+          <ModelStep active={pos === 3} onBack={goBack} onContinue={goNext} />
         </div>
       </div>
     </div>
