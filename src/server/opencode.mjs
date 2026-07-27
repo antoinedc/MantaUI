@@ -841,19 +841,19 @@ export async function rejectQuestion({ requestId, sessionId }) {
 
 /**
  * Get the default model from the first connected provider.
+ * Single source of truth for live provider state is `getProviders()`
+ * (BET-318). Keeping the inline `GET /provider` fetch out of here
+ * eliminates the latent drift trap between this caller and the
+ * `opencode:provider-auth` `status` action.
+ *
+ * Returns `null` when opencode is unreachable, returns a non-2xx,
+ * or when no connected provider has a default model recorded.
  * @returns {Promise<{ providerID: string, modelID: string }|null>}
  */
 export async function getDefaultModel() {
-  const res = await ocFetch(apiUrl("/provider"));
-  if (!res.ok) {
-    await discardBody(res);
-    return null;
-  }
-  const data = await res.json();
-  const connected = data.connected ?? [];
-  const defaults = data.default ?? {};
+  const { connected, default: defaults } = await getProviders();
   for (const id of connected) {
-    const modelID = defaults[id];
+    const modelID = defaults?.[id];
     if (modelID) return { providerID: id, modelID };
   }
   return null;
