@@ -860,6 +860,37 @@ export async function getDefaultModel() {
 }
 
 /**
+ * Read the live provider state from opencode's `GET /provider`.
+ * Single source of truth for callers that need the authoritative
+ * `connected[]` list (and the full `all`/`default` shape when available).
+ *
+ * Used by the `opencode:provider-auth` `status` action to feed
+ * `subscriptionProviders.subscriptionStatuses(connected)`.
+ *
+ * @returns {Promise<{ connected: string[], all?: Array<{id:string}>, default?: Record<string,string> }>}
+ *   Never throws — a transport failure or non-2xx response yields
+ *   `{ connected: [] }` so the caller's `connected[]` reads are safe.
+ */
+export async function getProviders() {
+  try {
+    const res = await ocFetch(apiUrl("/provider"));
+    if (!res.ok) {
+      await discardBody(res);
+      return { connected: [] };
+    }
+    const data = await res.json();
+    return {
+      connected: Array.isArray(data?.connected) ? data.connected : [],
+      all: Array.isArray(data?.all) ? data.all : undefined,
+      default:
+        data?.default && typeof data.default === "object" ? data.default : undefined,
+    };
+  } catch {
+    return { connected: [] };
+  }
+}
+
+/**
  * List all models from CONNECTED providers only.
  * Strips raw API keys by reconstructing the model shape (normalizeProviderModel).
  * @returns {Promise<Array<{ id: string, providerID: string, name: string, ... }>>}
