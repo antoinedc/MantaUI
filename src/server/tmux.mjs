@@ -142,20 +142,24 @@ async function newSessionGetIndex(name, cwd, windowName, chatMode) {
 // Create the tmux window with an explicit index-returning form. For chat-mode
 // we launch the holder pane (`sleep infinity`) instead of the default shell so
 // the pane is inert under manta's overlaid ChatPanel; for non-chat we launch the
-// default shell (no trailing command). `cwd` MUST be an absolute path — callers
-// run it through `resolveCwdOrThrow` first.
+// default shell (no trailing command).
 //
 // `chatMode` defaults to false (fork-session is the 3-arg caller from
 // src/server/rpc.mjs and never wanted chatMode). Exported so rpc handlers can
 // create windows directly (fork-session stamp path) without going through
 // newWindow + restampSessionId.
+//
+// THE tmux-side chokepoint lives here too — `newWindowGetIndex` is reachable
+// from outside the `newSession`/`newWindow` envelope (rpc.mjs:376 fork-session
+// calls it directly), so we resolve and reject a missing dir the same way.
 export async function newWindowGetIndex(sessionName, windowName, cwd, chatMode = false) {
+  const dir = resolveCwdOrThrow(cwd);
   const { stdout } = await run("tmux", [
     "new-window",
     "-t", sessionName,
     "-n", windowName,
     "-P", "-F", "#{window_index}",
-    "-c", cwd,
+    "-c", dir,
     ...(chatMode ? ["sh", "-c", CHAT_HOLDER_CMD] : []),
   ]);
   const idx = Number(stdout.trim());

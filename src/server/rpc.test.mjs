@@ -158,7 +158,14 @@ test("opencode:fork-session creates the new tmux window in the resolved defaultC
     windowName: "fork-1",
     cwd: "",
   });
-  assert.equal(calls.newWindowGetIndex.at(-1).cwd, "/home/dev/projects/better-ui");
+  const call = calls.newWindowGetIndex.at(-1);
+  assert.equal(call.cwd, "/home/dev/projects/better-ui", "resolved cwd forwarded");
+  assert.equal(call.sessionName, "better-ui");
+  assert.equal(call.windowName, "fork-1");
+  // BET-307: rpc.mjs:376 fork-session calls `newWindowGetIndex` with three
+  // args (no chatMode). The new tmux-side signature defaults the 4th arg
+  // to false, so the mock records chatMode as undefined.
+  assert.equal(call.chatMode, undefined, "3-arg call → chatMode undefined → defaults to false in tmux.mjs");
 });
 
 // ---- BET-113: chatMode must reach the tmux layer with the oc client -------
@@ -330,24 +337,4 @@ test("tmux:new-session swallows projectMetaUpsert failures (best-effort)", async
     chatMode: true,
   });
   assert.deepEqual(result, [], "tmux.newSession result returned (no throw)");
-});
-
-// BET-307: opencode:fork-session still works after the newWindowGetIndex
-// rename. The mock above now records a 4-arg call; assert it gets the
-// resolved absolute cwd (same as before).
-test("opencode:fork-session creates the new tmux window in the resolved defaultCwd", async () => {
-  const { deps, calls } = makeDeps([{ tmuxSession: "better-ui", defaultCwd: "/home/dev/projects/better-ui" }]);
-  const handlers = buildHandlers(deps);
-  await handlers["opencode:fork-session"]({
-    sessionId: "ses_old",
-    sessionName: "better-ui",
-    windowName: "fork-1",
-    cwd: "",
-  });
-  const call = calls.newWindowGetIndex.at(-1);
-  assert.equal(call.cwd, "/home/dev/projects/better-ui", "resolved cwd forwarded");
-  assert.equal(call.sessionName, "better-ui");
-  assert.equal(call.windowName, "fork-1");
-  // chatMode defaults to false (the new signature's optional 4th arg).
-  assert.equal(call.chatMode, undefined, "3-arg call leaves chatMode undefined → defaults to false in tmux.mjs");
 });
