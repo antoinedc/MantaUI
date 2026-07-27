@@ -1,16 +1,37 @@
 # CI — the deterministic merge gate, ported from the leasebot/tenanture setup.
 #
-# Job name `typecheck-test` is a REQUIRED check (required-checks.json + branch
-# protection). This makes the PM agent's GATE 2 tamper-proof: the gate runs on
-# the repo's self-hosted runner (manta-dev-runner on the dev box), independent of
-# whatever an implementer agent claims locally. The PM reads `gh pr checks`
-# instead of checking out PR branches.
+# Job name `typecheck-test` is a REQUIRED check (required-checks.json + the main
+# branch ruleset). This makes the PM agent's GATE 2 tamper-proof: the gate runs
+# on the repo's self-hosted runner (manta-dev-runner on the dev box),
+# independent of whatever an implementer agent claims locally. The PM reads
+# `gh pr checks` instead of checking out PR branches.
+#
+# ── COST DISCIPLINE (2026-07-27, mirrors tenanture TEN-618) ──────────────────
+# This repo has exactly ONE self-hosted runner, so jobs do NOT run in parallel —
+# they queue, and every extra job is wall-clock time every other open PR waits
+# behind. Before this pass a PR cost 13.2 minutes of exclusive runner time
+# across six jobs in three workflow files, four of them repeating the same
+# checkout and `npm ci`.
+#
+# Two fixes, both of which keep every detector and every blocking semantic:
+#   1. `node_modules` is CACHED on the lockfile hash, so `npm ci` runs only when
+#      the lockfile actually moves. This is where most of the time went.
+#   2. The advisory duplication report is now a STEP of this job rather than its
+#      own workflow (anti-spaghetti.yml is deleted).
+#
+# `secret-scan` and `dep-audit` remain separate jobs ONLY because they are named
+# required contexts in the `main` branch ruleset, which is GitHub-side config
+# this repo cannot edit from CI. Folding them in here is the obvious next step
+# and needs exactly one manual change first: drop those two contexts from the
+# ruleset, then move the steps across and delete security-gates.yml. Do the
+# ruleset edit FIRST — a required context that no job produces blocks every PR
+# forever.
 #
 # Scope deliberately matches AGENTS.md's documented gate:
 #   npm run typecheck && npm test   (tsc x2, vitest, node:test)
 # No lint gate — the repo has no eslint config and ChatPanel-scale legacy would
-# make one permanently red. Duplication/lint signal is the NON-blocking
-# anti-spaghetti workflow instead.
+# make one permanently red. Duplication/lint signal is the non-blocking advisory
+# report below instead.
 
 name: CI
 
@@ -26,22 +47,38 @@ concurrency:
 
 jobs:
   typecheck-test:
-    runs-on: self-hosted
-    timeout-minutes: 15
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 20
     permissions:
       contents: read
+      pull-requests: write # advisory duplication sticky comment (PR events only)
     steps:
+      # Full history: the advisory report diffs against the merge base.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
+      # node_modules keyed on the lockfile: `npm ci` only runs when the lockfile
+      # changes. Exact key only, no restore-keys — a node_modules built for a
+      # different lockfile must never be silently reused.
+      - name: Cache node_modules
+        id: nm-cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-nm-${{ hashFiles('package-lock.json') }}
+
       # node-pty's electron-rebuild postinstall needs build tools; it is
       # best-effort in package.json already (`|| true`), so npm ci works on the
       # runner even if the native rebuild is skipped — tests don't spawn ptys.
-      - run: npm ci
+      - name: Install dependencies
+        if: steps.nm-cache.outputs.cache-hit != 'true'
+        run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
@@ -49,13 +86,61 @@ jobs:
       - name: Test (vitest + node:test)
         run: npm test
 
-  # STRICT blocking duplication gate (owner decision 2026-07-02) — required
-  # check. Any jscpd clone among changed files fails; exemptions only via the
-  # human-approval-class scripts/duplication-gate-ignore.txt. The advisory
-  # anti-spaghetti sticky comment remains the reviewer's judgment layer.
+      # ── Advisory duplication report (moved verbatim from anti-spaghetti.yml,
+      #    now deleted). NON-BLOCKING by design and deliberately NOT a required
+      #    check: jscpd on a diff is noisy (coincidental clones, the intentional
+      #    desktop/mobile transport mirrors), so a hard gate would block nearly
+      #    every PR. The signal is computed once and posted as a sticky PR
+      #    comment; the manta-reviewer agent READS it and exercises judgment.
+      #    CI never decides. Detector logic lives in scripts/check-duplication.sh
+      #    so the reviewer can run the identical script when the comment is
+      #    missing. The blocking half is the separate duplication-gate job. ──
+      - name: Duplication report (advisory)
+        if: github.event_name == 'pull_request'
+        run: |
+          # Never fail the job on detector output — this is a signal, not a gate.
+          bash scripts/check-duplication.sh "origin/${{ github.base_ref }}" \
+            > /tmp/anti-spaghetti-report.md 2>&1 || true
+          echo "Report written ($(wc -l < /tmp/anti-spaghetti-report.md) lines)."
+
+      - name: Post / update duplication sticky comment
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/anti-spaghetti-report.md', 'utf8');
+            const marker = '<!-- anti-spaghetti-report -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body,
+              });
+            }
+
+  # STRICT duplication gate — the blocking half of the anti-spaghetti
+  # discipline. Deliberately NOT a required check (de-required 2026-07-02:
+  # flaky at token boundaries, it blocked BET-57/PR#27, and agents cannot rerun
+  # CI). It still runs and still goes red, which is the signal the PM and
+  # reviewer read.
+  #
+  # It restores the same node_modules cache as the job above, so `npx jscpd`
+  # resolves the version pinned in package.json instead of fetching the latest
+  # from npm on every run — faster, and it closes the local-vs-CI version drift
+  # that BET-220 flagged.
   duplication-gate:
     if: github.event_name == 'pull_request'
-    runs-on: self-hosted
+    runs-on: [self-hosted, linux]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -67,16 +152,20 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - name: Restore node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-nm-${{ hashFiles('package-lock.json') }}
       - name: Strict duplication gate
         run: bash scripts/check-duplication-gate.sh "origin/${{ github.base_ref }}"
 
-  # Restored from the pre-existing ci.yml (65bfc0f) — the BET-9 e2e smoke gate.
-  # NOT in required-checks.json (Electron+Xvfb on the runner is flakier than
-  # the deterministic gates); the PM treats a red e2e-smoke as a judgment call,
-  # a red typecheck-test as an absolute stop.
+  # The BET-9 e2e smoke gate. NOT in required-checks.json (Electron+Xvfb on the
+  # runner is flakier than the deterministic gates); the PM treats a red
+  # e2e-smoke as a judgment call, a red typecheck-test as an absolute stop.
   e2e-smoke:
     name: E2E Smoke Test
-    runs-on: self-hosted
+    runs-on: [self-hosted, linux]
     timeout-minutes: 30
     needs: typecheck-test
     steps:
@@ -87,10 +176,29 @@ jobs:
           node-version: 20
           cache: npm
 
-      - run: npm ci
+      - name: Restore node_modules
+        id: nm-cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-nm-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        if: steps.nm-cache.outputs.cache-hit != 'true'
+        run: npm ci
+
+      # Playwright's browser download is the slowest part of this job and only
+      # changes when the Playwright version does. `--with-deps` needs sudo apt
+      # and is only required the first time on a given runner.
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install ${{ steps.pw-cache.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}
 
       - name: Run E2E smoke tests
         run: bash scripts/check-e2e-smoke.sh

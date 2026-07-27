@@ -6,8 +6,8 @@
 #
 # This is a SIGNAL, not a gate. It NEVER exits non-zero on findings — it emits
 # a markdown report for the manta-reviewer agent (or a human) to exercise
-# judgment on. The CI job that calls it (.github/workflows/anti-spaghetti.yml)
-# is non-blocking and NOT in required-checks.json.
+# judgment on. It is called from a non-blocking step of the typecheck-test job
+# in .github/workflows/ci.yml (`|| true`), so a finding never fails CI.
 #
 # better-ui adaptations vs the leasebot original:
 #   - scans .ts/.tsx/.mjs (server modules are .mjs here), excludes mobile/www

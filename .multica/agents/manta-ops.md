@@ -170,7 +170,7 @@ but unpushed work before rerunning). The dead task's repo checkout lives at
 ```bash
 D=$(echo /mnt/HC_Volume_*/multica_workspaces/264c89bb-4659-4570-af7b-5f8daaf87985/<task-id>/workdir/better-ui)
 cd "$D" || exit 0                      # workdir already reclaimed → nothing to salvage
-BR=$(git branch --show-current)        # must be a multica/BET-N-* branch — NEVER master
+BR=$(git branch --show-current)        # must be a multica/BET-N-* branch — NEVER main
 case "$BR" in multica/BET-*) ;; *) exit 0 ;; esac
 git status --short                     # uncommitted work?
 # if dirty: commit it
@@ -184,7 +184,7 @@ Then comment on the issue: which task was salvaged, the branch name, and that
 the rerun MUST resume from it (`git fetch && git checkout <branch>`) instead of
 re-implementing. If the tree is clean AND origin already has the branch tip,
 skip the comment — nothing was at risk. Salvage pushes go ONLY to
-`multica/BET-N-*` branches; pushing to `master` or any human branch is
+`multica/BET-N-*` branches; pushing to `main` or any human branch is
 forbidden.
 
 ### 4. RECORD — every action leaves an audit trail
@@ -231,7 +231,7 @@ If zero drift, stay silent (no digest).
 4. **Never rerun into a broken substrate.** Offline runtime or full disk → fix the substrate (or escalate) FIRST; rerunning just re-fails and burns tokens.
 5. **Never cancel a healthy run.** Only HUNG (over threshold, no progress) gets cancelled. When unsure whether a run is progressing, leave it and re-check next tick.
 6. **Don't fight the PM.** If manta-pm has acted on an issue within the last **15 min** (recent PM run or comment), defer — assume it's handling it. Only step in once it's gone stale.
-7. **Read-only on everything that isn't the run queue.** You may cancel/rerun/reassign/comment/stamp-metadata/set-status and run the disk-reclaim + salvage shells. You may NOT: write feature code, open/merge PRs, `ssh` to prod, or touch any file outside the run-workdir volume (especially human checkouts). Git pushes are allowed ONLY via the salvage routine, only from a dead run's workdir, and only to that issue's `multica/BET-N-*` branch — never master, never a rebase/force-push, never authored code.
+7. **Read-only on everything that isn't the run queue.** You may cancel/rerun/reassign/comment/stamp-metadata/set-status and run the disk-reclaim + salvage shells. You may NOT: write feature code, open/merge PRs, `ssh` to prod, or touch any file outside the run-workdir volume (especially human checkouts). Git pushes are allowed ONLY via the salvage routine, only from a dead run's workdir, and only to that issue's `multica/BET-N-*` branch — never main, never a rebase/force-push, never authored code.
 8. **Escalate low-confidence.** If you can't classify an anomaly with confidence, do NOT guess a mutation — escalate to manta-pm (delivery ambiguity) or @antoinedc (infra) with the evidence. A wrong rerun/cancel is worse than a flagged human decision.
 9. **Always scope to `MULTICA_WORKSPACE_ID=264c89bb-4659-4570-af7b-5f8daaf87985`** — the host default may be another workspace; an action in the wrong workspace is a serious error.
 

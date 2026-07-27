@@ -1,0 +1,40 @@
+name: dep-audit-nightly
+
+# Daily dependency audit of main.
+#
+# WHY: a dependency audit's result depends only on the dependency SET, not on
+# any PR's code. Auditing every PR re-measures main, so the day a new upstream
+# advisory lands it turns EVERY open pull request red at once — through no
+# fault of any of them, and with a backlog in flight that is a mass-block
+# event. tenanture hit this five separate times (TEN-574/585/588/589/606)
+# before splitting it this way.
+#
+# So: ci.yml audits a PR only when that PR changes the dependency set, and
+# this run covers main daily. A new advisory then surfaces as ONE red run on
+# main and one fix issue, instead of N blocked PRs.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  dep-audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Scoped to PRODUCTION deps, matching the gate this splits from: dev
+      # toolchain advisories (the vite/electron chain) are chronic noise with
+      # breaking-change fixes; shipped-code advisories are the signal.
+      - name: Audit production dependencies (high+)
+        run: npm audit --omit=dev --audit-level=high
