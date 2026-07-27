@@ -7,7 +7,9 @@
     "build:mp4": "remotion render Hero out/hero.mp4",
     "build:webm": "remotion render Hero out/hero.webm",
     "build": "npm run build:mp4 && npm run build:webm && mkdir -p ../website && cp out/hero.mp4 out/hero.webm ../website/",
-    "studio": "remotion studio"
+    "studio": "remotion studio",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@remotion/cli": "^4.0.250",
