@@ -21,13 +21,14 @@
 # does real network I/O (mantaui.com, github.com, opencode.ai) and takes ~10
 # min, so it is deliberately not wired into the PR gate.
 #
-# GATEWAY REGISTRATION IS SKIPPED BY DEFAULT. Sub-step 7.5-B of the installer
-# POSTs a fresh box_id to gateway.mantaui.com/register, which publishes a real
-# per-box DNS A record on the prod zone. A CI box is thrown away minutes later,
-# so the default points MANTA_GATEWAY_BASE at a dead loopback port: curl fails
-# fast, the installer warns and continues (the documented degraded path), and
-# prod DNS stays clean. Pass gateway=real to exercise the registration for
-# real — expect a junk A record afterwards.
+# GATEWAY REGISTRATION. `gateway=skip` (the default) points the INSTALLER's
+# MANTA_GATEWAY_BASE at a dead loopback port so its own registration POST fails
+# fast and takes the documented degraded path. Be aware this does NOT stop the
+# registration entirely: manta-server ALSO registers itself on boot against the
+# built-in gateway URL, and the LaunchAgent plist passes it no override — so a
+# run does leave one throwaway `<box_id>.boxes.mantaui.com` A record behind on
+# the prod zone. Harmless (it points at a dead runner IP) but worth knowing
+# before scheduling this hourly.
 #
 # WHAT A GREEN RUN PROVES
 #   1. Prereq detection works with BSD tooling (shasum, no coreutils).
@@ -113,7 +114,30 @@ jobs:
           echo "shasum: $(command -v shasum)"
           echo "sha256sum: $(command -v sha256sum || echo '(absent — expected on a stock Mac)')"
 
+      # Full history: the branch-mode step below publishes HEAD into a local
+      # bare repo, and git refuses to push out of a shallow clone.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Point the deploy at this PR's code (branch mode only)
+        if: env.INSTALLER == 'branch'
+        run: |
+          set -euo pipefail
+          # install.sh re-creates $MANTA_HOME as a git checkout and does
+          # `fetch origin main && reset --hard origin/main` (step 4b) so
+          # self-update.sh has something to pull. Left alone, that would deploy
+          # `main`'s server code even though we are testing a PR — the branch's
+          # install.sh would run, but every file it deploys (src/server/**, the
+          # launchd templates) would come from main. Publishing HEAD as `main`
+          # in a local bare repo makes the deploy the PR's code, so a change to
+          # a plist or to the server is actually exercised on the Mac.
+          # (node_modules + runtime/ still come from the released tarball —
+          # untracked paths survive `reset --hard`.)
+          git init --bare -q "$RUNNER_TEMP/manta.git"
+          git push -q "$RUNNER_TEMP/manta.git" "HEAD:refs/heads/main"
+          echo "MANTA_REPO_URL=file://$RUNNER_TEMP/manta.git" >> "$GITHUB_ENV"
+          echo "deploy source: this PR ($(git rev-parse --short HEAD))"
 
       - name: Install box prerequisites (tmux)
         run: |

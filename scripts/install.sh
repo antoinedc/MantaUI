@@ -123,6 +123,36 @@ resolve_arch() {
   esac
 }
 
+# launchd_agent_path — the PATH a MantaUI LaunchAgent must run with.
+#
+# launchd does NOT give an agent the user's login-shell PATH; it hands out a
+# bare `/usr/bin:/bin:/usr/sbin:/sbin`. Every tool the box actually depends on
+# that a Mac gets from Homebrew (tmux above all — macOS ships no tmux) is
+# therefore invisible to manta-server and opencode even though the very same
+# command works in Terminal. The failure is silent and confusing: the box
+# installs, pairs, and answers HTTP, but `tmux:new-session` 500s with ENOENT
+# and `listProjects` swallows its error and reports an empty box.
+#
+# We emit both Homebrew prefixes (Apple Silicon + Intel) plus the standard
+# system dirs, and prepend the directory `tmux` was actually resolved from
+# when it lives somewhere else entirely (MacPorts, /usr/local/opt, a
+# hand-built binary) — the prereq check already proved that copy exists.
+# Same class of fix as the macOS PATH handling in the desktop plugin
+# executor (see AGENTS.md, "macOS PATH gotcha").
+launchd_agent_path() {
+  local base="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  local tmux_bin tmux_dir
+  tmux_bin="$(command -v tmux 2>/dev/null || true)"
+  if [ -n "$tmux_bin" ]; then
+    tmux_dir="$(dirname "$tmux_bin")"
+    case ":$base:" in
+      *":$tmux_dir:"*) ;;
+      *) base="$tmux_dir:$base" ;;
+    esac
+  fi
+  printf '%s' "$base"
+}
+
 # _sha256_of echoes the sha256 hex of $1. Prefers GNU sha256sum (Linux ships
 # it via coreutils); falls back to BSD `shasum -a 256` on macOS, which ships
 # shasum by default but NOT sha256sum. Single shared helper so the prereq
@@ -326,8 +356,8 @@ wait_for_box_id() {
 
 # Test mode: when sourced by scripts/install.test.mjs with MANTA_INSTALL_TEST_MODE=1,
 # only the bash helpers (log/ok/warn/die + manifest_get + _sha256_of +
-# verify_sha256 + resolve_arch + print_provider_detection_summary +
-# read_box_id / wait_for_box_id) are
+# verify_sha256 + resolve_arch + launchd_agent_path +
+# print_provider_detection_summary + read_box_id / wait_for_box_id) are
 # loaded. The actual install does NOT run. Lets the unit tests exercise
 # the helpers with mocked `uname`/etc. without hitting the network. See
 # scripts/install.test.mjs.
@@ -716,6 +746,7 @@ main() {
       -e "s|@@MANTA_TAILNET_HOST@@|${TAILNET_IP:-}|g" \
       -e "s|@@OPENCODE_BIN@@|${OPENCODE_BIN:-}|g" \
       -e "s|@@AUTH_DIR@@|$AUTH_DIR|g" \
+      -e "s|@@AGENT_PATH@@|$(launchd_agent_path)|g" \
       "$src" > "$dest"
     local uid; uid="$(id -u)"
     # bootout first (ignore failure if not loaded), then bootstrap for a clean
