@@ -64,15 +64,13 @@ const CHROME_PATH = "/usr/bin/google-chrome";
 const MAX_SIZE_KB = 250;
 const WEBP_QUALITY = 82;
 
-// CSS injected via `addStyleTag` per page. Three effects:
+// CSS injected via `addStyleTag` per page. Two effects:
 //   - Disable the sidebar running-dot pulse + every other CSS animation
 //     so a screenshot never catches a mid-pulse frame.
 //   - Hide the xterm.js blinking cursor so the terminal shot is stable.
-//   - Force the xterm WebGL renderer to fall back to the DOM renderer by
-//     hiding the WebGL canvas. xterm.js renders the same buffer through
-//     the DOM/canvas2d path instead, which is byte-deterministic across
-//     runs (WebGL pixel output depends on GPU rasterisation that can
-//     settle into one of two visually-identical states).
+// WebGL/non-determinism for the terminal shot is now handled in the
+// renderer itself (`src/renderer/Terminal.tsx` skips the `WebglAddon` for
+// `?demo` builds), so this CSS stays narrow.
 const NO_ANIMATION_CSS = `
 *, *::before, *::after {
   animation: none !important;
@@ -83,8 +81,6 @@ const NO_ANIMATION_CSS = `
   caret-color: transparent !important;
 }
 .xterm-cursor { opacity: 0 !important; }
-canvas.xterm-canvas, canvas.xterm-webgl { display: none !important; }
-.xterm-screen { display: block !important; }
 `;
 
 function log(msg) {
@@ -180,70 +176,26 @@ async function prepareShot(page, shot) {
   // Final stable selector — never a timeout. The screenshot captures the
   // DOM as it is at this moment.
   await page.waitForSelector(shot.finalSelector, { state: "visible", timeout: 30_000 });
-  // Per-shot settle. Two distinct failure modes this defends against:
-  //  (a) the font set hasn't loaded when the canvas first paints, so the
-  //      glyphs render against a fallback font (the "first stable hash"
-  //      the reviewer observed). `document.fonts.ready` resolves once
-  //      every CSS-declared font is ready.
-  //  (b) the xterm.js WebGL renderer occasionally settles into one of two
-  //      visually-identical canvas states whose pixel hashes differ. We
-  //      wait for two consecutive frames whose canvas hashes match,
-  //      which is the cheapest "we have stopped mutating" signal in
-  //      browser pixel-buffer land without falling back to a fixed
-  //      timeout on app logic.
+  // Per-shot settle. Two effects:
+  //  - Wait on `document.fonts.ready` so the font set is loaded before
+  //    the screenshot reads the framebuffer. (xterm.js does its own
+  //    font measurement; if the JetBrains-Mono webfont isn't loaded
+  //    yet, glyphs render against the fallback and pixel hashes differ.)
+  //  - Wait up to 5s of `networkidle` so any post-mode-switch image
+  //    fetch has settled. Some shots hold SSE streams open that never
+  //    go idle — the timeout absorbs that.
+  //  - Two rAFs: minimum frames needed for the addStyleTag override
+  //    + any in-flight layout to land in the GPU framebuffer.
   await page.evaluate(async () => {
     if (document.fonts && document.fonts.ready) {
       try { await document.fonts.ready; } catch {}
     }
   });
-  // Wait for the network to idle so any post-mode-switch image/font
-  // request from the terminal-mode session has settled.
   try {
     await page.waitForLoadState("networkidle", { timeout: 5_000 });
   } catch {
     // Some shots have SSE streams that never go idle — ignore.
   }
-  // xterm canvas pixel-stability wait: hash the canvas each rAF until
-  // five consecutive frames match — xterm.js's WebGL renderer can
-  // settle into one of two visually-identical canvas states whose
-  // pixel buffers differ (the same glyph path can be rendered through
-  // different rasterisation paths on different runs). The 5-frame
-  // window biases toward whichever state xterm settles into first and
-  // is empirically stable across runs on the same hardware. Bounded at
-  // 60 iterations so a wedged terminal can't deadlock the harness.
-  await page.evaluate(async () => {
-    const canvas = document.querySelector(".xterm canvas");
-    if (!canvas) return; // not a terminal shot — fall through.
-    const ctx = canvas.getContext("webgl2") || canvas.getContext("webgl") || canvas.getContext("2d");
-    if (!ctx) return;
-    const READ_W = 256;
-    const READ_H = 64;
-    let prev = "";
-    let stable = 0;
-    for (let i = 0; i < 60 && stable < 5; i++) {
-      await new Promise((r) => requestAnimationFrame(r));
-      let hash = "";
-      try {
-        const buf = new Uint8Array(READ_W * READ_H * 4);
-        ctx.readPixels(0, 0, READ_W, READ_H, ctx.RGBA, ctx.UNSIGNED_BYTE, buf);
-        // FNV-1a 32-bit; cheap, no string allocation per byte.
-        let h = 0x811c9dc5;
-        for (let j = 0; j < buf.length; j++) {
-          h ^= buf[j];
-          h = Math.imul(h, 0x01000193);
-        }
-        hash = (h >>> 0).toString(16);
-      } catch {
-        break;
-      }
-      if (hash === prev) stable++;
-      else { stable = 0; prev = hash; }
-    }
-    // One final rAF so the last stable frame is in the GPU framebuffer.
-    await new Promise((r) => requestAnimationFrame(r));
-  });
-  // Two rAFs for non-terminal shots (the canvas-wait above is a no-op
-  // for them — there's no .xterm canvas in the DOM).
   await page.evaluate(
     () =>
       new Promise((r) =>
@@ -393,12 +345,14 @@ const SHOTS = [
     viewport: { width: 1440, height: 900 },
     urlQuery: "?demo&desktop",
     readySelector: "text=Refactor auth middleware",
-    // Wait on the xterm `<canvas>` element — xterm.js paints into a
-    // canvas that's only inserted once its internal layout has run.
-    // Waiting on the parent `.xterm` selector fires earlier (the
-    // container is in the DOM before the canvas is appended) and
-    // captures a mid-layout frame that varies between runs.
-    finalSelector: ".xterm canvas",
+    // Wait on `.xterm .xterm-screen` — the DOM container that wraps
+    // whichever renderer xterm picked (canvas2d, WebGL, or DOM). The
+    // bare `.xterm` selector fires earlier when the container is in
+    // the DOM but the rows haven't been laid out yet, and the
+    // `.xterm canvas` selector only fires for canvas-based renderers
+    // (the demo build now skips the WebGL addon and xterm falls back
+    // to the DOM renderer, which has no canvas).
+    finalSelector: ".xterm .xterm-screen",
     beforeScreenshot: async (page) => {
       // Switch into a chat-mode window first so the mode `<select>` is
       // rendered, then flip it to "Terminal" — bare-terminal windows

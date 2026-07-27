@@ -105,7 +105,17 @@ export function Terminal({ sessionKey, cwd, active, launcher }: Props) {
       }),
     );
 
-    // Absolute remote paths → click to scp-pull and open with the default app.
+    // `?demo` URL flag (set by `scripts/shots.mjs` for the marketing screenshot
+// harness) disables the xterm WebGL addon. WebGL paints into a GPU buffer
+// whose final pixel readback can settle into one of two visually-identical
+// states depending on canvas timing, which makes `shot-terminal.webp`
+// byte-non-deterministic across runs. The DOM/canvas2d renderer xterm
+// falls back to is byte-stable. Detection is at module scope so the flag is
+// pinned for the lifetime of the renderer process — matches the same
+// `isDemoMode` literal `src/renderer/main.tsx:50` reads once on boot.
+const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
+
+// Absolute remote paths → click to scp-pull and open with the default app.
     // Match `/foo/bar...` or `~/foo/bar...`, only word-end terminators (so the
     // trailing `.` in "see /tmp/foo." doesn't get included). Requires at least
     // one path segment beyond the root, so bare `/tmp` or `~` won't match.
@@ -175,10 +185,14 @@ export function Terminal({ sessionKey, cwd, active, launcher }: Props) {
     term.unicode.activeVersion = "11";
 
     term.open(containerRef.current);
-    try {
-      term.loadAddon(new WebglAddon());
-    } catch {
-      /* webgl unavailable, fall back to canvas */
+    if (!IS_DEMO) {
+      // Skip WebGL on demo builds — see IS_DEMO note above for the
+      // determinism rationale. Real Electron sessions keep WebGL.
+      try {
+        term.loadAddon(new WebglAddon());
+      } catch {
+        /* webgl unavailable, fall back to canvas */
+      }
     }
 
     termRef.current = term;
