@@ -89,7 +89,7 @@
           <tr><td>Approve a command from your phone</td><td class="us on">One tap</td><td class="off">No</td></tr>
           <tr><td>Tells you when the agent is blocked</td><td class="us on">Push to the right device</td><td class="off">No</td></tr>
           <tr><td>Remote access</td><td class="us on">Detected and set up</td><td class="mid">Conductor Cloud (beta, Pro, GitHub-only, 10-workspace cap)</td></tr>
-          <tr><td>Platforms</td><td class="us mid">Linux or macOS box, macOS desktop, iPhone app, browser</td><td class="mid">macOS only. <q>Not available for Windows or Linux yet.</q></td></tr>
+          <tr><td>Platforms</td><td class="us mid">Linux or macOS box, macOS desktop, iPhone app, browser</td><td class="mid">macOS only. <q>not available for Windows or Linux yet.</q> <span class="src">conductor.build/docs</span></td></tr>
           <tr><td>Permissions model</td><td class="us on">Explicit permission cards, yolo opt-in</td><td class="off">Agents run without sandboxing</td></tr>
           <tr><td>Sandboxing</td><td class="us on">Commands ask first</td><td class="off">Workspace isolation is development isolation, not a security boundary</td></tr>
           <tr><td>Diff review / inline annotation</td><td class="us off">No</td><td class="on">Yes, with inline comments back to the agent</td></tr>
@@ -145,7 +145,7 @@
       <p>Conductor sells the same outcome Manta gives you by default, but only as a paid beta.</p>
     </div>
     <ul class="checks">
-      <li><span class="ck">›</span><span><b>The agent outlives the laptop for free.</b> Conductor pitches <q>close your laptop during a task and the agent keeps going</q> as the reason to buy Conductor Cloud. Manta does that by default, on your own box, with no Pro tier.</span></li>
+      <li><span class="ck">›</span><span><b>The agent outlives the laptop for free.</b> Conductor pitches <q>close your laptop during a task and the agent keeps going</q> as the reason to buy Conductor Cloud. <span class="src">conductor.build/cloud</span> Manta does that by default, on your own box, with no Pro tier.</span></li>
       <li><span class="ck">›</span><span><b>A phone app that can actually approve a command.</b> Conductor ships no phone app at all. Manta's phone app is the same code as the desktop: full transcript, live output, dictation, upload, and one-tap approvals.</span></li>
       <li><span class="ck">›</span><span><b>Self-hosted, MIT, no Pro tier.</b> Conductor is closed source, Pro-gated, GitHub-only and capped at 10 workspaces on Cloud. Manta is MIT, runs on any hardware you own, and has no workspace cap.</span></li>
     </ul>
@@ -212,9 +212,9 @@
     </div>
     <div class="faq">
       <div class="q"><h3>Is Manta a fork of Conductor?</h3><p>No. They are separate products from separate teams. Manta is MIT and solo. Conductor is closed source, YC S24, and has raised $24M. Both run Claude Code in a chat panel.</p></div>
-      <div class="q"><h3>Why is Conductor macOS only?</h3><p>Per Conductor's own docs: <q>not available for Windows or Linux yet.</q> Manta's box runs on Linux or macOS today, which is the path to running agents on a server.</p></div>
+      <div class="q"><h3>Why is Conductor macOS only?</h3><p>Per Conductor's own docs: <q>not available for Windows or Linux yet.</q> <span class="src">conductor.build/docs</span> Manta's box runs on Linux or macOS today, which is the path to running agents on a server.</p></div>
       <div class="q"><h3>Does Conductor's "Cloud" beta do what Manta does?</h3><p>It tries to, with restrictions. Conductor Cloud is in beta, requires the Pro tier, supports GitHub only, and caps you at 10 workspaces. Manta runs on your own box, is free, supports any agent runtime that ships a CLI, and has no workspace cap.</p></div>
-      <div class="q"><h3>Is Conductor more secure than Manta?</h3><p>No, and Conductor says so itself: <q>Agents run directly on your system without sandboxing</q> and <q>Workspace isolation is development isolation, not a security boundary.</q> Manta's default is that every command shows up as a permission card you answer.</p></div>
+      <div class="q"><h3>Is Conductor more secure than Manta?</h3><p>No, and Conductor says so itself: <q>Agents run directly on your system without sandboxing</q> and <q>Workspace isolation is development isolation, not a security boundary.</q> <span class="src">conductor.build/docs/security</span> Manta's default is that every command shows up as a permission card you answer.</p></div>
       <div class="q"><h3>Which one should I pick if I edit heavily and run on macOS?</h3><p>Conductor. Its Mac-native editor, diff review with inline comments back to the agent, and Linear/GitHub depth are the strongest parts of its product. Manta is for when the work has to outlive the laptop, or when you want a phone client.</p></div>
     </div>
   </div>
