@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
+import { SubscriptionsCard } from "./SubscriptionsCard";
 import { PairingQR, PairingCountdown } from "./PairingQR";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
@@ -446,6 +447,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   for manta's typical "step away to read code" pattern.
                 </div>
               </div>
+
+              {/* Subscriptions (BET-314) — sits ABOVE ProvidersCard so the
+                  user sees the one-tap OAuth path before the
+                  bring-your-own-key path. New card, not a widening of
+                  ProvidersCard (see src/server/providers.mjs's baseURL
+                  filter). */}
+              <SubscriptionsCard />
 
               <div className="border-t border-border pt-6">
                 <ProvidersCard />

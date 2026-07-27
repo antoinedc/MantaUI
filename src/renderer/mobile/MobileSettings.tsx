@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { ProvidersCard } from "../ProvidersCard";
+import { SubscriptionsCard } from "../SubscriptionsCard";
 import { resolveLauncherFlags } from "../chatShared";
 import type { AvailableLauncher, OpencodeModel } from "../../shared/types";
 import {
@@ -374,6 +375,7 @@ export function MobileSettings({ onClose }: Props) {
           </div>
         </section>
 
+        <SubscriptionsCard />
         <ProvidersCard />
 
         {/* AI CLI launch options (BET-138 refinement) — mirrors desktop
