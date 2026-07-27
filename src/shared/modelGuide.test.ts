@@ -99,6 +99,85 @@ describe("describeModel", () => {
     expect(r).toBeTruthy();
     expect(r?.tier).toBe("fast"); // gpt-4o-mini wins, not a hypothetical later "mini"
   });
+
+  it("matches codex-mini", () => {
+    const r = describeModel("openai", "gpt-5.1-codex-mini");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("fast");
+  });
+
+  it("matches codex-max", () => {
+    const r = describeModel("openai", "gpt-5.1-codex-max");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("deep");
+  });
+
+  it("matches codex", () => {
+    const r = describeModel("openai", "gpt-5.2-codex");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("balanced");
+  });
+
+  it("matches gpt-5", () => {
+    const r = describeModel("openai", "gpt-5.1");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("balanced");
+  });
+
+  it("matches kimi-for-coding-highspeed", () => {
+    const r = describeModel("kimi-for-coding", "kimi-for-coding-highspeed");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("fast");
+  });
+
+  it("matches kimi-for-coding", () => {
+    const r = describeModel("kimi-for-coding", "kimi-for-coding");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("balanced");
+  });
+
+  it("matches k3-256k", () => {
+    const r = describeModel("kimi-for-coding", "k3-256k");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("balanced");
+  });
+
+  it("matches k3", () => {
+    const r = describeModel("kimi-for-coding", "k3");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("deep");
+  });
+
+  it("resolves gpt-5.2-codex to the codex entry, not the bare gpt-5 one", () => {
+    const r = describeModel("openai", "gpt-5.2-codex");
+    expect(r).toBeTruthy();
+    // codex is "balanced"; gpt-5 is also "balanced", so use blurb to disambiguate.
+    expect(r?.blurb).toContain("Codex-tuned");
+  });
+
+  it("resolves gpt-5.1-codex-mini to codex-mini, not codex", () => {
+    const r = describeModel("openai", "gpt-5.1-codex-mini");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("fast"); // codex-mini is fast; codex is balanced
+  });
+
+  it("resolves gpt-5.1-codex-max to codex-max, not codex", () => {
+    const r = describeModel("openai", "gpt-5.1-codex-max");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("deep"); // codex-max is deep; codex is balanced
+  });
+
+  it("resolves k3-256k to k3-256k, not k3", () => {
+    const r = describeModel("kimi-for-coding", "k3-256k");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("balanced"); // k3-256k is balanced; k3 is deep
+  });
+
+  it("resolves kimi-for-coding-highspeed to the highspeed entry", () => {
+    const r = describeModel("kimi-for-coding", "kimi-for-coding-highspeed");
+    expect(r).toBeTruthy();
+    expect(r?.tier).toBe("fast"); // highspeed is fast; kimi-for-coding is balanced
+  });
 });
 
 describe("familyKey", () => {
@@ -114,5 +193,10 @@ describe("familyKey", () => {
   it("returns null for invalid input", () => {
     expect(familyKey("")).toBeNull();
     expect(familyKey(null as unknown as string)).toBeNull();
+  });
+
+  it("returns a non-null key for newly cataloged models so subagent naming stops falling back to slugs", () => {
+    expect(familyKey("gpt-5.2-codex")).toBe("codex");
+    expect(familyKey("k3")).toBe("k3");
   });
 });
