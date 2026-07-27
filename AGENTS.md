@@ -168,6 +168,22 @@ is cached on the lockfile hash and Playwright browsers on the same key, so
 that was the bulk of the waste. **Before adding a job, ask whether it can be a
 step instead** — on one runner a job costs every other open PR wall-clock time.
 
+**The one exception to "no extra jobs": `macos-install-smoke.yml`.** It runs on a
+GitHub-hosted `macos-14` (Apple Silicon) runner, so it costs the self-hosted
+runner nothing and blocks nobody. It installs the box END-TO-END the way a user
+does (`curl mantaui.com/install.sh | bash`) and asserts the macOS-only path
+actually works: LaunchAgents load and stay alive, manta-server + opencode answer
+on loopback, the tail prints a 6-digit pairing code, no `systemctl` advice is
+ever printed (BET-277), `manta pair` mints a fresh code, `/auth/claim` exchanges
+it for a real box token, that token drives a tmux RPC (which catches the launchd
+PATH trap — launchd agents do NOT inherit a login-shell PATH, so a Homebrew-only
+`tmux` is invisible to the server), and a re-install preserves the box identity.
+Triggers: manual, weekly cron, and PRs that touch `scripts/install*.{sh,mjs}` /
+`scripts/launchd/**` (those run the BRANCH copy of the script). Gateway
+registration is stubbed to a dead loopback port by default — the real one
+publishes a per-box DNS record on the prod zone that a throwaway CI box would
+leave behind forever.
+
 **`main` is governed by ONE system: the ruleset** (Settings → Rules → Rulesets →
 "main"). The legacy per-branch protection rule was deleted 2026-07-27 because
 GitHub enforces the UNION of both, so having two overlapping configs meant an
