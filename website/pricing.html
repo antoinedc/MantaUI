@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manta pricing: free, MIT, self-hosted</title>
+<meta name="description" content="Manta is free and open source. You pay your model provider and supply the box. There are no tiers and no seat count.">
+<meta name="theme-color" content="#0B1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/site.css">
+<style>
+
+/* page-specific: hero, three-column "what you pay for" panels */
+.hero-comp{padding:64px 0 36px;text-align:center}
+.hero-comp .wrap{position:relative;z-index:1}
+.hero-comp h1{font-size:clamp(32px,5vw,52px);line-height:1.1;font-weight:800;letter-spacing:-.03em;color:var(--text-primary);margin:0 auto 18px;max-width:880px}
+.hero-comp .lede{font-size:clamp(15.5px,1.9vw,18px);color:var(--text-tertiary);max-width:720px;margin:0 auto;line-height:1.55}
+
+.pricegrid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:980px;margin:42px auto 0}
+@media(max-width:880px){.pricegrid{grid-template-columns:1fr}}
+.pricegrid .pcard{background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:22px 24px;text-align:left}
+.pricegrid .pcard.us{background:#0d1830;border-color:var(--border-strong)}
+.pricegrid .pcard h3{color:var(--text-primary);font-size:13.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:14px;color:var(--cyan-400)}
+.pricegrid .pcard .amt{font-size:32px;font-weight:800;color:var(--text-primary);letter-spacing:-.02em;margin-bottom:6px}
+.pricegrid .pcard .amt small{font-size:14px;font-weight:500;color:var(--text-tertiary);margin-left:6px}
+.pricegrid .pcard .desc{font-size:14px;color:var(--text-tertiary);line-height:1.55;margin-bottom:14px}
+.pricegrid .pcard ul{list-style:none;display:flex;flex-direction:column;gap:8px}
+.pricegrid .pcard ul li{font-size:13px;color:var(--slate-300);display:flex;gap:8px;align-items:flex-start;line-height:1.5}
+.pricegrid .pcard ul li .ck{color:var(--cyan-400);flex-shrink:0;font-family:var(--font-mono)}
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
+      <div class="navlinks">
+        <a href="/" class="hide-sm">Home</a>
+        <a href="/#compare" class="hide-sm">Compare</a>
+        <a href="/#how" class="hide-sm">How it works</a>
+        <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<div class="hero-comp">
+  <div class="wrap">
+    <h1>Manta is free. You supply the box.</h1>
+    <p class="lede">Manta is free and open source. No tiers, no seats, no usage caps, no upgrade prompts. You pay your model provider and you supply the hardware Manta runs on. Both competitors 404 on this page. Manta does not.</p>
+
+    <div class="pricegrid">
+      <div class="pcard us">
+        <h3>Manta</h3>
+        <div class="amt">$0<small>forever</small></div>
+        <div class="desc">The server, the desktop client, the phone client, the install script. MIT licensed, self-hosted.</div>
+        <ul>
+          <li><span class="ck">✓</span><span>No seat count</span></li>
+          <li><span class="ck">✓</span><span>No workspace limit</span></li>
+          <li><span class="ck">✓</span><span>No hosted control plane</span></li>
+          <li><span class="ck">✓</span><span>No telemetry, no analytics</span></li>
+          <li><span class="ck">✓</span><span>No future paid tier</span></li>
+        </ul>
+      </div>
+      <div class="pcard">
+        <h3>Your model</h3>
+        <div class="amt">you pay</div>
+        <div class="desc">Anthropic, OpenAI, DeepSeek, Groq, or any other provider your agent already supports. Billed by them, on their pricing.</div>
+        <ul>
+          <li><span class="ck">✓</span><span>Claude via your Max subscription or API key</span></li>
+          <li><span class="ck">✓</span><span>OpenAI via your API key</span></li>
+          <li><span class="ck">✓</span><span>Any provider with an OpenAI-compatible API</span></li>
+          <li><span class="ck">✓</span><span>You set the spend cap on their end</span></li>
+        </ul>
+      </div>
+      <div class="pcard">
+        <h3>Your box</h3>
+        <div class="amt">you own it</div>
+        <div class="desc">A Linux VPS, a home server, or a Mac you already have. The installer runs on hardware you control.</div>
+        <ul>
+          <li><span class="ck">✓</span><span>From a $5 VPS and up</span></li>
+          <li><span class="ck">✓</span><span>Mac mini or laptop running at home</span></li>
+          <li><span class="ck">✓</span><span>Tailnet, public hostname, or both</span></li>
+          <li><span class="ck">✓</span><span>Stops costing the day you stop paying for the box</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 1. WHAT'S FREE ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">What's free</div>
+      <h2>The whole product, with nothing locked</h2>
+      <p>The version on GitHub is the version you install. There is no separate "free" tier and no feature that lives behind a paywall in a different binary.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>The server.</b> tmux, opencode, push, schedules, webhooks, secrets, peer sessions, the per-device pairing flow. All of it.</span></li>
+      <li><span class="ck">✓</span><span><b>The desktop client.</b> Electron, xterm.js, the React chat panel, the file upload and screenshot detection, voice dictation.</span></li>
+      <li><span class="ck">✓</span><span><b>The phone client.</b> Capacitor shell, the same React code as the desktop, push delivery, dictation.</span></li>
+      <li><span class="ck">✓</span><span><b>Updates.</b> Pull from the repo or wait for the in-app update. Both work, both are free.</span></li>
+      <li><span class="ck">✓</span><span><b>Future features.</b> Anything that lands in main lands in your box when you update. There is no Pro feature in the roadmap.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 2. WHAT YOU ACTUALLY PAY FOR ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">What you actually pay for</div>
+      <h2>Two things, and both are yours to choose</h2>
+      <p>Manta does not bill you. It also does not bill your model provider. The only money that leaves is what you spend on the model and on the hardware the box runs on.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Your model provider.</b> Anthropic via a Max subscription or an API key, OpenAI, DeepSeek, Groq, or any provider with an OpenAI-compatible API. You set the spend cap on their side, not in Manta.</span></li>
+      <li><span class="ck">✓</span><span><b>Your hardware.</b> A Linux VPS from any provider you already use. A Mac mini at home. A laptop you leave on. The hardware you control, not a managed service.</span></li>
+      <li><span class="ck">✓</span><span><b>Optional.</b> A domain name, if you want one. Otherwise the installer provisions a free <span class="mono">&lt;your-box&gt;.boxes.mantaui.com</span> hostname for you.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 3. WHY THE BOX IS YOURS ============ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Why the box is yours</div>
+      <h2>Self-hosted is the price too</h2>
+      <p>The reason Manta is free is that you bring the box. The product runs on hardware you control, and you can stop paying for the box the day you stop using Manta. The install is reversible.</p>
+    </div>
+    <ul class="checks">
+      <li><span class="ck">✓</span><span><b>Reversible.</b> Uninstalling stops the server and removes the Caddy vhost. There is nothing to migrate off, no data export to run.</span></li>
+      <li><span class="ck">✓</span><span><b>No lock-in.</b> The transcripts are plain text on the box. The configuration is JSON. The install script is in the repo.</span></li>
+      <li><span class="ck">✓</span><span><b>Forkable.</b> If you want a different default model, a different push provider, or a different default port, you can fork the repo and run your own version. The licence allows it.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">FAQ</div>
+      <h2>Questions about the price</h2>
+      <p>Five questions, answered in full.</p>
+    </div>
+    <div class="faq">
+      <div class="q"><h3>Is Manta really free?</h3><p>Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier, no Pro feature, no in-app purchase, no upgrade prompt. You pay your model provider and you supply the box.</p></div>
+      <div class="q"><h3>What does it cost to run?</h3><p>Whatever you spend on the model and whatever you spend on the box. A $5 VPS is enough to host a single agent for a single user. Most teams reuse hardware they already have, which means the marginal cost is the model spend.</p></div>
+      <div class="q"><h3>Will there be paid tiers in the future?</h3><p>No. The product is the binary on GitHub. Anything that lands in main lands in your box when you update. There is no paid feature in the roadmap, and there are no plans to add one.</p></div>
+      <div class="q"><h3>Does Manta take a cut of my API spend?</h3><p>No. Manta does not bill you, does not see your API spend, and does not sit between you and your model provider. You give the agent your key, the agent talks to the provider directly, and the bill comes from the provider.</p></div>
+      <div class="q"><h3>What happens if I stop paying for the box?</h3><p>The server stops. The data is plain text on the disk, so a reinstall on a new box picks up where the old one left off, and a permanent shutdown is just an uninstall. There is nothing to migrate off and no vendor to call. <a href="/open-source">The open source page</a> covers the part that makes this possible.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="band">
+  <div class="wrap">
+    <h2>Put it on your own box</h2>
+    <p>Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.</p>
+    <div class="install" style="max-width:600px;margin:0 auto 14px">
+      <div class="install-cmd">
+        <code><span class="prompt">$</span> curl -fsSL <span class="url">https://mantaui.com/install.sh</span> | bash</code>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mantaui.com/install.sh | bash');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)">Copy</button>
+      </div>
+    </div>
+    <div class="cta" style="margin-top:20px">
+      <a class="btn btn-primary" href="https://github.com/antoinedc/MantaUI">Open the repo</a>
+      <a class="btn btn-ghost" href="/">Back to the homepage</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="/#features">Features</a></li><li><a href="/#mobile">Mobile</a></li>
+        <li><a href="/#opensource">Open source</a></li>
+        <li><a href="/#how">How it works</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <li><a href="/vs-orca">vs Orca</a></li>
+        <li><a href="/vs-conductor">vs Conductor</a></li>
+        <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Use cases</h4><ul>
+        <li><a href="/claude-code-web-ui">Claude Code web UI</a></li>
+        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
+        <li><a href="/claude-code-remote">Claude Code remote</a></li>
+        <li><a href="/open-source">Open source</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
+    </div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
