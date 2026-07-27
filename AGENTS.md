@@ -2025,7 +2025,7 @@ live URL / TestFlight against `main`, then push the right tag.
 |---|---|---|---|---|
 | `ios-v*` | iOS app → TestFlight | Codemagic `mac_mini_m2` | build + sign + notarize `.ipa` → TestFlight | `codemagic.yaml` `ios-testflight` |
 | `mac-v*` | macOS desktop → DMG | Codemagic `mac_mini_m2` | build + Developer ID sign → DMG → publish to `mantaui.com` | `codemagic.yaml` `mac-desktop` |
-| `win-v*` | Windows desktop → NSIS installer (**artifact only, not published**) | GitHub-hosted (`windows-latest`) | build `.exe` + `latest.yml`, upload as a workflow artifact | `.github/workflows/windows-desktop-build.yml` |
+| `win-v*` | Windows desktop → NSIS installer on a **GitHub Release** (not mantaui.com) | GitHub-hosted (`windows-latest`) | build `.exe` + `latest.yml`, attach the `.exe` to a prerelease on the tag | `.github/workflows/windows-desktop-build.yml` |
 | `web-v*` | marketing site + install assets | self-hosted (`manta-dev-runner`, this box) | scp `website/` + `install.sh` + `llms-install.md` → prod webroot, verify | `.github/workflows/website-deploy.yml` |
 | `server-v*` | Linux box server tarball(s) → `mantaui.com/releases` | GitHub-hosted (`ubuntu-latest` x64 + `ubuntu-24.04-arm` matrix) + self-hosted publish (`manta-dev-runner`) | build x64 + arm64 tarballs natively, merge the two per-arch sidecars via `scripts/release/merge-manifest.mjs`, scp both tarballs + the combined manifest to prod, verify both arches (200 + sha256 drift) | `.github/workflows/server-tarball-deploy.yml` |
 | `relay-v*` | ~~relay service~~ (deprecated 2026-07; replaced by direct mode) | n/a | n/a | `.github/workflows/relay-deploy.yml` (deleted in BET-204) |
@@ -2045,9 +2045,9 @@ git tag ios-v1.0.8 && git push origin ios-v1.0.8
 # Desktop — bump package.json version if you want, then:
 git tag mac-v0.0.2 && git push origin mac-v0.0.2
 
-# Windows desktop (internal test build — downloads from the Actions artifact,
-# nothing reaches mantaui.com). A workflow_dispatch run does the same thing
-# from any branch, which is usually what you want:
+# Windows desktop — bump package.json version if you want, then tag. The tag
+# publishes a PRERELEASE on GitHub with the .exe attached; nothing reaches
+# mantaui.com. (workflow_dispatch also works, but produces only an artifact.)
 git tag win-v0.0.13 && git push origin win-v0.0.13
 
 # Website / install.sh / llms-install.md:
@@ -2126,25 +2126,35 @@ entirely) — treat it as a bonus, never the plan.
   manta mark (`assets/icon.icns` + `assets/icons/*.png`, regenerated from the
   iOS AppIcon).
 
-### Windows desktop (`win-v*`) — GitHub-hosted, artifact only
+### Windows desktop (`win-v*`) — GitHub-hosted, published as a GitHub Release
 
 `.github/workflows/windows-desktop-build.yml`, on `windows-latest`. Builds the
 NSIS installer that `electron-builder.yml`'s `win:` block has always described
 but that nothing ever built (`scripts/release/desktop.sh` passes `--mac
 --linux`, and the Codemagic desktop workflow runs on a Mac).
 
-- **The output is a workflow ARTIFACT, not a release.** Nothing is scp'd to
-  prod and the website has no Windows link. The installer is **not code-signed**
-  — an unsigned NSIS binary trips SmartScreen on every download, so publishing
-  it would be worse than offering nothing. Internal testers download it from the
-  Actions run. When an OV/EV certificate exists, add a publish job modelled on
-  `server-tarball-deploy.yml` (scp → verify 200 + sha) and only then link it.
-- **`latest.yml` is built and kept on purpose.** It is the electron-updater feed
-  file for Windows, and the workflow fails red if it is missing — so the day we
-  do publish, the update feed is already complete. Until it is uploaded to
-  `https://mantaui.com/updates/`, a Windows build's update check 404s;
+- **A tag push publishes a GitHub Release; a manual dispatch does not.** The
+  tag job creates a **prerelease** on the tag and attaches the `.exe` (via `gh`,
+  no third-party action, no extra secret) — that release URL is the link you
+  hand a tester. Prerelease is deliberate: the installer is unsigned and must
+  not present itself as the project's latest official release. A dispatch run
+  has no tag, so it uploads a workflow artifact and stops. Re-running the same
+  tag re-uploads with `--clobber` rather than failing.
+- **The repo is private, so a release asset needs a GitHub account to
+  download.** That is the point — it is the internal channel. Nothing reaches
+  mantaui.com: no download-page link, and `latest.yml` is never uploaded to
+  `https://mantaui.com/updates/`, so a Windows build's auto-update check 404s.
   `src/main/autoUpdate.ts` only `console.warn`s on error, so that is invisible
-  to the user.
+  to the user — they simply never get an update and you re-send a release link.
+  Both gaps are blocked on code signing, not on effort: an unsigned installer
+  trips SmartScreen for every visitor. When an OV/EV certificate exists, add a
+  publish job modelled on `server-tarball-deploy.yml` (scp → verify 200 + sha)
+  and only then link it from the website.
+- **`latest.yml` is still built, and its absence fails the job**, so the
+  electron-updater feed is complete the day that happens.
+- The installer filename has **no space** (`Manta-UI-<version>-x64.exe`), unlike
+  the mac/linux artifacts: GitHub rewrites spaces in release-asset names to
+  dots, and `Manta.UI-…exe` is a confusing thing to download.
 - **electron-builder compiles nothing, and this is load-bearing.**
   `electron-builder.yml` sets `npmRebuild: false` and excludes `node-pty` from
   `files`. The desktop app imports exactly three packages at runtime

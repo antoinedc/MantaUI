@@ -8,26 +8,35 @@
 # missing Windows leg.
 #
 # WHAT IT PRODUCES
-#   dist/desktop/Manta UI-<version>-x64.exe   — the NSIS installer
+#   dist/desktop/Manta-UI-<version>-x64.exe   — the NSIS installer
 #   dist/desktop/latest.yml                   — the electron-updater feed file
-# Both are uploaded as a workflow ARTIFACT. Nothing is published to
-# mantaui.com.
 #
-# WHY NOTHING IS PUBLISHED YET
-#   The installer is NOT code-signed (see the `win:` block in
-#   electron-builder.yml). An unsigned installer trips SmartScreen on every
-#   download, so putting it on the public download page would be worse than
-#   not offering Windows at all. Internal testers download the artifact from
-#   the Actions run instead. When an OV/EV certificate exists, add a publish
+# WHERE IT GOES
+#   Tag push → a GitHub Release on that tag, with the .exe attached. That is
+#   the download link you hand a tester. Marked PRERELEASE, deliberately: the
+#   installer is unsigned, and it must not present itself as the project's
+#   latest official release.
+#   Manual dispatch → the workflow ARTIFACT only (a dispatch has no tag, so
+#   there is no release to attach to).
+#
+#   The repo is PRIVATE, so a release asset needs a GitHub account with access
+#   to download. That is fine for internal testing and is the whole reason
+#   this is a Release rather than the public website.
+#
+# WHAT IS STILL NOT PUBLISHED, ON PURPOSE
+#   Nothing reaches mantaui.com: no download-page link, and `latest.yml` is
+#   never uploaded to https://mantaui.com/updates/, so a Windows build's
+#   auto-update check 404s (src/main/autoUpdate.ts only console.warns, so this
+#   is invisible to the user — they simply never get an update, and you re-send
+#   a release link instead). Both are blocked on code signing: an unsigned
+#   installer trips SmartScreen for every visitor, which is worse than not
+#   offering Windows at all. When an OV/EV certificate exists, add a publish
 #   job modelled on server-tarball-deploy.yml's (scp to
 #   /var/www/mantaui/{downloads,updates}, then verify the URL is 200 and
 #   sha-matches) — and only then link it from the website.
 #
-#   `latest.yml` is built and kept deliberately: it is the proof that the
-#   auto-update feed will be complete the day we do publish. Until it is
-#   uploaded to https://mantaui.com/updates/, a Windows build's update check
-#   404s, which electron-updater reports as a logged warning and nothing more
-#   (src/main/autoUpdate.ts only console.warns on error).
+#   `latest.yml` is still built here, and its absence fails the job, so the
+#   feed is complete the day that happens.
 #
 # BUILD HOST
 #   GitHub-hosted `windows-latest`. The repo's own runner is Linux, and
@@ -45,9 +54,9 @@
 #   during `npm ci` with a node-gyp error, that is the cause, and the fix is a
 #   node-pty prebuild, not a change here.
 #
-# TRIGGER: push a tag matching win-v* (e.g. win-v0.0.13). Also runnable
-#   manually via workflow_dispatch against any branch, which is the expected
-#   way to produce a test build.
+# TRIGGER: push a tag matching win-v* (e.g. win-v0.0.13) — that is what
+#   produces a downloadable release. Also runnable manually via
+#   workflow_dispatch for a throwaway build, which lands as an artifact only.
 
 name: Windows desktop build
 
@@ -62,7 +71,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  # write is required to create the Release and upload the installer to it.
+  contents: write
 
 defaults:
   run:
@@ -124,3 +134,25 @@ jobs:
             dist/desktop/latest.yml
           if-no-files-found: error
           retention-days: 30
+
+      # Tag pushes only — a workflow_dispatch run has no tag to hang a release
+      # on, and the artifact above already covers that case.
+      #
+      # `gh` is preinstalled on the runner image; no third-party action and no
+      # extra secret. `--clobber` makes a re-run of the same tag replace the
+      # asset instead of failing, so a retried build is not a dead end.
+      - name: Publish the installer to a GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Manta UI for Windows — $TAG" \
+              --prerelease \
+              --notes 'Unsigned internal build. Windows SmartScreen will warn on first run: **More info → Run anyway**. Per-user install, no admin rights needed. Auto-update is not wired up for Windows — grab the next release from here.'
+          fi
+          gh release upload "$TAG" dist/desktop/*.exe --clobber
+          gh release view "$TAG" --json url --jq .url

@@ -110,7 +110,10 @@ win:
         # there is no arm64 tester — a second arch would double build time
         # for nobody.
         - x64
-  artifactName: "${productName}-${version}-${arch}.${ext}"
+  # No space in the filename, unlike the mac/linux artifacts: this one is
+  # uploaded to a GitHub Release, and GitHub rewrites spaces in asset names to
+  # dots ("Manta UI-…" would download as "Manta.UI-…").
+  artifactName: "Manta-UI-${version}-${arch}.${ext}"
   # NOT code-signed. The build is for internal testing only; an unsigned NSIS
   # installer trips SmartScreen ("Windows protected your PC" → More info → Run
   # anyway) on first launch. Signing needs a paid OV/EV certificate plus a
