@@ -315,6 +315,12 @@ jobs:
           # Independent confirmation from outside the server: the tmux server
           # the RPC spawned is real and reachable on the user's default socket.
           tmux list-sessions || { echo "FAIL: no tmux server running after the RPC"; exit 1; }
+          # FYI, not an assertion: the API reports the new session with an EMPTY
+          # windows array (so `defaultCwd` falls back to "~"). Print the raw
+          # window list so a future run can say whether tmux really created no
+          # window or whether `list-windows -a` is what's misbehaving here.
+          echo "--- tmux list-windows -a ---"; tmux list-windows -a || true
+          tmux -V
           echo "ok — server-side tmux works."
 
       - name: Assert — re-running the installer preserves box identity
