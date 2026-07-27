@@ -214,6 +214,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     setRunning,
     sendError,
     setSendError,
+    authReconnect,
+    openAuthReconnect,
     messageQueue,
     setMessageQueue,
     permissions,
@@ -270,6 +272,17 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     scheduleFlush,
     oldestPendingAt,
     FLUSH_MAX_AGE_MS,
+    // Active-model providerID for the auth-error banner (BET-316).
+    // Per-session override (localStorage) wins over the persisted default;
+    // null if neither is set — the banner then falls through to the
+    // raw-message path. Computed inline rather than via useMemo: the
+    // cost is one localStorage read + one object lookup per render, and
+    // keeping it inline avoids a second memo that exists only to feed one
+    // hook argument.
+    providerID:
+      readSavedModel(sessionId)?.providerID ??
+      configDefaultModel?.providerID ??
+      null,
     submit: () => {}, // placeholder — ChatPanel's submit is used below
     submitRef,
     setInput,
@@ -1911,10 +1924,22 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       )}
 
       {/* Send error banner — surfaced from both client-side capability */}
-      {/* checks and server-side session.error events. Dismissable. */}
+      {/* checks and server-side session.error events. Dismissable. For an */}
+      {/* auth-error (BET-316) the banner also renders a [Reconnect] button */}
+      {/* that dispatches `manta-open-subscriptions` — a no-op until the */}
+      {/* Settings → AI → Subscriptions card lands (BET-314). */}
       {sendError && (
         <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-[12px] text-red-300 bg-red-900/20 border border-red-500/30 rounded break-words flex items-start gap-2">
           <span className="flex-1">⚠ {sendError}</span>
+          {authReconnect && (
+            <button
+              onClick={openAuthReconnect}
+              className="text-red-300 hover:text-red-100 underline leading-none px-1"
+              title={`Reconnect ${authReconnect}`}
+            >
+              Reconnect
+            </button>
+          )}
           <button
             onClick={() => setSendError(null)}
             className="text-red-300 hover:text-red-200 leading-none px-1"

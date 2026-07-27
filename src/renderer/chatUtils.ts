@@ -2260,3 +2260,106 @@ export function terminalShortcut(
 export function describeSubscriptionStatus(s: SubscriptionStatus): string {
   return s.connected ? "connected" : "not connected";
 }
+// ===== Auth-error banner (BET-316) =====
+//
+// Opencode emits `session.error` whenever a turn fails. The legacy path in
+// useSseBus falls through to `default:` and surfaces the raw error message
+// — fine for Claude, where the upstream message is already actionable, but
+// misleading for Codex and Kimi: their messages can land without context, and
+// for Claude specifically the message ends with "Run `claude` to refresh
+// them." regardless of which provider the user is on.
+//
+// The banner this helper feeds into fixes both. When the error is recognisably
+// a credential/auth failure on one of the three providers in the subscription
+// registry, the banner shows `<Label> needs to be reconnected.` with a single
+// [Reconnect] button that dispatches `manta-open-subscriptions`. Claude's own
+// server-side auto-refresh (`maybeRecoverCredentials`, the 10-min pre-expiry
+// poller) still runs in parallel — it is additive, not a replacement.
+//
+// Deliberately Claude-agnostic at the renderer level: only the active model's
+// providerID decides which label to render. We never reach into the message
+// text to "guess" the provider — a wrong attribution is worse than falling
+// through to the existing raw-message path, which still names the right CLI
+// for Claude specifically and surfaces opencode's own message for the others.
+
+// Human label per provider, for the banner text. Single source of truth at
+// the renderer layer; mirrors `SUBSCRIPTION_PROVIDERS` in
+// src/server/subscriptionProviders.mjs (server) and the demo fixture in
+// src/renderer/api/demoApi.ts. Three entries — the entire registry.
+export const AUTH_PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Claude",
+  openai: "Codex",
+  "kimi-for-coding": "Kimi",
+};
+
+/**
+ * Decide whether to surface a "needs to be reconnected" banner for a
+ * `session.error` event. Returns the provider id + label when ALL of:
+ *
+ *   1. The error is recognisably a credential/auth failure. We accept
+ *      `ProviderAuthError` (the legacy typed name opencode emitted pre-BET-280)
+ *      AND `ApiError` whose message carries credential-shaped keywords
+ *      (`credential`, `authentication`, `unauthorized`, `api[-_ ]?key`,
+ *      `auth token`/`auth failed`, `token expired`, `key expired`). The
+ *      `ApiError` keyword gate is tight enough that an unrelated API failure
+ *      (rate limit, 5xx, network blip) does NOT match — those messages
+ *      contain none of the auth tokens above.
+ *   2. `providerID` (the session's active model's provider) is a known
+ *      registry entry — `anthropic` / `openai` / `kimi-for-coding`. Any
+ *      other value, or null/undefined, returns null. The active model is
+ *      authoritative: the user just tried to run a turn with that provider,
+ *      so any auth failure on this turn belongs to it.
+ *   3. A label exists for that provider (always true given condition 2,
+ *      but asserted here so the registry and the helper stay in sync).
+ *
+ * Returns null otherwise — the caller falls back to the existing raw-
+ * message path. Non-string / nullish inputs are tolerated (defensive against
+ * malformed upstream payloads) and treated as "no match".
+ *
+ * @param errorName  the typed error name from `properties.error.name`
+ *                   (`"ProviderAuthError"`, `"ApiError"`, etc.) — pass
+ *                   `undefined` when the event has no name field.
+ * @param message    the raw message from `properties.error.data.message`
+ *                   (or `error.name` as the ultimate fallback the caller
+ *                   already resolved). Pass `undefined` when neither exists.
+ * @param providerID the session's active model's `providerID`. The single
+ *                   authoritative source for "which provider's banner do we
+ *                   show". `null`/`undefined` → no banner.
+ */
+export function authErrorAdvice(
+  errorName: string | null | undefined,
+  message: string | null | undefined,
+  providerID: string | null | undefined,
+): { providerID: string; label: string } | null {
+  if (!isAuthErrorName(errorName, message)) return null;
+  if (typeof providerID !== "string" || providerID.length === 0) return null;
+  const label = AUTH_PROVIDER_LABELS[providerID];
+  if (!label) return null;
+  return { providerID, label };
+}
+
+/**
+ * Inner predicate for authErrorAdvice. Exposed for tests so the keyword
+ * matching can be asserted independently from the provider-label lookup.
+ * Not exported on the renderer's public API — chatUtils re-exports the
+ * surface-level `authErrorAdvice` only.
+ */
+function isAuthErrorName(
+  errorName: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  const name = typeof errorName === "string" ? errorName : "";
+  if (name === "ProviderAuthError") return true;
+  // `ApiError` is broad (rate limit, 5xx, network blip all land here too);
+  // require credential-shaped keywords in the message so we only catch the
+  // auth sub-type. Provider-agnostic — Claude/Codex/Kimi all phrase auth
+  // failures with one of these tokens. Standalone "expired" is intentionally
+  // excluded (too broad: matches "rate limit window expired", "context
+  // expired", etc.) — the combined keywords above always co-occur with the
+  // expired-word in the real failure messages.
+  if (name !== "ApiError") return false;
+  const msg = typeof message === "string" ? message : "";
+  return /credential|authentication|unauthorized|api[-_ ]?key|auth(?:entication)?\s+(?:token|failed)|token\s+expired|key\s+expired/i.test(
+    msg,
+  );
+}
