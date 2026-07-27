@@ -325,23 +325,30 @@ jobs:
           # `smoke` — i.e. the TAB that src/server/tmux.mjs uses to separate
           # format fields is not surviving this tmux. Dump the raw bytes for a
           # few candidate separators so the fix is chosen on evidence.
-          # Replay the EXACT two queries src/server/tmux.mjs runs (same formats,
-          # including the @manta-* user options) and dump the raw bytes.
+          # The server reports this session as `smoke_0` with NO windows, while
+          # the same query from this shell returns a clean tab-separated line —
+          # i.e. the TAB that src/server/tmux.mjs uses as its field separator
+          # comes back as `_` for the server but not for us. Everything else
+          # (binary, socket, cwd) is identical, so the difference has to be the
+          # environment launchd gives the agent. Bisect it.
           node -e '
             const { execFileSync } = require("child_process");
             const FS = "\t";
-            const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
-            const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}`;
-            for (const [label, args] of [
-              ["list-sessions", ["list-sessions", "-F", sessFmt]],
-              ["list-windows ", ["list-windows", "-a", "-F", winFmt]],
-            ]) {
+            const fmt = `#{session_name}${FS}#{?session_attached,1,0}`;
+            const run = (label, env) => {
               try {
-                console.log(label, JSON.stringify(execFileSync("tmux", args, { encoding: "utf8" })));
+                console.log(label, JSON.stringify(execFileSync("tmux", ["list-sessions", "-F", fmt], { encoding: "utf8", env })));
               } catch (e) {
                 console.log(label, "FAILED", String(e.stderr ?? e.message).trim());
               }
-            }
+            };
+            const PATH = process.env.PATH;
+            run("inherited     ", process.env);
+            run("bare PATH     ", { PATH });
+            run("PATH+TERM     ", { PATH, TERM: "xterm-256color" });
+            run("PATH+LANG     ", { PATH, LANG: "en_US.UTF-8" });
+            run("PATH+TERM+LANG", { PATH, TERM: "xterm-256color", LANG: "en_US.UTF-8" });
+            console.log("our TERM:", JSON.stringify(process.env.TERM), "LANG:", JSON.stringify(process.env.LANG), "LC_ALL:", JSON.stringify(process.env.LC_ALL));
           ' || true
           echo "ok — server-side tmux works."
 
