@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2973,16 +2973,26 @@ test("write-ingress CLI subcommand persists tailscale mode with derived serverUr
   }
 });
 
+// assertWriteIngressPublic — shared inner block for the two
+// `write-ingress --mode public` tests below. The shape is identical
+// (execSync the lib CLI, JSON.parse the written file, deepEqual) but the
+// ingress-file path differs (flat dir vs nested). Extracted so the
+// duplication-gate (jscpd min-tokens 70) doesn't flag the two tests
+// as a 14-line clone. Returns the parsed JSON so each caller can assert
+// on whatever shape they care about.
+function runWriteIngressPublic(ingressFile) {
+  execSync(
+    `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
+      `--file ${ingressFile} --mode public`,
+    { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+  );
+  return JSON.parse(readFileSync(ingressFile, "utf-8"));
+}
+
 test("write-ingress CLI subcommand persists public mode", () => {
   const dir = mkdtempSync(join(tmpdir(), "manta-write-ingress-public-"));
-  const ingressFile = join(dir, "ingress.json");
   try {
-    execSync(
-      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
-        `--file ${ingressFile} --mode public`,
-      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
-    );
-    const written = JSON.parse(readFileSync(ingressFile, "utf-8"));
+    const written = runWriteIngressPublic(join(dir, "ingress.json"));
     assert.deepEqual(written, { mode: "public" });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -3020,14 +3030,8 @@ test("write-ingress CLI subcommand creates the parent dir if it does not exist",
   // first install. The lib uses mkdirSync({ recursive: true }), so the
   // nested parent dir + the file land in one atomic write.
   const dir = mkdtempSync(join(tmpdir(), "manta-write-ingress-nested-"));
-  const ingressFile = join(dir, "nested", "deeper", "ingress.json");
   try {
-    execSync(
-      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
-        `--file ${ingressFile} --mode public`,
-      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
-    );
-    const written = JSON.parse(readFileSync(ingressFile, "utf-8"));
+    const written = runWriteIngressPublic(join(dir, "nested", "deeper", "ingress.json"));
     assert.deepEqual(written, { mode: "public" });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -3421,14 +3425,39 @@ function stripAnsi(s) {
 
 // runBootstrapStderrEmptyPath — runBootstrapStderr variant that strips
 // everything from PATH except the dir holding the test runner's `node`
-// binary. The helper spawns child node processes, so node must remain on
+// binary AND the standard system dirs that bash / cat / mkdir / etc.
+// live in. The helper spawns child node processes, so node must remain on
 // PATH; the claude/codex/kimi CLIs must NOT be (so the CLI-row assertions
-// are deterministic across runners).
+// are deterministic across runners). On CI (setup-node installs Node 20
+// into a non-standard path), stripping PATH to just the node dir leaves
+// bash ENOENT inside spawnSync — so we union in the system dirs the
+// runner inherited at start. Each system dir is OPT-IN: only added when
+// it actually exists on this box, so the test never hardcodes a path
+// that doesn't resolve.
 function runBootstrapStderrEmptyPath({ preBody = "", func = ":" } = {}) {
+  // Collect every dir the runner inherited that contains a system binary
+  // the generated bash script needs (bash, mkdir, cat, ...). Dedupe +
+  // filter to existing dirs only — empty dirs would be silently dropped
+  // by bash's PATH lookup, but a missing dir on a non-Linux runner is a
+  // real footgun. POSIX-only stat check (mirrors what /usr/bin/env uses).
+  const inherited = (process.env.PATH ?? "").split(":").filter(Boolean);
+  const probeBin = (dir, name) => {
+    try {
+      // readdirSync is faster than a stat per file (one syscall per
+      // directory, not per directory+name). Throws on ENOENT → skip.
+      return readdirSync(dir).includes(name);
+    } catch {
+      return false;
+    }
+  };
+  const sysDirs = inherited.filter((d) => probeBin(d, "bash"));
   return runBootstrapStderr({
     preBody,
     func,
-    env: { ...process.env, PATH: NODE_DIR_FOR_TESTS },
+    env: {
+      ...process.env,
+      PATH: [NODE_DIR_FOR_TESTS, ...sysDirs].join(":"),
+    },
   });
 }
 // the real install-lib.mjs's CLI subcommand dispatch + a controlled
