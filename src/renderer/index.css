@@ -29,6 +29,22 @@ html, body, #root {
   -webkit-app-region: no-drag;
 }
 
+:root {
+  /* Width of the OS caption buttons overlaying the top-right of the window.
+     Windows (titleBarOverlay) reports a titlebar area narrower than the
+     window; macOS and Linux define neither variable, so the fallbacks make
+     this evaluate to 0 and the rule costs nothing there. */
+  --titlebar-inset-right: calc(
+    100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)
+  );
+}
+
+/* Trailing spacer inside any header row that reaches the top-right of the
+   window. Zero-width off Windows. */
+.titlebar-inset-right {
+  flex: 0 0 var(--titlebar-inset-right);
+}
+
 /* xterm tweaks */
 .xterm-viewport {
   background-color: transparent !important;

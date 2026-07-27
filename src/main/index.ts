@@ -30,6 +30,7 @@ import {
   stopCapExecutor,
 } from "./capExecutor.js";
 import { checkForUpdates } from "./autoUpdate.js";
+import { titleBarOptions } from "./windowChrome.js";
 import { IPC, type AppConfig, type AuthClaimInput } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -150,8 +151,7 @@ function createWindow(): void {
     minWidth: 800,
     minHeight: 500,
     backgroundColor: "#0B1020",
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 14 },
+    ...titleBarOptions(process.platform),
     webPreferences: {
       preload: join(__dirname, "../preload/index.mjs"),
       sandbox: false,
