@@ -8,6 +8,7 @@ import {
 import { useStore, type WindowStatusUI } from "./store";
 import type { Project, WorktreeInfo } from "../shared/types";
 import { classifyCacheAge, formatAge, selectCacheTtlMs } from "./chatUtils";
+import { MOD_KEY } from "./platform";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
 
@@ -552,7 +553,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         <button
           onClick={() => setNewProjectOpen(true)}
           className="text-text-muted hover:text-text text-lg leading-none"
-          title="New project (⌘N)"
+          title={`New project (${MOD_KEY}N)`}
         >
           +
         </button>
@@ -687,7 +688,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       <div className="flex-1 overflow-y-auto px-1 pb-2">
         {projects.length === 0 && !newProjectOpen && (
           <div className="px-2 py-3 text-xs text-text-faint">
-            No projects yet. Click + or press ⌘N.
+            No projects yet. Click + or press {MOD_KEY}N.
           </div>
         )}
 
