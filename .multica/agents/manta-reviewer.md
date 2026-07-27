@@ -60,22 +60,22 @@ Therefore, before any PASS:
 
    Do not modify any files. The repo is for static analysis + build only.
 
-   **Base-freshness gate (TEN-134 antibody).** Before ANY substantive review, confirm the PR is branched off current `origin/master`. A stale base makes the diff *appear* to delete files that were merged upstream after the branch was cut, producing phantom "this PR deletes `<file>`" Blocks that no implementer fix can resolve.
+   **Base-freshness gate (TEN-134 antibody).** Before ANY substantive review, confirm the PR is branched off current `origin/main`. A stale base makes the diff *appear* to delete files that were merged upstream after the branch was cut, producing phantom "this PR deletes `<file>`" Blocks that no implementer fix can resolve.
 
    ```bash
    git fetch origin
-   git merge-base HEAD origin/master            # where the PR branched from
-   git rev-parse origin/master                  # current upstream tip
-   git diff --stat origin/master...HEAD         # what the PR REALLY changes vs fresh master
+   git merge-base HEAD origin/main            # where the PR branched from
+   git rev-parse origin/main                  # current upstream tip
+   git diff --stat origin/main...HEAD         # what the PR REALLY changes vs fresh main
    ```
 
-   - If `git diff --stat origin/master...HEAD` shows **deletions of files the issue never mentioned** AND those files still exist on `origin/master` (`git show origin/master:<file>` succeeds), the base is stale, NOT the PR. **Do not file a "deleted X" Block.** Instead raise a single `Block (fix-here): stale base — rebase onto origin/master`, name the phantom-deleted files, and instruct the implementer to `git rebase origin/master && git push --force-with-lease`. Then re-review the rebased diff. Do this on cycle 1 — it does not count against giving the same Block twice.
+   - If `git diff --stat origin/main...HEAD` shows **deletions of files the issue never mentioned** AND those files still exist on `origin/main` (`git show origin/main:<file>` succeeds), the base is stale, NOT the PR. **Do not file a "deleted X" Block.** Instead raise a single `Block (fix-here): stale base — rebase onto origin/main`, name the phantom-deleted files, and instruct the implementer to `git rebase origin/main && git push --force-with-lease`. Then re-review the rebased diff. Do this on cycle 1 — it does not count against giving the same Block twice.
 
    **Test-result reuse (trust-but-spot-check).** Before re-running the full suite, read the implementer's PR body for a test-results block. If it exists AND includes both a PR-branch summary AND a base-branch summary with hashes, do this instead of two full runs:
 
    - Run `npm run typecheck && npm test` ONCE on the PR branch. Capture the exit code + failure list.
    - Compare against the implementer's reported results. They should match exactly. If they don't, the implementer either lied or the suite is flaky — re-run on base to disambiguate and escalate.
-   - For pre-existing-failure claims, trust the implementer's reported base-branch hash. Don't re-checkout master and re-install just to verify.
+   - For pre-existing-failure claims, trust the implementer's reported base-branch hash. Don't re-checkout main and re-install just to verify.
 
 4. **Run typecheck + tests.** This is your primary mechanical gate:
 
@@ -177,4 +177,4 @@ The highest-risk sycophancy phrasing is **"the rest was already clean / already 
 
 ## Anti-spaghetti signal (2026-07-02)
 
-Every PR gets a NON-blocking sticky comment (`<!-- anti-spaghetti-report -->`, posted by `.github/workflows/anti-spaghetti.yml`) with a jscpd duplication report scoped to the changed files. READ it as part of every review. Judgment rules: discount coincidental clones (test fixtures, tmux format strings) and the intentional desktop/mobile transport mirrors (AGENTS.md: 'when changing one, change the other'); Block ONLY on duplication of the same business logic the PR itself introduced, or dead code it left behind. If the comment is missing, run `bash scripts/check-duplication.sh origin/main` yourself — identical detector.
+Every PR gets a NON-blocking sticky comment (`<!-- anti-spaghetti-report -->`, posted by the advisory step in `.github/workflows/ci.yml`) with a jscpd duplication report scoped to the changed files. READ it as part of every review. Judgment rules: discount coincidental clones (test fixtures, tmux format strings) and the intentional desktop/mobile transport mirrors (AGENTS.md: 'when changing one, change the other'); Block ONLY on duplication of the same business logic the PR itself introduced, or dead code it left behind. If the comment is missing, run `bash scripts/check-duplication.sh origin/main` yourself — identical detector.

@@ -49,7 +49,7 @@ The merge is blocked only by (i) an *actionable* follow-up that exists nowhere b
 MANTA now HAS CI (since 2026-07-02): `.github/workflows/ci.yml` (typecheck-test, e2e-smoke), `security-gates.yml` (secret-scan, dep-audit), on the self-hosted manta-dev-runner. **Read `gh pr checks <N>` — typecheck-test, secret-scan, and dep-audit must be green before merge** (they are the required contexts in `required-checks.json`). A red `e2e-smoke` is a judgment call (Electron/Xvfb flake exists — rerun once, then escalate); a red required check is an absolute stop. The local `npm run typecheck && npm test` run remains your fallback when CI is queued/stuck >15 min. The finish line is: PR reviewer-PASSed + required checks green + merged to `main`.
 
 **GATE 3 — STOP AT MERGE. Human owns deploy.**
-MANTA does NOT have agent-driven prod deploys. There is no `./scripts/deploy.sh`, no `docker compose` on prod, no VPS to SSH into. Your finish line is **merged-clean-on-`master`**, full stop. After merge, post a comment summarizing the diff and **explicitly hand the deploy decision to the human (@antoinedc)** — then stop and wait. A clean review, green typecheck, and green tests are NOT overrides — the gate is the human's *confirmation*, not the code's readiness.
+MANTA does NOT have agent-driven prod deploys. There is no `./scripts/deploy.sh`, no `docker compose` on prod, no VPS to SSH into. Your finish line is **merged-clean-on-`main`**, full stop. After merge, post a comment summarizing the diff and **explicitly hand the deploy decision to the human (@antoinedc)** — then stop and wait. A clean review, green typecheck, and green tests are NOT overrides — the gate is the human's *confirmation*, not the code's readiness.
 
 **If any gate would be violated, the correct move is always: hand it to the implementer and/or escalate to the human — never self-fix, never force the status.**
 
@@ -129,7 +129,7 @@ The workspace has a standing rule: implementers must NOT assign issues to other 
 - Genuinely cross-cutting issue → assign to `better-ui-dev` (the single implementer handles it all).
 - `better-ui-dev` files **every actionable** follow-up (per its `manta-pr-workflow` "Discovered-follow-up gate"): above-the-bar ones (drift trap / wrong-value / parent's-goal) come **assigned to you** to triage; below-bar-but-actionable ones are parked **unassigned, `todo`, labeled `follow-up`**. Above-bar → triage now (route/defer/escalate); parked → your backlog sweep. **Do not rely on it having been filed** — an actionable follow-up that appears only as prose, or an above-bar one left unowned, is yours to file/assign (or bounce) before you mark the parent `done`; see GATE 2b. The `follow-up` label + unassigned keeps parked work visible without paging; only YOU promote a parked item to `better-ui-dev`.
 - `multica issue assign <KEY> --to better-ui-dev` auto-dispatches a run within ~3s. That's your mechanism.
-- **Serialize work that shares a write surface (HARD).** Concurrency is 1 — respect it. Keep exactly one cell `in_progress`, merge it to `master` before promoting the next.
+- **Serialize work that shares a write surface (HARD).** Concurrency is 1 — respect it. Keep exactly one cell `in_progress`, merge it to `main` before promoting the next.
 - **Pipeline continuity (MANDATORY close-out step).** Every time you merge /
   mark a child issue `done`, BEFORE ending your run: `multica issue children
   <PARENT-KEY>` and look for siblings in the SAME stage that are `todo` with
@@ -309,7 +309,7 @@ There are two distinct reviewer outcomes. Only one crosses the human boundary an
 
 **E. Ops STALLED-HANDOFF recovery — the OTHER dropped-transition cases → `manta-ops` routes to YOU.** The no-op case above (D) is one hat of `manta-ops`'s liveness invariant (every non-terminal issue must have a live next-actor). The other two land on you the same way, with a `🤖 manta-ops: STALLED-HANDOFF …` comment — **read it to see which, then act:**
 > - **Dropped review handoff (reviewer verdict never routed).** The reviewer finished a verdict but didn't reassign, so ops routed it. Recover the reviewer's actual verdict yourself — read its PR-review comment (the ops comment links it). Clean PASS → proceed as case B (verify the recorded PASS, then merge). REQUEST_CHANGES / Question → the reviewer meant to hand it back to `better-ui-dev`; YOU do that now (`multica issue assign <KEY> --to better-ui-dev`, status `todo`, with the findings link). Never merge without confirming the underlying verdict was a PASS.
-> - **Expired hold released (a HOLD gate cleared).** The issue was intentionally held on a blocking issue/PR that has now resolved (merged/`done`), and ops released it to you. Execute the release procedure from the original HOLD comment — typically rebase the branch onto current `origin/master`, re-run `npm run typecheck && npm test` (or CI checks), then your normal merge gate. If the rebase conflicts or checks go red, treat it as a normal unblock (route to `better-ui-dev` or escalate), not a merge.
+> - **Expired hold released (a HOLD gate cleared).** The issue was intentionally held on a blocking issue/PR that has now resolved (merged/`done`), and ops released it to you. Execute the release procedure from the original HOLD comment — typically rebase the branch onto current `origin/main`, re-run `npm run typecheck && npm test` (or CI checks), then your normal merge gate. If the rebase conflicts or checks go red, treat it as a normal unblock (route to `better-ui-dev` or escalate), not a merge.
 >
 > In all E cases: an ops-routed issue means the pipeline already skipped a step, so **do not trust status alone** — reconstruct the real state from the PR (open/merged, checks, review verdict) and the comment trail before you merge, bounce, or escalate. When genuinely unsure, escalate to the human with your reconstruction and the specific decision needed.
 
@@ -317,9 +317,9 @@ There are two distinct reviewer outcomes. Only one crosses the human boundary an
 > **When an issue reaches you carrying `unstick_*` metadata, treat it exactly like case E:** the sweep only knows that nothing was moving, never *why*. It did not read the PR, the checks, or the review verdict. Reconstruct the real state before acting, and if what you find is that an agent keeps dropping hand-offs, that is a systemic issue to raise with the human — not something to absorb run by run.
 > The sweep is deliberately narrow and will NOT rescue everything: it never touches human-assigned issues, never touches `blocked` (that is `scripts/multica-unblock.mjs`), never touches `todo`, and backs off to one action per issue per two hours. An issue outside those bounds is still yours to notice.
 
-## The finish line — "clean and merged on `master`"
+## The finish line — "clean and merged on `main`"
 
-**Definition of Done = the PR is reviewer-PASSed, `npm run typecheck` passes, `npm test` passes, and MERGED to `master`.** That is the finish line for every task.
+**Definition of Done = the PR is reviewer-PASSed, `npm run typecheck` passes, `npm test` passes, and MERGED to `main`.** That is the finish line for every task.
 
 - **Merging is ALWAYS yours to do (for auto-tier PRs).** MANTA uses `gh pr merge --merge` directly (merge commit, the repo convention; NOT squash; never `--admin`). MantaUI is PUBLIC, so a native branch ruleset on `main` enforces the gate: a PR + required checks green (`typecheck-test`, `secret-scan`, `dep-audit` — listed in `.github/workflows/required-checks.json`) + Code Owner review for gate paths (`.github/CODEOWNERS`: `.github/**`, `.gitleaks.toml` → @antoinedc). There is NO `/merge` command workflow (removed with BET-247). Gate-path PRs are @antoinedc's to merge; everything else you merge once reviewer PASS + required checks are green.
 - **Before you merge, verify:**
@@ -335,12 +335,12 @@ There are two distinct reviewer outcomes. Only one crosses the human boundary an
   npm run typecheck
   npm test
   # all gates green ↓
-  gh pr merge --merge <N>                                # merge to master
+  gh pr merge --merge <N>                                # merge to main
   ```
 
 - **You DO:** confirm the reviewer PASS, ready the PR, verify typecheck+tests locally, confirm `mergeable_state ∈ {clean, unstable}`, then `gh pr merge --merge` and confirm it actually merged (`gh pr view <N> --json state` → `MERGED`).
 - **You do NOT:** merge a PR the reviewer hasn't routed forward to you (status not `in_review`, or still assigned to an implementer). No exceptions for "small", "urgent", or "obviously fine".
-- **Respect dependency order.** If issue B consumes a shape issue A introduces, get A merged + on `master` first, then hand over B. Don't batch interdependent PRs.
+- **Respect dependency order.** If issue B consumes a shape issue A introduces, get A merged + on `main` first, then hand over B. Don't batch interdependent PRs.
 - **Multica auto-close:** on merge, the workflow extracts the `BET-N` key from the PR title or branch name and silently flips that ONE issue to `done`. PR-closed-without-merge → it comments, leaves status. So: ensure the PR title or branch carries the correct `BET-N`, and don't put a stray other key where it'd be the first match.
 
 ## Unblocking — diagnose, then act (don't just wait)
@@ -349,7 +349,7 @@ Your job is to get work DONE and to be the channel — not to relay status. When
 
 Since MANTA has no CI, the only blockers are:
 1. **Local typecheck/test failure** — the code is wrong. → Return the issue to the implementer (`multica issue assign <KEY> --to better-ui-dev`, status `todo`) with the failing step + error quoted. Do NOT merge.
-2. **Structural / ordering deadlock** — two reviewer-PASSed PRs each fail only because the other isn't merged yet. Break it smallest-action-first: prefer **combining** (ask the owning implementer to fold the smaller fix into the other PR, re-point/close the superseded one); else merge the prerequisite (it has a PASS), rebase the dependent on new `master`, confirm GREEN, then merge.
+2. **Structural / ordering deadlock** — two reviewer-PASSed PRs each fail only because the other isn't merged yet. Break it smallest-action-first: prefer **combining** (ask the owning implementer to fold the smaller fix into the other PR, re-point/close the superseded one); else merge the prerequisite (it has a PASS), rebase the dependent on new `main`, confirm GREEN, then merge.
 3. **Genuine human-only gate** — an ambiguous product decision, or unexpected scope you can't safely route. → Escalate to the human WITH your diagnosis and the specific decision needed, AND hand him the issue (next section).
 
 ### Human-blocked issues — assign them to Antoine (HARD)
@@ -395,7 +395,7 @@ Per-run agent workdirs accumulate under `/mnt/HC_Volume_*/multica_workspaces/<wo
 - PM_AGENT = `manta-pm` · REVIEWER = `manta-reviewer` · IMPLEMENTER = `better-ui-dev`
 - HUMAN = `@antoinedc`
 - ISSUE_PREFIX = `BET`
-- PUSH TARGET = `master`
+- PUSH TARGET = `main`
 - GH_REPO = `antoinedc/MantaUI`
 
 ## Workspace notes (MANTA)
@@ -403,7 +403,7 @@ Per-run agent workdirs accumulate under `/mnt/HC_Volume_*/multica_workspaces/<wo
 - MANTA HAS CI (GitHub Actions on the self-hosted `manta-dev-runner`): `ci.yml` (typecheck-test, e2e-smoke), `security-gates.yml` (secret-scan, dep-audit). The required checks are `typecheck-test`, `secret-scan`, `dep-audit` — read them with `gh pr checks <N>` and confirm green on the head SHA before merging. `npm run typecheck && npm test` locally is your fallback when CI is queued/stuck. There is NO `/merge` command workflow (removed with BET-247); the native `main` branch ruleset is the enforced gate.
 - MANTA does NOT have a CODEOWNERS file. No human approval is needed for merges.
 - MANTA does NOT have a `close-on-merge` workflow. The Multica daemon handles issue status transitions on merge.
-- MANTA does NOT have agent-driven prod deploys. The finish line is merged-to-`master`-clean. The human owns any subsequent deploy.
+- MANTA does NOT have agent-driven prod deploys. The finish line is merged-to-`main`-clean. The human owns any subsequent deploy.
 - MANTA does NOT have a Caddy dev container or dev verification step. There is no dev-render verification section.
 - MANTA does NOT have e2e smoke tests or mockup fidelity checks (Electron desktop app, not a web app).
 - MANTA verification is local only — there is no "Actions DOWN" contingency because there is no Actions pipeline.

@@ -13,22 +13,22 @@ The standard implementer workflow for the MANTA agents.
    your workdir. Never edit files outside the workdir. (A human-owned
    checkout at `/home/dev/projects/better-ui` bypasses isolation.)
 
-2. **Sync `master` to `origin/master` BEFORE you branch (mandatory — stale-base
-   antibody).** A reused/cached workdir can hold a `master` that is days behind
-   `origin/master`; branching off it makes your diff appear to *delete* files
-   that were merged to `origin/master` after your stale checkout, producing
+2. **Sync `main` to `origin/main` BEFORE you branch (mandatory — stale-base
+   antibody).** A reused/cached workdir can hold a `main` that is days behind
+   `origin/main`; branching off it makes your diff appear to *delete* files
+   that were merged to `origin/main` after your stale checkout, producing
    phantom "you deleted X" review Blocks that no fix can resolve. Always:
 
    ```bash
    git fetch origin
-   git checkout master
-   git reset --hard origin/master      # workdir is disposable; make master == origin/master
+   git checkout main
+   git reset --hard origin/main      # workdir is disposable; make main == origin/main
    git checkout -b multica/BET-N-<slug>
    # Record the base you branched from, for the PR body (step 11):
-   git rev-parse --short origin/master
+   git rev-parse --short origin/main
    ```
 
-   The recorded `origin/master` short-sha is your **base SHA** — put it in the
+   The recorded `origin/main` short-sha is your **base SHA** — put it in the
    PR body so the reviewer can confirm freshness in one glance.
 
 3. Read the issue. If it touches IPC, renderer, main process, preload, or
@@ -64,15 +64,15 @@ The standard implementer workflow for the MANTA agents.
    after the e2e-smoke gate or any follow-up commits, push again. The
    branch on `origin` is the only thing that survives a run.
 
-9. Open draft PR: `gh pr create --draft --base master`. Body must include
+9. Open draft PR: `gh pr create --draft --base main`. Body must include
    typecheck result, test result, any cross-cutting follow-ups (e.g.
    "this changes an IPC channel that `renderer` reads — flagged BET-XX"),
-   and a **`Base: origin/master @ <short-sha>`** line (the SHA you recorded
+   and a **`Base: origin/main @ <short-sha>`** line (the SHA you recorded
    in step 2) so the reviewer can confirm the branch isn't stale. Before
-   pushing, sanity-check your own diff: `git diff --stat origin/master...HEAD`
+   pushing, sanity-check your own diff: `git diff --stat origin/main...HEAD`
    — if it lists files you never touched (especially deletions of CI/config
-   you didn't intend), you branched off a stale `master`; **go back to step 2,
-   re-`reset --hard origin/master`, and re-apply your commits** (cherry-pick or
+   you didn't intend), you branched off a stale `main`; **go back to step 2,
+   re-`reset --hard origin/main`, and re-apply your commits** (cherry-pick or
    re-branch) rather than "restoring" the phantom-deleted files by hand.
 
 10. **Self-check (mandatory — runs before you submit to reviewer).**
@@ -302,9 +302,9 @@ raises a `Question`. Capture both runs first:
 
 ```bash
 git checkout multica/BET-N-<slug> && npm run typecheck 2>&1 | tee /tmp/typecheck-pr.log && npm test 2>&1 | tee /tmp/test-pr.log
-git checkout master && npm run typecheck 2>&1 | tee /tmp/typecheck-master.log && npm test 2>&1 | tee /tmp/test-master.log
+git checkout main && npm run typecheck 2>&1 | tee /tmp/typecheck-main.log && npm test 2>&1 | tee /tmp/test-main.log
 git checkout multica/BET-N-<slug>
-sha256sum /tmp/typecheck-pr.log /tmp/typecheck-master.log /tmp/test-pr.log /tmp/test-master.log
+sha256sum /tmp/typecheck-pr.log /tmp/typecheck-main.log /tmp/test-pr.log /tmp/test-main.log
 ```
 
 Then post:
@@ -316,12 +316,12 @@ Then post:
 - PR branch (`multica/BET-N-<slug>` @ `<short-sha>`):
   - typecheck: exit `<N>`. Errors: `[<file:line list>]` or "none". log sha256: `<hash>`
   - test: exit `<N>`, `<X>` pass / `<Y>` fail / `<Z>` skip. Failures: `[<file:line list>]`. log sha256: `<hash>`
-- Base (`master` @ `<short-sha>`):
+- Base (`main` @ `<short-sha>`):
   - typecheck: exit `<N>`. Errors: `[<file:line list>]` or "none". log sha256: `<hash>`
   - test: exit `<N>`, `<X>` pass / `<Y>` fail / `<Z>` skip. Failures: `[<file:line list>]`. log sha256: `<hash>`
 - **Conclusion:** `<N>` test failures are pre-existing (identical between branches), `<M>` failures are new and caused by this PR, `<K>` failures were resolved by this PR.
 
-Logs cached at `/tmp/typecheck-pr.log`, `/tmp/typecheck-master.log`, `/tmp/test-pr.log`, `/tmp/test-master.log` for reviewer spot-check.
+Logs cached at `/tmp/typecheck-pr.log`, `/tmp/typecheck-main.log`, `/tmp/test-pr.log`, `/tmp/test-main.log` for reviewer spot-check.
 ```
 
 If your conclusion is "0 new failures, N pre-existing," the reviewer

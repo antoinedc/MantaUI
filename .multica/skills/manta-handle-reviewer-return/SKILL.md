@@ -79,7 +79,7 @@ cycle — especially a Block of the form "this PR deletes / removes
 again.** A Block that re-appears after you addressed it is almost never a
 real defect you keep getting wrong; it's a structural artifact. The most
 common cause is a **stale base**: your branch was cut from a
-`master` that is behind `origin/master`, so your diff *appears* to delete
+`main` that is behind `origin/main`, so your diff *appears* to delete
 files that were merged upstream after your checkout. Each cycle you "restore"
 them, the next `git diff` against the fresher base shows them deleted again,
 and the loop never converges.
@@ -89,22 +89,22 @@ Diagnose before re-fixing any repeated/deletion Block:
 ```bash
 git fetch origin
 git rev-parse --short HEAD                       # your branch tip
-git merge-base HEAD origin/master                   # where you branched
-git rev-parse --short origin/master                 # current upstream
-git diff --stat origin/master...HEAD                # what your PR REALLY changes
+git merge-base HEAD origin/main                   # where you branched
+git rev-parse --short origin/main                 # current upstream
+git diff --stat origin/main...HEAD                # what your PR REALLY changes
 ```
 
-- If `merge-base` ≠ `origin/master` AND the "deleted" files exist on
-  `origin/master` (`git show origin/master:<file>` succeeds) but not on your
+- If `merge-base` ≠ `origin/main` AND the "deleted" files exist on
+  `origin/main` (`git show origin/main:<file>` succeeds) but not on your
   branch → **stale base confirmed.** Fix the base, not the files:
 
   ```bash
-  git rebase origin/master        # or: reset to origin/master and re-apply your commits
+  git rebase origin/main        # or: reset to origin/main and re-apply your commits
   git push --force-with-lease
   ```
 
   Post a PR comment naming the root cause ("phantom deletions were a stale
-  base — rebased onto `origin/master @ <sha>`; the diff now touches only the
+  base — rebased onto `origin/main @ <sha>`; the diff now touches only the
   N intended files"), then reassign to the reviewer. Do **not** re-add the
   files by hand — that re-creates the loop.
 

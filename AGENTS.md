@@ -145,6 +145,56 @@ on-device: force-quit + reopen the iOS PWA (or hard-refresh the browser).
 Desktop is unaffected by this — only the mobile/web client serves from
 `mobile/www/`.
 
+**CI runs on ONE runner — every extra job is queue time.** GitHub Actions uses a
+single self-hosted runner (`manta-dev-runner`, this dev box), so jobs do NOT run
+in parallel — they queue, and each one is wall-clock time every other open PR
+waits behind. Before the 2026-07-27 pass a PR cost **13.2 minutes of exclusive
+runner time** across six jobs in three workflow files, four of them repeating the
+same checkout and `npm ci`.
+
+| Job | Workflow | Required? | What |
+|---|---|---|---|
+| `typecheck-test` | ci.yml | **yes** | `npm run typecheck`, `npm test`, advisory duplication sticky comment |
+| `secret-scan` | security-gates.yml | **yes** | gitleaks over full history, version-pinned + cached binary |
+| `dep-audit` | security-gates.yml | **yes** | `npm audit --omit=dev`, only when the PR changes the dependency set |
+| `duplication-gate` | ci.yml | no | strict jscpd gate; de-required 2026-07-02 (flaky at token boundaries) but still goes red as a signal |
+| `E2E Smoke Test` | ci.yml | no | Electron + Xvfb smoke; flakier than the deterministic gates, so a judgment call |
+
+What changed (mirrors tenanture TEN-618): `node_modules` is cached on the
+lockfile hash and Playwright browsers on the same key, so `npm ci` and the
+browser download run only when the lockfile actually moves — that was the bulk
+of the waste. `anti-spaghetti.yml` was deleted and its report is now a
+non-blocking step of `typecheck-test`. **Before adding a job, ask whether it can
+be a step instead.**
+
+**The remaining consolidation is gated on one manual change.** `secret-scan` and
+`dep-audit` should be steps of `typecheck-test` too (tenanture ended at a single
+job), but they are named required contexts in the `main` branch ruleset, which
+is GitHub-side config and needs repo-admin rights to edit. Order matters and is
+not negotiable: **drop the two contexts from the ruleset FIRST**, then move the
+steps and delete `security-gates.yml`. A required context that no job produces
+blocks every PR forever.
+
+Two rules that are load-bearing, not stylistic:
+
+- **The dependency audit runs on a PR only when that PR changes
+  `package.json`/`package-lock.json`.** Its result depends on the dependency
+  set, not on the PR's code, so auditing every PR re-measures `main` — and the
+  day a new upstream advisory lands, every open PR goes red at once through no
+  fault of its own. `dep-audit-nightly.yml` covers `main` daily instead, so an
+  advisory surfaces as one red run and one fix issue. tenanture hit the mass-red
+  failure five times (TEN-574/585/588/589/606) before splitting it this way.
+- **`required-checks.json` must stay in sync with the `main` branch ruleset's
+  required contexts.** They are two separate places (one in git, one in GitHub
+  config). Requiring a context no job produces blocks every PR forever, so when
+  changing job names update the ruleset FIRST, then merge the workflow change.
+
+The ruleset itself is deliberately **not strict** (branches need not be up to
+date with `main` before merging). Do not turn that on: with several agent PRs in
+flight it forces every merge to invalidate every other PR, which is O(N²) rebase
++ re-review + re-run churn. tenanture enabled it (TEN-386) and had to undo it
+(TEN-617).
+
 Git-synced (since 2026-05-16). Single source of truth:
 `git@github.com:antoinedc/MantaUI.git` (private). Both the remote dev box
 (`dev@157.90.224.92:/home/dev/projects/better-ui`) and the Mac are clones
