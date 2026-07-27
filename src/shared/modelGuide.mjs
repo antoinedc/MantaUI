@@ -111,6 +111,99 @@ const CATALOG = [
     ],
     tier: "balanced",
   },
+
+  // OpenAI Codex / GPT-5 family - ordered with the more specific keys first
+  // because match is by case-insensitive substring and first match wins.
+  // "codex-mini" and "codex-max" must precede "codex"; every codex entry must
+  // precede the bare "gpt-5" so a model like gpt-5.2-codex resolves to the
+  // codex entry, not gpt-5.
+  {
+    key: "codex-mini",
+    blurb: "Fast, smallest Codex-tuned model, suited for quick tasks.",
+    goodFor: [
+      "Quick mechanical edits",
+      "Fast file lookups and grep tasks",
+      "Simple refactors and lint fixes",
+    ],
+    tier: "fast",
+  },
+  {
+    key: "codex-max",
+    blurb: "Deep-reasoning Codex-tuned model for long agentic runs.",
+    goodFor: [
+      "Long agentic runs",
+      "Multi-step architectural work",
+      "Hard debugging and root-cause analysis",
+      "Tricky refactors with extended context",
+    ],
+    tier: "deep",
+  },
+  {
+    key: "codex",
+    blurb: "Balanced Codex-tuned GPT-5 for general coding work.",
+    goodFor: [
+      "General coding tasks",
+      "Feature implementation",
+      "Code review and bug fixes",
+    ],
+    tier: "balanced",
+  },
+  {
+    key: "gpt-5",
+    blurb: "Balanced general-purpose GPT-5 for coding and reasoning.",
+    goodFor: [
+      "General coding tasks",
+      "Feature implementation",
+      "Code review",
+      "Reasoning-heavy tasks",
+    ],
+    tier: "balanced",
+  },
+
+  // Kimi family - "kimi-for-coding-highspeed" must precede "kimi-for-coding"
+  // and "k3-256k" must precede "k3" so the more specific substring wins.
+  // Disjoint from the OpenAI block above; ordering across blocks does not
+  // affect matching.
+  {
+    key: "kimi-for-coding-highspeed",
+    blurb: "Fast K2.7 Code variant, roughly 5-6x faster.",
+    goodFor: [
+      "Quick mechanical edits",
+      "Fast file lookups",
+      "Simple refactors when latency matters",
+    ],
+    tier: "fast",
+  },
+  {
+    key: "kimi-for-coding",
+    blurb: "Balanced K2.7 Code, available on every Kimi tier.",
+    goodFor: [
+      "General coding tasks",
+      "Feature implementation",
+      "Code review across Kimi membership tiers",
+    ],
+    tier: "balanced",
+  },
+  {
+    key: "k3-256k",
+    blurb: "Balanced K3 at 256K context, costs about half the quota of 1M K3.",
+    goodFor: [
+      "Tasks needing longer context without 1M cost",
+      "Mid-sized code review sessions",
+      "Working through large monorepo diffs",
+    ],
+    tier: "balanced",
+  },
+  {
+    key: "k3",
+    blurb: "Deep-reasoning Kimi flagship, up to 1M context with thinking-effort variants.",
+    goodFor: [
+      "Long-running architectural work",
+      "Complex multi-file refactors",
+      "Tuning low/high/max thinking effort per task",
+    ],
+    tier: "deep",
+  },
 ];
 
 function matchFamily(modelID) {
