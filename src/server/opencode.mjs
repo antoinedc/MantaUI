@@ -893,23 +893,21 @@ export async function getProviders() {
 /**
  * List all models from CONNECTED providers only.
  * Strips raw API keys by reconstructing the model shape (normalizeProviderModel).
+ * Routes through `getProviders()` so the live `/provider` fetch lives in
+ * exactly one place (BET-342 — sibling of BET-320 for `getDefaultModel`).
  * @returns {Promise<Array<{ id: string, providerID: string, name: string, ... }>>}
  */
 export async function listModels() {
   const out = [];
   try {
-    const res = await ocFetch(apiUrl("/provider"));
-    if (res.ok) {
-      const data = await res.json();
-      const connected = new Set(data.connected ?? []);
-      for (const p of data.all ?? []) {
-        if (!p.id || !connected.has(p.id)) continue;
-        for (const modelId of Object.keys(p.models ?? {})) {
-          out.push(_normalizeProviderModel(p.id, modelId, (p.models ?? {})[modelId]));
-        }
+    const { connected: connectedIds, all } = await getProviders();
+    if (!Array.isArray(all)) return out;
+    const connected = new Set(connectedIds);
+    for (const p of all) {
+      if (!p.id || !connected.has(p.id)) continue;
+      for (const modelId of Object.keys(p.models ?? {})) {
+        out.push(_normalizeProviderModel(p.id, modelId, (p.models ?? {})[modelId]));
       }
-    } else {
-      await discardBody(res);
     }
   } catch {
     /* non-fatal */

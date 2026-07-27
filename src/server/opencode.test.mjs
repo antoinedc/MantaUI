@@ -30,6 +30,7 @@ import {
   discardBody,
   getProviders,
   getDefaultModel,
+  listModels,
 } from "./opencode.mjs";
 
 test("apiUrl targets local opencode port 4096", () => {
@@ -853,6 +854,86 @@ test("getDefaultModel returns null when default is missing from the payload", as
 });
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// listModels — flattens connected providers into a normalized model list.
+//
+// BET-342 follow-up: listModels used to inline its own `GET /provider` fetch
+// alongside `getProviders()`. The two paths were byte-identical for any 2xx
+// opencode response, but a future drift in defensive handling between them
+// would be a silent bug. The refactor routes listModels through
+// getProviders() so there is exactly one fetch site for /provider.
+// ---------------------------------------------------------------------------
+
+test("listModels returns normalized models for every connected provider", async () => {
+  await withMockFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          connected: ["anthropic", "openai"],
+          all: [
+            {
+              id: "anthropic",
+              models: {
+                "claude-sonnet-4-6": { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+              },
+            },
+            {
+              id: "openai",
+              models: {
+                "gpt-5": { id: "gpt-5", name: "GPT-5" },
+              },
+            },
+            {
+              id: "deepseek",
+              models: { "deepseek-chat": { id: "deepseek-chat" } },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    async () => {
+      const out = await listModels();
+      const ids = out.map((m) => `${m.providerID}/${m.id}`).sort();
+      // deepseek is in `all` but not in `connected` → must be filtered out.
+      assert.deepEqual(ids, ["anthropic/claude-sonnet-4-6", "openai/gpt-5"]);
+      const anthropic = out.find((m) => m.providerID === "anthropic");
+      assert.equal(anthropic.name, "Claude Sonnet 4.6");
+      const openai = out.find((m) => m.providerID === "openai");
+      assert.equal(openai.name, "GPT-5");
+    },
+  );
+});
+
+test("listModels returns [] when no providers are connected", async () => {
+  // `connected` empty → every provider in `all` is filtered out → empty out.
+  await withMockFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          connected: [],
+          all: [
+            { id: "anthropic", models: { "claude-sonnet-4-6": { id: "claude-sonnet-4-6" } } },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    async () => {
+      const out = await listModels();
+      assert.deepEqual(out, []);
+    },
+  );
+});
+
+test("listModels returns [] on a transport throw (never re-throws)", async () => {
+  await withMockFetch(
+    async () => { throw new Error("ECONNREFUSED"); },
+    async () => {
+      const out = await listModels();
+      assert.deepEqual(out, []);
+    },
+  );
+});
+
 // Scoped-stream readiness gate (BET-115 fix C)
 //
 // sendPrompt (via getSessionDirectoryQuery) must not POST to opencode before
