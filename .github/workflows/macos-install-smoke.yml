@@ -218,12 +218,17 @@ jobs:
       - name: Assert — servers answer on loopback
         run: |
           set -euo pipefail
-          curl -fsS http://127.0.0.1:8787/auth/status >/dev/null \
-            || { echo "FAIL: manta-server /auth/status unreachable"; exit 1; }
-          code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4096/ || true)"
-          [ -n "$code" ] && [ "$code" != "000" ] \
+          # ANY HTTP status means the listener is up — /auth/status answers 401
+          # to an unauthenticated caller, which is correct behaviour for a box
+          # that has not been paired yet. Only "000" (no response) is a failure.
+          # This mirrors waitForHealth's acceptAnyStatus contract.
+          mcode="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/auth/status || true)"
+          [ -n "$mcode" ] && [ "$mcode" != "000" ] \
+            || { echo "FAIL: manta-server not listening on 8787"; exit 1; }
+          ocode="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4096/ || true)"
+          [ -n "$ocode" ] && [ "$ocode" != "000" ] \
             || { echo "FAIL: opencode-serve not listening on 4096"; exit 1; }
-          echo "manta-server ok; opencode http=$code"
+          echo "manta-server http=$mcode; opencode http=$ocode"
 
       - name: Assert — restarting the agent brings the server back
         run: |
@@ -232,7 +237,8 @@ jobs:
           # KeepAlive + RunAtLoad put it back on the port.
           launchctl kickstart -k "gui/$(id -u)/com.mantaui.server"
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8787/auth/status >/dev/null 2>&1; then
+            # Any status (incl. the unpaired 401) = the listener is back.
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/auth/status || true)" != "000" ]; then
               echo "server back after ${i}s"; exit 0
             fi
             sleep 1
@@ -296,8 +302,8 @@ jobs:
           [ "$before" = "$after" ] || { echo "FAIL: box_id changed on re-install ($before -> $after)"; exit 1; }
           grep -q "preserving it" "$GITHUB_WORKSPACE/install2.log" \
             || { echo "FAIL: re-install did not report a preserved identity"; exit 1; }
-          curl -fsS http://127.0.0.1:8787/auth/status >/dev/null \
-            || { echo "FAIL: server unhealthy after re-install"; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/auth/status || true)" != "000" ] \
+            || { echo "FAIL: server not listening after re-install"; exit 1; }
           echo "identity preserved: $after"
 
       - name: Collect diagnostics
