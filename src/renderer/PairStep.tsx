@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { normalizeCode } from "../shared/claim.mjs";
-import { canConnectSetup, normalizeServerUrl } from "./mobile/setupLogic";
+import {
+  canConnectSetup,
+  normalizeServerUrl,
+  prefillFromPairLink,
+} from "./mobile/setupLogic";
 import { isValidBoxToken } from "../shared/transport.mjs";
 import { claimBox } from "./pairClaim";
 import { useStore } from "./store";
 
 // PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2,
-// BET-255, BET-268).
+// BET-255, BET-268, BET-335).
 //
 // Mounts into Onboarding.tsx's step-1 slot. Owns the pairing form:
 //   • a Box ID input (32-hex box id)
@@ -30,11 +34,14 @@ import { useStore } from "./store";
 // session (BET-254). Finally we call onPaired() to let the shell advance to
 // Step 2.
 //
-// The deep-link `manta://pair?box=…&code=…` flow no longer lands here —
-// App.tsx's onPairLink handler auto-claims via the SAME `claimBox` helper and
-// advances via `finishOnboarding()`. If the auto-claim fails, the handler
-// falls back to opening onboarding at step 1 (Onboarding.tsx still reads
-// `pendingPairLink` to force step 1) so the user can retry by hand.
+// The deep-link `manta://pair?box=…&code=…` flow DOES land here (BET-335):
+// App.tsx's onPairLink handler stashes the URL via `setPendingPairLink` and
+// opens onboarding at step 1 (Onboarding reads `pendingPairLink` to force
+// step 1). We lazily prefill Box ID + code from that URL via
+// `prefillFromPairLink` — the user lands on the Connect screen with both
+// fields filled, and the click on Connect IS the confirmation the pair page
+// promises. We clear `pendingPairLink` on a successful claim so a later
+// re-pair doesn't re-prefill a stale link.
 //
 // All non-React logic (Box ID validation, the submit gate, the 6-digit
 // contract, server-URL normalization, HTTP-outcome classification, the claim
@@ -58,8 +65,17 @@ export function PairStep({
   onPaired: () => void;
   onSkip: () => void;
 }) {
-  const [boxId, setBoxId] = useState("");
-  const [code, setCode] = useState("");
+  // Deep-link prefill (BET-335): if App.tsx stashed a valid `manta://pair?…`
+  // URL into `pendingPairLink` before this step mounted, seed both fields
+  // from it. Lazy init via `useState(() => …)` so we read the store ONCE at
+  // mount — the user can then edit the fields freely without our re-reading
+  // the stashed URL on every keystroke. `prefillFromPairLink` returns null
+  // for any nullish/empty/invalid input (foreign URL, bad box, bad code),
+  // which falls through to empty fields — the same default the form already
+  // used for a non-deep-link open.
+  const prefill = prefillFromPairLink(useStore.getState().pendingPairLink);
+  const [boxId, setBoxId] = useState(() => prefill?.boxId ?? "");
+  const [code, setCode] = useState(() => prefill?.code ?? "");
   const [serverUrl, setServerUrl] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -107,6 +123,10 @@ export function PairStep({
       serverUrl: serverUrlTrimmed,
     });
     if (result.ok) {
+      // Consume the stashed deep-link (BET-335): otherwise a later re-pair
+      // (different box, or fresh claim failure on this same box) would
+      // re-prefill the fields from a stale URL.
+      useStore.getState().setPendingPairLink(null);
       setSubmitting(false);
       onPaired();
       return;
