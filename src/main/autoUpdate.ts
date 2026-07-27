@@ -16,6 +16,7 @@
 import { autoUpdater } from "electron-updater";
 import { app, BrowserWindow, ipcMain } from "electron";
 import { IPC } from "../shared/types.js";
+import { shouldSurfaceUpdateError, describeUpdateError } from "../shared/updateError.mjs";
 
 // Disable auto-download so we can prompt the user before installing.
 // This gives us a chance to show a "Restart to update" dialog.
@@ -46,7 +47,29 @@ autoUpdater.on("update-downloaded", (info) => {
 
 autoUpdater.on("error", (err) => {
   console.warn("[auto-update] Update error:", err.message);
+  // A transient error (offline, DNS, timeout) fixes itself and must not nag.
+  // A TERMINAL one (checksum/signature mismatch, can't replace the bundle)
+  // means this install will never update again on its own — the user has to
+  // act, so they have to be told. Swallowing these into the console above is
+  // how 0.0.13 and 0.0.14 both shipped with a broken update feed unnoticed:
+  // every launch failed verification in silence and the app just never
+  // updated. See src/shared/updateError.mjs.
+  if (!shouldSurfaceUpdateError(err.message)) return;
+  notifyUpdateError(describeUpdateError(err.message), err.message);
 });
+
+/**
+ * Push a terminal update failure to every open window. Separate from
+ * notifyRenderer() because it carries both the human-facing copy and the raw
+ * message (useful in logs / a support paste) rather than an UpdateInfo.
+ */
+function notifyUpdateError(message: string, raw: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send(IPC.autoUpdateError, { message, raw });
+    }
+  }
+}
 
 /**
  * Send an update event to the renderer via IPC.

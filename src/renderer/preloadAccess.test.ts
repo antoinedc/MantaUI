@@ -42,6 +42,14 @@ function makeFakePreload(): MantaPreload {
       cb({ version: "test-server", notesUrl: null });
       return vi.fn();
     }),
+    // Desktop auto-update bridge. These moved onto the preload because
+    // window.api is httpApi on every paired desktop and its auto-update
+    // entries were no-op stubs, so the updater's events reached nothing.
+    autoUpdateDownload: vi.fn(async () => {}),
+    autoUpdateInstall: vi.fn(async () => {}),
+    onAutoUpdateAvailable: vi.fn(() => vi.fn()),
+    onAutoUpdateDownloaded: vi.fn(() => vi.fn()),
+    onAutoUpdateError: vi.fn(() => vi.fn()),
   };
 }
 

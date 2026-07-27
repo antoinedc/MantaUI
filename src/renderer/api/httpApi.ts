@@ -903,11 +903,31 @@ export const httpApi: Api = {
   // registry stays single-source-of-truth regardless of transport.
   pushRegisterApns: (token) => rpc(IPC.pushRegisterApns, token),
 
-  // -- auto-update (desktop-only; no-op in http/mobile mode) --
-  autoUpdateDownload: () => Promise.resolve(),
-  autoUpdateInstall: () => Promise.resolve(),
-  onAutoUpdateAvailable: () => () => {},
-  onAutoUpdateDownloaded: () => () => {},
+  // -- auto-update (electron-updater; delegated to the preload on desktop) --
+  //
+  // These used to be unconditional no-ops, commented "desktop-only; no-op in
+  // http/mobile mode". That reasoning was stale: desktop is ALWAYS in http
+  // mode since the SSH transport was removed (BET-82), so window.api is
+  // httpApi on every paired desktop and the stubs swallowed the entire
+  // updater UX — main downloaded the update, sent autoUpdate:* IPC, and the
+  // renderer was listening to `() => () => {}`. The "Restart to update"
+  // banner could never render and autoUpdateInstall() resolved without
+  // restarting. Combined with the release feed's checksum drift (fixed in
+  // scripts/release/restamp-update-feed.mjs) desktop auto-update was broken
+  // end to end, silently, for multiple releases.
+  //
+  // Route through window.__mantaPreload when it exists (desktop), fall back
+  // to a genuine no-op on mobile/web where there is no updater at all. Same
+  // delegation shape as peekRemoteFile above.
+  autoUpdateDownload: async () => {
+    await getMantaPreload()?.autoUpdateDownload();
+  },
+  autoUpdateInstall: async () => {
+    await getMantaPreload()?.autoUpdateInstall();
+  },
+  onAutoUpdateAvailable: (cb) => getMantaPreload()?.onAutoUpdateAvailable(cb) ?? (() => {}),
+  onAutoUpdateDownloaded: (cb) => getMantaPreload()?.onAutoUpdateDownloaded(cb) ?? (() => {}),
+  onAutoUpdateError: (cb) => getMantaPreload()?.onAutoUpdateError(cb) ?? (() => {}),
 
   // -- typeahead --
   opencodeCommands: () => rpc(IPC.opencodeCommands),

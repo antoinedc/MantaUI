@@ -286,6 +286,23 @@ export type ServerUpdateAvailablePayload = {
   notesUrl: string | null;
 };
 
+// Desktop auto-update (electron-updater) payloads, shared by the preload
+// bridge, the httpApi delegation, and the renderer.
+export type AutoUpdateInfo = {
+  version: string;
+  releaseName?: string;
+  releaseNotes?: string;
+};
+
+// A TERMINAL update failure (integrity / permission). `message` is the
+// user-facing copy from shared/updateError.mjs; `raw` is electron-updater's
+// own message, kept for logs and support reports. Transient failures never
+// reach the renderer — main filters them out.
+export type AutoUpdateErrorInfo = {
+  message: string;
+  raw: string;
+};
+
 export const IPC = {
   configGet: "config:get",
   configUpdate: "config:update",
@@ -577,6 +594,12 @@ export const IPC = {
   autoUpdateInstall: "autoUpdate:install",            // renderer → main: trigger restart+install
   autoUpdateAvailable: "autoUpdate:available",        // main → renderer: an update is available
   autoUpdateDownloaded: "autoUpdate:downloaded",      // main → renderer: update is ready to install
+  // main → renderer: an update failed TERMINALLY (integrity/permission — see
+  // shared/updateError.mjs). Transient network errors are NOT forwarded. This
+  // channel exists because a silent `console.warn` on updater errors let two
+  // releases (0.0.13, 0.0.14) ship with an unusable update feed and nobody
+  // noticed — the app simply stopped updating without ever saying so.
+  autoUpdateError: "autoUpdate:error",
 
   // ---- server version (BET-180) ----
   // Returns the manta-server's package.json version (read once at server startup,

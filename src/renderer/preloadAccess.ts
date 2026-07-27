@@ -1,4 +1,9 @@
-import type { DesktopNotifyPayload, ServerUpdateAvailablePayload } from "../shared/types.js";
+import type {
+  DesktopNotifyPayload,
+  ServerUpdateAvailablePayload,
+  AutoUpdateInfo,
+  AutoUpdateErrorInfo,
+} from "../shared/types.js";
 
 /**
  * OS-integration affordances exposed by the Electron preload bridge.
@@ -73,6 +78,18 @@ export interface MantaPreload {
   onServerUpdateAvailable(
     cb: (payload: ServerUpdateAvailablePayload) => void,
   ): () => void;
+  // Desktop auto-update. These live here rather than on window.api because a
+  // paired desktop's window.api is httpApi, whose auto-update entries are
+  // no-op stubs written for mobile/web. Desktop has been permanently in http
+  // mode since the SSH transport was removed, so routing auto-update through
+  // window.api meant every event was delivered to a stub — the updater
+  // downloaded fine and the UI never heard about it. httpApi delegates here
+  // when the preload is present (same pattern as peekRemoteFile).
+  autoUpdateDownload(): Promise<void>;
+  autoUpdateInstall(): Promise<void>;
+  onAutoUpdateAvailable(cb: (info: AutoUpdateInfo) => void): () => void;
+  onAutoUpdateDownloaded(cb: (info: AutoUpdateInfo) => void): () => void;
+  onAutoUpdateError(cb: (info: AutoUpdateErrorInfo) => void): () => void;
 }
 
 /**

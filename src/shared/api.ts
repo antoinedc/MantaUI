@@ -298,6 +298,10 @@ export interface Api {
   onAutoUpdateDownloaded(
     cb: (info: { version: string; releaseName?: string; releaseNotes?: string }) => void,
   ): () => void;
+  // Fires only for TERMINAL update failures (integrity / permission). Transient
+  // network errors are filtered out in main — see src/shared/updateError.mjs.
+  // `message` is user-facing copy; `raw` is the underlying updater message.
+  onAutoUpdateError(cb: (info: { message: string; raw: string }) => void): () => void;
 
   // Typeahead sources.
   opencodeCommands(): Promise<OpencodeCommand[]>;
