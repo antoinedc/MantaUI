@@ -154,7 +154,11 @@ jobs:
           # is still exercised for real.
           ver="$(gh api repos/anomalyco/opencode/releases/latest --jq .tag_name | sed 's/^v//')"
           echo "pinning opencode $ver"
-          curl -fsSL https://opencode.ai/install | bash -s -- --version "$ver" </dev/null
+          # Script from a FILE, stdin from /dev/null — `curl … | bash -s -- …
+          # </dev/null` starves bash of its own script (the same trap install.sh
+          # itself hit).
+          curl -fsSL https://opencode.ai/install -o "$RUNNER_TEMP/oc-install.sh"
+          bash "$RUNNER_TEMP/oc-install.sh" --version "$ver" </dev/null
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
           "$HOME/.opencode/bin/opencode" --version
 
