@@ -752,10 +752,40 @@ main() {
     # bootout first (ignore failure if not loaded), then bootstrap for a clean
     # reload that picks up template changes on re-run.
     launchctl bootout "gui/$uid/$label" 2>/dev/null || true
-    if ! launchctl bootstrap "gui/$uid" "$dest" 2>/dev/null; then
-      # Older macOS where `bootstrap` isn't available.
-      launchctl load -w "$dest" 2>/dev/null \
-        || warn "launchctl could not load $label — check: launchctl print gui/$uid/$label"
+
+    # `bootout` is ASYNCHRONOUS: launchctl returns as soon as the request is
+    # accepted, while launchd is still tearing the job down. Bootstrapping the
+    # same label during that window fails with "Input/output error" (5) — and
+    # because the original code silenced that failure, the RE-INSTALL path
+    # ended with NO agent loaded at all: the box came back with a dead
+    # opencode-serve and the install died at the health-wait. Wait for the
+    # label to actually disappear (up to ~10s) before bootstrapping, then
+    # retry a few times — launchd can still be busy on a slow machine.
+    local waited=0
+    while [ "$waited" -lt 50 ] && launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
+      sleep 0.2
+      waited=$((waited + 1))
+    done
+
+    local attempt=1 boot_err=""
+    while [ "$attempt" -le 5 ]; do
+      if boot_err="$(launchctl bootstrap "gui/$uid" "$dest" 2>&1)"; then
+        break
+      fi
+      sleep 1
+      attempt=$((attempt + 1))
+    done
+
+    # Verify by observation, not by exit code: `bootstrap` can report failure
+    # for a job that did load (and vice-versa). Only fall back to the
+    # deprecated `load -w` (older macOS, no `bootstrap`) when the label really
+    # isn't there, and surface the reason instead of swallowing it.
+    if ! launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+      launchctl load -w "$dest" 2>/dev/null || true
+      if ! launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+        warn "launchctl could not load $label${boot_err:+ ($boot_err)}"
+        warn "  check: launchctl print gui/\$(id -u)/$label"
+      fi
     fi
     launchctl kickstart -k "gui/$uid/$label" 2>/dev/null || true
   }
