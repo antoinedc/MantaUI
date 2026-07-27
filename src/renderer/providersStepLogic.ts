@@ -4,66 +4,35 @@
 // onboardingUtils.ts. ProvidersStep.tsx / ModelStep.tsx own the React/DOM; this
 // module owns the "which providers are connected / can we continue" decisions.
 //
-// The single source of truth for "connected" is opencode's own model list
-// (window.api.opencodeModels()), which main derives from GET /provider filtered
-// by `connected[]` (see opencode.ts:listModels) — NEVER /api/model, which leaks
-// apiKey. A provider is "connected" iff opencode actually serves at least one
-// model for it; that is exactly the condition under which a model can be picked
-// in Step 3, so the two steps stay consistent by construction.
+// Step 2's "connected" signal moved off `window.api.opencodeModels()` onto
+// the `status` action (BET-315). The action feeds directly off opencode's
+// `GET /provider` `connected[]`, which is the same source the model list is
+// built from, so a provider counted as connected here is one whose models
+// appear in Step 3 — the two steps stay consistent by construction.
 
-import type { OpencodeModel } from "../shared/types";
+import type { OpencodeModel, SubscriptionStatus } from "../shared/types";
 
-// Provider ids we surface as first-class cards in Step 2. Anthropic is the
-// Claude-auth path (connected on the box via the auth plugin); OpenAI is the
-// canonical hosted OpenAI-compatible endpoint added via an API key. Everything
-// else is reached through the "Custom" card.
-export const ANTHROPIC_ID = "anthropic";
-export const OPENAI_ID = "openai";
-
-// opencode's default OpenAI-compatible base URL for the built-in OpenAI card.
-// The Custom card lets the user type any baseURL; OpenAI is pinned so the user
-// only has to paste a key.
-export const OPENAI_BASE_URL = "https://api.openai.com/v1";
-
-// The set of provider ids opencode actually serves models for. This is the
-// authoritative "connected" signal for the whole step: a provider with zero
-// served models is not connected (even if a stale block sits in opencode.jsonc).
-export function connectedProviderIds(models: OpencodeModel[]): Set<string> {
-  const ids = new Set<string>();
-  for (const m of models) {
-    if (m.providerID) ids.add(m.providerID);
-  }
-  return ids;
+// Step 2 Continue gate: at least one provider must be connected (i.e. at
+// least one model is pickable in Step 3). Mirrors the acceptance criterion
+// "step 2 Continue requires ≥1 connected provider". Switching the input
+// from a served-models list to the `status` action's SubscriptionStatus[]
+// (BET-315) is what makes a subscription connected seconds ago count
+// immediately — the parent's refresh fires on connect-done and the
+// Continue gate re-evaluates off the same row.
+export function canContinueProviders(statuses: SubscriptionStatus[]): boolean {
+  return statuses.some((s) => s.connected);
 }
 
-// Is a specific provider connected (opencode serves ≥1 model for it)?
-export function isProviderConnected(models: OpencodeModel[], providerID: string): boolean {
-  return connectedProviderIds(models).has(providerID);
-}
-
-// Step 2 Continue gate: at least one provider must be connected (i.e. at least
-// one model is pickable in Step 3). Mirrors the acceptance criterion "step 2
-// Continue requires ≥1 connected provider".
-export function canContinueProviders(models: OpencodeModel[]): boolean {
-  return connectedProviderIds(models).size > 0;
-}
-
-// Validation for the OpenAI / Custom API-key add forms. OpenAI needs only a
-// key (baseURL is pinned); Custom needs id + baseURL, key optional (some
-// self-hosted endpoints are keyless). Returns the reason it's invalid, or null
-// when the draft is submittable — so the UI can both disable the button and
-// (optionally) show why.
+// Validation for the custom-endpoint add form. id + baseURL are required;
+// key is optional (some self-hosted endpoints are keyless). Returns the
+// reason it's invalid, or null when the draft is submittable — so the UI
+// can both disable the button and (optionally) show why.
 export type ProviderDraft = { id: string; name: string; baseURL: string; apiKey: string };
 
 export function customDraftError(draft: ProviderDraft): string | null {
   if (!draft.id.trim()) return "Provider id is required.";
   if (!draft.baseURL.trim()) return "Base URL is required.";
   if (!/^https?:\/\//i.test(draft.baseURL.trim())) return "Base URL must start with http:// or https://.";
-  return null;
-}
-
-export function openaiKeyError(apiKey: string): string | null {
-  if (!apiKey.trim()) return "API key is required.";
   return null;
 }
 
