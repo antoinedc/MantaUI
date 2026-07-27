@@ -269,9 +269,65 @@ print_provider_detection_summary() {
   fi
 }
 
+# read_box_id <lib-path> <node-path>
+# Echo the 32-hex box_id out of $MANTA_AUTH_FILE, or nothing when the file is
+# missing / half-written / corrupt. Single source of truth for the inline
+# `node -e readBoxIdentity` read — used by step 7.5 (gateway register needs
+# box_id) and step 8 (the trailing pairing block prints box_id + pair-link).
+# Without this helper the two reads drifted in subtle ways — see install.test's
+# strict duplication-gate catching the 6-line clone (BET-205).
+#
+# Errors go to /dev/null; the empty fallback lets the caller branch (e.g. warn
+# + skip on no box_id).
+read_box_id() {
+  "$2" -e '
+    import("'"$1"'").then((m) => {
+      const id = m.readBoxIdentity(process.env.MANTA_AUTH_FILE);
+      process.stdout.write(id?.box_id ?? "");
+    }).catch(() => process.stdout.write(""));
+  ' 2>/dev/null || true
+}
+
+# wait_for_box_id <lib-path> <node-path> [max-attempts] [interval-seconds]
+# Poll read_box_id until the identity shows up. Echoes the box_id (exit 0) or
+# nothing (exit 1) once the budget is spent.
+#
+# WHY THE WAIT (regression guard): the box identity is minted by the SERVER on
+# its first start (ensureAuth runs before it binds the port), and step 7 only
+# waits for the supervisor to fork the process — not for it to finish booting.
+# On a fresh box the identity read therefore RACED the mint and came back
+# empty, which cascaded: gateway registration was skipped, and step 7.5.E then
+# invoked `render-caddy-vhost` with an empty --box-id, which fails with
+#   render-caddy-vhost: --box-id <32hex> required
+# so the Caddy vhost was never written. The install still printed a pairing
+# code, so the box LOOKED installed while having no public TLS at all — and a
+# second run of the installer (by which time the identity existed) silently
+# "fixed" it. Polling here is what makes the first run sufficient.
+wait_for_box_id() {
+  local lib="$1" node_bin="$2" attempts="${3:-60}" interval="${4:-1}"
+  local id="" i=1
+  while [ "$i" -le "$attempts" ]; do
+    id="$(read_box_id "$lib" "$node_bin")"
+    if [ -n "$id" ]; then
+      if [ "$i" -gt 1 ]; then
+        printf 'box identity appeared after %s attempt(s)\n' "$i" >&2
+      fi
+      printf '%s' "$id"
+      return 0
+    fi
+    if [ "$i" = "1" ] && [ "$attempts" -gt 1 ]; then
+      printf 'waiting for the server to mint the box identity…\n' >&2
+    fi
+    i=$((i + 1))
+    if [ "$i" -le "$attempts" ]; then sleep "$interval"; fi
+  done
+  return 1
+}
+
 # Test mode: when sourced by scripts/install.test.mjs with MANTA_INSTALL_TEST_MODE=1,
 # only the bash helpers (log/ok/warn/die + manifest_get + _sha256_of +
-# verify_sha256 + resolve_arch + print_provider_detection_summary) are
+# verify_sha256 + resolve_arch + print_provider_detection_summary +
+# read_box_id / wait_for_box_id) are
 # loaded. The actual install does NOT run. Lets the unit tests exercise
 # the helpers with mocked `uname`/etc. without hitting the network. See
 # scripts/install.test.mjs.
@@ -786,8 +842,8 @@ main() {
   #
   # HOISTED ABOVE the mode-resolution block (BET-267 review fix): bash does
   # NOT forward-reference function definitions within the same function, so
-  # defining this AFTER its call sites (the original placement, near
-  # read_box_id_for_gateway) silently failed with
+  # defining this AFTER its call sites (the original placement, near the
+  # box-identity read) silently failed with
   # `detect_tailscale_ip: command not found` and the auto branch fell through
   # to public mode even when Tailscale was running. Moving the definition
   # above the call sites is the minimal fix; `bash -n` parses but does not
@@ -891,22 +947,9 @@ main() {
       || warn "launchctl kickstart com.mantaui.server failed — restart manually"
   fi
 
-  # Single source of truth for the inline `node -e readBoxIdentity`
-  # read. Used by step 7.5 (gateway register needs box_id) and step 8
-  # (the trailing-pairing heredoc prints box_id + pair-link). Without
-  # this helper the two reads drifted in subtle ways — see install.test's
-  # strict duplication-gate catching the 6-line clone (BET-205).
-  # Reads MANTA_AUTH_FILE; returns the 32-hex box_id or empty on a
-  # missing/corrupt auth.json. Errors go to stderr; the empty fallback
-  # lets the caller branch (e.g. warn + skip on no box_id).
-  read_box_id_for_gateway() {
-    "$NODE" -e '
-      import("'"$LIB"'").then((m) => {
-        const id = m.readBoxIdentity(process.env.MANTA_AUTH_FILE);
-        process.stdout.write(id?.box_id ?? "");
-      }).catch(() => process.stdout.write(""));
-    ' 2>/dev/null || true
-  }
+  # The identity read + its bounded first-boot wait are top-level helpers
+  # (read_box_id / wait_for_box_id, defined above main so install.test.mjs
+  # can exercise them) — main just calls them.
 
   # ===========================================================================
   # 7.5. PRIVILEGED SECTION — Caddy + DNS + gateway registration (BET-205 WP5).
@@ -1065,10 +1108,16 @@ main() {
   # failure (PRIVILEGED_SECTION_SKIP=1) where the rest of the section is
   # being skipped.
   if [ "$PRIVILEGED_SECTION_SKIP" = "0" ]; then
-    BOX_ID_FOR_GATEWAY="$(read_box_id_for_gateway)"
+    # The server mints the identity asynchronously on its first start, so on a
+    # fresh box this read races the mint — poll for up to ~60s rather than
+    # taking the first empty answer as final (see wait_for_box_id's comment for
+    # the failure this caused). Dry-run never waits: one probe and move on.
+    BOX_ID_WAIT_ATTEMPTS=60
+    if [ "$DRY_RUN" = "1" ]; then BOX_ID_WAIT_ATTEMPTS=1; fi
+    BOX_ID_FOR_GATEWAY="$(wait_for_box_id "$LIB" "$NODE" "$BOX_ID_WAIT_ATTEMPTS" 1 || true)"
 
     if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
-      warn "no box_id in $MANTA_AUTH_FILE yet — skipping gateway registration."
+      warn "no box_id in $MANTA_AUTH_FILE after waiting — skipping gateway registration."
       warn "  start the manta-server at least once ($(supervisor_hint restart server)) and re-run."
     else
       GATEWAY_BASE="${MANTA_GATEWAY_BASE:-https://gateway.mantaui.com}"
@@ -1273,6 +1322,18 @@ main() {
       # skip the vhost write entirely (cert issuance would fail against an
       # unresolvable name). DRY_RUN never times out, so this is a no-op there.
       CADDY_E_SKIP="${DNS_TIMED_OUT:-0}"
+      # Second seed: no box_id ⇒ nothing to name the vhost after. Without this
+      # guard the renderer below was invoked with an empty --box-id and failed
+      # ("render-caddy-vhost: --box-id <32hex> required") — noisy in the
+      # conf.d path and FATAL in the inline path (a failed command
+      # substitution under `set -e` kills the install before the pair code is
+      # printed). wait_for_box_id above makes this unreachable in practice;
+      # keep it as the belt to that braces.
+      if [ "$DRY_RUN" != "1" ] && [ -z "${BOX_ID_FOR_GATEWAY:-}" ]; then
+        warn "no box_id available — skipping the Caddy vhost write (nothing to point the hostname at)."
+        warn "  re-run the installer once the server has minted an identity ($(supervisor_hint status server))."
+        CADDY_E_SKIP=1
+      fi
       CADDY_DIR_D="/etc/caddy/Caddyfile.d"
       if [ "$DRY_RUN" = "1" ]; then
         dry_log "would render Caddy vhost (box_id=$BOX_ID_FOR_GATEWAY, port=$MANTA_PORT)"
@@ -1285,19 +1346,38 @@ main() {
       else
         if [ -d "$CADDY_DIR_D" ]; then
           # Caddyfile.d exists → write the snippet as a separate file.
+          # Render to a temp file FIRST, then install(1) it atomically. A
+          # direct `render | sudo tee` truncates the destination BEFORE the
+          # renderer's exit status is known, so a failed re-run replaces a
+          # working vhost with an empty file. Same staging rationale as the
+          # apt .list write above.
+          _caddy_snippet_tmp="$(mktemp)"
           if ! "$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode snippet \
-              | sudo -n tee "$CADDY_DIR_D/manta.caddy" >/dev/null 2>/tmp/manta-caddy-tee.err; then
-            warn "failed to write $CADDY_DIR_D/manta.caddy (sudo tee failed — see /tmp/manta-caddy-tee.err)"
+              > "$_caddy_snippet_tmp" 2>/tmp/manta-caddy-render.err; then
+            warn "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err)"
+            warn "  the rest of the install will proceed; re-run to write the Caddy vhost."
+            CADDY_E_SKIP=1
+          elif ! sudo -n install -m 0644 "$_caddy_snippet_tmp" "$CADDY_DIR_D/manta.caddy" 2>/tmp/manta-caddy-tee.err; then
+            warn "failed to write $CADDY_DIR_D/manta.caddy (sudo install failed — see /tmp/manta-caddy-tee.err)"
             warn "  the rest of the install will proceed; re-run after fixing sudo to write the Caddy vhost."
             CADDY_E_SKIP=1
           fi
+          rm -f "$_caddy_snippet_tmp"
         else
           # conf.d missing → append a marker-bracketed block to the main
           # Caddyfile. A re-run overwrites the same block (between the
           # markers), so we never accumulate duplicate vhosts.
-          SNIPPET="$("$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode inline)"
+          # `|| true` + the empty check below: a bare command substitution that
+          # fails would abort the whole install under `set -e`, before the pair
+          # code is ever printed. A Caddyfile we couldn't render is a warn, not
+          # a fatal.
+          SNIPPET="$("$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode inline 2>/tmp/manta-caddy-render.err || true)"
           CADDYFILE="/etc/caddy/Caddyfile"
-          if [ -f "$CADDYFILE" ]; then
+          if [ -z "$SNIPPET" ]; then
+            warn "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err)"
+            warn "  the rest of the install will proceed; re-run to write the Caddy vhost."
+            CADDY_E_SKIP=1
+          elif [ -f "$CADDYFILE" ]; then
             if grep -q '^# >>> manta >>>' "$CADDYFILE"; then
               # Replace the existing block (between the markers) with the
               # freshly-rendered one. sed -i is intentionally GNU-only —
