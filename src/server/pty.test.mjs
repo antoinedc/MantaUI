@@ -1,11 +1,18 @@
-// Tests for src/server/pty.mjs pure helpers (BET-138 + BET-346). Only
-// shellQuote + resolvePtyCommand are unit-testable without a real PTY spawn;
-// the login-shell launch path itself is exercised manually (it requires
-// node-pty + a real binary).
+// Tests for src/server/pty.mjs pure helpers (BET-138 + BET-346 + BET-348).
+// Only shellQuote + resolvePtyCommand are unit-testable without a real PTY
+// spawn; the login-shell launch path itself is exercised manually (it
+// requires node-pty + a real binary). BET-348 added a test-only
+// `_setSpawnShellPty()` hook so we can verify the `spawn()` wiring forwards
+// `tmuxTarget` all the way to the spawner.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { shellQuote, resolvePtyCommand } from "./pty.mjs";
+import {
+  shellQuote,
+  resolvePtyCommand,
+  spawn,
+  _setSpawnShellPty,
+} from "./pty.mjs";
 
 describe("shellQuote", () => {
   it("leaves safe tokens unquoted", () => {
@@ -97,6 +104,82 @@ describe("resolvePtyCommand", () => {
         shell: SHELL,
       }),
       { file: SHELL, args: ["-l"] },
+    );
+  });
+});
+
+// ---- BET-348: spawn() forwards tmuxTarget to spawnShellPty ----------------
+//
+// The resolvePtyCommand tests above pin the ARGV shape when `tmuxTarget` is
+// set, but they don't prove the higher-level `spawn(opts, onEvent)` (the
+// function the `pty:spawn` rpc handler calls) actually threads the field
+// through. node-pty itself isn't mockable without surgery, so the test uses
+// the `_setSpawnShellPty` test hook to swap in a recorder. The recorder
+// returns a stub object with the `onData` / `onExit` methods the production
+// code expects — those callbacks never fire in this test (the test calls
+// spawn() once and exits), so they can be no-ops.
+
+describe("spawn() forwards tmuxTarget to spawnShellPty", () => {
+  it("passes a non-empty tmuxTarget through verbatim", () => {
+    const calls = [];
+    _setSpawnShellPty((opts) => {
+      calls.push(opts);
+      // Minimal stub matching the IPty surface `spawn()` touches. The
+      // returned object sits in the module-level `ptys` Map; `spawn()`
+      // attaches onData/onExit to it. We never reach the cleanup path
+      // in this test, so the callbacks can be empty.
+      return {
+        onData: () => {},
+        onExit: () => {},
+      };
+    });
+    try {
+      spawn(
+        {
+          sessionKey: "tmux:myproject:0",
+          cwd: "/home/dev/projects/myproject",
+          cols: 80,
+          rows: 24,
+          tmuxTarget: "myproject:0",
+        },
+        () => {},
+      );
+    } finally {
+      _setSpawnShellPty(null);
+    }
+    assert.equal(calls.length, 1, "spawnShellPty called exactly once");
+    assert.equal(calls[0].tmuxTarget, "myproject:0", "tmuxTarget forwarded verbatim");
+    assert.equal(calls[0].cwd, "/home/dev/projects/myproject");
+    assert.equal(calls[0].launcher, undefined, "no launcher set");
+  });
+
+  it("forwards undefined tmuxTarget as undefined (no implicit default)", () => {
+    // The "Manta-owned" branch — the renderer omits `tmuxTarget` entirely
+    // when opening a window Manta created. Pin that the spawner receives
+    // undefined so resolvePtyCommand takes the launcher/shell branch.
+    const calls = [];
+    _setSpawnShellPty((opts) => {
+      calls.push(opts);
+      return { onData: () => {}, onExit: () => {} };
+    });
+    try {
+      spawn(
+        {
+          sessionKey: "ses_x:terminal",
+          cwd: "/home/dev/projects/manta",
+          cols: 80,
+          rows: 24,
+        },
+        () => {},
+      );
+    } finally {
+      _setSpawnShellPty(null);
+    }
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0].tmuxTarget,
+      undefined,
+      "omitted tmuxTarget arrives as undefined, not as '' or null",
     );
   });
 });

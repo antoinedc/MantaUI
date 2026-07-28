@@ -85,6 +85,57 @@ export function App() {
   const activeChatSessionId = activeWin?.opencodeSessionId ?? null;
   if (activeChatSessionId) visitedChats.current.add(activeChatSessionId);
 
+  // Resolved before the BET-348 block below so the non-Manta detection
+  // can read the project's `mantaOwned` flag.
+  const activeProject = activeProjectName
+    ? projects.find((p) => p.tmuxSession === activeProjectName) ?? null
+    : null;
+
+  // BET-348: active window in a NON-Manta session — there is no
+  // opencode session id (the user started this session in their own
+  // terminal, before opening Manta). We render a Terminal that does
+  // `tmux attach-session -t <session>:<windowIndex>` instead of
+  // spawning a fresh shell. A "non-Manta session" is one whose
+  // `mantaOwned` field is false on the project record (set by the
+  // server's `~/.manta/tmux-sessions.json` sidecar, stamped onto
+  // every listing — see src/server/tmux.mjs listProjects()).
+  //
+  // visitedNonManta keeps one entry per (session, windowIndex) so a
+  // Terminal stays warm across remounts, mirroring visitedModes /
+  // visitedChats above. Each key is "<session>:<windowIndex>" — the
+  // exact format `ptySpawn`'s tmuxTarget expects, which keeps the
+  // server-side PTY reuse key aligned with the click target.
+  const visitedNonManta = useRef<Set<string>>(new Set());
+  const isActiveNonManta =
+    !!activeProject &&
+    activeProject.mantaOwned === false &&
+    // Defensive: a non-Manta session with a stamped opencode session
+    // id is unusual but possible (a session the user shared with
+    // opencode before opening Manta). Treat the opencode-stamped
+    // windows as Manta sessions for routing — they go through the
+    // existing chat flow.
+    activeChatSessionId === null &&
+    activeWin !== undefined;
+  const activeNonMantaTarget = isActiveNonManta && activeWin
+    ? `${activeProject.tmuxSession}:${activeWin.index}`
+    : null;
+  if (activeNonMantaTarget) visitedNonManta.current.add(activeNonMantaTarget);
+  // Garbage-collect visitedNonManta against the live projects tree —
+  // sessions / windows that disappeared from the listing can't be
+  // reattached to.
+  for (const key of visitedNonManta.current) {
+    const [sess, winStr] = key.split(":");
+    const winIdx = Number(winStr);
+    const proj = projects.find((p) => p.tmuxSession === sess);
+    if (
+      !proj ||
+      proj.mantaOwned !== false || // session transitioned to Manta-owned (rename, etc.)
+      !proj.windows.find((w) => w.index === winIdx)
+    ) {
+      visitedNonManta.current.delete(key);
+    }
+  }
+
   // Session-mode toggle (BET-138): each chat session shows Chat, a bare
   // shell-in-cwd Terminal, or an AI CLI TUI launcher (e.g. Claude Code).
   // `mode` tracks the ACTIVE chat session's current mode; other sessions'
@@ -616,9 +667,6 @@ export function App() {
       window.removeEventListener("manta-voice-app-action", handler as EventListener);
   }, [projects, setActive]);
 
-  const activeProject = activeProjectName
-    ? projects.find((p) => p.tmuxSession === activeProjectName) ?? null
-    : null;
   const activeWinName = activeProject?.windows.find(
     (w) => w.index === activeWindowByProject[activeProjectName!],
   )?.name ?? null;
@@ -876,6 +924,41 @@ export function App() {
                       windowIndex={owner?.windowIndex ?? null}
                       cwd={owner?.cwd ?? ""}
                       isActive={isActiveChat}
+                    />
+                  </div>
+                );
+              })}
+              {/* BET-348: tmux-attach Terminals for non-Manta windows. One
+                  Terminal per (session, windowIndex); only the active one
+                  is visible. Keyed on "<session>:<windowIndex>" so the
+                  sessionKey passed to Terminal — and therefore the PTY
+                  key on the server — matches the tmuxTarget verbatim.
+                  The Terminal mounts a `tmux attach-session -t
+                  <session>:<windowIndex>` PTY (server branch 1 of
+                  resolvePtyCommand), which is exactly the pre-existing
+                  window's output — no blank pane, no detached other
+                  clients (the server explicitly does NOT pass `-d`,
+                  see BET-346 / pty.test.mjs). */}
+              {[...visitedNonManta.current].map((key) => {
+                const [sess, winStr] = key.split(":");
+                const winIdx = Number(winStr);
+                const proj = projects.find((p) => p.tmuxSession === sess);
+                const w = proj?.windows.find((x) => x.index === winIdx);
+                const isActiveNonMantaHere =
+                  isActiveNonManta && activeNonMantaTarget === key;
+                // sessionKey is the same string as tmuxTarget so the
+                // server's PTY reuse key stays stable across remounts.
+                return (
+                  <div
+                    key={`tmux:${key}`}
+                    className="absolute inset-0"
+                    style={{ display: isActiveNonMantaHere ? "block" : "none" }}
+                  >
+                    <Terminal
+                      sessionKey={`tmux:${key}`}
+                      cwd={w?.paneCurrentPath || proj?.defaultCwd || ""}
+                      tmuxTarget={key}
+                      active={isActiveNonMantaHere}
                     />
                   </div>
                 );

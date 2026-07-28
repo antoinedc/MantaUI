@@ -1,7 +1,10 @@
 import { spawn as cpSpawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import { expandTilde } from "../shared/paths.mjs";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, dirname } from "node:path";
+import { expandTilde, STATE_DIRNAME } from "../shared/paths.mjs";
+import { atomicWrite } from "./storeUtils.mjs";
 
 const FS = "\t";
 
@@ -45,6 +48,158 @@ function spawnRun(cmd, args) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// BET-348: Manta-owned session sidecar
+// ---------------------------------------------------------------------------
+//
+// The renderer needs to know which tmux sessions Manta created (so it can
+// spawn a fresh shell in cwd) vs which ones pre-existed on the box (so it
+// should `tmux attach-session -t <session>:<windowIndex>` instead — see the
+// SpawnOptions.tmuxTarget field in src/shared/types.ts). The tmux sidecar is
+// the only signal: nothing in tmux's own state distinguishes "Manta made
+// this" from "the user started this in their own terminal before opening
+// Manta".
+//
+// We persist the set of Manta-owned session names to
+// `~/.manta/tmux-sessions.json`. On server startup / every `listProjects`
+// call we reconcile against `tmux list-sessions`: entries for sessions
+// that have been killed (by anyone — Manta, the user, the OS) are pruned,
+// so a session that disappeared doesn't silently re-claim "owned" status
+// if it reappears under the same name later. The reconciliation also
+// satisfies "the marker doesn't leak across reboots and incorrectly claim
+// ownership" from the BET-348 acceptance criteria — after a reboot the
+// sidecar is read once, reconciled, and only contains sessions that
+// actually exist right now.
+//
+// Atomic-write pattern (same as schedule.mjs / secrets.mjs) so a crash
+// mid-write never leaves a half-truncated JSON file behind.
+
+export const OWNED_SESSIONS_PATH = join(homedir(), STATE_DIRNAME, "tmux-sessions.json");
+
+// Plain reader — not reactive. Returns the persisted set; missing/corrupt
+// files collapse to an empty set so the server can boot. Exported for
+// unit tests + the public `listOwnedSessions` helper below.
+export async function loadOwnedSessions(path = OWNED_SESSIONS_PATH, fs = { readFile }) {
+  try {
+    if (!existsSync(path)) return [];
+    const raw = await fs.readFile(path, "utf-8");
+    const parsed = JSON.parse(raw);
+    // Defensive: tolerate either {sessions: [...]} (the wire shape) or a
+    // bare array (legacy shape from earlier design drafts). Anything else
+    // collapses to [] so a corrupt file doesn't break the renderer.
+    const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+    return arr.filter((s) => typeof s === "string");
+  } catch {
+    // ENOENT / EACCES / JSON parse error — start empty, don't crash.
+    return [];
+  }
+}
+
+async function saveOwnedSessions(sessions, path = OWNED_SESSIONS_PATH) {
+  await mkdir(dirname(path), { recursive: true });
+  await atomicWrite(path, JSON.stringify({ sessions }, null, 2));
+}
+
+// Synchronous variant used at server boot / by tests that don't want to
+// mock `fs/promises`. Same contract: missing or unparseable → [].
+export function loadOwnedSessionsSync(path = OWNED_SESSIONS_PATH) {
+  try {
+    if (!existsSync(path)) return [];
+    const parsed = JSON.parse(readFileSync(path, "utf-8"));
+    const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+    return arr.filter((s) => typeof s === "string");
+  } catch {
+    return [];
+  }
+}
+
+// Cached set, hydrated lazily on the first call after server boot and
+// kept in sync by `addOwnedSession` / `removeOwnedSession`. Read on
+// every `listProjects()` to stamp `mantaOwned` on each session.
+//
+// `ownedSessionsCachePath` is the active target. Production code never
+// touches it — it stays at `OWNED_SESSIONS_PATH`. Tests override it via
+// `_setOwnedSessionsPath` (test-only hook) to redirect writes to a tmp
+// file. The helper defaults pick up the active path so a test that
+// primed the cache doesn't have to thread `{ path }` through every
+// call.
+let ownedSessionsCache = null;
+let ownedSessionsCachePath = OWNED_SESSIONS_PATH;
+async function getOwnedSessions(path = ownedSessionsCachePath) {
+  if (ownedSessionsCache === null || ownedSessionsCachePath !== path) {
+    ownedSessionsCache = await loadOwnedSessions(path);
+    ownedSessionsCachePath = path;
+  }
+  return new Set(ownedSessionsCache);
+}
+export async function addOwnedSession(name, { path = ownedSessionsCachePath } = {}) {
+  if (typeof name !== "string" || !name) return;
+  const cur = await getOwnedSessions(path);
+  if (cur.has(name)) return; // idempotent
+  cur.add(name);
+  ownedSessionsCache = [...cur];
+  ownedSessionsCachePath = path;
+  await saveOwnedSessions(ownedSessionsCache, path);
+}
+export async function removeOwnedSession(name, { path = ownedSessionsCachePath } = {}) {
+  if (typeof name !== "string" || !name) return;
+  const cur = await getOwnedSessions(path);
+  if (!cur.has(name)) return; // idempotent
+  cur.delete(name);
+  ownedSessionsCache = [...cur];
+  ownedSessionsCachePath = path;
+  await saveOwnedSessions(ownedSessionsCache, path);
+}
+
+/** Test-only: reset the module-level cache + active path so the next
+ *  call re-hydrates from disk. Used by tmux.test.mjs to keep test
+ *  cases hermetic — production code never calls this. */
+export function _resetOwnedSessionsCache() {
+  ownedSessionsCache = null;
+  ownedSessionsCachePath = OWNED_SESSIONS_PATH;
+}
+
+/** Test-only: redirect the default path used by `addOwnedSession` /
+ *  `removeOwnedSession` when no `{ path }` option is supplied. The
+ *  production callers (renameSession / killSession / newSession /
+ *  reconcileOwnedSessions) don't pass `path`, so they pick up this
+ *  override. Combined with `_resetOwnedSessionsCache`, tests can drive
+ *  the full public surface (renameSession etc.) against a tmp file
+ *  without touching `~/.manta/tmux-sessions.json`. */
+export function _setOwnedSessionsPath(path) {
+  ownedSessionsCachePath = path ?? OWNED_SESSIONS_PATH;
+  ownedSessionsCache = null;
+}
+
+// Reconcile the cache against the live tmux state: drop entries for
+// sessions that no longer exist (manually killed outside Manta, killed by
+// the user in their own terminal, or pruned by `destroy-unattached`).
+// Best-effort: a tmux error here doesn't break `listProjects` (we'd
+// rather serve an over-permissive set than fail the listing).
+async function reconcileOwnedSessions(liveSessions) {
+  const live = new Set(liveSessions);
+  // Pin the path at the start so the cache load and the eventual save
+  // both use the same target — without this the test override (which
+  // redirects `ownedSessionsCachePath`) only steers the read, and the
+  // dirty-cache write below would silently land on the production
+  // path. In production `ownedSessionsCachePath` is always
+  // `OWNED_SESSIONS_PATH`, so this is a no-op there.
+  const path = ownedSessionsCachePath;
+  const cur = await getOwnedSessions(path);
+  let dirty = false;
+  for (const name of cur) {
+    if (!live.has(name)) {
+      cur.delete(name);
+      dirty = true;
+    }
+  }
+  if (dirty) {
+    ownedSessionsCache = [...cur];
+    await saveOwnedSessions(ownedSessionsCache, path);
+  }
+  return cur;
+}
+
 // The transport every tmux command dispatches through. Production = spawnRun
 // (real child_process). Tests swap in a fake `(cmd, args) => Promise<{stdout,
 // stderr}>` via `_setRun` so the chat-mode branch (which calls tmux new-window
@@ -61,12 +216,22 @@ export function _setRun(fn) {
   runImpl = fn ?? spawnRun;
 }
 
-export function parseSessions(sessStdout, winStdout) {
+export function parseSessions(sessStdout, winStdout, owned = new Set()) {
   // Phase 1: build ordered session map from list-sessions output.
   const sessions = new Map();
   for (const line of sessStdout.split("\n").filter(Boolean)) {
     const [name, att] = line.split(FS);
-    sessions.set(name, { tmuxSession: name, attached: att === "1", windows: [] });
+    sessions.set(name, {
+      tmuxSession: name,
+      attached: att === "1",
+      windows: [],
+      // BET-348: stamp Manta-ownership on each session as we go. The
+      // `owned` set is what was loaded from `~/.manta/tmux-sessions.json`
+      // (reconciled against live state by `listProjects`). Absent from the
+      // Set = false, never undefined, so the renderer's `mantaOwned ?? false`
+      // never trips over an uninitialized field.
+      mantaOwned: owned.has(name),
+    });
   }
   // Phase 2: join windows into their session. Skip orphan window lines.
   for (const line of winStdout.split("\n").filter(Boolean)) {
@@ -94,7 +259,15 @@ export async function listProjects() {
   const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}`;
   const sess = await run("tmux", ["list-sessions", "-F", sessFmt]).catch(() => ({ stdout: "" }));
   const wins = await run("tmux", ["list-windows", "-a", "-F", winFmt]).catch(() => ({ stdout: "" }));
-  return parseSessions(sess.stdout, wins.stdout);
+  // BET-348: build the owned set from the cache (hydrated on first call),
+  // reconcile it against the LIVE tmux session list — anything in the
+  // sidecar that no longer exists gets pruned before we serve the listing,
+  // so the renderer can't see a session that "remembers ownership" of a
+  // session that was killed. Then stamp each session with mantaOwned.
+  const parsedSess = parseSessions(sess.stdout, "");
+  const liveNames = parsedSess.map((p) => p.tmuxSession);
+  const owned = await reconcileOwnedSessions(liveNames);
+  return parseSessions(sess.stdout, wins.stdout, owned);
 }
 
 // Chat-mode windows don't run a TUI — manta renders its own React ChatPanel
@@ -225,6 +398,15 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, o
   const idx = await newSessionGetIndex(name, dir, windowName, !!chatMode);
   await applySessionSurvivability(name);
   if (sid) await restampSessionId(name, idx, sid);
+  // BET-348: record ownership AFTER tmux accepted the new-session. If
+  // anything above threw, we never get here — and we'd rather fail loud
+  // than stamp a phantom entry. The next listProjects() will reconcile
+  // the sidecar against tmux's live list, so a stale entry from a
+  // crashed create() is bounded by the next listing call. Pin the
+  // path so a test-time path override (`_setOwnedSessionsPath`) is
+  // honored — without this the write would silently land on the
+  // production default.
+  await addOwnedSession(name, { path: ownedSessionsCachePath });
   return listProjects();
 }
 export async function newWindow({ sessionName, windowName, cwd, chatMode, worktreePath, oc }) {
@@ -257,6 +439,15 @@ export async function newWindow({ sessionName, windowName, cwd, chatMode, worktr
 
 export async function renameSession({ oldName, newName }) {
   await run("tmux", ["rename-session", "-t", oldName, newName]);
+  // BET-348: keep the sidecar in sync with the rename — otherwise the
+  // renamed session would lose its "Manta-owned" mark and the renderer
+  // would misclassify it as a pre-existing window on the next listing.
+  // Pin the path here so the helpers don't drift to the production
+  // default if a test has redirected `ownedSessionsCachePath` via the
+  // `_setOwnedSessionsPath` test hook.
+  const path = ownedSessionsCachePath;
+  await removeOwnedSession(oldName, { path });
+  await addOwnedSession(newName, { path });
   return listProjects();
 }
 export async function renameWindow({ sessionName, windowIndex, newName }) {
@@ -265,6 +456,16 @@ export async function renameWindow({ sessionName, windowIndex, newName }) {
 }
 export async function killSession(sessionName) {
   await run("tmux", ["kill-session", "-t", sessionName]).catch(() => {});
+  // BET-348: prune the sidecar eagerly on the explicit-kill path. The
+  // listProjects() reconciliation below is a defense in depth for kills
+  // that happened outside Manta (e.g. user typed :kill-session in their
+  // own terminal), but here we KNOW Manta just issued the kill, so the
+  // sidecar should drop the entry without waiting for the next listing.
+  // Fail-open on the sidecar write: if the disk hiccups, the
+  // reconciliation in listProjects() will still catch the orphaned
+  // entry next time around. Pin the path so a test-time path override
+  // is honored (no silent write to the production default).
+  try { await removeOwnedSession(sessionName, { path: ownedSessionsCachePath }); } catch { /* best-effort */ }
   return listProjects();
 }
 export async function killWindow({ sessionName, windowIndex }) {

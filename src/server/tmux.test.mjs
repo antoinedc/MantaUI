@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,15 @@ import {
   resolveCwdOrThrow,
   _setRun,
   CHAT_HOLDER_CMD,
+  loadOwnedSessions,
+  loadOwnedSessionsSync,
+  addOwnedSession,
+  removeOwnedSession,
+  listProjects,
+  killSession,
+  renameSession,
+  _resetOwnedSessionsCache,
+  _setOwnedSessionsPath,
 } from "./tmux.mjs";
 
 // Install a fake tmux transport that records every command and returns a
@@ -378,4 +387,274 @@ test("tmuxSpawnEnv preserves the rest of the environment", () => {
   const out = tmuxSpawnEnv({ PATH: "/usr/local/sbin", FOO: "bar" }, "darwin");
   assert.equal(out.PATH, "/usr/local/sbin");
   assert.equal(out.FOO, "bar");
+});
+
+// ---- BET-348: Manta-owned-session sidecar ---------------------------------
+//
+// Sidecar rules (see src/server/tmux.mjs OWNED_SESSIONS_PATH doc):
+//  - `addOwnedSession` / `removeOwnedSession` are idempotent and persist
+//    to disk via `atomicWrite` so a crash mid-write never corrupts the file.
+//  - The cache hydrates lazily; once warm, writes skip the read and only
+//    persist the delta.
+//  - `loadOwnedSessions` returns [] for a missing or corrupt file — it
+//    must NEVER crash the server (regression target).
+//  - Reconciliation drops sidecar entries for sessions that no longer
+//    exist in `tmux list-sessions`, so a session that's been killed by
+//    anyone (Manta, the user, the OS) doesn't linger with phantom
+//    ownership.
+//
+// Tests use `_resetOwnedSessionsCache()` to keep cases hermetic — they
+// MUST NOT touch the production default path (`~/.manta/tmux-sessions.json`),
+// and the cache must be reset between cases so each one re-hydrates from
+// its own tmp file.
+
+test("loadOwnedSessions returns [] for a missing file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    assert.deepEqual(await loadOwnedSessions(path), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadOwnedSessionsSync returns [] for a missing file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-sync-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    assert.deepEqual(loadOwnedSessionsSync(path), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadOwnedSessions reads {sessions:[...]} and tolerates a bare array", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  try {
+    const objPath = join(dir, "tmux-sessions.json");
+    await writeFile(objPath, JSON.stringify({ sessions: ["alpha", "beta"] }), "utf-8");
+    assert.deepEqual(await loadOwnedSessions(objPath), ["alpha", "beta"]);
+    const arrPath = join(dir, "tmux-sessions-arr.json");
+    await writeFile(arrPath, JSON.stringify(["alpha", "beta"]), "utf-8");
+    assert.deepEqual(await loadOwnedSessions(arrPath), ["alpha", "beta"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadOwnedSessions returns [] for a corrupt JSON file (no crash)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    await writeFile(path, "not json {", "utf-8");
+    assert.deepEqual(await loadOwnedSessions(path), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadOwnedSessions filters non-string entries from the array", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    await writeFile(path, JSON.stringify({ sessions: ["alpha", 42, null, "beta"] }), "utf-8");
+    assert.deepEqual(await loadOwnedSessions(path), ["alpha", "beta"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("addOwnedSession persists, idempotent across calls", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    _resetOwnedSessionsCache();
+    await addOwnedSession("alpha", { path });
+    await addOwnedSession("alpha", { path }); // idempotent
+    await addOwnedSession("beta", { path });
+    assert.deepEqual((await loadOwnedSessions(path)).sort(), ["alpha", "beta"]);
+    const raw = JSON.parse(await readFile(path, "utf-8"));
+    assert.deepEqual(raw.sessions.sort(), ["alpha", "beta"]);
+  } finally {
+    _resetOwnedSessionsCache();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("removeOwnedSession drops the entry and leaves the rest", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    _resetOwnedSessionsCache();
+    await addOwnedSession("alpha", { path });
+    await addOwnedSession("beta", { path });
+    await removeOwnedSession("alpha", { path });
+    assert.deepEqual(await loadOwnedSessions(path), ["beta"]);
+  } finally {
+    _resetOwnedSessionsCache();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("removeOwnedSession is a no-op for an unknown entry", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    _resetOwnedSessionsCache();
+    await addOwnedSession("alpha", { path });
+    await removeOwnedSession("never-existed", { path });
+    assert.deepEqual(await loadOwnedSessions(path), ["alpha"]);
+  } finally {
+    _resetOwnedSessionsCache();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("addOwnedSession / removeOwnedSession reject empty / non-string names", async () => {
+  // No throw, no write — purely defensive against a corrupt caller.
+  await addOwnedSession("");
+  await addOwnedSession(undefined);
+  await addOwnedSession(null);
+  await removeOwnedSession("");
+  await removeOwnedSession(undefined);
+});
+
+test("parseSessions stamps mantaOwned from the provided owned set", () => {
+  const sess = "alpha\t1\nbeta\t0\ngamma\t1";
+  const wins = "alpha\t1\tmain\t1\t/home/u/a\nbeta\t1\tmain\t1\t/home/u/b\ngamma\t1\tmain\t1\t/home/u/g";
+  const out = parseSessions(sess, wins, new Set(["alpha", "gamma"]));
+  const byName = Object.fromEntries(out.map((p) => [p.tmuxSession, p.mantaOwned]));
+  assert.equal(byName.alpha, true, "alpha is owned");
+  assert.equal(byName.beta, false, "beta is not owned");
+  assert.equal(byName.gamma, true, "gamma is owned");
+});
+
+test("parseSessions defaults mantaOwned to false when no owned set is passed", () => {
+  // Existing callers + tests that pass 2 args must keep working — and
+  // the new field must default to false so the renderer treats unknown
+  // sessions as non-Manta (the safe default; see BET-348 acceptance
+  // criteria).
+  const sess = "alpha\t1";
+  const wins = "alpha\t1\tmain\t1\t/home/u/a";
+  const out = parseSessions(sess, wins);
+  assert.equal(out[0].mantaOwned, false);
+});
+
+test("listProjects stamps mantaOwned + reconciles orphan sidecar entries", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    _resetOwnedSessionsCache();
+    // Seed: alpha + ghost (a session that no longer exists in tmux).
+    await addOwnedSession("alpha", { path });
+    await addOwnedSession("ghost", { path });
+    // installFakeTmux returns "" for `tmux list-sessions` — too thin
+    // for a reconciliation test. Replace it with a fake that reports
+    // "alpha" as live and nothing else.
+    _setRun(async (cmd, args) => {
+      if (args.includes("list-sessions")) {
+        return { stdout: "alpha\t1\n", stderr: "" };
+      }
+      if (args.includes("list-windows")) {
+        return { stdout: "", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      const projects = await listProjects();
+      const alpha = projects.find((p) => p.tmuxSession === "alpha");
+      assert.ok(alpha, "alpha is in the listing");
+      assert.equal(alpha.mantaOwned, true, "live Manta session is stamped");
+      assert.equal(
+        projects.find((p) => p.tmuxSession === "ghost"),
+        undefined,
+        "ghost session is not in the listing (it was killed outside Manta)",
+      );
+      // Sidecar is now reconciled: ghost dropped, alpha retained.
+      assert.deepEqual(
+        (await loadOwnedSessions(path)).sort(),
+        ["alpha"],
+        "listProjects() prunes the orphan 'ghost' entry from the sidecar",
+      );
+    } finally {
+      _setRun(null);
+      _resetOwnedSessionsCache();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("killSession prunes the sidecar entry (eager, before listProjects)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    _resetOwnedSessionsCache();
+    await addOwnedSession("alpha", { path });
+    await addOwnedSession("beta", { path });
+    // Fake reports "beta" as alive (alpha already gone — that's what
+    // `killSession` just did). Without this, the post-kill
+    // `listProjects()` reconciliation would empty the sidecar too,
+    // hiding the eager-prune behavior under test.
+    _setRun(async (cmd, args) => {
+      if (args.includes("list-sessions")) {
+        return { stdout: "beta\t1\n", stderr: "" };
+      }
+      if (args.includes("list-windows")) {
+        return { stdout: "", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      await killSession("alpha");
+    } finally {
+      _setRun(null);
+      _resetOwnedSessionsCache();
+    }
+    assert.deepEqual(
+      await loadOwnedSessions(path),
+      ["beta"],
+      "alpha was pruned by killSession; beta untouched (and survives reconciliation)",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("renameSession keeps ownership under the new name", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    _resetOwnedSessionsCache();
+    // Redirect the default path the production helpers (renameSession,
+    // killSession, newSession) read/write to the tmp path — without
+    // this they'd hit `~/.manta/tmux-sessions.json` and pollute the
+    // real state.
+    _setOwnedSessionsPath(path);
+    await addOwnedSession("alpha");
+    // Fake reports the renamed session as alive so the post-rename
+    // `listProjects()` reconciliation doesn't drop the entry.
+    _setRun(async (cmd, args) => {
+      if (args.includes("list-sessions")) {
+        return { stdout: "alpha-renamed\t1\n", stderr: "" };
+      }
+      if (args.includes("list-windows")) {
+        return { stdout: "", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      await renameSession({ oldName: "alpha", newName: "alpha-renamed" });
+    } finally {
+      _setRun(null);
+    }
+    assert.deepEqual(
+      await loadOwnedSessions(path),
+      ["alpha-renamed"],
+      "old name removed, new name added",
+    );
+  } finally {
+    _resetOwnedSessionsCache();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

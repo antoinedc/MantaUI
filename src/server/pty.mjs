@@ -21,6 +21,17 @@ import { expandTilde } from "../shared/paths.mjs";
 import { findLauncher } from "./launcherRegistry.mjs";
 import { tmuxSpawnEnv } from "./tmux.mjs";
 
+// Test-only hook: replace spawnShellPty with a spy/stub so a regression
+// test can assert that `spawn(opts, onEvent)` correctly forwards
+// `tmuxTarget` to the spawner (BET-348 acceptance criterion: "a non-
+// empty `tmuxTarget` reaches `spawnShellPty`"). Without this hook the
+// only verifiable path runs through resolvePtyCommand — which proves
+// the argv shape but not the wiring. Mirrors _setRun() in tmux.mjs.
+let spawnShellPtyImpl = spawnShellPty;
+export function _setSpawnShellPty(fn) {
+  spawnShellPtyImpl = fn ?? spawnShellPty;
+}
+
 // Single-quote a token so it survives a `$SHELL -lc "<cmd>"` re-parse intact.
 // Bin names + registry flags are trusted (no user input), but quoting keeps
 // this correct if a future launcher arg ever contains a space or metachar.
@@ -137,7 +148,7 @@ export function spawn(opts, onEvent) {
   // (bus.publish, a module singleton).
   if (ptys.has(sessionKey)) return;
 
-  const pty = spawnShellPty({ cwd, cols, rows, launcher, tmuxTarget });
+  const pty = spawnShellPtyImpl({ cwd, cols, rows, launcher, tmuxTarget });
   ptys.set(sessionKey, pty);
 
   pty.onData((data) => {
