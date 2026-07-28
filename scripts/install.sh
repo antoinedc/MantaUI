@@ -123,7 +123,12 @@ resolve_arch() {
   esac
 }
 
-# launchd_agent_path — the PATH a MantaUI LaunchAgent must run with.
+# launchd_agent_path — the PATH a MantaUI supervisor-managed service must
+# run with. Used by:
+#   * BOTH LaunchAgent plists (`scripts/launchd/com.mantaui.{opencode,server}.plist`)
+#     via @@AGENT_PATH@@ substitution,
+#   * BOTH systemd --user units (`scripts/systemd/{opencode-serve,manta-server}.service`)
+#     via @@AGENT_PATH@@ substitution (systemd's Environment=PATH=).
 #
 # launchd does NOT give an agent the user's login-shell PATH; it hands out a
 # bare `/usr/bin:/bin:/usr/sbin:/sbin`. Every tool the box actually depends on
@@ -133,12 +138,26 @@ resolve_arch() {
 # installs, pairs, and answers HTTP, but `tmux:new-session` 500s with ENOENT
 # and `listProjects` swallows its error and reports an empty box.
 #
-# We emit both Homebrew prefixes (Apple Silicon + Intel) plus the standard
-# system dirs, and prepend the directory `tmux` was actually resolved from
-# when it lives somewhere else entirely (MacPorts, /usr/local/opt, a
-# hand-built binary) — the prereq check already proved that copy exists.
-# Same class of fix as the macOS PATH handling in the desktop plugin
+# systemd --user services have the SAME trap (a minimal default PATH that
+# excludes Homebrew / user-local dirs) — the BET-353 fix unifies the two
+# supervisors onto one PATH so a tool either works under both or fails under
+# both. Same class of fix as the macOS PATH handling in the desktop plugin
 # executor (see AGENTS.md, "macOS PATH gotcha").
+#
+# Composition (precedence left-to-right; first match wins at exec time):
+#   1. $HOME/.local/bin  — where the official `claude` CLI installer places
+#                          its symlink (`~/.local/bin/claude`). Without this,
+#                          the credential-refresh machinery in
+#                          src/server/opencode.mjs (doRefresh → cpSpawn
+#                          "claude") ENOENTs and Claude auth silently rots.
+#                          Same resolver as opencode.mjs's resolveClaudeBin.
+#                          Dedup'd against the existing base (a Homebrew-
+#                          installed claude that also lives in /usr/local/bin
+#                          must not appear twice).
+#   2. the directory `tmux` was actually resolved from when it lives
+#      somewhere else entirely (MacPorts, /usr/local/opt, a hand-built
+#      binary) — the prereq check already proved that copy exists.
+#   3. Homebrew prefixes (Apple Silicon + Intel) + standard system dirs.
 launchd_agent_path() {
   local base="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   local tmux_bin tmux_dir
@@ -150,6 +169,10 @@ launchd_agent_path() {
       *) base="$tmux_dir:$base" ;;
     esac
   fi
+  case ":$base:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) base="$HOME/.local/bin:$base" ;;
+  esac
   printf '%s' "$base"
 }
 
@@ -236,7 +259,8 @@ print_provider_detection_summary() {
     # detection (BET-313: a missing provider is not an installation
     # failure).
     warn "could not build provider detection summary (see /tmp/manta-detect.err) — assuming no providers connected."
-    warn "Run \`claude\` on this box to sign in, then:"
+    warn "Connect any provider from the MantaUI app."
+    warn "Fallback (if the app is unavailable): run \`claude\` once on this box to sign in, then:"
     if [ "$macos" = "1" ]; then
       warn "  launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
     else
@@ -290,7 +314,8 @@ print_provider_detection_summary() {
 
   if [ "$show_guidance" = "1" ]; then
     warn "no providers connected — chat will start but reject requests until you authenticate."
-    warn "Connect any of Claude, Codex, or Kimi from the MantaUI app, or run \`claude\` (or the equivalent) once on this box to sign in, then:"
+    warn "Connect any of Claude, Codex, or Kimi from the MantaUI app."
+    warn "Fallback (if the app is unavailable): run \`claude\` (or the equivalent) once on this box to sign in, then:"
     if [ "$macos" = "1" ]; then
       warn "  launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
     else
@@ -652,6 +677,64 @@ main() {
     ok "opencode installed ($("$OPENCODE_BIN" --version 2>/dev/null | head -n1 || echo "$OPENCODE_BIN"))."
   fi
 
+  # --- A2. claude CLI install (idempotent via official installer). ----------
+  # opencode's "anthropic" provider is a passthrough that reads
+  # ~/.claude/.credentials.json — a file only the `claude` CLI writes. Without
+  # the binary, Claude cannot work on a fresh box at all (BET-353). Same
+  # shape as the opencode install above: curl-to-file + bash </dev/null +
+  # PATH probe + non-fatal-on-failure (a box without Claude must still finish
+  # installing, still pair, and still be usable with Codex).
+  #
+  # The official installer places the binary in $HOME/.local/bin/claude —
+  # SAME dir we prepend to launchd_agent_path above so the supervisor-managed
+  # services can spawn it for credential refresh
+  # (src/server/opencode.mjs doRefresh / refreshClaudeCredentials). Reuses
+  # the opencode install's stdin dance because the SAME `curl | bash` pipe-
+  # truncation footgun applies (install.sh itself is run as `curl | bash`,
+  # so the child's stdin must be /dev/null AND the script must come from a
+  # file, not stdin).
+  #
+  # PLATFORM: macOS arm64 + Linux x64/arm64 — same matrix install.sh ships
+  # tarballs for (resolve_arch). The official installer honours that matrix
+  # directly.
+  if [ "$DRY_RUN" = "1" ]; then
+    if command -v claude >/dev/null 2>&1; then
+      dry_log "claude CLI already installed ($(command -v claude)) — would skip install step"
+    else
+      dry_log "would install claude CLI (official installer https://claude.ai/install.sh); idempotent on PATH probe"
+    fi
+  elif command -v claude >/dev/null 2>&1; then
+    ok "claude CLI already installed ($(command -v claude))."
+  else
+    log "Installing claude CLI (official installer)…"
+    _claude_installer="$WORK/claude-install.sh"
+    curl -fsSL https://claude.ai/install.sh -o "$_claude_installer" \
+      || { warn "claude installer download failed — skipping. Connect Codex/Kimi from the MantaUI app, or install manually: https://claude.ai"; rm -f "$_claude_installer"; }
+    if [ -f "$_claude_installer" ]; then
+      bash "$_claude_installer" </dev/null \
+        || warn "claude install failed — skipping. Connect Codex/Kimi from the MantaUI app, or install manually: https://claude.ai"
+      rm -f "$_claude_installer"
+      # Mirror the opencode install's PATH recovery: source .bashrc if the
+      # installer wrote to it, then probe the well-known install location
+      # as a safety net.
+      if [ -f "$HOME/.bashrc" ]; then
+        set +e
+        # shellcheck disable=SC1090
+        . "$HOME/.bashrc" 2>/dev/null || true
+        set -e
+      fi
+      if [ -x "$HOME/.local/bin/claude" ]; then
+        export PATH="$HOME/.local/bin:$PATH"
+      fi
+      CLAUDE_BIN="$(command -v claude || true)"
+      if [ -n "$CLAUDE_BIN" ]; then
+        ok "claude CLI installed ($("$CLAUDE_BIN" --version 2>/dev/null | head -n1 || echo "$CLAUDE_BIN"))."
+      else
+        warn "claude installer ran but the binary is not on PATH — non-fatal: Claude auth will be unavailable until you install it manually (https://claude.ai). Connect Codex/Kimi from the MantaUI app in the meantime."
+      fi
+    fi
+  fi
+
   # --- B. opencode config seeding — MERGE the plugin entry, never clobber. --
   # Target: ~/.config/opencode/opencode.jsonc. Required:
   #   plugin: ["opencode-claude-auth@latest", ...]
@@ -842,7 +925,8 @@ main() {
       mkdir -p "$UNIT_DIR"
       rendered="$("$NODE" "$LIB" render-systemd-unit \
         --template "$OC_UNIT_SRC" \
-        --placeholder OPENCODE_BIN="$OPENCODE_BIN")" \
+        --placeholder OPENCODE_BIN="$OPENCODE_BIN" \
+        --placeholder AGENT_PATH="$(launchd_agent_path)")" \
         || die "render-systemd-unit failed (see lib)"
       printf '%s' "$rendered" > "$OC_UNIT"
       systemctl --user daemon-reload
@@ -969,6 +1053,7 @@ main() {
       -e "s|@@NODE_BIN@@|$NODE|g" \
       -e "s|@@MANTA_PORT@@|$MANTA_PORT|g" \
       -e "s|@@MANTA_TAILNET_HOST@@|$TAILNET_IP|g" \
+      -e "s|@@AGENT_PATH@@|$(launchd_agent_path)|g" \
       "$UNIT_SRC" > "$UNIT_DIR/manta-server.service"
 
     # Survive logout/reboot without an active session.

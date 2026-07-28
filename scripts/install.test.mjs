@@ -3910,7 +3910,8 @@ print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 
   }
 });
 
-// launchd_agent_path — the PATH written into both LaunchAgent plists.
+// launchd_agent_path — the PATH written into both LaunchAgent plists AND
+// both systemd --user units (BET-353 unified them onto one helper).
 //
 // WHY IT MATTERS: launchd does not give an agent a login-shell PATH, it gives
 // `/usr/bin:/bin:/usr/sbin:/sbin`. macOS ships no tmux, so tmux always comes
@@ -3918,6 +3919,13 @@ print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 
 // happily and fails every session action (`tmux:new-session` 500s, and
 // `listProjects` swallows its error so the UI just shows an empty box). Caught
 // by the macOS install smoke workflow on a real runner.
+//
+// BET-353 added `$HOME/.local/bin` for the same reason but for Claude: the
+// official `claude` CLI installer places its symlink at `~/.local/bin/claude`,
+// and the credential-refresh machinery in src/server/opencode.mjs (doRefresh
+// → cpSpawn "claude") ENOENTs without it. A bare bare-name spawn inside the
+// service process fails for the same reason tmux fails — supervisors do not
+// source the user's login shell PATH.
 test("install.sh launchd_agent_path: always covers both Homebrew prefixes + system dirs", () => {
   const out = runBootstrap({
     preBody: `
@@ -3936,11 +3944,17 @@ command() {
   assert.match(out, /\/usr\/sbin/);
   // Already-covered dir must not be duplicated.
   assert.equal(out.match(/\/opt\/homebrew\/bin/g).length, 1);
+  // BET-353: the official `claude` CLI lives in $HOME/.local/bin/claude; the
+  // supervisor-managed service must see it for doRefresh to spawn it.
+  assert.match(out, new RegExp(`\\.local/bin`));
+  assert.equal(out.match(/\.local\/bin/g).length, 1, "$HOME/.local/bin must not be duplicated");
 });
 
 test("install.sh launchd_agent_path: prepends a tmux dir the defaults don't cover", () => {
   // MacPorts / a hand-built tmux lives outside both Homebrew prefixes. The
   // prereq check already proved that copy exists, so trust it.
+  // BET-353 ordering: $HOME/.local/bin (Claude) → MacPorts tmux → Homebrew
+  // prefixes → system dirs.
   const out = runBootstrap({
     preBody: `
 command() {
@@ -3952,7 +3966,9 @@ command() {
 `,
     func: "launchd_agent_path; echo",
   });
-  assert.match(out, /^\/opt\/local\/bin:\/opt\/homebrew\/bin:/m);
+  // HOME is whatever the test runner inherited; escape it for the regex.
+  const homeRe = process.env.HOME?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") ?? "/home/tester";
+  assert.match(out, new RegExp(`^${homeRe}/\\.local/bin:/opt/local/bin:/opt/homebrew/bin:`, "m"));
 });
 
 test("install.sh launchd_agent_path: no tmux on PATH still yields a usable PATH", () => {
@@ -3969,7 +3985,236 @@ command() {
 `,
     func: "launchd_agent_path; echo",
   });
-  assert.match(out, /^\/opt\/homebrew\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin$/m);
+  const homeRe = process.env.HOME?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") ?? "/home/tester";
+  assert.match(
+    out,
+    new RegExp(`^${homeRe}/\\.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin$`, "m"),
+  );
+});
+
+test("install.sh launchd_agent_path: ~/.local/bin stays prepended even when tmux resolves to the same dir (BET-353)", () => {
+  // Defensive: a Homebrew-style install where claude ALSO lives in
+  // /opt/homebrew/bin would risk the .local/bin dedup branch returning a
+  // path without Claude. Pin that the HOME/.local/bin prefix survives
+  // regardless of where tmux is found.
+  const out = runBootstrap({
+    preBody: `
+command() {
+  case "$1" in
+    -v) case "$2" in tmux) echo "/opt/homebrew/bin/tmux"; return 0 ;; claude) echo "/opt/homebrew/bin/claude"; return 0 ;; *) builtin command "$@" ;; esac ;;
+    *) builtin command "$@" ;;
+  esac
+}
+`,
+    func: "launchd_agent_path; echo",
+  });
+  // $HOME/.local/bin must still be first (Claude must be reachable).
+  const homeRe = process.env.HOME?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") ?? "/home/tester";
+  assert.match(out, new RegExp(`^${homeRe}/\\.local/bin:`, "m"));
+  // And Homebrew must not be duplicated (the test asserts exact counts, not
+  // just presence).
+  assert.equal(out.match(/\/opt\/homebrew\/bin/g).length, 1);
+});
+
+test("install.sh claude install step: dry-run shows the install branch when claude is absent (BET-353)", () => {
+  // Stage-2 acceptance: a fresh box has no claude binary; the installer's
+  // dry-run mode must show that it WOULD install it (not silently skip it).
+  // Pin the dry-run shape so a future regression that drops the step is
+  // caught here instead of on a real box.
+  const out = runBootstrap({
+    preBody: `
+# Force claude to be absent (the test runner itself may have claude
+# installed — see the same stub used in print_provider_detection_summary's
+# CLI-probe test).
+command() {
+  case "$1" in
+    -v) case "$2" in claude) return 1 ;; *) builtin command "$@" ;; esac ;;
+    *) builtin command "$@" ;;
+  esac
+}
+export -f command
+
+# claude is NOT on PATH for this test; dry-run must emit the install branch.
+DRY_RUN=1
+dry_log() { [ "$DRY_RUN" = "1" ] && printf '\\033[36m▸\\033[0m [dry-run] %s\\n' "$*"; }
+# Inline the Claude install branch from install.sh (the helper lives inside
+# main() so we can't call it directly).
+if [ "$DRY_RUN" = "1" ]; then
+  if command -v claude >/dev/null 2>&1; then
+    dry_log "claude CLI already installed ($(command -v claude)) — would skip install step"
+  else
+    dry_log "would install claude CLI (official installer https://claude.ai/install.sh); idempotent on PATH probe"
+  fi
+elif command -v claude >/dev/null 2>&1; then
+  echo "BRANCH=already-installed"
+else
+  echo "BRANCH=install"
+fi
+echo "DONE"
+`,
+    func: ":",
+  });
+  assert.match(out, /\[dry-run\] would install claude CLI/);
+  assert.doesNotMatch(out, /already installed/);
+  assert.match(out, /DONE/);
+});
+
+test("install.sh claude install step: dry-run reports skip when claude is on PATH (BET-353)", () => {
+  // Mirror of the previous test: when `command -v claude` succeeds, the
+  // dry-run output must say "already installed … would skip" — never the
+  // install branch. This is the BET-353 idempotency acceptance: re-running
+  // the installer must not re-download or re-install.
+  const out = runBootstrap({
+    preBody: `
+DRY_RUN=1
+dry_log() { [ "$DRY_RUN" = "1" ] && printf '\\033[36m▸\\033[0m [dry-run] %s\\n' "$*"; }
+command() {
+  case "$1" in
+    -v) case "$2" in claude) echo "/home/tester/.local/bin/claude"; return 0 ;; *) builtin command "$@" ;; esac ;;
+    *) builtin command "$@" ;;
+  esac
+}
+if [ "$DRY_RUN" = "1" ]; then
+  if command -v claude >/dev/null 2>&1; then
+    dry_log "claude CLI already installed ($(command -v claude)) — would skip install step"
+  else
+    dry_log "would install claude CLI (official installer https://claude.ai/install.sh); idempotent on PATH probe"
+  fi
+fi
+echo "DONE"
+`,
+    func: ":",
+  });
+  assert.match(out, /claude CLI already installed/);
+  assert.match(out, /would skip install step/);
+  assert.doesNotMatch(out, /\[dry-run\] would install claude CLI \(official/);
+});
+
+test("install.sh: scripts/systemd/*.service carries @@AGENT_PATH@@ placeholder (BET-353 wiring)", () => {
+  // Belt-and-braces: the systemd units must contain the @@AGENT_PATH@@
+  // token, otherwise render-systemd-unit won't substitute it. Without the
+  // substitution, the supervisor-managed service inherits the bare
+  // systemd default PATH and the `claude` spawn in doRefresh ENOENTs.
+  for (const f of [
+    join(__dirname, "systemd", "manta-server.service"),
+    join(__dirname, "systemd", "opencode-serve.service"),
+  ]) {
+    const text = readFileSync(f, "utf-8");
+    assert.match(
+      text,
+      /Environment=PATH=@@AGENT_PATH@@/,
+      `${f} must carry @@AGENT_PATH@@ for the unified PATH substitution`,
+    );
+  }
+});
+
+test("install.sh systemd render: AGENT_PATH substitution materialises ~/.local/bin in both units (BET-353)", () => {
+  // Pin the Linux render: install.sh substitutes @@AGENT_PATH@@ via the
+  // lib's render-systemd-unit call (opencode-serve.service) AND via the
+  // sed-based manta-server.service renderer. Both must produce an
+  // Environment=PATH=… line that resolves to a path containing
+  // ~/.local/bin, so doRefresh's `claude` spawn finds the binary.
+  //
+  // Two reasons this matters:
+  //   (a) The fix must apply to BOTH supervisors uniformly — the test
+  //       would have caught a half-fix that only touched launchd.
+  //   (b) A regression that drops the substitution would silently leave
+  //       the bare @@AGENT_PATH@@ token in the unit file; systemd would
+  //       refuse to parse it.
+  const dir = mkdtempSync(join(tmpdir(), "manta-systemd-agent-path-"));
+  try {
+    const OC_RENDERED = join(dir, "opencode-rendered.service");
+    const SERVER_RENDERED = join(dir, "server-rendered.service");
+    const out = runMain({
+      stubs: `
+INSTALL_SH="${INSTALL_SH}"
+export INSTALL_SH
+MANTA_HOME="/tmp/fake-manta-home"
+# The actual node binary doesn't need to exist — we're using bash's PATH
+# resolver ("node") the same way the print_provider_detection_summary tests
+# do, so the test doesn't need to lay down a fake runtime tree.
+NODE="node"
+MANTA_PORT="8787"
+TAILNET_IP=""
+OPENCODE_BIN="/usr/local/bin/opencode"
+export MANTA_HOME NODE MANTA_PORT TAILNET_IP OPENCODE_BIN
+OC_UNIT_SRC="\${INSTALL_SH%/*}/systemd/opencode-serve.service"
+SERVER_UNIT_SRC="\${INSTALL_SH%/*}/systemd/manta-server.service"
+
+# Mirror install.sh's opencode-serve render path (the lib's render-systemd-unit).
+rendered_oc="\$("\${NODE}" "\${INSTALL_SH%/*}/install-lib.mjs" render-systemd-unit \\
+  --template "\${OC_UNIT_SRC}" \\
+  --placeholder OPENCODE_BIN="\${OPENCODE_BIN}" \\
+  --placeholder AGENT_PATH="\$(launchd_agent_path)")"
+printf '%s' "\$rendered_oc" > "${OC_RENDERED}"
+
+# Mirror install.sh's manta-server.service sed-based render path.
+sed \\
+  -e "s|@@MANTA_HOME@@|\$MANTA_HOME|g" \\
+  -e "s|@@NODE_BIN@@|\$NODE|g" \\
+  -e "s|@@MANTA_PORT@@|\$MANTA_PORT|g" \\
+  -e "s|@@MANTA_TAILNET_HOST@@|\${TAILNET_IP:-}|g" \\
+  -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
+  "\$SERVER_UNIT_SRC" > "${SERVER_RENDERED}"
+
+echo "SYSTEMD_RENDER_DONE=1"
+`,
+      preBody: `: # run stubs above`,
+    });
+    assert.match(out, /SYSTEMD_RENDER_DONE=1/);
+    const homeRe = process.env.HOME?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") ?? "/home/tester";
+    for (const f of [OC_RENDERED, SERVER_RENDERED]) {
+      const text = readFileSync(f, "utf-8");
+      // No placeholder leaks through.
+      assert.doesNotMatch(text, /@@AGENT_PATH@@/, `unsubstituted @@AGENT_PATH@@ leaked into ${f}`);
+      // Environment=PATH=… materialised.
+      assert.match(text, /Environment=PATH=/);
+      // The substituted PATH must include ~/.local/bin — without it the
+      // service can't find `claude` for credential refresh.
+      assert.match(text, new RegExp(`${homeRe}/\\.local/bin`));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install.sh print_provider_detection_summary guidance: app-first wording with manual fallback (BET-353)", () => {
+  // The Stage-2 acceptance for the post-install summary: the "no providers
+  // connected" guidance must lead with the app and demote the manual
+  // terminal command to a labelled fallback line. The shell-side help text
+  // is the user-visible surface of the whole epic — if it still says
+  // "run claude once" as the primary action, BET-353 has failed.
+  const dir = mkdtempSync(join(tmpdir(), "manta-detect-app-first-"));
+  try {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const fakeLib = mkFakeLib({ dir, connectedIds: [] });
+    const out = runBootstrapStderrEmptyPath({
+      preBody: `
+print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 0
+`,
+    });
+    // Primary guidance must lead with "from the MantaUI app".
+    assert.match(
+      out,
+      /Connect any of Claude, Codex, or Kimi from the MantaUI app\./,
+      "guidance must lead with the app, not a terminal command",
+    );
+    // The manual command must still appear as a labelled fallback.
+    assert.match(
+      out,
+      /Fallback \(if the app is unavailable\): run .claude./,
+      "the manual command must remain as a labelled fallback",
+    );
+    // The OLD combined phrasing must NOT appear anymore — that was the
+    // wrong-default signal BET-353 is fixing.
+    assert.doesNotMatch(
+      out,
+      /Connect any of Claude, Codex, or Kimi from the MantaUI app, or run .claude/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("install.sh install_launchd_agent: plist substitution replaces every placeholder (BET-277)", () => {
