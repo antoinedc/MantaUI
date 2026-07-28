@@ -31,11 +31,17 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
+import { nowMs } from "./clock";
 
 export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | null; atBottom: boolean }) {
   // Tick once per second to drive the elapsed-time re-render.
   const [, setTick] = useState(0);
-  const startRef = useRef<number>(Date.now());
+  // `nowMs()` returns the demo mode's deterministic clock when the hero
+  // video is rendering (see src/renderer/clock.ts). Real apps fall back to
+  // Date.now(). This is the *reference* timestamp the elapsed-time label
+  // measures against, so two consecutive renders of the same frame use
+  // the same value (no `Date.now()` label drift).
+  const startRef = useRef<number>(nowMs());
   // Pick a verb once per indicator mount so it doesn't shuffle between
   // renders.
   const verb = useRef<string>(
@@ -47,7 +53,7 @@ export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | nu
     return () => clearInterval(id);
   }, []);
 
-  const elapsedMs = Date.now() - startRef.current;
+  const elapsedMs = nowMs() - startRef.current;
 
   const outTokens = tokens != null ? tokens.output + tokens.reasoning : 0;
 

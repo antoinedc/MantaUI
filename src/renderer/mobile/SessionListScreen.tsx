@@ -3,6 +3,7 @@ import { useStore } from "../store";
 import type { Project, TmuxWindow } from "../../shared/types";
 import { MobileCreateSheet } from "./MobileCreateSheet";
 import { classifyCacheAge, formatAge, selectCacheTtlMs } from "../chatUtils";
+import { nowMs } from "../clock";
 
 type Props = {
   onOpenSession: (projectName: string, windowIndex: number) => void;
@@ -72,10 +73,10 @@ function SessionRow({
           {typeLabel(w, running, attention)}
           {showAge && (
             <span
-              className={`tabular-nums ${ageColorClass(classifyCacheAge(status!.lastMessageAt!, Date.now(), selectCacheTtlMs(cacheTtl)))}`}
+              className={`tabular-nums ${ageColorClass(classifyCacheAge(status!.lastMessageAt!, nowMs(), selectCacheTtlMs(cacheTtl)))}`}
             >
               {" "}
-              · {formatAge(Date.now() - status!.lastMessageAt!)}
+              · {formatAge(nowMs() - status!.lastMessageAt!)}
             </span>
           )}
         </span>

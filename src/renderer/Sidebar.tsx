@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import { useStore, type WindowStatusUI } from "./store";
+import { nowMs } from "./clock";
 import type { Project, WorktreeInfo } from "../shared/types";
 import { classifyCacheAge, formatAge, selectCacheTtlMs } from "./chatUtils";
 import { MOD_KEY } from "./platform";
@@ -975,7 +976,11 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
     status.lastMessageAt != null && !status.running && !isBlockingAttention
       ? (() => {
           const ttlMs = selectCacheTtlMs(cacheTtl);
-          const now = Date.now();
+          // `nowMs()` returns the demo mode's deterministic clock when the
+          // hero video is rendering (seeded by `DemoBootstrap`, advanced
+          // per-frame by `useFrameSync`), or `Date.now()` in the real app.
+          // Same return type as `Date.now()`; see src/renderer/clock.ts.
+          const now = nowMs();
           const cls = classifyCacheAge(status.lastMessageAt!, now, ttlMs);
           const color =
             cls === "fresh"
