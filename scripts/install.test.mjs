@@ -4322,3 +4322,148 @@ echo "       \$(supervisor_hint status server)"
   // messages (the headline acceptance criterion).
   assert.doesNotMatch(out, /systemctl/);
 });
+
+// ----------------------------------------------------------------------------
+// scripts/self-update.sh — refresh_opencode_tools.
+// ----------------------------------------------------------------------------
+//
+// The manta-native opencode tools (docs/opencode-tools/*.ts) are COPIED into
+// ~/.config/opencode/tools/, never symlinked (opencode resolves a tool's
+// imports from the file's REAL path). install.sh does that copy on INSTALL;
+// nothing did it on UPDATE, so `git reset --hard origin/main` refreshed the
+// source while every box kept running the tool copy it was installed with —
+// making any change to what the AI is told about a tool undeliverable to an
+// existing box (BET-344 rewrote serve_page's description and no box would
+// ever have seen it).
+//
+// These tests run the REAL function out of the REAL script against a fake box
+// layout, rather than replicating its logic in a preBody, so a regression in
+// the shipped source is what goes red.
+
+function runRefreshOpencodeTools({ manthaHome, opencodeConfigDir }) {
+  const selfUpdate = join(__dirname, "self-update.sh");
+  const src = readFileSync(selfUpdate, "utf8");
+  const start = src.indexOf("refresh_opencode_tools() {");
+  assert.ok(start !== -1, "self-update.sh must define refresh_opencode_tools()");
+  const end = src.indexOf("\n}\n", start);
+  assert.ok(end !== -1, "refresh_opencode_tools() must be brace-terminated");
+  const fn = src.slice(start, end + 3);
+
+  const dir = mkdtempSync(join(tmpdir(), "manta-selfupd-fn-"));
+  const fnPath = join(dir, "fn.sh");
+  writeFileSync(fnPath, `set -euo pipefail\n${fn}\nrefresh_opencode_tools\n`);
+  try {
+    const res = spawnSync("bash", [fnPath], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        MANTA_HOME: manthaHome,
+        OPENCODE_CONFIG_DIR: opencodeConfigDir,
+      },
+    });
+    return `${res.stdout ?? ""}${res.stderr ?? ""}EXIT=${res.status}`;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function makeFakeBox() {
+  const root = mkdtempSync(join(tmpdir(), "manta-fakebox-"));
+  const srcDir = join(root, "repo", "docs", "opencode-tools");
+  const toolsDir = join(root, "home", ".config", "opencode", "tools");
+  mkdirSync(srcDir, { recursive: true });
+  mkdirSync(toolsDir, { recursive: true });
+  return { root, srcDir, toolsDir, manthaHome: join(root, "repo"), opencodeConfigDir: join(root, "home", ".config", "opencode") };
+}
+
+test("self-update.sh refresh_opencode_tools overwrites a stale installed tool (BET-344 deliverability)", () => {
+  const box = makeFakeBox();
+  try {
+    writeFileSync(join(box.srcDir, "serve-page.ts"), "NEW serve-page\n");
+    writeFileSync(join(box.toolsDir, "serve-page.ts"), "OLD serve-page\n");
+
+    const out = runRefreshOpencodeTools(box);
+
+    assert.equal(
+      readFileSync(join(box.toolsDir, "serve-page.ts"), "utf8"),
+      "NEW serve-page\n",
+      "the installed tool must be replaced by the repo's version",
+    );
+    assert.match(out, /opencode tools refreshed/);
+    assert.match(out, /EXIT=0/);
+  } finally {
+    rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("self-update.sh refresh_opencode_tools never copies *.test.ts into tools/", () => {
+  // opencode loads EVERY file in tools/ as a tool; a test file imports vitest
+  // (absent under ~/.config/opencode/node_modules), which makes tool
+  // resolution throw and every chat turn fail with "Cannot find package
+  // 'vitest'". Same exclusion install.sh carries.
+  const box = makeFakeBox();
+  try {
+    writeFileSync(join(box.srcDir, "serve-page.ts"), "tool\n");
+    writeFileSync(join(box.srcDir, "serve-page.test.ts"), "import 'vitest'\n");
+
+    runRefreshOpencodeTools(box);
+
+    const installed = readdirSync(box.toolsDir);
+    assert.ok(installed.includes("serve-page.ts"));
+    assert.deepEqual(
+      installed.filter((f) => f.endsWith(".test.ts")),
+      [],
+      "a *.test.ts must never land in tools/",
+    );
+  } finally {
+    rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("self-update.sh refresh_opencode_tools is idempotent — a second run reports no change", () => {
+  const box = makeFakeBox();
+  try {
+    writeFileSync(join(box.srcDir, "notify.ts"), "same\n");
+
+    const first = runRefreshOpencodeTools(box);
+    assert.match(first, /opencode tools refreshed/);
+
+    const second = runRefreshOpencodeTools(box);
+    assert.match(second, /already current/);
+    assert.doesNotMatch(second, /refreshed/);
+    assert.match(second, /EXIT=0/);
+  } finally {
+    rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("self-update.sh refresh_opencode_tools is non-fatal when the source dir is missing", () => {
+  // It runs AFTER the checkout has been reset and deps reinstalled. Aborting
+  // there would leave the box half-updated, so a missing source dir must warn
+  // and return 0.
+  const box = makeFakeBox();
+  try {
+    rmSync(join(box.root, "repo", "docs"), { recursive: true, force: true });
+    const out = runRefreshOpencodeTools(box);
+    assert.match(out, /skipping opencode tool refresh/);
+    assert.match(out, /EXIT=0/);
+  } finally {
+    rmSync(box.root, { recursive: true, force: true });
+  }
+});
+
+test("self-update.sh does NOT restart opencode — that would kill in-flight agent turns", () => {
+  // Loading a new tool needs an opencode restart, but restarting opencode ends
+  // every running agent turn on the box, which is exactly the "close the lid
+  // and the work carries on" guarantee. The script stages the files and tells
+  // the user how to restart; it must never do it itself.
+  const src = readFileSync(join(__dirname, "self-update.sh"), "utf8");
+  const commands = src
+    .split("\n")
+    .filter((l) => !l.trimStart().startsWith("#") && !l.includes("echo "));
+  assert.deepEqual(
+    commands.filter((l) => /restart opencode-serve|kickstart .*com\.mantaui\.opencode/.test(l)),
+    [],
+    "self-update.sh must not execute an opencode restart (only print it as advice)",
+  );
+});
