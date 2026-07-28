@@ -5,12 +5,69 @@
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
 import type { SubscriptionStatus } from "../shared/types";
+import type { SessionMode } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
 // shared/versionCompare.mjs so both src/server/*.mjs and the renderer share
 // one source of truth; re-imported here so chooseUpdateSkewVariant is
 // testable in isolation (no DOM/network, just the compare).
 import { isClientTooOld } from "../shared/versionCompare.mjs";
+
+// Stable identity for a mounted Terminal in App.tsx's visitedModes map. A
+// tmux window is identified by its session name + index, which EVERY window
+// has — unlike the opencode session id, which only manta-created windows
+// carry. Without this, opening a pre-existing tmux session in the sidebar
+// renders a black pane (BET-347).
+//
+// The NUL separator is deliberate: tmux session names may contain `:` (the
+// only character tmux forbids in a session name is `.`), and the key is
+// NEVER parsed back apart — the map value carries the fields. Do not write a
+// matching parse function; if you find yourself needing one, you have kept a
+// string where the map value should be used instead.
+export function terminalMountKey(
+  tmuxSession: string,
+  windowIndex: number,
+  modeId: string,
+): string {
+  return `${tmuxSession}\u0000${windowIndex}\u0000${modeId}`;
+}
+
+// One mounted Terminal record (BET-347). `tmuxTarget` is set iff the window
+// has no opencodeSessionId (a window Manta did not create) — the server's
+// pty:spawn then runs `tmux attach-session -t <target>` so the user sees
+// the live contents of their pre-existing tmux window instead of a blank
+// pane.
+export type MountedTerminal = {
+  tmuxSession: string;
+  windowIndex: number;
+  modeId: string;
+  cwd: string;
+  tmuxTarget?: string;
+};
+
+// Record (or refresh) a Terminal mount for the given window + mode in
+// App.tsx's visitedModes map. Sets `tmuxTarget` iff chatSessionId is null
+// (adopted window) so the server spawns `tmux attach-session` instead of a
+// fresh shell. Centralising this keeps the mode-reset effect and setMode
+// from drifting (BET-347).
+export function registerMountedTerminal(
+  visited: Map<string, MountedTerminal>,
+  tmuxSession: string,
+  windowIndex: number,
+  m: SessionMode,
+  cwd: string,
+  chatSessionId: string | null,
+): void {
+  if (m === "chat") return;
+  const modeId = m === "terminal" ? "terminal" : m.slice("tui:".length);
+  visited.set(terminalMountKey(tmuxSession, windowIndex, modeId), {
+    tmuxSession,
+    windowIndex,
+    modeId,
+    cwd,
+    tmuxTarget: chatSessionId ? undefined : `${tmuxSession}:${windowIndex}`,
+  });
+}
 
 // Fallback context size used when the active model has no `limit.context`
 // (or no active model is known yet). 200k is the lowest common denominator

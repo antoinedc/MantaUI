@@ -14,18 +14,11 @@ import {
   writeSavedMode,
   resolveLauncherFlags,
 } from "./chatShared";
-import { chooseUpdateSkewVariant } from "./chatUtils";
+import { chooseUpdateSkewVariant, registerMountedTerminal, type MountedTerminal } from "./chatUtils";
 import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
 import { parsePairPayload } from "./mobile/pairPayload";
 import type { AvailableLauncher } from "../shared/types";
-
-// mode -> the composite-key "modeId" segment used for the PTY sessionKey and
-// the visitedModes tracking set. "chat" has no PTY, so it's never called with
-// mode==="chat" (callers guard first).
-function modeIdFor(m: SessionMode): string {
-  return m === "terminal" ? "terminal" : m.slice("tui:".length);
-}
 
 export function App() {
   const {
@@ -76,7 +69,10 @@ export function App() {
   // session we've ever opened, keep it mounted so scroll position + in-flight
   // streaming state are preserved when switching back.
   const visitedChats = useRef<Set<string>>(new Set());
-  // Active chat session id (set if active window is chat-mode, else null).
+  // Active window — every tmux window has this; only manta-created windows
+  // additionally carry opencodeSessionId, so the terminal layer uses
+  // (tmuxSession, windowIndex) directly to avoid the black-pane bug for
+  // adopted windows (BET-347).
   const activeWin = activeProjectName
     ? projects
         .find((p) => p.tmuxSession === activeProjectName)
@@ -85,65 +81,21 @@ export function App() {
   const activeChatSessionId = activeWin?.opencodeSessionId ?? null;
   if (activeChatSessionId) visitedChats.current.add(activeChatSessionId);
 
-  // Resolved before the BET-348 block below so the non-Manta detection
-  // can read the project's `mantaOwned` flag.
+  // Resolved early so it can be reused at the activeWinName display site
+  // (line ~695) and anywhere else that needs the active project's metadata.
   const activeProject = activeProjectName
     ? projects.find((p) => p.tmuxSession === activeProjectName) ?? null
     : null;
 
-  // BET-348: active window in a NON-Manta session — there is no
-  // opencode session id (the user started this session in their own
-  // terminal, before opening Manta). We render a Terminal that does
-  // `tmux attach-session -t <session>:<windowIndex>` instead of
-  // spawning a fresh shell. A "non-Manta session" is one whose
-  // `mantaOwned` field is false on the project record (set by the
-  // server's `~/.manta/tmux-sessions.json` sidecar, stamped onto
-  // every listing — see src/server/tmux.mjs listProjects()).
-  //
-  // visitedNonManta keeps one entry per (session, windowIndex) so a
-  // Terminal stays warm across remounts, mirroring visitedModes /
-  // visitedChats above. Each key is "<session>:<windowIndex>" — the
-  // exact format `ptySpawn`'s tmuxTarget expects, which keeps the
-  // server-side PTY reuse key aligned with the click target.
-  const visitedNonManta = useRef<Set<string>>(new Set());
-  const isActiveNonManta =
-    !!activeProject &&
-    activeProject.mantaOwned === false &&
-    // Defensive: a non-Manta session with a stamped opencode session
-    // id is unusual but possible (a session the user shared with
-    // opencode before opening Manta). Treat the opencode-stamped
-    // windows as Manta sessions for routing — they go through the
-    // existing chat flow.
-    activeChatSessionId === null &&
-    activeWin !== undefined;
-  const activeNonMantaTarget = isActiveNonManta && activeWin
-    ? `${activeProject.tmuxSession}:${activeWin.index}`
-    : null;
-  if (activeNonMantaTarget) visitedNonManta.current.add(activeNonMantaTarget);
-  // Garbage-collect visitedNonManta against the live projects tree —
-  // sessions / windows that disappeared from the listing can't be
-  // reattached to.
-  for (const key of visitedNonManta.current) {
-    const [sess, winStr] = key.split(":");
-    const winIdx = Number(winStr);
-    const proj = projects.find((p) => p.tmuxSession === sess);
-    if (
-      !proj ||
-      proj.mantaOwned !== false || // session transitioned to Manta-owned (rename, etc.)
-      !proj.windows.find((w) => w.index === winIdx)
-    ) {
-      visitedNonManta.current.delete(key);
-    }
-  }
-
-  // Session-mode toggle (BET-138): each chat session shows Chat, a bare
-  // shell-in-cwd Terminal, or an AI CLI TUI launcher (e.g. Claude Code).
-  // `mode` tracks the ACTIVE chat session's current mode; other sessions'
-  // last-used modes stay in localStorage (read lazily when they're
-  // activated). `visitedModes` tracks every `${sessionId}:${modeId}`
-  // composite key ever opened, so its Terminal is mounted lazily on first
-  // use and then kept warm (mirrors visitedChats above).
-  const visitedModes = useRef<Set<string>>(new Set());
+  // Session-mode toggle (BET-138). `mode` tracks the active window's
+  // current mode; other windows' last-used modes stay in localStorage. The
+  // visitedModes Map is keyed by terminalMountKey so its Terminal is
+  // mounted lazily on first use and kept warm (BET-347) — the value carries
+  // the fields, the loop never parses the key back apart. The single
+  // terminal mount loop below also handles adopted (pre-existing) tmux
+  // windows via the `tmuxTarget` field — supersedes BET-348's parallel
+  // visitedNonManta loop, removed.
+  const visitedModes = useRef<Map<string, MountedTerminal>>(new Map());
   const [mode, setModeState] = useState<SessionMode>("chat");
   const [availableLaunchers, setAvailableLaunchers] = useState<AvailableLauncher[]>([]);
 
@@ -166,22 +118,42 @@ export function App() {
       .catch(() => setAvailableLaunchers([]));
   }, [activeChatSessionId]);
 
-  // Reset to the persisted mode whenever the active chat session changes. A
-  // saved `tui:<id>` whose launcher isn't in `availableLaunchers` downgrades
-  // to "chat" (readSavedMode's fallback).
+  // Reset to the persisted mode whenever the active window changes. Adopted
+  // windows (no opencodeSessionId) are forced to "terminal" — the dropdown
+  // is hidden for them and there's no opencode session id to key
+  // localStorage on. Primitive deps so a freshly-derived activeWin per
+  // render doesn't re-fire this.
   useEffect(() => {
-    const m = activeChatSessionId ? readSavedMode(activeChatSessionId, availableLaunchers) : "chat";
+    const m: SessionMode = activeChatSessionId
+      ? readSavedMode(activeChatSessionId, availableLaunchers)
+      : activeWin && activeProjectName
+        ? "terminal"
+        : "chat";
     setModeState(m);
-    if (activeChatSessionId && m !== "chat") {
-      visitedModes.current.add(`${activeChatSessionId}:${modeIdFor(m)}`);
+    if (activeWin && activeProjectName && m !== "chat") {
+      registerMountedTerminal(
+        visitedModes.current,
+        activeProjectName,
+        activeWin.index,
+        m,
+        activeWin.paneCurrentPath || "",
+        activeChatSessionId,
+      );
     }
-  }, [activeChatSessionId, availableLaunchers]);
+  }, [activeChatSessionId, availableLaunchers, activeProjectName, activeWin?.index, activeWin?.paneCurrentPath]);
 
   const setMode = (m: SessionMode) => {
-    if (activeChatSessionId) {
+    if (activeChatSessionId && activeWin && activeProjectName) {
       writeSavedMode(activeChatSessionId, m);
       if (m !== "chat") {
-        visitedModes.current.add(`${activeChatSessionId}:${modeIdFor(m)}`);
+        registerMountedTerminal(
+          visitedModes.current,
+          activeProjectName,
+          activeWin.index,
+          m,
+          activeWin.paneCurrentPath || "",
+          activeChatSessionId,
+        );
       }
     }
     setModeState(m);
@@ -870,21 +842,18 @@ export function App() {
             </div>
           ) : (
             <>
-              {/* Terminal / AI-TUI layer (BET-138): one per `${sessionId}:${modeId}` */}
-              {/* composite key ever opened, kept mounted so the shell/CLI */}
-              {/* stays warm across mode toggles. Visible only when it's the */}
-              {/* active session's CURRENT mode. modeId is "terminal" (bare */}
-              {/* shell) or an available launcher's id (AI CLI TUI). */}
-              {[...visitedModes.current].map((key) => {
-                const sepIdx = key.lastIndexOf(":");
-                const sid = key.slice(0, sepIdx);
-                const modeId = key.slice(sepIdx + 1);
-                const owner = resolveSessionOwner(projects, sid);
-                const wantMode: SessionMode =
-                  modeId === "terminal" ? "terminal" : `tui:${modeId}`;
-                const isActiveThisMode = sid === activeChatSessionId && mode === wantMode;
-                const launcherDef =
-                  modeId === "terminal" ? undefined : availableLaunchers.find((l) => l.id === modeId);
+              {/* Terminal / AI-TUI layer (BET-138, BET-347): one per
+                  (tmuxSession, windowIndex, modeId) triple, kept mounted so
+                  the shell/CLI stays warm. Adopted + manta-created windows
+                  share this loop — `tmuxTarget` is the only diff (BET-347). */}
+              {[...visitedModes.current.entries()].map(([key, m]) => {
+                const isActiveThisMode =
+                  activeProjectName === m.tmuxSession &&
+                  activeWin?.index === m.windowIndex &&
+                  mode === (m.modeId === "terminal" ? "terminal" : `tui:${m.modeId}`);
+                const launcherDef = m.modeId === "terminal"
+                  ? undefined
+                  : availableLaunchers.find((l) => l.id === m.modeId);
                 const launcher = launcherDef
                   ? { id: launcherDef.id, flags: resolveLauncherFlags(launcherDef.flags, launcherFlags[launcherDef.id]) }
                   : undefined;
@@ -896,8 +865,9 @@ export function App() {
                   >
                     <Terminal
                       sessionKey={key}
-                      cwd={owner?.cwd ?? ""}
+                      cwd={m.cwd}
                       launcher={launcher}
+                      tmuxTarget={m.tmuxTarget}
                       active={isActiveThisMode}
                     />
                   </div>
@@ -924,41 +894,6 @@ export function App() {
                       windowIndex={owner?.windowIndex ?? null}
                       cwd={owner?.cwd ?? ""}
                       isActive={isActiveChat}
-                    />
-                  </div>
-                );
-              })}
-              {/* BET-348: tmux-attach Terminals for non-Manta windows. One
-                  Terminal per (session, windowIndex); only the active one
-                  is visible. Keyed on "<session>:<windowIndex>" so the
-                  sessionKey passed to Terminal — and therefore the PTY
-                  key on the server — matches the tmuxTarget verbatim.
-                  The Terminal mounts a `tmux attach-session -t
-                  <session>:<windowIndex>` PTY (server branch 1 of
-                  resolvePtyCommand), which is exactly the pre-existing
-                  window's output — no blank pane, no detached other
-                  clients (the server explicitly does NOT pass `-d`,
-                  see BET-346 / pty.test.mjs). */}
-              {[...visitedNonManta.current].map((key) => {
-                const [sess, winStr] = key.split(":");
-                const winIdx = Number(winStr);
-                const proj = projects.find((p) => p.tmuxSession === sess);
-                const w = proj?.windows.find((x) => x.index === winIdx);
-                const isActiveNonMantaHere =
-                  isActiveNonManta && activeNonMantaTarget === key;
-                // sessionKey is the same string as tmuxTarget so the
-                // server's PTY reuse key stays stable across remounts.
-                return (
-                  <div
-                    key={`tmux:${key}`}
-                    className="absolute inset-0"
-                    style={{ display: isActiveNonMantaHere ? "block" : "none" }}
-                  >
-                    <Terminal
-                      sessionKey={`tmux:${key}`}
-                      cwd={w?.paneCurrentPath || proj?.defaultCwd || ""}
-                      tmuxTarget={key}
-                      active={isActiveNonMantaHere}
                     />
                   </div>
                 );

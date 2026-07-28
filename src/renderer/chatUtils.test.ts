@@ -73,9 +73,91 @@ import {
   terminalShortcut,
   authErrorAdvice,
   AUTH_PROVIDER_LABELS,
+  terminalMountKey,
+  registerMountedTerminal,
 } from "./chatUtils";
 
 // ===== formatTokens =====
+
+// ===== terminalMountKey =====
+
+describe("terminalMountKey", () => {
+  it("is stable for the same inputs", () => {
+    expect(terminalMountKey("proj", 0, "terminal")).toBe(
+      terminalMountKey("proj", 0, "terminal"),
+    );
+  });
+
+  it("different window indexes in the same session produce different keys", () => {
+    expect(terminalMountKey("proj", 0, "terminal")).not.toBe(
+      terminalMountKey("proj", 1, "terminal"),
+    );
+  });
+
+  it("a session name containing `:` does not collide with a different session/index pair", () => {
+    // Without the NUL separator, a `:` in the session name would let two
+    // distinct (session, index, modeId) tuples produce the same string.
+    // Pin the separator behaviour: tmux session names may contain `:`,
+    // so the key must not be parseable on `:`. Two tuples that would
+    // collide under a `:` separator must produce distinct keys here.
+    const colonInSession = terminalMountKey("proj:0", 1, "terminal");
+    const parsedAcrossColon = terminalMountKey("proj", 0, "1:terminal");
+    expect(colonInSession).not.toBe(parsedAcrossColon);
+    // The key is opaque (NUL-separated) by design — splitting on NUL must
+    // yield exactly the input triple for the colon-in-session case.
+    expect(colonInSession.split("\u0000")).toEqual(["proj:0", "1", "terminal"]);
+  });
+
+  it("different modeIds for the same window produce different keys", () => {
+    expect(terminalMountKey("proj", 0, "terminal")).not.toBe(
+      terminalMountKey("proj", 0, "claude"),
+    );
+  });
+});
+
+// ===== registerMountedTerminal =====
+
+describe("registerMountedTerminal", () => {
+  it("is a no-op for chat mode (no PTY is needed)", () => {
+    const visited = new Map();
+    registerMountedTerminal(visited, "proj", 0, "chat", "/tmp", "sid");
+    expect(visited.size).toBe(0);
+  });
+
+  it("records a terminal mount with tmuxTarget for adopted windows", () => {
+    const visited = new Map();
+    registerMountedTerminal(visited, "proj", 0, "terminal", "/tmp", null);
+    const entry = visited.get(terminalMountKey("proj", 0, "terminal"));
+    expect(entry).toEqual({
+      tmuxSession: "proj",
+      windowIndex: 0,
+      modeId: "terminal",
+      cwd: "/tmp",
+      tmuxTarget: "proj:0",
+    });
+  });
+
+  it("records a terminal mount WITHOUT tmuxTarget for manta-created windows", () => {
+    const visited = new Map();
+    registerMountedTerminal(visited, "proj", 0, "terminal", "/tmp", "sid-abc");
+    const entry = visited.get(terminalMountKey("proj", 0, "terminal"));
+    expect(entry).toEqual({
+      tmuxSession: "proj",
+      windowIndex: 0,
+      modeId: "terminal",
+      cwd: "/tmp",
+    });
+    expect(entry?.tmuxTarget).toBeUndefined();
+  });
+
+  it("strips the tui: prefix from launcher modes", () => {
+    const visited = new Map();
+    registerMountedTerminal(visited, "proj", 0, "tui:claude", "/tmp", "sid");
+    const entry = visited.get(terminalMountKey("proj", 0, "claude"));
+    expect(entry?.modeId).toBe("claude");
+    expect(entry?.tmuxTarget).toBeUndefined();
+  });
+});
 
 describe("formatTokens", () => {
   it("shows raw count below 1k", () => {
