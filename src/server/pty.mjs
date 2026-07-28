@@ -19,6 +19,7 @@
 import { spawn as ptySpawnNative } from "node-pty";
 import { expandTilde } from "../shared/paths.mjs";
 import { findLauncher } from "./launcherRegistry.mjs";
+import { tmuxSpawnEnv } from "./tmux.mjs";
 
 // Single-quote a token so it survives a `$SHELL -lc "<cmd>"` re-parse intact.
 // Bin names + registry flags are trusted (no user input), but quoting keeps
@@ -28,17 +29,55 @@ export function shellQuote(token) {
   return `'${String(token).replace(/'/g, `'\\''`)}'`;
 }
 
+// Decide what to exec for a pty. Pure — returns { file, args }; the caller
+// does the spawning. Exported for testing so the three-way branch can be
+// pinned without a live node-pty. `shell` is injected (defaults to the
+// server's `$SHELL` or "bash") so tests don't depend on the host env.
+//
+// Branches (in priority order):
+//   1. tmuxTarget set      → `tmux attach-session -t <target>`. Wins over
+//                            any `launcher`; attaching is not a launcher
+//                            choice (BET-346).
+//   2. launcher with a     → `$SHELL -lc "<bin> [args…]>"`. Reproduces the
+//      registered def         login-shell PATH the availability probe saw
+//                            so AI CLIs at ~/.local/bin/ are reachable.
+//   3. fallback            → `$SHELL -l`. Plain interactive login shell.
+//                            Unknown launcher ids fall through here too.
+export function resolvePtyCommand({ launcher, tmuxTarget, shell }) {
+  const effectiveShell = shell || process.env.SHELL || "bash";
+  if (tmuxTarget) {
+    return { file: "tmux", args: ["attach-session", "-t", tmuxTarget] };
+  }
+  if (launcher && launcher.id) {
+    const def = findLauncher(launcher.id);
+    if (def) {
+      const args = def.buildArgs(launcher.flags || {});
+      const cmd = [def.bin, ...args].map(shellQuote).join(" ");
+      return { file: effectiveShell, args: ["-l", "-c", cmd] };
+    }
+    // Unknown launcher id -> fall through to a plain shell.
+  }
+  return { file: effectiveShell, args: ["-l"] };
+}
+
 // ---------- shared low-level spawn helper ----------
 //
-// Spawns either a login shell (no launcher) OR an AI CLI TUI (launcher given)
-// in `cwd`. Ephemeral, no tmux. Returns the raw IPty object. Does NOT
-// register it in the registry below.
+// Spawns one of three things (decided by resolvePtyCommand):
+//   - `tmux attach-session -t <target>` for a window Manta didn't create
+//     (tmuxTarget).
+//   - a login shell launching an AI CLI TUI (launcher with a registered def).
+//   - a plain interactive login shell (base "terminal" mode).
 //
-// opts: { cwd, cols, rows, launcher? }
+// Ephemeral, no scrollback recovery — the PTY dies with whatever it spawned.
+// Returns the raw IPty object. Does NOT register it in the registry below.
+//
+// opts: { cwd, cols, rows, launcher?, tmuxTarget? }
 // launcher, if given: { id: string, flags?: Record<string, boolean> }.
+// tmuxTarget, if given: "<session>:<windowIndex>" — the exact format
+//   killWindow/selectWindow/renameWindow in src/server/tmux.mjs already use.
 // Unknown launcher ids fall through to a plain shell (defensive — e.g. a
 // stale localStorage mode referencing a launcher that no longer exists).
-export function spawnShellPty({ cwd, cols, rows, launcher }) {
+export function spawnShellPty({ cwd, cols, rows, launcher, tmuxTarget }) {
   const dir = expandTilde(cwd && cwd.trim() ? cwd : "~");
   const size = {
     name: "xterm-256color",
@@ -49,38 +88,25 @@ export function spawnShellPty({ cwd, cols, rows, launcher }) {
   };
 
   const shell = process.env.SHELL || "bash";
+  const { file, args } = resolvePtyCommand({ launcher, tmuxTarget, shell });
 
-  if (launcher && launcher.id) {
-    const def = findLauncher(launcher.id);
-    if (def) {
-      const args = def.buildArgs(launcher.flags || {});
-      // Run the CLI through a LOGIN shell (`$SHELL -lc "<cmd>"`), NOT a bare
-      // execFile of the binary. The availability probe in launchers.mjs uses
-      // `command -v` inside a login shell, so a launcher only ever appears in
-      // the dropdown when it resolves in the interactive PATH (claude lives at
-      // ~/.local/bin/claude, which is NOT on the systemd --user service PATH).
-      // Spawning the bin directly would inherit the server's bare PATH and
-      // exit immediately (127 → surfaced to the user as "[shell exited: 1]").
-      // The login shell reproduces the same PATH the probe saw, so the CLI is
-      // found. When it exits, the login shell exits, so the PTY still dies with
-      // the CLI (ephemeral lifecycle preserved).
-      const cmd = [def.bin, ...args].map(shellQuote).join(" ");
-      return ptySpawnNative(shell, ["-l", "-c", cmd], size);
-    }
-    // Unknown launcher id -> fall through to a plain shell.
-  }
+  // Env is selected per branch (matches the three cases in resolvePtyCommand):
+  //  - tmux attach: tmuxSpawnEnv() supplies the UTF-8 locale tmux needs —
+  //    without it tmux mangles its own -F output under a non-UTF-8 locale
+  //    (see AGENTS.md, "A service gets no LOCALE").
+  //  - login shell with `-lc <cmd>` launcher: non-interactive, so the
+  //    user's rc file cannot trigger an auto-attach block — no
+  //    MANTA_TERMINAL needed.
+  //  - plain interactive login shell: MANTA_TERMINAL=1 so a user's rc
+  //    file can skip a tmux auto-attach block that would otherwise hijack
+  //    this shell into a blank tmux alternate-screen.
+  const env = tmuxTarget
+    ? { ...tmuxSpawnEnv(), TERM: "xterm-256color" }
+    : launcher && launcher.id && findLauncher(launcher.id)
+      ? size.env
+      : { ...size.env, MANTA_TERMINAL: "1" };
 
-  // Plain shell-in-cwd (base "terminal" mode): an interactive LOGIN shell.
-  // MANTA_TERMINAL=1 marks this as a manta embedded terminal so a user's rc file
-  // can skip hostile interactive-login behaviour — notably a tmux auto-attach
-  // block (common in ~/.bashrc), which would otherwise hijack this shell into a
-  // blank tmux alternate-screen and the terminal would look frozen/empty. The
-  // login launcher path above is unaffected: it's `-lc <cmd>` (non-interactive)
-  // so it never triggers such blocks.
-  return ptySpawnNative(shell, ["-l"], {
-    ...size,
-    env: { ...size.env, MANTA_TERMINAL: "1" },
-  });
+  return ptySpawnNative(file, args, { ...size, env });
 }
 
 // ---------- RPC registry ----------
@@ -98,11 +124,11 @@ const ptys = new Map(); // sessionKey → IPty
 
 /**
  * Spawn (or silently reuse) a shell/launcher pty for opts.sessionKey.
- * @param {{ sessionKey: string, cwd: string, cols: number, rows: number, launcher?: { id: string, flags?: Record<string, boolean> } }} opts
+ * @param {{ sessionKey: string, cwd: string, cols: number, rows: number, launcher?: { id: string, flags?: Record<string, boolean> }, tmuxTarget?: string }} opts
  * @param {(e) => void} onEvent
  */
 export function spawn(opts, onEvent) {
-  const { sessionKey, cwd, cols, rows, launcher } = opts;
+  const { sessionKey, cwd, cols, rows, launcher, tmuxTarget } = opts;
   if (!sessionKey) throw new Error("pty:spawn — sessionKey required");
 
   // Mirror desktop: if already exists, do not respawn (avoids disconnect
@@ -111,7 +137,7 @@ export function spawn(opts, onEvent) {
   // (bus.publish, a module singleton).
   if (ptys.has(sessionKey)) return;
 
-  const pty = spawnShellPty({ cwd, cols, rows, launcher });
+  const pty = spawnShellPty({ cwd, cols, rows, launcher, tmuxTarget });
   ptys.set(sessionKey, pty);
 
   pty.onData((data) => {

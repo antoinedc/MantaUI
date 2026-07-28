@@ -222,6 +222,13 @@ export type WorktreeInfo = {
 // `${opencodeSessionId}:${modeId}` (modeId = "terminal" or a launcher id from
 // src/server/launcherRegistry.mjs) so Terminal mode and each TUI launcher
 // mode of the same chat session get independent, kept-warm PTYs.
+//
+// BET-346: when `tmuxTarget` is set, the server spawns `tmux attach-session
+// -t <target>` instead — for a window Manta did NOT create (a pre-existing
+// tmux session the user wants to view). Format is `<session>:<windowIndex>`,
+// matching killWindow/selectWindow/renameWindow in src/server/tmux.mjs.
+// `tmuxTarget` wins over `launcher` if both are supplied. Nothing sets this
+// field yet; the renderer follow-up is a separate issue.
 export type SpawnOptions = {
   sessionKey: string; // stable per-session-mode id: see comment above
   cwd: string;        // working dir for the shell/CLI (may be tilde-prefixed)
@@ -229,6 +236,10 @@ export type SpawnOptions = {
   rows: number;
   // Present only for a TUI launch mode (absent = plain login shell).
   launcher?: { id: string; flags: Record<string, boolean> };
+  // Present only when attaching to an existing tmux window (a window Manta
+  // did not create). WINS over `launcher`. Server-only behavior today; the
+  // renderer half to wire this through is the follow-up issue.
+  tmuxTarget?: string;
 };
 
 export type PtyEvent =
