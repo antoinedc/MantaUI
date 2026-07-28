@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+    <title>POC: SSH Claude login</title>
+    <style>
+      body { font: 13px -apple-system, system-ui, sans-serif; margin: 0; padding: 12px; background: #1e1e1e; color: #e6e6e6; }
+      header { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+      header input { flex: 1; font: inherit; padding: 6px 8px; border: 1px solid #444; background: #2a2a2a; color: #e6e6e6; border-radius: 4px; }
+      header button { font: inherit; padding: 6px 12px; border: 1px solid #555; background: #2d2d2d; color: #e6e6e6; border-radius: 4px; cursor: pointer; }
+      header button:hover { background: #3a3a3a; }
+      header button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .url-bar { display: flex; gap: 8px; align-items: center; margin: 8px 0; padding: 8px; background: #2d2d2d; border: 1px solid #555; border-radius: 4px; }
+      .url-bar code { flex: 1; word-break: break-all; font-size: 12px; color: #f0c674; }
+      .url-bar button { font: inherit; padding: 4px 10px; border: 1px solid #5a8f5a; background: #2d4a2d; color: #c8e6c8; border-radius: 4px; cursor: pointer; }
+      .url-bar button:hover { background: #3a5a3a; }
+      pre.log { font: 12px ui-monospace, Menlo, monospace; background: #000; color: #d4d4d4; padding: 10px; height: 280px; overflow: auto; border: 1px solid #333; border-radius: 4px; white-space: pre-wrap; word-break: break-all; }
+      pre.log .stderr { color: #f48771; }
+      footer { display: flex; gap: 8px; margin-top: 8px; }
+      footer input { flex: 1; font: inherit; padding: 6px 8px; border: 1px solid #444; background: #2a2a2a; color: #e6e6e6; border-radius: 4px; }
+      footer button { font: inherit; padding: 6px 12px; border: 1px solid #555; background: #2d2d2d; color: #e6e6e6; border-radius: 4px; cursor: pointer; }
+      footer button:hover { background: #3a3a3a; }
+      .check { margin-top: 8px; padding: 8px; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; font-size: 12px; }
+      .check h3 { margin: 0 0 6px 0; font-size: 13px; }
+      .check pre { font: 11px ui-monospace, Menlo, monospace; background: #000; color: #d4d4d4; padding: 6px; margin: 4px 0; max-height: 160px; overflow: auto; border-radius: 3px; white-space: pre-wrap; word-break: break-all; }
+      .status { font-size: 12px; color: #888; }
+      h1 { font-size: 16px; margin: 0 8px 0 0; font-weight: 500; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>SSH host:</h1>
+      <input id="host" type="text" placeholder="user@host or alias from ~/.ssh/config" />
+      <button id="connect">Connect</button>
+      <button id="disconnect">Disconnect</button>
+      <button id="check">Check</button>
+      <span class="status" id="status"></span>
+    </header>
+
+    <div class="url-bar" id="url-bar" style="display:none">
+      <code id="url"></code>
+      <button id="open-url">Open in browser</button>
+    </div>
+
+    <pre class="log" id="log"></pre>
+
+    <footer>
+      <input id="code" type="text" placeholder="Paste the code shown in your browser, then press Send (or Enter)" />
+      <button id="send">Send</button>
+    </footer>
+
+    <div class="check" id="check-result" style="display:none">
+      <h3>Check result</h3>
+      <div id="check-summary"></div>
+      <h4>Provider BEFORE restart:</h4>
+      <pre id="before"></pre>
+      <h4>Provider AFTER restart:</h4>
+      <pre id="after"></pre>
+      <h4>Restart stderr:</h4>
+      <pre id="restart-stderr"></pre>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>
