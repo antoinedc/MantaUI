@@ -7,9 +7,9 @@
 //
 // This tool is a THIN registrar. It validates the request and POSTs it to
 // manta-server (127.0.0.1:8787, same box — no SSH hop), which copies the page
-// into a stable directory and serves it via an in-process HTTP server. Caddy
-// reverse-proxies *.pages.mantaui.com to this server. The tool does NOT sleep
-// or run the page itself — execute() must return promptly.
+// into a stable directory and serves it from `/pages/<subdomain>` under the
+// box's own public hostname. The tool does NOT sleep or run the page itself —
+// execute() must return promptly.
 //
 // See docs/manta-tools-scheduler.md for the general "manta tools" pattern.
 
@@ -69,12 +69,13 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
 
 export const serve_page = tool({
   description: [
-    "Host a standalone HTML webpage publicly under *.pages.mantaui.com.",
+    "Host a standalone HTML webpage publicly on this box's own public URL.",
     "Use when you generate a web page (design preview, demo, mockup, interactive",
     "prototype) and want it accessible from anywhere — especially from the",
-    "machine where the manta UI is running. The page is served at",
-    "https://<subdomain>.pages.mantaui.com and auto-expires after 24h by",
-    "default (configurable via ttlHours). To update a page, call this tool",
+    "machine where the manta UI is running. The tool returns the full public",
+    "URL from the server — echo `result.url` verbatim, NEVER construct one",
+    "yourself (the hostname differs per box). The page auto-expires after 24h",
+    "by default (configurable via ttlHours). To update a page, call this tool",
     "again with the same subdomain and a new file path.",
   ].join(" "),
   args: {
@@ -83,8 +84,8 @@ export const serve_page = tool({
       .describe(
         "Subdomain for the page (e.g. 'preview', 'my-design'). " +
           "Must be 1-63 lowercase alphanumeric characters or hyphens, no " +
-          "leading/trailing hyphens. The page will be served at " +
-          "https://<subdomain>.pages.mantaui.com",
+          "leading/trailing hyphens — it becomes a single URL path segment " +
+          "under /pages/, so no dots, no slashes.",
       ),
     filePath: z
       .string()
@@ -133,7 +134,7 @@ export const stop_page = tool({
       `/api/serve-page?subdomain=${encodeURIComponent(args.subdomain)}`,
     );
     return result.deleted
-      ? `Page ${args.subdomain}.pages.mantaui.com has been taken down.`
+      ? `Page "${args.subdomain}" has been taken down.`
       : `No page found for subdomain "${args.subdomain}".`;
   },
 });
