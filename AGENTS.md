@@ -2287,10 +2287,9 @@ box-local and unchanged — it doesn't touch the gateway.
 - **Caddyfile is NOT in the repo** — it lives only on the box (`/etc/caddy/`),
   unversioned. `gateway.mantaui.com` (gateway) and one
   `<box_id>.boxes.mantaui.com` per registered box have their own Caddy
-  blocks there. (The old `*.pages.mantaui.com` serve-page vhost was retired
-  in BET-343 — pages now share the box's own hostname on the
-  `/pages/<sub>` path, so no wildcard DNS record, no OVH DNS-01 cert, no
-  extra port.)
+  blocks there. (The old dedicated serve-page vhost was retired in BET-343 —
+  pages now share the box's own hostname on the `/pages/<sub>` path, so no
+  wildcard DNS record, no OVH DNS-01 cert, no extra port.)
 - **`scripts/release/publish.sh`** is the OLDER manual all-in-one deploy
   (tarball + desktop + server + install.sh, run from a laptop over
   `MANTA_PROD_HOST`). The tag-driven workflows above supersede it for
