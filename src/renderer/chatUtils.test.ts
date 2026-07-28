@@ -3113,11 +3113,36 @@ describe("connectPhaseLabel", () => {
     expect(connectPhaseLabel({ kind: "needsKey", consoleUrl: null })).toBe(
       "Enter your API key",
     );
+    expect(
+      connectPhaseLabel({
+        kind: "needsClaudeLogin",
+        ptySessionKey: "k",
+        startedAt: 0,
+        cwd: "~",
+        url: "",
+      }),
+    ).toBe("Awaiting Claude sign-in");
     expect(connectPhaseLabel({ kind: "applying", restartConfirmed: true })).toBe(
       "Applying…",
     );
     expect(connectPhaseLabel({ kind: "done" })).toBe("Connected");
     expect(connectPhaseLabel({ kind: "failed", message: "x" })).toBe("Failed");
+  });
+
+  // BET-354: the claude-login phase distinguishes "waiting" from
+  // "already signed in" via the `preExisting` flag — the label flips so
+  // the user can tell why nothing is happening.
+  it("labels needsClaudeLogin 'Already signed in' when preExisting is true", () => {
+    expect(
+      connectPhaseLabel({
+        kind: "needsClaudeLogin",
+        ptySessionKey: "k",
+        startedAt: 0,
+        cwd: "~",
+        url: "",
+        preExisting: true,
+      }),
+    ).toBe("Already signed in");
   });
 });
 

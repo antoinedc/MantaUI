@@ -3753,8 +3753,16 @@ print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 
     assert.match(out, /claude CLI not found/);
     assert.match(out, /codex CLI not found/);
     assert.match(out, /kimi CLI not found/);
-    // Linux branch of the restart hint.
-    assert.match(out, /systemctl --user restart opencode-serve/);
+    // BET-354: the Linux "systemctl --user restart opencode-serve" restart
+    // hint is GONE — the app drives Claude's OAuth end-to-end via the
+    // pty bus, so the user never has to bounce opencode-serve by hand.
+    // Pin the absence so a regression that reintroduces the manual
+    // restart hint fails loudly.
+    assert.doesNotMatch(
+      out,
+      /systemctl --user restart opencode-serve/,
+      "BET-354 removed the Linux restart hint — the app drives the OAuth end-to-end",
+    );
     // macOS branch must NOT appear in the Linux case.
     assert.doesNotMatch(out, /launchctl kickstart/);
   } finally {
@@ -3821,10 +3829,13 @@ print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 
 });
 
 test("install.sh print_provider_detection_summary: macOS restart hint branches on IS_MACOS (BET-313)", () => {
-  // The guidance message's restart hint must follow IS_MACOS exactly the
-  // way the old BET-277 check did: launchctl on Mac, systemctl elsewhere.
-  // A regression that drops the branch would brick every macOS box's
-  // guidance. PATH stripped so the assertion doesn't depend on the runner.
+  // BET-354 (Stage 3) demoted the launchctl/systemctl restart hint entirely:
+  // the app now drives Claude's OAuth end-to-end via the pty bus, so the
+  // user no longer needs to bounce opencode-serve by hand. This test is
+  // kept as a regression pin — should the helper ever reintroduce a
+  // restart hint (e.g. for an unrelated provider) the branch must follow
+  // IS_MACOS exactly the way the old BET-277 check did. Until that
+  // happens we assert the hint is GONE.
   const dir = mkdtempSync(join(tmpdir(), "manta-detect-macos-"));
   try {
     const home = join(dir, "home");
@@ -3835,8 +3846,16 @@ test("install.sh print_provider_detection_summary: macOS restart hint branches o
 print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 1
 `,
     });
-    assert.match(out, /launchctl kickstart -k gui\/\$\(id -u\)\/com\.mantaui\.opencode/);
-    assert.doesNotMatch(out, /systemctl --user restart opencode-serve/);
+    assert.doesNotMatch(
+      out,
+      /launchctl kickstart -k gui\/\$\(id -u\)\/com\.mantaui\.opencode/,
+      "BET-354 removed the macOS restart hint — the app drives the OAuth end-to-end",
+    );
+    assert.doesNotMatch(
+      out,
+      /systemctl --user restart opencode-serve/,
+      "BET-354 removed the Linux restart hint — the app drives the OAuth end-to-end",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -4178,12 +4197,13 @@ echo "SYSTEMD_RENDER_DONE=1"
   }
 });
 
-test("install.sh print_provider_detection_summary guidance: app-first wording with manual fallback (BET-353)", () => {
+test("install.sh print_provider_detection_summary guidance: app-first wording with manual fallback (BET-353, BET-354)", () => {
   // The Stage-2 acceptance for the post-install summary: the "no providers
   // connected" guidance must lead with the app and demote the manual
-  // terminal command to a labelled fallback line. The shell-side help text
-  // is the user-visible surface of the whole epic — if it still says
-  // "run claude once" as the primary action, BET-353 has failed.
+  // terminal command to a labelled fallback line. BET-354 refined the
+  // fallback to point at the in-app Connect flow — the manual
+  // `claude` invocation is now a safety-net for boxes where the app is
+  // unreachable, NOT the primary path.
   const dir = mkdtempSync(join(tmpdir(), "manta-detect-app-first-"));
   try {
     const home = join(dir, "home");
@@ -4200,14 +4220,23 @@ print_provider_detection_summary "${fakeLib}" "${NODE_BIN_FOR_TESTS}" "${home}" 
       /Connect any of Claude, Codex, or Kimi from the MantaUI app\./,
       "guidance must lead with the app, not a terminal command",
     );
-    // The manual command must still appear as a labelled fallback.
+    // The fallback must still appear — the helper labels it as a
+    // fallback for when the app is unreachable. BET-354 changed the
+    // exact phrasing (no more bare "run claude"); assert the new
+    // wording mentions the in-app Connect flow's commands.
     assert.match(
       out,
-      /Fallback \(if the app is unavailable\): run .claude./,
-      "the manual command must remain as a labelled fallback",
+      /Fallback \(if the app is unavailable\): connect providers from inside opencode/,
+      "the manual command must remain as a labelled fallback (BET-354 wording)",
     );
-    // The OLD combined phrasing must NOT appear anymore — that was the
-    // wrong-default signal BET-353 is fixing.
+    // The OLD BET-353 fallback phrasing must NOT appear anymore — BET-354
+    // replaces it with the in-app Connect commands.
+    assert.doesNotMatch(
+      out,
+      /Fallback \(if the app is unavailable\): run .claude./,
+      "the BET-353 'run claude' fallback is replaced by BET-354's in-app guidance",
+    );
+    // The OLD combined phrasing must NOT appear anymore.
     assert.doesNotMatch(
       out,
       /Connect any of Claude, Codex, or Kimi from the MantaUI app, or run .claude/,

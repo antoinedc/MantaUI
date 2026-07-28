@@ -231,15 +231,24 @@ request-time by design, which means:
   required.** This is the design contract: `opencode-claude-auth`
   advertises "no restart needed" as a feature.
 
-**Verdict:** **YES — no restart required.** The plugin reads
-`~/.claude/.credentials.json` at request time; on the next Anthropic
-API call after the file changes, the new credentials take effect. The
-POC could not exercise the positive path (write a new file via OAuth,
-then call Anthropic) without breaking the box's own opencode session,
-so this is the strongest answer the POC can give without that
-destructive test. Recommendation for Stage 6: include the test
+**Verdict (SUPERSEDED by BET-352 follow-up, see PR #306 fix branch
+`poc/ssh-claude-login-fixes`):** The "no restart required" answer
+above is WRONG. The plugin's request-time read claim is the
+theoretical design contract, but the live end-to-end run that drove
+PR #306 proved otherwise: after `claude auth login` completed and
+the credentials file was freshly written, opencode did **not** pick
+up the new tokens until `systemctl --user restart opencode-serve`
+was run. opencode reads credentials at startup, not at request time,
+despite what the plugin's docs say.
+
+**Bet-354 (Stage 3) follows this corrected verdict:** the in-app
+Connect flow always calls `restartOpencode()` after the credentials
+file appears. Do NOT trust the "no restart" claim above — the
+corrected evidence is on the `poc/ssh-claude-login-fixes` branch
+(commit `6028b6f`) and the live box log. Recommendation: include
 "`systemctl --user restart opencode-serve; sleep 2; curl /provider`"
-in the integration test suite so the no-restart invariant gets pinned.
+in the integration test suite so the restart-required invariant
+gets pinned.
 
 ---
 

@@ -1,18 +1,28 @@
-// Pure helpers for the Claude credential auto-refresh flow (BET-139, BET-280).
+// Pure helpers for the Claude credential flow (BET-139, BET-280, BET-354).
 //
-// Chat mode authenticates to Anthropic via the opencode-claude-auth plugin,
-// which reads/writes ~/.claude/.credentials.json. When the plugin can't
-// refresh a stale access token, opencode emits an error event whose
-// `error.data.message` reads "Claude Code credentials are unavailable or
-// expired. Run `claude` to refresh them." — opencode wraps the plugin's
-// plain `Error` throw as `UnknownError`, so the legacy ProviderAuthError
-// name match never fires in production (BET-280 follow-up). The user's
-// manual fix today is to run `claude` once on the box, which re-mints the
-// token; this module supplies the PURE decision logic for automating that
-// fix. All IO (spawn, file read) lives in src/server/opencode.mjs
-// (refreshClaudeCredentials) — this file has no top-level side effects and
-// no imports of node:fs / node:child_process, so it's directly node:test-able
-// with in-memory literals.
+// Two flows live in this module:
+//
+//   1. REACTIVE AUTO-REFRESH (BET-139, BET-280). Chat mode authenticates
+//      to Anthropic via the opencode-claude-auth plugin, which reads/writes
+//      ~/.claude/.credentials.json. When the plugin can't refresh a stale
+//      access token, opencode emits an error event whose
+//      `error.data.message` reads "Claude Code credentials are unavailable or
+//      expired. Run `claude` to refresh them." — opencode wraps the plugin's
+//      plain `Error` throw as `UnknownError`, so the legacy ProviderAuthError
+//      name match never fires in production. This module supplies the PURE
+//      decision logic for automating the CLI fix. All IO (spawn, file read)
+//      lives in src/server/opencode.mjs (refreshClaudeCredentials).
+//
+//   2. PROACTIVE CONNECT (BET-354). Onboarding + Settings → Connect Claude
+//      spawn `claude auth login` on the box, stream its output through the
+//      existing pty bus, and detect completion by watching the credentials
+//      file. This module supplies the pure helpers for the
+//      connect flow: URL extraction from a noisy stream and completion
+//      detection from file mtime. IO still lives outside this file — in
+//      opencode.mjs's `startClaudeLogin` / `pollClaudeLogin`.
+//
+// No top-level side effects; no node:fs / node:child_process imports. All
+// helpers are directly testable in node:test with in-memory literals.
 
 import { homedir } from "node:os";
 import path from "node:path";
@@ -170,4 +180,82 @@ export function shouldRefreshAhead(creds, now, leadMs = 30 * 60_000) {
   if (typeof creds.expiresAt !== "number") return false;
   if (creds.expiresAt - now > leadMs) return false;
   return !isRefreshTokenExpired(creds, now);
+}
+
+// ---------------------------------------------------------------------------
+// BET-354: Claude connect flow helpers
+// ---------------------------------------------------------------------------
+//
+// Used by the in-app Claude connect card (ConnectProvider.tsx) which spawns
+// `claude auth login` on the box and drives it interactively. The IO
+// (spawn / pty write / fs.stat) lives in src/server/opencode.mjs
+// (`startClaudeLogin`, `pollClaudeLogin`, `claudeLoginWrite`); this file
+// holds the PURE helpers that make those decisions testable.
+
+/**
+ * Pattern that matches Claude's OAuth authorize URL specifically. Anchored
+ * to the `claude.com/cai/oauth/authorize` path with an OAuth-shape query
+ * (client_id, response_type=code, redirect_uri). Exported so a future
+ * upstream shape change is one place to fix.
+ *
+ * Filtering on shape rather than the byte position of the first https:// is
+ * load-bearing: the first-launch trust prompt's "Security guide" link is
+ * also `https://…`; a regex that latches onto the FIRST URL picks that one
+ * and never updates.
+ */
+export const CLAUDE_OAUTH_URL_RE =
+  /https:\/\/claude\.com\/cai\/oauth\/authorize\?[^\s\x07\x1b]+/g;
+
+/**
+ * Pull the Claude OAuth authorize URL out of a free-form text chunk (the
+ * concatenated stdout of `claude auth login` so far). Returns the FIRST
+ * match — the URL stays on screen until the OAuth completes, so the first
+ * match IS the live one. Returns null when the chunk has no
+ * authorize-URL-shaped substring.
+ *
+ * Trailing punctuation that occasionally wraps in (`)].,;`) is stripped
+ * defensively; the live URL is clean today but terminal soft-wrap and
+ * future TUI rewordings may not be.
+ *
+ * @param {string} chunk   accumulated stdout bytes, decoded to text
+ * @returns {string|null}
+ */
+export function extractClaudeAuthUrl(chunk) {
+  if (typeof chunk !== "string" || chunk.length === 0) return null;
+  const matches = chunk.match(CLAUDE_OAUTH_URL_RE);
+  if (!matches || matches.length === 0) return null;
+  // Strip trailing `)].,;` that can ride in from parenthetical wraps.
+  return matches[0].replace(/[\]).,;]+$/, "");
+}
+
+/**
+ * Classify the state of a Claude login attempt given the current credentials
+ * file mtime + when the connect card started. Pure — IO lives in
+ * `pollClaudeLogin`.
+ *
+ * Returns one of:
+ *   - `"no-file"`         — credentials file does not exist (yet). The card
+ *                           stays in `waiting`. This is the "still authenticating"
+ *                           state for a fresh box.
+ *   - `"pre-existing"`    — file exists AND was last modified before the
+ *                           connect card started. The user had a working login
+ *                           already; the connect flow is a no-op for them
+ *                           unless they actually went through OAuth. Not an
+ *                           error — the caller can choose to short-circuit
+ *                           straight to the restart step.
+ *   - `"completed"`       — file exists AND was last modified after the
+ *                           connect card started. The CLI login wrote new
+ *                           credentials; ready for restart + connected poll.
+ *
+ * A `null` `mtimeMs` is treated as "file missing" (the IO wrapper uses
+ * fs.stat and a missing file returns `mtimeMs === null`).
+ *
+ * @param {{ mtimeMs: number | null }} stat
+ * @param {number} startedAt     epoch ms the connect flow began
+ * @returns {"no-file" | "pre-existing" | "completed"}
+ */
+export function classifyClaudeLoginProgress(stat, startedAt) {
+  if (!stat || typeof stat.mtimeMs !== "number") return "no-file";
+  if (!Number.isFinite(startedAt)) return "no-file";
+  return stat.mtimeMs >= startedAt ? "completed" : "pre-existing";
 }

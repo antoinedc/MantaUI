@@ -64,6 +64,20 @@ describe("listAvailableLaunchers", () => {
     ]);
     assert.equal(claude.flags[0].arg, undefined);
   });
+
+  // BET-354: the claude-auth-login entry is a programmatic spawn target
+  // for the connect card — it must NEVER appear in the user-facing
+  // dropdown regardless of whether its bin resolves.
+  it("hides the claude-auth-login launcher even when its bin resolves (BET-354)", async () => {
+    const out = await listAvailableLaunchers({
+      binExists: async () => true,
+    });
+    assert.equal(
+      out.find((l) => l.id === "claude-auth-login"),
+      undefined,
+      "claude-auth-login must not appear in the dropdown",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -96,5 +110,15 @@ describe("findLauncher", () => {
 
   it("returns the registry entry for a known id", () => {
     assert.equal(findLauncher("claude"), LAUNCHERS.find((l) => l.id === "claude"));
+  });
+
+  // BET-354: even though listAvailableLaunchers hides claude-auth-login,
+  // findLauncher still resolves it so pty:spawn can use it programmatically.
+  it("resolves claude-auth-login (BET-354)", () => {
+    const l = findLauncher("claude-auth-login");
+    assert.ok(l);
+    assert.equal(l.bin, "claude");
+    assert.deepEqual(l.buildArgs({}), ["auth", "login"]);
+    assert.equal(l.hidden, true);
   });
 });

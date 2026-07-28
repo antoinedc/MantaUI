@@ -952,6 +952,13 @@ export const httpApi: Api = {
   opencodeProviderAuth: (req: OpencodeProviderAuthRequest) =>
     rpc<OpencodeProviderAuthResult>(IPC.opencodeProviderAuth, req),
 
+  // BET-354: cancel an in-flight Claude login session. The renderer is
+  // responsible for the matching `ptyKill(sessionKey)` — these two calls
+  // together release both the metadata (server-side) and the IPty
+  // (server-side) so a fresh start can register under the SAME name.
+  claudeLoginCancel: (sessionKey: string) =>
+    rpc<{ ok: boolean }>(IPC.claudeLoginCancel, sessionKey),
+
   // -- server version (BET-180) --
   // Returns the manta-server's package.json version. In-process via the
   // `server:version` RPC channel (no HTTP round-trip; same value GET

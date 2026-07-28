@@ -28,6 +28,11 @@ export async function listAvailableLaunchers({
 }) {
   const out = [];
   for (const l of LAUNCHERS) {
+    // Hidden launchers (BET-354 `claude-auth-login`) are programmatic
+    // spawn targets the connect card drives — they must NOT appear in
+    // the user-facing session-mode dropdown. findLauncher still resolves
+    // them so pty:spawn can use them by id.
+    if (l.hidden) continue;
     if (!(await probe(l.bin))) continue;
     out.push({
       id: l.id,

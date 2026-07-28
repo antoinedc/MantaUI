@@ -189,7 +189,7 @@ describe("describeConnectShape", () => {
 
   it("returns 'oauth-code' when authorize method is 'code'", () => {
     const r = { index: 1, method: { type: "oauth", label: "ChatGPT Pro/Plus (headless)" } };
-    assert.equal(describeConnectShape(r, "code"), "oauth-code");
+    assert.equal(describeConnectShape(r, { ok: true, url: "https://example.com", method: "code" }), "oauth-code");
   });
 
   it("returns 'oauth-auto' for every other oauth case", () => {
@@ -197,6 +197,36 @@ describe("describeConnectShape", () => {
     assert.equal(describeConnectShape(r, "auto"), "oauth-auto");
     assert.equal(describeConnectShape(r, undefined), "oauth-auto");
     assert.equal(describeConnectShape(r, ""), "oauth-auto");
+  });
+
+  // BET-354: anthropic + oauth + empty URL → "claude-login".
+  it("returns 'claude-login' when id is anthropic and authorize url is empty (BET-354)", () => {
+    const r = { index: 0, method: { type: "oauth", label: "Switch Claude Code account" } };
+    // Empty string url (opencode's actual anthropic authorize response)
+    assert.equal(describeConnectShape(r, { ok: true, url: "", method: "auto" }, "anthropic"), "claude-login");
+    // Undefined / missing url fields — same conclusion
+    assert.equal(describeConnectShape(r, { ok: true, url: undefined }, "anthropic"), "claude-login");
+    assert.equal(describeConnectShape(r, null, "anthropic"), "claude-login");
+  });
+
+  it("does NOT return 'claude-login' when id is NOT anthropic (BET-354)", () => {
+    const r = { index: 0, method: { type: "oauth", label: "Some other OAuth" } };
+    // Same empty-url response, but a different provider id — fall through to
+    // the regular oauth shape, NOT the Claude-specific path.
+    assert.equal(describeConnectShape(r, { ok: true, url: "", method: "auto" }, "openai"), "oauth-auto");
+    assert.equal(describeConnectShape(r, { ok: true, url: "", method: "auto" }, "kimi-for-coding"), "oauth-auto");
+  });
+
+  it("does NOT return 'claude-login' when id is anthropic but the method is 'api' (BET-354)", () => {
+    const r = { index: 0, method: { type: "api", label: "Manually enter API Key" } };
+    assert.equal(describeConnectShape(r, { ok: true, url: "", method: "auto" }, "anthropic"), "api-key");
+  });
+
+  it("does NOT return 'claude-login' when id is anthropic and authorize returns a real URL (BET-354)", () => {
+    // Hypothetical future where opencode DOES start returning a URL for
+    // anthropic — we should fall through to the standard oauth flow.
+    const r = { index: 0, method: { type: "oauth", label: "Switch Claude Code account" } };
+    assert.equal(describeConnectShape(r, { ok: true, url: "https://example.com", method: "auto" }, "anthropic"), "oauth-auto");
   });
 });
 

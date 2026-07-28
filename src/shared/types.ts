@@ -540,6 +540,13 @@ export const IPC = {
   // into opencode's auth store and never echoes it back, not in the
   // return value and not in any log line.
   opencodeProviderAuth: "opencode:provider-auth",
+  // BET-354: explicitly cancel an in-flight Claude login session. Called
+  // from the renderer's claude connect card when the user hits ×/Cancel
+  // or retries after a failure. Drops the server-side metadata; the
+  // renderer is responsible for the matching pty:kill (the pty bus is
+  // shared with every other terminal, so cancellation here + pty:kill
+  // there = full teardown).
+  claudeLoginCancel: "claude:login-cancel",
 
   // ---- voice (Groq STT + lightweight classifier) ----
   // Renderer captures audio via MediaRecorder, ships the ArrayBuffer to
@@ -1096,14 +1103,47 @@ export type SubscriptionStatus = {
   connected: boolean;     // true iff opencode reports this provider connected
 };
 
-export type SubscriptionConnectShape = "oauth-auto" | "oauth-code" | "api-key";
+export type SubscriptionConnectShape =
+  | "oauth-auto"
+  | "oauth-code"
+  | "api-key"
+  // BET-354: Claude-only. The renderer mounts a live terminal pane for
+  // `claude auth login` and feeds the Anthropic callback code back
+  // through pty:write; completion is detected via the credentials file
+  // mtime (see opencode.mjs pollClaudeLogin).
+  | "claude-login";
+
+// BET-354: progress object returned by the claude-status RPC action.
+// "no-file"      → credentials file is missing — keep polling.
+// "pre-existing" → file exists but was last modified BEFORE the card
+//                  mounted. The user already had a working login and did
+//                  not complete a fresh OAuth. The renderer surfaces
+//                  this as a distinct failure.
+// "completed"    → file modified AT or AFTER startedAt. The server has
+//                  already called restartOpencode + probed connected[];
+//                  `connected: true` means `anthropic` is now in
+//                  opencode's provider list and the card flips to done.
+export type ClaudeLoginProgress =
+  | { state: "no-file" }
+  | { state: "pre-existing" }
+  | {
+      state: "completed";
+      restart: { ok: true } | { ok: false; error: string };
+      connected: boolean;
+      restartAttempts: number;
+    };
 
 export type OpencodeProviderAuthRequest =
   | { action: "status" }
   | { action: "start"; id: string }
   | { action: "code"; id: string; methodIndex: number; code: string }
   | { action: "key"; id: string; key: string }
-  | { action: "disconnect"; id: string };
+  | { action: "disconnect"; id: string }
+  // BET-354: Claude login completion poll. Mirrors the renderer's 1s
+  // tick while in the claude-login phase. Server-side: file mtime check
+  // + restartOpencode() if changed + connected[] verification. The
+  // server retains startedAt across requests by keying off sessionKey.
+  | { action: "claude-status"; sessionKey: string; startedAt: number };
 
 export type OpencodeProviderAuthResult =
   | { action: "status"; providers: SubscriptionStatus[] }
@@ -1113,7 +1153,20 @@ export type OpencodeProviderAuthResult =
       url?: string;
       instructions?: string;
       methodIndex?: number;
+      // BET-354: when shape === "claude-login", the start response
+      // carries the server-generated sessionKey + startedAt for the
+      // live-terminal connect card. The renderer then mounts a Terminal
+      // pane with that sessionKey (driven via pty:spawn) and polls
+      // claude-status on its 1s tick.
+      sessionKey?: string;
+      startedAt?: number;
+      cwd?: string;
     }
   | { action: "code"; ok: boolean; error?: string }
   | { action: "key"; ok: boolean; error?: string }
-  | { action: "disconnect"; ok: boolean; error?: string };
+  | { action: "disconnect"; ok: boolean; error?: string }
+  // BET-354: claude-status result. `progress.state === "no-file"` is
+  // the keep-polling case; `pre-existing` is a distinct failure (the
+  // user already had a working login and the connect was a no-op);
+  // `completed` means restartOpencode fired + the connect[ed] probe ran.
+  | { action: "claude-status"; ok: boolean; progress?: ClaudeLoginProgress; error?: string };

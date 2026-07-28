@@ -21,6 +21,8 @@ import {
   isClaudeCredentialError,
   shouldAttemptRecovery,
   shouldRefreshAhead,
+  extractClaudeAuthUrl,
+  classifyClaudeLoginProgress,
 } from "./claudeAuth.mjs";
 
 const REMOTE_PORT = 4096;
@@ -1828,4 +1830,111 @@ export function subscribeEvents(onEvent, opts = {}) {
   stop._touch = touch;
   stop._openFor = openFor;
   return stop;
+}
+
+// ---------------------------------------------------------------------------
+// BET-354: in-app Claude connect flow
+// ---------------------------------------------------------------------------
+//
+// The renderer's connect card spawns `claude auth login` on the box, streams
+// its output via the existing pty bus, feeds the Anthropic callback code back
+// through pty:write, and polls for completion. This module owns the IO: the
+// completion-detection file stat + the opencode restart + the connected[]
+// verification. Pure logic (URL extraction, classifyClaudeLoginProgress) lives
+// in claudeAuth.mjs and is unit-tested there. The credential-overwrite hazard
+// the POC flagged is mitigated by the file-mtime check in
+// `pollClaudeLogin` — the flow only advances when the credentials file was
+// modified AFTER the card mounted, so an existing valid login is never
+// silently destroyed.
+
+import { stat as fsStat } from "node:fs/promises";
+import { restartOpencode as restartOpencodeImpl } from "./opencodeAdmin.mjs";
+
+/**
+ * Poll the credentials file + opencode status. Called by the connect card on
+ * its periodic tick (every 1s while `kind === "waiting"` or
+ * `kind === "needsClaudeLogin"`).
+ *
+ * State machine:
+ *   - `"no-file"`     — credentials file is missing. Keep polling.
+ *   - `"pre-existing"`— file exists but was last modified BEFORE the card
+ *                       mounted. The user already had a working login and
+ *                       did not complete a fresh OAuth. Stop polling with
+ *                       `ok: false` and a distinct reason; the renderer
+ *                       surfaces this as a fail with the right copy.
+ *   - `"completed"`   — file exists and was modified AT or AFTER the card
+ *                       mounted. Call `restartOpencode()` (BET-354: a
+ *                       restart is needed — verified live by BET-352 POC;
+ *                       the opencode-claude-auth plugin reads the file at
+ *                       startup, not at request time, despite the
+ *                       RESULTS.md Q4 "no restart required" claim that was
+ *                       not exercised against the positive path). Then
+ *                       poll `GET /provider` until `anthropic` appears in
+ *                       `connected[]` (or until the 15s deadline).
+ *
+ * Never throws. `restartOpencode` failure is non-fatal — the renderer can
+ * still see `connected: true` on a slower retry.
+ *
+ * @param {{ startedAt: number, restartOpencode?: typeof restartOpencodeImpl, getProviders?: typeof getProviders, now?: number }} args
+ * @returns {Promise<
+ *   | { state: "no-file" }
+ *   | { state: "pre-existing" }
+ *   | { state: "completed"; restart: { ok: true } | { ok: false; error: string }; connected: boolean; restartAttempts: number }
+ * >}
+ */
+export async function pollClaudeLogin({
+  startedAt,
+  restartOpencode = restartOpencodeImpl,
+  getProviders: getProvidersImpl = getProviders,
+  now = Date.now(),
+} = {}) {
+  let stat;
+  try {
+    stat = await fsStat(CREDENTIALS_PATH);
+  } catch {
+    stat = { mtimeMs: null };
+  }
+  const progress = classifyClaudeLoginProgress(stat, startedAt);
+  if (progress !== "completed") {
+    return { state: progress };
+  }
+
+  // Credentials updated → bounce opencode so the new tokens are read at
+  // startup. Mirrors the desktop `restartOpencode()` from the existing
+  // providers/subagents flow but called from the server side of the
+  // connect card (the rpc.mjs wiring invokes it through this helper so
+  // the restart happens with NO renderer involvement — the connect card
+  // can be in any state, including "user is on another tab").
+  //
+  // We retry the restart up to 2 times because the `applying` phase in
+  // ConnectProvider.tsx already polls `connected[]` and we want the second
+  // restart attempt to win even if the first lost a systemctl race (the
+  // opencode-serve unit may still be "activating" on the first try after
+  // a fresh boot). The renderer's own 30s readiness poll (ConnectProvider
+  // `applying` phase) is the source of truth for "user sees done".
+  let restartResult;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    restartResult = await restartOpencode();
+    if (restartResult?.ok) break;
+  }
+
+  // Probe the provider list — opencode usually needs a moment to bind +
+  // re-scan the auth store after a restart, so the first call often returns
+  // an empty `connected[]`. The renderer's 30s readiness poll covers the
+  // case where even our two-call attempt misses; this probe exists only so
+  // a server-side caller (or a future non-renderer consumer) has a hint.
+  let connected = false;
+  try {
+    const { connected: ids } = await getProvidersImpl();
+    connected = Array.isArray(ids) && ids.includes("anthropic");
+  } catch {
+    connected = false;
+  }
+
+  return {
+    state: "completed",
+    restart: restartResult,
+    connected,
+    restartAttempts: 2,
+  };
 }
