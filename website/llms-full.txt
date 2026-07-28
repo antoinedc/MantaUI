@@ -499,32 +499,299 @@ MantaMantaUI
 
     Free. No signup. Runs on hardware you already own.
 
-        Manta UI
+        The difference
+        ## Shut the lid and the work carries on
 
-          Ethernal
-          feat/auth
-          refactor/db!
-          main
-          Marketing
-          hero-copy?
-          landing2
-          Infra
-          deploy
+        Manta's server runs on your box as a system service. Your agents live in real tmux windows. The desktop app and the phone app are clients, so you can close every one of them and nothing stops.
 
-          ethernal / feat/auth · box-fra-1
-            Running
+          - ✓ Agents keep working with no client connected
 
-            Youadd a device-code pairing flow to the auth module
-            MantaReading the current auth module before I change anything.
-            › read src/server/auth.mjs
-            › edit src/server/auth.mjs +38 −4
-            $ npm test   ✓ 41 passed · 2.1s
+          - ✓ Reconnect from any device and the full history is there
 
-            ctx
+          - ✓ Survives a reboot, because it is a system service
 
-            73% · 146k/200k
+          - ✓ Your phone buzzes when the agent needs a decision
 
-            Reply to Manta…
+          Orca's own docs: Closing the desktop app drops the connection. There is no cloud relay.
+          Conductor sells this as their paid beta: close your laptop during a task and the agent keeps going.
+          quoted verbatim, linked and dated on /vs/orca and /vs/conductor
+
+            9:41
+            Tuesday, 14 October
+
+                Mantanow
+
+              ethernal / feat-auth
+              Permission needed: Bash(rm -rf ./dist)
+              DenyAllow
+
+      What you get
+      ## Everything the agent does, on every device
+
+      The desktop app and the phone app run the same code, so the transcript, the tool output and the approval buttons are identical on both.
+
+        ### Real tmux underneath
+
+        A chat panel and a real `tmux` terminal for every window. Your box stays a normal tmux server, so you can still SSH in and attach to the same session.
+
+        Orca and Conductor each run their own process model. Neither leaves the box usable without their app.
+
+        ### The phone app is the same app
+
+        Same code as the desktop: full transcript, live command output, approvals, dictation and file uploads. A native iPhone app, and any browser everywhere else.
+
+        Orca calls its mobile app "read-mostly" and "intentionally not a full editor". Conductor has no phone app.
+
+        ### Notifications that know where you are
+
+        Working at your desk? Your phone stays quiet. Away from it? The desktop gets it first and your phone 90 seconds later. Anything blocking reaches every device at once.
+
+        Neither competitor routes notifications at all.
+
+        ### You approve what runs
+
+        Permissions and questions arrive as cards you answer with one tap. Allow, deny, or write a clarification. Trust a whole session when you want it to move faster.
+
+        Orca ships --dangerously-skip-permissions pre-filled. Conductor's docs say agents run without sandboxing.
+
+        ### A worktree per session
+
+        New sessions in a git repo branch their own sibling worktree, so several agents work in parallel without standing on each other. Close the session and Manta offers to remove the worktree, asking first if anything is uncommitted.
+
+        Command output also streams live, and a context bar splits fresh tokens from cached ones so a cold cache does not surprise you.
+
+        ### It works out how to reach you
+
+        The installer checks whether Tailscale is already running. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and an HTTPS certificate. You do not pick.
+
+        Orca requires Tailscale and tells you not to expose its port to the internet. Here a tailnet is one of two supported paths, not a prerequisite.
+
+      Nobody else does this
+      ## The agent can reach you between turns
+
+      Manta gives the agent a few tools of its own. It can put work on a timer, wake up when something happens outside, or ask for your attention on whichever device you are using.
+
+        ### Schedule
+
+        Ask it to check the deploy every five minutes. The prompt re-runs in this session on a cron, on the server, whether or not you are connected.
+
+        ### Webhooks
+
+        Hand your CI a signed URL. The session wakes up when the build finishes, instead of burning tokens asking whether it is done yet.
+
+        ### Secrets
+
+        The agent gets a file path, never the value. Your token goes into the command at run time and never appears in the transcript.
+
+        ### Notify
+
+        Ask to be told when the migration finishes. Manta picks the device based on where you have actually been active.
+
+        ### Peers
+
+        Agents in the same workspace can see and message each other, so one can warn another before touching a file it is editing.
+
+        ### Serve page
+
+        The agent publishes a preview to a URL you can open on any device, with no file transfer in between.
+
+      Setup
+      ## Paired in under a minute
+
+      No SSH keys to distribute and no tunnel to keep alive. The server installs on your box, works out how to make itself reachable, and you pair each device once.
+
+        STEP 01
+        ### Install on your box
+
+        One command. It ships its own Node runtime, so there is no compiler and no package manager involved. It then works out how devices will reach the box: over your tailnet if Tailscale is already running, otherwise through Caddy and a Let's Encrypt certificate on <your-box>.boxes.mantaui.com.
+
+        STEP 02
+        ### Pair a device
+
+        Type in the six-digit code the installer printed. The device gets a token, and every call after that is authenticated over HTTPS.
+
+        STEP 03
+        ### Start working
+
+        Create a project and open a session. Install the phone app, pair it with a second code, and the same sessions are there.
+
+```
+   Desktop app                Phone app                  Browser
+        │                          │                         │
+        └──────────────────  HTTPS  ────────────────────────┘
+                                │
+   <box_id>.boxes.mantaui.com   or   your box on the tailnet
+   Caddy + Let's Encrypt                  if Tailscale is already running
+
+        the installer detects which one applies and sets it up
+                                │
+                       YOUR LINUX BOX OR MAC
+              manta-server  ── owns tmux, files, config, secrets
+                ├── tmux ── your sessions  (keep running with 0 clients)
+                └── opencode ── chat mode and agent tools
+```
+
+      Away from your desk
+      ## The whole session on your phone
+
+      Reading a terminal UI on a phone keyboard is miserable. This is the actual client: read the diff, approve the risky command, dictate what to do next.
+
+          - ✓ A native iPhone app, and any browser everywhere else
+
+          - ✓ Full transcript, live command output and inline diffs
+
+          - ✓ Answer permissions and questions with one tap
+
+          - ✓ Dictate a reply instead of typing it
+
+          - ✓ Push for permissions, questions, errors and finished work
+
+          - ✓ Talks straight to your box, with no account in between
+
+          A phone client that cannot approve a permission also cannot unblock an agent. The work still waits until you get back to your laptop, which defeats the point of carrying it around.
+
+      Manta UI phone session list with mixed session statuses
+
+      Honest comparison
+      ## How Manta compares
+
+      Orca and Conductor run agents on your laptop. Termius over SSH runs them on a VPS already, which is most of the way there. These are the axes we chose to compete on. The full picture, including what the others do better, is on each comparison page.
+
+          Manta UI
+          Orca
+          Conductor
+          Termius + SSH
+
+          Agents run onYour VPSYour desktopYour MacYour VPS
+          Keeps running with every client closedYesNoPaid betaYes
+          Phone clientThe full appRead-mostlyNoneTerminal only
+          Approve a command from your phoneOne tapLimitedNoType into the TUI
+          Tells you when the agent is blockedPushNoNoNo
+          Remote accessDetected and set upTailscale requiredCloud betaSSH keys by hand
+          Git worktree per sessionYesYesYesBy hand
+          Agent scheduling, webhooks, secretsYesNoNoNo
+          Real tmux underneathYesNoNoYes
+          Account requiredNoFor mobileYesTo sync
+          LicenceMITMITProprietaryProprietary
+          PriceFreeFreeFree, plus ProFree, plus paid
+
+          [Full comparison →](/vs-orca)
+          [Full comparison →](/vs-conductor)
+          [Full comparison →](/vs-ssh-tmux)
+
+      If you already run Claude Code on a VPS and reach it with Termius, you have solved the hard part. What Manta adds is a readable transcript instead of a TUI, one-tap approvals, and a notification the moment the agent gets stuck.
+      Orca and Conductor each do things Manta does not, including diff review and a built-in editor, and Orca supports far more agent runtimes. Each comparison page lays that out in full. Sourced from public docs, dated and linked.
+
+      Open source
+      ## Yours to run, read and fork
+
+      Being open source is table stakes here, because Orca is MIT too. The combination is what differs: open source, self-hosted, no account, and a server that outlives whichever client you happen to be holding.
+
+          - ✓Runs on hardware you own. There is no hosted control plane, no workspace limit and no seat count.
+
+          - ✓Your code stays on the box. The only thing that leaves is your agent talking to its model provider.
+
+          - ✓Nothing to sign up for. Pairing is a six-digit code your own machine generates.
+
+          - ✓Read [install.sh](/install.sh) before you pipe it into bash. We would rather you did.
+
+          - ✓MIT licensed. Fork it, run your own gateway, write your own client.
+
+         antoinedc / MantaUI
+        Open-source, self-hosted Claude Code and opencode client. Agents run in real tmux on your own Linux box or Mac, and you drive them from desktop, phone or browser over HTTPS.
+
+          MIT licenceTypeScriptIssues open
+
+      FAQ
+      ## Questions people actually ask
+
+      Each answer is written to be quotable on its own, and each one maps to a page we want to rank for.
+
+      ### Does the agent keep running if I close my laptop?
+
+Yes. The server runs on your box as a system service and your agents live in real tmux sessions. Every client is disposable, so you can close all of them and the work continues. Reconnect later and the full history is still there.
+
+      ### Do I need Tailscale, a VPN or port forwarding?
+
+No, and you do not have to decide either. The installer checks whether Tailscale is already running on the box. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and a Let's Encrypt certificate. Either way there is nothing to port-forward and no tunnel to keep alive, and you can force either path if you prefer.
+
+      ### Can I really use Claude Code from my phone?
+
+Yes, and the phone app is the same app as the desktop rather than a status viewer. You get the full transcript, live command output, approvals, dictation and file uploads, in a native iPhone app or any browser.
+
+      ### I already SSH into a VPS with Termius. Why switch?
+
+You have already solved the part most tools get wrong, which is keeping the agent alive when you walk away. What you do not get is a readable transcript instead of a terminal UI, buttons to approve a command, or a notification when the agent stops and waits for you. Manta runs on the same box and you can still SSH in alongside it.
+
+      ### What does it cost?
+
+Nothing. Manta is free and open source. You pay whoever supplies your agent, so an Anthropic subscription or an API key, and you supply the box.
+
+      ### Does my code leave my box?
+
+No. Transcripts, uploads, secrets and configuration stay on your machine. The only outbound traffic is your agent talking to its model provider, plus a small push payload carrying the session name if you turn on phone notifications.
+
+      ### Which agents does it work with?
+
+Claude Code and opencode today. Anything that runs in a terminal works in terminal mode, and the chat panel is built on opencode.
+
+      ### Is this an alternative to Conductor or Orca?
+
+It overlaps with both, on a different bet. They run agents on your Mac and give you a window onto them. Manta runs agents on a box you own and gives every device the same window, so the work outlives whatever you are holding.
+
+    ## Put it on your own box
+
+    Free, no signup, and it runs on hardware you already have.
+
+        `$ curl -fsSL https://mantaui.com/install.sh | bash`
+        this.textContent='Copy',1400)">Copy
+
+      [Download for macOS](https://mantaui.com/downloads/Manta-latest.dmg)
+
+      Read the docs
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code web UI](/claude-code-web-ui)
+
+        - [Claude Code on mobile](/claude-code-mobile)
+
+        - [Claude Code remote](/claude-code-remote)
+
+        - [Open source](/open-source)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
 
         The difference
         ## Shut the lid and the work carries on
@@ -677,14 +944,7 @@ MantaMantaUI
 
           A phone client that cannot approve a permission also cannot unblock an agent. The work still waits until you get back to your laptop, which defeats the point of carrying it around.
 
-          Sessions
-          ethernal / feat-authRunning
-          ethernal / refactor-dbApprove
-          ethernal / mainIdle
-          marketing / heroQuestion
-          marketing / landingRunning
-          infra / deployDone
-          notes / scratchIdle
+      Manta UI phone session list with mixed session statuses
 
       Honest comparison
       ## How Manta compares
