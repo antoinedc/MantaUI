@@ -34,6 +34,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=@@OPENCODE_BIN@@ serve --port 4096 --hostname 127.0.0.1
+# Same PATH the LaunchAgent plists get — systemd --user services inherit a
+# minimal default PATH that excludes ~/.local/bin (claude CLI) and Homebrew
+# dirs (tmux). install.sh substitutes the resolved list (see
+# launchd_agent_path()).
+Environment=PATH=@@AGENT_PATH@@
 Restart=on-failure
 RestartSec=2
 # Give opencode a moment to flush pending SSE frames on stop before SIGKILL.
