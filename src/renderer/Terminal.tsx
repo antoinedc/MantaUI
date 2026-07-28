@@ -44,13 +44,10 @@ type Props = {
   // Present only when this Terminal is an AI CLI TUI launch mode (BET-138
   // refinement). Absent = plain login shell (base "terminal" mode).
   launcher?: { id: string; flags: Record<string, boolean> };
-  // BET-348: when set, the server spawns `tmux attach-session -t <target>`
-  // instead of a fresh shell — for a window Manta did NOT create (a
-  // pre-existing tmux session the user wants to view). Format is
-  // `<session>:<windowIndex>`, matching killWindow/selectWindow in
-  // src/server/tmux.mjs. WINS over `launcher` when both are set (server
-  // branch 1 of resolvePtyCommand). Omit for a Manta-owned window — the
-  // server falls through to the launcher / plain-shell branch.
+  // BET-347: set iff this Terminal is a window Manta did not create (a
+  // pre-existing tmux session). The server then runs `tmux attach-session
+  // -t <target>` instead of spawning a fresh shell. Format matches
+  // killWindow/selectWindow/renameWindow in src/server/tmux.mjs.
   tmuxTarget?: string;
 };
 
