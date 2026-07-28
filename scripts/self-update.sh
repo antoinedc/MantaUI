@@ -125,6 +125,81 @@ refresh_mobile_bundle() {
 
 refresh_mobile_bundle
 
+# --- Refresh the manta-native opencode tools --------------------------------
+# The AI-facing tool sources (docs/opencode-tools/*.ts) are COPIED into
+# ~/.config/opencode/tools/ rather than symlinked — opencode resolves a tool's
+# imports from the file's REAL path, so a symlink back into the checkout misses
+# ~/.config/opencode/node_modules/@opencode-ai/plugin and the tool silently
+# never registers.
+#
+# WHY THIS IS HERE: install.sh does that copy, but ONLY on install. Nothing in
+# the update path did, so `git reset --hard origin/main` refreshed the SOURCE
+# while every box kept running whatever tool copy it was installed with. Any
+# change to what the AI is told about a tool was therefore undeliverable to an
+# existing box — BET-344 rewrote serve_page's description to stop naming the
+# retired *.pages.mantaui.com domain, and no box would ever have seen it.
+#
+# Non-fatal throughout: a tool copy failing must never abort an update that has
+# already reset the checkout and reinstalled deps.
+#
+# NOTE: we deliberately do NOT restart opencode here. Picking up a new tool
+# needs an opencode restart, but that kills every in-flight agent turn on the
+# box — which is exactly the "close the lid and the work carries on" guarantee
+# the product is built on. Staging the files is safe and unconditional; they
+# take effect at the next opencode restart, and we say so.
+refresh_opencode_tools() {
+  local src="$MANTA_HOME/docs/opencode-tools"
+  local dest="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/tools"
+
+  if [ ! -d "$src" ]; then
+    echo "⚠ self-update: $src not found — skipping opencode tool refresh"
+    return 0
+  fi
+  if ! mkdir -p "$dest" 2>/dev/null; then
+    echo "⚠ self-update: cannot create $dest — skipping opencode tool refresh"
+    return 0
+  fi
+
+  # EXCLUDE *.test.ts: opencode loads EVERY file in tools/ as a tool, and a
+  # test file imports vitest (absent under ~/.config/opencode/node_modules),
+  # which makes tool resolution throw and every chat turn fail with
+  # "Cannot find package 'vitest'". Same exclusion as install.sh.
+  local copied=0 changed=0 tool base
+  for tool in "$src"/*.ts; do
+    case "$tool" in
+      *.test.ts) continue ;;
+    esac
+    [ -e "$tool" ] || continue
+    base="$(basename "$tool")"
+    if ! cmp -s "$tool" "$dest/$base" 2>/dev/null; then
+      changed=$((changed + 1))
+    fi
+    if cp -f "$tool" "$dest/" 2>/dev/null; then
+      copied=$((copied + 1))
+    else
+      echo "⚠ self-update: failed to copy opencode tool $base"
+    fi
+  done
+
+  if [ "$copied" = "0" ]; then
+    echo "⚠ self-update: no opencode tool sources found in $src"
+    return 0
+  fi
+  if [ "$changed" = "0" ]; then
+    echo "✓ self-update: opencode tools already current ($copied checked)"
+    return 0
+  fi
+  echo "✓ self-update: opencode tools refreshed ($changed of $copied changed)"
+  echo "  ↳ restart opencode to load them (this will end any running agent turn):"
+  if command -v systemctl >/dev/null 2>&1; then
+    echo "      systemctl --user restart opencode-serve"
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    echo "      launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
+  fi
+}
+
+refresh_opencode_tools
+
 # Restart the supervisor that runs manta-server. Linux uses the systemd
 # --user unit (default since v1); macOS (BET-277) uses the LaunchAgent
 # installed by install.sh — `launchctl kickstart -k` kills any running
