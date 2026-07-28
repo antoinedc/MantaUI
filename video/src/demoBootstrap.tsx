@@ -30,7 +30,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { setWindowApi } from "@renderer/transportInstall";
 import { demoApi } from "@renderer/api/demoApi";
-import { applyDemoStateAt, demoState } from "@renderer/api/demoFixture";
+import { applyDemoStateAt, DEMO_T0, demoState } from "@renderer/api/demoFixture";
 import { useStore } from "@renderer/store";
 
 // Run-once bootstrap. Mounts a `useEffect` that wires the demo environment
@@ -82,6 +82,13 @@ export function DemoBootstrap({ children }: { children: ReactNode }) {
           ? { [demoState.activeProjectName]: demoState.activeWindowIndex ?? 0 }
           : {}),
       },
+      // Seed the deterministic clock at DEMO_T0 (the fixture's reference
+      // time). `useFrameSync` advances this per frame to `DEMO_T0 - t*1000`
+      // so `Sidebar.tsx:978`'s `nowMs()` and `MessageRow.tsx:RunningIndicator`'s
+      // `nowMs()` resolve to a deterministic value across renders. Real
+      // apps leave `videoRenderNow` null and `nowMs()` falls back to
+      // `Date.now()` (see src/renderer/clock.ts).
+      videoRenderNow: DEMO_T0,
     });
     // runBackgroundSync fires replayChatAttention + backfillLastMessageTimes
     // so the sidebar status block (running dot, attention kind) and

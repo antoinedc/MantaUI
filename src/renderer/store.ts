@@ -226,6 +226,13 @@ type State = {
   // slowdown from bounded-concurrency fetches reads as "syncing", not
   // "frozen" (BET-135). False the rest of the time.
   backgroundSyncing: boolean;
+  // Deterministic clock for elapsed-time labels (Sidebar's session-age
+  // chip, ChatPanel's running-indicator "X minutes ago"). When the demo
+  // mode hero video renders (BET-322), this is set per-frame from
+  // `DEMO_T0 - t*1000` so two consecutive renders are byte-comparable
+  // (no `Date.now()` leakage in labels). Real apps leave it null and
+  // `nowMs()` in src/renderer/clock.ts falls back to `Date.now()`.
+  videoRenderNow: number | null;
   // ----- derived selectors -----
   activeSession: () => ActiveSession | null;
   // A minimal AppConfig-shaped snapshot of the onboarding-relevant fields,
@@ -369,6 +376,7 @@ export const useStore = create<State>((set, get) => ({
   serverUpdatePrompt: null,
   connectionState: { state: "idle" },
   backgroundSyncing: false,
+  videoRenderNow: null,
 
   configSnapshot: () => {
     const s = get();

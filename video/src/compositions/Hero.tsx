@@ -27,7 +27,7 @@ import {
 import { useEffect } from "react";
 import { App } from "@renderer/App";
 import { MobileApp } from "@renderer/mobile/MobileApp";
-import { applyDemoStateAt, HERO_BEATS } from "@renderer/api/demoFixture";
+import { applyDemoStateAt, DEMO_T0, HERO_BEATS } from "@renderer/api/demoFixture";
 import { useStore } from "@renderer/store";
 import { DemoBootstrap } from "../demoBootstrap";
 
@@ -209,10 +209,21 @@ function useFrameSync(t: number) {
     if (next.activeProjectName != null && next.activeWindowIndex != null) {
       activeWindowByProject[next.activeProjectName] = next.activeWindowIndex;
     }
+    // Advance the deterministic clock: `DEMO_T0 - t*1000` puts the
+    // composition's "now" at t=0 seconds BEFORE DEMO_T0 and walks
+    // backward in time as the video plays. lastMessageAt in demoStateAt
+    // uses the same anchor (DEMO_T0 - t*1000), so the sidebar's
+    // classifyCacheAge computation (`(now - lastMessageAt) / ttlMs`)
+    // produces the same number across two consecutive renders — the
+    // byte-comparable contract lands for the visual side too.
+    const videoRenderNow = HERO_BEATS.BEAT_6_END >= t
+      ? Math.round(DEMO_T0 - t * 1000)
+      : useStore.getState().videoRenderNow;
     useStore.setState({
       activeProjectName: next.activeProjectName,
       activeWindowByProject,
       status: next.status,
+      videoRenderNow,
     });
   }, [t]);
 }
