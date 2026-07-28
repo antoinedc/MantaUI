@@ -417,6 +417,65 @@ test("publicBaseUrl reads fresh on each call (no module-scope cache)", async () 
   assert.equal(publicBaseUrl(path), `https://${BOX_ID}.boxes.mantaui.com`);
 });
 
+// ----------------------------------------------------------------------------
+// publicBaseUrl — tailscale fallback (BET-349). A Tailscale-only box never
+// registers with the gateway (no gateway_host), but it has a reachable
+// tailnet address recorded in ~/.manta/ingress.json. The resolver MUST fall
+// back to ingress.json's serverUrl when mode === "tailscale", else serve_page
+// refuses to register a page on what is in fact a reachable box.
+// ----------------------------------------------------------------------------
+
+test("publicBaseUrl: gateway_host wins over a tailscale ingress.json", async () => {
+  const path = tmpAuthPath("public-base-gateway-wins");
+  await writeAuth(path, {
+    box_id: BOX_ID,
+    box_token: PRIOR_TOKEN,
+    gateway_host: `${BOX_ID}.boxes.mantaui.com`,
+  });
+  // ingress.json in the same directory as auth.json
+  await writeFile(join(path, "..", "ingress.json"), JSON.stringify({
+    mode: "tailscale",
+    tailnetIp: "100.64.0.1",
+    serverUrl: "http://100.64.0.1:8787",
+  }, null, 2), { mode: 0o600 });
+  assert.equal(publicBaseUrl(path), `https://${BOX_ID}.boxes.mantaui.com`);
+});
+
+test("publicBaseUrl: tailscale ingress.json when no gateway_host (BET-349 regression)", async () => {
+  const path = tmpAuthPath("public-base-tailscale");
+  await writeAuth(path, { box_id: BOX_ID, box_token: PRIOR_TOKEN });
+  await writeFile(join(path, "..", "ingress.json"), JSON.stringify({
+    mode: "tailscale",
+    tailnetIp: "100.64.0.1",
+    serverUrl: "http://100.64.0.1:8787",
+  }, null, 2), { mode: 0o600 });
+  assert.equal(publicBaseUrl(path), "http://100.64.0.1:8787");
+});
+
+test("publicBaseUrl: public-mode ingress.json is NOT a fallback", async () => {
+  const path = tmpAuthPath("public-base-public-mode");
+  await writeAuth(path, { box_id: BOX_ID, box_token: PRIOR_TOKEN });
+  await writeFile(join(path, "..", "ingress.json"), JSON.stringify({
+    mode: "public",
+  }, null, 2), { mode: 0o600 });
+  assert.equal(publicBaseUrl(path), "");
+});
+
+test("publicBaseUrl: no gateway_host and no ingress.json → ''", async () => {
+  const path = tmpAuthPath("public-base-no-ingress");
+  await writeAuth(path, { box_id: BOX_ID, box_token: PRIOR_TOKEN });
+  // No ingress.json written alongside auth.json
+  assert.equal(publicBaseUrl(path), "");
+});
+
+test("publicBaseUrl: malformed ingress.json does not throw, returns ''", async () => {
+  const path = tmpAuthPath("public-base-bad-ingress");
+  await writeAuth(path, { box_id: BOX_ID, box_token: PRIOR_TOKEN });
+  await mkdir(join(path, ".."), { recursive: true });
+  await writeFile(join(path, "..", "ingress.json"), "not json {", { mode: 0o600 });
+  assert.equal(publicBaseUrl(path), "");
+});
+
 // Cleanup any stray tmp dirs. Best-effort; safe to ignore errors.
 test("cleanup tmp auth files", async () => {
   // No-op assertion: each test already uses its own unique tmp path. This

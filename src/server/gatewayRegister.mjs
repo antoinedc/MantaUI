@@ -63,16 +63,29 @@ export function loadAuthFile(path) {
   }
 }
 
-// The box's own public base URL, or "" when the box has never registered with
-// the gateway (Tailscale-only / offline install) and therefore has no publicly
-// resolvable hostname. Read fresh on each call: registerWithGateway() may
-// write gateway_host AFTER the server has booted, so a value cached at module
-// scope would be permanently empty on a box's first run. Reuses loadAuthFile
+// The box's own public base URL, or "" when the box has no reachable
+// hostname. Resolves in order:
+//   1. gateway_host from auth.json → https://<host> (published FQDN wins)
+//   2. serverUrl from ingress.json, only when mode === "tailscale"
+//      (Tailscale-only box — the tailnet address IS reachable from the tailnet)
+//   3. "" (unaddressable — caller must refuse rather than return a 404 URL)
+//
+// Reads both files fresh on each call: registerWithGateway() may write
+// gateway_host AFTER the server has booted, and install.sh may rewrite
+// ingress.json in the same window, so a module-scope cache would lock in
+// stale values. Reuses loadAuthFile (a plain JSON reader, not auth-specific)
 // rather than auth.mjs's loadAuth() because the latter deliberately drops
 // gateway_host (only returns {box_id, box_token, created_at}).
 export function publicBaseUrl(path = DEFAULT_AUTH_PATH) {
-  const host = loadAuthFile(path)?.gateway_host;
-  return typeof host === "string" && host ? `https://${host}` : "";
+  const auth = loadAuthFile(path);
+  const host = auth?.gateway_host;
+  if (typeof host === "string" && host) return `https://${host}`;
+
+  const ingress = loadAuthFile(join(dirname(path), "ingress.json"));
+  if (ingress?.mode === "tailscale" && typeof ingress.serverUrl === "string" && ingress.serverUrl) {
+    return ingress.serverUrl;
+  }
+  return "";
 }
 
 /**
