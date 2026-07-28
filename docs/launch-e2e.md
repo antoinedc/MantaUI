@@ -341,10 +341,12 @@ The pairing code `252653` was minted and the box identity is
 
 The only thing the install could NOT auto-configure is
 `~/.claude/.credentials.json` — claude authentication is a separate user
-action (run `claude` once on the box, then `systemctl --user restart
-opencode-serve`). This is the intended flow per the original install.sh
-comment ("the only auth prerequisite we assume is the user has run/authed
-\`claude\` on this box at least once").
+action that the desktop app drives end-to-end (BET-354: the in-app
+Connect card spawns `claude auth login` over the pty bus, feeds the
+Anthropic callback code back, restarts opencode, and verifies
+`anthropic` in `connected[]`). As of BET-354 this no longer requires
+the user to open a terminal — they do it from the Settings →
+Subscriptions card or the onboarding step.
 
 ## Findings — bugs the live re-run revealed
 
@@ -719,10 +721,11 @@ $ loginctl show-user manta | grep Linger     → Linger=yes
 warning: `! no $HOME/.claude/.credentials.json — chat will start but
 reject requests until you authenticate.`). That is the intended
 state for a brand-new box — the chat backend will refuse requests
-until the user signs in to Claude on the box once
-(`claude`, then `systemctl --user restart opencode-serve`). Not a
-launch-blocker — it's the documented "fresh box needs Claude auth"
-flow.
+until the user signs in to Claude from the app's Connect card
+(Settings → Subscriptions, or the onboarding step). BET-354 drives
+the OAuth end-to-end; the user no longer has to open a terminal
+unless the app is unreachable. Not a launch-blocker — it's the
+documented "fresh box needs Claude auth" flow.
 
 ### Section-3 health checks (REST/CLI surface where reachable)
 

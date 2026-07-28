@@ -9,6 +9,12 @@
 // flags    flag schema: [{ key, label, type:"boolean", default, arg }]. `arg`
 //          is the CLI flag emitted when a boolean flag is truthy.
 // buildArgs(values) -> string[] argv (excluding the bin itself).
+// hidden   when true, the entry still resolves via findLauncher (so a
+//          non-dropdown consumer like the Claude connect card can spawn it)
+//          but is filtered OUT of launchers:list so it never shows in the
+//          session-mode dropdown. Used by the Claude auth-login launcher
+//          (BET-354) which is driven programmatically, not chosen by the
+//          user.
 
 export const LAUNCHERS = [
   {
@@ -45,6 +51,21 @@ export const LAUNCHERS = [
     bin: "kimi",
     flags: [],
     buildArgs: () => [],
+  },
+  // BET-354: Claude OAuth login flow. Reuses the pty bus so the existing
+  // pty:spawn / pty:write / pty:kill channels drive it transparently; the
+  // connect card just listens to the same pty event stream and feeds the
+  // callback code back through pty:write. Hidden from the session-mode
+  // dropdown — it's a one-shot interactive flow, not a user-selectable
+  // terminal mode. argv = `claude auth login` per the BET-352 POC; bare
+  // `claude` opens the normal TUI and never offers a login.
+  {
+    id: "claude-auth-login",
+    label: "Claude auth login",
+    bin: "claude",
+    flags: [],
+    hidden: true,
+    buildArgs: () => ["auth", "login"],
   },
 ];
 

@@ -80,9 +80,10 @@ Run on the target box:
   when sudo isn't available or the distro isn't Debian/Ubuntu.
 - `test -f ~/.claude/.credentials.json && echo present || echo missing` —
   chat mode reuses the box's claude login. If missing, tell the user: chat
-  will 401 until they run `claude` once on this box and log in. Offer to
-  pause here while they do (then `systemctl --user restart opencode-serve`
-  after install), or continue and remind them at the end. Continue either way.
+  will 401 until they sign in to Claude from the desktop app's
+  Settings → Subscriptions card (or the onboarding provider step) —
+  the app now drives `claude auth login` end-to-end (BET-354). Continue
+  with the install; the user can sign in from the app after pairing.
 - Do NOT check for or install Node — the installer vendors its own runtime.
 
 ## Step 3 — install
@@ -218,7 +219,8 @@ Tell the user, in this order:
    macOS: devices reach the box at the tailnet URL printed by the installer
    (e.g. `http://<tailscale-ip>:8787`) — same pairing flow.
 3. Everything else (providers, first project) happens in the desktop app's
-   onboarding.
-4. If claude login was missing: remind them to run `claude` on the box, then
-   `systemctl --user restart opencode-serve` (Linux) or
-   `launchctl kickstart -k gui/$(id -u)/com.mantaui.opencode` (macOS).
+   onboarding — including signing in to Claude. The app drives
+   `claude auth login` end-to-end (BET-354); the user no longer has to
+   SSH in for that step. If they hit Claude issues later, the
+   Settings → Subscriptions card has a "Reconnect" path that handles
+   re-authentication without a terminal.

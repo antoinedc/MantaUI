@@ -410,3 +410,106 @@ test("pty:spawn forwards tmuxTarget to pty.spawn unchanged", async () => {
   assert.equal(seen[0].sessionKey, "tmux:myproject:0");
   assert.equal(seen[0].cwd, "/home/dev/projects/myproject");
 });
+
+// ---- BET-354: opencode:provider-auth `start` returns claude-login shape ---
+//
+// When describeConnectShape resolves to "claude-login" (anthropic oauth +
+// empty URL), the rpc handler must hand back a sessionKey + startedAt
+// stamp so the renderer's connect card can mount a Terminal pane and
+// poll claude-status. We test the shape directly; the underlying IO
+// lives in opencode.mjs (already covered by its own tests).
+
+test("opencode:provider-auth start routes anthropic → claude-login shape (BET-354)", async () => {
+  const { deps } = makeDeps([]);
+  // opencode reports the standard anthropic oauth method with an EMPTY
+  // url (the verified shape per BET-352 POC). describeConnectShape
+  // picks "claude-login" — the handler then stamps a sessionKey.
+  deps.oc.listProviderAuthMethods = async () => ({
+    ok: true,
+    methods: {
+      anthropic: [
+        { type: "oauth", label: "Switch Claude Code account" },
+      ],
+    },
+  });
+  deps.oc.startProviderOauth = async () => ({
+    ok: true,
+    url: "",
+    method: "auto",
+    instructions: "Using Claude Max — credentials loaded from credentials file.",
+  });
+  const handlers = buildHandlers(deps);
+  const result = await handlers["opencode:provider-auth"]({
+    action: "start",
+    id: "anthropic",
+  });
+  assert.equal(result.action, "start");
+  assert.equal(result.shape, "claude-login");
+  assert.ok(typeof result.sessionKey === "string" && result.sessionKey.length > 0,
+    `expected a non-empty sessionKey; got ${JSON.stringify(result)}`);
+  assert.ok(result.sessionKey.startsWith("claude-login-"),
+    `sessionKey should carry the claude-login- prefix for debugging; got ${result.sessionKey}`);
+  assert.equal(typeof result.startedAt, "number");
+  assert.equal(typeof result.cwd, "string");
+});
+
+test("opencode:provider-auth start keeps oauth-auto for non-anthropic with empty url (BET-354)", async () => {
+  // Belt-and-braces: an "empty url" response from opencode for a
+  // non-anthropic provider is NOT the Claude-specific path — we fall
+  // through to the regular oauth-auto shape. Use openai (which has
+  // prefer rules for "headless" / "chatgpt", not the empty-URL Claude
+  // special case) with an oauth method that DOES match openai's prefer
+  // rule so resolveAuthMethod returns a non-null result and we
+  // actually exercise describeConnectShape's branch.
+  const { deps } = makeDeps([]);
+  deps.oc.listProviderAuthMethods = async () => ({
+    ok: true,
+    methods: {
+      openai: [
+        { type: "oauth", label: "ChatGPT Pro/Plus (browser)" },
+      ],
+    },
+  });
+  deps.oc.startProviderOauth = async () => ({
+    ok: true,
+    url: "",
+    method: "auto",
+  });
+  const handlers = buildHandlers(deps);
+  const result = await handlers["opencode:provider-auth"]({
+    action: "start",
+    id: "openai",
+  });
+  assert.equal(result.action, "start");
+  assert.equal(result.shape, "oauth-auto");
+  assert.equal(result.sessionKey, undefined, "non-claude providers must NOT get a sessionKey");
+});
+
+test("claude:login-cancel removes the session from the registry (BET-354)", async () => {
+  const { deps } = makeDeps([]);
+  deps.oc.listProviderAuthMethods = async () => ({
+    ok: true,
+    methods: { anthropic: [{ type: "oauth", label: "Switch Claude Code account" }] },
+  });
+  deps.oc.startProviderOauth = async () => ({ ok: true, url: "", method: "auto" });
+  const handlers = buildHandlers(deps);
+  const start = await handlers["opencode:provider-auth"]({ action: "start", id: "anthropic" });
+  assert.equal(start.shape, "claude-login");
+  const sessionKey = start.sessionKey;
+
+  // Cancel it.
+  const cancelResult = await handlers["claude:login-cancel"](sessionKey);
+  assert.equal(cancelResult.ok, true);
+
+  // A subsequent claude-status for the same sessionKey must return
+  // unknown_session (the metadata was dropped, so the registry has no
+  // record).
+  deps.oc.getProviders = async () => ({ connected: [] });
+  const status = await handlers["opencode:provider-auth"]({
+    action: "claude-status",
+    sessionKey,
+    startedAt: start.startedAt,
+  });
+  assert.equal(status.ok, false);
+  assert.equal(status.error, "unknown_session");
+});

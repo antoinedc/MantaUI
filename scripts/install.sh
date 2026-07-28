@@ -260,12 +260,14 @@ print_provider_detection_summary() {
     # failure).
     warn "could not build provider detection summary (see /tmp/manta-detect.err) — assuming no providers connected."
     warn "Connect any provider from the MantaUI app."
-    warn "Fallback (if the app is unavailable): run \`claude\` once on this box to sign in, then:"
-    if [ "$macos" = "1" ]; then
-      warn "  launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
-    else
-      warn "  systemctl --user restart opencode-serve"
-    fi
+    # BET-354: the app now connects Claude end-to-end (spawns `claude auth
+    # login` over the pty bus, feeds the OAuth callback code back, restarts
+    # opencode, verifies `anthropic` in connected[]). The "run claude by
+    # hand" fallback is no longer the primary path; it's a safety net for
+    # when the app is genuinely unreachable. The same caveat applies to
+    # Codex/Kimi but those already had opencode-native OAuth, so only the
+    # Claude-specific copy changes.
+    warn "Fallback (if the app is unavailable): connect providers from inside opencode (Claude: 'claude auth login'; Codex: '/auth' command)."
     return 0
   fi
 
@@ -315,12 +317,12 @@ print_provider_detection_summary() {
   if [ "$show_guidance" = "1" ]; then
     warn "no providers connected — chat will start but reject requests until you authenticate."
     warn "Connect any of Claude, Codex, or Kimi from the MantaUI app."
-    warn "Fallback (if the app is unavailable): run \`claude\` (or the equivalent) once on this box to sign in, then:"
-    if [ "$macos" = "1" ]; then
-      warn "  launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
-    else
-      warn "  systemctl --user restart opencode-serve"
-    fi
+    # BET-354: the app drives Claude's OAuth end-to-end (BET-352 POC +
+    # BET-354 wiring), so the "run claude by hand" guidance is now only
+    # a fallback for boxes where the app is unreachable. Codex/Kimi
+    # already had opencode-native OAuth, so the original copy just lost
+    # its Claude-specific invocation.
+    warn "Fallback (if the app is unavailable): connect providers from inside opencode (Claude: 'claude auth login'; Codex: '/auth' command)."
   fi
 }
 

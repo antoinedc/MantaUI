@@ -1,4 +1,4 @@
-// ConnectProvider.tsx — subscription-provider connect card (BET-312).
+// ConnectProvider.tsx — subscription-provider connect card (BET-312, BET-354).
 //
 // The single shared connect-flow component for Codex, Kimi, and Claude
 // (in-app, OAuth device flow / API-key paste). Consumed by stage 3 from both
@@ -7,24 +7,37 @@
 //
 // State machine — exactly the transitions the issue calls for, no extras:
 //
-//   mount -> starting -> (waiting | needsCode | needsKey) -> applying -> done | failed
+//   mount -> starting -> (waiting | needsCode | needsKey | needsClaudeLogin)
+//          -> applying -> done | failed
 //
-//   waiting        device-code OAuth (Codex). Shows URL + instructions + a
-//                  copyable code; polls status until connected or 5 min.
-//   needsCode      paste-back OAuth (browser variant, deliberately never
-//                  selected by the server's resolveAuthMethod). Same UX as
-//                  waiting, but no poll — the user submits the code.
-//   needsKey       API-key path (Kimi, plus the fallback when resolveAuthMethod
-//                  returns null). One password input + optional "Get a key"
-//                  link to the registry-supplied console URL.
-//   applying       restart + 30s poll. confirmRestart=true gates step 1
-//                  behind a confirm bar; false starts the restart immediately.
+//   waiting           device-code OAuth (Codex). Shows URL + instructions + a
+//                     copyable code; polls status until connected or 5 min.
+//   needsCode         paste-back OAuth (browser variant, deliberately never
+//                     selected by the server's resolveAuthMethod). Same UX as
+//                     waiting, but no poll — the user submits the code.
+//   needsKey          API-key path (Kimi, plus the fallback when
+//                     resolveAuthMethod returns null). One password input +
+//                     optional "Get a key" link to the registry-supplied
+//                     console URL.
+//   needsClaudeLogin  (BET-354) Claude's in-app connect. The server has
+//                     spawned `claude auth login` on the box and returned
+//                     a sessionKey the renderer mounts a Terminal pane
+//                     for. The renderer polls claude-status (1s tick)
+//                     until the credentials file appears (or
+//                     "pre-existing" — the user already had a working
+//                     login), then transitions to `applying`.
+//   applying          restart + 30s poll. confirmRestart=true gates step 1
+//                     behind a confirm bar; false starts the restart
+//                     immediately. The Claude path bypasses the confirm
+//                     bar (BET-354: confirmRestart is settings-only;
+//                     onboarding does not show it because there are no
+//                     active sessions to drop).
 //
 // Pure helpers (connectPhaseLabel, parseDeviceCode, isPollExpired) live in
 // chatUtils.ts so every "what does this phase mean?" / "has the poll
 // expired?" decision pins against a unit test. This file is intentionally
-// close to render-only: the state machine, two polling effects, and one
-// input component are the only non-render code.
+// close to render-only: the state machine, polling effects, and one input
+// component are the only non-render code.
 //
 // No provider id, label, or console URL is hardcoded here — all of it
 // arrives via props (id, label) or the `status` action (console). See the
@@ -39,15 +52,20 @@ import {
   type ConnectPhase,
 } from "./chatUtils";
 import { CopyButton } from "./CopyButton";
+import { Terminal } from "./Terminal";
 
-// Poll cadences (BET-312): 3s for both the device-code wait and the
-// post-restart readiness poll. The caps (5 min / 30 s) are intentionally
-// separate and live as constants here so a future tuning pass touches one
-// place, not three.
+// Poll cadences (BET-312, BET-354): 3s for both the device-code wait and
+// the post-restart readiness poll. BET-354 adds a 1s tick for the
+// Claude-login progress poll (file mtime is cheap to read at 1Hz and
+// the user wants to see the card flip promptly when the OAuth completes).
+// The caps (5 min / 30 s / 5 min) are intentionally separate and live as
+// constants here so a future tuning pass touches one place, not three.
 const DEVICE_POLL_INTERVAL_MS = 3_000;
 const DEVICE_POLL_LIMIT_MS = 5 * 60 * 1_000;
 const RESTART_POLL_INTERVAL_MS = 3_000;
 const RESTART_POLL_LIMIT_MS = 30_000;
+const CLAUDE_POLL_INTERVAL_MS = 1_000;
+const CLAUDE_POLL_LIMIT_MS = 5 * 60 * 1_000;
 
 // Track the in-flight action so an unmounted / unmounting component cannot
 // call setPhase on an unmounted tree (React's "set state on unmounted
@@ -93,7 +111,7 @@ export function ConnectProvider({
 
   // Fire `{action:"start"}` on mount. The server's resolveAuthMethod picks
   // the right opencode method index (NEVER a literal) and returns one of
-  // three shapes that drive the next state directly. Errors fall back to
+  // four shapes that drive the next state directly. Errors fall back to
   // the API-key path so a transient box-unreachable still gives the user a
   // way forward.
   useEffect(() => {
@@ -110,6 +128,24 @@ export function ConnectProvider({
       if (cancelled) return;
       if (res.action !== "start") {
         safeSetPhase({ kind: "failed", message: "Unexpected response from the box." });
+        return;
+      }
+      // BET-354: claude-login shape carries a sessionKey for the live
+      // terminal pane + the server-side startedAt timestamp the renderer
+      // passes back to the claude-status poll. The server has already
+      // stamped the metadata; the actual pty:spawn is below (in the
+      // Terminal's own useEffect) so the IPty sizes to the rendered
+      // cols/rows rather than a fixed 80x24.
+      if (res.shape === "claude-login") {
+        safeSetPhase({
+          kind: "needsClaudeLogin",
+          ptySessionKey: typeof res.sessionKey === "string" ? res.sessionKey : "",
+          startedAt: typeof res.startedAt === "number" ? res.startedAt : Date.now(),
+          cwd: typeof res.cwd === "string" ? res.cwd : "~",
+          url: "",
+          inputError: undefined,
+          preExisting: false,
+        });
         return;
       }
       if (res.shape === "oauth-auto") {
@@ -151,6 +187,77 @@ export function ConnectProvider({
     };
   }, [id, safeSetPhase]);
 
+  // BET-354: claude-status poll. Fires every 1s while `needsClaudeLogin`.
+  // The server checks the credentials file mtime + probes opencode's
+  // `connected[]`. We advance to `applying` on `completed` (the server
+  // has already called restartOpencode + verified connected[], so the
+  // `applying` effect skips its own restart — `restarted: true`).
+  // `pre-existing` advances to `applying` too: the user had a working
+  // login, the server did NOT restart (no fresh credentials to
+  // apply), and the standard 30s connected[] poll resolves the flow
+  // either to `done` (anthropic already online) or to the existing
+  // 30s-cap `failed` ("provider didn't come online"). `no-file` keeps
+  // polling. 5-minute hard cap matches the device-code cap (same
+  // rationale: an unbounded poll would leave the user staring at a
+  // stale UI forever).
+  useEffect(() => {
+    if (phase.kind !== "needsClaudeLogin") return;
+    const startedAt = phase.startedAt;
+    const sessionKey = phase.ptySessionKey;
+    const startedWall = Date.now();
+    const handle = window.setInterval(async () => {
+      if (!mounted.current) return;
+      if (isPollExpired(startedWall, Date.now(), CLAUDE_POLL_LIMIT_MS)) {
+        window.clearInterval(handle);
+        safeSetPhase({
+          kind: "failed",
+          message:
+            "The Claude sign-in didn't complete in time. Try again.",
+        });
+        return;
+      }
+      try {
+        const res = await window.api.opencodeProviderAuth({
+          action: "claude-status",
+          sessionKey,
+          startedAt,
+        });
+        if (!mounted.current) return;
+        if (res.action !== "claude-status" || !res.ok) return;
+        const p = res.progress;
+        if (!p) return;
+        if (p.state === "completed") {
+          // Server already called restartOpencode + probed connected[];
+          // tell the `applying` effect to skip its own restart so we
+          // don't flap opencode-serve a third time on the same flow.
+          window.clearInterval(handle);
+          safeSetPhase({
+            kind: "applying",
+            restartConfirmed: true,
+            restarted: true,
+          });
+          return;
+        }
+        if (p.state === "pre-existing") {
+          // Credentials file predates this connect flow. The user
+          // already had a working login; advance to the standard
+          // `applying` flow which polls connected[] (and only
+          // restarts if anthropic isn't there — restart is gated on
+          // the existing confirm bar in Settings).
+          window.clearInterval(handle);
+          safeSetPhase({
+            kind: "applying",
+            restartConfirmed: false,
+          });
+          return;
+        }
+      } catch {
+        /* keep polling; box may be transiently unreachable */
+      }
+    }, CLAUDE_POLL_INTERVAL_MS);
+    return () => window.clearInterval(handle);
+  }, [phase, safeSetPhase, mounted]);
+
   // Device-code poll (waiting). Polls `{action:"status"}` every 3s; the
   // provider-id appearing in `connected[]` is the success signal (opencode
   // has acknowledged the OAuth callback). Hard cap of 5 minutes — device
@@ -188,16 +295,27 @@ export function ConnectProvider({
   // poll drives the transition to `done` / `failed`. The 30s cap is what
   // catches a mistyped API key: the write succeeds, but the re-read is the
   // only proof the credential is real.
+  //
+  // BET-354 (Block #3): when phase.restarted is true (the Claude
+  // "completed" path), the server already called restartOpencode as
+  // part of pollClaudeLogin. Skipping the renderer's restart here is
+  // load-bearing — opencode-serve restarts drop every in-flight
+  // opencode turn across the box, and a third back-to-back restart on
+  // the same flow flaps systemd and (worse) destroys any user-visible
+  // progress that completed before the second restart.
   useEffect(() => {
     if (phase.kind !== "applying") return;
     if (confirmRestart && !phase.restartConfirmed) return;
     let cancelled = false;
     const startedAt = Date.now();
+    const serverAlreadyRestarted = phase.restarted === true;
     (async () => {
-      try {
-        await window.api.opencodeRestart();
-      } catch {
-        /* poll below will catch a no-op restart on a reachable box */
+      if (!serverAlreadyRestarted) {
+        try {
+          await window.api.opencodeRestart();
+        } catch {
+          /* poll below will catch a no-op restart on a reachable box */
+        }
       }
       if (cancelled) return;
       const tick = async () => {
@@ -229,16 +347,27 @@ export function ConnectProvider({
     return () => {
       cancelled = true;
     };
-    // `phase.restartConfirmed` only exists on the `applying` variant; the
-    // ternary narrows `phase` for the access and the `null` branch keeps
-    // the deps array a uniform value list (the false branch never reads
-    // the field).
-  }, [phase.kind, phase.kind === "applying" ? phase.restartConfirmed : null, confirmRestart, id, safeSetPhase]);
+    // `phase.restartConfirmed` / `phase.restarted` only exist on the
+    // `applying` variant; the ternary narrows `phase` for the access and
+    // the `null` branch keeps the deps array a uniform value list (the
+    // false branches never read the field).
+  }, [phase.kind, phase.kind === "applying" ? phase.restartConfirmed : null, phase.kind === "applying" ? phase.restarted : null, confirmRestart, id, safeSetPhase]);
 
-  // done is terminal — fire onDone exactly once. Mounted-check guards the
-  // case where setPhase({kind:"done"}) races with unmount.
+  // done is terminal — fire onDone exactly once when the phase KIND
+  // becomes "done". Deps `[phase.kind, onDone]` so updates to fields
+  // within the same kind (e.g. inputError) do not re-fire onDone.
+  //
+  // Claude-login teardown (server-side metadata) is handled by the
+  // ClaudeLoginBlock's own unmount cleanup (its useEffect on
+  // ptySessionKey), which calls claudeLoginCancel when ClaudeLoginBlock
+  // unmounts. We deliberately do NOT call cancelClaudeLoginSession
+  // here — earlier this effect fired on entry to needsClaudeLogin and
+  // cancelled the just-minted server session, breaking every
+  // subsequent claude-status poll (server returned unknown_session and
+  // the flow never advanced; BET-354 cycle-2 Block #1).
   useEffect(() => {
-    if (phase.kind === "done") onDone(true);
+    if (phase.kind !== "done") return;
+    onDone(true);
   }, [phase.kind, onDone]);
 
   const retry = useCallback(() => {
@@ -362,6 +491,49 @@ export function ConnectProvider({
             }}
           />
         </div>
+      )}
+
+      {/* BET-354: in-app Claude connect. Mounts a Terminal pane for the
+          spawned `claude auth login` so the user can see what the box is
+          doing (raw escape sequences render through xterm — the existing
+          Terminal component is reused, NOT a <pre>, per the POC's
+          recommendation). Above the terminal: a clickable URL extracted
+          from the live stream + a code input that feeds back through
+          pty:write. */}
+      {phase.kind === "needsClaudeLogin" && (
+        <ClaudeLoginBlock
+          ptySessionKey={phase.ptySessionKey}
+          cwd={phase.cwd}
+          url={phase.url}
+          preExisting={phase.preExisting ?? false}
+          inputError={phase.inputError}
+          onUrlDetected={(url) =>
+            safeSetPhase({ ...phase, url, inputError: undefined })
+          }
+          onSubmitCode={async (code) => {
+            // Feed the code back through the existing pty bus. The
+            // server has already attached a sessionKey to a live
+            // `claude auth login` process, so the write reaches the
+            // child directly. CR submits (verified by the BET-352 POC).
+            const trimmed = code.trim();
+            if (!trimmed) return;
+            try {
+              await window.api.ptyWrite(phase.ptySessionKey, trimmed + "\r");
+            } catch {
+              safeSetPhase({
+                ...phase,
+                inputError: "Couldn't reach the box. Try again.",
+              });
+              return;
+            }
+            // Clear any prior input error on a successful write. The
+            // claude-status poll will surface a real auth failure (no
+            // mtime advance after the next tick).
+            if (phase.inputError) {
+              safeSetPhase({ ...phase, inputError: undefined });
+            }
+          }}
+        />
       )}
 
       {phase.kind === "applying" && confirmRestart && !phase.restartConfirmed && (
@@ -517,3 +689,123 @@ const CredentialInput = memo(function CredentialInput({
     </div>
   );
 });
+
+// ---------------------------------------------------------------------------
+// BET-354: Claude connect card body.
+//
+// Self-contained — receives everything via props (ptySessionKey, cwd, the
+// extracted URL, the pre-existing flag, and any input error). Owns two
+// effects: the live URL extraction (re-runs on every pty data event the
+// Terminal passes up) and the pty:kill on unmount.
+//
+// The Terminal component (Terminal.tsx) is the single owner of the
+// pty:spawn / pty:write / ptyResize lifecycle; this block only adds the
+// connect-flow concerns (URL extraction, code input, server-side cancel
+// RPC). Per the issue: "Reuse the existing terminal component, not a <pre>"
+// — xterm renders the raw escape sequences the box's `claude auth login`
+// emits, so the user actually sees the same TUI as on a terminal.
+const CLAUDE_URL_RE =
+  /https:\/\/claude\.com\/cai\/oauth\/authorize\?[^\s\x07\x1b]+/g;
+
+function ClaudeLoginBlock({
+  ptySessionKey,
+  cwd,
+  url,
+  preExisting,
+  inputError,
+  onUrlDetected,
+  onSubmitCode,
+}: {
+  ptySessionKey: string;
+  cwd: string;
+  url: string;
+  preExisting: boolean;
+  inputError: string | undefined;
+  onUrlDetected: (url: string) => void;
+  onSubmitCode: (code: string) => void | Promise<void>;
+}) {
+  // Track every pty data chunk to extract the OAuth URL as soon as it
+  // appears. The Terminal owns the underlying IPty; we re-subscribe to
+  // the pty bus here so the URL appears above the terminal pane the
+  // moment it's emitted. Filtering is by sessionKey so we never read
+  // other terminals' bytes.
+  useEffect(() => {
+    if (!ptySessionKey || url) return;
+    let buffer = "";
+    const dispose = window.api.onPtyEvent((ev) => {
+      if (ev.sessionKey !== ptySessionKey) return;
+      if (ev.kind !== "data") return;
+      buffer += ev.data;
+      const m = buffer.match(CLAUDE_URL_RE);
+      if (m && m[0]) {
+        // Strip trailing `)].,;` defensively (terminal soft-wrap can
+        // bleed punctuation into the captured chunk).
+        onUrlDetected(m[0].replace(/[\]).,;]+$/, ""));
+      }
+    });
+    return () => dispose();
+  }, [ptySessionKey, url, onUrlDetected]);
+
+  // Defensive teardown: if the parent unmounts the card (×, retry after
+  // failure, navigation away) the IPty is reaped by the Terminal's own
+  // cleanup; this effect drops the SERVER-SIDE bookkeeping so a fresh
+  // start can register under the same name.
+  useEffect(() => {
+    if (!ptySessionKey) return;
+    return () => {
+      void window.api.claudeLoginCancel(ptySessionKey).catch(() => {
+        /* best-effort — the IPty is gone via the Terminal's own teardown */
+      });
+    };
+  }, [ptySessionKey]);
+
+  return (
+    <div className="space-y-1.5">
+      {preExisting ? (
+        <div className="text-text-muted">
+          {inputError ?? "Claude is already signed in on this box."}
+        </div>
+      ) : (
+        <>
+          <div className="text-text-muted">
+            Open the link below in your browser, then paste the code Claude
+            shows you here.
+          </div>
+          {url && (
+            <div className="flex items-center gap-1.5 min-w-0">
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-text-muted underline decoration-dotted truncate min-w-0"
+                title={url}
+              >
+                {url.replace(/^https?:\/\//, "")}
+              </a>
+              <CopyButton text={url} />
+            </div>
+          )}
+          <CredentialInput
+            label="Code from the page"
+            type="text"
+            placeholder="paste the code"
+            submitLabel="Submit"
+            error={inputError}
+            onSubmit={onSubmitCode}
+          />
+          {/* Live terminal pane — renders the raw escape sequences from
+              `claude auth login`. Sized small enough to live inside the
+              connect card without dominating the onboarding step. */}
+          <div className="rounded border border-border overflow-hidden h-40 bg-[#0B1020]">
+            <Terminal
+              sessionKey={ptySessionKey}
+              cwd={cwd}
+              active={true}
+              launcher={{ id: "claude-auth-login", flags: {} }}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

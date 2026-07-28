@@ -2177,8 +2177,23 @@ export function arrowDownNavigatesHistory(row: CaretRow): boolean {
 
 // State machine phases the connect card can be in. Mirrors the
 // `idle -> starting -> (waiting | needsCode | needsKey) -> applying -> done |
-// failed` transition graph from BET-312 exactly; adding a state would mean
-// the design has drifted and needs revisiting.
+// failed` transition graph from BET-312; BET-354 adds `needsClaudeLogin`
+// for the in-app Claude connect flow. The transition graph is now:
+//   starting -> (waiting | needsCode | needsKey | needsClaudeLogin) ->
+//               applying -> done | failed
+//
+//   needsClaudeLogin (BET-354):
+//     Active during an in-app Claude OAuth. `ptySessionKey` is the
+//     server-generated id (consumed by the existing pty bus) the renderer
+//     mounts a Terminal pane for. `startedAt` is the server-side timestamp
+//     the renderer passes back to the claude-status poll for the
+//     credentials-file mtime check. `url` is extracted from the live
+//     stream so the user gets a clickable "Open in browser" button
+//     without the terminal filling the card. `inputError` re-arms a
+//     failed submit. `preExisting` flips to true on a "pre-existing"
+//     poll result so the card can show the distinct copy
+//     ("Claude is already signed in. Restart didn't help…") instead of
+//     hanging in `waiting`.
 export type ConnectPhase =
   | { kind: "starting" }
   | { kind: "waiting"; url: string; instructions: string; methodIndex: number }
@@ -2190,7 +2205,28 @@ export type ConnectPhase =
       inputError?: string;
     }
   | { kind: "needsKey"; consoleUrl: string | null; inputError?: string }
-  | { kind: "applying"; restartConfirmed: boolean }
+  | {
+      kind: "needsClaudeLogin";
+      ptySessionKey: string;
+      startedAt: number;
+      cwd: string;
+      url: string;
+      inputError?: string;
+      preExisting?: boolean;
+    }
+  | {
+      // BET-354: `restarted` is true when the server already called
+      // `restartOpencode()` for this transition (the Claude "completed"
+      // path). When true, the `applying` effect skips the renderer's
+      // own restart call — a second restart would flap opencode-serve
+      // and drop every in-flight opencode turn across the box. The
+      // Codex / Kimi paths leave `restarted` undefined (treated as
+      // false) so they still trigger the renderer's restart — that one
+      // is the only restart for those flows.
+      kind: "applying";
+      restartConfirmed: boolean;
+      restarted?: boolean;
+    }
   | { kind: "done" }
   | { kind: "failed"; message: string };
 
@@ -2226,6 +2262,10 @@ export function connectPhaseLabel(state: ConnectPhase): string {
       return "Enter the code";
     case "needsKey":
       return "Enter your API key";
+    case "needsClaudeLogin":
+      return state.preExisting
+        ? "Already signed in"
+        : "Awaiting Claude sign-in";
     case "applying":
       return "Applying…";
     case "done":

@@ -3,6 +3,8 @@
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
@@ -17,6 +19,7 @@ import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
 import * as subscriptionProviders from "./subscriptionProviders.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
+import { pollClaudeLogin } from "./opencode.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { MIN_CLIENT } from "./version.mjs";
@@ -28,6 +31,74 @@ import { MIN_CLIENT } from "./version.mjs";
 // server already passes an absolute cwd to tmux/opencode spawning.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SELF_UPDATE_SCRIPT = join(__dirname, "..", "..", "scripts", "self-update.sh");
+
+// ---------------------------------------------------------------------------
+// BET-354: Claude connect session registry
+// ---------------------------------------------------------------------------
+//
+// One pty per in-flight `claude auth login`. The sessionKey is generated
+// by `startClaudeLogin` (uuid), returned to the renderer, and used by
+// `pty:spawn`/`pty:write`/`pty:kill` on the existing pty bus — those
+// channels operate on whatever sessionKey the renderer holds, the new
+// registry just owns the metadata the connect card needs (startedAt for
+// the file-mtime progress check, the spawn cwd, and a way to look up the
+// session from the claude-status RPC handler).
+//
+// We DO NOT spawn a second IPty here — the renderer drives that via
+// `pty:spawn({launcher:{id:"claude-auth-login"}, sessionKey})` so the
+// data/exit events flow through the same bus everything else does.
+// `startClaudeLogin` only stamps the metadata; cancelClaudeLogin tears
+// it down.
+const _claudeLoginSessions = new Map();
+
+/** Test-only: peek the in-flight Claude connect sessions. */
+export function _getClaudeLoginSessions() {
+  return new Map(_claudeLoginSessions);
+}
+
+/** Test-only: clear between scenarios. */
+export function _resetClaudeLoginSessions() {
+  _claudeLoginSessions.clear();
+}
+
+/**
+ * Spawn-side metadata registrar for a Claude login flow. Called by the
+ * `opencode:provider-auth start` action when `describeConnectShape` returns
+ * `claude-login`. Returns `{action:"start", shape:"claude-login", sessionKey,
+ * startedAt, cwd}` to the renderer — the renderer then calls
+ * `pty:spawn({sessionKey, launcher:{id:"claude-auth-login"}, cwd})` itself,
+ * using the SAME pty bus every terminal/CLI uses. Splitting the metadata
+ * stamp from the actual pty.spawn lets the renderer mount a Terminal pane
+ * with its normal `useEffect`-driven spawn flow (so the pty is sized to
+ * the terminal component's actual rendered cols/rows, not a fixed 80x24).
+ */
+async function startClaudeLogin(id) {
+  const sessionKey = `claude-login-${randomUUID()}`;
+  const startedAt = Date.now();
+  const cwd = homedir();
+  _claudeLoginSessions.set(sessionKey, {
+    id,
+    startedAt,
+    cwd,
+    killed: false,
+  });
+  return {
+    action: "start",
+    shape: "claude-login",
+    sessionKey,
+    startedAt,
+    cwd,
+  };
+}
+
+function cancelClaudeLogin(sessionKey) {
+  const entry = _claudeLoginSessions.get(sessionKey);
+  if (!entry) return;
+  // The renderer's claude:login-cancel is paired with pty:kill(same
+  // sessionKey) — pty.kill handles the IPty teardown; here we just drop
+  // the metadata so a fresh start can register under the SAME name.
+  _claudeLoginSessions.delete(sessionKey);
+}
 
 export async function dispatch(handlers, channel, args) {
   const fn = handlers[channel];
@@ -463,8 +534,18 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
         }
         const shape = subscriptionProviders.describeConnectShape(
           resolved,
-          oauth.method,
+          oauth,
+          id,
         );
+        // BET-354: when describeConnectShape returns "claude-login", we
+        // also need to spawn `claude auth login` on the box. The renderer
+        // will drive it via the existing pty bus + the new
+        // `claude:login-status` channel. We return the sessionKey + the
+        // generated startedAt so the renderer can show a live terminal
+        // pane and the poller can detect completion via file mtime.
+        if (shape === "claude-login") {
+          return await startClaudeLogin(id);
+        }
         return {
           action: "start",
           shape,
@@ -501,12 +582,45 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
           error: r?.ok ? undefined : r?.error,
         };
       }
+      // BET-354: Claude login status check. The renderer's connect card
+      // polls this on its 1s tick while in the claude-login phase; the
+      // server handles the file-stat + opencode-restart + connected-poll
+      // logic and returns a structured progress object. The renderer
+      // never restarts opencode itself for Claude — the issue's hard rule
+      // ("call restartOpencode() unconditionally after the credentials file
+      // appears") is enforced here.
+      if (action === "claude-status") {
+        const sessionKey = String(req?.sessionKey ?? "");
+        const startedAt = Number(req?.startedAt ?? NaN);
+        const entry = _claudeLoginSessions.get(sessionKey);
+        if (!entry || !Number.isFinite(startedAt)) {
+          return {
+            action: "claude-status",
+            ok: false,
+            error: "unknown_session",
+          };
+        }
+        const progress = await pollClaudeLogin({
+          startedAt,
+          restartOpencode,
+          getProviders: oc.getProviders,
+        });
+        return { action: "claude-status", ok: true, progress };
+      }
       // Unknown action — surface as a generic failure so the renderer's
       // typed result narrows correctly without throwing across the wire.
       return { action: "status", providers: [] };
     },
 
-    // ---- scheduled prompts (manta-server owned; in-process on mobile) ----
+    // BET-354: explicitly cancel a Claude login session. The renderer calls
+    // this when the user closes the connect card (×/Cancel) or retries after
+    // a failure. The pty is killed and removed from the registry so a
+    // subsequent start generates a fresh sessionKey.
+    "claude:login-cancel": (sessionKey) => {
+      const key = String(sessionKey ?? "");
+      cancelClaudeLogin(key);
+      return { ok: true };
+    },    // ---- scheduled prompts (manta-server owned; in-process on mobile) ----
     // Mirror of desktop IPC.scheduleList / scheduleDelete. The store + firing
     // loop live in src/server/schedule.mjs; these just read/mutate it. Delete
     // publishes schedule.updated so the ScheduledTasksCard refetches live.

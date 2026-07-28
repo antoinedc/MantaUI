@@ -161,9 +161,17 @@ const opencodeProviderAuth = (req: unknown): Promise<{ action: "status"; provide
     providers: [
       { id: "anthropic", label: "Claude", plan: "Claude Pro / Max", console: null, docs: "https://claude.com/pricing", connected: true },
       { id: "openai", label: "Codex", plan: "ChatGPT Plus / Pro", console: null, docs: "https://openai.com/chatgpt/pricing", connected: false },
-      { id: "kimi-for-coding", label: "Kimi", plan: "Kimi For Coding", console: "https://www.kimi.com/code/console", docs: "https://www.kimi.com/code/docs/en/third-party-tools/opencode.html", connected: false },
+      { id: "kimi-for-coding", label: "Kimi", plan: "Kimi For Coding", console: "https://www.kimi.com/code/console", docs: "https://kimi.com/code/docs/en/third-party-tools/opencode.html", connected: false },
     ],
   });
+};
+
+// BET-354: no-op cancel for demo mode. Demo cards never mount the Claude
+// login flow (status always shows anthropic connected), so this is purely
+// present so the typed `claudeLoginCancel` method doesn't 404 when a
+// future demo mount calls it.
+const claudeLoginCancel = (_sessionKey: string): Promise<{ ok: boolean }> => {
+  return Promise.resolve({ ok: true });
 };
 
 // ===========================================================================
@@ -189,6 +197,7 @@ const explicitMethods = {
   getClientVersion,
   getServerVersion,
   opencodeProviderAuth,
+  claudeLoginCancel,
 } as const;
 
 // ===========================================================================

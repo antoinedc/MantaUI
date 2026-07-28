@@ -44,6 +44,13 @@ export const SUBSCRIPTION_PROVIDERS = [
     detect: ["~/.claude/.credentials.json"],
     console: null,
     docs: "https://claude.com/pricing",
+    // BET-354: tag that flags this row for the claude-login connect shape
+    // + the `claude auth login` spawn path. Kept here (rather than
+    // special-cased in describeConnectShape by id) so the registry table
+    // remains the single source of truth — adding a second
+    // Claude-auth-style provider later means adding a row, not editing a
+    // branch. describeConnectShape consults this tag.
+    authFlow: "claude-cli",
   },
   {
     id: "openai",
@@ -146,34 +153,64 @@ export function resolveAuthMethod(entry, methods) {
 // ---------------------------------------------------------------------------
 //
 // The renderer needs to know which UI to render for a given provider:
-//   "oauth-auto"  — paste-back flow where the user opens a URL on their own
-//                   device and types a device code back. The renderer shows
-//                   the URL + the "Enter the code shown on the page" input.
-//   "oauth-code"  — paste-back flow where opencode returns a short code AND
-//                   the auth URL. The renderer shows the code and the URL
-//                   (the user can copy either). Same renderer UX as auto;
-//                   the distinction matters for callers that want to know
-//                   whether to display the inline code.
-//   "api-key"     — the user pastes an API key into a password input.
+//   "oauth-auto"    — paste-back flow where the user opens a URL on their
+//                     own device and types a device code back. The renderer
+//                     shows the URL + the "Enter the code shown on the page"
+//                     input.
+//   "oauth-code"    — paste-back flow where opencode returns a short code
+//                     AND the auth URL. The renderer shows the code and the
+//                     URL (the user can copy either). Same renderer UX as
+//                     auto; the distinction matters for callers that want
+//                     to know whether to display the inline code.
+//   "api-key"       — the user pastes an API key into a password input.
+//   "claude-login"  — Claude-specific (BET-354). opencode's anthropic
+//                     auth-method has type "oauth" but the authorize URL is
+//                     empty (Anthropic is a passthrough over
+//                     ~/.claude/.credentials.json; the only way to write
+//                     that file is to run `claude auth login` on the box).
+//                     The renderer mounts a live terminal pane, extracts the
+//                     OAuth URL from the stream, and lets the user paste the
+//                     Anthropic callback code back. Resolved by
+//                     `describeConnectShape` ONLY when the resolved oauth
+//                     method has an empty url AND the registry id is
+//                     "anthropic" — the explicit-id gate is what keeps the
+//                     shape Claude-specific (BET-354: "Do not special-case
+//                     Claude in the components — but the registry CAN
+//                     special-case it because the policy lives here").
 //
-// Resolved by `describeConnectShape(resolvedMethod, authorizeMethod)`:
-//   resolvedMethod === null                              → "api-key"
+// Resolved by `describeConnectShape(resolvedMethod, authorizeResponse, id)`:
+//   id === "anthropic" && resolvedMethod.method.type === "oauth"
+//       && (oauthResponse?.url == null || oauthResponse.url === "")
+//                                                         → "claude-login"
+//   resolvedMethod == null                               → "api-key"
 //   resolvedMethod.method.type === "api"                 → "api-key"
-//   authorizeMethod === "code"                           → "oauth-code"
+//   authorizeResponse?.method === "code"                 → "oauth-code"
 //   otherwise                                            → "oauth-auto"
 
 /**
+ * @typedef {{ok:true, url:string, method?:string, instructions?:string} | {ok:false, error:string, detail?:string} | null | undefined} AuthorizeResponse
+ */
+
+/**
  * Pick the connect-card shape from the resolved method + opencode's
- * authorize response.
+ * authorize response + the registry id.
  *
  * @param {{index:number,method:object}|null} resolvedMethod  result of resolveAuthMethod
- * @param {string|undefined|null} authorizeMethod             opencode's `method` field on the authorize response
- * @returns {"oauth-auto"|"oauth-code"|"api-key"}
+ * @param {AuthorizeResponse} authorizeResponse               opencode's authorize response (ok/ok-false/null)
+ * @param {string} [id]                                       registry id; gates the Claude-specific shape
+ * @returns {"oauth-auto"|"oauth-code"|"api-key"|"claude-login"}
  */
-export function describeConnectShape(resolvedMethod, authorizeMethod) {
+export function describeConnectShape(resolvedMethod, authorizeResponse, id) {
   if (resolvedMethod == null) return "api-key";
   if (resolvedMethod.method?.type === "api") return "api-key";
-  if (authorizeMethod === "code") return "oauth-code";
+  if (id === "anthropic" && resolvedMethod.method?.type === "oauth") {
+    // opencode's anthropic authorize returns an empty URL because Claude
+    // auth is a passthrough over `~/.claude/.credentials.json`. Route to
+    // the live-terminal connect shape instead of pretending we got a URL.
+    const url = typeof authorizeResponse?.url === "string" ? authorizeResponse.url : "";
+    if (!url) return "claude-login";
+  }
+  if (authorizeResponse?.method === "code") return "oauth-code";
   return "oauth-auto";
 }
 

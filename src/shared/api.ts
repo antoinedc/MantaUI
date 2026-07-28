@@ -337,6 +337,12 @@ export interface Api {
   // never echoes it back, not in the return value and not in any log line.
   opencodeProviderAuth(req: OpencodeProviderAuthRequest): Promise<OpencodeProviderAuthResult>;
 
+  // BET-354: cancel an in-flight Claude login session. Drops the
+  // server-side metadata; the renderer is responsible for the matching
+  // ptyKill(sessionKey). Both calls together release the full session so
+  // a fresh start can register under the SAME name.
+  claudeLoginCancel(sessionKey: string): Promise<{ ok: boolean }>;
+
   // Server version (BET-180): returns the manta-server's package.json version,
   // served in-process via the `server:version` RPC channel (no HTTP round
   // trip). Used by MobileSettings to render "Server vX.Y.Z" under the URL

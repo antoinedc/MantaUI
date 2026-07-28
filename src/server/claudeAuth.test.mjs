@@ -7,6 +7,8 @@ import {
   isClaudeCredentialError,
   shouldAttemptRecovery,
   shouldRefreshAhead,
+  extractClaudeAuthUrl,
+  classifyClaudeLoginProgress,
 } from "./claudeAuth.mjs";
 
 // ===== parseCredentials =====
@@ -229,4 +231,101 @@ test("shouldRefreshAhead: respects a custom leadMs", () => {
     shouldRefreshAhead({ expiresAt: now + 2 * 60 * 60_000, refreshTokenExpiresAt: now + 10_000_000 }, now, 3 * 60 * 60_000),
     true,
   );
+});
+
+// ===== extractClaudeAuthUrl (BET-354) =====
+
+test("extractClaudeAuthUrl: extracts the live OAuth URL from a verbatim stdout chunk", () => {
+  // Verbatim capture from the BET-352 POC's pane. The URL is one logical
+  // line; the visible wrap is a renderer artifact.
+  const chunk = [
+    "Opening browser to sign in…",
+    "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key&code_challenge=1E6xfP1krrHacUqxrGCQx_u0jjEPN6VRwJCqih7BDok&code_challenge_method=S256&state=BCqkklUE391xOA5X8Z900durI9Rr9a3Bf2lkMS2c4HA",
+    "Paste code here if prompted > ",
+  ].join("\n");
+  const url = extractClaudeAuthUrl(chunk);
+  assert.ok(url);
+  assert.ok(url.startsWith("https://claude.com/cai/oauth/authorize?"));
+  assert.ok(url.includes("client_id="));
+  assert.ok(url.includes("state=BCqkklUE391xOA5X8Z900durI9Rr9a3Bf2lkMS2c4HA"));
+});
+
+test("extractClaudeAuthUrl: ignores the first-launch trust prompt's docs URL", () => {
+  // The trust prompt's "Security guide" link is the trap: a "first
+  // https://" filter picks this and never updates. Filter on URL SHAPE,
+  // not on byte order.
+  const chunk = [
+    "Quick safety check: Is this a project you created or one you trust?",
+    "  1. Yes, I trust this project",
+    "  2. No, exit",
+    "Read our security guide: https://docs.claude.com/en/docs/claude-code-security",
+    "Paste code here if prompted > ",
+  ].join("\n");
+  assert.equal(extractClaudeAuthUrl(chunk), null);
+});
+
+test("extractClaudeAuthUrl: still finds the OAuth URL after a docs URL in the same chunk", () => {
+  // A log that contains BOTH the docs link AND the OAuth URL — make sure
+  // the docs link doesn't shadow the real one.
+  const chunk = [
+    "Read our security guide: https://docs.claude.com/en/docs/claude-code-security",
+    "Opening browser to sign in…",
+    "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key&state=BCqkklUE391xOA5X8Z900durI9Rr9a3Bf2lkMS2c4HA",
+    "Paste code here if prompted > ",
+  ].join("\n");
+  const url = extractClaudeAuthUrl(chunk);
+  assert.ok(url);
+  assert.ok(url.startsWith("https://claude.com/cai/oauth/authorize?"));
+  assert.ok(!url.startsWith("https://docs.claude.com/"));
+});
+
+test("extractClaudeAuthUrl: strips trailing punctuation that survives a parenthesised wrap", () => {
+  // Some TUI terminals wrap long URLs in parens; the closing `)` bleeds into
+  // the captured chunk. The URL extractor strips trailing `)].,;` defensively.
+  const url = extractClaudeAuthUrl(
+    "(see https://claude.com/cai/oauth/authorize?code=true&state=ABC)",
+  );
+  assert.equal(url, "https://claude.com/cai/oauth/authorize?code=true&state=ABC");
+});
+
+test("extractClaudeAuthUrl: returns null for empty / non-string input", () => {
+  assert.equal(extractClaudeAuthUrl(""), null);
+  assert.equal(extractClaudeAuthUrl(null), null);
+  assert.equal(extractClaudeAuthUrl(undefined), null);
+  assert.equal(extractClaudeAuthUrl(42), null);
+});
+
+test("extractClaudeAuthUrl: returns null when the chunk has no authorize URL", () => {
+  assert.equal(extractClaudeAuthUrl("just some output without any url"), null);
+  assert.equal(extractClaudeAuthUrl(""), null);
+});
+
+// ===== classifyClaudeLoginProgress (BET-354) =====
+
+test("classifyClaudeLoginProgress: 'no-file' when the file is missing", () => {
+  assert.equal(classifyClaudeLoginProgress({ mtimeMs: null }, 1000), "no-file");
+  assert.equal(classifyClaudeLoginProgress(null, 1000), "no-file");
+  assert.equal(classifyClaudeLoginProgress(undefined, 1000), "no-file");
+});
+
+test("classifyClaudeLoginProgress: 'completed' when the file was modified AT or AFTER startedAt", () => {
+  // The credentials file appeared as a direct result of this connect flow.
+  assert.equal(classifyClaudeLoginProgress({ mtimeMs: 2000 }, 1000), "completed");
+  // Equal mtime counts as completed — `>=`, not `>` (some filesystems
+  // round to second granularity, an OAuth completion and the startedAt
+  // call landing in the same tick would otherwise miss).
+  assert.equal(classifyClaudeLoginProgress({ mtimeMs: 1000 }, 1000), "completed");
+});
+
+test("classifyClaudeLoginProgress: 'pre-existing' when the file was last modified BEFORE startedAt", () => {
+  // The user already had a working login before this card mounted.
+  assert.equal(classifyClaudeLoginProgress({ mtimeMs: 500 }, 1000), "pre-existing");
+});
+
+test("classifyClaudeLoginProgress: treats a non-finite startedAt as 'no-file'", () => {
+  // Defensive: a card that mounted without a clock (SSR, tests) cannot
+  // decide what "pre-existing" means, so it falls through to the
+  // "still authenticating" branch instead of incorrectly claiming success.
+  assert.equal(classifyClaudeLoginProgress({ mtimeMs: 2000 }, NaN), "no-file");
+  assert.equal(classifyClaudeLoginProgress({ mtimeMs: 2000 }, Infinity), "no-file");
 });
