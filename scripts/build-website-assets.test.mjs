@@ -22,6 +22,14 @@
 //   - og.png is a 1200x630 PNG.
 //   - .well-known/agent-skills/index.json is valid JSON.
 //   - .well-known/agent-skills/manta/SKILL.md has frontmatter and a body.
+//   - website/updates/server.json's version matches package.json's version.
+//     THIS ONE IS NOT COSMETIC: that manifest is the ONLY way a running box
+//     learns a new server release exists (src/server/serverUpdate.mjs polls it
+//     every 6h and drives the in-app update banner + the push notification).
+//     It shipped as a `0.0.0` placeholder and no release ever bumped it, so
+//     the banner had never fired for anyone and every box stayed on whatever
+//     it installed with. Nothing else catches this: the deploy workflow
+//     verifies the file is SERVED, not that it names the current version.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -234,6 +242,18 @@ test(".well-known/agent-skills/manta/SKILL.md has YAML frontmatter and body", ()
   assert.match(skill, /^license: MIT$/m, "frontmatter must declare license: MIT");
   assert.match(skill, /^description: /m, "frontmatter must declare a description");
   assert.ok(skill.length > 1000, "SKILL.md body must be substantial");
+});
+
+test("website/updates/server.json version matches package.json version", () => {
+  const manifest = JSON.parse(read("website/updates/server.json"));
+  const pkg = JSON.parse(read("package.json"));
+  assert.equal(
+    manifest.version,
+    pkg.version,
+    "website/updates/server.json is what tells a running box a new server release exists " +
+      "(src/server/serverUpdate.mjs polls it every 6h). If it lags package.json, no box is " +
+      "ever offered the update. Bump it in the same commit as the version bump.",
+  );
 });
 
 function stripTags(s) {
