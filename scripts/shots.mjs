@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 /**
  * scripts/shots.mjs — capture product screenshots from the demo-mode build
- * (BET-303) and write them into `website/` for the marketing site.
+ * (BET-303) and write them into `website/` for the marketing site. Also
+ * extracts the hero video's poster frame (BET-304 stage 2) from
+ * `website/hero.mp4` so the same pipeline produces every `website/*.webp`
+ * asset (the BET-322 acceptance criterion "npm run shots extracts
+ * hero-poster.webp from frame 0 of the rendered video").
  *
  * Pipeline:
  *   1. Build the renderer bundle (mobile/www/) with `vite build --config
@@ -13,6 +17,9 @@
  *      shot, then encode to `.webp` at quality 82.
  *   5. Composite `shot-sync.webp` (desktop hero + phone list, side-by-side)
  *      with sharp.
+ *   6. Extract frame 0 of `website/hero.mp4` (the BET-304 stage-2 render)
+ *      to `website/hero-poster.webp` via ffmpeg. The same sharp pipeline
+ *      re-encodes to webp for size parity with the rest of the site assets.
  *
  * Determinism gates — every one is required, every run must produce
  * byte-identical files. Two back-to-back invocations on an unchanged UI
@@ -37,6 +44,7 @@
  *   | shot-phone-list.webp    | phone 393x852    | ?demo&mobile   |
  *   | shot-phone-session.webp | phone 393x852    | ?demo&mobile, infra session |
  *   | shot-sync.webp          | composite        | both           |
+ *   | hero-poster.webp        | 1920x1080      | ffmpeg -ss 0 -i hero.mp4 (BET-322) |
  *
  * Usage:
  *   node scripts/shots.mjs [--skip-build] [--serve-dir <path>]
@@ -61,8 +69,10 @@ const ROOT = resolve(__dirname, "..");
 const RENDERER_DIR = join(ROOT, "mobile/www");
 const WEBSITE_DIR = join(ROOT, "website");
 const CHROME_PATH = "/usr/bin/google-chrome";
+const FFMPEG_PATH = "/usr/bin/ffmpeg";
 const MAX_SIZE_KB = 250;
 const WEBP_QUALITY = 82;
+const POSTER_MAX_SIZE_KB = 250;
 
 // CSS injected via `addStyleTag` per page. Two effects:
 //   - Disable the sidebar running-dot pulse + every other CSS animation
@@ -415,6 +425,65 @@ async function composeSync(heroPath, phonePath, outPath) {
     .toFile(outPath);
 }
 
+// Extract frame 0 of `hero.mp4` to `hero-poster.webp` (BET-322). The video
+// is rendered by `npm run video` (Remotion, see video/package.json); the
+// poster is the static fallback the website's hero `<video poster=…>`
+// element shows until the video buffers, and what reduced-motion users see
+// outright. ffmpeg handles the frame extraction; sharp re-encodes to webp
+// at the same quality as the rest of the site assets.
+//
+// Why ffmpeg instead of Playwright + Chrome: BET-303's screenshot harness
+// captures LIVE web pages via Playwright. The poster is a frame FROM a
+// video file, not a page in a browser — driving Chromium to load the mp4,
+// seek to frame 0, and screenshot is much heavier than `ffmpeg -ss 0 -i
+// hero.mp4 -frames:v 1 -f image2pipe` for the same byte-identical output.
+// ffmpeg is a system dependency, present wherever Chrome is.
+//
+// `-ss 0` (before `-i`) seeks to the keyframe at frame 0; combined with
+// `-frames:v 1` this returns exactly one PNG-equivalent frame. `-update 1`
+// is implicit when piping; we pipe into sharp so we never touch disk for
+// the intermediate PNG.
+async function extractPoster(videoPath, outPath) {
+  if (!existsSync(FFMPEG_PATH)) {
+    throw new Error(
+      `ffmpeg not found at ${FFMPEG_PATH} — required for poster extraction`,
+    );
+  }
+  log(`→ hero-poster.webp (ffmpeg frame 0 of ${videoPath})`);
+  // Spawn ffmpeg and pipe its stdout (a single-frame PNG) into sharp.
+  // Using a child process rather than `-frames:v 1` + a temp file keeps
+  // the working directory clean.
+  const ff = spawn(
+    FFMPEG_PATH,
+    [
+      "-y",
+      "-ss",
+      "0",
+      "-i",
+      videoPath,
+      "-frames:v",
+      "1",
+      "-f",
+      "image2pipe",
+      "-vcodec",
+      "png",
+      "-loglevel",
+      "error",
+      "-",
+    ],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  const chunks = [];
+  for await (const chunk of ff.stdout) chunks.push(chunk);
+  const exitCode = await new Promise((resolve) => ff.on("close", resolve));
+  if (exitCode !== 0) {
+    throw new Error(`ffmpeg exited with code ${exitCode}`);
+  }
+  const buf = Buffer.concat(chunks);
+  await sharp(buf).webp({ quality: WEBP_QUALITY }).toFile(outPath);
+  log(`  ${buf.length} bytes → hero-poster.webp`);
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const skipBuild = args.includes("--skip-build");
@@ -485,6 +554,26 @@ async function main() {
       fail("cannot compose shot-sync.webp: hero or phone source missing");
     }
 
+    // Hero video poster (BET-304 stage 2 / BET-322). Extract frame 0 of
+    // `website/hero.mp4` (rendered by `npm run video`) to a webp the
+    // website's hero <video> element uses as the static fallback. Uses the
+    // same sharp webp encoder as the rest of the site assets so byte-
+    // comparable CI checks against it are apples-to-apples.
+    const heroVideo = join(WEBSITE_DIR, "hero.mp4");
+    const posterOut = join(WEBSITE_DIR, "hero-poster.webp");
+    if (existsSync(heroVideo)) {
+      try {
+        await extractPoster(heroVideo, posterOut);
+        producedPaths["hero-poster.webp"] = posterOut;
+      } catch (e) {
+        fail(`hero-poster.webp extraction failed: ${e.message}`);
+      }
+    } else {
+      log(
+        `[shots] ${heroVideo} not present; skipping poster extraction (run \`npm run video\` first)`,
+      );
+    }
+
     // Size-check every output. The acceptance criterion is ≤ 250KB.
     for (const name of [
       "shot-hero.webp",
@@ -493,15 +582,21 @@ async function main() {
       "shot-phone-list.webp",
       "shot-phone-session.webp",
       "shot-sync.webp",
+      "hero-poster.webp",
     ]) {
       const p = join(WEBSITE_DIR, name);
       if (!existsSync(p)) {
+        // hero-poster is opt-in (the video may not exist yet on a fresh
+        // checkout that ran `npm run shots` before `npm run video`). Skip
+        // that one silently; the rest are mandatory.
+        if (name === "hero-poster.webp") continue;
         fail(`shot missing: ${name}`);
         continue;
       }
       const kb = statSync(p).size / 1024;
-      if (kb > MAX_SIZE_KB) {
-        fail(`${name} is ${kb.toFixed(1)}KB (> ${MAX_SIZE_KB}KB)`);
+      const ceiling = name === "hero-poster.webp" ? POSTER_MAX_SIZE_KB : MAX_SIZE_KB;
+      if (kb > ceiling) {
+        fail(`${name} is ${kb.toFixed(1)}KB (> ${ceiling}KB)`);
       } else {
         log(`✓ ${name} ${kb.toFixed(1)}KB`);
       }

@@ -51,6 +51,13 @@ const SES_ETHERNAL_IDLE = "ses_5e9c1b3a7d2f4e6c";
 const SES_ETHERNAL_QUESTION = "ses_8b4d6c2e1a9f3d5b";
 const SES_MARKETING_PERM = "ses_6f1a3c5e9b2d4f8c";
 
+// Fixed reference timestamp — anchors every relative offset in the fixture
+// so two consecutive renders of the hero video are byte-comparable (per the
+// BET-322 acceptance test) and the screenshot harness's existing drift
+// gate (BET-303 → BET-341) stays byte-identical across PR-time runs.
+// `Date.now()` would shift every offset on every run.
+export const DEMO_T0 = 1_700_000_000_000; // 2023-11-14T22:13:20Z.
+
 // =============================================================================
 // AppConfig — what configGet returns. Includes a valid boxToken so the
 // transport-mode resolver lands on "http" (App.tsx renders the normal shell,
@@ -202,7 +209,7 @@ export const demoStatus: Record<
       attention: true,
       attentionKind: "idle",
       // ~14m ago: amber "aging" stage (50–90% of 1h TTL).
-      lastMessageAt: Date.now() - 14 * 60_000,
+      lastMessageAt: DEMO_T0 - 14 * 60_000,
     },
     2: {
       running: false,
@@ -264,7 +271,7 @@ export const demoMessages: OpencodeMessage[] = [
       id: "msg_u1",
       sessionID: SES_INFRA,
       role: "user",
-      time: { created: Date.now() - 90_000 },
+      time: { created: DEMO_T0 - 90_000 },
     },
     parts: [
       {
@@ -583,6 +590,12 @@ export const demoPermission: PermissionRequest = {
 // Opencode session list — what opencodeListSessions returns. Drives the
 // backfillLastMessageTimes fan-out (the most recent active chat session's
 // `time.updated` becomes its sidebar age label).
+//
+// Timestamps are anchored to `DEMO_T0` (a fixed reference moment, NOT
+// `Date.now()`) so the hero-video render is deterministic across runs. The
+// screenshot harness already exercises this property (`prefers-reduced-motion`
+// + the byte-equal drift gate in scripts/shots.mjs); keeping the fixture
+// deterministic lets the video reproduce the same stills it composes from.
 // =============================================================================
 export const demoSessionList: OpencodeSessionListItem[] = [
   {
@@ -590,7 +603,7 @@ export const demoSessionList: OpencodeSessionListItem[] = [
     slug: "deploy-billing",
     title: "Deploy new billing service",
     directory: "/home/dev/projects/infra/terraform/billing",
-    time: { created: Date.now() - 90_000, updated: Date.now() - 30_000 },
+    time: { created: DEMO_T0 - 90_000, updated: DEMO_T0 - 30_000 },
     model: { id: "claude-opus-4-7", providerID: "anthropic" },
     tokens: { input: 70_155, output: 485 },
   },
@@ -599,7 +612,7 @@ export const demoSessionList: OpencodeSessionListItem[] = [
     slug: "csv-export",
     title: "Add CSV export",
     directory: "/home/dev/projects/ethernal/services/billing",
-    time: { created: Date.now() - 600_000, updated: Date.now() - 5_000 },
+    time: { created: DEMO_T0 - 600_000, updated: DEMO_T0 - 5_000 },
     model: { id: "claude-sonnet-4-6", providerID: "anthropic" },
   },
   {
@@ -607,7 +620,7 @@ export const demoSessionList: OpencodeSessionListItem[] = [
     slug: "refactor-auth",
     title: "Refactor auth middleware",
     directory: "/home/dev/projects/ethernal/services/auth",
-    time: { created: Date.now() - 3_600_000, updated: Date.now() - 14 * 60_000 },
+    time: { created: DEMO_T0 - 3_600_000, updated: DEMO_T0 - 14 * 60_000 },
     model: { id: "claude-sonnet-4-6", providerID: "anthropic" },
   },
   {
@@ -615,7 +628,7 @@ export const demoSessionList: OpencodeSessionListItem[] = [
     slug: "orders-500s",
     title: "Investigate 500s in /api/v1/orders",
     directory: "/home/dev/projects/ethernal/services/orders",
-    time: { created: Date.now() - 1_800_000, updated: Date.now() - 60_000 },
+    time: { created: DEMO_T0 - 1_800_000, updated: DEMO_T0 - 60_000 },
     model: { id: "claude-sonnet-4-6", providerID: "anthropic" },
   },
   {
@@ -623,7 +636,7 @@ export const demoSessionList: OpencodeSessionListItem[] = [
     slug: "landing-copy",
     title: "Landing page copy iteration",
     directory: "/home/dev/projects/marketing-site/app",
-    time: { created: Date.now() - 720_000, updated: Date.now() - 45_000 },
+    time: { created: DEMO_T0 - 720_000, updated: DEMO_T0 - 45_000 },
     model: { id: "claude-sonnet-4-6", providerID: "anthropic" },
   },
 ];
@@ -672,3 +685,269 @@ export const demoState = {
   sessions: demoSessionList,
   models: demoModels,
 };
+
+// =============================================================================
+// Time-varying fixture — `demoStateAt(t)` returns a snapshot of the demo
+// state evaluated at `t` seconds from the start of the hero video. A still
+// is one evaluation of this; six beats per BET-304's description:
+//
+//   1. Desktop. User submits a task. Agent begins, tool calls streaming.
+//   2. The laptop closes. Desktop frame dims out.
+//   3. Hold on nothing for a beat — do not rush this; it's the whole argument.
+//   4. Phone lights up with a push notification: permission needed.
+//   5. Tap Allow on the phone. Transcript continues on the phone.
+//   6. Desktop reopens, already caught up. Tests pass. Work is done.
+//
+// `t` is in seconds. The whole sequence runs roughly 50s. We extend the
+// existing fixture rather than writing a second one (per BET-304); the static
+// `demoState` above is just `demoStateAt(0)`.
+//
+// `applyDemoStateAt(t)` mutates the module-level `demoState` in-place so the
+// existing demoApi (which captures `demoState.*` lazily via the Proxy) sees
+// the new values on its next call. Returns the (mutated) `demoState` for
+// callers that want to chain.
+//
+// All timestamps are derived from `DEMO_T0` (no `Date.now()` leakage) so two
+// consecutive renders are byte-comparable (per the BET-322 acceptance test).
+// =============================================================================
+
+// Snapshot type — extends the static `demoState` shape with the time-varying
+// fields whose types can be null in certain beats (active session is null on
+// the "hold on nothing" beat; question/permission are null when resolved).
+// The cast at the end of `demoStateAt` keeps the surface a superset of
+// `demoState`'s shape so demoApi can keep its un-narrowed property accesses.
+type DemoStateSnapshot = {
+  config: typeof demoState.config;
+  projects: typeof demoState.projects;
+  status: typeof demoState.status;
+  activeProjectName: string | null;
+  activeWindowIndex: number | null;
+  activeSessionId: string | null;
+  branch: string;
+  messages: typeof demoState.messages;
+  question: typeof demoQuestion | null;
+  permission: typeof demoPermission | null;
+  sessions: typeof demoState.sessions;
+  models: typeof demoState.models;
+};
+
+// Six-beat timeline (seconds). Boundaries chosen so each beat gets roughly
+// 6–10s — long enough for the visual to register, short enough to keep the
+// total under the 50–70s budget.
+export const HERO_BEATS = {
+  // Beat 1 — desktop active, agent mid-stream (Bash running, permission pending).
+  BEAT_1_END: 10,
+  // Beat 2 — laptop closes, desktop dimming.
+  BEAT_2_END: 14,
+  // Beat 3 — hold on nothing.
+  BEAT_3_END: 24,
+  // Beat 4 — phone lights up with push notification: permission needed.
+  BEAT_4_END: 28,
+  // Beat 5 — tap Allow, transcript continues on phone.
+  BEAT_5_END: 36,
+  // Beat 6 — desktop reopens, agent done, tests pass. Total ~50s.
+  BEAT_6_END: 50,
+};
+
+// The two `PermissionRequest` clones we swap between. Beat 1 + 5: pending
+// permission. Beat 6: resolved (null) — the assistant completed and the
+// permission is no longer pending. Beat 3 / 4: irrelevant (no card visible).
+const PERMISSION_PENDING = demoPermission;
+
+function beatState(t: number): {
+  activeProjectName: string | null;
+  activeWindowIndex: number | null;
+  activeSessionId: string | null;
+  // Whether the desktop frame is "lit" (alpha 1) or dimming.
+  desktopLit: number;
+  // Whether the phone frame is visible (alpha > 0).
+  phoneLit: number;
+  // Whether the phone shows the session-list or the active chat session.
+  phoneScreen: "list" | "session";
+  // The currently-rendered permission request (or null when resolved).
+  currentPermission: typeof demoPermission | null;
+  // The currently-rendered question request (or null when resolved).
+  currentQuestion: typeof demoQuestion | null;
+  // Whether the in-flight assistant message is still running (no
+  // `time.completed`) or has finished (time.completed set). Drives the
+  // running dot + "Ruminating…" line.
+  assistantRunning: boolean;
+} {
+  // Default: Beat 1 / desktop / running / pending permission.
+  if (t < HERO_BEATS.BEAT_1_END) {
+    return {
+      activeProjectName: demoActiveProjectName,
+      activeWindowIndex: demoActiveWindowIndex,
+      activeSessionId: demoActiveSessionId,
+      desktopLit: 1,
+      phoneLit: 0,
+      phoneScreen: "list",
+      currentPermission: PERMISSION_PENDING,
+      currentQuestion: demoQuestion,
+      assistantRunning: true,
+    };
+  }
+  // Beat 2 — laptop closes. Desktop dimming, otherwise same as beat 1.
+  if (t < HERO_BEATS.BEAT_2_END) {
+    return {
+      activeProjectName: demoActiveProjectName,
+      activeWindowIndex: demoActiveWindowIndex,
+      activeSessionId: demoActiveSessionId,
+      desktopLit: 0.15, // dim — visible only as a hint of "the box is still working"
+      phoneLit: 0,
+      phoneScreen: "list",
+      currentPermission: PERMISSION_PENDING,
+      currentQuestion: demoQuestion,
+      assistantRunning: true,
+    };
+  }
+  // Beat 3 — hold on nothing. No active UI.
+  if (t < HERO_BEATS.BEAT_3_END) {
+    return {
+      activeProjectName: null,
+      activeWindowIndex: null,
+      activeSessionId: null,
+      desktopLit: 0,
+      phoneLit: 0,
+      phoneScreen: "list",
+      currentPermission: null,
+      currentQuestion: null,
+      assistantRunning: true,
+    };
+  }
+  // Beat 4 — phone lights up. Show the active session on phone with the
+  // permission card visible (the push notification beats 4's visual).
+  if (t < HERO_BEATS.BEAT_4_END) {
+    return {
+      activeProjectName: demoActiveProjectName,
+      activeWindowIndex: demoActiveWindowIndex,
+      activeSessionId: demoActiveSessionId,
+      desktopLit: 0,
+      phoneLit: 1,
+      phoneScreen: "session",
+      currentPermission: PERMISSION_PENDING,
+      currentQuestion: demoQuestion,
+      assistantRunning: true,
+    };
+  }
+  // Beat 5 — tap Allow on phone; transcript continues on the phone.
+  if (t < HERO_BEATS.BEAT_5_END) {
+    return {
+      activeProjectName: demoActiveProjectName,
+      activeWindowIndex: demoActiveWindowIndex,
+      activeSessionId: demoActiveSessionId,
+      desktopLit: 0,
+      phoneLit: 1,
+      phoneScreen: "session",
+      currentPermission: null, // user tapped Allow
+      currentQuestion: demoQuestion,
+      assistantRunning: true,
+    };
+  }
+  // Beat 6 — desktop reopens. Caught up. Tests pass. Agent finished.
+  return {
+    activeProjectName: demoActiveProjectName,
+    activeWindowIndex: demoActiveWindowIndex,
+    activeSessionId: demoActiveSessionId,
+    desktopLit: 1,
+    phoneLit: 0,
+    phoneScreen: "session",
+    currentPermission: null,
+    currentQuestion: null,
+    assistantRunning: false,
+  };
+}
+
+export function demoStateAt(t: number): DemoStateSnapshot {
+  const beat = beatState(t);
+  // The status block is keyed by project → window → status fields. We mutate
+  // a shallow clone so we never trash the source `demoStatus` between calls.
+  const status: typeof demoStatus = JSON.parse(JSON.stringify(demoStatus));
+  if (beat.activeSessionId) {
+    // Find the (project, window) that owns the active session. The infra
+    // session is the one with the question + permission cards in the
+    // fixture; mirror that session's state.
+    const [projName, winIdx] =
+      beat.activeSessionId === SES_INFRA
+        ? ["infra", 0]
+        : beat.activeSessionId === SES_ETHERNAL_RUN
+          ? ["ethernal", 0]
+          : beat.activeSessionId === SES_MARKETING_PERM
+            ? ["marketing", 0]
+            : ["infra", 0];
+    const ownerStatus = status[projName]?.[winIdx];
+    if (ownerStatus) {
+      ownerStatus.running = beat.assistantRunning;
+      ownerStatus.attention =
+        beat.currentPermission !== null || beat.currentQuestion !== null;
+      ownerStatus.attentionKind = beat.currentPermission
+        ? "permission"
+        : beat.currentQuestion
+          ? "question"
+          : "idle";
+      // lastMessageAt advances with `t` so the sidebar's "now" label feels
+      // live during the video. Anchored on DEMO_T0 so the value is stable
+      // across renders.
+      ownerStatus.lastMessageAt = DEMO_T0 - Math.round(t * 1000);
+    }
+  }
+  return {
+    config: demoState.config,
+    projects: demoState.projects,
+    status,
+    activeProjectName: beat.activeProjectName,
+    activeWindowIndex: beat.activeWindowIndex,
+    activeSessionId: beat.activeSessionId,
+    branch: demoState.branch,
+    messages: demoState.messages,
+    question: beat.currentQuestion,
+    permission: beat.currentPermission,
+    sessions: demoState.sessions,
+    models: demoState.models,
+  };
+}
+
+// Mutate the module-level `demoState` in place so the demoApi (which closes
+// over `demoState` lazily via the module reference) sees the time-varying
+// values on its next call. The status block is rebuilt as a fresh object so
+// deep-equal checks in the renderer pick up the change.
+//
+// Returns the same `demoState` object so callers can chain.
+export function applyDemoStateAt(t: number): typeof demoState {
+  const next = demoStateAt(t);
+  demoState.status = next.status as typeof demoState.status;
+  // The static `demoState` types `activeProjectName` / `activeWindowIndex` /
+  // `activeSessionId` as non-nullable (their demoState-at-t=0 values), but
+  // the time-varying fixture legitimately returns null on the "hold on
+  // nothing" beat. The renderer treats null as "no active session" via the
+  // same path the httpApi takes when a session is killed mid-flight.
+  demoState.activeProjectName =
+    (next.activeProjectName as typeof demoState.activeProjectName) ?? null;
+  demoState.activeWindowIndex =
+    (next.activeWindowIndex as typeof demoState.activeWindowIndex) ?? null;
+  demoState.activeSessionId =
+    (next.activeSessionId as typeof demoState.activeSessionId) ?? null;
+  demoState.question = next.question as typeof demoState.question;
+  demoState.permission = next.permission as typeof demoState.permission;
+  // Stamp a `time.completed` on the in-flight assistant message when the
+  // assistant is no longer running. The renderer checks this to decide
+  // whether to render the "Ruminating…" line / pulsing running dot.
+  if (!next.activeSessionId) {
+    // No active session; leave the message alone.
+  } else if (demoMessages[1].info) {
+    const info = demoMessages[1].info as { time?: { completed?: number } };
+    if (next.activeProjectName === demoActiveProjectName) {
+      info.time = info.time ?? {};
+      if (next.activeSessionId === demoActiveSessionId) {
+        info.time.completed = next.activeSessionId
+          ? (beatState(t).assistantRunning ? undefined : DEMO_T0)
+          : undefined;
+      } else {
+        info.time.completed = undefined;
+      }
+    } else {
+      info.time = { completed: DEMO_T0 };
+    }
+  }
+  return demoState;
+}
