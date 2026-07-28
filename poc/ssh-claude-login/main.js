@@ -42,7 +42,18 @@ function startSession(host) {
   // -tt forces a remote PTY even though our local side is just pipes; `claude`
   // therefore believes it is interactive while we just read/write ordinary
   // streams. No pseudo-terminal library needed.
-  const child = spawn('ssh', ['-tt', '-o', 'BatchMode=yes', host, 'claude'], {
+  // Two findings are baked into this argv:
+  //
+  // 1. Absolute path, not bare `claude`. `ssh host claude` runs a non-login,
+  //    non-interactive shell that never sources the rc files putting
+  //    ~/.local/bin on PATH, so bare `claude` dies with "command not found".
+  //    HARDCODED to this box's dev user — generalize before reuse.
+  // 2. `auth login`, not the bare TUI. It goes straight to the OAuth flow:
+  //    no first-launch trust prompt, and the OAuth URL is the first https://
+  //    in the stream so URL detection latches onto the right one. Bare
+  //    `claude` on an already-authenticated box just opens the normal UI and
+  //    never offers a login at all.
+  const child = spawn('ssh', ['-tt', '-o', 'BatchMode=yes', host, '/home/dev/.local/bin/claude', 'auth', 'login'], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, TERM: 'xterm-256color' },
   });
@@ -132,7 +143,7 @@ ipcMain.handle('ssh:check', async (_evt, host) => {
   const creds = await runRemote(h, 'test -f ~/.claude/.credentials.json && echo CREDS_YES || echo CREDS_NO');
   const providerBefore = await runRemote(
     h,
-    'curl -s --max-time 5 http://127.0.0.1:4096/provider'
+    'curl -s --max-time 30 http://127.0.0.1:4096/provider'
   );
   const restart = await runRemote(
     h,
@@ -142,7 +153,7 @@ ipcMain.handle('ssh:check', async (_evt, host) => {
   );
   const providerAfter = await runRemote(
     h,
-    'curl -s --max-time 5 http://127.0.0.1:4096/provider'
+    'curl -s --max-time 30 http://127.0.0.1:4096/provider'
   );
   const flag = (text) => {
     try {

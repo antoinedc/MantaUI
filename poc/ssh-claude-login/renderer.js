@@ -133,4 +133,8 @@ window.poc.onOpen(({ host }) => {
 window.poc.onClosed(({ reason, host }) => {
   connected = false;
   setStatus(`disconnected (${reason})`);
+  // Also mark it in the log: without this a session death followed by a
+  // reconnect looks like the prompt simply redrawing itself, and anything
+  // typed in between goes to a dead process.
+  appendLog('stderr', `\n[session closed: ${reason}]\n`);
 });
