@@ -2214,7 +2214,19 @@ export type ConnectPhase =
       inputError?: string;
       preExisting?: boolean;
     }
-  | { kind: "applying"; restartConfirmed: boolean }
+  | {
+      // BET-354: `restarted` is true when the server already called
+      // `restartOpencode()` for this transition (the Claude "completed"
+      // path). When true, the `applying` effect skips the renderer's
+      // own restart call — a second restart would flap opencode-serve
+      // and drop every in-flight opencode turn across the box. The
+      // Codex / Kimi paths leave `restarted` undefined (treated as
+      // false) so they still trigger the renderer's restart — that one
+      // is the only restart for those flows.
+      kind: "applying";
+      restartConfirmed: boolean;
+      restarted?: boolean;
+    }
   | { kind: "done" }
   | { kind: "failed"; message: string };
 

@@ -37,3 +37,4 @@ HANDOFF*.md
 # True source lives in src/renderer/ + src/renderer/public/. Do NOT hand-edit
 # anything under mobile/www/ — it will be overwritten by the next build.
 mobile/www/
+report/

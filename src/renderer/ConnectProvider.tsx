@@ -189,11 +189,17 @@ export function ConnectProvider({
 
   // BET-354: claude-status poll. Fires every 1s while `needsClaudeLogin`.
   // The server checks the credentials file mtime + probes opencode's
-  // `connected[]`. We advance to `applying` on `completed`; `pre-existing`
-  // (user already had a working login) flips the phase's `preExisting`
-  // flag so the UI can show the distinct copy; `no-file` keeps polling.
-  // 5-minute hard cap matches the device-code cap (same rationale: an
-  // unbounded poll would leave the user staring at a stale UI forever).
+  // `connected[]`. We advance to `applying` on `completed` (the server
+  // has already called restartOpencode + verified connected[], so the
+  // `applying` effect skips its own restart — `restarted: true`).
+  // `pre-existing` advances to `applying` too: the user had a working
+  // login, the server did NOT restart (no fresh credentials to
+  // apply), and the standard 30s connected[] poll resolves the flow
+  // either to `done` (anthropic already online) or to the existing
+  // 30s-cap `failed` ("provider didn't come online"). `no-file` keeps
+  // polling. 5-minute hard cap matches the device-code cap (same
+  // rationale: an unbounded poll would leave the user staring at a
+  // stale UI forever).
   useEffect(() => {
     if (phase.kind !== "needsClaudeLogin") return;
     const startedAt = phase.startedAt;
@@ -220,23 +226,29 @@ export function ConnectProvider({
         if (res.action !== "claude-status" || !res.ok) return;
         const p = res.progress;
         if (!p) return;
-        if (p.state === "pre-existing") {
+        if (p.state === "completed") {
+          // Server already called restartOpencode + probed connected[];
+          // tell the `applying` effect to skip its own restart so we
+          // don't flap opencode-serve a third time on the same flow.
           window.clearInterval(handle);
           safeSetPhase({
-            kind: "needsClaudeLogin",
-            ptySessionKey: sessionKey,
-            startedAt,
-            cwd: phase.cwd,
-            url: phase.url,
-            preExisting: true,
-            inputError:
-              "Claude is already signed in on this box. If chat isn't working, restart the box and try again.",
+            kind: "applying",
+            restartConfirmed: true,
+            restarted: true,
           });
           return;
         }
-        if (p.state === "completed") {
+        if (p.state === "pre-existing") {
+          // Credentials file predates this connect flow. The user
+          // already had a working login; advance to the standard
+          // `applying` flow which polls connected[] (and only
+          // restarts if anthropic isn't there — restart is gated on
+          // the existing confirm bar in Settings).
           window.clearInterval(handle);
-          safeSetPhase({ kind: "applying", restartConfirmed: false });
+          safeSetPhase({
+            kind: "applying",
+            restartConfirmed: false,
+          });
           return;
         }
       } catch {
@@ -245,21 +257,6 @@ export function ConnectProvider({
     }, CLAUDE_POLL_INTERVAL_MS);
     return () => window.clearInterval(handle);
   }, [phase, safeSetPhase, mounted]);
-
-  // BET-354: teardown. When the card leaves `needsClaudeLogin` (Cancel,
-  // done, failed) the server-side metadata + the IPty both need to go.
-  // The matching renderer-side `ptyKill` is fired inside the Terminal
-  // component's cleanup; here we drop the server's bookkeeping via the
-  // dedicated channel so a fresh start can register under the same name.
-  const cancelClaudeLoginSession = useCallback(
-    (sessionKey: string) => {
-      if (!sessionKey) return;
-      void window.api.claudeLoginCancel(sessionKey).catch(() => {
-        /* best-effort; the IPty is torn down by the Terminal's own cleanup */
-      });
-    },
-    [],
-  );
 
   // Device-code poll (waiting). Polls `{action:"status"}` every 3s; the
   // provider-id appearing in `connected[]` is the success signal (opencode
@@ -298,16 +295,27 @@ export function ConnectProvider({
   // poll drives the transition to `done` / `failed`. The 30s cap is what
   // catches a mistyped API key: the write succeeds, but the re-read is the
   // only proof the credential is real.
+  //
+  // BET-354 (Block #3): when phase.restarted is true (the Claude
+  // "completed" path), the server already called restartOpencode as
+  // part of pollClaudeLogin. Skipping the renderer's restart here is
+  // load-bearing — opencode-serve restarts drop every in-flight
+  // opencode turn across the box, and a third back-to-back restart on
+  // the same flow flaps systemd and (worse) destroys any user-visible
+  // progress that completed before the second restart.
   useEffect(() => {
     if (phase.kind !== "applying") return;
     if (confirmRestart && !phase.restartConfirmed) return;
     let cancelled = false;
     const startedAt = Date.now();
+    const serverAlreadyRestarted = phase.restarted === true;
     (async () => {
-      try {
-        await window.api.opencodeRestart();
-      } catch {
-        /* poll below will catch a no-op restart on a reachable box */
+      if (!serverAlreadyRestarted) {
+        try {
+          await window.api.opencodeRestart();
+        } catch {
+          /* poll below will catch a no-op restart on a reachable box */
+        }
       }
       if (cancelled) return;
       const tick = async () => {
@@ -339,23 +347,28 @@ export function ConnectProvider({
     return () => {
       cancelled = true;
     };
-    // `phase.restartConfirmed` only exists on the `applying` variant; the
-    // ternary narrows `phase` for the access and the `null` branch keeps
-    // the deps array a uniform value list (the false branch never reads
-    // the field).
-  }, [phase.kind, phase.kind === "applying" ? phase.restartConfirmed : null, confirmRestart, id, safeSetPhase]);
+    // `phase.restartConfirmed` / `phase.restarted` only exist on the
+    // `applying` variant; the ternary narrows `phase` for the access and
+    // the `null` branch keeps the deps array a uniform value list (the
+    // false branches never read the field).
+  }, [phase.kind, phase.kind === "applying" ? phase.restartConfirmed : null, phase.kind === "applying" ? phase.restarted : null, confirmRestart, id, safeSetPhase]);
 
-  // done is terminal — fire onDone exactly once. Mounted-check guards the
-  // case where setPhase({kind:"done"}) races with unmount. Also drop
-  // any Claude login session bookkeeping (BET-354); the Terminal
-  // inside ClaudeLoginBlock already kills the IPty on unmount, but the
-  // server-side metadata needs an explicit cancel RPC.
+  // done is terminal — fire onDone exactly once when the phase KIND
+  // becomes "done". Deps `[phase.kind, onDone]` so updates to fields
+  // within the same kind (e.g. inputError) do not re-fire onDone.
+  //
+  // Claude-login teardown (server-side metadata) is handled by the
+  // ClaudeLoginBlock's own unmount cleanup (its useEffect on
+  // ptySessionKey), which calls claudeLoginCancel when ClaudeLoginBlock
+  // unmounts. We deliberately do NOT call cancelClaudeLoginSession
+  // here — earlier this effect fired on entry to needsClaudeLogin and
+  // cancelled the just-minted server session, breaking every
+  // subsequent claude-status poll (server returned unknown_session and
+  // the flow never advanced; BET-354 cycle-2 Block #1).
   useEffect(() => {
-    if (phase.kind === "needsClaudeLogin") {
-      cancelClaudeLoginSession(phase.ptySessionKey);
-    }
-    if (phase.kind === "done") onDone(true);
-  }, [phase, onDone, cancelClaudeLoginSession]);
+    if (phase.kind !== "done") return;
+    onDone(true);
+  }, [phase.kind, onDone]);
 
   const retry = useCallback(() => {
     safeSetPhase({ kind: "starting" });
