@@ -87,7 +87,7 @@ test("parseBearer extracts token from Authorization header", () => {
 // isExemptPath
 // ----------------------------------------------------------------------------
 
-test("isExemptPath exempts only /auth pairing + /pair onboarding + /hook delivery", () => {
+test("isExemptPath exempts only /auth pairing + /pair onboarding + /hook delivery + /pages hosting", () => {
   assert.equal(isExemptPath("/auth/pair"), true);
   assert.equal(isExemptPath("/auth/claim"), true);
   assert.equal(isExemptPath("/pair"), true);
@@ -95,13 +95,21 @@ test("isExemptPath exempts only /auth pairing + /pair onboarding + /hook deliver
   assert.equal(isExemptPath("/pair/logo.png"), true);
   assert.equal(isExemptPath("/hook/deadbeef"), true);
   assert.equal(isExemptPath("/hook/"), true);
+  // /pages/<sub> — hosted page (AI `serve_page` tool). Sandbox CSP keeps the
+  // document in an opaque origin so it can't reach the box_token. Visitor
+  // holds no token by definition.
+  assert.equal(isExemptPath("/pages/foo"), true);
+  assert.equal(isExemptPath("/pages/"), true);
+  assert.equal(isExemptPath("/pages/my-design"), true);
   // NOT exempt — these must be gated
   assert.equal(isExemptPath("/auth/status"), false);
   assert.equal(isExemptPath("/api/projects"), false);
+  assert.equal(isExemptPath("/api/serve-page"), false); // management API is gated
   assert.equal(isExemptPath("/rpc/tmux"), false);
   assert.equal(isExemptPath("/events"), false);
   assert.equal(isExemptPath("/pair/other"), false); // narrow exemption: only the 3 exact paths
   assert.equal(isExemptPath("/pairx"), false);      // prefix attack guard
+  assert.equal(isExemptPath("/pagesx"), false);     // prefix attack guard
   assert.equal(isExemptPath("/"), false);
   assert.equal(isExemptPath(null), false);
 });
@@ -340,12 +348,15 @@ test("authorize allows exempt + preflight + public-asset paths without a token",
   assert.equal(eng.authorize({ method: "GET", path: "/pair/qr.png" }).ok, true);
   assert.equal(eng.authorize({ method: "GET", path: "/pair/logo.png" }).ok, true);
   assert.equal(eng.authorize({ method: "POST", path: "/hook/abcd" }).ok, true);
+  assert.equal(eng.authorize({ method: "GET", path: "/pages/foo" }).ok, true);
   assert.equal(eng.authorize({ method: "GET", path: "/" }).ok, true);
   assert.equal(eng.authorize({ method: "GET", path: "/assets/x.js" }).ok, true);
   // /auth/status is NOT exempt → gated
   assert.equal(eng.authorize({ method: "GET", path: "/auth/status" }).ok, false);
   // /pair/other is NOT exempt — narrow allowlist
   assert.equal(eng.authorize({ method: "GET", path: "/pair/other" }).ok, false);
+  // /api/serve-page is NOT exempt — management API must be gated
+  assert.equal(eng.authorize({ method: "GET", path: "/api/serve-page" }).ok, false);
   // a POST to an asset-looking path is still gated (assets are GET-only)
   assert.equal(eng.authorize({ method: "POST", path: "/assets/x.js" }).ok, false);
 });

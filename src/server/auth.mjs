@@ -107,6 +107,11 @@ export function parseBearer(headerValue) {
 //     (code is in the URL fragment; qr.png is a shape-validated encoder).
 //   /hook/<token>          — external senders can't hold the box_token; the hook
 //     already authenticates via its own 128-bit token + HMAC (webhooks.mjs).
+//   /pages/<sub>           — hosted HTML page (AI `serve_page` tool). The page
+//     is public by design and its visitor holds no box_token; the box hostname
+//     itself is a 128-bit unguessable label, and the response's sandbox CSP
+//     (see src/server/servePage.mjs pageResponseHeaders) denies the page any
+//     access to the origin's credentials (localStorage, cookies).
 //   OPTIONS (handled by caller) — CORS preflight carries no credentials.
 //
 // NOTE: /auth/status is intentionally NOT exempt — it reports whether the
@@ -116,6 +121,7 @@ export function isExemptPath(path) {
   if (path === "/auth/pair" || path === "/auth/claim") return true;
   if (path === "/pair" || path === "/pair/qr.png" || path === "/pair/logo.png") return true;
   if (path === "/hook/" || path.startsWith("/hook/")) return true;
+  if (path === "/pages/" || path.startsWith("/pages/")) return true;
   return false;
 }
 

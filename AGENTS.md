@@ -643,30 +643,50 @@ generates on the box. Follows the same "MantaUI tools" pattern as the scheduler
   (atomic writes). Source file is **COPIED** at register time into
   `~/.manta/pages/<subdomain>/index.html` (stable snapshot — survives
   `/tmp` cleanup; updating = re-call `serve_page` with the same subdomain).
-- **In-process file server on `127.0.0.1:20080`** (`createFileServer`/
-  `startFileServer`, started in `index.mjs` alongside the schedule poller).
-  Routes by **Host header**: `<sub>.pages.mantaui.com` → that subdomain's
-  `index.html`. `extractSubdomain` (pure, tested) rejects non-matching hosts
-  and multi-level subdomains. Re-reads from disk per request with `no-store`,
-  so an overwrite of the page file is live immediately.
+- **Served from manta-server itself, on a path, under the box's own
+  published hostname.** Public URL shape is
+  `https://<gateway_host>/pages/<subdomain>` (e.g.
+  `https://0123abc.boxes.mantaui.com/pages/preview`). The hostname is the
+  one Caddy already reverse-proxies to `127.0.0.1:8787` for the SPA, with an
+  automatic LE cert — nothing new to provision. `gateway_host` is read fresh
+  per call from `~/.manta/auth.json` via `publicBaseUrl()` in
+  `gatewayRegister.mjs`. **An unregistered box (Tailscale-only / offline
+  install) fails `registerPage` loudly with a clear error** — never hands
+  back a URL that would silently 404 (BET-343).
+- **Sandbox CSP is load-bearing.** Pages now share an origin with the SPA
+  (which keeps the box_token in localStorage), so the response carries
+  `Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups
+  allow-modals` — *without* `allow-same-origin`, so the page lives in an
+  opaque origin and its scripts cannot read that storage or send
+  credentialed same-origin requests. Response headers also include
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and
+  `Cache-Control: no-store`. See `pageResponseHeaders()` in
+  `src/server/servePage.mjs` (test pins the absence of `allow-same-origin`).
+  `/pages/...` is auth-exempt in `isExemptPath` — the box hostname itself is
+  a 128-bit unguessable label, and a visitor by definition holds no token.
+- **`isValidSubdomain`** (1-63 lowercase alphanumeric + hyphen, no
+  leading/trailing hyphen) is the path-traversal guard: the route handler
+  validates the slug against it before touching the filesystem, so a crafted
+  `/pages/../etc/passwd` can never escape `~/.manta/pages/`. Sub-paths
+  (`/pages/a/b`) → 404 JSON. The validator is also used as the registry
+  key, so every persisted subdomain is a safe single path segment.
 - **TTL expiry** (default 24h, `ttlHours:0` = never). `startCleanupPoller`
   sweeps every 5 min (`createCleanupSweep`, injectable load/save/now, inFlight
   guard + `timer.unref()`), `rm`-ing expired page dirs. `stop_page` deletes
-  immediately. A request for a subdomain whose dir was deleted externally
-  prunes the stale registry entry.
-- **Public path is the system Caddy, NOT the Cloudflare tunnel.** Distinct from
-  MantaUI's own `app.mantaui.com` tunnel. `/etc/caddy/Caddyfile` has a
-  `*.pages.mantaui.com` block → `reverse_proxy 127.0.0.1:20080` with an **OVH
-  DNS-01 wildcard cert** (3-level subdomain, needs its own `tls { dns ovh … }`
-  block — not covered by the `*.dev` single-level wildcard). DNS: `*.pages`
-  A-record → `157.90.224.92` in the OVH `mantaui.com` zone (OVH creds are
-  root-only at `/etc/caddy/ovh.env`; the python `ovh` module + passwordless
-  sudo were used to add the record). Caddy reload: `sudo systemctl reload caddy`.
+  immediately. `readPage()` (exported, I/O-injectable) also prunes a registry
+  entry whose on-disk file is missing — page dir may have been deleted
+  externally or swept — matching the file-server behaviour this replaced.
 - **No UI card (v1).** Unlike the scheduler there's no ChatPanel management
-  card yet — the AI lists/stops via the tools. Port 20080 claimed in
-  `shared/ports/registry.md` (MantaUI `20xxx` block).
-- Tests: `src/server/servePage.test.mjs` (`isValidSubdomain`, `extractSubdomain`,
-  cleanup-sweep expiry, 10). Pure logic only.
+  card yet — the AI lists/stops via the tools.
+- **No extra port, no separate file server, no Host-header routing, no
+  wildcard DNS record.** All of that was the old design (BET-343 replaced
+  it). The 127.0.0.1:20080 listener is gone; the `*.pages.<domain>` Caddy
+  block, OVH DNS-01 wildcard cert, and wildcard A-record on the prod zone
+  are retired out-of-band (manual maintainer step, not part of any PR).
+- Tests: `src/server/servePage.test.mjs` (`isValidSubdomain`, `pageUrl`,
+  `registerPage` empty-`baseUrl` guard, `readPage` prune-on-missing,
+  cleanup-sweep expiry, `pageResponseHeaders` CSP invariant). Pure logic
+  only — no live HTTP.
 
 ## Peer awareness — MantaUI-native AI tool (`src/server/peers.mjs`)
 
@@ -2265,9 +2285,12 @@ box-local and unchanged — it doesn't touch the gateway.
   (from `website/`), `install.sh` (from `scripts/`), `llms-install.md`,
   `Manta-latest.dmg` + `latest-mac.yml` (desktop), `releases/*` (tarballs).
 - **Caddyfile is NOT in the repo** — it lives only on the box (`/etc/caddy/`),
-  unversioned. `*.pages.mantaui.com` (serve-page), `gateway.mantaui.com`
-  (gateway), and one `<box_id>.boxes.mantaui.com` per registered box have
-  their own Caddy blocks there.
+  unversioned. `gateway.mantaui.com` (gateway) and one
+  `<box_id>.boxes.mantaui.com` per registered box have their own Caddy
+  blocks there. (The old `*.pages.mantaui.com` serve-page vhost was retired
+  in BET-343 — pages now share the box's own hostname on the
+  `/pages/<sub>` path, so no wildcard DNS record, no OVH DNS-01 cert, no
+  extra port.)
 - **`scripts/release/publish.sh`** is the OLDER manual all-in-one deploy
   (tarball + desktop + server + install.sh, run from a laptop over
   `MANTA_PROD_HOST`). The tag-driven workflows above supersede it for

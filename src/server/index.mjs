@@ -54,11 +54,13 @@ import {
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
 import {
-  startFileServer,
   startCleanupPoller,
   registerPage,
   unregisterPage,
   listPages,
+  readPage,
+  pageResponseHeaders,
+  isValidSubdomain,
 } from "./servePage.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
@@ -84,7 +86,7 @@ import {
   readPairAsset,
 } from "./pairPage.mjs";
 import * as push from "./push.mjs";
-import { registerWithGateway } from "./gatewayRegister.mjs";
+import { registerWithGateway, publicBaseUrl } from "./gatewayRegister.mjs";
 import { readServerVersion, writeVersionResponse } from "./version.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -259,14 +261,6 @@ const { stop: stopServerUpdatePoller } = startServerUpdatePoller({
   currentVersion: SERVER_VERSION,
   notify: push.fireNotify,
 });
-
-// Serve-page file server: lightweight HTTP server on 127.0.0.1:20080 that
-// serves HTML pages from ~/.manta/pages/<subdomain>/index.html. Caddy
-// reverse-proxies *.pages.mantaui.com to this port. Pages are registered by
-// the remote AI's global opencode `serve_page` tool → POST /api/serve-page.
-// See src/server/servePage.mjs + docs/.
-// eslint-disable-next-line no-unused-vars
-const { stop: stopFileServer } = startFileServer();
 
 // Cleanup sweep for expired pages (runs every 5 min).
 // eslint-disable-next-line no-unused-vars
@@ -711,6 +705,30 @@ const handleRequest = async (req, res) => {
       "Cache-Control": "no-store",
     });
     res.end(png);
+    return;
+  }
+
+  // ---------- Hosted pages (PUBLIC, sandboxed) ----------
+  // GET /pages/<sub>  or  GET /pages/<sub>/   — one index.html per page.
+  // Pages share an origin with the SPA, so the response headers (sandbox CSP
+  // without allow-same-origin) put the document in an opaque origin: its
+  // scripts can't read localStorage or send credentialed same-origin requests
+  // and therefore can't reach the box_token. The route is auth-exempt (see
+  // isExemptPath) — a visitor by definition holds no token. See
+  // src/server/servePage.mjs.
+  if (req.method === "GET" && path.startsWith("/pages/")) {
+    const sub = path.slice("/pages/".length).replace(/\/+$/, "");
+    if (!sub || sub.includes("/") || !isValidSubdomain(sub)) {
+      respondJson(res, 404, { error: "not found" });
+      return;
+    }
+    const result = await readPage(sub);
+    if (!result.ok) {
+      respondJson(res, 404, { error: `page "${sub}" not found` });
+      return;
+    }
+    res.writeHead(200, pageResponseHeaders());
+    res.end(result.html);
     return;
   }
 
@@ -1193,11 +1211,12 @@ const handleRequest = async (req, res) => {
   // GET    /api/serve-page        → {pages:[{subdomain, url, expiresAt, ...}]}
   // DELETE /api/serve-page?subdomain= → {deleted:bool}
   // Created by the remote AI's global opencode `serve_page` tool. Source files
-  // are copied into ~/.manta/pages/<subdomain>/index.html and served by the
-  // in-process file server on 127.0.0.1:20080. Caddy reverse-proxies
-  // *.pages.mantaui.com to that port. Pages expire after TTL (default 24h).
+  // are copied into ~/.manta/pages/<subdomain>/index.html and served from
+  // manta-server itself at GET /pages/<subdomain> under the box's own
+  // published hostname. Pages expire after TTL (default 24h).
   if (path === "/api/serve-page") {
     try {
+      const baseUrl = publicBaseUrl();
       if (req.method === "POST") {
         const body = await readJsonBody(req);
         const result = await registerPage(
@@ -1207,7 +1226,7 @@ const handleRequest = async (req, res) => {
             ttlHours: body?.ttlHours,
             sessionID: body?.sessionID,
           },
-          BUS_PUBLISH_DEPS,
+          { ...BUS_PUBLISH_DEPS, baseUrl },
         );
         if (!result.ok) {
           respondJson(res, 400, { error: result.error });
@@ -1224,7 +1243,7 @@ const handleRequest = async (req, res) => {
         return;
       }
       if (req.method === "GET") {
-        const pages = listPages();
+        const pages = listPages({ baseUrl });
         respondJson(res, 200, { pages });
         return;
       }

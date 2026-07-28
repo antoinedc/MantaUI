@@ -1,11 +1,12 @@
-// servePage.mjs — file server + page registry for the mobile server.
+// servePage.mjs — page registry + read for the mobile server.
 //
 // The remote AI calls the global opencode `serve_page` tool
 // (docs/opencode-tools/serve-page.ts), which POSTs to manta-server's
 // /api/serve-page. The source file is copied into a stable directory
-// under ~/.manta/pages/<subdomain>/, and an in-process HTTP server
-// on 127.0.0.1:20080 serves it. Caddy reverse-proxies *.pages.mantaui.com
-// to this port, so the page is accessible at https://<sub>.pages.mantaui.com.
+// under ~/.manta/pages/<subdomain>/index.html. Pages are served from
+// manta-server itself at GET /pages/<subdomain> under the box's own
+// published hostname (https://<gateway_host>/pages/<subdomain>) — no
+// separate file server, no Host-header routing, no wildcard DNS record.
 //
 // Server-owned so pages survive Mac-app-close / session navigation / reboot.
 // Pages expire after a configurable TTL (default 24h). A cleanup sweep
@@ -13,41 +14,19 @@
 
 import { readFile, writeFile, rename, mkdir, copyFile, stat, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
-import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { join, dirname, extname } from "node:path";
+import { join, dirname } from "node:path";
 import { STATE_DIRNAME } from "../shared/paths.mjs";
 
 const STORE_PATH = join(homedir(), STATE_DIRNAME, "serve-page.json");
 const PAGES_DIR = join(homedir(), STATE_DIRNAME, "pages");
-const FILE_SERVER_PORT = 20080;
-const FILE_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TTL_HOURS = 24;
-const DOMAIN_SUFFIX = ".pages.mantaui.com";
 
 // Cleanup sweep interval — 5 min. Pages expire at TTL, sweep removes
 // stale entries. 5 min is coarse enough to be cheap, fine enough that
 // expired pages don't linger.
 const CLEANUP_MS = 5 * 60 * 1000;
-
-// MIME types for common file extensions.
-const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".htm": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".json": "application/json",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".ico": "image/x-icon",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-};
 
 // ---------------------------------------------------------------------------
 // Atomic write — same pattern as local.mjs / schedule.mjs
@@ -99,31 +78,26 @@ function resolvePageDir(subdomain) {
 }
 
 // Validate subdomain: 1-63 chars, alphanumeric + hyphen, no leading/trailing
-// hyphen. This prevents injection into the Host header and ensures the
-// subdomain matches the *.pages.mantaui.com wildcard cert.
+// hyphen. This keeps the value a safe single path segment under
+// /pages/<subdomain>, so the route handler can hand it straight to the FS
+// without any further traversal guard.
 export function isValidSubdomain(s) {
   return typeof s === "string" && /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(s);
 }
 
-// Extract the page subdomain from an incoming Host header. Returns null when
-// the host isn't under DOMAIN_SUFFIX, the subdomain is empty, or it contains a
-// dot (multi-level subdomains aren't valid page names). Pure + tested.
-export function extractSubdomain(hostHeader, suffix = DOMAIN_SUFFIX) {
-  if (typeof hostHeader !== "string") return null;
-  const host = hostHeader.split(":")[0].toLowerCase();
-  if (!host.endsWith(suffix)) return null;
-  const sub = host.slice(0, host.length - suffix.length);
-  if (!sub || sub.includes(".")) return null;
-  return sub;
+// Pure URL builder. Centralises the path shape so callers don't reconstruct
+// it independently.
+export function pageUrl(baseUrl, subdomain) {
+  return `${baseUrl}/pages/${subdomain}`;
 }
 
 // ---------------------------------------------------------------------------
-// CRUD — injectable via {load, save, publish}
+// CRUD — injectable via {load, save, publish, baseUrl}
 // ---------------------------------------------------------------------------
 
 export async function registerPage(
   { subdomain, filePath, ttlHours, sessionID },
-  { load = loadPages, save = savePages, publish } = {},
+  { load = loadPages, save = savePages, publish, baseUrl } = {},
 ) {
   if (!subdomain || !isValidSubdomain(subdomain)) {
     return {
@@ -133,6 +107,17 @@ export async function registerPage(
   }
   if (!filePath) {
     return { ok: false, error: "filePath is required" };
+  }
+  // An unregistered box has no published hostname, so any URL we returned
+  // would 404 silently — the exact failure this issue exists to kill.
+  if (!baseUrl) {
+    return {
+      ok: false,
+      error:
+        "This box has no published public hostname (it has not registered with " +
+        "the gateway), so a hosted page would not be reachable from anywhere. " +
+        "Page hosting is unavailable on this box.",
+    };
   }
 
   // Source file must exist and be a regular file.
@@ -176,7 +161,7 @@ export async function registerPage(
 
   return {
     ok: true,
-    url: `https://${subdomain}.pages.mantaui.com`,
+    url: pageUrl(baseUrl, subdomain),
     subdomain,
     expiresAt,
   };
@@ -203,14 +188,62 @@ export async function unregisterPage(
   return { deleted };
 }
 
-export function listPages() {
+export function listPages({ baseUrl } = {}) {
   return loadPages().map((p) => ({
     subdomain: p.subdomain,
-    url: `https://${p.subdomain}.pages.mantaui.com`,
+    url: baseUrl ? pageUrl(baseUrl, p.subdomain) : "",
     expiresAt: p.expiresAt,
     createdAt: p.createdAt,
     sessionID: p.sessionID,
   }));
+}
+
+// Read a served page from disk. Returns {ok:true, html:Buffer} on success,
+// or {ok:false} when the page is missing — in which case the matching
+// registry entry is also pruned (the page dir may have been removed
+// externally or swept), matching the file-server behaviour this replaces.
+// I/O is injectable so tests don't need a real filesystem.
+export async function readPage(
+  subdomain,
+  { load = loadPages, save = savePages } = {},
+) {
+  const pageFile = resolvePageFile(subdomain);
+  if (!existsSync(pageFile)) {
+    // Best-effort prune — a missing page dir is treated as "stop_page without
+    // a stop_page call", same as the old file server did.
+    try {
+      const pages = load();
+      const filtered = pages.filter((p) => p.subdomain !== subdomain);
+      if (filtered.length < pages.length) {
+        await save(filtered);
+      }
+    } catch {
+      // best-effort
+    }
+    return { ok: false };
+  }
+  try {
+    const html = await readFile(pageFile);
+    return { ok: true, html };
+  } catch {
+    return { ok: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Response headers — sandboxed + opaque-origin so a hosted page can't read
+// the box_token out of the app's localStorage (which lives on the SAME
+// origin now that pages share the hostname with the SPA).
+// ---------------------------------------------------------------------------
+
+export function pageResponseHeaders() {
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups allow-modals",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -260,66 +293,4 @@ export function startCleanupPoller({ intervalMs = CLEANUP_MS } = {}) {
   const timer = setInterval(sweep, intervalMs);
   timer.unref();
   return { stop: () => clearInterval(timer) };
-}
-
-// ---------------------------------------------------------------------------
-// HTTP file server — serves pages from disk on 127.0.0.1:20080
-// ---------------------------------------------------------------------------
-
-export function createFileServer({ host = FILE_SERVER_HOST, port = FILE_SERVER_PORT } = {}) {
-  const server = createServer(async (req, res) => {
-    // Extract subdomain from Host header.
-    // e.g. "preview.pages.mantaui.com" → "preview"
-    const subdomain = extractSubdomain(req.headers.host ?? "");
-    if (!subdomain) {
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "unknown host" }));
-      return;
-    }
-
-    const pageFile = resolvePageFile(subdomain);
-
-    if (!existsSync(pageFile)) {
-      // Page directory may have been deleted externally; clean up stale registry entry.
-      try {
-        const pages = loadPages();
-        const filtered = pages.filter((p) => p.subdomain !== subdomain);
-        if (filtered.length < pages.length) {
-          await savePages(filtered);
-        }
-      } catch {
-        // best-effort
-      }
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: `page "${subdomain}" not found` }));
-      return;
-    }
-
-    try {
-      const content = await readFile(pageFile);
-      const contentType = MIME[extname(pageFile).toLowerCase()] || "application/octet-stream";
-      res.writeHead(200, {
-        "content-type": contentType,
-        "content-length": content.length,
-        "cache-control": "no-store",
-      });
-      res.end(content);
-    } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "failed to read page" }));
-    }
-  });
-
-  return {
-    start: () => new Promise((resolve) => server.listen(port, host, resolve)),
-    stop: () => new Promise((resolve) => server.close(resolve)),
-    server,
-  };
-}
-
-export function startFileServer() {
-  const { start, stop, server } = createFileServer();
-  start();
-  console.log(`[serve-page] file server listening on ${FILE_SERVER_HOST}:${FILE_SERVER_PORT}`);
-  return { stop, server };
 }

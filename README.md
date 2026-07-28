@@ -169,8 +169,7 @@ used by reference); `~/.config/opencode/` (opencode config and the
 manta agent tools).
 
 Ports (all loopback on the box): 8787 manta-server; 4096
-opencode-serve; 20080 serve-page (behind `*.pages.<domain>` vhost);
-20081 hosted push gateway (not on customer boxes).
+opencode-serve; 20081 hosted push gateway (not on customer boxes).
 
 Components: `manta-server` (`src/server/`) runs at `127.0.0.1:8787`
 and owns tmux CRUD, PTY WebSocket, opencode proxy, auth, schedules,

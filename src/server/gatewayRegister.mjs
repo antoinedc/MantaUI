@@ -63,6 +63,18 @@ export function loadAuthFile(path) {
   }
 }
 
+// The box's own public base URL, or "" when the box has never registered with
+// the gateway (Tailscale-only / offline install) and therefore has no publicly
+// resolvable hostname. Read fresh on each call: registerWithGateway() may
+// write gateway_host AFTER the server has booted, so a value cached at module
+// scope would be permanently empty on a box's first run. Reuses loadAuthFile
+// rather than auth.mjs's loadAuth() because the latter deliberately drops
+// gateway_host (only returns {box_id, box_token, created_at}).
+export function publicBaseUrl(path = DEFAULT_AUTH_PATH) {
+  const host = loadAuthFile(path)?.gateway_host;
+  return typeof host === "string" && host ? `https://${host}` : "";
+}
+
 /**
  * Register this box with the hosted gateway at startup. Idempotent: safe to
  * call on every boot. Never throws — best-effort by design (push fanout
