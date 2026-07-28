@@ -167,24 +167,52 @@ function captionFor(t: number): string {
   return "";
 }
 
-// Per-frame sync. Pushes the time-varying fixture into the renderer's
-// module-level demoState + the zustand store so the App / MobileApp shells
-// re-render with the current beat's view.
+// Per-frame sync. `applyDemoStateAt(t)` mutates the module-level `demoState`
+// (the closure target of the `demoApi` Proxy's lazy reads) AND returns the
+// mutated object — we pull the beat-shaped fields that the renderer
+// components actually subscribe to and push them into the zustand store
+// so the next render sees the new values.
+//
+// What we push and what we don't:
+//   - `activeProjectName` + `activeWindowByProject`: the renderer reads
+//     these directly via `useStore((s) => s.activeProjectName)` and
+//     `useStore((s) => s.activeWindowByProject[s.activeProjectName])`
+//     (e.g. `SessionListScreen.tsx:108`). Push these.
+//   - `status`: the renderer's `applyStatusBatch` is what populates this,
+//     but it normally fires once at mount from `demoApi.onStatusEvent`.
+//     Pushing it per-frame makes the sidebar's running dot / pulse
+//     match the beat's `running` flag (beat 1 running, beat 6 not).
+//   - `question` / `permission`: these live in ChatPanel's local
+//     `useState`, NOT in the store. The renderer fetches them via
+//     `window.api.opencodeQuestions/Permissions(sessionId)` on mount and
+//     on permission/question events. For pass 1 we accept that the
+//     ChatPanel card doesn't visually transition mid-video — the demo
+//     state mutation still drives the data, but the renderer doesn't
+//     re-fetch. The visible beats (desktop→phone→desktop) are conveyed
+//     by the `desktopAlpha` / `phoneAlpha` opacity gates above.
 //
 // `useEffect` runs after the render commit; combined with `useCurrentFrame`
-// driven by `useEffect` re-renders the composition at every frame, so this
-// fires once per frame in practice. Doing it in `useEffect` (not the render
-// body) keeps the side-effects off the synchronous render path — the
-// renderer's child components observe the new store state on their next
-// render, not as a mid-render write.
+// driven re-renders the composition fires this once per frame. Doing the
+// mutation in `useEffect` (not the render body) keeps the side-effects off
+// the synchronous render path — the renderer's child components observe
+// the new store state on their next render, not as a mid-render write.
 function useFrameSync(t: number) {
   useEffect(() => {
-    applyDemoStateAt(t);
-    const s = useStore.getState();
+    const next = applyDemoStateAt(t);
+    // Translate the demoState's `activeWindowIndex` (single int for the
+    // active session) into the store's `activeWindowByProject` shape
+    // (Record<projectName, windowIndex>) so the renderer's selectors
+    // resolve to the right window.
+    const activeWindowByProject = {
+      ...useStore.getState().activeWindowByProject,
+    };
+    if (next.activeProjectName != null && next.activeWindowIndex != null) {
+      activeWindowByProject[next.activeProjectName] = next.activeWindowIndex;
+    }
     useStore.setState({
-      activeProjectName: s.activeProjectName,
-      activeWindowByProject: s.activeWindowByProject,
-      status: useStore.getState().status,
+      activeProjectName: next.activeProjectName,
+      activeWindowByProject,
+      status: next.status,
     });
   }, [t]);
 }
