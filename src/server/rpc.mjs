@@ -599,8 +599,14 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // attach — keyed by sessionKey (`${opencodeSessionId}:${modeId}`), not
     // projectName. See src/server/pty.mjs.
     //
+    // BET-346: SpawnOptions now also accepts `tmuxTarget?: string`. When
+    // set, the server spawns `tmux attach-session -t <target>` instead,
+    // letting Manta open a pre-existing tmux window (one it did not create).
+    // `tmuxTarget` wins over `launcher`; nothing sets it yet (renderer
+    // follow-up is a separate issue).
+    //
     // IPC.ptySpawn   = "pty:spawn"   preload: ipcRenderer.invoke(IPC.ptySpawn, opts)
-    //   → args[0] = SpawnOptions { sessionKey, cwd, cols, rows, launcher? }
+    //   → args[0] = SpawnOptions { sessionKey, cwd, cols, rows, launcher?, tmuxTarget? }
     //   Side-effect: data/exit events flow to bus as { kind:"pty", payload: PtyEvent }
     //   where PtyEvent = { kind:"data"|"exit", sessionKey, data? / code? }
     //   (matches src/shared/types.ts PtyEvent)
