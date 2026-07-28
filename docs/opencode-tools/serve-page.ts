@@ -69,14 +69,19 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
 
 export const serve_page = tool({
   description: [
-    "Host a standalone HTML webpage publicly on this box's own public URL.",
-    "Use when you generate a web page (design preview, demo, mockup, interactive",
-    "prototype) and want it accessible from anywhere — especially from the",
-    "machine where the manta UI is running. The tool returns the full public",
-    "URL from the server — echo `result.url` verbatim, NEVER construct one",
-    "yourself (the hostname differs per box). The page auto-expires after 24h",
-    "by default (configurable via ttlHours). To update a page, call this tool",
-    "again with the same subdomain and a new file path.",
+    "Host a standalone HTML webpage on the box's own URL and return it.",
+    "Use when you generate a web page (design preview, demo, mockup,",
+    "interactive prototype) and want it accessible from anywhere —",
+    "especially from the machine where the manta UI is running. The returned",
+    "URL may be a public `https://` hostname OR a private tailnet `http://`",
+    "address depending on how the box is reached — echo `result.url`",
+    "verbatim, NEVER construct one yourself. A tailnet URL is only reachable",
+    "from inside the user's tailnet (if the link doesn't open, that is the",
+    "likely reason — not a bug to retry). If the box has neither a public",
+    "hostname nor a tailnet address, `serve_page` returns a clear error",
+    "instead of a URL — relay it to the user. The page auto-expires after",
+    "24h by default (configurable via ttlHours). To update a page, call this",
+    "tool again with the same subdomain and a new file path.",
   ].join(" "),
   args: {
     subdomain: z
