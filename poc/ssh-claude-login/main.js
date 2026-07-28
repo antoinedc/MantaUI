@@ -4,7 +4,6 @@ const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const { spawn } = require('node:child_process');
 
 const URL_RE = /https:\/\/[^\s\x07\x1b]+/g;
-const REDACT_TOKEN = (s) => s; // POC — no redaction; throwaway.
 
 let mainWindow = null;
 let session = null; // { child: ChildProcess, host: string }
@@ -135,7 +134,12 @@ ipcMain.handle('ssh:check', async (_evt, host) => {
     h,
     'curl -s --max-time 5 http://127.0.0.1:4096/provider'
   );
-  const restart = await runRemote(h, 'systemctl --user restart opencode-serve');
+  const restart = await runRemote(
+    h,
+    // systemctl --user over a non-login SSH session needs XDG_RUNTIME_DIR set
+    // explicitly; otherwise it silently no-ops with "Failed to connect to bus".
+    'XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart opencode-serve'
+  );
   const providerAfter = await runRemote(
     h,
     'curl -s --max-time 5 http://127.0.0.1:4096/provider'
