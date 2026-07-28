@@ -44,6 +44,14 @@ type Props = {
   // Present only when this Terminal is an AI CLI TUI launch mode (BET-138
   // refinement). Absent = plain login shell (base "terminal" mode).
   launcher?: { id: string; flags: Record<string, boolean> };
+  // BET-348: when set, the server spawns `tmux attach-session -t <target>`
+  // instead of a fresh shell — for a window Manta did NOT create (a
+  // pre-existing tmux session the user wants to view). Format is
+  // `<session>:<windowIndex>`, matching killWindow/selectWindow in
+  // src/server/tmux.mjs. WINS over `launcher` when both are set (server
+  // branch 1 of resolvePtyCommand). Omit for a Manta-owned window — the
+  // server falls through to the launcher / plain-shell branch.
+  tmuxTarget?: string;
 };
 
 const THEME = {
@@ -70,7 +78,7 @@ const THEME = {
   brightWhite: "#ffffff",
 };
 
-export function Terminal({ sessionKey, cwd, active, launcher }: Props) {
+export function Terminal({ sessionKey, cwd, active, launcher, tmuxTarget }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -213,7 +221,7 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
       try { fit.fit(); } catch { /* not ready, ResizeObserver will retry */ }
       const cols = term.cols || 80;
       const rows = term.rows || 24;
-      window.api.ptySpawn({ sessionKey, cwd, cols, rows, launcher }).then(() => {
+      window.api.ptySpawn({ sessionKey, cwd, cols, rows, launcher, tmuxTarget }).then(() => {
         if (cancelled) return;
         disposeEvents = window.api.onPtyEvent((e) => {
           if (e.sessionKey !== sessionKey) return;

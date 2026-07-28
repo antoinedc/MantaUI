@@ -188,6 +188,16 @@ export type TmuxSession = {
   name: string;
   attached: boolean;
   windows: TmuxWindow[];
+  // BET-348: true iff this session was created by Manta (recorded in the
+  // `~/.manta/tmux-sessions.json` sidecar). When false, the session pre-
+  // existed on the box (the user started it in their own terminal before
+  // opening Manta), and the renderer's Terminal layer attaches via
+  // `tmux attach-session -t <session>:<windowIndex>` instead of spawning
+  // a fresh shell. Absent / undefined → unknown / pre-sidecar build —
+  // treated as false by the renderer (safe default: pre-existing window
+  // can be attached; a brand-new session won't be misclassified since
+  // the renderer never sees a project before the sidecar entry exists).
+  mantaOwned?: boolean;
 };
 
 // ----- Derived view used by the UI -----
@@ -197,6 +207,14 @@ export type Project = {
   defaultCwd: string;         // from local meta, or "~" if unknown
   windows: TmuxWindow[];
   attached: boolean;
+  // BET-348: mirror of TmuxSession.mantaOwned. See TmuxSession for the
+  // contract — same field, propagated through the server→renderer
+  // listing so the renderer can decide between `ptySpawn` with a
+  // tmuxTarget (pre-existing tmux window) and without (Manta-created
+  // window, spawn a fresh shell/launcher). False / absent means
+  // "not Manta-owned" — safe because the renderer treats both the
+  // unknown and the known-false cases the same way.
+  mantaOwned?: boolean;
 };
 
 export type TmuxConfigStatus = {

@@ -321,6 +321,14 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
             sessionKey={`${sid ?? projectName}:${modeId}`}
             cwd={owner?.cwd ?? ""}
             launcher={launcher}
+            // BET-348: non-Manta session (no opencode session id — the
+            // user started this tmux session before opening Manta) —
+            // attach to the existing window via `tmux attach-session -t
+            // <session>:<windowIndex>` instead of spawning a blank
+            // shell. The same fix as App.tsx's non-Manta Terminal, just
+            // per-session-key here (mobile shows one session at a time,
+            // no multi-window Terminal reuse needed).
+            tmuxTarget={sid ? undefined : `${projectName}:${windowIndex}`}
             active={true}
           />
         )}

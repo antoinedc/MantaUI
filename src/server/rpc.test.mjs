@@ -380,3 +380,33 @@ test("opencode:provider-auth status rejects with the upstream error (no try/catc
     /upstream gone/,
   );
 });
+
+// ---- BET-348: pty:spawn forwards tmuxTarget through the rpc envelope -------
+//
+// The server-side spawn primitive (`tmux attach-session -t <target>`) is
+// already in src/server/pty.mjs (merged in BET-346, commit 66ad8a2). The
+// rpc layer's `pty:spawn` handler is `(opts) => pty.spawn(opts, onEvent)`
+// — a literal forwarder. This test pins that the wire payload's
+// `tmuxTarget` reaches the pty.spawn() entry point unchanged. Combined
+// with the pty.test.mjs spawn-wiring tests, this proves the full chain:
+// renderer → rpc envelope → pty.spawn → spawnShellPty → resolvePtyCommand
+// → tmux attach-session argv.
+
+test("pty:spawn forwards tmuxTarget to pty.spawn unchanged", async () => {
+  const { deps } = makeDeps([]);
+  const seen = [];
+  deps.pty.spawn = async (opts) => { seen.push(opts); };
+  deps.bus.publish = () => {};
+  const handlers = buildHandlers(deps);
+  await handlers["pty:spawn"]({
+    sessionKey: "tmux:myproject:0",
+    cwd: "/home/dev/projects/myproject",
+    cols: 80,
+    rows: 24,
+    tmuxTarget: "myproject:0",
+  });
+  assert.equal(seen.length, 1, "pty.spawn called exactly once");
+  assert.equal(seen[0].tmuxTarget, "myproject:0", "tmuxTarget forwarded verbatim");
+  assert.equal(seen[0].sessionKey, "tmux:myproject:0");
+  assert.equal(seen[0].cwd, "/home/dev/projects/myproject");
+});
