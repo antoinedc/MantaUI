@@ -46,6 +46,94 @@
 .phone .composer .send svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2}
 
 </style>
+
+<!-- BEGIN:head-meta -->
+<link rel="canonical" href="https://mantaui.com/claude-code-mobile">
+<meta property="og:title" content="Claude Code on mobile: full parity iPhone">
+<meta property="og:description" content="Run Claude Code from your phone with full transcript, live tool output, dictation and one-tap approvals.">
+<meta property="og:url" content="https://mantaui.com/claude-code-mobile">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://mantaui.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Manta UI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Claude Code on mobile: full parity iPhone">
+<meta name="twitter:description" content="Run Claude Code from your phone with full transcript, live tool output, dictation and one-tap approvals.">
+<meta name="twitter:image" content="https://mantaui.com/og.png">
+<meta name="twitter:site" content="@mantaui">
+<!-- END:head-meta -->
+
+<!-- BEGIN:head-schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": "https://mantaui.com/"
+    },
+    {
+      "@type": "ListItem",
+      "position": 2,
+      "name": "Claude Code on mobile",
+      "item": "https://mantaui.com/claude-code-mobile"
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is the phone app a viewer or a real client?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "A real client. The iPhone app is the same React code as the desktop, packaged with Capacitor. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Manta have a phone app for other phones?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No native app beyond iOS. The browser client works on every phone and serves the same app. You can pin the box's URL to the home screen. The remote page covers the part that does not depend on a phone form factor."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Do notifications wake up the phone even when I am at my desk?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Manta's push routing only sends to the phone when the desktop is not foreground or active. At your desk, the desktop rings. Away from it, the phone rings. Blocking asks like a permission request ring every device at once, because the agent is stuck until you answer."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I dictate a reply instead of typing on the phone keyboard?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Hold the mic, speak, release. The same command classifier the desktop uses picks dictation from a spoken question. The text lands in the composer ready to send or edit."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does the phone talk to my laptop or straight to the box?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Straight to the box. The phone pairs with the box directly over HTTPS, the same way the desktop does. Your laptop does not need to be open. Closing the laptop does not drop the phone."
+      }
+    }
+  ]
+}
+</script>
+<!-- END:head-schema -->
 </head>
 <body>
 

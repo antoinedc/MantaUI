@@ -31,6 +31,94 @@
 .pricegrid .pcard ul li .ck{color:var(--cyan-400);flex-shrink:0;font-family:var(--font-mono)}
 
 </style>
+
+<!-- BEGIN:head-meta -->
+<link rel="canonical" href="https://mantaui.com/pricing">
+<meta property="og:title" content="Manta pricing: free, MIT, self-hosted">
+<meta property="og:description" content="Manta is free and open source. You pay your model provider and supply the box. There are no tiers and no seat count.">
+<meta property="og:url" content="https://mantaui.com/pricing">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://mantaui.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Manta UI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Manta pricing: free, MIT, self-hosted">
+<meta name="twitter:description" content="Manta is free and open source. You pay your model provider and supply the box. There are no tiers and no seat count.">
+<meta name="twitter:image" content="https://mantaui.com/og.png">
+<meta name="twitter:site" content="@mantaui">
+<!-- END:head-meta -->
+
+<!-- BEGIN:head-schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": "https://mantaui.com/"
+    },
+    {
+      "@type": "ListItem",
+      "position": 2,
+      "name": "Pricing",
+      "item": "https://mantaui.com/pricing"
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is Manta really free?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier, no Pro feature, no in-app purchase, no upgrade prompt. You pay your model provider and you supply the box."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What does it cost to run?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Whatever you spend on the model and whatever you spend on the box. A $5 VPS is enough to host a single agent for a single user. Most teams reuse hardware they already have, which means the marginal cost is the model spend."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Will there be paid tiers in the future?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. The product is the binary on GitHub. Anything that lands in main lands in your box when you update. There is no paid feature in the roadmap, and there are no plans to add one."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Manta take a cut of my API spend?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Manta does not bill you, does not see your API spend, and does not sit between you and your model provider. You give the agent your key, the agent talks to the provider directly, and the bill comes from the provider."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What happens if I stop paying for the box?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The server stops. The data is plain text on the disk, so a reinstall on a new box picks up where the old one left off, and a permanent shutdown is just an uninstall. There is nothing to migrate off and no vendor to call. The open source page covers the part that makes this possible."
+      }
+    }
+  ]
+}
+</script>
+<!-- END:head-schema -->
 </head>
 <body>
 

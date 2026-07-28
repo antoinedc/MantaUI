@@ -52,6 +52,86 @@
 @media(max-width:780px){.browsermock .body{grid-template-columns:1fr}.browsermock .side{display:none}}
 
 </style>
+
+<!-- BEGIN:head-meta -->
+<link rel="canonical" href="https://mantaui.com/claude-code-web-ui">
+<meta property="og:title" content="Claude Code web UI: a self-hosted client">
+<meta property="og:description" content="A self-hosted web UI for Claude Code that runs on your own box, with phone parity and push notifications.">
+<meta property="og:url" content="https://mantaui.com/claude-code-web-ui">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://mantaui.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Manta UI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Claude Code web UI: a self-hosted client">
+<meta name="twitter:description" content="A self-hosted web UI for Claude Code that runs on your own box, with phone parity and push notifications.">
+<meta name="twitter:image" content="https://mantaui.com/og.png">
+<meta name="twitter:site" content="@mantaui">
+<!-- END:head-meta -->
+
+<!-- BEGIN:head-schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": "https://mantaui.com/"
+    },
+    {
+      "@type": "ListItem",
+      "position": 2,
+      "name": "Claude Code web UI",
+      "item": "https://mantaui.com/claude-code-web-ui"
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Does the web UI work in every browser?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. The browser client is a standard React app served by the box. Chrome, Safari, Firefox and Edge all work. Mobile browsers on iOS and other phones work too. There is no extension to install."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Do I need to expose the box to the internet?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. The installer detects whether Tailscale is already running and chooses a tailnet path when it can. Nothing is published to the internet in that case. If you do not run Tailscale, the installer provisions a hostname and a Let's Encrypt certificate for you, and that is the only thing that is public."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How is this different from opening Claude Code's local dev server?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Claude Code's local dev server runs on your laptop and dies when the laptop closes. Manta's web UI is served from a server that runs on a box you own, as a system service, and the agent lives in a real tmux session there. The web UI is a client. Close every browser tab and the work continues, because the agent never lived in the tab."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does the agent keep running if I close the browser?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. The browser is a client to the box, not the place where the agent runs. Close the tab, shut the laptop, lose the connection. When you open a browser again and pair the device, the same session is there with the full history. The remote page describes the same property from the server end."
+      }
+    }
+  ]
+}
+</script>
+<!-- END:head-schema -->
 </head>
 <body>
 

@@ -39,6 +39,94 @@
 .hostmock .mode p .mono{color:var(--cyan-300)}
 
 </style>
+
+<!-- BEGIN:head-meta -->
+<link rel="canonical" href="https://mantaui.com/claude-code-remote">
+<meta property="og:title" content="Claude Code remote: run it on a server you own">
+<meta property="og:description" content="Run Claude Code on a VPS or home server. Real tmux, push notifications, and the work outlives the laptop.">
+<meta property="og:url" content="https://mantaui.com/claude-code-remote">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://mantaui.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Manta UI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Claude Code remote: run it on a server you own">
+<meta name="twitter:description" content="Run Claude Code on a VPS or home server. Real tmux, push notifications, and the work outlives the laptop.">
+<meta name="twitter:image" content="https://mantaui.com/og.png">
+<meta name="twitter:site" content="@mantaui">
+<!-- END:head-meta -->
+
+<!-- BEGIN:head-schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": "https://mantaui.com/"
+    },
+    {
+      "@type": "ListItem",
+      "position": 2,
+      "name": "Claude Code remote",
+      "item": "https://mantaui.com/claude-code-remote"
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Can I run Claude Code on a VPS?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. The installer runs on Debian, Ubuntu and the usual Linux suspects, with Caddy and a Let's Encrypt certificate when you need public ingress. The agent runs in a real tmux session on the box, so it outlives every device that connects to it."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Do I have to forward a port?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. If Tailscale is already running on the box, devices connect over your tailnet and nothing is published to the internet. If Tailscale is not running, the installer provisions a hostname and a certificate, which is the only public surface. You never forward a port by hand."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What happens when I close my laptop?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you open a browser or pair your phone again, the same session is there with the full history. The mobile page covers what the phone sees when this happens."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does this work without a public DNS record?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Pick the tailnet path at install time and the box has no public DNS, no certificate, and no open port. Devices reach it over your tailnet at a private IPv4."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is this self-hosted Claude Code?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes, and the install script is auditable before you pipe it into bash. The repository is MIT licensed and the server runs on hardware you control. The open source page covers what that means in practice."
+      }
+    }
+  ]
+}
+</script>
+<!-- END:head-schema -->
 </head>
 <body>
 

@@ -1,0 +1,1912 @@
+# https://mantaui.com/claude-code-mobile
+
+MantaMantaUI
+
+        [Home](/)
+        [Compare](/#compare)
+        [How it works](/#how)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Claude Code on your phone, with full parity
+
+    Manta's phone app is the same code as the desktop, so you get the full Claude Code transcript on your iPhone, not a status viewer. Read the diff, approve the risky command, dictate what to do next.
+
+          ethernal / feat-authbox-fra-1
+
+            write tests for the new pairing flow
+            Manta
+            Adding tests for the pairing flow now. Reading the auth module first.
+            › read src/server/auth.mjs
+            › edit src/server/auth.test.mjs +52 −0
+            awaiting permission…
+
+            Permission needed
+            Bash(rm -rf ./dist && npm run build)
+            DenyAllow
+
+            Reply to Manta…
+
+      The client
+      ## Same code as the desktop
+
+      The phone app is not a viewer for the desktop. It is the desktop app, packaged for a phone, talking to the same box.
+
+      - ✓Full chat transcript. Every user turn, every assistant turn, every tool call. The same scrollback you see on the desktop, on a screen that fits in your hand.
+
+      - ✓Live command output. Bash output streams at roughly four hertz, with the same context bar at the bottom.
+
+      - ✓Permission cards with two buttons. The agent waits. You tap Allow or Deny. The work moves on.
+
+      - ✓Voice dictation with a push-to-talk button. Hold it, speak, release. The classifier picks dictation from a spoken question.
+
+      - ✓File upload from photos, files or paste. Pick a screenshot, attach a log, hand it to the agent as a path on the box.
+
+      - ✓Real tmux terminal. Switch from chat to terminal in the same window, attach to the same session the chat talks to.
+
+      Notifications
+      ## Push that knows which device to use
+
+      A phone client that cannot approve a permission also cannot unblock an agent. The work waits until you get back to your laptop, which defeats the point of carrying it around. Manta's notifications solve that, and route by what you are doing right now.
+
+      - ✓Working at the desk, phone stays quiet. If the desktop app is foreground and active, the phone does not buzz. The notification surfaces where you are.
+
+      - ✓Stepped away, desktop gets it first. The desktop rings first, the phone rings ninety seconds later. One or the other reaches you.
+
+      - ✓Blocking asks hit every device at once. A permission request, a question, an error. The agent is stuck until you say so, so every device you have rings together.
+
+      - ✓Native iPhone, any browser elsewhere. A real iOS app for push delivery. Any other phone reaches the same box in a browser, with no installation.
+
+      Where it works
+      ## Native iPhone, browser everywhere else
+
+      The iPhone app ships in the App Store. Every other phone runs the same client in a browser at the box's per-device URL. The transcript is identical.
+
+      - ✓Native iOS app. Capacitor shell around the same React client the desktop uses. Pair with a six-digit code, no account in between.
+
+      - ✓Any browser on any other phone. The browser client serves the full app. Pin it to the home screen and it behaves like a native shell.
+
+      - ✓The same session on every device. Pick up the phone, finish the thought on the laptop. Both devices show the same transcript, the same tool calls, the same approvals.
+
+      - ✓No account required. Pairing is a six-digit code your box prints. The phone never signs up, never sees an account form, never talks to anyone but your box.
+
+      FAQ
+      ## Questions about the phone app
+
+      Five questions, answered in full.
+
+      ### Is the phone app a viewer or a real client?
+
+A real client. The iPhone app is the same React code as the desktop, packaged with Capacitor. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop.
+
+      ### Does Manta have a phone app for other phones?
+
+No native app beyond iOS. The browser client works on every phone and serves the same app. You can pin the box's URL to the home screen. [The remote page](/claude-code-remote) covers the part that does not depend on a phone form factor.
+
+      ### Do notifications wake up the phone even when I am at my desk?
+
+No. Manta's push routing only sends to the phone when the desktop is not foreground or active. At your desk, the desktop rings. Away from it, the phone rings. Blocking asks like a permission request ring every device at once, because the agent is stuck until you answer.
+
+      ### Can I dictate a reply instead of typing on the phone keyboard?
+
+Yes. Hold the mic, speak, release. The same command classifier the desktop uses picks dictation from a spoken question. The text lands in the composer ready to send or edit.
+
+      ### Does the phone talk to my laptop or straight to the box?
+
+Straight to the box. The phone pairs with the box directly over HTTPS, the same way the desktop does. Your laptop does not need to be open. Closing the laptop does not drop the phone.
+
+    ## Put it on your own box
+
+    Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.
+
+        `$ curl -fsSL https://mantaui.com/install.sh | bash`
+        this.textContent='Copy',1400)">Copy
+
+      [Open the repo](https://github.com/antoinedc/MantaUI)
+      [Back to the homepage](/)
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code web UI](/claude-code-web-ui)
+
+        - [Claude Code on mobile](/claude-code-mobile)
+
+        - [Claude Code remote](/claude-code-remote)
+
+        - [Open source](/open-source)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
+
+
+---
+
+# https://mantaui.com/claude-code-remote
+
+MantaMantaUI
+
+        [Home](/)
+        [Compare](/#compare)
+        [How it works](/#how)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Run Claude Code on a server you control
+
+    Manta runs Claude Code on your own VPS, home server or Mac. The agent outlives the laptop because it lives in real tmux on the box, and you reach it from any device with the same session on every one.
+
+      box-fra-1· manta-server · systemd --user
+
+          ### The box is the source of truth
+
+```
+   Desktop      Phone      Browser
+       │            │            │
+       └──── HTTPS ─┴──── HTTPS ─┘
+                │
+   <box_id>.boxes.mantaui.com
+   or your tailnet, if Tailscale is up
+                │
+        YOUR BOX (VPS / Mac)
+   manta-server ── owns tmux, files, secrets
+        ├── tmux ── your sessions
+        │       (keep running with 0 clients)
+        └── opencode ── chat + agent tools
+```
+
+          ### How the box reaches you
+
+            Auto
+            The installer detects and picks. Tailnet when Tailscale is already running, public hostname otherwise. You do not choose.
+
+            Tailnet
+            HTTP at a tailnet IP. Caddy, public DNS and Let's Encrypt are skipped entirely. Devices reach the box at http://<tailnet-ip>:8787.
+
+            Public
+            HTTPS at a per-box hostname. <box_id>.boxes.mantaui.com, with a Let's Encrypt certificate. Caddy terminates TLS, proxies to the box.
+
+            Force
+            Either, on demand. Set MANTA_INGRESS=public or MANTA_INGRESS=tailnet at install time if you want a specific path regardless of detection.
+
+      Self-hosted
+      ## On a VPS, a home server, or a Mac you own
+
+      Manta is the box. There is no hosted control plane, no seat count, and no account. You bring the hardware and the model provider. Everything else lives on the machine you control.
+
+      - ✓Linux VPS. The installer runs on Debian, Ubuntu and the other usual suspects. Caddy and a Let's Encrypt certificate when you need public ingress.
+
+      - ✓Home server. A Mac mini, a NUC, anything with a static IP and an open port. Tailnet if you already have Tailscale up.
+
+      - ✓A Mac you own. The same server runs on macOS, with public TLS skipped because there is no need to terminate it for a laptop.
+
+      - ✓No account required. Pairing is a six-digit code the box prints. Devices exchange tokens, and that is the only credential in the loop.
+
+      - ✓No telemetry, no hosted control plane. The box talks to your model provider and to APNs for push fanout. Nothing else.
+
+      Ingress
+      ## The installer chooses how devices reach the box
+
+      There is one decision to make before you install: do you want a tailnet, a public hostname, or whatever the installer picks. Most people pick the third option and forget about it.
+
+      - ✓Default is auto. The installer checks whether Tailscale is already running on the box with an IPv4 address. If it is, the box listens only on the tailnet and skips Caddy, public DNS and Let's Encrypt.
+
+      - ✓Otherwise, a public hostname. The installer registers <your-box>.boxes.mantaui.com, provisions the certificate, and writes the per-box Caddy vhost.
+
+      - ✓Decision persists. The chosen path is written to ~/.manta/ingress.json, so subsequent installs on the same box do not re-decide.
+
+      - ✓Forceable at install. Set MANTA_INGRESS=public or MANTA_INGRESS=tailnet to override detection. Useful for boxes you always want reachable on the public hostname.
+
+      - ✓Pairing works either way. The six-digit code the box prints travels over whatever transport the installer chose. Devices pair once and the token rotates by signing out.
+
+      Persistence
+      ## The agent outlives every client
+
+      The whole point of running Claude Code on a server is that the work keeps going when you are not there. Manta is built around that. Close every client, lose the network, reboot the laptop. When you come back, the session is exactly where you left it.
+
+      - ✓Real tmux underneath. The server owns tmux and the agent runs in a tmux session. The chat panel talks to tmux. You can SSH in and attach to the same window, any time.
+
+      - ✓A system service. The server runs as a systemd user unit. Reboots do not kill it. There is nothing to keep alive by hand.
+
+      - ✓A worktree per session. New sessions in a git repo branch their own sibling worktree, so several agents work in parallel without standing on each other.
+
+      - ✓Schedules between turns. The agent can schedule a recurring task, wake on a webhook, and use a secret by file path. The box is a long-running environment, not a request handler.
+
+      FAQ
+      ## Questions about running Claude Code on a server
+
+      Five questions, answered in full.
+
+      ### Can I run Claude Code on a VPS?
+
+Yes. The installer runs on Debian, Ubuntu and the usual Linux suspects, with Caddy and a Let's Encrypt certificate when you need public ingress. The agent runs in a real tmux session on the box, so it outlives every device that connects to it.
+
+      ### Do I have to forward a port?
+
+No. If Tailscale is already running on the box, devices connect over your tailnet and nothing is published to the internet. If Tailscale is not running, the installer provisions a hostname and a certificate, which is the only public surface. You never forward a port by hand.
+
+      ### What happens when I close my laptop?
+
+The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you open a browser or pair your phone again, the same session is there with the full history. [The mobile page](/claude-code-mobile) covers what the phone sees when this happens.
+
+      ### Does this work without a public DNS record?
+
+Yes. Pick the tailnet path at install time and the box has no public DNS, no certificate, and no open port. Devices reach it over your tailnet at a private IPv4.
+
+      ### Is this self-hosted Claude Code?
+
+Yes, and the install script is auditable before you pipe it into bash. The repository is MIT licensed and the server runs on hardware you control. [The open source page](/open-source) covers what that means in practice.
+
+    ## Put it on your own box
+
+    Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.
+
+        `$ curl -fsSL https://mantaui.com/install.sh | bash`
+        this.textContent='Copy',1400)">Copy
+
+      [Open the repo](https://github.com/antoinedc/MantaUI)
+      [Back to the homepage](/)
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code web UI](/claude-code-web-ui)
+
+        - [Claude Code on mobile](/claude-code-mobile)
+
+        - [Claude Code remote](/claude-code-remote)
+
+        - [Open source](/open-source)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
+
+
+---
+
+# https://mantaui.com/claude-code-web-ui
+
+MantaMantaUI
+
+        [Home](/)
+        [Compare](/#compare)
+        [How it works](/#how)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # A self-hosted web UI for Claude Code
+
+    Manta is a web UI for Claude Code that runs on your own box in real tmux. The same transcript, the same live tool output, the same approvals, in any browser on any device, with the same session on every one.
+
+        https://a3f9…b21c.boxes.mantaui.com
+
+          Ethernal
+          feat/auth
+          refactor/db!
+          main
+          Marketing
+          hero-copy
+          Infra
+          deploy
+
+          ethernal / feat/auth · box-fra-1
+          Youadd a device-code pairing flow to the auth module
+          MantaReading the current auth module before I change anything.
+          › read src/server/auth.mjs
+          › edit src/server/auth.mjs +38 −4
+          $ npm test   ✓ 41 passed · 2.1s
+
+      What is on the page
+      ## The full client, in a browser tab
+
+      Everything you can do at the desktop is here, because the browser client is the same React app served from the box.
+
+      - ✓Full chat transcript. Read every turn the agent has produced, scroll back through the whole session, jump to any tool call.
+
+      - ✓Live tool output. Bash stdout streams at roughly four hertz, with the same context bar you see on desktop.
+
+      - ✓Permission cards. Approve, deny, or write a clarification. The same cards, the same buttons.
+
+      - ✓Voice dictation. Hold the mic, dictate a reply. The same command classifier picks dictation from a question.
+
+      - ✓File upload and screenshots. Drag in an image or a log, the agent gets it as a file path.
+
+      - ✓A real tmux terminal. Switch from chat to terminal in the same window, attach to the same session the chat talks to.
+
+      What is on the box
+      ## The same box, real tmux underneath
+
+      A web UI is only useful if the work survives the tab. Here it does, because the agent lives on your hardware and the browser is a client.
+
+      - ✓Real tmux sessions. The server owns tmux. Close the browser, the agent keeps running, and you can SSH in alongside it and attach to the same window.
+
+      - ✓A worktree per session. New sessions in a git repo branch their own sibling worktree, so several agents work in parallel without standing on each other.
+
+      - ✓A system service. The server runs as a systemd user unit, so a reboot does not kill it. There is nothing to keep alive by hand.
+
+      - ✓Schedules, webhooks and secrets. The agent can put work on a timer, wake up when CI finishes, and read secrets by file path without the value ever appearing in the transcript.
+
+      - ✓Peer sessions. Two agents in the same workspace can see each other, so one can warn another before touching a file it is editing.
+
+      How the box reaches you
+      ## You do not pick the transport
+
+      The installer checks whether Tailscale is already running on the box. If it is, your devices connect over your tailnet and nothing is published to the public internet. If it is not, the box gets its own hostname and a Let's Encrypt certificate.
+
+      - ✓Tailnet when Tailscale is already up. Devices reach the box at a tailnet IP over plain HTTP. Caddy, public DNS and Let's Encrypt are skipped entirely.
+
+      - ✓A per-box hostname otherwise. The installer registers <your-box>.boxes.mantaui.com, provisions the certificate, and reloads Caddy.
+
+      - ✓Pair once per device. Each browser pairs with a six-digit code the box prints. The token is stored locally, sent on every request, and rotated by signing out.
+
+      - ✓Forceable either way. Set MANTA_INGRESS=public or MANTA_INGRESS=tailnet at install time if you want a specific path regardless of what is detected.
+
+      FAQ
+      ## Questions about the web UI
+
+      Four questions, answered in full.
+
+      ### Does the web UI work in every browser?
+
+Yes. The browser client is a standard React app served by the box. Chrome, Safari, Firefox and Edge all work. Mobile browsers on iOS and other phones work too. There is no extension to install.
+
+      ### Do I need to expose the box to the internet?
+
+No. The installer detects whether Tailscale is already running and chooses a tailnet path when it can. Nothing is published to the internet in that case. If you do not run Tailscale, the installer provisions a hostname and a Let's Encrypt certificate for you, and that is the only thing that is public.
+
+      ### How is this different from opening Claude Code's local dev server?
+
+Claude Code's local dev server runs on your laptop and dies when the laptop closes. Manta's web UI is served from a server that runs on a box you own, as a system service, and the agent lives in a real tmux session there. The web UI is a client. Close every browser tab and the work continues, because the agent never lived in the tab.
+
+      ### Does the agent keep running if I close the browser?
+
+Yes. The browser is a client to the box, not the place where the agent runs. Close the tab, shut the laptop, lose the connection. When you open a browser again and pair the device, the same session is there with the full history. [The remote page](/claude-code-remote) describes the same property from the server end.
+
+    ## Put it on your own box
+
+    Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.
+
+        `$ curl -fsSL https://mantaui.com/install.sh | bash`
+        this.textContent='Copy',1400)">Copy
+
+      [Open the repo](https://github.com/antoinedc/MantaUI)
+      [Back to the homepage](/)
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code web UI](/claude-code-web-ui)
+
+        - [Claude Code on mobile](/claude-code-mobile)
+
+        - [Claude Code remote](/claude-code-remote)
+
+        - [Open source](/open-source)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
+
+
+---
+
+# https://mantaui.com/
+
+MantaMantaUI
+
+        [Home](/)
+        [Compare](/#compare)
+        [How it works](/#how)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Your agents keep working after you close the laptop
+
+    Manta runs Claude Code and opencode in real tmux on a Linux box or Mac you own. The desktop app and the phone app are both full clients. Close either one and the work carries on.
+
+        Coding agent
+        Manual
+
+          Set up this box as a Manta UI server, a self-hosted Claude Code client for desktop and mobile. Follow https://mantaui.com/llms-install.md exactly.
+
+          this.textContent='Copy',1400)">Copy
+
+        Paste this into Claude Code, opencode or Cursor on the box you want to use.
+
+          `$ curl -fsSL https://mantaui.com/install.sh | bash`
+          this.textContent='Copy',1400)">Copy
+
+        Runs on Linux or macOS. No Node install, no compiler, no sudo. Prints a pairing code when it finishes.
+
+      [Download for macOS](https://mantaui.com/downloads/Manta-latest.dmg)
+      See how it compares
+
+    Free. No signup. Runs on hardware you already own.
+
+        Manta UI
+
+          Ethernal
+          feat/auth
+          refactor/db!
+          main
+          Marketing
+          hero-copy?
+          landing2
+          Infra
+          deploy
+
+          ethernal / feat/auth · box-fra-1
+            Running
+
+            Youadd a device-code pairing flow to the auth module
+            MantaReading the current auth module before I change anything.
+            › read src/server/auth.mjs
+            › edit src/server/auth.mjs +38 −4
+            $ npm test   ✓ 41 passed · 2.1s
+
+            ctx
+
+            73% · 146k/200k
+
+            Reply to Manta…
+
+        The difference
+        ## Shut the lid and the work carries on
+
+        Manta's server runs on your box as a system service. Your agents live in real tmux windows. The desktop app and the phone app are clients, so you can close every one of them and nothing stops.
+
+          - ✓ Agents keep working with no client connected
+
+          - ✓ Reconnect from any device and the full history is there
+
+          - ✓ Survives a reboot, because it is a system service
+
+          - ✓ Your phone buzzes when the agent needs a decision
+
+          Orca's own docs: Closing the desktop app drops the connection. There is no cloud relay.
+          Conductor sells this as their paid beta: close your laptop during a task and the agent keeps going.
+          quoted verbatim, linked and dated on /vs/orca and /vs/conductor
+
+            9:41
+            Tuesday, 14 October
+
+                Mantanow
+
+              ethernal / feat-auth
+              Permission needed: Bash(rm -rf ./dist)
+              DenyAllow
+
+      What you get
+      ## Everything the agent does, on every device
+
+      The desktop app and the phone app run the same code, so the transcript, the tool output and the approval buttons are identical on both.
+
+        ### Real tmux underneath
+
+        A chat panel and a real `tmux` terminal for every window. Your box stays a normal tmux server, so you can still SSH in and attach to the same session.
+
+        Orca and Conductor each run their own process model. Neither leaves the box usable without their app.
+
+        ### The phone app is the same app
+
+        Same code as the desktop: full transcript, live command output, approvals, dictation and file uploads. A native iPhone app, and any browser everywhere else.
+
+        Orca calls its mobile app "read-mostly" and "intentionally not a full editor". Conductor has no phone app.
+
+        ### Notifications that know where you are
+
+        Working at your desk? Your phone stays quiet. Away from it? The desktop gets it first and your phone 90 seconds later. Anything blocking reaches every device at once.
+
+        Neither competitor routes notifications at all.
+
+        ### You approve what runs
+
+        Permissions and questions arrive as cards you answer with one tap. Allow, deny, or write a clarification. Trust a whole session when you want it to move faster.
+
+        Orca ships --dangerously-skip-permissions pre-filled. Conductor's docs say agents run without sandboxing.
+
+        ### A worktree per session
+
+        New sessions in a git repo branch their own sibling worktree, so several agents work in parallel without standing on each other. Close the session and Manta offers to remove the worktree, asking first if anything is uncommitted.
+
+        Command output also streams live, and a context bar splits fresh tokens from cached ones so a cold cache does not surprise you.
+
+        ### It works out how to reach you
+
+        The installer checks whether Tailscale is already running. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and an HTTPS certificate. You do not pick.
+
+        Orca requires Tailscale and tells you not to expose its port to the internet. Here a tailnet is one of two supported paths, not a prerequisite.
+
+      Nobody else does this
+      ## The agent can reach you between turns
+
+      Manta gives the agent a few tools of its own. It can put work on a timer, wake up when something happens outside, or ask for your attention on whichever device you are using.
+
+        ### Schedule
+
+        Ask it to check the deploy every five minutes. The prompt re-runs in this session on a cron, on the server, whether or not you are connected.
+
+        ### Webhooks
+
+        Hand your CI a signed URL. The session wakes up when the build finishes, instead of burning tokens asking whether it is done yet.
+
+        ### Secrets
+
+        The agent gets a file path, never the value. Your token goes into the command at run time and never appears in the transcript.
+
+        ### Notify
+
+        Ask to be told when the migration finishes. Manta picks the device based on where you have actually been active.
+
+        ### Peers
+
+        Agents in the same workspace can see and message each other, so one can warn another before touching a file it is editing.
+
+        ### Serve page
+
+        The agent publishes a preview to a URL you can open on any device, with no file transfer in between.
+
+      Setup
+      ## Paired in under a minute
+
+      No SSH keys to distribute and no tunnel to keep alive. The server installs on your box, works out how to make itself reachable, and you pair each device once.
+
+        STEP 01
+        ### Install on your box
+
+        One command. It ships its own Node runtime, so there is no compiler and no package manager involved. It then works out how devices will reach the box: over your tailnet if Tailscale is already running, otherwise through Caddy and a Let's Encrypt certificate on <your-box>.boxes.mantaui.com.
+
+        STEP 02
+        ### Pair a device
+
+        Type in the six-digit code the installer printed. The device gets a token, and every call after that is authenticated over HTTPS.
+
+        STEP 03
+        ### Start working
+
+        Create a project and open a session. Install the phone app, pair it with a second code, and the same sessions are there.
+
+```
+   Desktop app                Phone app                  Browser
+        │                          │                         │
+        └──────────────────  HTTPS  ────────────────────────┘
+                                │
+   <box_id>.boxes.mantaui.com   or   your box on the tailnet
+   Caddy + Let's Encrypt                  if Tailscale is already running
+
+        the installer detects which one applies and sets it up
+                                │
+                       YOUR LINUX BOX OR MAC
+              manta-server  ── owns tmux, files, config, secrets
+                ├── tmux ── your sessions  (keep running with 0 clients)
+                └── opencode ── chat mode and agent tools
+```
+
+      Away from your desk
+      ## The whole session on your phone
+
+      Reading a terminal UI on a phone keyboard is miserable. This is the actual client: read the diff, approve the risky command, dictate what to do next.
+
+          - ✓ A native iPhone app, and any browser everywhere else
+
+          - ✓ Full transcript, live command output and inline diffs
+
+          - ✓ Answer permissions and questions with one tap
+
+          - ✓ Dictate a reply instead of typing it
+
+          - ✓ Push for permissions, questions, errors and finished work
+
+          - ✓ Talks straight to your box, with no account in between
+
+          A phone client that cannot approve a permission also cannot unblock an agent. The work still waits until you get back to your laptop, which defeats the point of carrying it around.
+
+          Sessions
+          ethernal / feat-authRunning
+          ethernal / refactor-dbApprove
+          ethernal / mainIdle
+          marketing / heroQuestion
+          marketing / landingRunning
+          infra / deployDone
+          notes / scratchIdle
+
+      Honest comparison
+      ## How Manta compares
+
+      Orca and Conductor run agents on your laptop. Termius over SSH runs them on a VPS already, which is most of the way there. These are the axes we chose to compete on. The full picture, including what the others do better, is on each comparison page.
+
+          Manta UI
+          Orca
+          Conductor
+          Termius + SSH
+
+          Agents run onYour VPSYour desktopYour MacYour VPS
+          Keeps running with every client closedYesNoPaid betaYes
+          Phone clientThe full appRead-mostlyNoneTerminal only
+          Approve a command from your phoneOne tapLimitedNoType into the TUI
+          Tells you when the agent is blockedPushNoNoNo
+          Remote accessDetected and set upTailscale requiredCloud betaSSH keys by hand
+          Git worktree per sessionYesYesYesBy hand
+          Agent scheduling, webhooks, secretsYesNoNoNo
+          Real tmux underneathYesNoNoYes
+          Account requiredNoFor mobileYesTo sync
+          LicenceMITMITProprietaryProprietary
+          PriceFreeFreeFree, plus ProFree, plus paid
+
+          [Full comparison →](/vs-orca)
+          [Full comparison →](/vs-conductor)
+          [Full comparison →](/vs-ssh-tmux)
+
+      If you already run Claude Code on a VPS and reach it with Termius, you have solved the hard part. What Manta adds is a readable transcript instead of a TUI, one-tap approvals, and a notification the moment the agent gets stuck.
+      Orca and Conductor each do things Manta does not, including diff review and a built-in editor, and Orca supports far more agent runtimes. Each comparison page lays that out in full. Sourced from public docs, dated and linked.
+
+      Open source
+      ## Yours to run, read and fork
+
+      Being open source is table stakes here, because Orca is MIT too. The combination is what differs: open source, self-hosted, no account, and a server that outlives whichever client you happen to be holding.
+
+          - ✓Runs on hardware you own. There is no hosted control plane, no workspace limit and no seat count.
+
+          - ✓Your code stays on the box. The only thing that leaves is your agent talking to its model provider.
+
+          - ✓Nothing to sign up for. Pairing is a six-digit code your own machine generates.
+
+          - ✓Read [install.sh](/install.sh) before you pipe it into bash. We would rather you did.
+
+          - ✓MIT licensed. Fork it, run your own gateway, write your own client.
+
+         antoinedc / MantaUI
+        Open-source, self-hosted Claude Code and opencode client. Agents run in real tmux on your own Linux box or Mac, and you drive them from desktop, phone or browser over HTTPS.
+
+          MIT licenceTypeScriptIssues open
+
+      FAQ
+      ## Questions people actually ask
+
+      Each answer is written to be quotable on its own, and each one maps to a page we want to rank for.
+
+      ### Does the agent keep running if I close my laptop?
+
+Yes. The server runs on your box as a system service and your agents live in real tmux sessions. Every client is disposable, so you can close all of them and the work continues. Reconnect later and the full history is still there.
+
+      ### Do I need Tailscale, a VPN or port forwarding?
+
+No, and you do not have to decide either. The installer checks whether Tailscale is already running on the box. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and a Let's Encrypt certificate. Either way there is nothing to port-forward and no tunnel to keep alive, and you can force either path if you prefer.
+
+      ### Can I really use Claude Code from my phone?
+
+Yes, and the phone app is the same app as the desktop rather than a status viewer. You get the full transcript, live command output, approvals, dictation and file uploads, in a native iPhone app or any browser.
+
+      ### I already SSH into a VPS with Termius. Why switch?
+
+You have already solved the part most tools get wrong, which is keeping the agent alive when you walk away. What you do not get is a readable transcript instead of a terminal UI, buttons to approve a command, or a notification when the agent stops and waits for you. Manta runs on the same box and you can still SSH in alongside it.
+
+      ### What does it cost?
+
+Nothing. Manta is free and open source. You pay whoever supplies your agent, so an Anthropic subscription or an API key, and you supply the box.
+
+      ### Does my code leave my box?
+
+No. Transcripts, uploads, secrets and configuration stay on your machine. The only outbound traffic is your agent talking to its model provider, plus a small push payload carrying the session name if you turn on phone notifications.
+
+      ### Which agents does it work with?
+
+Claude Code and opencode today. Anything that runs in a terminal works in terminal mode, and the chat panel is built on opencode.
+
+      ### Is this an alternative to Conductor or Orca?
+
+It overlaps with both, on a different bet. They run agents on your Mac and give you a window onto them. Manta runs agents on a box you own and gives every device the same window, so the work outlives whatever you are holding.
+
+    ## Put it on your own box
+
+    Free, no signup, and it runs on hardware you already have.
+
+        `$ curl -fsSL https://mantaui.com/install.sh | bash`
+        this.textContent='Copy',1400)">Copy
+
+      [Download for macOS](https://mantaui.com/downloads/Manta-latest.dmg)
+
+      Read the docs
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code web UI](/claude-code-web-ui)
+
+        - [Claude Code on mobile](/claude-code-mobile)
+
+        - [Claude Code remote](/claude-code-remote)
+
+        - [Open source](/open-source)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
+
+
+---
+
+# https://mantaui.com/open-source
+
+MantaMantaUI
+
+        [Home](/)
+        [Compare](/#compare)
+        [How it works](/#how)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Open source and self-hosted
+
+    Manta is MIT licensed and self-hosted. No account, no telemetry, no vendor, no hosted control plane. You can read every line of the server, the desktop client and the install script before you pipe it into bash. We would rather you did.
+
+      antoinedc / MantaUI
+      Open-source, self-hosted Claude Code and opencode client. Agents run in real tmux on your own Linux box or Mac, and you drive them from desktop, phone or browser over HTTPS.
+
+        MIT licenceTypeScriptNode on the boxElectron desktopReact renderer
+
+      Licence
+      ## MIT, with a working install script you can read
+
+      Open source in this product is not a marketing line. The repo carries a working [MIT licence](https://github.com/antoinedc/MantaUI/blob/main/LICENSE), the install script is in the repository, and every line of the server, the desktop app and the phone client is on GitHub.
+
+      - ✓MIT licensed. Permissive, friction-free, matches Orca. Fork it, run your own gateway, write your own client, ship a derivative.
+
+      - ✓The install script is in the repo. Read [install.sh](https://github.com/antoinedc/MantaUI/blob/main/install.sh) before you pipe it into bash. It is roughly two hundred lines of plain bash, with a checksum-verified download.
+
+      - ✓The server is open source. Express, the tmux and opencode proxies, push, schedules, webhooks, secrets, peer sessions. Every line.
+
+      - ✓The desktop app is open source. Electron, xterm.js, React. The renderer is a normal npm package. Build it from source if you prefer.
+
+      - ✓The phone app is open source. Capacitor shell around the same React client. The native bits are minimal glue.
+
+      Self-hosted
+      ## No account, no telemetry, no seat count
+
+      The product runs on hardware you own. There is no hosted control plane to sign up for, no usage telemetry leaving the box, and no seat count to grow into a bill.
+
+      - ✓Nothing to sign up for. Pairing is a six-digit code your box generates. Devices exchange tokens, and that is the only credential in the loop.
+
+      - ✓No telemetry. The box talks to your model provider and to APNs for push fanout. Nothing else. The repo carries no analytics SDK.
+
+      - ✓Your code stays on your box. Transcripts, uploads, secrets and configuration live on your machine. The only outbound traffic is your agent talking to its model provider.
+
+      - ✓No hosted control plane. There is no workspace limit, no seat count, no Pro tier. The product is one binary plus a directory of state.
+
+      - ✓You can fork the box. Want a different default model, a different push provider, a different default port. Fork the repo, edit the manifest, run the install.
+
+      Auditability
+      ## The install is auditable end to end
+
+      The single sharpest difference between an open source product and a "self-hosted" one is whether the install can be read before it runs. Manta's can.
+
+      - ✓Source on GitHub. Every commit, every change, every reviewer. The repo is the source of truth for what ships.
+
+      - ✓Checksum-verified download. The manifest on the website lists a sha256 for each tarball. The script refuses to run if the bytes do not match.
+
+      - ✓No silent install of unrelated packages. The privileged section installs Caddy and registers a hostname. Both are visible, both are reversible, both leave a trail.
+
+      - ✓Reproducible from the manifest. A clean box, the manifest, and a known tarball reproduce the same install every time.
+
+      FAQ
+      ## Questions about the licence and the install
+
+      Five questions, answered in full.
+
+      ### Where is the source code?
+
+On GitHub at [github.com/antoinedc/MantaUI](https://github.com/antoinedc/MantaUI). The server, the Electron desktop app, the React renderer, the phone client and the install script all live in the same repository.
+
+      ### What is the licence?
+
+MIT. The full text is in the [LICENSE](https://github.com/antoinedc/MantaUI/blob/main/LICENSE) file at the root of the repository. It is permissive: fork it, modify it, ship a derivative, keep the copyright notice.
+
+      ### What stays on my box?
+
+Everything. Transcripts, uploads, secrets, configuration, schedules, peer metadata, ingress choice. The only outbound traffic is your agent talking to its model provider, and a small push payload carrying the session name when you turn on phone notifications.
+
+      ### Can I run my own gateway or push provider?
+
+Yes. Fork the repo, point the push routing at your own gateway, edit the manifest. The push and webhook modules are designed to be replaced. The same goes for the install script, the installer, and the desktop app.
+
+      ### Does the box phone home?
+
+Only to your model provider and to APNs, when you have phone notifications turned on. There is no analytics SDK, no telemetry beacon, no usage ping. [The pricing page](/pricing) covers what you actually pay for.
+
+    ## Put it on your own box
+
+    Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.
+
+        `$ curl -fsSL https://mantaui.com/install.sh | bash`
+        this.textContent='Copy',1400)">Copy
+
+      [Open the repo](https://github.com/antoinedc/MantaUI)
+      [Back to the homepage](/)
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code web UI](/claude-code-web-ui)
+
+        - [Claude Code on mobile](/claude-code-mobile)
+
+        - [Claude Code remote](/claude-code-remote)
+
+        - [Open source](/open-source)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
+
+
+---
+
+# https://mantaui.com/pricing
+
+MantaMantaUI
+
+        [Home](/)
+        [Compare](/#compare)
+        [How it works](/#how)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Manta is free. You supply the box.
+
+    Manta is free and open source. No tiers, no seats, no usage caps, no upgrade prompts. You pay your model provider and you supply the hardware Manta runs on. Both competitors 404 on this page. Manta does not.
+
+        ### Manta
+
+        $0forever
+        The server, the desktop client, the phone client, the install script. MIT licensed, self-hosted.
+
+          - ✓No seat count
+
+          - ✓No workspace limit
+
+          - ✓No hosted control plane
+
+          - ✓No telemetry, no analytics
+
+          - ✓No future paid tier
+
+        ### Your model
+
+        you pay
+        Anthropic, OpenAI, DeepSeek, Groq, or any other provider your agent already supports. Billed by them, on their pricing.
+
+          - ✓Claude via your Max subscription or API key
+
+          - ✓OpenAI via your API key
+
+          - ✓Any provider with an OpenAI-compatible API
+
+          - ✓You set the spend cap on their end
+
+        ### Your box
+
+        you own it
+        A Linux VPS, a home server, or a Mac you already have. The installer runs on hardware you control.
+
+          - ✓From a $5 VPS and up
+
+          - ✓Mac mini or laptop running at home
+
+          - ✓Tailnet, public hostname, or both
+
+          - ✓Stops costing the day you stop paying for the box
+
+      What's free
+      ## The whole product, with nothing locked
+
+      The version on GitHub is the version you install. There is no separate "free" tier and no feature that lives behind a paywall in a different binary.
+
+      - ✓The server. tmux, opencode, push, schedules, webhooks, secrets, peer sessions, the per-device pairing flow. All of it.
+
+      - ✓The desktop client. Electron, xterm.js, the React chat panel, the file upload and screenshot detection, voice dictation.
+
+      - ✓The phone client. Capacitor shell, the same React code as the desktop, push delivery, dictation.
+
+      - ✓Updates. Pull from the repo or wait for the in-app update. Both work, both are free.
+
+      - ✓Future features. Anything that lands in main lands in your box when you update. There is no Pro feature in the roadmap.
+
+      What you actually pay for
+      ## Two things, and both are yours to choose
+
+      Manta does not bill you. It also does not bill your model provider. The only money that leaves is what you spend on the model and on the hardware the box runs on.
+
+      - ✓Your model provider. Anthropic via a Max subscription or an API key, OpenAI, DeepSeek, Groq, or any provider with an OpenAI-compatible API. You set the spend cap on their side, not in Manta.
+
+      - ✓Your hardware. A Linux VPS from any provider you already use. A Mac mini at home. A laptop you leave on. The hardware you control, not a managed service.
+
+      - ✓Optional. A domain name, if you want one. Otherwise the installer provisions a free <your-box>.boxes.mantaui.com hostname for you.
+
+      Why the box is yours
+      ## Self-hosted is the price too
+
+      The reason Manta is free is that you bring the box. The product runs on hardware you control, and you can stop paying for the box the day you stop using Manta. The install is reversible.
+
+      - ✓Reversible. Uninstalling stops the server and removes the Caddy vhost. There is nothing to migrate off, no data export to run.
+
+      - ✓No lock-in. The transcripts are plain text on the box. The configuration is JSON. The install script is in the repo.
+
+      - ✓Forkable. If you want a different default model, a different push provider, or a different default port, you can fork the repo and run your own version. The licence allows it.
+
+      FAQ
+      ## Questions about the price
+
+      Five questions, answered in full.
+
+      ### Is Manta really free?
+
+Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier, no Pro feature, no in-app purchase, no upgrade prompt. You pay your model provider and you supply the box.
+
+      ### What does it cost to run?
+
+Whatever you spend on the model and whatever you spend on the box. A $5 VPS is enough to host a single agent for a single user. Most teams reuse hardware they already have, which means the marginal cost is the model spend.
+
+      ### Will there be paid tiers in the future?
+
+No. The product is the binary on GitHub. Anything that lands in main lands in your box when you update. There is no paid feature in the roadmap, and there are no plans to add one.
+
+      ### Does Manta take a cut of my API spend?
+
+No. Manta does not bill you, does not see your API spend, and does not sit between you and your model provider. You give the agent your key, the agent talks to the provider directly, and the bill comes from the provider.
+
+      ### What happens if I stop paying for the box?
+
+The server stops. The data is plain text on the disk, so a reinstall on a new box picks up where the old one left off, and a permanent shutdown is just an uninstall. There is nothing to migrate off and no vendor to call. [The open source page](/open-source) covers the part that makes this possible.
+
+    ## Put it on your own box
+
+    Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.
+
+        `$ curl -fsSL https://mantaui.com/install.sh | bash`
+        this.textContent='Copy',1400)">Copy
+
+      [Open the repo](https://github.com/antoinedc/MantaUI)
+      [Back to the homepage](/)
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code web UI](/claude-code-web-ui)
+
+        - [Claude Code on mobile](/claude-code-mobile)
+
+        - [Claude Code remote](/claude-code-remote)
+
+        - [Open source](/open-source)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
+
+
+---
+
+# https://mantaui.com/privacy
+
+MantaMantaUI
+
+        [Home](/)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Privacy
+
+    Last updated 17 July 2026 · Plain-language summary of what Manta UI stores where, who can read it, and how to delete it.
+
+    Manta UI is a thin client. The interesting data lives on your Linux box; the push gateway only sees the parts that have to cross our infrastructure to deliver a native APNs push.
+
+    ## What runs where
+
+    Manta UI is three surfaces:
+
+      - The desktop app (Electron) and the phone client (native iPhone app, or any browser) are thin clients — chat, terminal, and file browser over HTTPS.
+
+      - The server runs on your own Linux box. It owns your `tmux` sessions, your `opencode` chat sessions, your file uploads, your schedules, your secrets, your webhooks, and your notifications. Everything lives under `~/.manta/` on that box.
+
+      - The push gateway (`gateway.mantaui.com`) is the ONLY thing we still operate. It holds the Apple APNs key (which structurally cannot live on your box) and fans out native pushes on your box's behalf. Devices connect directly to your box at `https://<box_id>.boxes.mantaui.com` — there is no relay in the path for chat, terminal, or file traffic.
+
+    ## What's on your box
+
+      - Box identity — a random `box_id` (32 hex chars), a `box_token` (HMAC key), and a `gateway_token` (bearer credential for the push gateway) under `~/.manta/auth.json` (`0600`). The token never leaves the box.
+
+      - Pairing codes — short-lived (5 min), loopback-only, one-time. Mints when you run `npm run pair` or hit `GET /auth/pair` from the box itself.
+
+      - Device tokens — issued to each paired desktop / phone. Stored locally in each app's `config.json`; the box keeps no per-device record beyond "is this token currently valid."
+
+      - Your work — every `tmux` session, every opencode chat, every uploaded file (`~/.manta-uploads/`, hourly auto-clean), every scheduled prompt, every webhook, every secret, every published page.
+
+    Delete any of this by deleting the file. The installer's only hard rule is: never regenerate `~/.manta/auth.json` — that would unpair every device.
+
+    ## What's on the push gateway
+
+    The push gateway holds the minimum it needs to deliver native APNs notifications. It does not see your chat, terminal, or file traffic at all — that flows directly between device and box over HTTPS.
+
+      - Box row — `box_id`, `gateway_token` (HMAC-bearer), first-seen IP, last-seen IP, registered public hostname (`<box_id>.boxes.mantaui.com`), first/last-registered timestamps.
+
+      - OVH DNS record id — so we can update the per-box A record on re-registration (IP changed) without searching.
+
+      - APNs device tokens — stored on the box, not the gateway. The gateway is stateless about which devices exist — the box owns its token store and the gateway just fans out the pushes the box asks for, reporting back which tokens to prune.
+
+      - The Apple APNs key (`.p8`) — the single piece of state that structurally cannot live on your box. Stays in `/etc/manta-gateway/` on the prod box.
+
+    Retention: the box row stays until your box unregisters (it can't — the gateway doesn't expose unregister). To wipe: SSH into the prod gateway host and remove the row from `/var/lib/manta-gateway/boxes.json`. We never store anything about you beyond what's needed to fan out APNs deliveries.
+
+    ## What crosses the wire
+
+      - Device → box: chat prompts, terminal keystrokes, file uploads. Direct HTTPS to `https://<box_id>.boxes.mantaui.com`. Authenticated with your device token; the box checks HMAC + expiry on every request.
+
+      - Box → push gateway: native push payloads, sent over HTTPS to `https://gateway.mantaui.com/push` with a `Bearer <gateway_token>` header. The gateway signs the APNs JWT and forwards; the payload body (title, body, deep link) is opaque to the gateway.
+
+      - Push gateway → APNs: standard HTTPS to `api.push.apple.com`, signed with the gateway's APNs key. Apple sees the push envelope.
+
+    ## Push notifications
+
+    When you have the phone client open in the background (or installed as a native app later), Manta may send a push when an agent needs you — a permission prompt, a question, an error, or a long-running task finishing. The push body carries the session name and a short snippet of the question. We do not include the full transcript in the push body.
+
+    ## Cookies and analytics on this site
+
+    This website (the one you're reading right now) does not set cookies, does not run analytics, does not embed trackers, and does not fingerprint your browser. The only outbound requests are to Google Fonts for typography.
+
+    ## Third parties we use
+
+      - Google Fonts — typography CSS, loaded from `fonts.googleapis.com`. Google sees your IP. If you want to avoid that, the page degrades gracefully to system fonts.
+
+      - Apple Push Notification service (APNs) — for native push on the iOS app. Apple sees the push envelope and your IP.
+
+      - OVH DNS API — the gateway uses our OVH account to manage the `boxes.mantaui.com` A records. OVH sees the box's public IP at registration time.
+
+    ## Open source
+
+    Manta UI is open source. The server, push gateway, mobile web client, and desktop app are all on [GitHub](https://github.com/antoinedc/MantaUI). The only closed-source piece is the published iOS app (which exists only because the stores require it).
+
+    ## Your choices
+
+      - Run the server yourself. Every user runs their own server on their own hardware. Chat, terminal, and file traffic never crosses our infrastructure — only native APNs pushes do, and only because Apple's key model makes that structurally necessary.
+
+      - Use the push gateway. When the iOS app is open in the background, native pushes fan out through `gateway.mantaui.com`. Web Push (VAPID, for browser installs) stays box-local and does NOT touch the gateway.
+
+      - Delete your data. Uninstalling the desktop or phone app removes its local config. Wiping `~/.manta/` on the box removes identity + work. Asking us to forget a box drops the gateway row.
+
+---
+
+    ## Contact
+
+    Questions, deletion requests, or reports: [antoine@mantaui.com](mailto:antoine@mantaui.com).
+
+    Manta UI is open source; the canonical implementation of everything described here lives in the [README](https://github.com/antoinedc/MantaUI) and [server source](https://github.com/antoinedc/MantaUI/tree/main/src/server).
+
+    MantaMantaUI
+
+      [Home](/)
+      [Privacy](/privacy)
+      [Terms](/terms)
+      [GitHub](https://github.com/antoinedc/MantaUI)
+
+    Built for people who pair with agents.
+
+
+---
+
+# https://mantaui.com/terms
+
+MantaMantaUI
+
+        [Home](/)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Terms
+
+    Last updated 17 July 2026 · The short version. Manta UI is open source, your box is yours, and we don't warranty anything — but we'll do our best.
+
+    These terms cover the desktop app, the phone client (native iPhone app, or any browser), and the operated push gateway at `gateway.mantaui.com`. They do not cover anything your AI agent does inside your `tmux` session — that's between you and your model provider.
+
+    ## Your box is yours
+
+    Manta UI is software you run on hardware you own. The server runs under your user account on your Linux box; the desktop app runs on your Mac; the phone client runs on your phone. You are responsible for what runs on those machines and what your agents do with that access.
+
+    We do not host your code, your sessions, your files, or your transcripts. Everything you produce lives in `~/.manta/` on your box.
+
+    ## The push gateway is our service
+
+    Devices connect directly to your box at `https://<box_id>.boxes.mantaui.com` — Caddy on your box terminates TLS and reverse-proxies to the loopback server. The ONLY thing we still operate is the push gateway at `gateway.mantaui.com`, which holds the Apple APNs key (which structurally cannot live on your box) and fans out native pushes on your box's behalf. See the [Privacy](/privacy) page for what we store there.
+
+      - The push gateway accepts authenticated `POST /push` from your box and delivers APNs notifications for the device tokens it has stored.
+
+      - It does not inspect, log, or index the contents of your traffic.
+
+      - It does enforce a per-box rate limit on `/register` calls — abuse will get a box rate-limited or dropped.
+
+    ## Acceptable use
+
+    Don't use Manta UI to:
+
+      - Abuse the push gateway — no scanning, fuzzing, or volumetric traffic; we rate-limit per box.
+
+      - Impersonate another box — registration is by 32-hex box_id; a box presenting a forged id loses its slot.
+
+      - Reverse-engineer the gateway to extract other users' traffic. (You can read the gateway source — it's open source — but you cannot MITM another user's APNs delivery.)
+
+      - Use the push gateway as a general-purpose notification proxy for non-Manta traffic.
+
+      - Violate the law in any jurisdiction you operate from.
+
+    ## No warranty
+
+    Manta UI is provided as is, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability arising from, out of, or in connection with the software or the use or other dealings in the software.
+
+    The desktop app is unsigned in beta — first launch will be blocked by macOS Gatekeeper. Right-click the `.dmg` in Finder → Open to bypass, or strip the quarantine attribute after install. We are working on signing for the first App Store release.
+
+    ## Subscription
+
+    Free during beta. The desktop app, the mobile web client, and the push gateway are free to use during the public beta. When the App Store release ships, the iOS app will require an in-app subscription to cover operated-push and metering costs; the server you self-host will remain free and source-available forever. Subscription terms and pricing will be published here and in the app stores before any paid tier activates.
+
+    ## Changes to the service
+
+    We may change, suspend, or discontinue the push gateway with reasonable notice (a release note on the GitHub repo and an in-app banner). Self-hosted servers are unaffected — they don't depend on the gateway for the desktop or browser paths (only for native APNs push).
+
+    ## Data
+
+    What we store, what crosses the wire, and how to delete it: see the [Privacy](/privacy) page.
+
+    ## Governing law
+
+    These terms are governed by the laws of the United States of America, without regard to conflict-of-law provisions. Any dispute arising from these terms or your use of the push gateway will be resolved in the courts of the United States.
+
+    ## Contact
+
+    Questions, takedown requests, abuse reports: [antoine@mantaui.com](mailto:antoine@mantaui.com).
+
+    MantaMantaUI
+
+      [Home](/)
+      [Privacy](/privacy)
+      [Terms](/terms)
+      [GitHub](https://github.com/antoinedc/MantaUI)
+
+    Built for people who pair with agents.
+
+
+---
+
+# https://mantaui.com/vs-conductor
+
+MantaMantaUI
+
+        [Home](/)
+        [Compare](/#compare)
+        [How it works](/#how)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Manta UI vs Conductor
+
+    Conductor runs coding agents on your Mac and gives you a polished Mac app to steer them. Manta runs the same agents on a box you own and gives every device the same window. Both target someone who wants parallel agents. Here is the honest difference.
+
+      ## Verdict
+
+        - Pick ConductorIf you live on macOS, want a polished Mac-native IDE with diff review and inline comments back to the agent, and the lack of a phone app is fine. Conductor's Mac app, diff review and PR/merge tail are the strongest parts of the product.
+
+        - Pick MantaIf you want agents on a Linux box that outlives the laptop, a phone app that can approve a command, and self-hosted open source with no seat count.
+
+        - OverlapBoth run Claude Code in chat panels with a worktree per session. The trade-off is where the work lives and what happens when you close the lid.
+
+      Side by side
+      ## What is the same, and what differs
+
+      Conductor is the better-known Mac app. Manta is the box that outlives the laptop. Here is the row-by-row.
+
+          Manta UI
+          Conductor
+
+          Agents run onYour box (Linux or macOS)Your Mac
+          ArchitectureBox is the source of truthMac is the source of truth
+          Keeps running with every client closedYes (default, free)Conductor Cloud, paid beta
+          Phone clientThe full appNone shipped
+          Approve a command from your phoneOne tapNo
+          Tells you when the agent is blockedPush to the right deviceNo
+          Remote accessDetected and set upConductor Cloud (beta, Pro, GitHub-only, 10-workspace cap)
+          PlatformsLinux or macOS box, macOS desktop, iPhone app, browsermacOS only. not available for Windows or Linux yet. conductor.build/docs
+          Permissions modelExplicit permission cards, yolo opt-inAgents run without sandboxing
+          SandboxingCommands ask firstWorkspace isolation is development isolation, not a security boundary
+          Diff review / inline annotationNoYes, with inline comments back to the agent
+          Built-in code editorTerminal + chat onlyMac-native, polished
+          Agent runtimes supported2 (Claude Code, opencode)2 (Claude Code)
+          Git worktree per sessionYesYes
+          Real tmux underneathYes, you can SSH inNo
+          Agent scheduling, webhooks, secretsYesNo
+          Linear / GitHub integration depthBasicDeep
+          CONDUCTOR_PORT style dev port routingNoYes
+          Account requiredNoYes
+          LicenceMITProprietary, closed source
+          FundingSoloMelty Labs, YC S24, $24M raised
+          MaturityNewMore mature, polished
+          PriceFreeFree, plus Pro tier (no published prices)
+
+      Conductor is the better Mac IDE. Manta is the box that outlives it. The trade-off is not subtle.
+
+      Where Conductor is better
+      ## The five things we concede plainly
+
+      Conductor's strongest surface is the editor and the diff review. We are not pretending otherwise.
+
+      - ›Diff review with inline comments back to the agent. Review a change, leave a comment, and the agent reads it. Manta has none of this.
+
+      - ›The PR/merge/checks tail. The whole pipeline is in the same window. Manta leaves you to do that in your normal git host.
+
+      - ›Linear and GitHub depth. Conductor's first-party integration with both is real. Manta does not match it.
+
+      - ›CONDUCTOR_PORT-style dev port routing. Routing and exposing a local dev server is built in. Manta has a public-page tool for the agent, not a per-process port system.
+
+      - ›Polish and funding. Conductor is YC S24 and has raised $24M. The Mac app looks the part. Manta is solo and rougher.
+
+      Conductor on its own security stance: Agents run directly on your system without sandboxing. And on the related boundary: Workspace isolation is development isolation, not a security boundary.
+      conductor.build/docs/security
+
+      Where Manta is better
+      ## The architectural difference
+
+      Conductor sells the same outcome Manta gives you by default, but only as a paid beta.
+
+      - ›The agent outlives the laptop for free. Conductor pitches close your laptop during a task and the agent keeps going as the reason to buy Conductor Cloud. conductor.build/cloud Manta does that by default, on your own box, with no Pro tier.
+
+      - ›A phone app that can actually approve a command. Conductor ships no phone app at all. Manta's phone app is the same code as the desktop: full transcript, live output, dictation, upload, and one-tap approvals.
+
+      - ›Self-hosted, MIT, no Pro tier. Conductor is closed source, Pro-gated, GitHub-only and capped at 10 workspaces on Cloud. Manta is MIT, runs on any hardware you own, and has no workspace cap.
+
+      Architecture
+      ## Where the work actually lives
+
+      Conductor's Mac app is the source of truth. Manta's box is. The shape of the failure modes follows from that.
+
+        ### Conductor: the Mac app is the source of truth
+
+```
+   Conductor Mac app   ← owns agents, files, diffs
+        │
+   Conductor Cloud (paid beta)
+     GitHub-only, 10-workspace cap
+     no phone app, no browser client
+
+  close the Mac and the agents
+  stop, unless you are paying
+  for Cloud.
+```
+
+        ### Manta: the box is the source of truth
+
+```
+   Linux box or Mac      ← owns tmux, files, agents
+        │      │      │
+   desktop   phone   browser
+  (full app) (full)  (full)
+
+  close every client and the
+  work continues, on free,
+  open source, MIT.
+```
+
+      Coexistence
+      ## Can I use both?
+
+      Yes. They do not share state, and they target different surfaces.
+
+    Conductor runs on your Mac for editor-heavy work with diff review. Manta installs on the same Mac (acting as its own box) or on a Linux VPS for long-running tasks that have to outlive the laptop. They use different ports, different tmux sessions and different project files. The Conductor Mac app does not talk to the Manta box; the Manta box does not read the Conductor workspace.
+
+      FAQ
+      ## What people ask before they switch
+
+      Five questions, answered in full.
+
+      ### Is Manta a fork of Conductor?
+
+No. They are separate products from separate teams. Manta is MIT and solo. Conductor is closed source, YC S24, and has raised $24M. Both run Claude Code in a chat panel.
+
+      ### Why is Conductor macOS only?
+
+Per Conductor's own docs: not available for Windows or Linux yet. conductor.build/docs Manta's box runs on Linux or macOS today, which is the path to running agents on a server.
+
+      ### Does Conductor's "Cloud" beta do what Manta does?
+
+It tries to, with restrictions. Conductor Cloud is in beta, requires the Pro tier, supports GitHub only, and caps you at 10 workspaces. Manta runs on your own box, is free, supports any agent runtime that ships a CLI, and has no workspace cap.
+
+      ### Is Conductor more secure than Manta?
+
+No, and Conductor says so itself: Agents run directly on your system without sandboxing and Workspace isolation is development isolation, not a security boundary. conductor.build/docs/security Manta's default is that every command shows up as a permission card you answer.
+
+      ### Which one should I pick if I edit heavily and run on macOS?
+
+Conductor. Its Mac-native editor, diff review with inline comments back to the agent, and Linear/GitHub depth are the strongest parts of its product. Manta is for when the work has to outlive the laptop, or when you want a phone client.
+
+    ## Try Manta on your own box
+
+    Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.
+
+      [Open the repo](https://github.com/antoinedc/MantaUI)
+      [Back to the homepage](/)
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code on mobile](/#mobile)
+
+        - [Claude Code remote](/#how)
+
+        - [Notifications](/#features)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
+
+
+---
+
+# https://mantaui.com/vs-orca
+
+MantaMantaUI
+
+        [Home](/)
+        [Compare](/#compare)
+        [How it works](/#how)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Manta UI vs Orca
+
+    Orca runs coding agents on your desktop and gives you a window onto them. Manta runs the same agents on a box you own and gives every device an equal window. Both target the same buyer. Here is the honest difference.
+
+      ## Verdict
+
+        - Pick OrcaIf you want 34 agent runtimes, a Monaco-based editor with Design Mode, and you only need your laptop. Orca is the more mature IDE today, and the only one of the two with a Windows or Linux desktop.
+
+        - Pick MantaIf your agent should keep running after you close the laptop, your phone should be able to approve a command, and you want one self-hosted box rather than a desktop app you have to keep open.
+
+        - OverlapBoth give you an agent chat panel, a worktree per session, and a real terminal. The trade-off is where the work lives.
+
+      Side by side
+      ## What is the same, and what differs
+
+      Rows we lose are kept in. Honest tables get quoted, rigged tables get ignored.
+
+          Manta UI
+          Orca
+
+          Agents run onYour box (Linux or macOS)Your desktop
+          ArchitectureBox is the source of truthDesktop is the source of truth
+          Keeps running with every client closedYesNo
+          Phone clientThe full appRead-mostly view
+          Approve a command from your phoneOne tapLimited
+          Tells you when the agent is blockedPush to the right deviceNo
+          Remote accessDetected and set up (Tailscale supported, not required)Tailscale required
+          Permissions modelExplicit permission cards, yolo opt-in`--dangerously-skip-permissions` pre-filled by default
+          SandboxingCommands ask first; trust-a-session for speedPermission-bypass flag ships pre-checked
+          Diff review / inline annotationNoYes
+          Built-in code editorTerminal + chat onlyMonaco with Design Mode
+          Agent runtimes supported2 (Claude Code, opencode)34
+          Desktop OS coveragemacOS desktop (box runs on Linux or macOS)macOS, Windows, Linux
+          Git worktree per sessionYesYes
+          Real tmux underneathYes, you can SSH inNo
+          Agent scheduling, webhooks, secretsYesNo
+          Account requiredNoFor mobile pairing
+          LicenceMITMIT
+          MaturityNew29.6k GitHub stars, YC-backed
+          Open issuesFewer2,310
+          PriceFreeFree
+
+      Rows we lose stay in. Diff review, the built-in editor and 34 agent runtimes are the three things Orca does that Manta does not, and they are real.
+
+      Where Orca is better
+      ## The three things we would not want to fake
+
+      Stated plainly. If any of these is what you need, Orca is the right answer.
+
+      - ›Agent runtime count. Orca ships 34. Manta ships two today (Claude Code and opencode). If you want Cursor, Codex, Aider and the rest of the field on the same desktop, Orca is the answer.
+
+      - ›Built-in editor. Monaco with Design Mode lets you edit, preview and let the agent touch the same file. Manta gives you a terminal and a chat panel; your editor stays your editor.
+
+      - ›Diff review and inline annotation. Orca's PR/merge tail and inline comments back to the agent are the strongest part of the product. Manta has none of it.
+
+      - ›Cross-platform desktop. macOS, Windows and Linux. The Manta desktop is macOS only today; the box itself runs on Linux or macOS.
+
+      - ›Maturity. 29.6k GitHub stars, YC-backed, widely deployed. Manta is new and ships less surface.
+
+      Orca's own description of the mobile app: The mobile app is intentionally not a full editor — it's a remote control for the desktop you already have running.
+      onorca.dev/docs/mobile
+
+      Where Manta is better
+      ## What the desktop-first model cannot give you
+
+      The architectural difference, not a list of features we both ship.
+
+      - ›The agent outlives the client. Close the desktop and the work keeps going. Orca's own docs say Closing the desktop app drops the connection — there is no cloud relay. onorca.dev/docs/remote
+
+      - ›The phone app is a real client. Same code as the desktop: full transcript, approvals, live command output, dictation, file uploads. Orca calls the mobile app a remote control.
+
+      - ›Yolo is not the default. Every command shows up as a permission card. Orca ships `--dangerously-skip-permissions` pre-filled for every agent, which is a different stance than ours.
+
+      Architecture
+      ## Where the work actually lives
+
+      Both products have a server process and a client. They disagree about which one is the source of truth.
+
+        ### Orca: the desktop is the source of truth
+
+```
+   Orca desktop app     ← owns tmux, files, agents
+        │      │
+   phone client   browser
+  (read-mostly)   (read-mostly)
+
+  close the desktop and the
+  phone loses its session.
+```
+
+        ### Manta: the box is the source of truth
+
+```
+   Linux box or Mac      ← owns tmux, files, agents
+        │      │      │
+   desktop   phone   browser
+  (full app) (full)  (full)
+
+  close every client and the
+  work continues anyway.
+```
+
+      Coexistence
+      ## Can I use both?
+
+      Yes. They are not exclusive, and they do not share state.
+
+    Orca runs on your laptop. Manta installs on the same Mac (acting as its own box) or on a Linux box on your tailnet. They use different ports, different tmux sessions and different project files. The most common setup we expect is Orca on the laptop for editor-heavy work and Manta on a VPS for long-running tasks that have to outlive the laptop.
+
+      FAQ
+      ## What people ask before they switch
+
+      Five questions, answered in full.
+
+      ### Is Manta a fork of Orca?
+
+No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships two.
+
+      ### Does Manta run on any of Orca's agent runtimes?
+
+No. Manta runs Claude Code and opencode in a real tmux session on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor.
+
+      ### Can Manta and Orca share a machine?
+
+Yes, on a macOS box. They use different ports and different tmux sessions, so they do not interfere. On a Linux box the same applies; the desktop piece of Orca simply has no Linux desktop binary to launch there.
+
+      ### Why is Orca so much more mature?
+
+Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Windows and Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly.
+
+      ### Which one should I pick if my work runs locally?
+
+Orca. Manta is for when the work needs to outlive the laptop, or when you want a phone client that can approve a command. If neither matters and your editor matters most, Orca's Monaco integration is the answer.
+
+    ## Try Manta on your own box
+
+    Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.
+
+      [Open the repo](https://github.com/antoinedc/MantaUI)
+      [Back to the homepage](/)
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code on mobile](/#mobile)
+
+        - [Claude Code remote](/#how)
+
+        - [Notifications](/#features)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
+
+
+---
+
+# https://mantaui.com/vs-ssh-tmux
+
+MantaMantaUI
+
+        [Home](/)
+        [Compare](/#compare)
+        [How it works](/#how)
+        [GitHub](https://github.com/antoinedc/MantaUI)
+
+    # Manta UI vs Termius + SSH
+
+    If you already run Claude Code on a VPS and reach it with Termius, you have already solved the part most tools get wrong, which is keeping the agent alive when you walk away. Manta runs on the same box beside Termius. Here is the honest difference.
+
+      ## Verdict
+
+        - Keep SSHIf Termius, iTerm or Blink already gets you a tmux window on the box, your agent runs there, and the only thing you wish was different is smaller. You are using a battle-tested stack that costs nothing and runs anywhere.
+
+        - Add MantaFor the parts SSH does not cover. A readable transcript on a phone instead of a terminal UI on a phone keyboard, one-tap approvals instead of typing into a TUI, a push the moment the agent blocks, dictation, file upload, and tools the agent can use to act between turns.
+
+        - OverlapBoth share the box, the tmux session and the SSH transport. Manta adds a UI layer and a server process. Termius stays.
+
+      Side by side
+      ## What is the same, and what differs
+
+      The Termius + SSH column describes the common incumbent stack. Rows we lose stay in.
+
+          Termius + SSH
+          Manta UI
+
+          Agents run onYour VPSYour VPS (same box)
+          ArchitectureTerminal + tmux on the boxServer + clients, real tmux underneath
+          Keeps running with every client closedYes, that is the point of tmuxYes
+          Phone clientTermius app shows terminalThe full app, with a transcript
+          Approve a command from your phoneType into the TUIOne tap
+          Tells you when the agent is blockedNo. You go and lookPush to the right device
+          Remote accessSSH keys, by handDetected and set up (Tailscale or public hostname)
+          Platforms (the box)Anywhere SSH runsLinux or macOS
+          Permissions modelApprove at the terminalPermission cards in the chat panel
+          Diff review / inline annotationYour normal git hostNo
+          Built-in code editorYour editor over SSHTerminal + chat only
+          Agent runtimes supportedAnything that runs in a terminal2 (Claude Code, opencode)
+          Git worktree per sessionBy handYes
+          Real tmux underneathYesYes
+          Agent scheduling, webhooks, secretsNoYes
+          Account requiredTermius sync is account-bound; SSH itself is notNo
+          LicenceTermius: proprietary. Claude Code: proprietaryMIT
+          MaturityBoth are mature and widely deployedManta is new
+          PriceTermius has a free tier and a paid plan. Claude Code is API costFree. You still pay Claude
+
+      The Termius + SSH stack already keeps the agent alive. The cost is that the only way to interact with it from a phone is through a terminal UI.
+
+      Where Termius + SSH is better
+      ## The incumbent gets a lot right
+
+      Conceding first and plainly. The hard part is already solved.
+
+      - ›It keeps the agent alive. That is the hard part, and tmux has done it for two decades. Closing the lid never stops the work.
+
+      - ›It is mature. Termius, iTerm, Blink, the GNOME terminal, Windows Terminal, and PuTTY all do this. Whichever you use is well-understood by the people who maintain it.
+
+      - ›It runs anywhere SSH runs. Every desktop OS, every phone, every tablet. If SSH works there, your agent works there.
+
+      - ›It costs nothing extra. OpenSSH is on every Unix box. Termius has a free tier. Adding Claude Code is just an API key.
+
+      - ›You already know how it works. There is nothing to learn. The same key, the same config, the same muscle memory.
+
+      - ›It is general purpose. SSH gets you to anything on the box. Edit a file, run a deploy, check a log. The agent is one of many things you do there.
+
+      Where Manta is better
+      ## The five things SSH does not give you
+
+      Specific. None of these attack the SSH stack; they are things the stack is the wrong shape for.
+
+      - ›A real phone client. A readable transcript instead of a terminal UI, one-tap approvals instead of typing into a TUI, dictation, and file upload. Reading an agent's terminal output on a phone keyboard is miserable; this is the actual client.
+
+      - ›A push the moment the agent is blocked. Today, you have to go and look. Manta's phone app wakes up when the agent needs a decision, with the same routing it has on desktop.
+
+      - ›Tools the agent can use between turns. Schedules, webhooks, secrets by reference, notify, peers. The agent extends its own capabilities. SSH gives the agent the terminal; Manta gives it those tools too.
+
+      Reading a terminal UI on a phone keyboard is miserable. This is the actual client.
+
+      Architecture
+      ## The same box, one extra process
+
+      Manta installs a server on the same box. SSH still works. tmux still works. The agent still lives in tmux.
+
+        ### Termius + SSH: terminal + tmux
+
+```
+   Your VPS          ← owns the work
+     ├── tmux ── agent sessions
+     └── sshd ── termius, iTerm, etc.
+
+        │              │
+   termius (phone)   termius (desktop)
+
+  the only way to interact
+  with the agent is through
+  a terminal window.
+```
+
+        ### Manta: server + clients, tmux still underneath
+
+```
+   Your VPS          ← owns the work
+     ├── manta-server ── chat, schedules, secrets
+     ├── tmux ── agent sessions (same)
+     └── sshd ── still there
+
+        │      │      │
+   desktop   phone   browser
+  (full app) (full)  (full)
+
+  termius, ssh, tmux all
+  still work.
+```
+
+      Coexistence
+      ## Can I use both?
+
+      Yes. This is the page's whole point.
+
+    Manta installs on the same box and does not take SSH away. The same tmux session that Termius attaches to is the one Manta's chat panel talks to. SSH still works, tmux still works, Termius still works. The chat panel and the phone client are the parts that change. Most setups we expect are exactly that: Termius for terminal-heavy work, Manta for chat and phone.
+
+      FAQ
+      ## What people ask before they add Manta
+
+      Five questions, answered in full.
+
+      ### Does Manta replace SSH?
+
+No. SSH still works on the same box. You can ssh into the box, attach to the same tmux session Manta is steering, and continue from the terminal.
+
+      ### Do I need to give up Termius?
+
+No. Termius keeps connecting to the same box. The chat panel and the phone client are the parts that change. Most people we expect to talk to run both: Termius for editor-heavy work, Manta for chat and phone.
+
+      ### Does Manta work alongside Claude Code?
+
+Yes. Manta runs Claude Code in a tmux session on the box. The same session can be attached from Termius or steered from Manta's chat panel. The model provider stays the same.
+
+      ### Will Manta's installer break my existing SSH setup?
+
+No. The installer adds a system service (manta-server) and either opens no public port (Tailscale path) or one HTTPS port (Caddy + LE on a per-box hostname). It does not change your SSH config, your authorized keys, or your sshd settings.
+
+      ### Should I add Manta or stick with my current setup?
+
+If your current setup covers your needs, keep it. Manta is for the cases SSH does not cover: a phone app that can actually approve a command, a notification when the agent gets stuck, dictation, file upload, and tools the agent can use between turns.
+
+    ## Install Manta on the same box
+
+    One curl command. SSH and tmux keep working alongside it.
+
+      [Open the repo](https://github.com/antoinedc/MantaUI)
+      [Back to the homepage](/)
+
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
+
+      #### Product
+
+        - [Features](/#features)
+- [Mobile](/#mobile)
+
+        - [Open source](/#opensource)
+
+        - [How it works](/#how)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Use cases
+
+        - [Claude Code on mobile](/#mobile)
+
+        - [Claude Code remote](/#how)
+
+        - [Notifications](/#features)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
+

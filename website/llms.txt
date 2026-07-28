@@ -1,0 +1,35 @@
+# Manta UI
+
+> Self-hosted Claude Code and opencode on a Linux box or Mac you own. A full desktop client and a full phone client, push notifications, real tmux underneath. MIT, free, no signup.
+
+## Docs
+
+- [AI agent install guide](https://mantaui.com/llms-install.md): how a coding agent installs Manta on a user's box.
+- [Plugin authoring guide](https://mantaui.com/llms-plugins.md): how to write a Manta plugin (the iOS build hook format).
+
+## Pages
+
+- [Home](https://mantaui.com/): what Manta is, who it is for, the headline FAQs.
+- [Claude Code web UI](https://mantaui.com/claude-code-web-ui): self-hosted web UI served from your box.
+- [Claude Code on mobile](https://mantaui.com/claude-code-mobile): native iPhone app, browser on every other phone.
+- [Claude Code remote](https://mantaui.com/claude-code-remote): running the agent on a VPS or home server.
+- [Open source](https://mantaui.com/open-source): MIT, no account, no telemetry, auditable install.
+- [Pricing](https://mantaui.com/pricing): free, no tiers, you pay your model provider.
+- [Manta vs Orca](https://mantaui.com/vs-orca): honest side-by-side on architecture, mobile, runtimes.
+- [Manta vs Conductor](https://mantaui.com/vs-conductor): honest side-by-side on architecture, platforms, sandboxing, diff review.
+- [Manta vs SSH and tmux](https://mantaui.com/vs-ssh-tmux): honest side-by-side on what Termius + SSH already gives you and what Manta adds.
+- [Privacy](https://mantaui.com/privacy): what is stored on the box and on the push gateway, and how to delete it.
+- [Terms](https://mantaui.com/terms): terms of use for the desktop client, the mobile client, and the operated push gateway.
+
+## Agent Skills
+
+- [/manta](https://mantaui.com/.well-known/agent-skills/manta/SKILL.md): install Manta UI on a user's box. Frontmatter `name`, `description`, `license: MIT`. Discoverable via `/.well-known/agent-skills/index.json`.
+
+## Indexes
+
+- [Full corpus (llms-full.txt)](https://mantaui.com/llms-full.txt): every page as markdown, concatenated. For RAG and full-context retrieval.
+- [sitemap.xml](https://mantaui.com/sitemap.xml): every URL with lastmod, changefreq, priority.
+
+## Repo
+
+- [github.com/antoinedc/MantaUI](https://github.com/antoinedc/MantaUI): server, Electron desktop, React renderer, mobile client, install script. All MIT, in one repo.

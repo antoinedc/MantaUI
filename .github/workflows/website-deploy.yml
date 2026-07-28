@@ -15,6 +15,7 @@
 #                                                → /var/www/mantaui/ (each ext optional)
 #   website/updates/*.json, scripts/install.sh, llms-install.md,
 #     docs/plugins-authoring.md                  → /var/www/mantaui/ + subpaths
+#   .well-known/                                 → /var/www/mantaui/.well-known/  (EXPLICIT copy — dotfile dirs are NOT picked up by the website/ globs)
 # Verify follows the copy — no hand-maintained file list, so no silent 404.
 #
 # RUNNER + AUTH
@@ -78,6 +79,15 @@ jobs:
             $SCP website/updates/*.json "$PROD_HOST:$WEBROOT/updates/"
           fi
 
+          echo "▸ Copying .well-known/agent-skills/ (BET-300 — dotfile dirs are NOT picked up by website/* globs)"
+          $SSH "$PROD_HOST" "mkdir -p $WEBROOT/.well-known/agent-skills/manta"
+          if [ -f .well-known/agent-skills/index.json ]; then
+            $SCP .well-known/agent-skills/index.json "$PROD_HOST:$WEBROOT/.well-known/agent-skills/index.json"
+          fi
+          if [ -f .well-known/agent-skills/manta/SKILL.md ]; then
+            $SCP .well-known/agent-skills/manta/SKILL.md "$PROD_HOST:$WEBROOT/.well-known/agent-skills/manta/SKILL.md"
+          fi
+
           echo "▸ Keeping /opt/manta clone current (source-of-truth parity)"
           $SSH "$PROD_HOST" "git -C /opt/manta fetch origin main -q && git -C /opt/manta reset --hard origin/main -q" || \
             echo "⚠ /opt/manta pull skipped (non-fatal — webroot already updated)"
@@ -118,6 +128,15 @@ jobs:
           check "llms-install.md" llms-install.md
           check "llms-plugins.md" docs/plugins-authoring.md
           check "updates/server.json" website/updates/server.json
+          # GEO layer (BET-300) — every file the marketing site advertises
+          # to AI / search crawlers must be live and byte-equal to the repo.
+          check "robots.txt" website/robots.txt
+          check "sitemap.xml" website/sitemap.xml
+          check "llms.txt" website/llms.txt
+          check "llms-full.txt" website/llms-full.txt
+          check "og.png" website/og.png
+          check ".well-known/agent-skills/index.json" .well-known/agent-skills/index.json
+          check ".well-known/agent-skills/manta/SKILL.md" .well-known/agent-skills/manta/SKILL.md
           if [ "$fail" -ne 0 ]; then
             echo "::error::One or more web assets are not live or are stale."
             exit 1

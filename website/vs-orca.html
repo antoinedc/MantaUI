@@ -33,6 +33,94 @@
 .arch-card .hl{color:var(--cyan-400)}.arch-card .gr{color:var(--green-500)}.arch-card .dm{color:var(--slate-500)}
 
 </style>
+
+<!-- BEGIN:head-meta -->
+<link rel="canonical" href="https://mantaui.com/vs-orca">
+<meta property="og:title" content="Manta UI vs Orca: an honest comparison">
+<meta property="og:description" content="A fair side-by-side of Manta UI and Orca (onorca.dev) on architecture, mobile, remote access, permissions, diff review, agent runtimes, and licensing.">
+<meta property="og:url" content="https://mantaui.com/vs-orca">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://mantaui.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Manta UI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Manta UI vs Orca: an honest comparison">
+<meta name="twitter:description" content="A fair side-by-side of Manta UI and Orca (onorca.dev) on architecture, mobile, remote access, permissions, diff review, agent runtimes, and licensing.">
+<meta name="twitter:image" content="https://mantaui.com/og.png">
+<meta name="twitter:site" content="@mantaui">
+<!-- END:head-meta -->
+
+<!-- BEGIN:head-schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": "https://mantaui.com/"
+    },
+    {
+      "@type": "ListItem",
+      "position": 2,
+      "name": "Manta UI vs Orca",
+      "item": "https://mantaui.com/vs-orca"
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is Manta a fork of Orca?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships two."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Manta run on any of Orca's agent runtimes?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Manta runs Claude Code and opencode in a real tmux session on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can Manta and Orca share a machine?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes, on a macOS box. They use different ports and different tmux sessions, so they do not interfere. On a Linux box the same applies; the desktop piece of Orca simply has no Linux desktop binary to launch there."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why is Orca so much more mature?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Windows and Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Which one should I pick if my work runs locally?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Orca. Manta is for when the work needs to outlive the laptop, or when you want a phone client that can approve a command. If neither matters and your editor matters most, Orca's Monaco integration is the answer."
+      }
+    }
+  ]
+}
+</script>
+<!-- END:head-schema -->
 </head>
 <body>
 
