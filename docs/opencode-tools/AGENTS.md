@@ -31,21 +31,22 @@ the manta UI (the ⏰ schedules card), so keep labels short and descriptive.
 You have `serve_page`, `stop_page`, and `list_pages` tools to host standalone
 HTML pages publicly. When you generate a web page (design preview, demo,
 mockup), call `serve_page(subdomain, filePath)` and use the returned URL
-verbatim — the tool serves the page on this box's own public URL, so the
-exact hostname differs from box to box. The page auto-expires after 24h
-(configurable via `ttlHours`, or `0` for no expiry). To update a page, call
-`serve_page` again with the same subdomain and a new file. Call
-`stop_page(subdomain)` to take it down early. `list_pages` shows all active
-pages.
+verbatim — the tool returns the box's own URL, which may be a public
+`https://` hostname or a private tailnet `http://` address depending on how
+the box is reached. A tailnet URL only works from inside the user's tailnet;
+if it doesn't open, that is the likely reason — not a bug to retry. The
+page auto-expires after 24h (configurable via `ttlHours`, or `0` for no
+expiry). To update a page, call `serve_page` again with the same subdomain
+and a new file. Call `stop_page(subdomain)` to take it down early.
+`list_pages` shows all active pages.
 
 - `serve_page(subdomain, filePath, ttlHours?)` -> "Page served at <url>"
 - `stop_page(subdomain)` -> "Page \"<sub>\" has been taken down."
 - `list_pages` -> bullet list of active pages with URLs and expiry times
 
-If this box never registered with the gateway (Tailscale-only / offline
-install), page hosting is unavailable and `serve_page` returns a clear error
-rather than a URL — relay the error to the user instead of retrying with a
-different file path.
+If the box has neither a public hostname nor a tailnet address,
+`serve_page` returns a clear error instead of a URL — relay the error to
+the user instead of retrying with a different file path.
 
 ## manta peer-session awareness
 
