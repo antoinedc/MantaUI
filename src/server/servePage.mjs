@@ -91,6 +91,31 @@ export function pageUrl(baseUrl, subdomain) {
   return `${baseUrl}/pages/${subdomain}`;
 }
 
+// Resolve the registry's `expiresAt` from the caller-provided `ttlHours`.
+//   - `undefined`/`null` → DEFAULT_TTL_HOURS from `now`
+//   - `0`               → `null` (never expires; sweep filter skips falsy)
+//   - any other number  → `now + ttlHours * 3600 * 1000`
+//   - non-number / negative / non-finite → {ok:false, error}
+export function resolveExpiresAt(ttlHours, now = Date.now()) {
+  if (ttlHours === undefined || ttlHours === null) {
+    return { ok: true, expiresAt: now + DEFAULT_TTL_HOURS * 3600 * 1000 };
+  }
+  if (ttlHours === 0) {
+    return { ok: true, expiresAt: null };
+  }
+  if (
+    typeof ttlHours !== "number" ||
+    !Number.isFinite(ttlHours) ||
+    ttlHours < 0
+  ) {
+    return {
+      ok: false,
+      error: "ttlHours must be a non-negative number (0 = never expires)",
+    };
+  }
+  return { ok: true, expiresAt: now + ttlHours * 3600 * 1000 };
+}
+
 // ---------------------------------------------------------------------------
 // CRUD — injectable via {load, save, publish, baseUrl}
 // ---------------------------------------------------------------------------
@@ -130,9 +155,16 @@ export async function registerPage(
     return { ok: false, error: `Source file "${filePath}" not found or not readable` };
   }
 
-  const ttl = ttlHours ?? DEFAULT_TTL_HOURS;
+  // Validate ttlHours before any file is written. `0` means "never expires"
+  // (stored as `expiresAt: null`); anything else present must be a finite
+  // non-negative number.
   const now = Date.now();
-  const expiresAt = now + ttl * 3600 * 1000;
+  const ttlResult = resolveExpiresAt(ttlHours, now);
+  if (!ttlResult.ok) {
+    return { ok: false, error: ttlResult.error };
+  }
+  const expiresAt = ttlResult.expiresAt;
+
   const pageFile = resolvePageFile(subdomain);
 
   // Copy source into stable directory.

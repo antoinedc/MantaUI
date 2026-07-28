@@ -3,9 +3,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, rm } from "node:fs/promises";
 import {
   isValidSubdomain,
   pageUrl,
@@ -13,7 +13,9 @@ import {
   readPage,
   createCleanupSweep,
   pageResponseHeaders,
+  resolveExpiresAt,
 } from "./servePage.mjs";
+import { STATE_DIRNAME } from "../shared/paths.mjs";
 
 // ---------------------------------------------------------------------------
 // isValidSubdomain
@@ -58,6 +60,60 @@ test("pageUrl builds the public URL under the box's base URL", () => {
 });
 
 // ---------------------------------------------------------------------------
+// resolveExpiresAt — pure TTL parsing for the registry
+// ---------------------------------------------------------------------------
+
+test("resolveExpiresAt with ttlHours: 0 returns null (never expires)", () => {
+  const r = resolveExpiresAt(0, 1_000_000);
+  assert.deepEqual(r, { ok: true, expiresAt: null });
+});
+
+test("resolveExpiresAt with ttlHours omitted uses the default 24h window", () => {
+  const NOW = 1_000_000;
+  const r = resolveExpiresAt(undefined, NOW);
+  assert.equal(r.ok, true);
+  assert.equal(r.expiresAt, NOW + 24 * 3600 * 1000);
+});
+
+test("resolveExpiresAt with ttlHours null uses the default 24h window", () => {
+  const NOW = 1_000_000;
+  const r = resolveExpiresAt(null, NOW);
+  assert.equal(r.ok, true);
+  assert.equal(r.expiresAt, NOW + 24 * 3600 * 1000);
+});
+
+test("resolveExpiresAt with a positive ttlHours returns now + that window", () => {
+  const NOW = 1_000_000;
+  const r = resolveExpiresAt(2, NOW);
+  assert.equal(r.ok, true);
+  assert.equal(r.expiresAt, NOW + 2 * 3600 * 1000);
+});
+
+test("resolveExpiresAt rejects a negative ttlHours", () => {
+  const r = resolveExpiresAt(-1, 1_000_000);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /non-negative number/);
+});
+
+test("resolveExpiresAt rejects a non-number ttlHours (string)", () => {
+  const r = resolveExpiresAt("soon", 1_000_000);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /non-negative number/);
+});
+
+test("resolveExpiresAt rejects a non-number ttlHours (object)", () => {
+  const r = resolveExpiresAt({ hours: 1 }, 1_000_000);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /non-negative number/);
+});
+
+test("resolveExpiresAt rejects NaN and Infinity", () => {
+  assert.equal(resolveExpiresAt(NaN, 1_000_000).ok, false);
+  assert.equal(resolveExpiresAt(Infinity, 1_000_000).ok, false);
+  assert.equal(resolveExpiresAt(-Infinity, 1_000_000).ok, false);
+});
+
+// ---------------------------------------------------------------------------
 // registerPage — empty baseUrl guard (load-bearing — keeps silent-404 dead
 // URLs from ever being returned by an unregistered box)
 // ---------------------------------------------------------------------------
@@ -88,6 +144,114 @@ test("registerPage with empty baseUrl returns ok:false AND writes nothing", asyn
   assert.equal(result.ok, false);
   assert.match(result.error, /no published public hostname/);
   assert.equal(saveCalls, 0, "save must not run when baseUrl is empty");
+});
+
+// ---------------------------------------------------------------------------
+// registerPage — TTL handling (BET-345 — `ttlHours: 0` must mean never expires,
+// not "delete in 5 minutes")
+// ---------------------------------------------------------------------------
+
+async function pageCleanup(subdomain) {
+  try {
+    await rm(join(homedir(), STATE_DIRNAME, "pages", subdomain), {
+      recursive: true,
+      force: true,
+    });
+  } catch {
+    // best-effort — page dir may not exist if the test failed before copy
+  }
+}
+
+test("registerPage with ttlHours: 0 stores expiresAt: null (never expires)", async () => {
+  const source = join(tmpDir("source"), "page.html");
+  await mkdir(join(source, ".."), { recursive: true });
+  await writeFile(source, "<html></html>");
+
+  const label = `ttl0-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let savedPages = null;
+  try {
+    const result = await registerPage(
+      { subdomain: label, filePath: source, ttlHours: 0 },
+      {
+        baseUrl: "https://0123abc.boxes.mantaui.com",
+        load: () => [],
+        save: async (pages) => {
+          savedPages = pages;
+        },
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.expiresAt, null);
+    assert.equal(result.url, `https://0123abc.boxes.mantaui.com/pages/${label}`);
+    assert.ok(savedPages && savedPages.length === 1);
+    assert.equal(savedPages[0].subdomain, label);
+    assert.equal(savedPages[0].expiresAt, null);
+  } finally {
+    await pageCleanup(label);
+  }
+});
+
+test("registerPage with ttlHours omitted uses the default 24h window", async () => {
+  const source = join(tmpDir("source"), "page.html");
+  await mkdir(join(source, ".."), { recursive: true });
+  await writeFile(source, "<html></html>");
+
+  const label = `default-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let savedPages = null;
+  try {
+    const before = Date.now();
+    const result = await registerPage(
+      { subdomain: label, filePath: source },
+      {
+        baseUrl: "https://0123abc.boxes.mantaui.com",
+        load: () => [],
+        save: async (pages) => {
+          savedPages = pages;
+        },
+      },
+    );
+    const after = Date.now();
+    assert.equal(result.ok, true);
+    // 24h ± a few ms of clock drift during the call.
+    assert.ok(
+      result.expiresAt >= before + 24 * 3600 * 1000,
+      "expiresAt must be ≥ now+24h",
+    );
+    assert.ok(
+      result.expiresAt <= after + 24 * 3600 * 1000,
+      "expiresAt must be ≤ now+24h",
+    );
+    assert.equal(savedPages[0].expiresAt, result.expiresAt);
+  } finally {
+    await pageCleanup(label);
+  }
+});
+
+test("registerPage with an invalid ttlHours rejects without writing the file or registry", async () => {
+  const source = join(tmpDir("source"), "page.html");
+  await mkdir(join(source, ".."), { recursive: true });
+  await writeFile(source, "<html></html>");
+
+  const label = `bad-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let saveCalled = false;
+  const result = await registerPage(
+    { subdomain: label, filePath: source, ttlHours: -1 },
+    {
+      baseUrl: "https://0123abc.boxes.mantaui.com",
+      load: () => [],
+      save: async () => {
+        saveCalled = true;
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /non-negative number/);
+  assert.equal(saveCalled, false, "registry save must not run for an invalid TTL");
+  // No page dir should have been created either.
+  // (Skipping a fs assertion here — the pageCleanup call would mask the
+  // absence-vs-creation difference. The `saveCalled === false` check above
+  // is sufficient: registerPage reaches the file copy AFTER the TTL check,
+  // so a save that didn't run proves the file copy didn't either.)
 });
 
 // ---------------------------------------------------------------------------
@@ -198,6 +362,32 @@ test("cleanup sweep is a no-op when nothing is expired", async () => {
   });
   await sweep();
   assert.equal(saveCalled, false);
+});
+
+test("cleanup sweep leaves an expiresAt: null entry alone while removing an expired sibling", async () => {
+  // BET-345 contract: ttlHours: 0 is stored as expiresAt: null, meaning
+  // "never expires". The sweep's `p.expiresAt && …` filter must skip a
+  // null entry even when a sibling in the same page list is stale.
+  const NOW = 1_000_000;
+  const pages = [
+    { subdomain: "noexp", expiresAt: null },
+    { subdomain: "stale", expiresAt: NOW - 10_000 },
+  ];
+  let saved = null;
+  const { sweep } = createCleanupSweep({
+    load: () => pages,
+    save: async (next) => {
+      saved = next;
+    },
+    now: () => new Date(NOW),
+  });
+  await sweep();
+  assert.deepEqual(
+    saved.map((p) => p.subdomain),
+    ["noexp"],
+  );
+  // The never-expires entry's null must be preserved, not coerced.
+  assert.equal(saved[0].expiresAt, null);
 });
 
 // ---------------------------------------------------------------------------
