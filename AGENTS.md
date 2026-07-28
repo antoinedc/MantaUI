@@ -2124,6 +2124,27 @@ by API without a tag (see the iOS section's "Triggering a release" for the
 `curl` + `CODEMAGIC_API_KEY` recipe) — useful for re-running a build without a
 version bump.
 
+**PUSH RELEASE TAGS ONE AT A TIME — NEVER MORE THAN THREE IN ONE PUSH.**
+GitHub silently drops the `push` event when a single push creates **more than
+three tags**: the refs are created, `git push` prints `[new tag]` for each, and
+**not one workflow runs**. Nothing anywhere reports an error — the only symptom
+is that `gh run list --workflow <target>.yml` shows no run for the new tag. This
+bit the 2026-07-28 release: `git push origin mac-v0.0.17 win-v0.0.15 server-v10
+web-v16` created all four tags and triggered zero deploys (Codemagic's own tag
+webhook was suppressed for the mac tag too, so it is not Actions-specific).
+
+A re-push of an already-existing tag is a no-op and fires nothing, so recovery
+is **delete the remote tag, then push it again alone**:
+
+```
+git push origin :refs/tags/<tag>   # delete remote
+git push origin <tag>              # re-push alone → event fires
+```
+
+Push each release tag in its own `git push`, and confirm each one actually
+started a run before pushing the next:
+`gh run list --workflow <target>.yml --limit 1`.
+
 ### iOS (`ios-v*`) — Codemagic
 
 Full detail in "## iOS release / TestFlight". Summary: build+sign+notarize on a
@@ -2161,15 +2182,19 @@ entirely) — treat it as a bonus, never the plan.
   Manta UI.app"). After the keychain step, CSC_LINK/CSC_KEY_PASSWORD are
   UNSET so electron-builder auto-discovers the "Developer ID Application"
   identity (`mac.identity`) from that keychain.
-- **NOTARIZATION IS OFF for the beta** (`mac.notarize: false`). Apple's
-  notarization queue added 20-40 min of unpredictable latency (two builds
-  stalled 30+ min in it). The DMG is Developer ID-SIGNED but not notarized, so
-  testers open it ONCE via right-click → Open (or `xattr -dr
-  com.apple.quarantine "/Applications/Manta UI.app"`). To re-enable for public
-  distribution: `mac.notarize: true` (electron-builder 25 reads the team id from
-  the `APPLE_TEAM_ID` env var — do NOT use `notarize.teamId`, it warns + stalls)
-  with `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID` in the Codemagic
-  `mantaui` env group.
+- **NOTARIZATION IS ON** (`mac.notarize: true`). It is notarized TWICE, and both
+  passes are required: electron-builder notarizes + staples the **.app** inside
+  the bundle, and a separate workflow step signs, notarizes and staples the
+  **outer .dmg** — an un-notarized DMG fails Gatekeeper on download
+  ("source=no usable signature") even when the app inside it is fine. A "Verify
+  notarization" step gates the publish. electron-builder 25 reads the team id
+  from the `APPLE_TEAM_ID` env var — do NOT use `notarize.teamId`, it warns +
+  stalls; `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID` live in the
+  Codemagic `mantaui` env group. A LOCAL `electron-builder --mac` with no
+  credentials will fail the notarize step — override with
+  `-c.mac.notarize=false` for a signed-only local build. (Historical: this was
+  OFF during the beta because the notarization queue added 20-40 min of
+  unpredictable latency and testers right-click → Open'd instead.)
 - **Publish to prod** (`Publish to mantaui.com` step): scp's the DMG +
   `latest-mac.yml` to `/var/www/mantaui/{updates,downloads}` and refreshes
   `Manta-latest.dmg` (arm64 preferred). Gated on `PROD_SSH_KEY` (base64 SSH key
@@ -2307,9 +2332,10 @@ check the live artifact:
 ```
 curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/llms-install.md   # web
 curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/downloads/Manta-latest.dmg  # desktop
-curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/releases/manta-latest-linux-x64.tar.gz   # server x64
-curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/releases/manta-latest-linux-arm64.tar.gz  # server arm64
-curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/releases/manta-latest-darwin-arm64.tar.gz  # server darwin-arm64 (Apple Silicon Mac box)
+# server — there is NO `manta-latest-<arch>.tar.gz`; those URLs 404. The only
+# stable name is the manifest, which names the VERSIONED tarball per arch:
+curl -s https://mantaui.com/releases/manta-latest.txt   # version= + file_/sha256_ per arch
+curl -s -o /dev/null -w "%{http_code}\n" https://mantaui.com/releases/manta-<version>-linux-x64.tar.gz
 curl -fsS https://gateway.mantaui.com/healthz    # gateway → {"ok":true}
 node /tmp/opencode/asc.mjs   # (on the box) — ASC build state for iOS (VALID = really uploaded)
 ```
