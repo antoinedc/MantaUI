@@ -53,5 +53,4 @@ public bind states so explicitly.
 
 | Port | Service |
 |---|---|
-| 20080 | serve-page file server (behind `*.pages.<domain>` vhost) |
 | 20081 | gateway (hosted push fanout → APNs + DNS automation, behind `gateway.<domain>` vhost) |

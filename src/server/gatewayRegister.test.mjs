@@ -6,6 +6,7 @@ import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import {
   registerWithGateway,
   loadAuthFile,
+  publicBaseUrl,
   DEFAULT_AUTH_PATH,
 } from "./gatewayRegister.mjs";
 
@@ -367,6 +368,53 @@ test("default auth path is exported and well-formed", () => {
   assert.ok(typeof DEFAULT_AUTH_PATH === "string");
   assert.ok(DEFAULT_AUTH_PATH.endsWith("/auth.json"));
   assert.ok(DEFAULT_AUTH_PATH.includes(".manta"));
+});
+
+// ----------------------------------------------------------------------------
+// publicBaseUrl — the box's own public base URL (no DNS round-trip; just
+// re-reads gateway_host from auth.json fresh per call so a value that lands
+// AFTER the server boots is visible to the next caller)
+// ----------------------------------------------------------------------------
+
+test("publicBaseUrl returns https://<host> when gateway_host is set", async () => {
+  const path = tmpAuthPath("public-base-set");
+  await writeAuth(path, {
+    box_id: BOX_ID,
+    box_token: PRIOR_TOKEN,
+    gateway_host: `${BOX_ID}.boxes.mantaui.com`,
+  });
+  assert.equal(publicBaseUrl(path), `https://${BOX_ID}.boxes.mantaui.com`);
+});
+
+test("publicBaseUrl returns '' when gateway_host is missing", async () => {
+  const path = tmpAuthPath("public-base-no-host");
+  await writeAuth(path, { box_id: BOX_ID, box_token: PRIOR_TOKEN });
+  assert.equal(publicBaseUrl(path), "");
+});
+
+test("publicBaseUrl returns '' when auth.json is missing", () => {
+  const path = tmpAuthPath("public-base-missing");
+  assert.equal(publicBaseUrl(path), "");
+});
+
+test("publicBaseUrl returns '' when gateway_host is the empty string", async () => {
+  const path = tmpAuthPath("public-base-empty-host");
+  await writeAuth(path, { box_id: BOX_ID, box_token: PRIOR_TOKEN, gateway_host: "" });
+  assert.equal(publicBaseUrl(path), "");
+});
+
+test("publicBaseUrl reads fresh on each call (no module-scope cache)", async () => {
+  const path = tmpAuthPath("public-base-fresh");
+  // First call: no host → ""
+  assert.equal(publicBaseUrl(path), "");
+  // Host lands AFTER the first read (simulating registerWithGateway writing
+  // gateway_host post-boot). Second call MUST see it.
+  await writeAuth(path, {
+    box_id: BOX_ID,
+    box_token: PRIOR_TOKEN,
+    gateway_host: `${BOX_ID}.boxes.mantaui.com`,
+  });
+  assert.equal(publicBaseUrl(path), `https://${BOX_ID}.boxes.mantaui.com`);
 });
 
 // Cleanup any stray tmp dirs. Best-effort; safe to ignore errors.
