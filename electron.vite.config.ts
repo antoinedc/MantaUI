@@ -16,6 +16,18 @@ const pkg = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8"))
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
+    // Build-time-injected channel id (BET-370). The release pipeline sets
+    // MANTA_CHANNEL=prod|staging for packaged builds; `npm run dev` leaves
+    // it unset so the main process falls back to "prod" baked value AND
+    // resolveChannel() itself overrides with "dev" when app.isPackaged is
+    // false. Defensive reference in main/index.ts:
+    // `typeof __MANTA_CHANNEL__ === "string" ? __MANTA_CHANNEL__ : "prod"`
+    // exists because an unbuilt / unprocessed main bundle has no define
+    // inlined — TypeScript would refuse an unknown identifier. The ambient
+    // declaration lives in src/main/buildDefines.d.ts.
+    define: {
+      __MANTA_CHANNEL__: JSON.stringify(process.env.MANTA_CHANNEL ?? "prod"),
+    },
     build: {
       rollupOptions: {
         input: { index: resolve(__dirname, "src/main/index.ts") },
