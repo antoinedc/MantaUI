@@ -29,8 +29,21 @@ import { MIN_CLIENT } from "./version.mjs";
 // self-update.sh — `restartOpencode` invokes an absolute binary on PATH;
 // this one is repo-local so we resolve it explicitly. Mirrors how the
 // server already passes an absolute cwd to tmux/opencode spawning.
+//
+// Exported (BET-366 reviewer return) so the regression guard in
+// src/server/rpc.test.mjs can match the channel routing against the
+// exact path the production wiring passes to `runServerSelfUpdate`.
+// Without this, a future path-rename here would silently slip past
+// the spawn test in opencodeAdmin.test.mjs (which only checks the
+// function — it can't see what the IPC channel passes in).
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SELF_UPDATE_SCRIPT = join(__dirname, "..", "..", "scripts", "self-update.sh");
+export const SELF_UPDATE_SCRIPT = join(
+  __dirname,
+  "..",
+  "..",
+  "scripts",
+  "self-update.sh",
+);
 
 // ---------------------------------------------------------------------------
 // BET-354: Claude connect session registry
@@ -106,21 +119,39 @@ export async function dispatch(handlers, channel, args) {
   return fn(...args);
 }
 
-// Build the full handler map. Accepts { tmux, oc, pty, bus, local, authPair, push, serverVersion } where:
-//   tmux          — src/server/tmux.mjs namespace
-//   oc            — src/server/opencode.mjs namespace
-//   pty           — src/server/pty.mjs namespace
-//   bus           — event bus created by createBus() in events.mjs
-//   local         — src/server/local.mjs namespace (git/fs/config/clipboard stubs)
-//   authPair      — () => authEngine.pair(); the `auth:pair` channel wraps it.
-//   push          — src/server/push.mjs namespace (BET-181: APNs token registration dispatch).
-//   serverVersion — string, package.json `version` read once at startup (same
-//                   value `GET /api/version` returns). The `server:version`
-//                   channel returns it in-process so the renderer avoids an
-//                   HTTP round-trip on every Settings mount.
+// Build the full handler map. Accepts { tmux, oc, pty, bus, local, authPair, push, serverVersion, runServerSelfUpdate } where:
+//   tmux                — src/server/tmux.mjs namespace
+//   oc                  — src/server/opencode.mjs namespace
+//   pty                 — src/server/pty.mjs namespace
+//   bus                 — event bus created by createBus() in events.mjs
+//   local               — src/server/local.mjs namespace (git/fs/config/clipboard stubs)
+//   authPair            — () => authEngine.pair(); the `auth:pair` channel wraps it.
+//   push                — src/server/push.mjs namespace (BET-181: APNs token registration dispatch).
+//   serverVersion       — string, package.json `version` read once at startup (same
+//                         value `GET /api/version` returns). The `server:version`
+//                         channel returns it in-process so the renderer avoids an
+//                         HTTP round-trip on every Settings mount.
+//   runServerSelfUpdate — the box's self-update spawner (BET-366 reviewer return).
+//                         Injected so the regression guard in rpc.test.mjs can
+//                         stub the spawn and assert the `server:update-apply`
+//                         IPC channel routes to it with the right script path.
+//                         Production callers (src/server/index.mjs) pass the
+//                         real `runServerSelfUpdate` from opencodeAdmin.mjs.
+//                         `restartOpencode` is still module-imported (no IPC
+//                         regression guard is pinned to it today).
 // Channel key strings MUST match IPC.* values in src/shared/types.ts.
 // Arg shapes MUST match what src/preload/index.ts packs per channel.
-export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serverVersion }) {
+export function buildHandlers({
+  tmux,
+  oc,
+  pty,
+  bus,
+  local,
+  authPair,
+  push,
+  serverVersion,
+  runServerSelfUpdate,
+}) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
   // migration). Renderer-supplied cwd is preferred when it's a real path, but
@@ -391,15 +422,20 @@ export function buildHandlers({ tmux, oc, pty, bus, local, authPair, push, serve
     // `agent`/`provider` blocks at startup). Was a no-op stub pre-BET-123.
     "opencode:restart": () => restartOpencode(),
 
-    // server-update apply (BET-225 stage 3 Part A): kick off the box's
-    // self-update script (scripts/self-update.sh — git fetch + reset --hard
-    // origin/main + npm ci --omit=dev + systemctl --user restart
-    // manta-server). The script's final step kills this manta-server process
-    // mid-run, so the child is detached via `runServerSelfUpdate` rather
-    // than awaited here — the caller (renderer UpdateBar) just sees the
-    // RPC promise resolve as soon as execFile returns. No caller-supplied
-    // input (no injection surface); script path is resolved once at module
-    // load from `import.meta.url` so cwd never enters the calculation.
+    // server-update apply (BET-225 stage 3 Part A / BET-357 §3): kick off
+    // the box's self-update script (scripts/self-update.sh — git fetch +
+    // reset --hard origin/main + npm ci --omit=dev + systemctl --user
+    // restart manta-server). The script's final step kills this
+    // manta-server process mid-run, so the child is detached via
+    // `runServerSelfUpdate` rather than awaited here — the caller
+    // (renderer UpdateBar) just sees the RPC promise resolve as soon as
+    // execFile returns. No caller-supplied input (no injection surface);
+    // script path is the module-level SELF_UPDATE_SCRIPT resolved from
+    // `import.meta.url` so cwd never enters the calculation. The
+    // `runServerSelfUpdate` reference comes from the `buildHandlers` deps
+    // (injected by src/server/index.mjs in production; stubbed in
+    // rpc.test.mjs for the regression guard) — see the comment block
+    // above buildHandlers for why this isn't a module-level import.
     "server:update-apply": () => runServerSelfUpdate(SELF_UPDATE_SCRIPT),
 
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args
