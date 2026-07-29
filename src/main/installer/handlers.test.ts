@@ -4,12 +4,13 @@
 //   1. The mint-and-claim IPC handler funnels through the INJECTED
 //      `persist` callback (the same one main's manual claim path uses).
 //      This is the regression test for BET-372 — the production wiring
-//      used to `require("../index.js")` and destructure a non-exported
-//      `commit`, throwing `TypeError: commit is not a function` on every
-//      successful SSH claim.
-//   2. The handlers.ts source file contains no `require("../index")`
-//      (a simple source-level assertion that pins the circular require
-//      from sneaking back in).
+//      used to grab a non-exported `commit` via a circular require against
+//      the main entry module, yielding `undefined` and throwing
+//      `TypeError: commit is not a function` on every successful SSH claim.
+//   2. The handlers.ts source file does NOT pull the main entry module
+//      back into the installer module's require graph (a simple
+//      source-level assertion that pins the circular require from
+//      sneaking back in).
 //
 // No SSH connection, no network: the installer module is mocked at the
 // boundary so the wiring — not the install — is what the tests exercise.
@@ -162,10 +163,10 @@ describe("registerInstallerHandlers — mint-and-claim (BET-372)", () => {
 
 // Source-level guard: the handlers.ts file MUST NOT pull main's index.js
 // back into the installer module's require graph. This catches a future
-// regression where someone re-adds the `require("../index.js")` to grab
-// `commit` — the same trap BET-372 fixed. A source-level assertion is
-// intentionally cheap and survives refactors that keep the function names
-// but rewrite the wiring.
+// regression where someone re-adds a circular require to grab `commit`
+// — the same trap BET-372 fixed. A source-level assertion is intentionally
+// cheap and survives refactors that keep the function names but rewrite
+// the wiring.
 describe("handlers.ts — no circular require of main/index", () => {
   const handlersPath = fileURLToPath(new URL("./handlers.ts", import.meta.url));
   const source = readFileSync(handlersPath, "utf8");
