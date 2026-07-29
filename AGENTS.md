@@ -206,6 +206,17 @@ mind:
   it holds under launchd, systemd, the nohup fallback and any hand-rolled
   supervisor. **Linux was latently exposed too** — the systemd unit declares no
   locale either; it only escaped because the box runs tmux 3.4.
+- **Windows SSH auth fails for non-Unix reasons.** The OpenSSH Agent service is
+  disabled by default on Windows 10/11, and PuTTYgen writes `.ppk` keys OpenSSH
+  cannot read. Both surface as a generic `Permission denied (publickey)` over SSH
+  with no hint of the real cause — a Windows user with an unconfigured agent or a
+  PuTTY-only key sees the preflight's auth-failed step and nothing more. The
+  installer's preflight now runs two LOCAL probes (`windows-agent` via `ssh-add -l`,
+  `key-format` via the `~/.ssh/id_*` file header) on `process.platform === 'win32'`
+  and surfaces a structured failure with the Windows-specific fix, but only when
+  auth already failed — a working Windows setup (unencrypted OpenSSH key, or a key
+  the agent already holds) must not be blocked by a stray `.ppk` file sitting
+  unused in `~/.ssh`. See `src/main/installer/preflight.ts` (BET-362).
 
 **`main` is governed by ONE system: the ruleset** (Settings → Rules → Rulesets →
 "main"). The legacy per-branch protection rule was deleted 2026-07-27 because
