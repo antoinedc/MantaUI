@@ -303,6 +303,14 @@ export interface Api {
   // `message` is user-facing copy; `raw` is the underlying updater message.
   onAutoUpdateError(cb: (info: { message: string; raw: string }) => void): () => void;
 
+  // BET-365 / BET-357 §1 — user-initiated reconnect. The events WebSocket
+  // auto-reconnects on its own exponential backoff; this method is the manual
+  // "Retry now" trigger wired into the ReconnectingBanner. Calling it resets
+  // the backoff attempt counter and the total-window deadline, then opens the
+  // socket immediately. Safe to call from any state (connected → no-op,
+  // reconnecting → jump the queue, closed → re-arm from scratch).
+  connectionRetryNow(): void;
+
   // Typeahead sources.
   opencodeCommands(): Promise<OpencodeCommand[]>;
   opencodeAgents(): Promise<OpencodeAgent[]>;

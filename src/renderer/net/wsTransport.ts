@@ -78,36 +78,64 @@ export interface WsReconnectOpts {
    * inline cap (1s → 15s) this controller replaces. Reset on every healthy open.
    */
   backoff?: ExponentialBackoff;
+  /**
+   * Maximum total reconnect window in ms. After the FIRST drop following a
+   * healthy connect, the controller arms a deadline timer for this many ms; if
+   * no healthy reconnect happens in that window the controller transitions to
+   * `closed` (reason: "reconnect window exceeded") and STOPS scheduling further
+   * reconnects. A manual `retryNow()` re-arms the deadline. Default 10 minutes
+   * — long enough to absorb a normal box restart / tunnel re-establish, short
+   * enough that a truly gone box doesn't ping forever. Set to 0 to disable.
+   */
+  maxTotalWindowMs?: number;
   /** Called when `url()` throws (no server configured). Optional; for logging. */
   onConfigError?: (err: unknown) => void;
   setTimeoutFn?: SetTimeoutFn;
   clearTimeoutFn?: ClearTimeoutFn;
 }
 
+/** Default total reconnect window when the caller does not supply one. 10
+ *  minutes is the balance the BET-357 §1 implementer picked: long enough to
+ *  ride out a typical box restart / tunnel re-establish, short enough that a
+ *  permanently-dead box stops trying within the lifetime of a user noticing. */
+export const DEFAULT_MAX_TOTAL_WINDOW_MS = 10 * 60 * 1000;
+
 /**
  * Owns a single reconnecting WebSocket. `ensure()` opens the socket if it is
  * not already live and is idempotent; a drop (`onclose`/`onerror`) schedules a
  * reconnect through the shared `ExponentialBackoff` and **never permanently
- * abandons** the socket (the guarantee the old inline code made, now unified).
+ * abandons** the socket during the total reconnect window (the guarantee the
+ * old inline code made, now unified).
  *
  * Connection lifecycle mapped onto the shared `ConnectionState`:
  *   idle → connecting → connected            (healthy open)
  *   connected → stalled → reconnecting → …    (drop → backoff retry)
- *   * → closed                                (explicit close() / config error)
+ *   * → closed                                (explicit close() / config error
+ *                                              OR total window exceeded)
  *
  * NOTE the socket is message-carrying, so "stalled" here means "the socket
  * dropped" (observed from onclose/onerror), which we surface before entering
  * `reconnecting`. There is no ping loop — liveness is the socket's own events.
+ *
+ * Total window (BET-365 / BET-357 §1): the controller arms a single deadline
+ * timer on the first drop following a healthy connect. If no healthy reconnect
+ * happens within `maxTotalWindowMs` (default 10 minutes) the controller
+ * transitions to `closed` and stops scheduling — the box has clearly gone
+ * away. A manual `retryNow()` re-arms both the backoff and the deadline so
+ * the user can immediately try again from the UI banner.
  */
 export class WsReconnectController {
   private readonly opts: WsReconnectOpts;
   private readonly backoff: ExponentialBackoff;
+  private readonly maxTotalWindowMs: number;
   private readonly setTimeoutFn: SetTimeoutFn;
   private readonly clearTimeoutFn: ClearTimeoutFn;
 
   private ws: WsLike | null = null;
   private state: ConnectionState = { state: "idle" };
   private reconnectTimer: TimerHandle | null = null;
+  /** Total-window deadline timer; null when not reconnecting or disabled. */
+  private deadlineTimer: TimerHandle | null = null;
   /** True once we've seen a drop, so the NEXT open is a reconnect (→ onReconnect). */
   private hadDrop = false;
   /** Bumped on close()/teardown so stale socket callbacks no-op. */
@@ -117,6 +145,8 @@ export class WsReconnectController {
     this.opts = opts;
     this.backoff =
       opts.backoff ?? new ExponentialBackoff({ base: 1000, max: 15000 });
+    this.maxTotalWindowMs =
+      opts.maxTotalWindowMs ?? DEFAULT_MAX_TOTAL_WINDOW_MS;
     this.setTimeoutFn =
       opts.setTimeoutFn ??
       ((fn, ms) => setTimeout(fn, ms) as unknown as TimerHandle);
@@ -157,6 +187,50 @@ export class WsReconnectController {
   }
 
   /**
+   * User-initiated "Retry now" — clear the current reconnect state and open
+   * the socket immediately, fresh backoff AND fresh total-window deadline.
+   *
+   * Wired into the renderer's reconnecting banner (BET-365 / BET-357 §1): when
+   * the banner shows the user a stuck link, clicking "Retry now" calls this.
+   * The deadline timer is re-armed so the new attempt gets the full window
+   * (a manual retry after a long disconnect should NOT count against the
+   * remaining budget — the user just volunteered to try again). The backoff
+   * counter resets to 0 so the next failure restarts at `base`, not at the
+   * previous (possibly already-capped) delay.
+   *
+   * Note: re-arming the deadline on each retry means a user can spam "Retry
+   * now" to keep trying indefinitely. That is intentional — the user has
+   * explicitly opted back in. The deadline still bounds each individual
+   * attempt-window; the aggregate is bounded only by user patience.
+   *
+   * Idempotent: calling `retryNow()` while connected is a no-op (the controller
+   * is healthy). Calling it while `closed` re-opens from `closed` (the shared
+   * state machine allows `closed → idle` via `ensure()` already, but here we
+   * keep the semantics simple: it just calls `open()`, which transitions via
+   * `connecting`).
+   */
+  retryNow(): void {
+    this.backoff.reset();
+    this.clearReconnectTimer();
+    this.clearDeadlineTimer();
+    this.hadDrop = true;
+    this.open();
+    // Re-arm the deadline so the new attempt gets the full window. We do this
+    // AFTER open() because open() may have transitioned the controller to a
+    // non-connected state (e.g. the URL build threw → "closed") — in which
+    // case a fresh deadline is irrelevant. Only arm when the controller is
+    // actually retrying.
+    if (
+      this.maxTotalWindowMs > 0 &&
+      this.deadlineTimer === null &&
+      this.state.state !== "connected" &&
+      this.state.state !== "closed"
+    ) {
+      this.startDeadlineTimer(this.epoch);
+    }
+  }
+
+  /**
    * Unconditionally tear down the current socket and open a fresh one RIGHT
    * NOW, even if `readyState === OPEN`. Used by the liveness watchdog
    * (httpApi.ts): a half-open socket keeps reporting OPEN even when the
@@ -181,6 +255,7 @@ export class WsReconnectController {
   close(reason = "close"): void {
     this.epoch += 1;
     this.clearReconnectTimer();
+    this.clearDeadlineTimer();
     this.closeSocket();
     this.transition({ state: "closed", reason });
   }
@@ -237,6 +312,9 @@ export class WsReconnectController {
 
   private onOpen(): void {
     this.backoff.reset();
+    // A healthy open resets the total-window deadline — the controller is
+    // back to "connected" and the budget is irrelevant until the next drop.
+    this.clearDeadlineTimer();
     this.transition({ state: "connected" });
     if (this.hadDrop) {
       this.hadDrop = false;
@@ -253,6 +331,16 @@ export class WsReconnectController {
       this.transition({ state: "stalled", since: new Date() });
     }
     this.scheduleReconnect(myEpoch);
+    // Arm the total-window deadline on the FIRST drop following a healthy
+    // connect (state.state was "connected" before this onDrop fired). On
+    // subsequent drops inside the same retry loop the deadline is already
+    // armed — leave it alone. Scheduled AFTER the reconnect timer so the
+    // fake-timer test scaffolding (which fires by insertion order) advances
+    // through reconnect retries before tripping the deadline; production
+    // wall-clock timers fire on their own clocks regardless of insertion order.
+    if (this.deadlineTimer === null && this.maxTotalWindowMs > 0) {
+      this.startDeadlineTimer(myEpoch);
+    }
   }
 
   private scheduleReconnect(myEpoch: number): void {
@@ -268,6 +356,27 @@ export class WsReconnectController {
       if (this.isStale(myEpoch)) return;
       this.open();
     }, backoffMs);
+  }
+
+  private startDeadlineTimer(myEpoch: number): void {
+    if (this.deadlineTimer !== null) return;
+    this.deadlineTimer = this.setTimeoutFn(() => {
+      this.deadlineTimer = null;
+      if (this.isStale(myEpoch)) return;
+      // Total reconnect window exceeded — stop trying, land in `closed`. The
+      // UI banner's "Retry now" button calls retryNow() which clears the
+      // closed state and re-opens from scratch.
+      this.clearReconnectTimer();
+      this.closeSocket();
+      this.transition({ state: "closed", reason: "reconnect window exceeded" });
+    }, this.maxTotalWindowMs);
+  }
+
+  private clearDeadlineTimer(): void {
+    if (this.deadlineTimer !== null) {
+      this.clearTimeoutFn(this.deadlineTimer);
+      this.deadlineTimer = null;
+    }
   }
 
   private enterConnecting(): void {
