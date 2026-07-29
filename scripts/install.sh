@@ -67,12 +67,16 @@
 #   MANTA_REPO_URL      git URL the deploy is initialised against for `scripts/self-update.sh`
 #                       (default https://github.com/antoinedc/MantaUI.git)
 #   MANTA_HOME          where code is unpacked (default ~/manta)
-#   MANTA_CHANNEL       build channel — prod|staging|dev (default prod). Baked
-#                       into the manta-server systemd unit / LaunchAgent plist
-#                       as Environment/EnvironmentVariables so the box's own
-#                       long-lived process resolves the right pair-link URL
+#   MANTA_CHANNEL       build channel — prod|staging|dev (default prod). Drives
+#                       the pair-link URL scheme install.sh/`manta pair` print
+#                       (BET-386 — see scripts/install-lib.mjs's resolveConfig),
+#                       and baked into the manta-server systemd unit / LaunchAgent
+#                       plist as Environment/EnvironmentVariables so the box's
+#                       own long-lived process resolves the right pair-link URL
 #                       scheme (resolveBoxChannel() in src/server/pairPage.mjs,
-#                       BET-373). Not persisted anywhere.
+#                       BET-373/BET-392). Baked into the `manta` CLI shim at
+#                       install time so later `manta pair` re-runs agree. Not
+#                       persisted anywhere.
 #   MANTA_MOBILE_PORT   server port (default 8787)
 #   MANTA_VERSION       version to fetch when MANTA_TARBALL_URL is unset (default: latest)
 #   MANTA_GATEWAY_BASE  push-gateway base URL (default https://gateway.mantaui.com)
@@ -551,11 +555,13 @@ main() {
   # ---------------------------------------------------------------------------
   MANTA_HOME="${MANTA_HOME:-$HOME/manta}"
   AUTH_DIR="$HOME/.manta"
-  # BET-392: resolve + export MANTA_CHANNEL here (same "unset/unrecognised ->
-  # prod" fallback resolveBoxChannel() applies) so it's available below when
-  # the manta-server systemd unit / LaunchAgent plist get rendered. Not
-  # persisted to disk — channel is a property of the build/install, not
-  # box state.
+  # BET-386/BET-392: resolve + export MANTA_CHANNEL here (same
+  # "unset/unrecognised -> prod" fallback resolveBoxChannel() applies) so every
+  # downstream node invocation in THIS run sees it, so it's available below when
+  # the manta-server systemd unit / LaunchAgent plist get rendered, and so the
+  # value is available to bake into the `manta` CLI shim below for later
+  # re-runs. Never persisted to disk — channel is a property of the
+  # build/install, not box state (BET-370).
   MANTA_CHANNEL="${MANTA_CHANNEL:-prod}"
   export MANTA_CHANNEL
 
@@ -1644,6 +1650,14 @@ main() {
 set -euo pipefail
 MANTA_HOME="$MANTA_HOME"
 NODE="$NODE"
+# BET-386 (review cycle 2): bake the install-time channel in the same way
+# MANTA_HOME/NODE above are baked — a fresh shell running \`manta pair\`
+# months later has no other way to learn the channel (resolveConfig()
+# deliberately never persists it to disk). Exported so manta-pair.mjs's
+# child process (which reads process.env.MANTA_CHANNEL via resolveConfig())
+# actually sees it, not just this shim's own shell.
+MANTA_CHANNEL="$MANTA_CHANNEL"
+export MANTA_CHANNEL
 case "\${1:-}" in
   pair) exec "\$NODE" "\$MANTA_HOME/scripts/manta-pair.mjs" ;;
   ""|-h|--help|help)

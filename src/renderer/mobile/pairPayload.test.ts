@@ -5,6 +5,15 @@ import {
   type PairPayload,
 } from "./pairPayload";
 import { CHANNELS, CHANNEL_IDS } from "../../shared/channel.mjs";
+// BET-386: install-lib.mjs's buildPairLink is the OTHER emitter of this
+// wire shape (install.sh's pairing block, via scripts/manta-pair.mjs) —
+// plain .mjs, no Electron/DOM dependency, importable straight into vitest's
+// node environment (same as the CHANNELS import above). Cross-importing it
+// here lets us round-trip the install-lib emitter against THIS module's
+// parser in one place, rather than re-implementing the wire shape as a
+// literal string in scripts/install.test.mjs (which is plain Node and
+// can't load this .ts parser directly).
+import { buildPairLink } from "../../../scripts/install-lib.mjs";
 
 const BOX = "0123456789abcdef0123456789abcdef"; // 32 hex
 
@@ -126,6 +135,46 @@ describe("parsePairPayload", () => {
       // is the cheap pin that catches a copy-paste typo in CHANNELS.
       expect(new Set(SCHEMES).size).toBe(SCHEMES.length);
       expect(SCHEMES.length).toBe(3);
+    });
+  });
+
+  // BET-386: scripts/install-lib.mjs's buildPairLink (the emitter behind
+  // install.sh's printed pairing block / `manta pair`) must produce a link
+  // this parser accepts for EVERY channel — not just the prod default the
+  // pre-BET-386 test only covered. A future drift where the two emitters
+  // (this module's buildPairPayload and install-lib's buildPairLink)
+  // disagree on the scheme literal would fail here.
+  describe("BET-386: install-lib's buildPairLink round-trips for every channel", () => {
+    for (const scheme of SCHEMES) {
+      it(`buildPairLink(..., { scheme: "${scheme}" }) round-trips through parsePairPayload`, () => {
+        const link = buildPairLink(BOX, "847291", { scheme });
+        expect(link).toBe(`${scheme}://pair?box=${BOX}&code=847291`);
+        expect(parsePairPayload(link, scheme)).toEqual({
+          boxId: BOX,
+          code: "847291",
+        });
+      });
+    }
+
+    it("defaults to the manta:// scheme when no scheme is passed (back-compat)", () => {
+      const link = buildPairLink(BOX, "847291");
+      expect(link).toBe(`manta://pair?box=${BOX}&code=847291`);
+      expect(parsePairPayload(link)).toEqual({ boxId: BOX, code: "847291" });
+    });
+
+    it("composes with a Tailscale serverUrl (BET-336) under a non-prod scheme", () => {
+      const link = buildPairLink(BOX, "847291", {
+        scheme: "manta-staging",
+        serverUrl: "http://100.64.1.5:8787",
+      });
+      expect(parsePairPayload(link, "manta-staging")).toEqual({
+        boxId: BOX,
+        code: "847291",
+        serverUrl: "http://100.64.1.5:8787",
+      });
+      // And it must NOT be accepted under a different channel's scheme —
+      // same wrong-app-routing boundary as the prod-only case above.
+      expect(parsePairPayload(link, "manta")).toBeNull();
     });
   });
 

@@ -260,6 +260,45 @@ test("resolveConfig honors MANTA_MOBILE_PORT and derives healthUrl", () => {
 });
 
 // ----------------------------------------------------------------------------
+// resolveConfig — MANTA_CHANNEL (BET-386)
+// ----------------------------------------------------------------------------
+//
+// Mirrors src/server/pairPage.mjs's resolveBoxChannel() env-var contract:
+// same env var name, same "unset/unrecognised → prod" fallback, so a box
+// server AND the install-lib pairing emitter agree on the channel from the
+// same MANTA_CHANNEL value.
+
+test("resolveConfig defaults channel to prod when MANTA_CHANNEL is unset", () => {
+  const cfg = resolveConfig({ env: {}, home: HOME });
+  assert.equal(cfg.channel, "prod");
+  assert.equal(cfg.urlScheme, "manta");
+});
+
+test("resolveConfig honors MANTA_CHANNEL=staging", () => {
+  const cfg = resolveConfig({ env: { MANTA_CHANNEL: "staging" }, home: HOME });
+  assert.equal(cfg.channel, "staging");
+  assert.equal(cfg.urlScheme, "manta-staging");
+});
+
+test("resolveConfig honors MANTA_CHANNEL=dev", () => {
+  const cfg = resolveConfig({ env: { MANTA_CHANNEL: "dev" }, home: HOME });
+  assert.equal(cfg.channel, "dev");
+  assert.equal(cfg.urlScheme, "manta-dev");
+});
+
+test("resolveConfig falls back to prod for an unrecognised MANTA_CHANNEL (never throws)", () => {
+  const cfg = resolveConfig({ env: { MANTA_CHANNEL: "garbage" }, home: HOME });
+  assert.equal(cfg.channel, "prod");
+  assert.equal(cfg.urlScheme, "manta");
+});
+
+test("resolveConfig treats an empty-string MANTA_CHANNEL as unset (shell footgun)", () => {
+  const cfg = resolveConfig({ env: { MANTA_CHANNEL: "" }, home: HOME });
+  assert.equal(cfg.channel, "prod");
+  assert.equal(cfg.urlScheme, "manta");
+});
+
+// ----------------------------------------------------------------------------
 // parsePort
 // ----------------------------------------------------------------------------
 
@@ -554,7 +593,10 @@ test("buildPairLink produces the canonical box-form pair link (BET-177 §2.4)", 
   // heredoc duplicate) in lockstep with this helper. The install.test
   // suite is plain Node — we don't load the .ts parser here — but we CAN
   // enforce the wire shape on the install-lib helper so a future drift is
-  // caught here.
+  // caught here. (BET-386: the actual cross-module round-trip against the
+  // real `parsePairPayload`, for all three channel schemes, lives in
+  // src/renderer/mobile/pairPayload.test.ts — vitest, not plain Node,
+  // can load the .ts parser directly.)
   //
   // 1. install-lib's buildPairLink produces the canonical shape:
   const fromLib = buildPairLink(HEX32, "847291");
@@ -562,6 +604,45 @@ test("buildPairLink produces the canonical box-form pair link (BET-177 §2.4)", 
     fromLib,
     "manta://pair?box=0123456789abcdef0123456789abcdef&code=847291",
     "install-lib buildPairLink produces the canonical box-form URL",
+  );
+});
+
+// ----------------------------------------------------------------------------
+// buildPairLink — channel-aware scheme (BET-386)
+// ----------------------------------------------------------------------------
+//
+// `buildPairLink` no longer hardcodes the `manta` literal in its URL
+// template — the scheme comes from the `scheme` option (default "manta",
+// same default as the renderer's `buildPairPayload`). Callers pass
+// `resolveConfig().urlScheme`. See src/renderer/mobile/pairPayload.test.ts
+// for the round-trip-through-parsePairPayload coverage across all three
+// channel schemes.
+
+test("buildPairLink derives the scheme from the `scheme` option, not a hardcoded literal", () => {
+  assert.equal(
+    buildPairLink(HEX32, "847291", { scheme: "manta-staging" }),
+    `manta-staging://pair?box=${HEX32}&code=847291`,
+  );
+  assert.equal(
+    buildPairLink(HEX32, "847291", { scheme: "manta-dev" }),
+    `manta-dev://pair?box=${HEX32}&code=847291`,
+  );
+});
+
+test("buildPairLink defaults scheme to manta when no scheme option is passed (back-compat)", () => {
+  assert.equal(
+    buildPairLink(HEX32, "847291"),
+    `manta://pair?box=${HEX32}&code=847291`,
+  );
+});
+
+test("buildPairLink threads scheme through the serverUrl branch too", () => {
+  assert.equal(
+    buildPairLink(HEX32, "847291", {
+      scheme: "manta-staging",
+      serverUrl: "http://100.64.1.5:8787",
+    }),
+    `manta-staging://pair?box=${HEX32}&code=847291&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
   );
 });
 
@@ -667,6 +748,27 @@ test("formatPairingOutput still throws on a non-6-digit code", () => {
     () => formatPairingOutput({ pairing_code: "12345" }),
     /6 digits/,
   );
+});
+
+// ----------------------------------------------------------------------------
+// formatPairingOutput — channel-aware scheme (BET-386)
+// ----------------------------------------------------------------------------
+
+test("formatPairingOutput threads the scheme option into the printed pair link", () => {
+  const out = formatPairingOutput(
+    { pairing_code: "847291", box_id: HEX32 },
+    { scheme: "manta-staging" },
+  );
+  assert.match(out, new RegExp(`manta-staging://pair\\?box=${HEX32}&code=847291`));
+  // "manta-staging://" does not contain the substring "manta://", so this
+  // also guards against the scheme option being ignored and the literal
+  // prod prefix leaking through instead.
+  assert.doesNotMatch(out, /manta:\/\//);
+});
+
+test("formatPairingOutput defaults to manta:// when no scheme option is passed (back-compat)", () => {
+  const out = formatPairingOutput({ pairing_code: "847291", box_id: HEX32 });
+  assert.match(out, new RegExp(`manta://pair\\?box=${HEX32}&code=847291`));
 });
 
 test("formatExpiry handles epoch-ms, ISO string, and junk", () => {
@@ -1357,6 +1459,115 @@ test("install.sh waits for the box id before rendering the Caddy vhost (first-ru
     /\[ -z "\$\{BOX_ID_FOR_GATEWAY:-\}" \]/,
     "step 7.5.E must skip the Caddy vhost write when no box_id is available",
   );
+});
+
+// ----------------------------------------------------------------------------
+// `manta` CLI shim — MANTA_CHANNEL propagation (BET-386 review cycle 2)
+// ----------------------------------------------------------------------------
+//
+// The reviewer's Block: resolveConfig() deliberately never persists the
+// channel to disk (BET-370), so the ONLY way a later `manta pair` re-run (in
+// a fresh shell, with no MANTA_CHANNEL in its environment) can still learn
+// the install-time channel is if install.sh bakes it into the CLI shim it
+// drops on PATH — the same way it already bakes MANTA_HOME and NODE. Two
+// tests: a static-layout guard (the heredoc's shape) and a dynamic
+// behavioral test that actually executes the extracted, unmodified
+// production heredoc and proves the value reaches a child process's env.
+
+test("install.sh's manta CLI shim heredoc bakes + exports MANTA_CHANNEL before the exec (static layout)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const shimStart = src.indexOf('cat > "$MANTA_SHIM" <<SHIM');
+  const shimEnd = src.indexOf("\nSHIM", shimStart);
+  assert.ok(
+    shimStart !== -1 && shimEnd !== -1,
+    "could not locate the manta CLI shim heredoc in install.sh — did it move?",
+  );
+  const heredoc = src.slice(shimStart, shimEnd);
+  // Baked the same way MANTA_HOME/NODE already are (unescaped $, expanded
+  // at heredoc-write time against install.sh's own resolved value).
+  assert.match(heredoc, /^MANTA_CHANNEL="\$MANTA_CHANNEL"$/m);
+  // Exported so the execed manta-pair.mjs child process (which reads
+  // process.env.MANTA_CHANNEL) actually sees it — a plain shell var set by
+  // a piped-in env var is not automatically exported once reassigned via
+  // ${VAR:-default} at the OUTER install.sh level, and the shim itself
+  // starts a fresh, unexported local var when it's baked as a literal.
+  assert.match(heredoc, /^export MANTA_CHANNEL$/m);
+  // Both must appear BEFORE the case/exec so the export is in effect when
+  // `manta pair` runs.
+  const bakedAt = heredoc.search(/^MANTA_CHANNEL="\$MANTA_CHANNEL"$/m);
+  const exportedAt = heredoc.search(/^export MANTA_CHANNEL$/m);
+  const execAt = heredoc.indexOf('exec "\\$NODE"');
+  assert.ok(bakedAt < execAt && exportedAt < execAt, "MANTA_CHANNEL must be baked + exported before the exec");
+});
+
+test("install.sh's manta CLI shim propagates MANTA_CHANNEL to `manta pair` re-runs (dynamic, BET-386 review cycle 2)", () => {
+  // Extracts and executes the REAL, unmodified shim-writing block (between
+  // its two stable anchor lines) rather than a hand-copied duplicate, so a
+  // future edit to the real heredoc can't silently drift out of sync with
+  // this test. Runs it with a fake $HOME (so the shim writes into a temp
+  // dir, never ~/.local/bin) and a fake $NODE (a stub that just echoes
+  // whether MANTA_CHANNEL reached its environment, standing in for the
+  // real manta-pair.mjs/resolveConfig() which reads process.env.MANTA_CHANNEL).
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const startMarker = 'MANTA_BIN_DIR="$HOME/.local/bin"';
+  const endMarker = 'chmod +x "$MANTA_SHIM"';
+  const startIdx = src.indexOf(startMarker);
+  const endIdx = src.indexOf(endMarker, startIdx);
+  assert.ok(
+    startIdx !== -1 && endIdx !== -1,
+    "could not locate the manta CLI shim block in install.sh — did the anchor lines move?",
+  );
+  const block = src.slice(startIdx, endIdx + endMarker.length);
+
+  const dir = mkdtempSync(join(tmpdir(), "manta-shim-"));
+  try {
+    const fakeNode = join(dir, "fake-node");
+    writeFileSync(
+      fakeNode,
+      `#!/usr/bin/env bash\necho "MANTA_CHANNEL_SEEN=\${MANTA_CHANNEL:-<unset>}"\n`,
+      { mode: 0o755 },
+    );
+    const script = join(dir, "shim-test.sh");
+    writeFileSync(
+      script,
+      `#!/usr/bin/env bash
+set -euo pipefail
+HOME="${dir}"
+MANTA_HOME="/tmp/fake-manta-home"
+NODE="${fakeNode}"
+MANTA_CHANNEL="staging"
+${block}
+"\$MANTA_SHIM" pair
+`,
+      { mode: 0o755 },
+    );
+    const out = execSync(`bash ${script}`, { encoding: "utf8" });
+    // The child process (fake-node, standing in for manta-pair.mjs) saw
+    // MANTA_CHANNEL — the export actually worked, not just the assignment.
+    assert.match(out, /MANTA_CHANNEL_SEEN=staging/);
+
+    const shimContent = readFileSync(join(dir, ".local", "bin", "manta"), "utf-8");
+    assert.match(shimContent, /^MANTA_CHANNEL="staging"$/m);
+    assert.match(shimContent, /^export MANTA_CHANNEL$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install.sh's manta CLI shim defaults MANTA_CHANNEL to prod when unset at install time", () => {
+  // Mirrors resolveConfig()'s own "unset -> prod" fallback contract — the
+  // shim must never be unbound (set -u in the shim would otherwise crash
+  // `manta pair` on a box installed without MANTA_CHANNEL in its env).
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const startIdx = src.indexOf('MANTA_HOME="${MANTA_HOME:-$HOME/manta}"');
+  assert.ok(startIdx !== -1, "could not locate the MANTA_HOME resolution line in install.sh");
+  const nearby = src.slice(startIdx, startIdx + 600);
+  assert.match(
+    nearby,
+    /MANTA_CHANNEL="\$\{MANTA_CHANNEL:-prod\}"/,
+    "MANTA_CHANNEL must default to prod (same fallback as resolveConfig()) near the MANTA_HOME resolution",
+  );
+  assert.match(nearby, /export MANTA_CHANNEL/);
 });
 
 // ----------------------------------------------------------------------------

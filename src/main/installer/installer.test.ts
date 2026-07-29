@@ -191,6 +191,11 @@ describe("runInstall", () => {
     expect(captured.args[captured.args.length - 1]).toMatch(
       /MANTA_RELEASE_HOST=https:\/\/mantaui\.com/,
     );
+    // BET-386: MANTA_CHANNEL rides the same curl-pipe invocation as
+    // MANTA_RELEASE_HOST so install.sh's pairing block emits the right
+    // pair-link scheme. Test env falls through to dev (see the BET-370
+    // comment above) — channelConfig("dev").id is "dev".
+    expect(captured.args[captured.args.length - 1]).toMatch(/MANTA_CHANNEL=dev/);
     expect(captured.args[captured.args.length - 1]).toMatch(/\sbash'$/);
   });
 
@@ -217,6 +222,9 @@ describe("runInstall", () => {
     // default), not from the installShUrl override — the channel is the
     // single source of truth per the spec.
     expect(cmd).toContain("MANTA_RELEASE_HOST=https://mantaui.com");
+    // BET-386: same story for MANTA_CHANNEL — it's the channel id, not
+    // derived from the installShUrl override.
+    expect(cmd).toContain("MANTA_CHANNEL=dev");
   });
 
   it("invokes onLine + onStage as the log advances through milestones", async () => {
