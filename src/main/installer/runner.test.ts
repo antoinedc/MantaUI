@@ -294,3 +294,105 @@ describe("probeSshG", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// BET-360: askpass env-var construction + BatchMode suppression
+// ---------------------------------------------------------------------------
+
+describe("execRemote — askpass env (BET-360)", () => {
+  it("drops BatchMode=yes when allowPrompt is true", async () => {
+    const captured: { args: string[] } = { args: [] };
+    const fake = makeFakeChild();
+    const p = execRemote("dev", "echo hi", {
+      spawn: (_c, args) => {
+        captured.args = args;
+        return fake.child as any;
+      },
+      allowPrompt: true,
+    });
+    setImmediate(() => fake.fireExit(0));
+    await p;
+    // BatchMode=yes must NOT be in the args when allowPrompt is set.
+    expect(captured.args).not.toContain("BatchMode=yes");
+    // ConnectTimeout is still present.
+    expect(captured.args).toContain("ConnectTimeout=10");
+  });
+
+  it("keeps BatchMode=yes by default (allowPrompt unset)", async () => {
+    const captured: { args: string[] } = { args: [] };
+    const fake = makeFakeChild();
+    const p = execRemote("dev", "echo hi", {
+      spawn: (_c, args) => {
+        captured.args = args;
+        return fake.child as any;
+      },
+    });
+    setImmediate(() => fake.fireExit(0));
+    await p;
+    expect(captured.args).toContain("BatchMode=yes");
+  });
+
+  it("merges env into the spawn options (overlay, not replace)", async () => {
+    const captured: { opts: Parameters<SpawnFn>[2] | undefined } = { opts: undefined };
+    const fake = makeFakeChild();
+    const askpassEnv = {
+      SSH_ASKPASS: "/tmp/helper.sh",
+      SSH_ASKPASS_REQUIRE: "force",
+      MANTA_ASKPASS_FILE: "/tmp/pw",
+    };
+    const p = execRemote("dev", "echo hi", {
+      spawn: (_c, _a, opts) => {
+        captured.opts = opts;
+        return fake.child as any;
+      },
+      env: askpassEnv,
+    });
+    setImmediate(() => fake.fireExit(0));
+    await p;
+    // The env was passed through and contains the askpass vars.
+    expect(captured.opts?.env).toBeDefined();
+    expect(captured.opts?.env?.SSH_ASKPASS).toBe("/tmp/helper.sh");
+    expect(captured.opts?.env?.SSH_ASKPASS_REQUIRE).toBe("force");
+    // process.env is preserved (PATH must survive).
+    expect(captured.opts?.env?.PATH).toBe(process.env.PATH);
+  });
+
+  it("does not set env on spawn when no env option is provided", async () => {
+    const captured: { opts: Parameters<SpawnFn>[2] | undefined } = { opts: undefined };
+    const fake = makeFakeChild();
+    const p = execRemote("dev", "echo hi", {
+      spawn: (_c, _a, opts) => {
+        captured.opts = opts;
+        return fake.child as any;
+      },
+    });
+    setImmediate(() => fake.fireExit(0));
+    await p;
+    // No env key → child inherits process.env (Node default).
+    expect(captured.opts?.env).toBeUndefined();
+  });
+});
+
+describe("streamRemote — askpass env (BET-360)", () => {
+  it("drops BatchMode and merges env when allowPrompt + env are set", async () => {
+    const captured: { args: string[]; opts: Parameters<SpawnFn>[2] | undefined } = {
+      args: [],
+      opts: undefined,
+    };
+    const fake = makeFakeChild();
+    const handle = streamRemote("dev", "echo hi", {
+      spawn: (_c, args, opts) => {
+        captured.args = args;
+        captured.opts = opts;
+        return fake.child as any;
+      },
+      allowPrompt: true,
+      env: { SSH_ASKPASS: "/tmp/helper.sh", SSH_ASKPASS_REQUIRE: "force", MANTA_ASKPASS_FILE: "/tmp/pw" },
+      onStdout: () => {},
+    });
+    setImmediate(() => fake.fireExit(0));
+    await handle.done;
+    expect(captured.args).not.toContain("BatchMode=yes");
+    expect(captured.opts?.env?.SSH_ASKPASS).toBe("/tmp/helper.sh");
+  });
+});
