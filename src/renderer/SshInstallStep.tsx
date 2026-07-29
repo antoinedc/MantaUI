@@ -1,19 +1,13 @@
-// SshInstallStep.tsx — minimal renderer harness for the SSH installer flow.
+// SshInstallStep.tsx — SSH installer harness for the desktop onboarding
+// "Connect your box" step (BET-355 / BET-382).
 //
-// Scope (BET-355): the issue explicitly scopes this stage to "machinery
-// only — connecting, checking, installing, reporting progress. The
-// onboarding UI rework is Stage 5." So this component is a working
-// harness that exercises the IPC channels end-to-end, NOT a polished
-// onboarding screen. Stage 5 will fully replace the PairStep → "Pair via
-// box id" pairing with this flow + remove the manual code entry entirely
-// (preserved as a behind-a-disclosure escape hatch for boxes the user
-// cannot reach over SSH).
-//
-// Integration today: PairStep renders a "Set up a fresh box via SSH"
-// button at the bottom that swaps its local state to render <SshInstallStep>
-// instead of the manual pairing form. On success, SshInstallStep calls
-// onPaired() — the SAME callback PairStep uses — so the onboarding shell's
-// transition to step 2 is identical regardless of which path got there.
+// PairStep renders this component inline as the primary surface when an
+// SSH installer preload is available and no deep-link is pending. The
+// step-level heading + intro live in PairStep — this component renders no
+// header of its own (BET-382), it just drops straight into the host
+// picker. On success it calls onPaired(), the same callback the manual
+// form uses, so the onboarding shell advances identically regardless of
+// which path closed the deal.
 //
 // All decision logic lives in the main-process installer module (pure
 // helpers + the IPC handlers). This component is React state + per-event
@@ -279,15 +273,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
 
   return (
     <div className="space-y-5">
-      <header>
-        <h2 className="text-2xl font-semibold mb-2">Set up your box via SSH</h2>
-        <p className="text-sm text-text-muted leading-relaxed">
-          Pick a host from your SSH config. The app will check the box, install
-          MantaUI, and pair with it — no terminal needed.
-        </p>
-      </header>
-
-      {/* Host picker */}
+      {/* Host picker — PairStep owns the step-level heading + intro
+          (BET-382); this component drops straight into the picker. */}
       <section className="space-y-2">
         <label className="block text-sm font-medium" htmlFor="ssh-host">
           Host

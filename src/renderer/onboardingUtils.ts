@@ -35,7 +35,7 @@ export const STEP_LABELS: Record<OnboardingStep, string> = {
 };
 
 // Back navigation is available on step 2 only (per the two-step flow — step 1
-// has "Skip setup" in its back slot via the shell, and success has no back).
+// has no back slot: it's the entry point, and success has no back either).
 export function canGoBack(pos: OnboardingPosition): boolean {
   return pos === 2;
 }
