@@ -1,56 +1,66 @@
-import { useCallback, useEffect, useState } from "react";
-import type { SubscriptionStatus } from "../shared/types";
-import {
-  canContinueProviders,
-  customDraftError,
-  type ProviderDraft,
-} from "./providersStepLogic";
-import { ConnectProvider } from "./ConnectProvider";
-import { StepFooter } from "./onboardingUi";
-
-// ProvidersStep.tsx — Step 2 (Providers) of the desktop onboarding shell
-// (BET-49-T4, BET-315). Mounts into Onboarding.tsx's step-2 slot.
+// ProvidersStep.tsx — Step 2 (Connect a provider) of the desktop onboarding
+// shell (BET-49-T4, BET-315, BET-356). Mounts into Onboarding.tsx's step-2
+// slot.
 //
-// Registry-driven (BET-315): one row per provider declared in
-// src/server/subscriptionProviders.mjs. Rows come from the `status` action
-// (the same source the Settings → Subscriptions card consumes, BET-314) — no
-// provider id, label, or plan is hardcoded here. The hardcoded Anthropic /
-// OpenAI / Custom cards and the deferred-Anthropic-sign-in hint block are
-// gone; in-app Anthropic sign-in is now shipped via the shared
-// <ConnectProvider> (BET-312), so Claude is just another row whose Connect
-// button starts the OAuth flow.
+// BET-356 behaviour: this step auto-skips when the box already has a
+// connected provider. On mount, the step probes `opencodeProviderAuth
+// ({action: "status"})`; if any row reports `connected: true` it calls
+// `onContinue()` immediately and renders nothing. The user sees step 2
+// for at most one frame on a resumed flow with a pre-connected box.
 //
-// Each row's Connect button delegates to <ConnectProvider> with
-// `confirmRestart={false}` — no sessions exist during onboarding, so the
-// opencode restart that every connect ends on is free, and a confirm bar
-// would be noise. Disconnect (and the destructive-confirm pattern from
-// Settings) are deliberately NOT exposed here; BET-315's "Do not" list
-// is explicit on that point. Settings handles reconnects later.
+// When zero providers are connected, the step renders the registry-driven
+// connect list (one row per provider declared in
+// src/server/subscriptionProviders.mjs). Each Connect delegates to the
+// shared <ConnectProvider> card (BET-312, BET-354) — same component the
+// Settings → Subscriptions card consumes, so an in-app Anthropic sign-in
+// works identically here and there.
 //
-// Below the subscription rows sits a demoted custom-endpoint form: just a
-// text link ("Use your own API endpoint instead") that reveals the existing
-// add-a-custom-provider form. The form's validation (customDraftError) is
-// unchanged; only its prominence moves.
+// Helpers (canContinueProviders, customDraftError) used to live in
+// `providersStepLogic.ts`; they're now inlined because that file became
+// dead weight after the model picker was removed from onboarding (the
+// surviving helpers had only this single consumer). Inlining keeps the
+// "providersStep" surface area to one file.
 //
-// Continue is gated on ≥1 connected provider via `canContinueProviders`,
-// fed by the `status` action — so a subscription connected seconds ago
-// counts immediately (BET-315 deliverable 3). The gate is still correct:
-// the same source that drives the badges drives the Step 3 model list, so
-// a provider counted as connected here is one whose models appear in
-// Step 3.
-//
-// This component owns its OWN footer (Back + Continue), like PairStep,
-// because Continue must be gated on ≥1 connected provider — the shell's
-// generic footer can't express that. The shell suppresses its footer for
-// this step.
+// `canContinueProviders(statuses)` is still the Continue gate — a
+// subscription connected seconds ago counts immediately because the same
+// `status` action drives the row badges and the gate, by construction
+// (BET-315). The shell's auto-skip on mount relies on the same probe.
 //
 // Props:
-//   onBack     — go to the previous step (Pair).
-//   onContinue — advance to Step 3 (Model). Enabled once ≥1 provider connected.
+//   onBack     — go to the previous step (Connect).
+//   onContinue — finalize onboarding (create welcome project + verify the
+//                box actually answers). The shell wraps this with the
+//                "verify by working" orchestrator (BET-356 §4).
+
+import { useCallback, useEffect, useState } from "react";
+import type { SubscriptionStatus } from "../shared/types";
+import { ConnectProvider } from "./ConnectProvider";
+import { StepFooter } from "./onboardingUi";
 
 const ACCENT = "#5A88FF";
 const DANGER = "#FF7A88";
 const SUCCESS = "#22C79A";
+
+// Continue gate: at least one provider must be connected. Mirrors the
+// gate ProvidersStep has had since BET-315 (the `status` action is the
+// single source of truth — the same probe that drives the row badges
+// drives this gate, so a subscription counted as connected here is the
+// one whose models appear in chat sessions).
+export function canContinueProviders(statuses: SubscriptionStatus[]): boolean {
+  return statuses.some((s) => s.connected);
+}
+
+// Validation for the custom-endpoint add form. id + baseURL are required;
+// key is optional (some self-hosted endpoints are keyless). Returns the
+// reason it's invalid, or null when the draft is submittable.
+type ProviderDraft = { id: string; name: string; baseURL: string; apiKey: string };
+
+export function customDraftError(draft: ProviderDraft): string | null {
+  if (!draft.id.trim()) return "Provider id is required.";
+  if (!draft.baseURL.trim()) return "Base URL is required.";
+  if (!/^https?:\/\//i.test(draft.baseURL.trim())) return "Base URL must start with http:// or https://.";
+  return null;
+}
 
 export function ProvidersStep({
   onBack,
@@ -61,23 +71,18 @@ export function ProvidersStep({
 }) {
   const [statuses, setStatuses] = useState<SubscriptionStatus[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // Exactly one row can be mid-mutation at a time. Registry id (anthropic /
-  // openai / kimi-for-coding); null when idle.
+  const [autoSkipped, setAutoSkipped] = useState(false);
+  // Exactly one row can be mid-mutation at a time.
   const [connectingId, setConnectingId] = useState<string | null>(null);
-  // Custom-endpoint form is collapsed behind a link by default.
   const [showCustom, setShowCustom] = useState(false);
 
-  // Refresh the live connected picture from the registry-backed `status`
-  // action. The same call drives Settings → SubscriptionsCard (BET-314),
-  // so an opencode restart triggered by either surface is visible to the
-  // other after its next refresh.
+  // Refresh + auto-skip on mount. The auto-skip path calls `onContinue`
+  // exactly once (latched via `autoSkipped`) so a late-arriving status
+  // response after the auto-skip fires cannot double-advance the shell.
+  // The shell's own progress dot math already collapses a "step 2 for
+  // one frame" jump — the user sees no flicker.
   const refresh = useCallback(async () => {
     setLoadError(null);
-    // Guard method existence (BET-254): if window.api was never swapped to
-    // the httpApi client (regression), opencodeProviderAuth is undefined and
-    // calling it throws a synchronous TypeError that bypasses .catch and
-    // hangs the step. Surface the missing method via the existing error
-    // state instead.
     if (typeof window.api.opencodeProviderAuth !== "function") {
       setLoadError("Couldn't reach the box to check providers.");
       setStatuses([]);
@@ -91,11 +96,18 @@ export function ProvidersStep({
         return;
       }
       setStatuses(res.providers);
+      // Auto-skip: with at least one provider connected, this step is
+      // done before the user sees it. Latch so a re-fetch (e.g. after a
+      // custom provider save) cannot fire onContinue a second time.
+      if (!autoSkipped && res.providers.some((p) => p.connected)) {
+        setAutoSkipped(true);
+        onContinue();
+      }
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
       setStatuses([]);
     }
-  }, []);
+  }, [autoSkipped, onContinue]);
 
   useEffect(() => {
     void refresh();
@@ -103,8 +115,6 @@ export function ProvidersStep({
 
   const canContinue = canContinueProviders(statuses ?? []);
 
-  // ConnectProvider fires `onDone(true)` on success; close the inline card
-  // and refetch so the row flips to connected (and the Continue gate opens).
   const onConnectDone = useCallback(
     (_ok: boolean) => {
       setConnectingId(null);
@@ -113,12 +123,6 @@ export function ProvidersStep({
     [refresh],
   );
 
-  // Custom-form write path. The shared saveProviderAndRestart pattern from
-  // the prior implementation is reproduced inline here because the only
-  // remaining consumer is the custom form itself — pulling it back into a
-  // shared helper would re-introduce a second call site for a one-call
-  // function. Restart failure is non-fatal to the config write but still
-  // surfaced (the card won't flip until a manual restart).
   const submitCustom = async (
     draft: ProviderDraft,
     onDone: () => Promise<void>,
@@ -149,6 +153,11 @@ export function ProvidersStep({
       return e instanceof Error ? e.message : String(e);
     }
   };
+
+  // Render nothing while the auto-skip path is in flight (the shell will
+  // have already advanced). Returning null here is what keeps the user
+  // from seeing a flash of the provider list before onContinue fires.
+  if (autoSkipped) return null;
 
   return (
     <div>
@@ -260,11 +269,6 @@ export function ProvidersStep({
   );
 }
 
-// Custom endpoint add form. Same validation + write path as before — only
-// its prominence in the step has changed. Kept as a local component so the
-// step file remains the single owner of the add-a-custom-provider UX
-// during onboarding; Settings' ProvidersCard handles the post-onboarding
-// case separately.
 function CustomForm({
   onDone,
   submit,
