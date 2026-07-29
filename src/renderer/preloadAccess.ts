@@ -3,6 +3,7 @@ import type {
   ServerUpdateAvailablePayload,
   AutoUpdateInfo,
   AutoUpdateErrorInfo,
+  OpenFileResult,
 } from "../shared/types.js";
 import type { InstallerEvent, InstallerState } from "../shared/types.js";
 import type { PreflightResult, PreflightFailure } from "../main/installer/preflight.js";
@@ -51,6 +52,11 @@ export interface MantaPreload {
   readLocalFile(path: string): Promise<ArrayBuffer>;
   openExternal(url: string): Promise<void>;
   revealInFolder(localPath: string): Promise<void>;
+  // BET-387: native file picker (single file, defaults to ~/.ssh/). Used by
+  // the custom-host SSH installer panel's "Identity file" Browse button.
+  // Returns { canceled:true } on a cancel / no-selection close; absent on
+  // mobile/web (no preload) — callers check the accessor and no-op.
+  dialogShowOpenFile(): Promise<OpenFileResult>;
   getPathForFile(file: File): string;
   onDesktopNotify(
     cb: (payload: DesktopNotifyPayload) => void,

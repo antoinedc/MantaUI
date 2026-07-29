@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   clipboard,
+  dialog,
   ipcMain,
   nativeImage,
   shell,
@@ -428,6 +429,28 @@ function registerHandlers(): void {
   });
 
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));
+
+  // BET-387: native file picker for the custom-host SSH installer panel's
+  // "Identity file" field. Only main can spawn an OS dialog. Defaults the
+  // picker to ~/.ssh/ (the overwhelmingly common location for the key a user
+  // wants to pick here). Single-file selection; a cancel / no-selection close
+  // returns { canceled:true } so the renderer can no-op without distinguishing
+  // the two. Attaches to the focused window when one exists so the dialog is
+  // modal to the app rather than free-floating.
+  ipcMain.handle(IPC.dialogShowOpenFile, async () => {
+    const opts: Electron.OpenDialogOptions = {
+      properties: ["openFile"],
+      defaultPath: join(homedir(), ".ssh"),
+    };
+    const parent = BrowserWindow.getFocusedWindow();
+    const result = parent
+      ? await dialog.showOpenDialog(parent, opts)
+      : await dialog.showOpenDialog(opts);
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true as const };
+    }
+    return { canceled: false as const, path: result.filePaths[0] };
+  });
 
   // Onboarding pairing (BET-49): POST <serverUrl>/auth/claim, and on success
   // persist { serverUrl, boxId, boxToken } to config (via commit — which also

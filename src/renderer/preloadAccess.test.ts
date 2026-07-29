@@ -25,6 +25,10 @@ function makeFakePreload(): MantaPreload {
     readLocalFile: vi.fn(async () => new ArrayBuffer(0)),
     openExternal: vi.fn(async () => {}),
     revealInFolder: vi.fn(async () => {}),
+    // BET-387: native file-dialog bridge. The fake matches the MantaPreload
+    // shape; per-method behavior is exercised by the main-process handler
+    // (Electron dialog) — here we only care about getMantaPreload's contract.
+    dialogShowOpenFile: vi.fn(async () => ({ canceled: true as const })),
     getPathForFile: vi.fn((f: File) => f.name),
     onDesktopNotify: vi.fn((cb: (p: unknown) => void) => {
       cb({ kind: "test" });
@@ -155,6 +159,27 @@ describe("getMantaPreload", () => {
     expect(preload).not.toBeNull();
     await preload!.revealInFolder("/tmp/foo");
     expect(fake.revealInFolder).toHaveBeenCalledWith("/tmp/foo");
+  });
+
+  // BET-387: the native file-dialog bridge forwards to the preload like the
+  // other OS-integration methods. The fake returns a canceled result; we
+  // only assert the call is forwarded (the Electron dialog itself is
+  // exercised manually — it's a thin wrapper the main handler owns).
+  it("forwards dialogShowOpenFile to the preload", async () => {
+    const fake = makeFakePreload();
+    fake.dialogShowOpenFile = vi.fn(async () => ({
+      canceled: false as const,
+      path: "/Users/me/.ssh/id_ed25519",
+    }));
+    const w = window as unknown as { __mantaPreload: MantaPreload | null };
+    w.__mantaPreload = fake;
+
+    const preload = getMantaPreload();
+    expect(preload).not.toBeNull();
+    const result = await preload!.dialogShowOpenFile();
+    expect(fake.dialogShowOpenFile).toHaveBeenCalled();
+    expect(result.canceled).toBe(false);
+    expect(result.canceled ? null : result.path).toBe("/Users/me/.ssh/id_ed25519");
   });
 
   it("forwards getPathForFile to the preload", () => {

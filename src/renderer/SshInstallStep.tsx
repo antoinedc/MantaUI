@@ -713,7 +713,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-2.5">
+            <div className="flex flex-col gap-2.5">
               <div className="flex flex-col gap-1">
                 <label
                   className="text-[11px] font-medium text-text-muted"
@@ -741,22 +741,40 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 >
                   Identity file
                 </label>
-                {/* No Browse button — MantaPreload exposes no native file
-                    dialog bridge today. A plain text input is the whole
-                    control until that IPC channel exists (follow-up
-                    filed, BET-384 doesn't add it). */}
-                <input
-                  id="ssh-custom-identity"
-                  type="text"
-                  placeholder="~/.ssh/id_ed25519"
-                  value={customIdentityFile}
-                  onChange={(e) => {
-                    setCustomIdentityFile(e.target.value);
-                    setTargetError(null);
-                  }}
-                  disabled={running || claimRunning}
-                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-                />
+                {/* BET-387: Browse button opens the native file picker via
+                    the preload's dialogShowOpenFile bridge (defaults to
+                    ~/.ssh/). A plain text input remains the fallback —
+                    typing a path directly still works, and the field is
+                    fully usable on mobile/web where the bridge is absent
+                    (the button is hidden there). */}
+                <div className="flex gap-2">
+                  <input
+                    id="ssh-custom-identity"
+                    type="text"
+                    placeholder="~/.ssh/id_ed25519"
+                    value={customIdentityFile}
+                    onChange={(e) => {
+                      setCustomIdentityFile(e.target.value);
+                      setTargetError(null);
+                    }}
+                    disabled={running || claimRunning}
+                    className="flex-1 min-w-0 rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const result = await preload.dialogShowOpenFile();
+                      if (!result.canceled) {
+                        setCustomIdentityFile(result.path);
+                        setTargetError(null);
+                      }
+                    }}
+                    disabled={running || claimRunning}
+                    className="shrink-0 px-3 py-2 rounded-md text-sm font-medium bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+                  >
+                    Browse
+                  </button>
+                </div>
               </div>
             </div>
             <p className="text-xs text-text-faint">

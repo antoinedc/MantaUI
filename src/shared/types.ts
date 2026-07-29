@@ -473,6 +473,14 @@ export const IPC = {
   // Open a URL in the user's default browser
   openExternal: "shell:open-external",
 
+  // Native file-dialog bridge (BET-387). Opens Electron's
+  // dialog.showOpenDialog (single file) and returns the chosen path. Used by
+  // the custom-host SSH installer panel's "Identity file" Browse button —
+  // only main can spawn a native picker, so the renderer asks through this
+  // channel. Mirrors peekRemoteFile / revealInFolder (OS-integration-only,
+  // never part of window.api / httpApi).
+  dialogShowOpenFile: "dialog:show-open-file",
+
   // ---- Agent → laptop file push (outbox) ----
   // Pull a remote outbox file to the local downloads dir. Returns the saved
   // local absolute path. Deletes the remote source on success (one-shot mailbox).
@@ -923,6 +931,14 @@ export type AgentFileReady = {
   // Saved local absolute path — only set when autoPulled is true.
   localPath?: string;
 };
+
+// Result of the native file-dialog bridge (IPC.dialogShowOpenFile, BET-387).
+// `canceled:true` covers both an explicit cancel and a no-selection close;
+// otherwise `path` is the single absolute path the user picked. Mirrors the
+// subset of Electron's OpenDialogReturnValue the renderer actually reads.
+export type OpenFileResult =
+  | { canceled: true }
+  | { canceled: false; path: string };
 
 // ----- Onboarding pairing (BET-49, BET-198 — relay dropped) -----
 
