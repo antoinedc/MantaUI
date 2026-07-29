@@ -356,6 +356,17 @@ export type InstallerEvent =
       handleId: string;
       fingerprint: HostFingerprint;
     }
+  // Preflight (BatchMode=yes) returned auth-failed: the key is passphrase-
+  // protected and not in ssh-agent. The install PAUSES here — the renderer
+  // shows a passphrase input; the user's answer comes back via
+  // installerAskpassRespond. On submit, main re-runs preflight with
+  // SSH_ASKPASS enabled (BET-360). A cancel / timeout aborts like a
+  // declined trust prompt.
+  | {
+      kind: "passphrase";
+      handleId: string;
+      prompt: string;
+    }
   | {
       kind: "done";
       handleId: string;
@@ -382,6 +393,12 @@ export type InstallerState = {
   // The fingerprint being awaited, or null. Mirrors the `fingerprint` event
   // payload so a remount recovers the prompt without a re-send.
   pendingFingerprint: HostFingerprint | null;
+  // BET-360: True while the install is PAUSED waiting for the user to enter
+  // an SSH key passphrase. The renderer re-shows the passphrase prompt on
+  // remount when this is set (mirrors waitingForTrust).
+  waitingForPassphrase: boolean;
+  // The handle id the paused passphrase prompt belongs to, or null.
+  passphraseHandleId: string | null;
 };
 
 // Desktop auto-update (electron-updater) payloads, shared by the preload
@@ -811,12 +828,19 @@ export const IPC = {
   // ~/.ssh/known_hosts and resumes the install; trust=false (or a cancel)
   // aborts with a preflight-failed event.
   installerTrustHost: "installer:trust-host",
+  // installerAskpassRespond (BET-360): the renderer's answer to a paused
+  // `passphrase` event. passphrase=non-empty string → main creates an
+  // askpass session and re-runs preflight with SSH_ASKPASS enabled;
+  // passphrase=null → the user cancelled → the install aborts with a
+  // preflight-failed event (same shape as a declined trust prompt).
+  installerAskpassRespond: "installer:askpass-respond",
   // installerEvent is the main → renderer push channel (mirrors the
   // pairLinkReceived pattern). Payload is a discriminated union:
   //   { kind: "line", handleId, text }
   //   { kind: "stage", handleId, stage }
   //   { kind: "preflight-failed", handleId, failures }
   //   { kind: "fingerprint", handleId, fingerprint }   (BET-361 — pause for trust)
+  //   { kind: "passphrase", handleId, prompt }         (BET-360 — pause for key passphrase)
   //   { kind: "done", handleId, code, signal }
   //   { kind: "error", handleId, message }
   installerEvent: "installer:event",

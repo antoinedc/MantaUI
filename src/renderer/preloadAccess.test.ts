@@ -58,6 +58,7 @@ function makeFakePreload(): MantaPreload {
     installerStart: vi.fn(async () => ({ handleId: "fake-handle" })),
     installerCancel: vi.fn(async () => {}),
     installerTrustHost: vi.fn(async () => {}),
+    installerAskpassRespond: vi.fn(async () => {}),
     installerMintAndClaim: vi.fn(async () => ({
       ok: false as const,
       kind: "network" as const,
@@ -71,6 +72,8 @@ function makeFakePreload(): MantaPreload {
       waitingForTrust: false,
       trustHandleId: null,
       pendingFingerprint: null,
+      waitingForPassphrase: false,
+      passphraseHandleId: null,
     })),
     installerGetDiagnostics: vi.fn(async () => ""),
     onInstallerEvent: vi.fn(() => vi.fn()),

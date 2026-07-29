@@ -57,6 +57,18 @@ export type RemoteOptions = {
   connectTimeoutSec?: number;
   /** Inject for tests; defaults to child_process.spawn. */
   spawn?: SpawnFn;
+  /** Extra environment variables merged into the ssh child's env (BET-360).
+   *  Used to set SSH_ASKPASS / SSH_ASKPASS_REQUIRE / MANTA_ASKPASS_FILE for
+   *  the passphrase-protected-key flow. When present, the child inherits
+   *  process.env with these overlaid — a partial env does NOT erase the
+   *  rest of the parent environment. */
+  env?: Record<string, string>;
+  /** When true, omit `BatchMode=yes` so ssh can prompt via SSH_ASKPASS
+   *  (BET-360). Defaults to false — BatchMode=yes is the safe default that
+   *  turns an auth failure into a clean non-zero exit instead of hanging on
+   *  a passphrase prompt the user can't see. Only the askpass retry path
+   *  (preflight returned auth-failed, user entered a passphrase) sets this. */
+  allowPrompt?: boolean;
 };
 
 // execRemote — run one remote command and return its outcome.
@@ -93,7 +105,7 @@ export async function execRemote(
   }
   const spawn = options.spawn ?? nodeSpawn;
   const args: string[] = buildArgs(alias, command, options);
-  const child = spawn(SSH_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(SSH_BIN, args, buildSpawnOptions(options));
   return collectChild(child, options.timeoutMs ?? 30_000);
 }
 
@@ -199,7 +211,7 @@ export function streamRemote(
   }
   const spawn = options.spawn ?? nodeSpawn;
   const args = buildArgs(alias, command, options);
-  const child = spawn(SSH_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(SSH_BIN, args, buildSpawnOptions(options));
   if (child.stdout) {
     child.stdout.on("data", (c: Buffer) => options.onStdout(c.toString("utf8")));
   }
@@ -282,12 +294,29 @@ function buildArgs(alias: SshTarget, command: string, opts: RemoteOptions): stri
   return [
     "-o",
     `ConnectTimeout=${opts.connectTimeoutSec ?? 10}`,
-    "-o",
-    "BatchMode=yes", // never prompt; non-zero exit on key auth failure
+    // BatchMode=yes forces ssh to NEVER prompt — a half-configured box fails
+    // the preflight cleanly instead of hanging. The ONE exception is the
+    // askpass retry path (BET-360): when the key is passphrase-protected and
+    // not in ssh-agent, BatchMode would suppress the very SSH_ASKPASS prompt
+    // we need, so `allowPrompt` drops it for that retry only.
+    ...(opts.allowPrompt ? [] : ["-o", "BatchMode=yes"]),
     ...sshTargetExtraArgs(alias),
     ...(opts.forceTty ? ["-tt"] : []),
     "--",
     sshTargetDestination(alias),
     command,
   ];
+}
+
+// buildSpawnOptions — shared spawn options for every ssh child in this module.
+// Merges the askpass env (if any) over process.env so the child inherits the
+// full parent environment plus SSH_ASKPASS / SSH_ASKPASS_REQUIRE / etc.
+// Without the spread, Node's spawn replaces the env entirely when `env` is set
+// (e.g. PATH would be lost) — we always overlay, never replace.
+function buildSpawnOptions(opts: RemoteOptions): Parameters<typeof nodeSpawn>[2] {
+  const base: Parameters<typeof nodeSpawn>[2] = { stdio: ["ignore", "pipe", "pipe"] };
+  if (opts.env) {
+    base.env = { ...process.env, ...opts.env };
+  }
+  return base;
 }

@@ -156,6 +156,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     algo: string;
     sha256: string;
   } | null>(null);
+  // BET-360: a passphrase-protected key (not in ssh-agent) paused the
+  // install for a passphrase. Rendered INLINE in the progress panel (same
+  // pattern as the fingerprint card) — a password input + Submit/Cancel.
+  const [passphrasePrompt, setPassphrasePrompt] = useState<{
+    handleId: string;
+    prompt: string;
+  } | null>(null);
+  const [passphraseInput, setPassphraseInput] = useState("");
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
@@ -271,6 +279,22 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         });
         return;
       }
+      // BET-360: recover a paused passphrase prompt on remount.
+      if (s.waitingForPassphrase && s.passphraseHandleId) {
+        setRunning(true);
+        setActiveHandle(s.passphraseHandleId);
+        setStage(INITIAL_STAGE);
+        setStageLabel(INITIAL_STAGE_INFO.label);
+        setStageIndex(INITIAL_STAGE_INFO.index);
+        setStageTotal(INITIAL_STAGE_INFO.total);
+        setLogOpen(true);
+        setPassphrasePrompt({
+          handleId: s.passphraseHandleId,
+          prompt: "Enter the passphrase for your SSH key:",
+        });
+        setPassphraseInput("");
+        return;
+      }
       if (s.active) {
         const info = currentStageInfo(s.stage);
         setRunning(true);
@@ -321,6 +345,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           setRunning(false);
           setActiveHandle(null);
           setFingerprintPrompt(null);
+          setPassphrasePrompt(null);
+          setPassphraseInput("");
           break;
         case "fingerprint":
           // The install is paused waiting for a trust decision — show the
@@ -333,11 +359,19 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             sha256: evt.fingerprint.sha256,
           });
           break;
+        case "passphrase":
+          // BET-360: the install is paused waiting for the SSH key
+          // passphrase — show the passphrase input card inline.
+          setPassphrasePrompt({ handleId: evt.handleId, prompt: evt.prompt });
+          setPassphraseInput("");
+          break;
         case "done":
           setDone({ ok: evt.ok, code: evt.code, signal: evt.signal });
           setRunning(false);
           setActiveHandle(null);
           setFingerprintPrompt(null);
+          setPassphrasePrompt(null);
+          setPassphraseInput("");
           if (evt.ok) {
             // Collapse the log back to the single status line on success.
             setLogOpen(false);
@@ -351,6 +385,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           setRunning(false);
           setActiveHandle(null);
           setFingerprintPrompt(null);
+          setPassphrasePrompt(null);
+          setPassphraseInput("");
           break;
       }
     });
@@ -408,6 +444,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     setInstallError(null);
     setPreflightFailure(null);
     setFingerprintPrompt(null);
+    setPassphrasePrompt(null);
+    setPassphraseInput("");
     setLines([]);
     setDone(null);
     setClaimError(null);
@@ -435,12 +473,12 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   }
 
   async function cancelInstall() {
-    // During the fingerprint trust pause, activeHandle is still null
-    // (installerStart hasn't returned) — but the install IS in flight and
-    // the Cancel button is visible. Route through the trust-prompt's
-    // handleId so installerCancel reaches the main-process trust-wait
-    // abort instead of silently no-oping (BET-361 review cycle 1 Block).
-    const handleId = activeHandle ?? fingerprintPrompt?.handleId;
+    // During the fingerprint trust pause OR the passphrase pause,
+    // activeHandle is still null (installerStart hasn't returned) — but the
+    // install IS in flight and the Cancel button is visible. Route through
+    // the paused prompt's handleId so installerCancel reaches the main-
+    // process abort instead of silently no-oping (BET-361/360).
+    const handleId = activeHandle ?? fingerprintPrompt?.handleId ?? passphrasePrompt?.handleId;
     if (!handleId) return;
     await preload.installerCancel({ handleId });
   }
@@ -460,6 +498,27 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     }
     try {
       await preload.installerTrustHost({ handleId, trust });
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // BET-360: submit the entered passphrase (or cancel). Submit → main
+  // creates an SSH_ASKPASS session and re-runs preflight; the install
+  // resumes streaming. Cancel → main aborts with a preflight-failed event;
+  // we drop the spinner immediately.
+  async function submitPassphrase(submit: boolean) {
+    if (!passphrasePrompt) return;
+    const handleId = passphrasePrompt.handleId;
+    const pw = submit ? passphraseInput : null;
+    setPassphrasePrompt(null);
+    setPassphraseInput("");
+    if (!submit) {
+      setRunning(false);
+      setActiveHandle(null);
+    }
+    try {
+      await preload.installerAskpassRespond({ handleId, passphrase: pw });
     } catch (e) {
       setInstallError(e instanceof Error ? e.message : String(e));
     }
@@ -782,7 +841,13 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 style={{ borderColor: ACCENT, borderTopColor: "transparent" }}
               />
             )}
-            <span>{fingerprintPrompt ? "Waiting for host trust…" : stageLabel}</span>
+            <span>
+              {fingerprintPrompt
+                ? "Waiting for host trust…"
+                : passphrasePrompt
+                ? "Waiting for SSH key passphrase…"
+                : stageLabel}
+            </span>
             <span className="text-text-muted">
               {stageIndex} of {stageTotal} · {formatElapsed(elapsedSeconds)}
             </span>
@@ -847,7 +912,59 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               </div>
             </div>
           )}
-          {logOpen && !fingerprintPrompt && (
+          {/* BET-360: inline passphrase prompt. The install is paused —
+              the key is passphrase-protected and not in ssh-agent. The
+              user enters the passphrase once; main caches it in a temp
+              file for every ssh invocation in the rest of the flow. */}
+          {passphrasePrompt && (
+            <div
+              className="rounded-md p-3.5 space-y-2.5"
+              style={{ border: `1px solid ${ACCENT}` }}
+            >
+              <div className="text-sm font-medium">{passphrasePrompt.prompt}</div>
+              <p className="text-xs text-text-muted">
+                Your SSH key is passphrase-protected and not loaded in
+                ssh-agent. Enter the passphrase to decrypt it for this
+                install — it is used only in-memory and never stored.
+              </p>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void submitPassphrase(passphraseInput.length > 0);
+                }}
+                className="space-y-2"
+              >
+                <input
+                  type="password"
+                  value={passphraseInput}
+                  onChange={(e) => setPassphraseInput(e.target.value)}
+                  autoFocus
+                  placeholder="Passphrase"
+                  className="w-full rounded-md px-3 py-2 text-sm bg-bg-elev"
+                  style={{ border: `1px solid ${ACCENT}` }}
+                />
+                <div className="flex gap-2 pt-0.5">
+                  <button
+                    type="submit"
+                    disabled={passphraseInput.length === 0}
+                    className="px-3 py-1.5 rounded-md text-sm font-medium disabled:opacity-40"
+                    style={{ background: ACCENT, color: "#0B1020" }}
+                  >
+                    Unlock &amp; continue
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void submitPassphrase(false)}
+                    className="px-3 py-1.5 rounded-md text-sm font-medium"
+                    style={{ border: `1px solid ${DANGER}`, color: DANGER }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+          {logOpen && !fingerprintPrompt && !passphrasePrompt && (
             <div
               ref={logRef}
               style={{ height: 172, overflowY: "auto" }}
