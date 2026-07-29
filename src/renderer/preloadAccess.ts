@@ -139,6 +139,10 @@ export interface MantaPreload {
   // (one from a previous renderer mount) or on an already-done handle.
   installerCancel(input: { handleId: string }): Promise<void>;
 
+  // BET-361: answer a paused `fingerprint` event. trust=true writes the
+  // host key to ~/.ssh/known_hosts and resumes; trust=false aborts.
+  installerTrustHost(input: { handleId: string; trust: boolean }): Promise<void>;
+
   // Mint a fresh pairing code over the existing SSH connection + claim it
   // via the box's public URL. Returns the SAME ClaimOutcome shape as the
   // manual PairStep claim — the renderer treats success and failure the

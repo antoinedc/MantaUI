@@ -24,8 +24,10 @@ import {
   DEFAULT_SSH_CONFIG_PATH,
 } from "./installer.js";
 import { buildDiagnostics, type DiagnosticsInput } from "./diagnostics.js";
+import { trustHost } from "./knownHosts.js";
 import type { InstallStageId } from "./stageMapper.js";
 import type { PreflightResult } from "./preflight.js";
+import type { HostFingerprint } from "./fingerprint.js";
 import { isEmptySshTarget, type SshTarget } from "../../shared/sshTarget.js";
 
 // ---------------------------------------------------------------------------
@@ -40,9 +42,60 @@ let nextHandleSeq = 0;
 // Most recent preflight verdict, read back by IPC.installerState.
 let activePreflight: PreflightResult | null = null;
 
+// BET-361: when preflight hits a never-seen host, the install PAUSES here
+// waiting for the renderer's "Trust this host" answer. The deferred is
+// resolved by the installerTrustHost handler (trust=true/false) or rejected
+// by installerCancel / a timeout. `waitingForTrust` is mirrored into
+// installerState so a renderer remount re-shows the prompt.
+let waitingForTrust: {
+  handleId: string;
+  fingerprint: HostFingerprint;
+  target: SshTarget;
+} | null = null;
+let trustDeferred: {
+  resolve: (decision: { trust: boolean }) => void;
+  reject: (err: Error) => void;
+} | null = null;
+// How long the install waits for a trust answer before giving up. Long
+// enough that a user reading the fingerprint isn't rushed; short enough
+// that a forgotten tab doesn't hold the single-active slot forever.
+const TRUST_WAIT_TIMEOUT_MS = 5 * 60_000;
+
 function pushTail(line: string): void {
   logTail.push(line);
   if (logTail.length > LOG_TAIL_MAX) logTail.splice(0, logTail.length - LOG_TAIL_MAX);
+}
+
+// awaitTrustDecision — pause the install while the renderer shows the host
+// fingerprint and a Trust button. Resolves with the user's answer
+// ({ trust: true|false }); a cancel or a timeout both resolve to
+// { trust: false } so the caller has a single, rejection-free path. The
+// module-level `waitingForTrust` is set for the duration so installerState
+// can recover the prompt after a renderer remount, and cleared on settle.
+async function awaitTrustDecision(
+  handleId: string,
+  fingerprint: HostFingerprint,
+  target: SshTarget,
+  send: (payload: unknown) => void,
+): Promise<{ trust: boolean }> {
+  waitingForTrust = { handleId, fingerprint, target };
+  send({ kind: "fingerprint", handleId, fingerprint });
+  return new Promise<{ trust: boolean }>((resolve) => {
+    let settled = false;
+    const finish = (decision: { trust: boolean }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      waitingForTrust = null;
+      trustDeferred = null;
+      resolve(decision);
+    };
+    const timer = setTimeout(() => finish({ trust: false }), TRUST_WAIT_TIMEOUT_MS);
+    trustDeferred = {
+      resolve: (d) => finish(d),
+      reject: () => finish({ trust: false }),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -67,12 +120,18 @@ export function registerInstallerHandlers(
     stage: activeStage,
     logTail: [...logTail],
     preflight: activePreflight,
+    // BET-361: mirror the trust-pause so a renderer remount re-shows the
+    // fingerprint prompt and routes its answer to the right handle.
+    waitingForTrust: waitingForTrust !== null,
+    trustHandleId: waitingForTrust?.handleId ?? null,
+    pendingFingerprint: waitingForTrust?.fingerprint ?? null,
   }));
 
   ipcMain.handle(IPC.installerStart, async (_e, input: { alias: SshTarget }) => {
-    if (activeHandle !== null) {
-      // Single-active constraint — refuse to start a second install.
-      // The renderer should call installCancel first (or wait for done).
+    if (activeHandle !== null || waitingForTrust !== null) {
+      // Single-active constraint — refuse to start a second install. The
+      // trust-pause counts as "in progress": a paused install holds the
+      // slot until the user answers (BET-361).
       throw new Error("an install is already in progress");
     }
     if (input?.alias === undefined || isEmptySshTarget(input.alias)) {
@@ -92,11 +151,50 @@ export function registerInstallerHandlers(
       win.webContents.send(IPC.installerEvent, payload);
     };
 
-    // Phase 1 — preflight, run here in main. A failure aborts before
-    // anything is written to the box: activeHandle stays unset, runInstall
-    // is never called, nothing is spawned.
-    const preflight = await preflightBox(alias);
+    // Phase 1 — preflight, run here in main. On a never-seen host ssh
+    // offers a fingerprint and bails (BatchMode=yes); preflight surfaces
+    // that as `unknownHost`. We PAUSE for a trust decision, write the host
+    // key to ~/.ssh/known_hosts, then re-run preflight exactly once. A
+    // second failure after trust (different problem, or a key that
+    // changed) is reported as a normal preflight-failed — no retry loop.
+    let preflight = await preflightBox(alias);
     activePreflight = preflight;
+    if (!preflight.ok && preflight.unknownHost) {
+      const decision = await awaitTrustDecision(
+        handleId,
+        preflight.unknownHost,
+        alias,
+        send,
+      );
+      if (!decision.trust) {
+        // User declined, cancelled, or the trust wait timed out. Nothing
+        // was written to the box — the standard preflight-failed guidance
+        // (which already says "pick a different host") is the right call.
+        send({ kind: "preflight-failed", handleId, failures: preflight.failures });
+        return { handleId };
+      }
+      const trusted = await trustHost({
+        target: alias,
+        fingerprint: preflight.unknownHost,
+      });
+      if (!trusted.ok) {
+        send({
+          kind: "preflight-failed",
+          handleId,
+          failures: [
+            {
+              cause: "Could not trust this host.",
+              action: trusted.message,
+            },
+          ],
+        });
+        return { handleId };
+      }
+      // Host key is now in known_hosts — re-run preflight over the now-
+      // trusted connection.
+      preflight = await preflightBox(alias);
+      activePreflight = preflight;
+    }
     if (!preflight.ok) {
       send({ kind: "preflight-failed", handleId, failures: preflight.failures });
       return { handleId };
@@ -150,11 +248,27 @@ export function registerInstallerHandlers(
 
   ipcMain.handle(IPC.installerCancel, (_e, input: { handleId: string }) => {
     if (typeof input?.handleId !== "string" || input.handleId === "") return;
+    // BET-361: cancel during the trust-pause aborts the wait (treated as
+    // "not trusted" — the install never started, so there's no child to
+    // SIGTERM).
+    if (waitingForTrust?.handleId === input.handleId && trustDeferred) {
+      trustDeferred.reject(new Error("cancelled"));
+      return;
+    }
     if (activeHandle?.handleId === input.handleId) {
       activeHandle.cancel();
     }
     // If handleId doesn't match the active handle (already done / cancelled
     // / a stale renderer): no-op. cancel is idempotent by design.
+  });
+
+  ipcMain.handle(IPC.installerTrustHost, (_e, input: { handleId: string; trust: boolean }) => {
+    if (typeof input?.handleId !== "string" || input.handleId === "") return;
+    // No paused trust prompt, or a stale renderer answering an old prompt:
+    // no-op. The active install (if any) is unaffected.
+    if (!waitingForTrust || !trustDeferred) return;
+    if (waitingForTrust.handleId !== input.handleId) return;
+    trustDeferred.resolve({ trust: input.trust });
   });
 
   ipcMain.handle(IPC.installerMintAndClaim, async (
