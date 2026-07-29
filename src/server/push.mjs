@@ -42,12 +42,11 @@
 import webpush from "web-push";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { statePath } from "../shared/paths.mjs";
 import * as tmux from "./tmux.mjs";
 
-const DIR = join(homedir(), STATE_DIRNAME);
+const DIR = statePath();
 const VAPID_PATH = join(DIR, "vapid.json");
 const SUBS_PATH = join(DIR, "push-subs.json");
 const APNS_TOKENS_PATH = join(DIR, "apns-tokens.json");
@@ -767,7 +766,7 @@ const GATEWAY_BASE = process.env.MANTA_GATEWAY_BASE || "https://gateway.mantaui.
 // auth.mjs). We don't import auth.mjs here — it would create a cycle once
 // BET-202 wires the registration module into index.mjs. Read just the two
 // fields we need directly.
-const AUTH_PATH = join(homedir(), STATE_DIRNAME, "auth.json");
+const AUTH_PATH = statePath("auth.json");
 
 async function readBoxGatewayIdentity() {
   try {

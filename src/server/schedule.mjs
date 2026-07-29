@@ -17,12 +17,11 @@
 import { readFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { statePath } from "../shared/paths.mjs";
 import { atomicWrite } from "./storeUtils.mjs";
 
-const STORE_PATH = join(homedir(), STATE_DIRNAME, "schedule.json");
+const STORE_PATH = statePath("schedule.json");
 
 // minute-granularity cron only needs sub-minute polling. 30s guarantees every
 // minute is observed at least once; the lastFiredMinute guard makes a second

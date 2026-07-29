@@ -15,12 +15,11 @@
 import { readFile, writeFile, rename, mkdir, copyFile, stat, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { statePath } from "../shared/paths.mjs";
 
-const STORE_PATH = join(homedir(), STATE_DIRNAME, "serve-page.json");
-const PAGES_DIR = join(homedir(), STATE_DIRNAME, "pages");
+const STORE_PATH = statePath("serve-page.json");
+const PAGES_DIR = statePath("pages");
 const DEFAULT_TTL_HOURS = 24;
 
 // Cleanup sweep interval — 5 min. Pages expire at TTL, sweep removes

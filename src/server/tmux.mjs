@@ -1,9 +1,8 @@
 import { spawn as cpSpawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { expandTilde, STATE_DIRNAME } from "../shared/paths.mjs";
+import { expandTilde, statePath } from "../shared/paths.mjs";
 import { atomicWrite } from "./storeUtils.mjs";
 
 const FS = "\t";
@@ -74,7 +73,7 @@ function spawnRun(cmd, args) {
 // Atomic-write pattern (same as schedule.mjs / secrets.mjs) so a crash
 // mid-write never leaves a half-truncated JSON file behind.
 
-export const OWNED_SESSIONS_PATH = join(homedir(), STATE_DIRNAME, "tmux-sessions.json");
+export const OWNED_SESSIONS_PATH = statePath("tmux-sessions.json");
 
 // Plain reader — not reactive. Returns the persisted set; missing/corrupt
 // files collapse to an empty set so the server can boot. Exported for

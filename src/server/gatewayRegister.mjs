@@ -32,16 +32,15 @@
 
 import { writeFile, rename, mkdir, chmod } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { statePath } from "../shared/paths.mjs";
 
 const DEFAULT_GATEWAY_BASE = "https://gateway.mantaui.com";
 // Same path auth.mjs uses (STORE_PATH). Mirror here so this module has no
 // import dependency on auth.mjs — a fresh boot may register the gateway
 // before ensureAuth() has run, and we don't want a circular import on a
 // module that's already past its first use.
-export const DEFAULT_AUTH_PATH = join(homedir(), STATE_DIRNAME, "auth.json");
+export const DEFAULT_AUTH_PATH = statePath("auth.json");
 
 async function atomicWrite(path, data, mode) {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;

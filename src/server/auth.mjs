@@ -34,11 +34,10 @@
 import { writeFile, rename, mkdir, chmod, unlink } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { statePath } from "../shared/paths.mjs";
 
-const STORE_PATH = join(homedir(), STATE_DIRNAME, "auth.json");
+const STORE_PATH = statePath("auth.json");
 
 // Pairing codes are short-lived by design: a device must claim within this
 // window or the code expires and the user re-opens the pair screen.
