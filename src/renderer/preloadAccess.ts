@@ -9,6 +9,7 @@ import type { PreflightResult, PreflightFailure } from "../main/installer/prefli
 import type { SshHostEntry } from "../main/installer/sshConfig.js";
 import type { InstallerStageSnapshotRow } from "../shared/types.js";
 import type { UnpairOutcome } from "../shared/unpair.mjs";
+import type { SshTarget } from "../shared/sshTarget.js";
 
 // Re-export so the renderer can use the type names from the same accessor
 // module that exposes the preload methods — same pattern as the existing
@@ -131,7 +132,7 @@ export interface MantaPreload {
   // preflight channel. Returns the handle id the renderer uses to match
   // incoming installerEvent pushes; a failed preflight is reported via a
   // `preflight-failed` installerEvent, not a rejection.
-  installerStart(input: { alias: string }): Promise<{ handleId: string }>;
+  installerStart(input: { alias: SshTarget }): Promise<{ handleId: string }>;
 
   // SIGTERM the in-flight install. Idempotent: safe on a stale handle id
   // (one from a previous renderer mount) or on an already-done handle.
@@ -143,7 +144,7 @@ export interface MantaPreload {
   // same way regardless of which entry point produced them. Persists
   // credentials through main's existing claim path (single config writer).
   installerMintAndClaim(input: {
-    alias: string;
+    alias: SshTarget;
     claimUrlOverride?: string;
   }): Promise<unknown>;
 

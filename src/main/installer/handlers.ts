@@ -26,6 +26,7 @@ import {
 import { buildDiagnostics, type DiagnosticsInput } from "./diagnostics.js";
 import type { InstallStageId } from "./stageMapper.js";
 import type { PreflightResult } from "./preflight.js";
+import { isEmptySshTarget, type SshTarget } from "../../shared/sshTarget.js";
 
 // ---------------------------------------------------------------------------
 // Per-install state (single-active; the renderer can re-mount and recover)
@@ -68,16 +69,19 @@ export function registerInstallerHandlers(
     preflight: activePreflight,
   }));
 
-  ipcMain.handle(IPC.installerStart, async (_e, input: { alias: string }) => {
+  ipcMain.handle(IPC.installerStart, async (_e, input: { alias: SshTarget }) => {
     if (activeHandle !== null) {
       // Single-active constraint — refuse to start a second install.
       // The renderer should call installCancel first (or wait for done).
       throw new Error("an install is already in progress");
     }
-    if (typeof input?.alias !== "string" || input.alias.trim() === "") {
+    if (input?.alias === undefined || isEmptySshTarget(input.alias)) {
       throw new Error("alias is required");
     }
-    const alias = input.alias.trim();
+    // Alias branch stays a trimmed string (unchanged); a custom target
+    // (BET-384) is already normalized by resolveInstallTarget on the
+    // renderer side, so there's nothing further to trim on an object.
+    const alias = typeof input.alias === "string" ? input.alias.trim() : input.alias;
     const handleId = `install-${++nextHandleSeq}-${Date.now()}`;
     activeStage = "preflight";
     logTail.length = 0;
@@ -155,7 +159,7 @@ export function registerInstallerHandlers(
 
   ipcMain.handle(IPC.installerMintAndClaim, async (
     _e,
-    input: { alias: string; claimUrlOverride?: string },
+    input: { alias: SshTarget; claimUrlOverride?: string },
   ) => {
     return mintAndClaim(input.alias, {
       persist,
