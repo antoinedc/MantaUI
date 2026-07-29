@@ -35,10 +35,29 @@ import { claimBox } from "./pairClaim";
 import { useStore } from "./store";
 import { SshInstallStep } from "./SshInstallStep";
 import { getMantaPreload } from "./preloadAccess";
+import { channelConfig } from "../shared/channel.mjs";
 
 const ACCENT = "#5A88FF"; // matches Onboarding.tsx + the app's accent token
 const DANGER = "#FF7A88"; // inline error text (no dedicated tailwind token)
 const SERVER_URL_ERROR = "Server URL must start with http:// or https://";
+
+// BET-373 (review cycle 1): the pending pair link stored by App.tsx was
+// already accepted against THIS channel's scheme (App.tsx's
+// PAIR_PARSE_SCHEME) — parsing it here with a different (default) scheme
+// would silently drop the payload on staging/dev. Same constant App.tsx
+// and PairingQR.tsx already build from `src/shared/channel.mjs`.
+//
+// BET-373 (review cycle 3): `__MANTA_CHANNEL__` is only DEFINEd by
+// electron-vite's build config (electron.vite.config.ts); it is not bound
+// under vitest/node, so a direct reference throws a ReferenceError at
+// import time. PairStep.test.tsx (BET-382) renders this component
+// directly, so — unlike App.tsx/PairingQR.tsx, which no test imports
+// today — this module needed the same `typeof` guard src/main/index.ts
+// and src/main/installer/installer.ts already use for exactly this
+// reason. Falls back to "prod", matching those call sites.
+const PAIR_PREFILL_SCHEME = channelConfig(
+  typeof __MANTA_CHANNEL__ === "string" ? __MANTA_CHANNEL__ : "prod",
+).urlScheme;
 
 export function PairStep({ onPaired }: { onPaired: () => void }) {
   const hasSshInstaller = getMantaPreload() !== null;
@@ -48,7 +67,7 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
   // so the user sees the address they're about to pair against. When no
   // link is pending, show the SSH picker as the primary surface.
   const pendingPairLink = useStore.getState().pendingPairLink;
-  const prefill = prefillFromPairLink(pendingPairLink);
+  const prefill = prefillFromPairLink(pendingPairLink, PAIR_PREFILL_SCHEME);
   const [disclosureOpen, setDisclosureOpen] = useState(() => Boolean(prefill));
   // On a renderer without an SSH installer (mobile / web), the picker is
   // unavailable — surface the manual form immediately rather than render an

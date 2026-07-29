@@ -142,12 +142,23 @@ export function resolveConnectRoute(_serverBase: string): "direct" {
  * setupLogic is the project's home for pure pairing helpers and is already
  * covered by setupLogic.test.ts — that's what makes the behaviour testable
  * without mounting React.
+ *
+ * BET-373 (channel-aware wire format, review cycle 1): `scheme` defaults to
+ * `"manta"` (unchanged shape for legacy callers) but MUST be passed by
+ * PairStep.tsx as `channelConfig(__MANTA_CHANNEL__).urlScheme` — the same
+ * constant App.tsx already uses to accept the deep-link in the first place.
+ * Without it, a staging/dev pair link is accepted by App.tsx (which DOES
+ * pass the channel scheme) and stored as `pendingPairLink`, but then
+ * silently dropped here because the default `"manta"` scheme doesn't match
+ * `manta-staging:` / `manta-dev:` — the user lands on an empty form one
+ * step after the link was correctly routed.
  */
 export function prefillFromPairLink(
   raw: string | null | undefined,
+  scheme: string = "manta",
 ): { boxId: string; code: string; serverUrl?: string } | null {
   if (raw == null) return null;
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  return parsePairPayload(trimmed);
+  return parsePairPayload(trimmed, scheme);
 }

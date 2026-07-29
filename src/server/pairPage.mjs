@@ -35,9 +35,9 @@ export const CODE_RE = /^\d{6}$/;
  *
  * Falls back to `"prod"` for an unset / unrecognised env value — matches
  * `resolveChannel`'s defensive rule (a mis-configured box must still
- * mint a working QR, not throw at request time). The same channel is
- * always used for every QR on a given process; the function is cheap so
- * we don't memoize it (env read once at first call).
+ * mint a working QR, not throw at request time). The function re-reads
+ * `process.env.MANTA_CHANNEL` on every call rather than memoizing — it's
+ * cheap, and tests rely on being able to mutate the env between cases.
  */
 export function resolveBoxChannel() {
   const raw =
