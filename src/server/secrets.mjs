@@ -31,15 +31,14 @@
 import { readFile, writeFile, rename, mkdir, chmod, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { STATE_DIRNAME, SECRETS_DIRNAME } from "../shared/paths.mjs";
+import { statePath, secretsRoot } from "../shared/paths.mjs";
 
-const STORE_PATH = join(homedir(), STATE_DIRNAME, "secrets.json");
+const STORE_PATH = statePath("secrets.json");
 // Where `secret_provide` writes the materialized value files. Shared secrets go
 // directly under here; session-scoped under sessions/<sessionID>/ so two
 // sessions can hold same-named secrets without colliding on disk.
-const SECRETS_DIR = join(homedir(), SECRETS_DIRNAME);
+const SECRETS_DIR = secretsRoot();
 
 // ---------------------------------------------------------------------------
 // Pure helpers (tested)

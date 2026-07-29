@@ -29,11 +29,10 @@
 import { readFile, writeFile, rename, mkdir, chmod } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, createHmac, timingSafeEqual } from "node:crypto";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { statePath } from "../shared/paths.mjs";
 
-const STORE_PATH = join(homedir(), STATE_DIRNAME, "webhooks.json");
+const STORE_PATH = statePath("webhooks.json");
 
 // Rate limit: 30 deliveries/min per token (token bucket, capacity 30, refill
 // 0.5/sec). A chatty/hostile source can burst 30 then is throttled to 1 per 2s.

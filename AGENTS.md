@@ -2581,6 +2581,43 @@ and add a test there. `vitest.config.ts` excludes `src/server/**`.
 only — no live tmux or opencode. Add tests for any new pure-parseable logic
 in the server modules.
 
+**THE SUITE RUNS ON A LIVE BOX — its state dirs are sandboxed, keep them that
+way.** The tests execute as the same user, on the same machine, as a running
+box, and this repo's CI runner IS the maintainer's dev box. Every server module
+resolves its store from the state home (`~/.manta/auth.json`,
+`secrets.json`, `schedule.json`, `webhooks.json`, `tmux-sessions.json`,
+`cap-jobs.json`, plus `~/.manta-uploads` / `-outbox` / `-secrets`), so an
+un-injected test writes PRODUCTION data. That is not hypothetical: an auth test
+built an engine without injecting `saveAuth`/`deleteAuth` and called `revoke()`
+with a matching token — the destructive path — so **every `npm test` deleted
+`~/.manta/auth.json` and minted a fresh box identity**. The running server kept
+the old token in memory, so the paired desktop/phone kept working while every
+manta-native AI tool (they re-read `auth.json` per call) started returning
+`unauthorized`, and the wiped `gateway_host`/`gateway_token` silently killed
+APNs fanout. It recurred on every CI run for days before anyone connected the
+two.
+
+Two layers now stand between a test and the live box; do not remove either:
+
+- **Injection discipline** (unchanged): a test that exercises persistence passes
+  its own writers/paths. `auth.test.mjs`'s `engine()` helper is the pattern —
+  every engine is built through it and stubs persistence by default.
+- **The sandbox** (the layer under it): `stateHome()` in `src/shared/paths.mjs`
+  honors `MANTA_STATE_HOME`, and both runners point it at a throwaway dir —
+  `node --import ./scripts/testSandbox.mjs --test …` in the `test` /
+  `test:server` scripts, and `test.env` in `vitest.config.ts`. Because module-
+  level `statePath(...)` constants are computed at import, the env MUST be set
+  before test modules load; that's the only reason the `--import` flag (not a
+  `beforeEach`) is used. Production never sets the var, so it resolves to
+  `$HOME` exactly as before — this is a test seam, not a configurable state dir.
+
+Canaries fail RED if the wiring is dropped: `stateSandbox.test.mjs` (asserts
+`MANTA_STATE_HOME` is set and that `auth.mjs`'s store resolved inside it) and
+the equivalent case in `src/shared/paths.test.ts` for vitest. **New state files
+must go through `statePath()` / `uploadRoot()` / `outboxRoot()` /
+`secretsRoot()`** — a fresh `join(homedir(), STATE_DIRNAME, …)` re-opens the
+hole for that store and no canary will notice.
+
 ## Custom opencode commands
 
 Global commands (`~/.claude/commands/*.md`) are symlinked into

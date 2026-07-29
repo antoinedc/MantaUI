@@ -13,9 +13,79 @@
 // reads `process.platform` nowhere inside, so the tests can assert each
 // branch from a Linux CI runner.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { homedir } from "node:os";
-import { expandTilde, patchPath, DARWIN_PATH_PREFIX } from "./paths.mjs";
+import { join } from "node:path";
+import {
+  expandTilde,
+  patchPath,
+  DARWIN_PATH_PREFIX,
+  stateHome,
+  statePath,
+  uploadRoot,
+  outboxRoot,
+  secretsRoot,
+  STATE_DIRNAME,
+  UPLOAD_DIRNAME,
+  OUTBOX_DIRNAME,
+  SECRETS_DIRNAME,
+} from "./paths.mjs";
+
+// ---------------------------------------------------------------------------
+// stateHome / statePath — the test-isolation seam (see paths.mjs for the
+// incident: an un-injected auth test wiped the live box's credentials on every
+// `npm test`, because the store path was `$HOME`-derived with no way to
+// redirect it).
+// ---------------------------------------------------------------------------
+
+describe("paths — state directory resolution", () => {
+  const original = process.env.MANTA_STATE_HOME;
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.MANTA_STATE_HOME;
+    else process.env.MANTA_STATE_HOME = original;
+  });
+
+  it("falls back to the real homedir when MANTA_STATE_HOME is unset", () => {
+    // PRODUCTION behaviour: a box must resolve its own $HOME, so that no stray
+    // env var can silently orphan its identity.
+    delete process.env.MANTA_STATE_HOME;
+    expect(stateHome()).toBe(homedir());
+    expect(statePath("auth.json")).toBe(join(homedir(), STATE_DIRNAME, "auth.json"));
+    expect(uploadRoot()).toBe(join(homedir(), UPLOAD_DIRNAME));
+    expect(outboxRoot()).toBe(join(homedir(), OUTBOX_DIRNAME));
+    expect(secretsRoot()).toBe(join(homedir(), SECRETS_DIRNAME));
+  });
+
+  it("relocates every state dir together when MANTA_STATE_HOME is set", () => {
+    process.env.MANTA_STATE_HOME = "/tmp/sandbox-home";
+    expect(stateHome()).toBe("/tmp/sandbox-home");
+    expect(statePath("secrets.json")).toBe(join("/tmp/sandbox-home", STATE_DIRNAME, "secrets.json"));
+    expect(statePath()).toBe(join("/tmp/sandbox-home", STATE_DIRNAME));
+    expect(uploadRoot()).toBe(join("/tmp/sandbox-home", UPLOAD_DIRNAME));
+    expect(outboxRoot()).toBe(join("/tmp/sandbox-home", OUTBOX_DIRNAME));
+    expect(secretsRoot()).toBe(join("/tmp/sandbox-home", SECRETS_DIRNAME));
+  });
+
+  it("ignores an empty or whitespace override rather than writing to /", () => {
+    // A blank env var is far likelier to be a broken wrapper script than an
+    // intentional "use the process root", and `join("", ".manta")` would
+    // resolve relative to the CWD — a store nobody owns.
+    process.env.MANTA_STATE_HOME = "";
+    expect(stateHome()).toBe(homedir());
+    process.env.MANTA_STATE_HOME = "   ";
+    expect(stateHome()).toBe(homedir());
+  });
+
+  it("is sandboxed while the suite runs (canary)", () => {
+    // This asserts the WIRING, not the function: vitest.config.ts injects
+    // MANTA_STATE_HOME into every worker. If that wiring is removed, tests
+    // silently start reading and writing the live box again — exactly the
+    // condition that cost a box its identity. Fail loudly instead.
+    expect(original, "MANTA_STATE_HOME must be set for the test run").toBeTruthy();
+    expect(original).not.toBe(homedir());
+  });
+});
 
 describe("paths — expandTilde", () => {
   it("expands a bare `~` to the user's homedir", () => {

@@ -20,9 +20,8 @@
 import { readFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { STATE_DIRNAME } from "../shared/paths.mjs";
+import { statePath } from "../shared/paths.mjs";
 import { normalizeHost } from "../shared/pluginManifest.mjs";
 import { atomicWrite } from "./storeUtils.mjs";
 
@@ -30,7 +29,7 @@ import { atomicWrite } from "./storeUtils.mjs";
 // Constants (single source of truth — see docs/mantaui-plugins.md §Constants)
 // ---------------------------------------------------------------------------
 
-const STORE_PATH = join(homedir(), STATE_DIRNAME, "cap-jobs.json");
+const STORE_PATH = statePath("cap-jobs.json");
 
 // Ring-buffer cap on a job's stored log. A runaway xcodebuild cannot fill the
 // disk or blow the AI's context — chunks are dropped oldest-first.

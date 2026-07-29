@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, resolve, basename } from "node:path";
 import { homedir, hostname } from "node:os";
 import { pipeline } from "node:stream/promises";
-import { UPLOAD_DIRNAME, OUTBOX_DIRNAME } from "../shared/paths.mjs";
+import { uploadRoot, outboxRoot } from "../shared/paths.mjs";
 import { WebSocketServer } from "ws";
 import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
@@ -515,11 +515,11 @@ function requireLoopback(req, res, errorMessage) {
 // the existing cleanup conventions apply. Client sends one request per file
 // with raw bytes; filename + batch id come in headers. No multipart parser.
 
-const UPLOAD_ROOT = join(homedir(), UPLOAD_DIRNAME);
+const UPLOAD_ROOT = uploadRoot();
 // Agent → device download root. The mobile mirror of the desktop outbox pull:
 // the device fetches a server-local file the AI dropped here. Constrained to
 // this dir so a crafted ?path= can't read arbitrary files off the box.
-const OUTBOX_ROOT = join(homedir(), OUTBOX_DIRNAME);
+const OUTBOX_ROOT = outboxRoot();
 const SESSION_RE = /^[A-Za-z0-9._-]+$/;
 const BATCH_RE = /^[0-9]{6,20}$/;
 

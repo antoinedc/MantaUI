@@ -15,16 +15,15 @@
 // not here — so a file the user never taps stays available across ticks.
 
 import { readdir, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, basename } from "node:path";
-import { OUTBOX_DIRNAME } from "../shared/paths.mjs";
+import { outboxRoot as defaultOutboxRoot } from "../shared/paths.mjs";
 
 const POLL_MS = 3000;
 
 // List every file in the outbox: loose files at the root plus one level of
 // session subdirs (matches the desktop `find -maxdepth 2 -type f`). Returns []
 // when the outbox doesn't exist yet (the steady state until the AI writes).
-export async function listOutbox(root = join(homedir(), OUTBOX_DIRNAME)) {
+export async function listOutbox(root = defaultOutboxRoot()) {
   const out = [];
   let topEntries;
   try {
@@ -125,7 +124,7 @@ export function createOutboxScanner(bus, root) {
  * @returns {{ stop: () => void }}
  */
 export function startOutboxPoller(bus, { intervalMs = POLL_MS, root } = {}) {
-  const outboxRoot = root ?? join(homedir(), OUTBOX_DIRNAME);
+  const outboxRoot = root ?? defaultOutboxRoot();
   const { tick } = createOutboxScanner(bus, outboxRoot);
 
   void tick();

@@ -7,6 +7,21 @@ export const UPLOAD_DIRNAME: string;
 export const OUTBOX_DIRNAME: string;
 export const SECRETS_DIRNAME: string;
 
+// Base directory the state dirs hang off: `$MANTA_STATE_HOME` when set to a
+// non-blank value, else `os.homedir()`. The override is a TEST-ISOLATION seam
+// (the runners point it at a throwaway dir so an un-injected test can't write
+// the live box's stores) — production never sets it.
+export function stateHome(): string;
+
+// `<stateHome>/.manta/<...parts>` — the box's own state files (auth, secrets,
+// schedules, webhooks, cap jobs, …). No args → the `.manta` dir itself.
+export function statePath(...parts: string[]): string;
+
+// The three roots that sit NEXT to `.manta` rather than inside it.
+export function uploadRoot(): string;
+export function outboxRoot(): string;
+export function secretsRoot(): string;
+
 // macOS-only PATH prefix used by `patchPath`. Single source of truth for
 // the desktop plugin runner (src/main/capExecutor.ts) and the box server's
 // Claude credential refresh (src/server/opencode.mjs).

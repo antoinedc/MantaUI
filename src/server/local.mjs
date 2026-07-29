@@ -12,7 +12,7 @@ import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { STATE_DIRNAME, expandTilde } from "../shared/paths.mjs";
+import { statePath, expandTilde } from "../shared/paths.mjs";
 import { deriveWorktree, isWorktreeDirtyError } from "../shared/worktree.mjs";
 
 // ============================================================
@@ -29,7 +29,7 @@ import { deriveWorktree, isWorktreeDirtyError } from "../shared/worktree.mjs";
 // and desktop-only concepts (Mac clipboard, drag-drop local paths, peek-remote-file)
 // are no-ops documented below.
 
-const CONFIG_PATH = join(homedir(), STATE_DIRNAME, "config.json");
+const CONFIG_PATH = statePath("config.json");
 
 // atomicWrite — write to a temp file then rename over the target.
 // rename(2) is atomic on the same filesystem, so a crash mid-write

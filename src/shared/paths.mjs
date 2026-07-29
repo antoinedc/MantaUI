@@ -19,6 +19,58 @@ export const UPLOAD_DIRNAME = ".manta-uploads";
 export const OUTBOX_DIRNAME = ".manta-outbox";
 export const SECRETS_DIRNAME = ".manta-secrets";
 
+// ---------------------------------------------------------------------------
+// Where the state directories live — and how to redirect them
+// ---------------------------------------------------------------------------
+//
+// Every state dir hangs off ONE base, resolved through `stateHome()`. In
+// production that base is `os.homedir()` and nothing sets the override, so the
+// layout is byte-identical to the old `join(homedir(), STATE_DIRNAME, …)`.
+//
+// WHY THE OVERRIDE EXISTS. The box's live state (box credentials, secrets,
+// schedules, webhooks, tmux ownership, cap jobs) used to be reachable ONLY at
+// `$HOME/.manta`, computed at import time, with no way to point it elsewhere.
+// The test suite runs as the same user on the same machine as a live box — and
+// on this project the CI runner IS the dev box — so the only thing separating a
+// unit test from the production store was every test remembering to inject its
+// own I/O. That discipline failed exactly once and cost the box its identity:
+// an auth test called revoke() with the default writers, which unlinked
+// ~/.manta/auth.json and minted a fresh box_id/box_token on every `npm test`
+// (see the auth.test.mjs `engine()` helper). auth.json was simply the file that
+// got hit first — a forgotten injection in the secrets, schedule or webhook
+// tests would have deleted real user data the same way.
+//
+// So the test runners set MANTA_STATE_HOME to a throwaway directory (see
+// scripts/testSandbox.mjs, wired through package.json + vitest.config.ts). A
+// test that forgets to inject now writes into the sandbox instead of the live
+// box, which turns a silent production-data loss into a no-op.
+//
+// This is NOT a general "configurable state dir" feature: production must keep
+// resolving to $HOME so a stray env var can't silently orphan a box's identity.
+// Treat it as a test-isolation seam.
+export function stateHome() {
+  const override = process.env.MANTA_STATE_HOME;
+  return typeof override === "string" && override.trim() !== "" ? override : homedir();
+}
+
+// `<stateHome>/.manta/<...parts>` — the box's own state files.
+export function statePath(...parts) {
+  return join(stateHome(), STATE_DIRNAME, ...parts);
+}
+
+// The three dirs that historically sat next to `.manta` rather than inside it.
+export function uploadRoot() {
+  return join(stateHome(), UPLOAD_DIRNAME);
+}
+
+export function outboxRoot() {
+  return join(stateHome(), OUTBOX_DIRNAME);
+}
+
+export function secretsRoot() {
+  return join(stateHome(), SECRETS_DIRNAME);
+}
+
 // Leading `~` → os.homedir(); `~/foo` → `<homedir>/foo`. Other strings pass
 // through unchanged. Single source of truth — three copies of this used to
 // live in tmux.mjs, opencode.mjs and pluginManifest.mjs.

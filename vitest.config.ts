@@ -1,7 +1,16 @@
 import { defineConfig, configDefaults } from "vitest/config";
+// @ts-expect-error — plain .mjs helper, no types; see scripts/testSandbox.mjs.
+import { sandboxStateHome } from "./scripts/testSandbox.mjs";
 
 export default defineConfig({
   test: {
+    // Point every worker's box-state directory at a throwaway dir. Renderer
+    // tests don't touch ~/.manta today, but src/shared/** is imported by both
+    // sides and nothing stops a future vitest test from pulling in a server
+    // module — which, unsandboxed, would read and WRITE the live box's stores
+    // (credentials, secrets, schedules). See scripts/testSandbox.mjs for the
+    // incident that motivated this.
+    env: { MANTA_STATE_HOME: sandboxStateHome() },
     // src/server/**, src/gateway/** and scripts/** use node:test (run via
     // `node --test`), not vitest. .claude/** holds Claude Code worktrees —
     // nested copies of this repo (incl. their own *.test.mjs) that vitest
