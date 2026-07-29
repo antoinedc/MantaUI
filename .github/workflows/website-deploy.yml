@@ -1,5 +1,5 @@
 # Website deploy — publish the marketing site + install assets to the prod box
-# on a `web-v*` git tag.
+# on a `web-v*` git tag, or to a `/staging/` subtree on demand.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -12,10 +12,10 @@
 #
 # WHAT IT DEPLOYS (glob-driven — adding a file to website/ deploys + verifies it)
 #   website/*.html + website/*.{png,css,txt,xml,svg,webp,jpg,mp4,webm}
-#                                                → /var/www/mantaui/ (each ext optional)
+#                                                → <WEBROOT>/ (each ext optional)
 #   website/updates/*.json, scripts/install.sh, llms-install.md,
-#     docs/plugins-authoring.md                  → /var/www/mantaui/ + subpaths
-#   .well-known/                                 → /var/www/mantaui/.well-known/  (EXPLICIT copy — dotfile dirs are NOT picked up by the website/ globs)
+#     docs/plugins-authoring.md                  → <WEBROOT>/ + subpaths
+#   .well-known/                                 → <WEBROOT>/.well-known/  (EXPLICIT copy — dotfile dirs are NOT picked up by the website/ globs; PROD ONLY)
 # Verify follows the copy — no hand-maintained file list, so no silent 404.
 #
 # RUNNER + AUTH
@@ -23,8 +23,10 @@
 #   box over SSH with the deploy key at ~/.manta-deploy/prod_key (public half is
 #   in the prod box's authorized_keys). No GitHub secret needed.
 #
-# TRIGGER: push a tag matching web-v* (e.g. web-v1, web-v2026-07-19). Also
-#   runnable manually via workflow_dispatch (deploys current main).
+# TRIGGER: push a tag matching web-v* (e.g. web-v1, web-v2026-07-19) → ALWAYS
+#   resolves to `prod`. Also runnable manually via workflow_dispatch with the
+#   `channel` input (default `staging`, since a manual run is nearly always a
+#   staging run — prod goes out by tag).
 
 name: Website deploy
 
@@ -33,6 +35,15 @@ on:
     tags:
       - "web-v*"
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Deploy channel. prod = /var/www/mantaui (the live site). staging = /var/www/mantaui/staging (on-demand QA channel; never auto-fires)."
+        type: choice
+        required: true
+        default: staging
+        options:
+          - prod
+          - staging
 
 concurrency:
   group: website-deploy
@@ -40,20 +51,68 @@ concurrency:
 
 env:
   PROD_HOST: root@91.107.196.2
-  WEBROOT: /var/www/mantaui
   SSH_KEY: /home/dev/.manta-deploy/prod_key
-  SITE: https://mantaui.com
 
 jobs:
   deploy:
     runs-on: self-hosted
     timeout-minutes: 10
+    # Resolve channel ONCE here: a tag push is always prod; a workflow_dispatch
+    # honours its input (default staging). Downstream steps read the resolved
+    # `channel` / `WEBROOT` / `SITE` outputs and never re-derive.
+    outputs:
+      channel: ${{ steps.resolve.outputs.channel }}
+      webroot: ${{ steps.resolve.outputs.webroot }}
+      site: ${{ steps.resolve.outputs.site }}
     steps:
+      - id: resolve
+        name: Resolve channel + destinations
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CHANNEL: ${{ github.event.inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            channel="prod"
+          else
+            channel="${INPUT_CHANNEL:-staging}"
+          fi
+          if [ "$channel" = "staging" ]; then
+            webroot="/var/www/mantaui/staging"
+            site="https://mantaui.com/staging"
+          else
+            webroot="/var/www/mantaui"
+            site="https://mantaui.com"
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "webroot=$webroot" >> "$GITHUB_OUTPUT"
+          echo "site=$site" >> "$GITHUB_OUTPUT"
+          echo "▸ Resolved channel=$channel webroot=$webroot site=$site"
+
+      # HARD GUARD: a staging run that silently writes to the prod webroot is
+      # the only truly dangerous failure mode here, and it must be impossible
+      # rather than unlikely. The three workflows share this contract — any
+      # divergence is a reviewer Block.
+      - name: Guard — staging destination must contain /staging/
+        env:
+          CHANNEL: ${{ steps.resolve.outputs.channel }}
+          WEBROOT: ${{ steps.resolve.outputs.webroot }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = "staging" ] && [[ "$WEBROOT" != */staging* ]]; then
+            echo "::error::channel=staging but WEBROOT='$WEBROOT' does not contain /staging/"
+            exit 1
+          fi
+          echo "✓ guard passed (channel=$CHANNEL, WEBROOT=$WEBROOT)"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Deploy static web assets to prod
+      - name: Deploy static web assets
+        env:
+          CHANNEL: ${{ steps.resolve.outputs.channel }}
+          WEBROOT: ${{ steps.resolve.outputs.webroot }}
         run: |
           set -euo pipefail
           SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
@@ -62,30 +121,40 @@ jobs:
           echo "▸ Ensuring webroot exists"
           $SSH "$PROD_HOST" "mkdir -p $WEBROOT"
 
-          echo "▸ Copying marketing site (website/*.html + optional assets)"
-          $SCP website/*.html "$PROD_HOST:$WEBROOT/"
-          for ext in png css txt xml svg webp jpg mp4 webm; do
-            ls website/*."$ext" >/dev/null 2>&1 && $SCP website/*."$ext" "$PROD_HOST:$WEBROOT/"
-          done
+          # Marketing site (HTML + assets) — prod only. Staging does NOT mirror
+          # the marketing site; a staging copy of it is dead weight and a
+          # drift trap if someone edits website/* while pointing at staging.
+          if [ "$CHANNEL" = "prod" ]; then
+            echo "▸ Copying marketing site (website/*.html + optional assets)"
+            $SCP website/*.html "$PROD_HOST:$WEBROOT/"
+            for ext in png css txt xml svg webp jpg mp4 webm; do
+              ls website/*."$ext" >/dev/null 2>&1 && $SCP website/*."$ext" "$PROD_HOST:$WEBROOT/"
+            done
+          fi
 
           echo "▸ Copying installer + AI install doc"
           $SCP scripts/install.sh "$PROD_HOST:$WEBROOT/install.sh"
           $SCP llms-install.md "$PROD_HOST:$WEBROOT/llms-install.md"
           $SCP docs/plugins-authoring.md "$PROD_HOST:$WEBROOT/llms-plugins.md"
 
-          echo "▸ Copying version manifest (BET-225)"
-          $SSH "$PROD_HOST" "mkdir -p $WEBROOT/updates"
-          if ls website/updates/*.json >/dev/null 2>&1; then
-            $SCP website/updates/*.json "$PROD_HOST:$WEBROOT/updates/"
-          fi
+          # Version manifest + .well-known/ — prod only. These are the
+          # AI-crawler discovery surface (llms.txt / sitemap.xml / agent-skills);
+          # staging must not be advertised.
+          if [ "$CHANNEL" = "prod" ]; then
+            echo "▸ Copying version manifest (BET-225)"
+            $SSH "$PROD_HOST" "mkdir -p $WEBROOT/updates"
+            if ls website/updates/*.json >/dev/null 2>&1; then
+              $SCP website/updates/*.json "$PROD_HOST:$WEBROOT/updates/"
+            fi
 
-          echo "▸ Copying .well-known/agent-skills/ (BET-300 — dotfile dirs are NOT picked up by website/* globs)"
-          $SSH "$PROD_HOST" "mkdir -p $WEBROOT/.well-known/agent-skills/manta"
-          if [ -f .well-known/agent-skills/index.json ]; then
-            $SCP .well-known/agent-skills/index.json "$PROD_HOST:$WEBROOT/.well-known/agent-skills/index.json"
-          fi
-          if [ -f .well-known/agent-skills/manta/SKILL.md ]; then
-            $SCP .well-known/agent-skills/manta/SKILL.md "$PROD_HOST:$WEBROOT/.well-known/agent-skills/manta/SKILL.md"
+            echo "▸ Copying .well-known/agent-skills/ (BET-300 — dotfile dirs are NOT picked up by website/* globs)"
+            $SSH "$PROD_HOST" "mkdir -p $WEBROOT/.well-known/agent-skills/manta"
+            if [ -f .well-known/agent-skills/index.json ]; then
+              $SCP .well-known/agent-skills/index.json "$PROD_HOST:$WEBROOT/.well-known/agent-skills/index.json"
+            fi
+            if [ -f .well-known/agent-skills/manta/SKILL.md ]; then
+              $SCP .well-known/agent-skills/manta/SKILL.md "$PROD_HOST:$WEBROOT/.well-known/agent-skills/manta/SKILL.md"
+            fi
           fi
 
           echo "▸ Keeping /opt/manta clone current (source-of-truth parity)"
@@ -93,6 +162,9 @@ jobs:
             echo "⚠ /opt/manta pull skipped (non-fatal — webroot already updated)"
 
       - name: Verify each asset is live + matches the repo
+        env:
+          CHANNEL: ${{ steps.resolve.outputs.channel }}
+          SITE: ${{ steps.resolve.outputs.site }}
         run: |
           set -euo pipefail
           fail=0
@@ -109,34 +181,44 @@ jobs:
               fail=1
             fi
           }
-          for f in website/*.html; do
-            base=$(basename "$f" .html)
-            if [ "$base" = "index" ]; then check "" "$f"; else check "$base" "$f"; fi
-          done
-          for f in website/*.css; do
-            [ -e "$f" ] || continue
-            check "$(basename "$f")" "$f"
-          done
-          # Hero video artefacts (BET-304 stage 1). The webp is also covered by
-          # the *.webp copy glob above (no duplicate rule needed), but listed
-          # explicitly here so the verify step confirms the poster is live.
-          for f in website/hero.mp4 website/hero.webm website/hero-poster.webp; do
-            [ -e "$f" ] || continue
-            check "$(basename "$f")" "$f"
-          done
+
+          # Marketing-site + GEO layer files are prod-only; on staging they would
+          # not exist and the verify would produce a hard fail. Same for
+          # .well-known/.
+          if [ "$CHANNEL" = "prod" ]; then
+            for f in website/*.html; do
+              base=$(basename "$f" .html)
+              if [ "$base" = "index" ]; then check "" "$f"; else check "$base" "$f"; fi
+            done
+            for f in website/*.css; do
+              [ -e "$f" ] || continue
+              check "$(basename "$f")" "$f"
+            done
+            # Hero video artefacts (BET-304 stage 1). The webp is also covered by
+            # the *.webp copy glob above (no duplicate rule needed), but listed
+            # explicitly here so the verify step confirms the poster is live.
+            for f in website/hero.mp4 website/hero.webm website/hero-poster.webp; do
+              [ -e "$f" ] || continue
+              check "$(basename "$f")" "$f"
+            done
+            check "updates/server.json" website/updates/server.json
+            # GEO layer (BET-300) — every file the marketing site advertises
+            # to AI / search crawlers must be live and byte-equal to the repo.
+            check "robots.txt" website/robots.txt
+            check "sitemap.xml" website/sitemap.xml
+            check "llms.txt" website/llms.txt
+            check "llms-full.txt" website/llms-full.txt
+            check "og.png" website/og.png
+            check ".well-known/agent-skills/index.json" .well-known/agent-skills/index.json
+            check ".well-known/agent-skills/manta/SKILL.md" .well-known/agent-skills/manta/SKILL.md
+          fi
+
+          # Shared across channels — install.sh + docs are what a staging
+          # installer (or a /staging/ llms-read) actually fetches.
           check "install.sh" scripts/install.sh
           check "llms-install.md" llms-install.md
           check "llms-plugins.md" docs/plugins-authoring.md
-          check "updates/server.json" website/updates/server.json
-          # GEO layer (BET-300) — every file the marketing site advertises
-          # to AI / search crawlers must be live and byte-equal to the repo.
-          check "robots.txt" website/robots.txt
-          check "sitemap.xml" website/sitemap.xml
-          check "llms.txt" website/llms.txt
-          check "llms-full.txt" website/llms-full.txt
-          check "og.png" website/og.png
-          check ".well-known/agent-skills/index.json" .well-known/agent-skills/index.json
-          check ".well-known/agent-skills/manta/SKILL.md" .well-known/agent-skills/manta/SKILL.md
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::One or more web assets are not live or are stale."
             exit 1

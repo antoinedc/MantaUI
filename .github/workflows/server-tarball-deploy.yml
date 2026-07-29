@@ -1,5 +1,6 @@
 # Server tarball deploy — build ALL arch tarballs (x64 + arm64 + darwin-arm64)
-# and publish them + a combined multi-arch manifest on a `server-v*` git tag.
+# and publish them + a combined multi-arch manifest on a `server-v*` git tag,
+# or to a `/staging/releases/` subtree on demand.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -14,11 +15,12 @@
 # runner (native Mach-O binding for node-pty).
 #
 # WHAT IT DEPLOYS
-#   dist/manta-<v>-linux-x64.tar.gz     → <PROD_HOST>:/var/www/mantaui/releases/
-#   dist/manta-<v>-linux-arm64.tar.gz   → <PROD_HOST>:/var/www/mantaui/releases/
-#   dist/manta-<v>-darwin-arm64.tar.gz  → <PROD_HOST>:/var/www/mantaui/releases/
-#   dist/manta-<v>.txt                  → <PROD_HOST>:/var/www/mantaui/releases/
-#   (then cp manta-<v>.txt → manta-latest.txt, last — atomicity guarantee)
+#   dist/manta-<v>-linux-x64.tar.gz     → <RELEASES_DIR>/
+#   dist/manta-<v>-linux-arm64.tar.gz   → <RELEASES_DIR>/
+#   dist/manta-<v>-darwin-arm64.tar.gz  → <RELEASES_DIR>/
+#   dist/manta-<v>.txt                  → <RELEASES_DIR>/
+#   (then cp manta-<v>.txt → manta-latest.txt  for prod,
+#    or   cp manta-<v>.txt → manta-staging-latest.txt for staging — atomicity)
 #
 # BUILD HOST CHOICE
 #   GitHub-hosted ubuntu-latest (x64) + ubuntu-24.04-arm (linux-arm64) +
@@ -36,22 +38,25 @@
 #   verbatim.
 #
 # ATOMICITY
-#   tarballs + versioned manifest are uploaded FIRST; manta-latest.txt is the
-#   pointer that install.sh fetches by default, and it is copied LAST. A client
-#   therefore either sees the OLD latest.txt (and the OLD tarballs are still
-#   served) OR the NEW latest.txt (and the NEW tarballs are already uploaded).
-#   Drift between manifest and tarballs is impossible. (Same rule publish.sh
-#   documents — generalized to both arches via a loop.)
+#   tarballs + versioned manifest are uploaded FIRST; the channel's *-latest.txt
+#   pointer (manta-latest.txt for prod, manta-staging-latest.txt for staging)
+#   is copied LAST. A client therefore either sees the OLD pointer (and the
+#   OLD tarballs are still served) OR the NEW pointer (and the NEW tarballs are
+#   already uploaded). Drift between manifest and tarballs is impossible.
+#   (Same rule publish.sh documents — generalized to both arches via a loop.)
+#   Staging refreshes its OWN pointer only — it must NEVER overwrite the prod
+#   manta-latest.txt.
 #
 # VERIFY
 #   After publish, fail red on:
 #     - any tarball URL returning non-200
-#     - served manta-latest.txt's version != the version we just published
+#     - served *-latest.txt's version != the version we just published
 #     - any arch's served tarball sha256 != the manifest's sha256_<archkey>
 #   This is the two-arch generalization of publish.sh's existing drift check.
 #
-# TRIGGER: push a tag matching server-v* (e.g. server-v1). Also runnable
-#   manually via workflow_dispatch (deploys current main).
+# TRIGGER: push a tag matching server-v* (e.g. server-v1) → ALWAYS resolves to
+#   prod. Also runnable manually via workflow_dispatch with the `channel`
+#   input (default staging, since a manual run is nearly always staging).
 
 name: Server tarball deploy
 
@@ -60,6 +65,15 @@ on:
     tags:
       - "server-v*"
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Deploy channel. prod = /var/www/mantaui/releases (the live tarballs). staging = /var/www/mantaui/staging/releases (on-demand QA channel; never auto-fires)."
+        type: choice
+        required: true
+        default: staging
+        options:
+          - prod
+          - staging
 
 # Serialize: two quick tags must not race two deploys that overwrite each
 # other's manifests / tarballs. Same group shape as build-mobile-bundle.yml +
@@ -71,10 +85,57 @@ concurrency:
 env:
   PROD_HOST: root@91.107.196.2
   SSH_KEY: /home/dev/.manta-deploy/prod_key
-  RELEASES_DIR: /var/www/mantaui/releases
-  SITE: https://mantaui.com
 
 jobs:
+  # Resolve channel ONCE at the entrypoint. Downstream steps read the resolved
+  # outputs and never re-derive — same shape as website-deploy.yml.
+  resolve:
+    runs-on: self-hosted
+    timeout-minutes: 2
+    outputs:
+      channel: ${{ steps.resolve.outputs.channel }}
+      releases_dir: ${{ steps.resolve.outputs.releases_dir }}
+      site: ${{ steps.resolve.outputs.site }}
+    steps:
+      - id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CHANNEL: ${{ github.event.inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            channel="prod"
+          else
+            channel="${INPUT_CHANNEL:-staging}"
+          fi
+          if [ "$channel" = "staging" ]; then
+            releases_dir="/var/www/mantaui/staging/releases"
+            site="https://mantaui.com/staging"
+          else
+            releases_dir="/var/www/mantaui/releases"
+            site="https://mantaui.com"
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "releases_dir=$releases_dir" >> "$GITHUB_OUTPUT"
+          echo "site=$site" >> "$GITHUB_OUTPUT"
+          echo "▸ Resolved channel=$channel releases_dir=$releases_dir site=$site"
+
+      # HARD GUARD: a staging run that silently writes to the prod releases
+      # directory is the only truly dangerous failure mode here, and it must
+      # be impossible rather than unlikely. Same guard shape as
+      # website-deploy.yml + mac-desktop.
+      - name: Guard — staging destination must contain /staging/
+        env:
+          CHANNEL: ${{ steps.resolve.outputs.channel }}
+          RELEASES_DIR: ${{ steps.resolve.outputs.releases_dir }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = "staging" ] && [[ "$RELEASES_DIR" != */staging* ]]; then
+            echo "::error::channel=staging but RELEASES_DIR='$RELEASES_DIR' does not contain /staging/"
+            exit 1
+          fi
+          echo "✓ guard passed (channel=$CHANNEL, RELEASES_DIR=$RELEASES_DIR)"
+
   build:
     name: pack (${{ matrix.arch }})
     # One job per arch — node-pty's native binding cannot be cross-compiled,
@@ -123,7 +184,7 @@ jobs:
 
   publish:
     name: publish + verify
-    needs: build
+    needs: [resolve, build]
     runs-on: self-hosted
     timeout-minutes: 15
     steps:
@@ -175,16 +236,19 @@ jobs:
           echo "✓ combined manifest: dist/manta-${VERSION}.txt"
 
       # Same scp/ssh plumbing as website-deploy.yml — no new secrets, no new
-      # key path. tarballs + versioned manifest first; manta-latest.txt pointer
-      # LAST so a client either sees old (and old tarballs) or new (and new
-      # tarballs are already uploaded) — drift is impossible.
-      - name: Upload tarballs + combined manifest to prod
+      # key path. tarballs + versioned manifest first; channel *-latest.txt
+      # pointer LAST so a client either sees old (and old tarballs) or new
+      # (and new tarballs are already uploaded) — drift is impossible.
+      - name: Upload tarballs + combined manifest to channel destination
         env:
           VERSION: ${{ steps.vars.outputs.version }}
+          RELEASES_DIR: ${{ needs.resolve.outputs.releases_dir }}
         run: |
           set -euo pipefail
           SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
           SCP="scp -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+          $SSH "$PROD_HOST" "mkdir -p $RELEASES_DIR"
 
           for arch in linux-x64 linux-arm64 darwin-arm64; do
             tarball="dist/manta-${VERSION}-${arch}.tar.gz"
@@ -195,12 +259,24 @@ jobs:
           echo "▸ Uploading ${manifest}"
           $SCP "$manifest" "$PROD_HOST:$RELEASES_DIR/"
 
-          echo "▸ Publishing manta-latest.txt pointer (LAST — atomicity)"
-          $SSH "$PROD_HOST" "cd $RELEASES_DIR && cp -f manta-${VERSION}.txt manta-latest.txt"
+          # Channel-specific pointer. prod refreshes manta-latest.txt (the
+          # canonical install.sh pointer). staging refreshes
+          # manta-staging-latest.txt — it MUST NOT touch prod's latest.txt,
+          # or every install.sh fetch returns a staging build to a prod user.
+          channel="${{ needs.resolve.outputs.channel }}"
+          if [ "$channel" = "staging" ]; then
+            pointer="manta-staging-latest.txt"
+          else
+            pointer="manta-latest.txt"
+          fi
+          echo "▸ Publishing ${pointer} (LAST — atomicity)"
+          $SSH "$PROD_HOST" "cd $RELEASES_DIR && cp -f manta-${VERSION}.txt ${pointer}"
 
       - name: Verify deploy (both arches)
         env:
           VERSION: ${{ steps.vars.outputs.version }}
+          SITE: ${{ needs.resolve.outputs.site }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: |
           set -euo pipefail
           fail=0
@@ -217,8 +293,14 @@ jobs:
             fi
           done
 
-          echo "▸ Fetch served manta-latest.txt and assert version"
-          served=$(curl -fsSL "$SITE/releases/manta-latest.txt")
+          # Channel-specific *-latest.txt pointer — same atomicity invariant.
+          if [ "$CHANNEL" = "staging" ]; then
+            pointer="manta-staging-latest.txt"
+          else
+            pointer="manta-latest.txt"
+          fi
+          echo "▸ Fetch served ${pointer} and assert version"
+          served=$(curl -fsSL "$SITE/releases/${pointer}")
           served_version=$(printf '%s\n' "$served" | grep '^version=' | head -n1 | cut -d= -f2-)
           if [ "$served_version" != "$VERSION" ]; then
             echo "::error::served version='${served_version}' expected='${VERSION}'"
