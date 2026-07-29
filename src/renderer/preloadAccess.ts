@@ -8,6 +8,7 @@ import type { InstallerEvent, InstallerState } from "../shared/types.js";
 import type { PreflightResult } from "../main/installer/preflight.js";
 import type { SshHostEntry } from "../main/installer/sshConfig.js";
 import type { InstallerStageSnapshotRow } from "../shared/types.js";
+import type { UnpairOutcome } from "../shared/unpair.mjs";
 
 // Re-export so the renderer can use the type names from the same accessor
 // module that exposes the preload methods — same pattern as the existing
@@ -72,6 +73,16 @@ export interface MantaPreload {
   // pluginsSetEnabled; both are no-ops on mobile/web (no preload).
   pluginsGetEnabled(): Promise<boolean>;
   pluginsSetEnabled(value: boolean): Promise<void>;
+
+  // BET-357 §2: "Remove this box from the device that holds the current
+  // box_token". Main reads the live { serverUrl, boxToken } from config
+  // (never trusting a renderer-supplied copy — those would be stale the
+  // instant the config changes), DELETEs <serverUrl>/auth/revoke, and
+  // ALWAYS clears the local config entry as a single transactional step.
+  // The unreachable-box path therefore still succeeds locally; the
+  // UnpairOutcome is the structured note the Settings panel renders
+  // ("removed locally — remote revocation didn't reach the box").
+  authUnpair(): Promise<UnpairOutcome>;
   // Client version (BET-225 stage 3): returns the running desktop app's own
   // version via main → `app.getVersion()`. Combined with the server's
   // `minClient` (from getServerVersion) by the renderer's isClientTooOld

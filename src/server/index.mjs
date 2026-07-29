@@ -76,6 +76,7 @@ import {
   ensureAuth,
   createAuthEngine,
   isLocalDirectRequest,
+  parseBearer,
   authorizationForRequest,
   AUTH_RL_CAPACITY,
   AUTH_RL_REFILL_PER_SEC,
@@ -609,15 +610,25 @@ const handleRequest = async (req, res) => {
   }
 
   // ---------- Auth pairing handshake (UNAUTHENTICATED, rate-limited) ----------
-  // GET  /auth/pair            → {pairing_code, box_id, expiresAt}
-  //                              Mint a one-time, ~5-min code. The desktop shows
-  //                              it (and encodes box_id+code in a QR for mobile).
-  // POST /auth/claim {pairing_code} → {box_token, box_id}
-  //                              Exchange a valid code for the bearer token.
-  //                              One-time; 403 on wrong/expired/reused code.
+  // GET    /auth/pair            → {pairing_code, box_id, expiresAt}
+  //                                Mint a one-time, ~5-min code. The desktop
+  //                                shows it (and encodes box_id+code in a QR
+  //                                for mobile).
+  // POST   /auth/claim {pairing_code} → {box_token, box_id}
+  //                                Exchange a valid code for the bearer token.
+  //                                One-time; 403 on wrong/expired/reused code.
+  // DELETE /auth/revoke           → 200 on success; 400/401 on bad token.
+  //                                "Remove this box from the device that holds
+  //                                the current box_token" (BET-357 §2). Mints
+  //                                a fresh identity and clears the pairing
+  //                                cache so the next device must pair again.
   // These are the ONLY pre-token surface, so they're the brute-force target and
   // are throttled by a shared token-bucket limiter (per client IP). See auth.mjs.
-  if (path === "/auth/pair" || path === "/auth/claim") {
+  if (
+    path === "/auth/pair" ||
+    path === "/auth/claim" ||
+    path === "/auth/revoke"
+  ) {
     const ip =
       (typeof req.headers["x-forwarded-for"] === "string" &&
         req.headers["x-forwarded-for"].split(",")[0].trim()) ||
@@ -663,6 +674,20 @@ const handleRequest = async (req, res) => {
           return;
         }
         respondJson(res, 200, { box_token: result.box_token, box_id: result.box_id });
+        return;
+      }
+      if (req.method === "DELETE" && path === "/auth/revoke") {
+        // Manual auth check (this route is exempt from the standard gate so
+        // we can distinguish malformed-token → 400 from missing-token → 401;
+        // the gate collapses both into 401). The shape of the response is
+        // whatever authEngine.revoke returns: { ok, status?, error? }.
+        const token = parseBearer(req.headers["authorization"]);
+        const result = await authEngine.revoke({ token });
+        if (!result.ok) {
+          respondJson(res, result.status ?? 401, { error: result.error });
+          return;
+        }
+        respondJson(res, 200, { ok: true, box_id: result.box_id });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

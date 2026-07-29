@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig } from "./config.js";
 import { claimPairing } from "./auth.js";
+import { unpairBox } from "./unpair.js";
 import {
   startDesktopPresence,
   stopDesktopPresence,
@@ -402,6 +403,30 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.authClaim, (_e, input: AuthClaimInput) =>
     claimPairing(input, (patch) => commit(patch)),
   );
+
+  // BET-357 §2: "Remove this box from the device that holds the current
+  // box_token". Reads the live { serverUrl, boxToken } from config (so the
+  // renderer never holds a stale copy), DELETEs <serverUrl>/auth/revoke, and
+  // — REGARDLESS of the remote outcome — clears the local config entry.
+  // The unreachable-box path still succeeds locally per the spec; the
+  // returned UnpairOutcome lets the renderer's Settings panel surface a
+  // structured note when the remote revocation didn't happen.
+  ipcMain.handle(IPC.authUnpair, async () => {
+    const serverUrl = config.serverUrl ?? "";
+    const boxToken = config.boxToken ?? "";
+    const outcome = await unpairBox({ serverUrl, boxToken });
+    // ALWAYS clear locally: config.ts is the single token writer (BET-355 §4).
+    // Empty strings (not delete) so the field shape on disk stays stable
+    // across saves — the schema migration in loadConfig doesn't need to
+    // chase removed keys.
+    commit({
+      serverUrl: "",
+      boxId: "",
+      boxToken: "",
+      projects: [],
+    });
+    return outcome;
+  });
 
   // BET-355 (Stage 4): SSH installer flow. The channels exposed by
   // registerInstallerHandlers are the renderer's ONLY handle on the
