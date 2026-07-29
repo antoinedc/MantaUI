@@ -115,8 +115,18 @@ const PROBE_AUTH_FILE_CMD =
 // behaviour change; for staging the box fetches the staging manifest +
 // tarball, which is the entire point of the channel split. The single
 // command shape keeps the wire-format tests trivial (BET-370 §Tests).
-function buildInstallCommand(installShUrl: string, releaseHost: string): string {
-  return `bash -lc 'curl -fsSL ${installShUrl} | MANTA_RELEASE_HOST=${releaseHost} bash'`;
+//
+// MANTA_CHANNEL (BET-386) rides along the same curl-pipe invocation: it's
+// the only way install.sh (served byte-identical across channels — see
+// scripts/release/publish.sh) learns which channel it's running under, so
+// the pairing block it prints at the end (via scripts/manta-pair.mjs →
+// install-lib.mjs's formatPairingOutput/buildPairLink) emits the right
+// pair-link scheme (manta:// / manta-staging:// / manta-dev://) instead of
+// always manta://. Same env-var-at-invocation pattern as MANTA_RELEASE_HOST,
+// same channel record — no new plumbing needed on the box side beyond what
+// scripts/install-lib.mjs's resolveConfig() already reads.
+function buildInstallCommand(installShUrl: string, releaseHost: string, channel: string): string {
+  return `bash -lc 'curl -fsSL ${installShUrl} | MANTA_RELEASE_HOST=${releaseHost} MANTA_CHANNEL=${channel} bash'`;
 }
 
 // ===========================================================================
@@ -311,7 +321,7 @@ export function runInstall(
   // mapper's prefix-matching still works after we strip them).
   //
   // TERM=xterm-256color is inherited from this process; nothing to set here.
-  const handle = streamRemote(alias, buildInstallCommand(installShUrl, cfg.releaseHost), {
+  const handle = streamRemote(alias, buildInstallCommand(installShUrl, cfg.releaseHost, cfg.id), {
     forceTty: true,
     spawn: deps.spawn,
     onStdout: (chunk) => pumpChunk(chunk, "stdout", sink),

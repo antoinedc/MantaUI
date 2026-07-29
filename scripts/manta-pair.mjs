@@ -88,12 +88,18 @@ async function main() {
   }
 
   try {
-    const block = formatPairingOutput({
-      pairing_code: data?.pairing_code,
-      box_id: data?.box_id,
-      expiresAt: data?.expiresAt,
-      serverUrl: readIngressServerUrl(cfg.authDir),
-    });
+    // BET-386: scheme comes from cfg.urlScheme (MANTA_CHANNEL, resolved by
+    // resolveConfig()) so a staging/dev box prints its own channel's pair
+    // link rather than always `manta://`.
+    const block = formatPairingOutput(
+      {
+        pairing_code: data?.pairing_code,
+        box_id: data?.box_id,
+        expiresAt: data?.expiresAt,
+        serverUrl: readIngressServerUrl(cfg.authDir),
+      },
+      { scheme: cfg.urlScheme },
+    );
     process.stdout.write(block + "\n");
   } catch (e) {
     fail(`unexpected pairing response from manta-server (${e?.message ?? e})`);

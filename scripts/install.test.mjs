@@ -260,6 +260,45 @@ test("resolveConfig honors MANTA_MOBILE_PORT and derives healthUrl", () => {
 });
 
 // ----------------------------------------------------------------------------
+// resolveConfig — MANTA_CHANNEL (BET-386)
+// ----------------------------------------------------------------------------
+//
+// Mirrors src/server/pairPage.mjs's resolveBoxChannel() env-var contract:
+// same env var name, same "unset/unrecognised → prod" fallback, so a box
+// server AND the install-lib pairing emitter agree on the channel from the
+// same MANTA_CHANNEL value.
+
+test("resolveConfig defaults channel to prod when MANTA_CHANNEL is unset", () => {
+  const cfg = resolveConfig({ env: {}, home: HOME });
+  assert.equal(cfg.channel, "prod");
+  assert.equal(cfg.urlScheme, "manta");
+});
+
+test("resolveConfig honors MANTA_CHANNEL=staging", () => {
+  const cfg = resolveConfig({ env: { MANTA_CHANNEL: "staging" }, home: HOME });
+  assert.equal(cfg.channel, "staging");
+  assert.equal(cfg.urlScheme, "manta-staging");
+});
+
+test("resolveConfig honors MANTA_CHANNEL=dev", () => {
+  const cfg = resolveConfig({ env: { MANTA_CHANNEL: "dev" }, home: HOME });
+  assert.equal(cfg.channel, "dev");
+  assert.equal(cfg.urlScheme, "manta-dev");
+});
+
+test("resolveConfig falls back to prod for an unrecognised MANTA_CHANNEL (never throws)", () => {
+  const cfg = resolveConfig({ env: { MANTA_CHANNEL: "garbage" }, home: HOME });
+  assert.equal(cfg.channel, "prod");
+  assert.equal(cfg.urlScheme, "manta");
+});
+
+test("resolveConfig treats an empty-string MANTA_CHANNEL as unset (shell footgun)", () => {
+  const cfg = resolveConfig({ env: { MANTA_CHANNEL: "" }, home: HOME });
+  assert.equal(cfg.channel, "prod");
+  assert.equal(cfg.urlScheme, "manta");
+});
+
+// ----------------------------------------------------------------------------
 // parsePort
 // ----------------------------------------------------------------------------
 
@@ -554,7 +593,10 @@ test("buildPairLink produces the canonical box-form pair link (BET-177 §2.4)", 
   // heredoc duplicate) in lockstep with this helper. The install.test
   // suite is plain Node — we don't load the .ts parser here — but we CAN
   // enforce the wire shape on the install-lib helper so a future drift is
-  // caught here.
+  // caught here. (BET-386: the actual cross-module round-trip against the
+  // real `parsePairPayload`, for all three channel schemes, lives in
+  // src/renderer/mobile/pairPayload.test.ts — vitest, not plain Node,
+  // can load the .ts parser directly.)
   //
   // 1. install-lib's buildPairLink produces the canonical shape:
   const fromLib = buildPairLink(HEX32, "847291");
@@ -562,6 +604,45 @@ test("buildPairLink produces the canonical box-form pair link (BET-177 §2.4)", 
     fromLib,
     "manta://pair?box=0123456789abcdef0123456789abcdef&code=847291",
     "install-lib buildPairLink produces the canonical box-form URL",
+  );
+});
+
+// ----------------------------------------------------------------------------
+// buildPairLink — channel-aware scheme (BET-386)
+// ----------------------------------------------------------------------------
+//
+// `buildPairLink` no longer hardcodes the `manta` literal in its URL
+// template — the scheme comes from the `scheme` option (default "manta",
+// same default as the renderer's `buildPairPayload`). Callers pass
+// `resolveConfig().urlScheme`. See src/renderer/mobile/pairPayload.test.ts
+// for the round-trip-through-parsePairPayload coverage across all three
+// channel schemes.
+
+test("buildPairLink derives the scheme from the `scheme` option, not a hardcoded literal", () => {
+  assert.equal(
+    buildPairLink(HEX32, "847291", { scheme: "manta-staging" }),
+    `manta-staging://pair?box=${HEX32}&code=847291`,
+  );
+  assert.equal(
+    buildPairLink(HEX32, "847291", { scheme: "manta-dev" }),
+    `manta-dev://pair?box=${HEX32}&code=847291`,
+  );
+});
+
+test("buildPairLink defaults scheme to manta when no scheme option is passed (back-compat)", () => {
+  assert.equal(
+    buildPairLink(HEX32, "847291"),
+    `manta://pair?box=${HEX32}&code=847291`,
+  );
+});
+
+test("buildPairLink threads scheme through the serverUrl branch too", () => {
+  assert.equal(
+    buildPairLink(HEX32, "847291", {
+      scheme: "manta-staging",
+      serverUrl: "http://100.64.1.5:8787",
+    }),
+    `manta-staging://pair?box=${HEX32}&code=847291&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
   );
 });
 
@@ -667,6 +748,27 @@ test("formatPairingOutput still throws on a non-6-digit code", () => {
     () => formatPairingOutput({ pairing_code: "12345" }),
     /6 digits/,
   );
+});
+
+// ----------------------------------------------------------------------------
+// formatPairingOutput — channel-aware scheme (BET-386)
+// ----------------------------------------------------------------------------
+
+test("formatPairingOutput threads the scheme option into the printed pair link", () => {
+  const out = formatPairingOutput(
+    { pairing_code: "847291", box_id: HEX32 },
+    { scheme: "manta-staging" },
+  );
+  assert.match(out, new RegExp(`manta-staging://pair\\?box=${HEX32}&code=847291`));
+  // "manta-staging://" does not contain the substring "manta://", so this
+  // also guards against the scheme option being ignored and the literal
+  // prod prefix leaking through instead.
+  assert.doesNotMatch(out, /manta:\/\//);
+});
+
+test("formatPairingOutput defaults to manta:// when no scheme option is passed (back-compat)", () => {
+  const out = formatPairingOutput({ pairing_code: "847291", box_id: HEX32 });
+  assert.match(out, new RegExp(`manta://pair\\?box=${HEX32}&code=847291`));
 });
 
 test("formatExpiry handles epoch-ms, ISO string, and junk", () => {

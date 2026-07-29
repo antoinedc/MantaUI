@@ -22,6 +22,7 @@ import { createRequire } from "node:module";
 import { STATE_DIRNAME } from "../src/shared/paths.mjs";
 import { loadAuth } from "../src/server/auth.mjs";
 import { isPrivateServerUrl } from "../src/shared/transport.mjs";
+import { channelConfig } from "../src/shared/channel.mjs";
 
 // `qrcode-terminal` is CommonJS; we keep this module ESM. The local
 // `createRequire` shim is sync (no top-level await) and resolves the lib
@@ -85,6 +86,21 @@ function envVal(env, key) {
  *   releaseHost  — MANTA_RELEASE_HOST || DEFAULT_RELEASE_HOST
  *   port         — MANTA_MOBILE_PORT || DEFAULT_PORT
  *   healthUrl    — http://127.0.0.1:<port>/auth/status
+ *   channel      — MANTA_CHANNEL, resolved through channelConfig's id
+ *                  (BET-386; unset/unrecognised → "prod", same fallback as
+ *                  resolveBoxChannel() in src/server/pairPage.mjs)
+ *   urlScheme    — channelConfig(channel).urlScheme — the pair-link scheme
+ *                  formatPairingOutput/buildPairLink default to
+ *
+ * MANTA_CHANNEL follows the exact same wiring as MANTA_RELEASE_HOST: it is
+ * an env var the caller sets before invoking install.sh (mirrors
+ * `src/main/installer/installer.ts`'s SSH orchestrator, which already
+ * resolves the desktop's build channel and passes MANTA_RELEASE_HOST in the
+ * same curl-pipe command — MANTA_CHANNEL rides along there). install.sh
+ * itself is served byte-identical across channels (no build-time
+ * substitution — see scripts/release/publish.sh), so a channel can only be
+ * communicated at invocation time via this env var, not by the script
+ * content.
  */
 export function resolveConfig({ env = process.env, home = homedir() } = {}) {
   const mantaHome = envVal(env, "MANTA_HOME") ?? join(home, DEFAULT_HOME_DIRNAME);
@@ -95,6 +111,7 @@ export function resolveConfig({ env = process.env, home = homedir() } = {}) {
     envVal(env, "MANTA_RELEASE_HOST") ?? DEFAULT_RELEASE_HOST,
   );
   const port = parsePort(envVal(env, "MANTA_MOBILE_PORT")) ?? DEFAULT_PORT;
+  const channel = channelConfig(envVal(env, "MANTA_CHANNEL") ?? "prod");
   return {
     mantaHome,
     authDir,
@@ -103,6 +120,8 @@ export function resolveConfig({ env = process.env, home = homedir() } = {}) {
     releaseHost,
     port,
     healthUrl: `http://127.0.0.1:${port}${HEALTH_PATH}`,
+    channel: channel.id,
+    urlScheme: channel.urlScheme,
   };
 }
 
@@ -910,7 +929,7 @@ export const readBoxIdentity = loadAuth;
  * try/catch degradation), and the per-row QR indenting loop are all kept
  * intact — only the assembled line list changes.
  *
- * BET-177 §2.4: the pair link `manta://pair?box=<id>&code=<code>` is
+ * BET-177 §2.4: the pair link `<scheme>://pair?box=<id>&code=<code>` is
  * always included in the output (when a box_id + a valid 6-digit code are
  * present) as BOTH a copy-paste line AND a terminal-rendered QR. The QR is
  * for the user who wants to scan with the iOS Camera instead of pasting the
@@ -918,6 +937,12 @@ export const readBoxIdentity = loadAuth;
  * `buildPairLink` (local helper) — single source of truth, consumed
  * exclusively by this function now (install.sh's heredoc duplicate was
  * retired in BET-241).
+ *
+ * BET-386 (channel-aware wire format): `scheme` (default "manta") flows
+ * straight through to `buildPairLink` so a staging/dev install prints
+ * `manta-staging://…` / `manta-dev://…` instead of always `manta://`.
+ * Callers should pass `resolveConfig().urlScheme` — see `buildPairLink`'s
+ * doc comment for the single-source-of-truth rationale.
  *
  * The QR generator is injected (`qrRender`) so tests can capture the output
  * without pulling in `qrcode-terminal` at module-load. The default
@@ -927,7 +952,7 @@ export const readBoxIdentity = loadAuth;
  */
 export function formatPairingOutput(
   { pairing_code, box_id, expiresAt, serverUrl } = {},
-  { qrRender = defaultQrRender } = {},
+  { qrRender = defaultQrRender, scheme = "manta" } = {},
 ) {
   if (!/^[0-9]{6}$/.test(String(pairing_code ?? ""))) {
     throw new Error("formatPairingOutput: pairing_code must be 6 digits");
@@ -952,7 +977,7 @@ export function formatPairingOutput(
     // crafted install can't smuggle a public address past this function).
     // ONE wire shape — no more manta:///pair-page fork.
     const useServerUrl = typeof serverUrl === "string" && serverUrl !== "";
-    const pairLinkOpts = useServerUrl ? { serverUrl } : {};
+    const pairLinkOpts = useServerUrl ? { serverUrl, scheme } : { scheme };
     const pairLink = buildPairLink(box_id, pairing_code, pairLinkOpts);
     const pairPageUrl = buildPairPageUrl(box_id, pairing_code, {
       baseUrl: useServerUrl ? serverUrl : undefined,
@@ -1038,11 +1063,20 @@ export function formatPairingOutput(
  * renderer-side parser uses); a non-private value throws — refusing is
  * the intended behaviour, not silently dropping the param.
  *
+ * BET-386 (channel-aware wire format): `scheme` (default "manta" — same
+ * default as the renderer's `buildPairPayload`) lets the caller pick the
+ * channel's own URL scheme so an install run under a non-prod channel
+ * emits `manta-staging://…` / `manta-dev://…` instead of always `manta://`.
+ * Callers should pass `resolveConfig().urlScheme` (channel-derived, single
+ * source of truth in src/shared/channel.mjs) rather than typing a scheme
+ * literal — mirrors how `pairPage.mjs`'s `validatePairQrQuery` and the
+ * renderer's `buildPairPayload` take the same channel-derived value.
+ *
  * Cross-reference: keep in sync with src/renderer/mobile/pairPayload.ts
  * `buildPairPayload` (box-form branch). If the canonical shape changes,
  * BOTH helpers must change in lockstep — the test catches drift.
  */
-export function buildPairLink(boxId, code, { serverUrl } = {}) {
+export function buildPairLink(boxId, code, { serverUrl, scheme = "manta" } = {}) {
   if (typeof boxId !== "string" || !/^[0-9a-f]{32}$/.test(boxId)) {
     throw new Error("buildPairLink: boxId must be a 32-hex token");
   }
@@ -1058,9 +1092,9 @@ export function buildPairLink(boxId, code, { serverUrl } = {}) {
         "buildPairLink: serverUrl must be a private/tailnet http(s) URL",
       );
     }
-    return `manta://pair?box=${encodeURIComponent(boxId)}&code=${code}&server=${encodeURIComponent(serverUrl)}`;
+    return `${scheme}://pair?box=${encodeURIComponent(boxId)}&code=${code}&server=${encodeURIComponent(serverUrl)}`;
   }
-  return `manta://pair?box=${encodeURIComponent(boxId)}&code=${code}`;
+  return `${scheme}://pair?box=${encodeURIComponent(boxId)}&code=${code}`;
 }
 
 /**
