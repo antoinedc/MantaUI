@@ -38,3 +38,5 @@ HANDOFF*.md
 # anything under mobile/www/ — it will be overwritten by the next build.
 mobile/www/
 report/
+playwright-report/
+test-results/

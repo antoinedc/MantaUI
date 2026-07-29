@@ -4,6 +4,17 @@ import type {
   AutoUpdateInfo,
   AutoUpdateErrorInfo,
 } from "../shared/types.js";
+import type { InstallerEvent, InstallerState } from "../shared/types.js";
+import type { PreflightResult } from "../main/installer/preflight.js";
+import type { SshHostEntry } from "../main/installer/sshConfig.js";
+import type { InstallerStageSnapshotRow } from "../shared/types.js";
+
+// Re-export so the renderer can use the type names from the same accessor
+// module that exposes the preload methods — same pattern as the existing
+// `MantaPreload` consumers below. The types live in src/shared/types.ts so
+// they can be imported by both preload AND renderer (two tsconfigs) without
+// crossing the process boundary.
+export type { InstallerEvent, InstallerState, InstallerStageSnapshotRow };
 
 /**
  * OS-integration affordances exposed by the Electron preload bridge.
@@ -90,6 +101,65 @@ export interface MantaPreload {
   onAutoUpdateAvailable(cb: (info: AutoUpdateInfo) => void): () => void;
   onAutoUpdateDownloaded(cb: (info: AutoUpdateInfo) => void): () => void;
   onAutoUpdateError(cb: (info: AutoUpdateErrorInfo) => void): () => void;
+
+  // ---- SSH installer (BET-355 — Stage 4) ----
+  // Preload bridge for the renderer's "install a new box via SSH" flow.
+  // All installer channels live here (NOT on window.api / httpApi) because
+  // the architectural rule is SSH-is-installer-only — there's no HTTP path
+  // to fall through on, and the channels only exist when the preload ran
+  // (i.e. the desktop is in Electron). Mobile/web callers see `null` from
+  // getMantaPreload and must not render this UI at all.
+
+  // Read ~/.ssh/config and return the pickable Host aliases (Host * is
+  // skipped). The renderer's host picker reads this on mount.
+  installerListHosts(): Promise<SshHostEntry[]>;
+
+  // Run the preflight probes (silent reachability, OS/arch, passwordless
+  // sudo, tailscale, clock skew, already-installed) over SSH for the chosen
+  // alias. Returns the structured PreflightResult; failures[] carries
+  // plain-language cause + one suggested action per failure.
+  installerPreflight(input: { alias: string }): Promise<PreflightResult>;
+
+  // Kick off the install. Returns the handle id the renderer uses to match
+  // incoming installerEvent pushes. The install itself streams back via
+  // onInstallerEvent below; this method itself resolves as soon as the
+  // spawn succeeds (typically <100ms).
+  installerStart(input: { alias: string }): Promise<{ handleId: string }>;
+
+  // SIGTERM the in-flight install. Idempotent: safe on a stale handle id
+  // (one from a previous renderer mount) or on an already-done handle.
+  installerCancel(input: { handleId: string }): Promise<void>;
+
+  // Mint a fresh pairing code over the existing SSH connection + claim it
+  // via the box's public URL. Returns the SAME ClaimOutcome shape as the
+  // manual PairStep claim — the renderer treats success and failure the
+  // same way regardless of which entry point produced them. Persists
+  // credentials through main's existing claim path (single config writer).
+  installerMintAndClaim(input: {
+    alias: string;
+    claimUrlOverride?: string;
+  }): Promise<unknown>;
+
+  // Returns the current install's { active, stage, logTail } — the renderer
+  // calls this on mount to recover the install state after a page refresh
+  // (the install survives the renderer's remount; only the display needs
+  // rehydrating).
+  installerState(): Promise<InstallerState>;
+
+  // Build a redacted diagnostics blob for the "Copy diagnostics" button.
+  // Redacts 32-hex tokens, 6-digit codes, ssh-key paths, host fingerprints,
+  // and Authorization: Bearer values (per BET-355 §6). Pure — the renderer
+  // hands back whatever the user copied.
+  installerGetDiagnostics(input: {
+    preflight: PreflightResult;
+    stage: InstallerStageSnapshotRow["id"];
+    logTail: string[];
+    alias?: string;
+  }): Promise<string>;
+
+  // Push events from main while an install is in flight. Returns an
+  // unsubscribe function (same pattern as onAutoUpdateAvailable above).
+  onInstallerEvent(cb: (event: InstallerEvent) => void): () => void;
 }
 
 /**

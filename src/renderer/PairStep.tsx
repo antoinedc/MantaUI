@@ -8,6 +8,8 @@ import {
 import { isValidBoxToken } from "../shared/transport.mjs";
 import { claimBox } from "./pairClaim";
 import { useStore } from "./store";
+import { SshInstallStep } from "./SshInstallStep";
+import { getMantaPreload } from "./preloadAccess";
 
 // PairStep.tsx — Step 1 (Pair) of the desktop onboarding shell (BET-49-T2,
 // BET-255, BET-268, BET-335, BET-336).
@@ -65,6 +67,15 @@ export function PairStep({
   onPaired: () => void;
   onSkip: () => void;
 }) {
+  // BET-355 (Stage 4): the SSH installer flow is an alternative path to the
+  // same onPaired() callback the manual form uses. We toggle which sub-UI
+  // renders with `mode`. The disclosure-link lets the user opt into the
+  // SSH-driven path on an already-paired box (where the manual PairStep
+  // form is irrelevant). Stage 5 will fully replace this with the
+  // primary picker + demote the manual form to a behind-a-disclosure
+  // escape hatch (per the issue's "this should be a net deletion" rule).
+  const [mode, setMode] = useState<"manual" | "ssh">("manual");
+  const hasSshInstaller = getMantaPreload() !== null;
   // Deep-link prefill (BET-335; extended BET-336 for the server URL): if
   // App.tsx stashed a valid `manta://pair?…` URL into `pendingPairLink`
   // before this step mounted, seed the fields from it. Lazy init via
@@ -154,6 +165,28 @@ export function PairStep({
 
   return (
     <div>
+      {hasSshInstaller && mode === "ssh" ? (
+        <>
+          <h2 className="text-2xl font-semibold tracking-tight text-text mb-1.5">
+            Set up a fresh box via SSH
+          </h2>
+          <p className="text-sm text-text-muted mb-5">
+            Pick a host, watch the install run, and end up paired — no
+            terminal, no codes copied by hand.
+          </p>
+          <SshInstallStep onPaired={onPaired} />
+          <div className="pt-3">
+            <button
+              type="button"
+              onClick={() => setMode("manual")}
+              className="text-xs text-text-muted hover:text-text"
+            >
+              ← Back to manual pairing code
+            </button>
+          </div>
+        </>
+      ) : (
+      <>
       <h2 className="text-2xl font-semibold tracking-tight text-text mb-1.5">
         Connect to your server
       </h2>
@@ -312,7 +345,20 @@ export function PairStep({
             )}
           </button>
         </div>
+        {hasSshInstaller && (
+          <div className="pt-4 text-center">
+            <button
+              type="button"
+              onClick={() => setMode("ssh")}
+              className="text-xs text-text-muted hover:text-text"
+            >
+              Or set up a fresh box via SSH →
+            </button>
+          </div>
+        )}
       </form>
+      </>
+      )}
     </div>
   );
 }
