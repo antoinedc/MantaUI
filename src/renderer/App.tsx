@@ -17,6 +17,7 @@ import {
 import { chooseUpdateSkewVariant, registerMountedTerminal, type MountedTerminal } from "./chatUtils";
 import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
+import { ReconnectingBanner } from "./ReconnectingBanner";
 import { parsePairPayload } from "./mobile/pairPayload";
 import type { AvailableLauncher } from "../shared/types";
 
@@ -763,6 +764,17 @@ export function App() {
               dismissible={false}
             />
           )}
+        {/* Reconnecting banner (BET-365 / BET-357 §1): full-width bar above
+            the titlebar that surfaces the events-WebSocket reconnect state.
+            Replaces the prior tiny titlebar pill with attempt count, the
+            next-backoff delay, and a "Retry now" button that calls
+            window.api.connectionRetryNow(). Hidden when connected/idle. */}
+        {!showOnboarding && (
+          <ReconnectingBanner
+            state={connectionState}
+            onRetryNow={() => window.api.connectionRetryNow()}
+          />
+        )}
         <div className="titlebar-drag h-10 border-b border-border flex items-center px-3 gap-2 min-w-0">
           <div className="text-xs text-text-muted flex items-center gap-2 min-w-0">
             {activeProjectName && (
@@ -775,7 +787,10 @@ export function App() {
                 non-connected state (reconnecting / stalled / closed). The
                 controller fires onState on every transition, so this reflects
                 live state without polling. Hidden in SSH mode (no WS) and
-                when connected (no signal needed). */}
+                when connected (no signal needed). The full-width
+                ReconnectingBanner above surfaces the same state with more
+                detail (attempt count, next-backoff delay, Retry button); the
+                pill is kept for at-a-glance context inside the titlebar. */}
             {connectionState.state !== "connected" &&
               connectionState.state !== "idle" && (
                 <span

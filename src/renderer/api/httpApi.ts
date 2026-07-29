@@ -1029,6 +1029,17 @@ export const httpApi: Api = {
     return rpc(IPC.voiceTranscribe, { buffer: b64, mime });
   },
   voiceClassifyCommand: (input) => rpc(IPC.voiceClassifyCommand, input),
+
+  // -- connection retry (BET-365 / BET-357 §1) --
+  // The events WebSocket auto-reconnects on its own backoff; this is the
+  // user-facing "Retry now" trigger wired into ReconnectingBanner. Calling it
+  // resets the backoff counter and the total-window deadline, then opens the
+  // socket immediately. No-op when there's no live controller (the http
+  // client is in a no-server-configured state — the banner isn't shown in
+  // that case anyway).
+  connectionRetryNow: () => {
+    if (_controller) _controller.retryNow();
+  },
 };
 
 // Base64-encode an ArrayBuffer in chunks. `btoa(String.fromCharCode(...))`

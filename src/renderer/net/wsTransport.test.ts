@@ -43,26 +43,37 @@ class FakeWs implements WsLike {
   }
 }
 
-// Deterministic timer: queue of {id, fn}. run() fires the earliest pending.
+// Deterministic timer: queue of {id, fn, ms}. run() fires the earliest-deadline
+// pending timer (matching how real setTimeout schedules). Tests that previously
+// relied on FIFO ordering still pass because timers are armed in the order
+// they fire; new tests that arm a long-deadline alongside a short-deadline
+// (reconnect + 10-minute deadline) now fire in wall-clock order.
 function makeFakeTimer() {
-  const timers = new Map<number, () => void>();
+  const timers = new Map<number, { fn: () => void; ms: number }>();
   let nextId = 1;
   return {
-    setTimeoutFn: (fn: () => void, _ms: number) => {
+    setTimeoutFn: (fn: () => void, ms: number) => {
       const id = nextId++;
-      timers.set(id, fn);
+      timers.set(id, { fn, ms });
       return id;
     },
     clearTimeoutFn: (h: unknown) => {
       timers.delete(h as number);
     },
-    /** Fire the oldest pending timer (FIFO by insertion / id). */
+    /** Fire the earliest-deadline pending timer (matching setTimeout semantics). */
     run() {
-      const id = [...timers.keys()][0];
-      if (id === undefined) return false;
-      const fn = timers.get(id)!;
-      timers.delete(id);
-      fn();
+      let earliestId: number | undefined;
+      let earliestMs = Infinity;
+      for (const [id, t] of timers) {
+        if (t.ms < earliestMs) {
+          earliestMs = t.ms;
+          earliestId = id;
+        }
+      }
+      if (earliestId === undefined) return false;
+      const entry = timers.get(earliestId)!;
+      timers.delete(earliestId);
+      entry.fn();
       return true;
     },
     count() {
@@ -83,6 +94,7 @@ function setup(overrides: Partial<Parameters<typeof buildController>[0]> = {}) {
 function buildController(overrides: {
   urlThrows?: boolean;
   onReconnect?: () => void;
+  maxTotalWindowMs?: number;
 } = {}) {
   const t = makeFakeTimer();
   const created: FakeWs[] = [];
@@ -102,6 +114,11 @@ function buildController(overrides: {
     onReconnect: overrides.onReconnect,
     onState: (s) => states.push(s.state),
     backoff: noJitterBackoff(),
+    // The total-window deadline is the BET-365 surface — opt in explicitly
+    // (or pass 0 to disable). Without this override every drop would also
+    // arm the 10-minute deadline timer, polluting the existing assertions
+    // that count `t.count()` and run the EARLIEST timer to fire a backoff.
+    maxTotalWindowMs: overrides.maxTotalWindowMs ?? 0,
     setTimeoutFn: t.setTimeoutFn,
     clearTimeoutFn: t.clearTimeoutFn,
   });
@@ -197,6 +214,10 @@ describe("WsReconnectController — reconnect with shared backoff", () => {
       },
       onMessage: () => {},
       backoff: noJitterBackoff(), // base 1000, factor 2, no jitter
+      // Disable the total-window deadline — this test only exercises the
+      // backoff curve; the deadline would otherwise arm a separate timer on
+      // the first drop and pollute the captured `delays` array.
+      maxTotalWindowMs: 0,
       setTimeoutFn: (fn, ms) => t.setTimeoutFn(fn, ms),
       clearTimeoutFn: (h) => t.clearTimeoutFn(h),
     });
@@ -230,6 +251,10 @@ describe("WsReconnectController — reconnect with shared backoff", () => {
       },
       onMessage: () => {},
       backoff: noJitterBackoff(),
+      // Disable the total-window deadline so this test pins the backoff curve
+      // cleanly. The deadline would otherwise arm a single 15000ms timer on
+      // the first drop and prepend it to `delays`.
+      maxTotalWindowMs: 0,
       setTimeoutFn: (fn, ms) => {
         delays.push(ms);
         timers.push(fn);
@@ -309,5 +334,138 @@ describe("WsReconnectController — teardown + config errors", () => {
     c.ensure();
     expect(c.getState().state).toBe("closed");
     expect(t.count()).toBe(0); // no reconnect scheduled — nothing to retry
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BET-365 / BET-357 §1 — total reconnect window + manual "Retry now"
+// ---------------------------------------------------------------------------
+//
+// The controller arms a single deadline timer on the first drop after a
+// healthy connect. After `maxTotalWindowMs` without a healthy reconnect the
+// controller transitions to `closed` and stops scheduling retries; the
+// user-facing "Retry now" button calls `retryNow()` to re-arm the deadline
+// and reconnect immediately. These tests exercise that surface end-to-end
+// against the existing fake-timer scaffolding.
+
+describe("WsReconnectController — total reconnect window (BET-365)", () => {
+  it("arms a single deadline timer on the first drop and clears it on healthy open", () => {
+    const { c, t, created } = setup({ maxTotalWindowMs: 600_000 });
+    c.ensure();
+    created[0].fireOpen();
+    expect(t.count()).toBe(0); // connected → no timers armed
+
+    created[0].fireClose(); // 1st drop following a healthy connect
+    expect(t.count()).toBe(2); // reconnect + deadline
+
+    // A subsequent drop inside the same retry loop must NOT re-arm the
+    // deadline — it was already counted in the budget.
+    created[1] && created[1].fireClose?.(); // (no-op: created[1] doesn't exist yet)
+    // (we use the backoff timer for the next close below)
+    t.run(); // fire the earliest timer (the backoff)
+    created[1].fireClose();
+    expect(t.count()).toBe(2); // deadline still armed, just one reconnect timer
+
+    // A healthy open clears the deadline. After the next backoff fires and
+    // a socket is opened, the deadline must be gone.
+    t.run(); // reconnect
+    created[2].fireOpen();
+    expect(t.count()).toBe(0); // deadline cleared on healthy open
+    expect(c.getState().state).toBe("connected");
+  });
+
+  it("transitions to closed when the total-window deadline fires", () => {
+    // Make the deadline fire FAST so the test doesn't need a 10-min fake timer.
+    const { c, t, created } = setup({ maxTotalWindowMs: 100 });
+    c.ensure();
+    created[0].fireOpen();
+    created[0].fireClose(); // arms reconnect + deadline (100ms)
+
+    // Fire timers until the deadline fires. The deadline is the FIRST timer
+    // armed (100ms < 1000ms backoff), so it fires first when run() drains
+    // the queue — except the reconnect timer was armed FIRST, so it runs
+    // first. We want to assert the closed transition: keep firing until
+    // we observe it.
+    let safety = 10;
+    while (c.getState().state !== "closed" && safety-- > 0) {
+      t.run();
+    }
+    expect(c.getState().state).toBe("closed");
+    expect(c.getState()).toMatchObject({ state: "closed", reason: "reconnect window exceeded" });
+
+    // After the deadline fires, the controller stops scheduling reconnects.
+    const createdBefore = created.length;
+    t.run(); // (no-op: no pending timers)
+    expect(created.length).toBe(createdBefore); // no new socket opened
+  });
+
+  it("manual retryNow() resets the backoff counter and reconnects immediately", () => {
+    const { c, t, created } = setup({ maxTotalWindowMs: 600_000 });
+    c.ensure();
+    created[0].fireOpen();
+
+    // Drop repeatedly until the backoff is well into its cap.
+    created[0].fireClose(); // backoff=1000
+    t.run();
+    created[1].fireClose(); // backoff=2000
+    t.run();
+    created[2].fireClose(); // backoff=4000
+    t.run();
+    created[3].fireClose(); // backoff=8000
+    expect(created.length).toBe(4);
+
+    // User clicks "Retry now" — backoff resets, a new socket opens immediately.
+    // The retry arms a fresh deadline timer (one 10-min timer in the queue),
+    // but the reconnect itself is immediate (no backoff timer pending).
+    c.retryNow();
+    expect(created.length).toBe(5); // fresh socket created right now
+    // Exactly one timer in the queue: the freshly-armed deadline (600000ms).
+    // No reconnect timer — the retry was immediate.
+    expect(t.count()).toBe(1);
+  });
+
+  it("retryNow() also re-arms the total-window deadline after it expired", () => {
+    const { c, t, created } = setup({ maxTotalWindowMs: 100 });
+    c.ensure();
+    created[0].fireOpen();
+    created[0].fireClose();
+
+    // Drain timers until the deadline fires (state → closed).
+    let safety = 10;
+    while (c.getState().state !== "closed" && safety-- > 0) {
+      t.run();
+    }
+    expect(c.getState().state).toBe("closed");
+
+    // User clicks "Retry now": the controller re-opens, clears the closed
+    // state, and arms a fresh deadline.
+    c.retryNow();
+    expect(created.length).toBeGreaterThan(1);
+    expect(c.getState().state).not.toBe("closed");
+    expect(t.count()).toBeGreaterThan(0); // fresh deadline timer armed
+  });
+
+  it("retryNow() while connected opens a fresh socket AND fires onReconnect", () => {
+    let reconnects = 0;
+    const { c, created } = setup({ onReconnect: () => reconnects++ });
+    c.ensure();
+    created[0].fireOpen();
+    expect(c.getState().state).toBe("connected");
+    expect(reconnects).toBe(0);
+
+    // Manually trigger a retry while already connected — opens a fresh
+    // socket and treats it as a reconnect (hadDrop=true path).
+    c.retryNow();
+    expect(created.length).toBe(2);
+    created[1].fireOpen();
+    expect(reconnects).toBe(1);
+  });
+
+  it("maxTotalWindowMs=0 disables the deadline (no extra timer)", () => {
+    const { c, t, created } = setup({ maxTotalWindowMs: 0 });
+    c.ensure();
+    created[0].fireOpen();
+    created[0].fireClose();
+    expect(t.count()).toBe(1); // only the reconnect timer, no deadline
   });
 });
