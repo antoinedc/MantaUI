@@ -57,7 +57,11 @@ function makeFakePreload(): MantaPreload {
     installerListHosts: vi.fn(async () => []),
     installerStart: vi.fn(async () => ({ handleId: "fake-handle" })),
     installerCancel: vi.fn(async () => {}),
-    installerMintAndClaim: vi.fn(async () => ({ ok: false })),
+    installerMintAndClaim: vi.fn(async () => ({
+      ok: false as const,
+      kind: "network" as const,
+      message: "manta pair exited 1 on the box",
+    })),
     installerState: vi.fn(async () => ({
       active: false,
       stage: "preflight" as const,

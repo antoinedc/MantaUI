@@ -10,6 +10,7 @@ import type { SshHostEntry } from "../main/installer/sshConfig.js";
 import type { InstallerStageSnapshotRow } from "../shared/types.js";
 import type { UnpairOutcome } from "../shared/unpair.mjs";
 import type { SshTarget } from "../shared/sshTarget.js";
+import type { ClaimOutcome } from "../shared/claim.mjs";
 
 // Re-export so the renderer can use the type names from the same accessor
 // module that exposes the preload methods — same pattern as the existing
@@ -146,7 +147,7 @@ export interface MantaPreload {
   installerMintAndClaim(input: {
     alias: SshTarget;
     claimUrlOverride?: string;
-  }): Promise<unknown>;
+  }): Promise<ClaimOutcome>;
 
   // Returns the current install's { active, stage, logTail } — the renderer
   // calls this on mount to recover the install state after a page refresh
