@@ -1,9 +1,7 @@
 // runner.test.ts — execRemote / streamRemote / probeSshG unit tests with a
 // stubbed spawn. No real SSH connection is ever opened.
 
-import { describe, it, expect, vi } from "vitest";
-import { EventEmitter } from "node:events";
-import { Readable } from "node:stream";
+import { describe, it, expect } from "vitest";
 import {
   execRemote,
   streamRemote,
@@ -11,48 +9,7 @@ import {
   type SpawnFn,
   SSH_BIN,
 } from "./runner.js";
-
-// ---------------------------------------------------------------------------
-// spawn stub
-// ---------------------------------------------------------------------------
-
-// A ChildProcess-shaped fake: stdout/stderr are Readables we can push to, and
-// `exit` / `error` can be emitted by the test. `.kill()` is recorded so cancel
-// tests can assert on it. Implements the minimum surface the runner touches.
-function makeFakeChild(): {
-  child: Parameters<SpawnFn>[2] extends infer X
-    ? X extends { stdio: any }
-      ? X
-      : never
-    : never;
-  pushStdout: (s: string) => void;
-  pushStderr: (s: string) => void;
-  fireExit: (code: number | null, signal?: NodeJS.Signals) => void;
-  fireError: (err: Error) => void;
-  killCount: () => number;
-} {
-  const stdout = new Readable({ read() {} });
-  const stderr = new Readable({ read() {} });
-  const emitter = new EventEmitter();
-  const fake: any = {
-    stdio: ["ignore", stdout, stderr],
-    stdout,
-    stderr,
-    on: emitter.on.bind(emitter),
-    once: emitter.once.bind(emitter),
-    emit: emitter.emit.bind(emitter),
-    kill: vi.fn(),
-  };
-  return {
-    // @ts-expect-error – deliberately narrowing the fake to the SpawnFn return
-    child: fake,
-    pushStdout: (s) => stdout.push(Buffer.from(s)),
-    pushStderr: (s) => stderr.push(Buffer.from(s)),
-    fireExit: (code, signal) => emitter.emit("exit", code, signal ?? null),
-    fireError: (err) => emitter.emit("error", err),
-    killCount: () => (fake.kill as ReturnType<typeof vi.fn>).mock.calls.length,
-  };
-}
+import { makeFakeChild } from "./_testFixtures.js";
 
 // ---------------------------------------------------------------------------
 // execRemote

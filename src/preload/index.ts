@@ -7,31 +7,13 @@ import {
   type ServerUpdateAvailablePayload,
   type AutoUpdateInfo,
   type AutoUpdateErrorInfo,
+  type InstallerEvent,
+  type InstallerState,
+  type InstallerStageSnapshotRow,
 } from "../shared/types.js";
 import type { ClaimOutcome } from "../shared/claim.mjs";
 import type { PreflightResult } from "../main/installer/preflight.js";
-import type { InstallStageId } from "../main/installer/stageMapper.js";
 import type { SshHostEntry } from "../main/installer/sshConfig.js";
-
-// Discriminated union for events streamed from main → renderer while an
-// install is in flight. Mirrors the patterns main/installer/handlers.ts
-// pushes via webContents.send(IPC.installerEvent, …).
-export type InstallerEvent =
-  | { kind: "line"; handleId: string; text: string }
-  | {
-      kind: "stage";
-      handleId: string;
-      stage: InstallStageId;
-      snapshot: Array<{ id: InstallStageId; label: string; state: "done" | "active" | "pending" }>;
-    }
-  | { kind: "done"; handleId: string; code: number | null; signal: NodeJS.Signals | null; ok: boolean }
-  | { kind: "error"; handleId: string; message: string };
-
-export type InstallerState = {
-  active: boolean;
-  stage: InstallStageId;
-  logTail: string[];
-};
 
 // This is the OS-bridge + pairing SUBSET of the full `Api` contract
 // (`src/shared/api.ts`) — the methods the desktop preload runtime actually
@@ -235,7 +217,7 @@ const api = {
   // paths, host fingerprints, and Authorization: Bearer values.
   installerGetDiagnostics: (input: {
     preflight: PreflightResult;
-    stage: InstallStageId;
+    stage: InstallerStageSnapshotRow["id"];
     logTail: string[];
     alias?: string;
   }): Promise<string> => ipcRenderer.invoke(IPC.installerGetDiagnostics, input),

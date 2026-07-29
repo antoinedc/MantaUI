@@ -315,6 +315,47 @@ export type ServerUpdateAvailablePayload = {
   notesUrl: string | null;
 };
 
+// SSH installer (BET-355) — push-event shape + state snapshot. These types
+// are declared in src/shared/types.ts so both the preload runtime (which
+// imports them into src/preload/index.ts) AND the renderer-side accessor
+// (src/renderer/preloadAccess.ts) can derive their types from a SINGLE
+// source — keeps the two halves of the bridge in lock-step. Lives next to
+// the IPC channel constants (above) because they're the wire contract.
+export type InstallerStageSnapshotRow = {
+  id:
+    | "preflight"
+    | "download"
+    | "extract"
+    | "service"
+    | "pairing"
+    | "done";
+  label: string;
+  state: "done" | "active" | "pending";
+};
+
+export type InstallerEvent =
+  | { kind: "line"; handleId: string; text: string }
+  | {
+      kind: "stage";
+      handleId: string;
+      stage: InstallerStageSnapshotRow["id"];
+      snapshot: InstallerStageSnapshotRow[];
+    }
+  | {
+      kind: "done";
+      handleId: string;
+      code: number | null;
+      signal: NodeJS.Signals | null;
+      ok: boolean;
+    }
+  | { kind: "error"; handleId: string; message: string };
+
+export type InstallerState = {
+  active: boolean;
+  stage: InstallerStageSnapshotRow["id"];
+  logTail: string[];
+};
+
 // Desktop auto-update (electron-updater) payloads, shared by the preload
 // bridge, the httpApi delegation, and the renderer.
 export type AutoUpdateInfo = {

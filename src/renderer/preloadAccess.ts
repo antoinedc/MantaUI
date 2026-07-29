@@ -4,29 +4,17 @@ import type {
   AutoUpdateInfo,
   AutoUpdateErrorInfo,
 } from "../shared/types.js";
+import type { InstallerEvent, InstallerState } from "../shared/types.js";
 import type { PreflightResult } from "../main/installer/preflight.js";
-import type { InstallStageId } from "../main/installer/stageMapper.js";
 import type { SshHostEntry } from "../main/installer/sshConfig.js";
+import type { InstallerStageSnapshotRow } from "../shared/types.js";
 
-// Discriminated union of the events main pushes while an install is in
-// flight. Mirrors the IPC.installerEvent payloads in
-// src/main/installer/handlers.ts. The renderer dispatches on `kind`.
-export type InstallerEvent =
-  | { kind: "line"; handleId: string; text: string }
-  | {
-      kind: "stage";
-      handleId: string;
-      stage: InstallStageId;
-      snapshot: Array<{ id: InstallStageId; label: string; state: "done" | "active" | "pending" }>;
-    }
-  | { kind: "done"; handleId: string; code: number | null; signal: NodeJS.Signals | null; ok: boolean }
-  | { kind: "error"; handleId: string; message: string };
-
-export type InstallerState = {
-  active: boolean;
-  stage: InstallStageId;
-  logTail: string[];
-};
+// Re-export so the renderer can use the type names from the same accessor
+// module that exposes the preload methods — same pattern as the existing
+// `MantaPreload` consumers below. The types live in src/shared/types.ts so
+// they can be imported by both preload AND renderer (two tsconfigs) without
+// crossing the process boundary.
+export type { InstallerEvent, InstallerState, InstallerStageSnapshotRow };
 
 /**
  * OS-integration affordances exposed by the Electron preload bridge.
@@ -164,7 +152,7 @@ export interface MantaPreload {
   // hands back whatever the user copied.
   installerGetDiagnostics(input: {
     preflight: PreflightResult;
-    stage: InstallStageId;
+    stage: InstallerStageSnapshotRow["id"];
     logTail: string[];
     alias?: string;
   }): Promise<string>;
