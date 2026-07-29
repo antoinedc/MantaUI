@@ -790,7 +790,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           <div>{claimError}</div>
           <div>
             Pair manually: run `manta pair` on the box and enter the 6-digit
-            code above.
+            code in the "Pair to an existing box" form below.
           </div>
         </section>
       )}
