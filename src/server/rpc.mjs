@@ -20,6 +20,7 @@ import * as launchers from "./launchers.mjs";
 import * as subscriptionProviders from "./subscriptionProviders.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { pollClaudeLogin } from "./opencode.mjs";
+import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { MIN_CLIENT } from "./version.mjs";
@@ -84,16 +85,58 @@ export function _resetClaudeLoginSessions() {
  * stamp from the actual pty.spawn lets the renderer mount a Terminal pane
  * with its normal `useEffect`-driven spawn flow (so the pty is sized to
  * the terminal component's actual rendered cols/rows, not a fixed 80x24).
+ *
+ * BET-359 fold-in: takes a snapshot of the existing credentials file
+ * BEFORE returning the sessionKey, so that if `claude auth login` later
+ * overwrites it with garbage we can roll back. The backup path is stored
+ * on the session entry and plumbed into `pollClaudeLogin` via the
+ * `claude-status` RPC handler. A backup failure (e.g. EACCES on the
+ * credentials file) does NOT block the connect flow — the metadata is
+ * still stamped and the renderer can still attempt OAuth — but the
+ * failure is logged so a future operator can see the safety net wasn't
+ * in place.
  */
 async function startClaudeLogin(id) {
   const sessionKey = `claude-login-${randomUUID()}`;
   const startedAt = Date.now();
   const cwd = homedir();
+  // Backup first — strictly BEFORE the renderer can spawn `claude auth
+  // login` via the pty bus. If this throws the connect flow dies (we'd
+  // rather crash loudly here than silently leave an unprotected file
+  // behind); the helper itself is non-throwing, so the only realistic
+  // throw is a programmer error (no credentialsFile / no now).
+  let backupPath = null;
+  let backupResult = null;
+  try {
+    backupResult = await backupClaudeCredentials({
+      credentialsFile: CREDENTIALS_PATH,
+      now: startedAt,
+    });
+    if (backupResult.backedUp) {
+      backupPath = backupResult.backupPath;
+    } else if (backupResult.reason === "copy-failed") {
+      // A real IO error — log so an operator sees the safety net is
+      // down, but DO NOT block the connect flow. The renderer's
+      // pre-OAuth warning UX lives elsewhere (the connect card already
+      // shows the existing login when one's present).
+      console.warn(
+        "[claude-auth] startClaudeLogin: backup copy failed (%s) — connect flow will proceed without a rollback target",
+        backupResult.error,
+      );
+    }
+  } catch (e) {
+    // Defensive: backupClaudeCredentials is contractually non-throwing.
+    // A throw here is a programmer error in the helper; log + continue
+    // so a stale `now` arg or a future code change doesn't take down
+    // the whole connect flow.
+    console.warn("[claude-auth] startClaudeLogin: backup helper threw:", e?.message ?? e);
+  }
   _claudeLoginSessions.set(sessionKey, {
     id,
     startedAt,
     cwd,
     killed: false,
+    backupPath,
   });
   return {
     action: "start",
@@ -640,6 +683,12 @@ export function buildHandlers({
           startedAt,
           restartOpencode,
           getProviders: oc.getProviders,
+          // BET-359: plumb the snapshot taken at startClaudeLogin into
+          // the completion-side validator. null when the connect flow
+          // started against a fresh box (nothing to back up) — pollClaudeLogin
+          // routes that through `restoreFromBackup`'s no-backup branch,
+          // which is a correct no-op rather than an error.
+          backupPath: entry?.backupPath ?? null,
         });
         return { action: "claude-status", ok: true, progress };
       }

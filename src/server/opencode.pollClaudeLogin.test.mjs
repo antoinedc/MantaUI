@@ -92,3 +92,56 @@ test("pollClaudeLogin: never throws on getProviders failure", async () => {
     assert.equal(r.connected, false, "a thrown getProviders means connected is false");
   }
 });
+
+// ---- BET-359 fold-in: pollClaudeLogin plumbs the backup path ----
+//
+// On the `"completed"` branch, pollClaudeLogin calls restoreFromBackup with
+// the injected `backupPath` BEFORE bouncing opencode. We don't pin the
+// rollback itself here (the heavy lifting is tested in claudeAuth.test.mjs)
+// — only the surface: the response carries a `restore` field and the helper
+// does not throw when `backupPath` is null / invalid.
+
+test("pollClaudeLogin: 'completed' response carries a `restore` field (BET-359 fold-in)", async () => {
+  const r = await pollClaudeLogin({
+    startedAt: 0,
+    restartOpencode: async () => ({ ok: true }),
+    getProviders: async () => ({ connected: ["anthropic"] }),
+    backupPath: null,
+  });
+  if (await assertCompletedOrNoFile(r)) {
+    assert.ok(
+      r.restore && typeof r.restore === "object" && "restored" in r.restore,
+      `expected a restore field on completed; got ${JSON.stringify(r)}`,
+    );
+    // backupPath=null → fresh-box flow → no-backup no-op.
+    assert.equal(r.restore.restored, false);
+    assert.equal(r.restore.reason, "no-backup");
+  }
+});
+
+test("pollClaudeLogin: invalid backupPath surfaces a structured restore failure (never throws)", async () => {
+  // A path that does not exist on this box: copyFile will throw, the
+  // helper maps it to copy-failed. pollClaudeLogin must propagate the
+  // structured failure — the connect card's caller can then surface a
+  // clear message ("the new login failed AND the rollback target is
+  // gone") instead of crashing the polling loop.
+  const r = await pollClaudeLogin({
+    startedAt: 0,
+    restartOpencode: async () => ({ ok: true }),
+    getProviders: async () => ({ connected: [] }),
+    backupPath: "/this/path/does/not/exist/.credentials.json.bak.123",
+  });
+  if (await assertCompletedOrNoFile(r)) {
+    assert.ok(r.restore);
+    assert.equal(r.restore.restored, false);
+    // Either "valid" (the real creds file passes validation so no
+    // restore was attempted) or "copy-failed" (the validator rejected
+    // the live file and the copy of the missing backup failed). Both
+    // are correct outcomes — the test box's real credentials state is
+    // not under our control.
+    assert.ok(
+      ["valid", "copy-failed", "no-backup"].includes(r.restore.reason),
+      `expected a structured restore reason; got ${r.restore.reason}`,
+    );
+  }
+});

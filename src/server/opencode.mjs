@@ -23,6 +23,8 @@ import {
   shouldRefreshAhead,
   extractClaudeAuthUrl,
   classifyClaudeLoginProgress,
+  defaultCredentialsValidator,
+  restoreFromBackup,
 } from "./claudeAuth.mjs";
 
 const REMOTE_PORT = 4096;
@@ -1846,6 +1848,14 @@ export function subscribeEvents(onEvent, opts = {}) {
 // `pollClaudeLogin` — the flow only advances when the credentials file was
 // modified AFTER the card mounted, so an existing valid login is never
 // silently destroyed.
+//
+// BET-359 fold-in (BET-367 §4): the connect flow takes a one-shot snapshot
+// of the existing credentials file at `startClaudeLogin` time
+// (`backupClaudeCredentials` in claudeAuth.mjs) BEFORE the renderer spawns
+// `claude auth login`. The backup path is plumbed through to
+// `pollClaudeLogin` via the `backupPath` arg; on `"completed"` we validate
+// the freshly-written file and call `restoreFromBackup` to roll back to
+// the snapshot if the new file is empty / malformed.
 
 import { stat as fsStat } from "node:fs/promises";
 import { restartOpencode as restartOpencodeImpl } from "./opencodeAdmin.mjs";
@@ -1872,14 +1882,27 @@ import { restartOpencode as restartOpencodeImpl } from "./opencodeAdmin.mjs";
  *                       poll `GET /provider` until `anthropic` appears in
  *                       `connected[]` (or until the 15s deadline).
  *
+ * BET-359 fold-in: when `backupPath` is supplied (set by `startClaudeLogin`),
+ * the `"completed"` branch validates the freshly-written file and rolls
+ * back from the snapshot via `restoreFromBackup` if the new file is empty
+ * / malformed. A rollback is surfaced as `restore: { restored: true }` in
+ * the response — never silent.
+ *
  * Never throws. `restartOpencode` failure is non-fatal — the renderer can
  * still see `connected: true` on a slower retry.
  *
- * @param {{ startedAt: number, restartOpencode?: typeof restartOpencodeImpl, getProviders?: typeof getProviders, now?: number }} args
+ * @param {{
+ *   startedAt: number,
+ *   restartOpencode?: typeof restartOpencodeImpl,
+ *   getProviders?: typeof getProviders,
+ *   now?: number,
+ *   backupPath?: string | null,
+ *   validator?: (rawFileText: string) => boolean,
+ * }} args
  * @returns {Promise<
  *   | { state: "no-file" }
  *   | { state: "pre-existing" }
- *   | { state: "completed"; restart: { ok: true } | { ok: false; error: string }; connected: boolean; restartAttempts: number }
+ *   | { state: "completed"; restart: { ok: true } | { ok: false; error: string }; connected: boolean; restartAttempts: number; restore?: { restored: true, from: string, to: string } | { restored: false, reason: string, error?: string } }
  * >}
  */
 export async function pollClaudeLogin({
@@ -1887,6 +1910,8 @@ export async function pollClaudeLogin({
   restartOpencode = restartOpencodeImpl,
   getProviders: getProvidersImpl = getProviders,
   now = Date.now(),
+  backupPath = null,
+  validator = defaultCredentialsValidator,
 } = {}) {
   let stat;
   try {
@@ -1898,6 +1923,20 @@ export async function pollClaudeLogin({
   if (progress !== "completed") {
     return { state: progress };
   }
+
+  // BET-359: validate the freshly-written file BEFORE bouncing opencode.
+  // A `claude auth login` that overwrote the file with an empty / malformed
+  // blob (mid-OAuth crash, disk-full, CLI bug) would otherwise be observed
+  // as "completed" by the mtime check, and the subsequent restart would
+  // leave every running session holding a half-broken token. The rollback
+  // happens HERE — before restart — so a restored file is what opencode
+  // sees on its next boot. Never throws (restoreFromBackup is contractually
+  // non-throwing), so the surrounding flow is unaffected by a restore.
+  const restore = await restoreFromBackup({
+    credentialsFile: CREDENTIALS_PATH,
+    backupPath,
+    validator,
+  });
 
   // Credentials updated → bounce opencode so the new tokens are read at
   // startup. Mirrors the desktop `restartOpencode()` from the existing
@@ -1936,5 +1975,6 @@ export async function pollClaudeLogin({
     restart: restartResult,
     connected,
     restartAttempts: 2,
+    restore,
   };
 }

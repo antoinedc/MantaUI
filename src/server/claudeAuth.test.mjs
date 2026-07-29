@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   parseCredentials,
   isRefreshTokenExpired,
@@ -9,6 +12,9 @@ import {
   shouldRefreshAhead,
   extractClaudeAuthUrl,
   classifyClaudeLoginProgress,
+  backupClaudeCredentials,
+  restoreFromBackup,
+  defaultCredentialsValidator,
 } from "./claudeAuth.mjs";
 
 // ===== parseCredentials =====
@@ -328,4 +334,337 @@ test("classifyClaudeLoginProgress: treats a non-finite startedAt as 'no-file'", 
   // "still authenticating" branch instead of incorrectly claiming success.
   assert.equal(classifyClaudeLoginProgress({ mtimeMs: 2000 }, NaN), "no-file");
   assert.equal(classifyClaudeLoginProgress({ mtimeMs: 2000 }, Infinity), "no-file");
+});
+
+// ===== backupClaudeCredentials + restoreFromBackup (BET-359, BET-367 §4) =====
+//
+// Both helpers do async IO against `~/.claude/.credentials.json`. Each test
+// spins up a hermetic tmp HOME-style layout (mirrors opencodeRestart.test.mjs):
+// the helper accepts `credentialsFile` and `now` as injected args, so we
+// point it at a file inside `mkdtempSync(...)`. The real credentials path
+// on this box is NEVER touched.
+
+function setupFakeCredentialsDir() {
+  const dir = mkdtempSync(path.join(tmpdir(), "claude-auth-test-"));
+  mkdirSync(path.join(dir, ".claude"), { recursive: true });
+  const credsFile = path.join(dir, ".claude", ".credentials.json");
+  return { dir, credsFile };
+}
+
+function teardownFakeHome(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+}
+
+test("backupClaudeCredentials: 'no existing file' when the credentials file is missing", async () => {
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    const r = await backupClaudeCredentials({ credentialsFile: credsFile, now: 1_700_000_000_000 });
+    assert.equal(r.backedUp, false);
+    assert.equal(r.reason, "no existing file");
+  } finally {
+    teardownFakeHome(dir);
+  }
+});
+
+test("backupClaudeCredentials: copies the existing file to .bak.<unix-ts> and returns the path", async () => {
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    const original = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "old-at",
+        refreshToken: "old-rt",
+        expiresAt: 1,
+        refreshTokenExpiresAt: 9_999_999_999_999,
+      },
+    });
+    writeFileSync(credsFile, original);
+
+    const now = 1_700_000_123_000; // 1700000123 seconds since epoch
+    const r = await backupClaudeCredentials({ credentialsFile: credsFile, now });
+    assert.equal(r.backedUp, true);
+    assert.equal(r.backupPath, `${credsFile}.bak.${Math.floor(now / 1000)}`);
+    // The backup file must byte-match the original — nothing trimmed,
+    // nothing reinterpreted (the validator later parses the backup as
+    // the original was parsed, so a round-trip through copyFile must be
+    // transparent).
+    assert.equal(readFileSync(r.backupPath, "utf-8"), original);
+    // The original credentials file is unchanged.
+    assert.equal(readFileSync(credsFile, "utf-8"), original);
+  } finally {
+    teardownFakeHome(dir);
+  }
+});
+
+test("backupClaudeCredentials: a bad inputs short-circuit to 'no existing file' rather than throwing", async () => {
+  // Defensive: the connect flow calls this helper inside an async try/catch
+  // chain. A throw would be a programmer error (TypeError on a missing
+  // argument); the helper's contract is "never throw", so bad inputs
+  // surface as the no-op result instead. This is the simpler-honest
+  // behaviour — the caller logs and proceeds, the same as if the file
+  // genuinely didn't exist.
+  assert.equal(
+    (await backupClaudeCredentials({ credentialsFile: "", now: 1 })).reason,
+    "no existing file",
+  );
+  assert.equal(
+    (await backupClaudeCredentials({ credentialsFile: "/tmp/x", now: NaN })).reason,
+    "no existing file",
+  );
+  assert.equal(
+    (await backupClaudeCredentials({ credentialsFile: "/tmp/x", now: -1 })).reason,
+    "no existing file",
+  );
+});
+
+test("defaultCredentialsValidator: accepts a well-formed credentials blob, rejects empty / malformed", () => {
+  const good = JSON.stringify({
+    claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: 1, refreshTokenExpiresAt: 2 },
+  });
+  assert.equal(defaultCredentialsValidator(good), true);
+  assert.equal(defaultCredentialsValidator(""), false);
+  assert.equal(defaultCredentialsValidator("not json{"), false);
+  assert.equal(defaultCredentialsValidator(JSON.stringify({ other: "field" })), false);
+  assert.equal(defaultCredentialsValidator(JSON.stringify({ claudeAiOauth: "not an object" })), false);
+});
+
+test("restoreFromBackup: leaves the live file alone when the validator accepts it", async () => {
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    // Take a backup first so backupPath exists.
+    const original = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "OLD",
+        refreshToken: "OLD_RT",
+        expiresAt: 1,
+        refreshTokenExpiresAt: 9_999_999_999_999,
+      },
+    });
+    writeFileSync(credsFile, original);
+    const backup = await backupClaudeCredentials({ credentialsFile: credsFile, now: 1_700_000_000_000 });
+    assert.equal(backup.backedUp, true);
+
+    // Now simulate a successful OAuth write — replace the live file with
+    // a different (valid) blob. The validator should accept it and the
+    // backup must NOT be copied over.
+    const next = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "NEW",
+        refreshToken: "NEW_RT",
+        expiresAt: 9_999_999_999_999,
+        refreshTokenExpiresAt: 9_999_999_999_999,
+      },
+    });
+    writeFileSync(credsFile, next);
+
+    const r = await restoreFromBackup({
+      credentialsFile: credsFile,
+      backupPath: backup.backupPath,
+      validator: defaultCredentialsValidator,
+    });
+    assert.equal(r.restored, false);
+    assert.equal(r.reason, "valid");
+    // Live file is the new (successful) write, not the backup.
+    assert.equal(readFileSync(credsFile, "utf-8"), next);
+  } finally {
+    teardownFakeHome(dir);
+  }
+});
+
+test("restoreFromBackup: rolls back to the backup when the live file is malformed", async () => {
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    // Pre-state: take a snapshot of v1 credentials.
+    const v1 = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "OLD_AT",
+        refreshToken: "OLD_RT",
+        expiresAt: 1,
+        refreshTokenExpiresAt: 9_999_999_999_999,
+      },
+    });
+    writeFileSync(credsFile, v1);
+    const backup = await backupClaudeCredentials({ credentialsFile: credsFile, now: 1_700_000_000_000 });
+    assert.equal(backup.backedUp, true);
+
+    // Simulate a half-broken `claude auth login` write: the file is now
+    // truncated / empty. (This is the BET-359 hazard: a destructive
+    // overwrite that leaves an unusable file behind.)
+    writeFileSync(credsFile, "");
+
+    const r = await restoreFromBackup({
+      credentialsFile: credsFile,
+      backupPath: backup.backupPath,
+      validator: defaultCredentialsValidator,
+    });
+    assert.equal(r.restored, true);
+    assert.equal(r.from, backup.backupPath);
+    assert.equal(r.to, credsFile);
+    // The live file is byte-for-byte the backup (v1) — every running
+    // session's cached snapshot is still valid because we didn't
+    // touch the underlying file in a way that invalidates their
+    // captured state. (opencode itself only re-reads on restart, which
+    // is what pollClaudeLogin does after the restore.)
+    assert.equal(readFileSync(credsFile, "utf-8"), v1);
+  } finally {
+    teardownFakeHome(dir);
+  }
+});
+
+test("restoreFromBackup: rolls back when the live file has unparseable JSON", async () => {
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    const v1 = JSON.stringify({ claudeAiOauth: { accessToken: "OLD" } });
+    writeFileSync(credsFile, v1);
+    const backup = await backupClaudeCredentials({ credentialsFile: credsFile, now: 1_700_000_000_000 });
+
+    // OAuth wrote something that LOOKS like JSON but isn't valid — the
+    // most realistic "CLI got SIGKILLed mid-write" outcome.
+    writeFileSync(credsFile, '{"claudeAiOauth": ');
+
+    const r = await restoreFromBackup({
+      credentialsFile: credsFile,
+      backupPath: backup.backupPath,
+      validator: defaultCredentialsValidator,
+    });
+    assert.equal(r.restored, true);
+    assert.equal(readFileSync(credsFile, "utf-8"), v1);
+  } finally {
+    teardownFakeHome(dir);
+  }
+});
+
+test("restoreFromBackup: rolls back when the live file is missing entirely (mid-write crash)", async () => {
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    const v1 = JSON.stringify({ claudeAiOauth: { accessToken: "OLD" } });
+    writeFileSync(credsFile, v1);
+    const backup = await backupClaudeCredentials({ credentialsFile: credsFile, now: 1_700_000_000_000 });
+
+    // Simulate the file being unlinked by the broken OAuth flow.
+    rmSync(credsFile);
+
+    const r = await restoreFromBackup({
+      credentialsFile: credsFile,
+      backupPath: backup.backupPath,
+      validator: defaultCredentialsValidator,
+    });
+    assert.equal(r.restored, true);
+    assert.equal(readFileSync(credsFile, "utf-8"), v1);
+  } finally {
+    teardownFakeHome(dir);
+  }
+});
+
+test("restoreFromBackup: 'no-backup' is a correct no-op when backupPath was never set (fresh box)", async () => {
+  // The user had no credentials file at startClaudeLogin time, so
+  // backupClaudeCredentials returned `no existing file` and
+  // startClaudeLogin stored backupPath=null on the session entry.
+  // pollClaudeLogin still calls restoreFromBackup with backupPath=null;
+  // the helper must NOT throw, must NOT pretend to restore, and must
+  // surface the reason so the connect flow can distinguish "nothing to
+  // restore" from "restore failed".
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    // Fresh-box state: no backup, but the new OAuth write DID succeed.
+    const next = JSON.stringify({ claudeAiOauth: { accessToken: "NEW" } });
+    writeFileSync(credsFile, next);
+
+    const r = await restoreFromBackup({
+      credentialsFile: credsFile,
+      backupPath: null,
+      validator: defaultCredentialsValidator,
+    });
+    assert.equal(r.restored, false);
+    assert.equal(r.reason, "no-backup");
+    // Live file is unchanged.
+    assert.equal(readFileSync(credsFile, "utf-8"), next);
+  } finally {
+    teardownFakeHome(dir);
+  }
+});
+
+test("restoreFromBackup: a missing validator function surfaces as 'copy-failed' (never throws)", async () => {
+  // Defensive: the helper's contract is "never throws", so a programmer
+  // error (passing the wrong shape for `validator`) must surface as a
+  // structured result the caller can route into the UI rather than
+  // propagate as an uncaught exception.
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    const r = await restoreFromBackup({
+      credentialsFile: credsFile,
+      backupPath: "/tmp/whatever.bak.123",
+      validator: null,
+    });
+    assert.equal(r.restored, false);
+    assert.equal(r.reason, "copy-failed");
+    assert.match(r.error, /validator/);
+  } finally {
+    teardownFakeHome(dir);
+  }
+});
+
+test("backup + restore round-trip: backup copy → fresh write → restore returns to v1 byte-for-byte", async () => {
+  // Belt-and-braces integration check: cover the exact sequence the
+  // connect flow executes when a successful OAuth follows a real
+  // pre-existing login. Confirms no surprise re-encoding or path
+  // mangling across the helper boundary.
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    const v1 = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "OLD_AT",
+        refreshToken: "OLD_RT",
+        expiresAt: 1,
+        refreshTokenExpiresAt: 9_999_999_999_999,
+      },
+    });
+    writeFileSync(credsFile, v1);
+
+    const backup = await backupClaudeCredentials({ credentialsFile: credsFile, now: 1_700_000_000_000 });
+    assert.equal(backup.backedUp, true);
+
+    // Simulate a corrupt OAuth write that the validator rejects.
+    writeFileSync(credsFile, "definitely not json");
+
+    const r = await restoreFromBackup({
+      credentialsFile: credsFile,
+      backupPath: backup.backupPath,
+      validator: defaultCredentialsValidator,
+    });
+    assert.equal(r.restored, true);
+    assert.equal(readFileSync(credsFile, "utf-8"), v1);
+  } finally {
+    teardownFakeHome(dir);
+  }
+});
+
+test("backupClaudeCredentials: a same-second retry overwrites the earlier backup (simpler-honest behaviour)", async () => {
+  // The backup naming uses seconds granularity. Two startClaudeLogin
+  // calls inside the same wall-clock second land on the same backup
+  // path; the second copyFile overwrites the first. This is
+  // intentional — the issue spec says "simplest honest path", and a
+  // backup that survives a same-second second attempt would need
+  // collision-avoidance logic that the issue doesn't ask for. Pin the
+  // behaviour here so a future "let's add a random suffix" change is
+  // an explicit decision, not a silent drift.
+  const { dir, credsFile } = setupFakeCredentialsDir();
+  try {
+    writeFileSync(credsFile, "v1");
+    const t = 1_700_000_000_000;
+    const r1 = await backupClaudeCredentials({ credentialsFile: credsFile, now: t });
+    assert.equal(r1.backedUp, true);
+    // Overwrite the live file, then take a second backup at the same
+    // wall-clock second. The second backup MUST land at the same path.
+    writeFileSync(credsFile, "v2");
+    const r2 = await backupClaudeCredentials({ credentialsFile: credsFile, now: t });
+    assert.equal(r2.backedUp, true);
+    assert.equal(r2.backupPath, r1.backupPath);
+    assert.equal(readFileSync(r2.backupPath, "utf-8"), "v2");
+  } finally {
+    teardownFakeHome(dir);
+  }
 });
