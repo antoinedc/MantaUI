@@ -144,16 +144,20 @@ describe("preflightBox", () => {
     const r = await preflightBox("dev", { spawn: makeProbeSpawn(responses) });
     expect(r.probes.clockSkewSeconds).toBeGreaterThanOrEqual(119);
     expect(r.probes.clockSkewSeconds).toBeLessThanOrEqual(121);
-    expect(r.warnings[0].message).toMatch(/clock is off by/);
+    // BET-383: clock skew past the threshold is a hard failure, not a
+    // warning — it breaks certificate issuance and OAuth outright.
+    expect(r.ok).toBe(false);
+    expect(r.failures[0].cause).toMatch(/clock is off by/);
   });
 
-  it("captures alreadyInstalled when ~/.manta/auth.json is present", async () => {
+  it("captures alreadyInstalled when ~/.manta/auth.json is present (not a failure)", async () => {
     const responses = happyLinuxProbes({
       [PROBE_KEYS.AUTH_FILE]: { code: 0, stdout: "INSTALLED\n" },
     });
     const r = await preflightBox("dev", { spawn: makeProbeSpawn(responses) });
     expect(r.probes.alreadyInstalled).toBe(true);
-    expect(r.warnings[0].message).toMatch(/existing install/i);
+    expect(r.ok).toBe(true);
+    expect(r.failures).toEqual([]);
   });
 });
 

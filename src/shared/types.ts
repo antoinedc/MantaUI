@@ -1,3 +1,6 @@
+// Type-only, erased at compile time (preloadAccess.ts does the same).
+import type { PreflightResult, PreflightFailure } from "../main/installer/preflight.js";
+
 // ----- Local app config -----
 // Source of truth for sessions/windows is tmux on the remote. We only persist
 // per-project UI metadata locally (defaultCwd, eventually color/sort/etc).
@@ -335,11 +338,12 @@ export type InstallerStageSnapshotRow = {
 
 export type InstallerEvent =
   | { kind: "line"; handleId: string; text: string }
+  | { kind: "stage"; handleId: string; stage: InstallerStageSnapshotRow["id"] }
+  // Preflight (phase 1, in main) failed — no install ever started.
   | {
-      kind: "stage";
+      kind: "preflight-failed";
       handleId: string;
-      stage: InstallerStageSnapshotRow["id"];
-      snapshot: InstallerStageSnapshotRow[];
+      failures: PreflightFailure[];
     }
   | {
       kind: "done";
@@ -354,6 +358,9 @@ export type InstallerState = {
   active: boolean;
   stage: InstallerStageSnapshotRow["id"];
   logTail: string[];
+  // Most recent preflight verdict, null before any install started — feeds
+  // "Copy diagnostics" with the real values instead of a placeholder.
+  preflight: PreflightResult | null;
 };
 
 // Desktop auto-update (electron-updater) payloads, shared by the preload
@@ -752,14 +759,10 @@ export const IPC = {
   //
   // Renderer's view of the world:
   //   listHosts        → SshHostEntry[]  — populate the alias picker
-  //   preflight({alias})→ PreflightResult — show "proceed / branch / fail"
-  //                                      with structured failures[] (cause
-  //                                      + action per failure)
   //   installStart({alias})
-  //                   → { handleId }   — kicks off the install; the renderer
-  //                                      listens to `installerEvent` for
-  //                                      per-line + per-stage events until
-  //                                      the install exits
+  //                   → { handleId }   — runs preflight (phase 1, in main)
+  //                                      then the install; renderer listens
+  //                                      to `installerEvent` until it exits.
   //   installCancel({handleId})
   //                   → void          — SIGTERM the in-flight install; safe
   //                                      even if the handle is already done
@@ -771,14 +774,12 @@ export const IPC = {
   //                                      existing claim path (single
   //                                      config writer per BET-355
   //                                      constraint #4).
-  //   installState()  → { active, stage } — renderer queries on mount to
-  //                                       recover the current install state
-  //                                       after a page refresh.
+  //   installState()  → { active, stage, logTail, preflight } — renderer
+  //                                       queries on mount to recover state.
   //   installGetDiagnostics({preflight, stage, logTail, alias})
   //                   → string         — redacted diagnostics blob for the
   //                                      "Copy diagnostics" action.
   installerListHosts: "installer:list-hosts",
-  installerPreflight: "installer:preflight",
   installerStart: "installer:start",
   installerCancel: "installer:cancel",
   installerMintAndClaim: "installer:mint-and-claim",
@@ -786,9 +787,10 @@ export const IPC = {
   installerGetDiagnostics: "installer:get-diagnostics",
   // installerEvent is the main → renderer push channel (mirrors the
   // pairLinkReceived pattern). Payload is a discriminated union:
-  //   { kind: "line",  handleId, text }
-  //   { kind: "stage", handleId, stage, snapshot }
-  //   { kind: "done",  handleId, code, signal }
+  //   { kind: "line", handleId, text }
+  //   { kind: "stage", handleId, stage }
+  //   { kind: "preflight-failed", handleId, failures }
+  //   { kind: "done", handleId, code, signal }
   //   { kind: "error", handleId, message }
   installerEvent: "installer:event",
 } as const;

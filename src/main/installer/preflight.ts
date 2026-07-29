@@ -126,11 +126,6 @@ export type PreflightFailure = {
   action: string;
 };
 
-export type PreflightWarning = {
-  /** Plain-language warning text (no action required — proceed anyway). */
-  message: string;
-};
-
 export type PreflightResult = {
   /** True when the install can start (no failures). */
   ok: boolean;
@@ -140,14 +135,14 @@ export type PreflightResult = {
   probes: PreflightProbes;
   /** Structured failures the UI renders one-per-line with the cause + action. */
   failures: PreflightFailure[];
-  /** Soft warnings — install proceeds, but the UI shows them prominently. */
-  warnings: PreflightWarning[];
 };
 
 // Clock skew: a wrong box clock silently breaks Let's Encrypt issuance and
-// OAuth flows. Warn past a 60s threshold (NTP typically keeps things inside
-// a few seconds — 60s is a "definitely broken" cutoff).
-const CLOCK_SKEW_WARN_SECONDS = 60;
+// OAuth flows outright — there is no "proceed anyway" that actually works,
+// so past a 60s threshold this is a hard failure, not a warning (BET-383).
+// NTP typically keeps things inside a few seconds — 60s is a "definitely
+// broken" cutoff.
+const CLOCK_SKEW_FAIL_SECONDS = 60;
 
 /**
  * Classify a set of probe results into the preflight verdict the UI renders
@@ -157,15 +152,14 @@ const CLOCK_SKEW_WARN_SECONDS = 60;
  * Rules:
  *   - unreachable / auth-failed → fail (one structured failure)
  *   - unsupported OS/arch       → fail (one structured failure)
- *   - clock skew > 60s           → warn, proceed
- *   - already installed         → warn (not a failure — installer is
- *                                  idempotent and re-runnable; the UI shows a
- *                                  "this looks like a re-install" hint)
+ *   - clock skew > 60s          → fail (breaks cert issuance + OAuth outright)
+ *   - already installed         → not a failure — installer is idempotent
+ *                                  and re-runnable, so this is a no-op signal,
+ *                                  echoed in `probes` for diagnostics only
  *   - everything else            → ok
  */
 export function classifyPreflight(probes: PreflightProbes): PreflightResult {
   const failures: PreflightFailure[] = [];
-  const warnings: PreflightWarning[] = [];
 
   if (probes.reachability === "unreachable") {
     failures.push({
@@ -198,24 +192,22 @@ export function classifyPreflight(probes: PreflightProbes): PreflightResult {
   }
 
   const skew = Math.abs(probes.clockSkewSeconds);
-  if (skew > CLOCK_SKEW_WARN_SECONDS) {
-    warnings.push({
-      message: `Box clock is off by ${skew}s — this can break certificate issuance and OAuth. Sync the box's time before continuing.`,
+  if (skew > CLOCK_SKEW_FAIL_SECONDS) {
+    failures.push({
+      cause: `Box clock is off by ${skew}s.`,
+      action:
+        "Certificate issuance and OAuth will fail. Sync the box's time, then try again.",
     });
   }
 
-  if (probes.alreadyInstalled) {
-    warnings.push({
-      message:
-        "An existing install was detected — the installer will re-run idempotently and preserve the box identity.",
-    });
-  }
+  // alreadyInstalled is NOT a failure or a warning — install.sh is
+  // idempotent and already says so in its own log. The probe is still
+  // echoed in `probes` for diagnostics.
 
   return {
     ok: failures.length === 0,
     ingressMode: decideIngressMode(probes),
     probes,
     failures,
-    warnings,
   };
 }

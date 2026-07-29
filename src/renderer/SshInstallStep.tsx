@@ -1,5 +1,5 @@
 // SshInstallStep.tsx — SSH installer harness for the desktop onboarding
-// "Connect your box" step (BET-355 / BET-382).
+// "Connect your box" step (BET-355 / BET-382 / BET-383).
 //
 // PairStep renders this component inline as the primary surface when an
 // SSH installer preload is available and no deep-link is pending. The
@@ -9,25 +9,40 @@
 // form uses, so the onboarding shell advances identically regardless of
 // which path closed the deal.
 //
-// All decision logic lives in the main-process installer module (pure
-// helpers + the IPC handlers). This component is React state + per-event
-// dispatch + JSX, nothing more.
+// BET-383: exactly one entry point — Install & pair. Preflight runs as
+// phase 1 in the main process; no standalone button, no verdict that can go
+// stale, and a failed check aborts before anything is written to the box.
+// The six-row checklist is gone in favour of one status line over an
+// always-mounted, auto-scrolling log that collapses on success.
+//
+// All decision logic lives in the main-process installer module. This
+// component is React state + per-event dispatch + JSX, nothing more.
 
 import { useEffect, useState, useRef } from "react";
-import { getMantaPreload, type InstallerEvent, type InstallerState } from "./preloadAccess";
-
-// Local view of one stage row — what the checklist renders. Mirrors the
-// snapshot the main process pushes on every stage transition.
-type StageRow = {
-  id: string;
-  label: string;
-  state: "done" | "active" | "pending";
-};
+import {
+  getMantaPreload,
+  type InstallerEvent,
+  type PreflightFailure,
+} from "./preloadAccess";
+import { currentStageInfo, type InstallStageId } from "../shared/installStages";
 
 const ACCENT = "#5A88FF";
 const DANGER = "#FF7A88";
 const OK_GREEN = "#22C55E";
-const WARN_YELLOW = "#FACC15";
+
+// Keep the last N log lines only — main already caps its own tail at 200
+// (handlers.ts LOG_TAIL_MAX); the renderer needs its own cap too, or a long
+// install grows the DOM without bound.
+const LOG_LINES_MAX = 500;
+
+const INITIAL_STAGE: InstallStageId = "preflight";
+const INITIAL_STAGE_INFO = currentStageInfo(INITIAL_STAGE);
+
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
 
 export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   // The preload bridge — null on mobile/web (the issue's "SSH is installer-
@@ -53,18 +68,25 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   );
   const [hostsLoaded, setHostsLoaded] = useState(false);
   const [alias, setAlias] = useState("");
-  const [preflight, setPreflight] = useState<InstallerState | null>(null);
-  const [preflightRunning, setPreflightRunning] = useState(false);
-  const [installStarted, setInstallStarted] = useState(false);
+  const [running, setRunning] = useState(false);
   const [activeHandle, setActiveHandle] = useState<string | null>(null);
-  const [stage, setStage] = useState<string>("preflight");
-  const [snapshot, setSnapshot] = useState<StageRow[]>([]);
+  const [stage, setStage] = useState<InstallStageId>(INITIAL_STAGE);
+  const [stageLabel, setStageLabel] = useState(INITIAL_STAGE_INFO.label);
+  const [stageIndex, setStageIndex] = useState(INITIAL_STAGE_INFO.index);
+  const [stageTotal, setStageTotal] = useState(INITIAL_STAGE_INFO.total);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [logOpen, setLogOpen] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState<
     | { ok: boolean; code: number | null; signal: NodeJS.Signals | null }
     | null
   >(null);
   const [installError, setInstallError] = useState<string | null>(null);
+  // From a `preflight-failed` event — checks failed before any write.
+  // Rendered as its own card, never folded into the progress panel.
+  const [preflightFailure, setPreflightFailure] = useState<{
+    failures: PreflightFailure[];
+  } | null>(null);
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
@@ -90,33 +112,25 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   }, [preload]);
 
   // Recover any in-flight install on mount (a page refresh mid-install
-  // should not strand the user). Main keeps the install alive across the
-  // renderer remount; we just re-read state and re-attach the listener.
+  // shouldn't strand the user), or a preflight failure the user hasn't
+  // dismissed yet — main echoes the real verdict, no placeholder needed.
   useEffect(() => {
     let alive = true;
     (async () => {
       const s = await preload.installerState();
       if (!alive) return;
-      setStage(s.stage);
-      setLines(s.logTail);
-      setSnapshot(
-        // Map the simple stage + logTail into a single-stage snapshot the
-        // checklist can render. The first "stage" push will replace it
-        // with the real snapshot; until then we just show "active" on the
-        // current stage.
-        [
-          { id: "preflight", label: "Preflight", state: "done" as const },
-          { id: "download", label: "Download release", state: "pending" as const },
-          { id: "extract", label: "Extract + atomic swap", state: "pending" as const },
-          { id: "service", label: "Install + start service", state: "pending" as const },
-          { id: "pairing", label: "Pair with the desktop", state: "pending" as const },
-          { id: "done", label: "Done", state: "pending" as const },
-        ].map((row) =>
-          row.id === s.stage
-            ? { ...row, state: "active" as const }
-            : row,
-        ),
-      );
+      if (s.active) {
+        const info = currentStageInfo(s.stage);
+        setRunning(true);
+        setStage(s.stage);
+        setStageLabel(info.label);
+        setStageIndex(info.index);
+        setStageTotal(info.total);
+        setLines(s.logTail);
+        setLogOpen(true);
+      } else if (s.preflight && !s.preflight.ok) {
+        setPreflightFailure({ failures: s.preflight.failures });
+      }
     })();
     return () => {
       alive = false;
@@ -124,9 +138,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   }, [preload]);
 
   // Subscribe to installer events. Re-subscribes when the active handle
-  // changes (so old events from a previous handle don't bleed into the new
-  // install's UI). The unsubscribers are captured in a ref so a re-render
-  // triggered by setActiveHandle doesn't double-subscribe.
+  // changes so stale events from a previous handle don't bleed into the UI.
   useEffect(() => {
     const unsub = preload.onInstallerEvent((evt: InstallerEvent) => {
       // Only react to events from the CURRENT handle — stale events from a
@@ -135,70 +147,92 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       if (activeHandle !== null && evt.handleId !== activeHandle) return;
       switch (evt.kind) {
         case "line":
-          setLines((prev) => [...prev, evt.text]);
+          setLines((prev) => {
+            const next = [...prev, evt.text];
+            return next.length > LOG_LINES_MAX
+              ? next.slice(next.length - LOG_LINES_MAX)
+              : next;
+          });
           break;
-        case "stage":
+        case "stage": {
+          const info = currentStageInfo(evt.stage);
           setStage(evt.stage);
-          setSnapshot(evt.snapshot);
+          setStageLabel(info.label);
+          setStageIndex(info.index);
+          setStageTotal(info.total);
+          break;
+        }
+        case "preflight-failed":
+          // Nothing was written to the box — the progress panel never
+          // shows for this case.
+          setPreflightFailure({ failures: evt.failures });
+          setRunning(false);
+          setActiveHandle(null);
           break;
         case "done":
           setDone({ ok: evt.ok, code: evt.code, signal: evt.signal });
-          setInstallStarted(false);
+          setRunning(false);
           setActiveHandle(null);
-          // Auto-claim on success — the whole point of the flow. The user
-          // typed a host, nothing else.
           if (evt.ok) {
+            // Collapse the log back to the single status line on success.
+            setLogOpen(false);
+            // Auto-claim on success — the whole point of the flow. The
+            // user typed a host, nothing else.
             void runClaim();
           }
           break;
         case "error":
           setInstallError(evt.message);
-          setInstallStarted(false);
+          setRunning(false);
           setActiveHandle(null);
           break;
       }
     });
     return unsub;
-    // We intentionally include activeHandle in deps so the listener captures
-    // the right guard value, but we ALSO store activeHandle in a ref so
-    // the closure sees the latest value (avoids stale-state bugs on rapid
-    // re-renders).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preload, activeHandle]);
 
-  // Auto-scroll the log pane on new lines — matches what a terminal user
-  // expects (Tail-style: stick to the bottom while streaming).
+  // Auto-scroll the log pane on new lines while it's open — matches what a
+  // terminal user expects (Tail-style: stick to the bottom while streaming).
   useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [lines]);
+    if (logOpen && logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [lines, logOpen]);
+
+  // Tick the elapsed-time display once a second while running.
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setElapsedSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [running]);
 
   // ---------- Actions ----------
-  async function runPreflight() {
-    if (!alias.trim()) return;
-    setPreflightRunning(true);
-    setInstallError(null);
-    try {
-      const r = await preload.installerPreflight({ alias: alias.trim() });
-      setPreflight(r as unknown as InstallerState);
-    } catch (e) {
-      setInstallError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPreflightRunning(false);
-    }
-  }
-
   async function startInstall() {
     setInstallError(null);
+    setPreflightFailure(null);
     setLines([]);
     setDone(null);
     setClaimError(null);
-    setSnapshot([]);
-    setStage("preflight");
+    // Clear the previous handle so the event guard doesn't discard this
+    // install's events (esp. a `preflight-failed` push, which main sends
+    // BEFORE the installerStart invoke below resolves) while it's still
+    // filtering against a prior, now-dead handle.
+    setActiveHandle(null);
+    setStage(INITIAL_STAGE);
+    setStageLabel(INITIAL_STAGE_INFO.label);
+    setStageIndex(INITIAL_STAGE_INFO.index);
+    setStageTotal(INITIAL_STAGE_INFO.total);
+    setElapsedSeconds(0);
+    setLogOpen(true);
+    // Mount the progress panel immediately on click — no gap before the
+    // main process's response comes back.
+    setRunning(true);
     try {
       const { handleId } = await preload.installerStart({ alias: alias.trim() });
       setActiveHandle(handleId);
-      setInstallStarted(true);
     } catch (e) {
+      setRunning(false);
       setInstallError(e instanceof Error ? e.message : String(e));
     }
   }
@@ -216,9 +250,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         alias: alias.trim(),
       })) as { ok: boolean };
       if (outcome.ok) {
-        // Mirror the manual PairStep onPaired — the onboarding shell advances
-        // to step 2 (Providers) exactly as if the user had typed a pairing
-        // code by hand.
+        // Mirror the manual PairStep onPaired — advances onboarding to
+        // step 2 exactly as a typed pairing code would.
         onPaired();
       } else {
         setClaimError("Pairing failed — check the install log.");
@@ -231,31 +264,13 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   }
 
   async function copyDiagnostics() {
-    // The renderer never sees a structured PreflightResult object outside of
-    // the preflight() call (it's a transient value used for the inline UI
-    // verdict). To build a diagnostics blob we need it back in scope — the
-    // typed `preflight` state was modeled too loosely. We carry a placeholder
-    // here so the "Copy diagnostics" button still works when the user clicks
-    // it before preflight has run; the snapshot they get will lack the
-    // probes but that's better than a no-op. Real fix lands when Stage 5
-    // reworks the UX (the issue explicitly defers UI quality to Stage 5).
-    const placeholderPreflight = {
-      ok: true as const,
-      ingressMode: "public-tls" as const,
-      probes: {
-        reachability: "ok" as const,
-        os: { id: "unknown" as const, arch: "unknown" as const, release: null },
-        passwordlessSudo: false,
-        tailscale: { running: false, ipv4: null },
-        clockSkewSeconds: 0,
-        alreadyInstalled: false,
-      },
-      failures: [],
-      warnings: [],
-    };
+    // Read the real preflight verdict back from main — always populated by
+    // the time this button can be visible. No placeholder.
+    const s = await preload.installerState();
+    if (!s.preflight) return;
     const r = await preload.installerGetDiagnostics({
-      preflight: placeholderPreflight,
-      stage: stage as never,
+      preflight: s.preflight,
+      stage,
       logTail: lines,
       alias,
     });
@@ -263,13 +278,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   }
 
   // ---------- Render ----------
-  const canRunPreflight = alias.trim() !== "" && !installStarted && !claimRunning;
-  const preflightVerdict = (preflight as unknown as {
-    ok?: boolean;
-    failures?: Array<{ cause: string; action: string }>;
-    warnings?: Array<{ message: string }>;
-    ingressMode?: string;
-  } | null);
+  const installDisabled = running || claimRunning || !alias.trim();
+  // Keep the panel (status line + log) mounted through an install error too
+  // — that's the log line the user needs most ("is it stuck, or just
+  // slow?"). Only the preflight-failure card excludes it (nothing was
+  // written to the box, so there's no install log to show).
+  const showProgress =
+    !preflightFailure &&
+    (running || done !== null || (installError !== null && lines.length > 0));
 
   return (
     <div className="space-y-5">
@@ -284,7 +300,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             id="ssh-host"
             value={alias}
             onChange={(e) => setAlias(e.target.value)}
-            disabled={installStarted || claimRunning}
+            disabled={running || claimRunning}
             className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
           >
             {hosts.map((h) => (
@@ -301,7 +317,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             value={alias}
             onChange={(e) => setAlias(e.target.value)}
             placeholder="user@box.example"
-            disabled={installStarted || claimRunning}
+            disabled={running || claimRunning}
             className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
           />
         )}
@@ -313,29 +329,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         )}
         <div className="flex gap-2 pt-2">
           <button
-            onClick={runPreflight}
-            disabled={!canRunPreflight || preflightRunning}
-            className="px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50"
-            style={{ background: ACCENT, color: "#0B1020" }}
-          >
-            {preflightRunning ? "Checking…" : "Preflight"}
-          </button>
-          <button
             onClick={startInstall}
-            disabled={
-              installStarted ||
-              claimRunning ||
-              !alias.trim() ||
-              // Block install start if a preflight ran AND failed; the user
-              // can still proceed past a warning.
-              (preflightVerdict !== null && preflightVerdict.ok === false)
-            }
+            disabled={installDisabled}
             className="px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50"
             style={{ background: ACCENT, color: "#0B1020" }}
           >
-            {installStarted ? "Installing…" : "Install + pair"}
+            {running ? "Installing…" : "Install & pair"}
           </button>
-          {installStarted && (
+          {running && (
             <button
               onClick={cancelInstall}
               className="px-4 py-2 rounded-md text-sm font-medium"
@@ -347,93 +348,77 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         </div>
       </section>
 
-      {/* Preflight verdict */}
-      {preflightVerdict && (
+      {/* Preflight failure — checks ran before any write; must not read as
+          a failed install. Never shown alongside the progress panel. */}
+      {preflightFailure && (
         <section className="space-y-2 text-sm">
-          <h3 className="font-medium">Preflight</h3>
-          {preflightVerdict.failures && preflightVerdict.failures.length > 0 && (
-            <ul className="space-y-1">
-              {preflightVerdict.failures.map((f, i) => (
-                <li
-                  key={i}
-                  className="rounded-md px-3 py-2"
-                  style={{ border: `1px solid ${DANGER}`, color: DANGER }}
-                >
-                  <div className="font-medium">{f.cause}</div>
-                  <div className="text-xs mt-0.5 opacity-80">{f.action}</div>
-                </li>
-              ))}
-            </ul>
-          )}
-          {preflightVerdict.warnings && preflightVerdict.warnings.length > 0 && (
-            <ul className="space-y-1">
-              {preflightVerdict.warnings.map((w, i) => (
-                <li
-                  key={i}
-                  className="rounded-md px-3 py-2 text-xs"
-                  style={{ border: `1px solid ${WARN_YELLOW}`, color: WARN_YELLOW }}
-                >
-                  {w.message}
-                </li>
-              ))}
-            </ul>
-          )}
-          {preflightVerdict.ok && preflightVerdict.failures?.length === 0 && (
-            <p style={{ color: OK_GREEN }}>
-              Ready — install path: {preflightVerdict.ingressMode}
-            </p>
-          )}
-        </section>
-      )}
-
-      {/* Stages checklist */}
-      {snapshot.length > 0 && (
-        <section className="space-y-1 text-sm">
-          <h3 className="font-medium">Progress</h3>
           <ul className="space-y-1">
-            {snapshot.map((s) => (
-              <li key={s.id} className="flex items-center gap-2">
-                <span
-                  aria-hidden
-                  style={{
-                    color:
-                      s.state === "done"
-                        ? OK_GREEN
-                        : s.state === "active"
-                        ? ACCENT
-                        : undefined,
-                    opacity: s.state === "pending" ? 0.4 : 1,
-                  }}
-                >
-                  {s.state === "done" ? "✓" : s.state === "active" ? "●" : "○"}
-                </span>
-                <span
-                  style={{
-                    opacity: s.state === "pending" ? 0.4 : 1,
-                  }}
-                >
-                  {s.label}
-                </span>
+            {preflightFailure.failures.map((f, i) => (
+              <li
+                key={i}
+                className="rounded-md px-3 py-2"
+                style={{ border: `1px solid ${DANGER}`, color: DANGER }}
+              >
+                <div className="font-medium">{f.cause}</div>
+                <div className="text-xs mt-0.5 opacity-80">{f.action}</div>
               </li>
             ))}
           </ul>
+          <p className="text-xs text-text-muted">
+            Nothing was installed or changed on the box — the checks run
+            before any write.
+          </p>
         </section>
       )}
 
-      {/* Live log + diagnostics */}
-      {lines.length > 0 && (
+      {/* Status line + progress bar + live log — mounted on click, streams,
+          auto-scrolls, collapses to the single line on success. */}
+      {showProgress && (
         <section className="space-y-2">
-          <details>
-            <summary className="text-xs cursor-pointer text-text-muted">
-              Show raw install log ({lines.length} lines)
-            </summary>
+          <div className="flex items-center gap-2 text-sm">
+            {done ? (
+              <span aria-hidden style={{ color: done.ok ? OK_GREEN : DANGER }}>
+                {done.ok ? "✓" : "✕"}
+              </span>
+            ) : (
+              <span
+                aria-hidden
+                className="inline-block w-3 h-3 rounded-full border-2 animate-spin"
+                style={{ borderColor: ACCENT, borderTopColor: "transparent" }}
+              />
+            )}
+            <span>{stageLabel}</span>
+            <span className="text-text-muted">
+              {stageIndex} of {stageTotal} · {formatElapsed(elapsedSeconds)}
+            </span>
+            <button
+              onClick={() => setLogOpen((o) => !o)}
+              className="ml-auto text-xs text-text-muted hover:text-text"
+            >
+              {logOpen ? "Hide log ▴" : "Show log ▾"}
+            </button>
+          </div>
+          <div
+            className="h-0.5 rounded-full overflow-hidden bg-bg-elev"
+            aria-hidden
+          >
+            <div
+              className="h-full"
+              style={{
+                width: `${(stageIndex / stageTotal) * 100}%`,
+                background: done && !done.ok ? DANGER : ACCENT,
+              }}
+            />
+          </div>
+          {logOpen && (
             <div
               ref={logRef}
-              className="mt-2 max-h-64 overflow-y-auto rounded-md bg-bg-elev px-3 py-2 text-xs font-mono whitespace-pre-wrap"
+              style={{ height: 172, overflowY: "auto" }}
+              className="rounded-md bg-bg-elev px-3 py-2 text-xs font-mono whitespace-pre-wrap"
             >
               {lines.join("\n")}
             </div>
-          </details>
+          )}
         </section>
       )}
 

@@ -140,7 +140,6 @@ describe("classifyPreflight", () => {
     expect(r.ok).toBe(true);
     expect(r.ingressMode).toBe("public-tls");
     expect(r.failures).toEqual([]);
-    expect(r.warnings).toEqual([]);
   });
 
   it("happy-path macOS arm64 → ok + macos-loopback", () => {
@@ -201,35 +200,37 @@ describe("classifyPreflight", () => {
     expect(r.failures[0].action).toMatch(/x86_64 and aarch64/);
   });
 
-  it("clock skew > 60s → warning + still ok", () => {
+  it("clock skew > 60s → hard failure, not a warning (BET-383: breaks cert issuance outright)", () => {
     const r = classifyPreflight(
       makeProbes({ clockSkewSeconds: 90 }),
     );
-    expect(r.ok).toBe(true);
-    expect(r.warnings).toHaveLength(1);
-    expect(r.warnings[0].message).toMatch(/clock is off by 90s/);
+    expect(r.ok).toBe(false);
+    expect(r.failures).toHaveLength(1);
+    expect(r.failures[0].cause).toMatch(/clock is off by 90s/);
+    expect(r.failures[0].action).toMatch(/Certificate issuance and OAuth will fail/);
   });
 
-  it("clock skew exactly at the threshold (60s) → ok with no warning", () => {
+  it("clock skew exactly at the threshold (60s) → ok, no failure", () => {
     const r = classifyPreflight(makeProbes({ clockSkewSeconds: -60 }));
     expect(r.ok).toBe(true);
-    expect(r.warnings).toEqual([]);
+    expect(r.failures).toEqual([]);
   });
 
-  it("clock skew negative (remote ahead of local) also warns at the same threshold", () => {
+  it("clock skew negative (remote ahead of local) also fails at the same threshold", () => {
     const r = classifyPreflight(makeProbes({ clockSkewSeconds: -200 }));
-    expect(r.ok).toBe(true);
-    expect(r.warnings[0].message).toMatch(/off by 200s/);
+    expect(r.ok).toBe(false);
+    expect(r.failures[0].cause).toMatch(/off by 200s/);
   });
 
-  it("alreadyInstalled → warning + still ok", () => {
+  it("alreadyInstalled is not a failure — installer is idempotent, install.sh already says so", () => {
     const r = classifyPreflight(makeProbes({ alreadyInstalled: true }));
     expect(r.ok).toBe(true);
-    expect(r.warnings).toHaveLength(1);
-    expect(r.warnings[0].message).toMatch(/existing install/i);
+    expect(r.failures).toEqual([]);
+    // Still echoed in probes for diagnostics.
+    expect(r.probes.alreadyInstalled).toBe(true);
   });
 
-  it("failures and warnings can coexist (unreachable + clock skew)", () => {
+  it("unreachable + clock skew → both surface as failures", () => {
     const r = classifyPreflight(
       makeProbes({
         reachability: "unreachable",
@@ -237,8 +238,7 @@ describe("classifyPreflight", () => {
       }),
     );
     expect(r.ok).toBe(false);
-    expect(r.failures).toHaveLength(1);
-    expect(r.warnings).toHaveLength(1);
+    expect(r.failures).toHaveLength(2);
   });
 
   it("echoes the probes back so the UI can render the disclosure panel", () => {
