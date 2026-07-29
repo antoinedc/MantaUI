@@ -2315,7 +2315,7 @@ meaning **prod**; staging is triggered by hand after the spec change lands.
 | `install.sh`, `llms-install.md` | `/var/www/mantaui/` | `/var/www/mantaui/staging/` |
 | server tarballs + manifest | `/var/www/mantaui/releases/` | `/var/www/mantaui/staging/releases/` |
 | desktop update feed + DMG | `/var/www/mantaui/updates/` | `/var/www/mantaui/staging/updates/` |
-| desktop canonical download | `Manta-latest.dmg` (under `downloads/`) | `Manta-UI-Staging-latest.dmg` (under `staging/downloads/`) |
+| desktop canonical download | `Manta-latest.dmg` (under `downloads/`) | `Manta-Staging-latest.dmg` (under `staging/downloads/`) |
 
 **Triggers (three commands, no new workflow files):**
 ```

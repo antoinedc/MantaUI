@@ -236,7 +236,7 @@ workflows:
           if [ "$CHANNEL" = "staging" ]; then
             FEED_DIR='/var/www/mantaui/staging/updates'
             DOWNLOADS_DIR='/var/www/mantaui/staging/downloads'
-            LATEST_DMG='Manta-UI-Staging-latest.dmg'
+            LATEST_DMG='Manta-Staging-latest.dmg'
           else
             FEED_DIR='/var/www/mantaui/updates'
             DOWNLOADS_DIR='/var/www/mantaui/downloads'
@@ -452,7 +452,7 @@ workflows:
           # CHANNEL (BET-371): all paths + the canonical *-latest.dmg name come
           # from the "Resolve + guard channel" step above (FEED_DIR,
           # DOWNLOADS_DIR, LATEST_DMG). Staging writes under /staging/ and
-          # refreshes Manta-UI-Staging-latest.dmg; prod stays on the original
+          # refreshes Manta-Staging-latest.dmg; prod stays on the original
           # /var/www/mantaui/{updates,downloads}/ + Manta-latest.dmg. The guard
           # step would already have failed RED if the resolved paths were
           # inconsistent with MANTA_CHANNEL — this step just trusts them.

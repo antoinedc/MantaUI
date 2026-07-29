@@ -132,15 +132,19 @@ jobs:
             done
           fi
 
-          echo "▸ Copying installer + AI install doc"
+          echo "▸ Copying installer + AI install doc (shared — staging needs both)"
           $SCP scripts/install.sh "$PROD_HOST:$WEBROOT/install.sh"
           $SCP llms-install.md "$PROD_HOST:$WEBROOT/llms-install.md"
-          $SCP docs/plugins-authoring.md "$PROD_HOST:$WEBROOT/llms-plugins.md"
 
-          # Version manifest + .well-known/ — prod only. These are the
-          # AI-crawler discovery surface (llms.txt / sitemap.xml / agent-skills);
-          # staging must not be advertised.
+          # Version manifest, .well-known/ + llms-plugins.md — prod only. The
+          # spec's decision 4 names the staging artifact set as install.sh +
+          # llms-install.md only; llms-plugins.md (= docs/plugins-authoring.md)
+          # is part of the prod AI-crawler discovery surface and must not be
+          # advertised on the staging subtree.
           if [ "$CHANNEL" = "prod" ]; then
+            echo "▸ Copying llms-plugins.md (BET-300 — prod AI-crawler surface only)"
+            $SCP docs/plugins-authoring.md "$PROD_HOST:$WEBROOT/llms-plugins.md"
+
             echo "▸ Copying version manifest (BET-225)"
             $SSH "$PROD_HOST" "mkdir -p $WEBROOT/updates"
             if ls website/updates/*.json >/dev/null 2>&1; then
@@ -211,13 +215,16 @@ jobs:
             check "og.png" website/og.png
             check ".well-known/agent-skills/index.json" .well-known/agent-skills/index.json
             check ".well-known/agent-skills/manta/SKILL.md" .well-known/agent-skills/manta/SKILL.md
+            # llms-plugins.md is part of the prod AI-crawler discovery surface
+            # (see decision 4 — staging publishes install.sh + llms-install.md
+            # only); the verify step must follow the publish scope.
+            check "llms-plugins.md" docs/plugins-authoring.md
           fi
 
           # Shared across channels — install.sh + docs are what a staging
           # installer (or a /staging/ llms-read) actually fetches.
           check "install.sh" scripts/install.sh
           check "llms-install.md" llms-install.md
-          check "llms-plugins.md" docs/plugins-authoring.md
 
           if [ "$fail" -ne 0 ]; then
             echo "::error::One or more web assets are not live or are stale."
