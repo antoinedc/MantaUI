@@ -433,6 +433,9 @@ function registerHandlers(): void {
   // installer module — main owns the SSH connection from start to
   // pairing-success, and the connection dies at pairing time. The
   // renderer never touches ssh itself (no preload API for it).
-  registerInstallerHandlers(() => mainWindow);
+  // BET-372: pass main's `commit` so the auto-pair path persists via
+  // the SAME writer as the manual claim path above (no circular
+  // require, no second config writer).
+  registerInstallerHandlers(() => mainWindow, commit);
 
 }
