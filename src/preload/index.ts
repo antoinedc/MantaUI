@@ -203,6 +203,14 @@ const api = {
   installerCancel: (input: { handleId: string }): Promise<void> =>
     ipcRenderer.invoke(IPC.installerCancel, input),
 
+  // BET-361: the renderer's answer to a paused `fingerprint` event. trust=true
+  // → main writes the host key to ~/.ssh/known_hosts (verifying it matches
+  // the shown fingerprint) and re-runs preflight; trust=false → the install
+  // aborts with a preflight-failed event. Resolves once main has acted on
+  // the decision; the renderer does NOT need to wait for a separate event.
+  installerTrustHost: (input: { handleId: string; trust: boolean }): Promise<void> =>
+    ipcRenderer.invoke(IPC.installerTrustHost, input),
+
   // Mint a fresh pairing code over the existing SSH connection + claim it
   // via the box's public URL. Persists credentials through main's existing
   // claim path (single config writer, per BET-355 constraint #4). The

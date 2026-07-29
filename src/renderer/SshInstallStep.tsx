@@ -148,6 +148,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   const [preflightFailure, setPreflightFailure] = useState<{
     failures: PreflightFailure[];
   } | null>(null);
+  // BET-361: a never-seen host paused the install for a trust decision.
+  // Rendered INLINE in the progress panel (the status line flips to
+  // "Waiting for host trust…" and the log pauses) — not a separate panel.
+  const [fingerprintPrompt, setFingerprintPrompt] = useState<{
+    handleId: string;
+    algo: string;
+    sha256: string;
+  } | null>(null);
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
@@ -244,6 +252,25 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     (async () => {
       const s = await preload.installerState();
       if (!alive) return;
+      // BET-361: a paused trust prompt recovers first — it's neither an
+      // active install nor a hard preflight failure, and the unknown-host
+      // verdict sitting in `s.preflight` must NOT be rendered as the
+      // failure card while we're waiting on the user.
+      if (s.waitingForTrust && s.trustHandleId && s.pendingFingerprint) {
+        setRunning(true);
+        setActiveHandle(s.trustHandleId);
+        setStage(INITIAL_STAGE);
+        setStageLabel(INITIAL_STAGE_INFO.label);
+        setStageIndex(INITIAL_STAGE_INFO.index);
+        setStageTotal(INITIAL_STAGE_INFO.total);
+        setLogOpen(true);
+        setFingerprintPrompt({
+          handleId: s.trustHandleId,
+          algo: s.pendingFingerprint.algo,
+          sha256: s.pendingFingerprint.sha256,
+        });
+        return;
+      }
       if (s.active) {
         const info = currentStageInfo(s.stage);
         setRunning(true);
@@ -293,11 +320,24 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           setPreflightFailure({ failures: evt.failures });
           setRunning(false);
           setActiveHandle(null);
+          setFingerprintPrompt(null);
+          break;
+        case "fingerprint":
+          // The install is paused waiting for a trust decision — show the
+          // fingerprint card inline. The handleId on the event is what
+          // installerTrustHost needs (installerStart hasn't returned yet,
+          // so activeHandle is still null here).
+          setFingerprintPrompt({
+            handleId: evt.handleId,
+            algo: evt.fingerprint.algo,
+            sha256: evt.fingerprint.sha256,
+          });
           break;
         case "done":
           setDone({ ok: evt.ok, code: evt.code, signal: evt.signal });
           setRunning(false);
           setActiveHandle(null);
+          setFingerprintPrompt(null);
           if (evt.ok) {
             // Collapse the log back to the single status line on success.
             setLogOpen(false);
@@ -310,6 +350,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           setInstallError(evt.message);
           setRunning(false);
           setActiveHandle(null);
+          setFingerprintPrompt(null);
           break;
       }
     });
@@ -366,6 +407,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     setTargetError(null);
     setInstallError(null);
     setPreflightFailure(null);
+    setFingerprintPrompt(null);
     setLines([]);
     setDone(null);
     setClaimError(null);
@@ -395,6 +437,26 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   async function cancelInstall() {
     if (!activeHandle) return;
     await preload.installerCancel({ handleId: activeHandle });
+  }
+
+  // BET-361: answer the paused fingerprint prompt. Trust → main writes the
+  // host key and resumes (running stays true, the install streams on).
+  // Decline → main aborts with a preflight-failed event; we drop the
+  // spinner immediately so the UI never hangs on a verdict that's already
+  // been decided.
+  async function trustHostDecision(trust: boolean) {
+    if (!fingerprintPrompt) return;
+    const handleId = fingerprintPrompt.handleId;
+    setFingerprintPrompt(null);
+    if (!trust) {
+      setRunning(false);
+      setActiveHandle(null);
+    }
+    try {
+      await preload.installerTrustHost({ handleId, trust });
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function runClaim() {
@@ -714,7 +776,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 style={{ borderColor: ACCENT, borderTopColor: "transparent" }}
               />
             )}
-            <span>{stageLabel}</span>
+            <span>{fingerprintPrompt ? "Waiting for host trust…" : stageLabel}</span>
             <span className="text-text-muted">
               {stageIndex} of {stageTotal} · {formatElapsed(elapsedSeconds)}
             </span>
@@ -737,7 +799,49 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               }}
             />
           </div>
-          {logOpen && (
+          {/* BET-361: inline fingerprint prompt. The install is paused — the
+              log has nothing new to show, so the card takes the place of
+              attention until the user answers. */}
+          {fingerprintPrompt && (
+            <div
+              className="rounded-md p-3.5 space-y-2.5"
+              style={{ border: `1px solid ${ACCENT}` }}
+            >
+              <div className="text-sm font-medium">Trust this host?</div>
+              <p className="text-xs text-text-muted">
+                The host's identity can't be verified yet. Its{" "}
+                {fingerprintPrompt.algo} key fingerprint is:
+              </p>
+              <code
+                className="block text-xs font-mono break-all rounded px-2 py-1.5 bg-bg-elev"
+                style={{ color: ACCENT }}
+              >
+                {fingerprintPrompt.sha256}
+              </code>
+              <p className="text-xs text-text-faint">
+                Only trust this if you recognize the fingerprint (for example,
+                from your VPS console). The key is saved to
+                ~/.ssh/known_hosts so future connections skip this prompt.
+              </p>
+              <div className="flex gap-2 pt-0.5">
+                <button
+                  onClick={() => void trustHostDecision(true)}
+                  className="px-3 py-1.5 rounded-md text-sm font-medium"
+                  style={{ background: ACCENT, color: "#0B1020" }}
+                >
+                  Trust &amp; continue
+                </button>
+                <button
+                  onClick={() => void trustHostDecision(false)}
+                  className="px-3 py-1.5 rounded-md text-sm font-medium"
+                  style={{ border: `1px solid ${DANGER}`, color: DANGER }}
+                >
+                  Don't trust
+                </button>
+              </div>
+            </div>
+          )}
+          {logOpen && !fingerprintPrompt && (
             <div
               ref={logRef}
               style={{ height: 172, overflowY: "auto" }}

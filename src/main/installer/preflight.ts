@@ -23,6 +23,8 @@
 // Pure: takes the raw probe results, returns structured objects. Tested in
 // preflight.test.ts.
 
+import type { HostFingerprint } from "./fingerprint.js";
+
 export type OsId = "linux" | "darwin" | "unknown";
 export type Arch = "x64" | "arm64" | "unknown";
 
@@ -33,7 +35,7 @@ export type OsInfo = {
   release: string | null;
 };
 
-export type Reachability = "ok" | "auth-failed" | "unreachable";
+export type Reachability = "ok" | "auth-failed" | "unreachable" | "unknown-host";
 
 export type TailscaleState = {
   /** `command -v tailscale` succeeded AND `tailscale status --json` had BackendState=Running. */
@@ -44,6 +46,10 @@ export type TailscaleState = {
 
 export type PreflightProbes = {
   reachability: Reachability;
+  /** The host-key fingerprint ssh offered on a never-seen host, when
+   *  reachability is "unknown-host". Null in every other case. Populated by
+   *  probeReachability from the ssh stderr block (fingerprint.ts). */
+  hostFingerprint: HostFingerprint | null;
   os: OsInfo;
   /** `sudo -n true` exited 0 over the SSH connection. */
   passwordlessSudo: boolean;
@@ -135,6 +141,10 @@ export type PreflightResult = {
   probes: PreflightProbes;
   /** Structured failures the UI renders one-per-line with the cause + action. */
   failures: PreflightFailure[];
+  /** When the host is unknown and ssh offered a fingerprint, this carries it
+   *  so installerStart can pause for a trust decision instead of hard-failing.
+   *  Null for every other verdict (ok, unreachable, auth-failed, etc.). */
+  unknownHost: HostFingerprint | null;
 };
 
 // Clock skew: a wrong box clock silently breaks Let's Encrypt issuance and
@@ -160,6 +170,29 @@ const CLOCK_SKEW_FAIL_SECONDS = 60;
  */
 export function classifyPreflight(probes: PreflightProbes): PreflightResult {
   const failures: PreflightFailure[] = [];
+
+  // Unknown host: ssh printed a fingerprint and bailed (BatchMode=yes
+  // suppresses the interactive yes/no). This is NOT a hard failure — the
+  // installer pauses for a trust decision (BET-361) — so we short-circuit
+  // with a single guidance failure and surface the fingerprint. The OS /
+  // clock / sudo checks are meaningless until the host can be reached, so
+  // they are skipped here (they would otherwise pile on "unsupported
+  // unknown/unknown" noise the user cannot act on before trusting).
+  if (probes.reachability === "unknown-host") {
+    return {
+      ok: false,
+      ingressMode: decideIngressMode(probes),
+      probes,
+      failures: [
+        {
+          cause: "This host's identity is not yet trusted.",
+          action:
+            "Review the host key fingerprint and choose Trust to continue, or pick a different host.",
+        },
+      ],
+      unknownHost: probes.hostFingerprint,
+    };
+  }
 
   if (probes.reachability === "unreachable") {
     failures.push({
@@ -209,5 +242,6 @@ export function classifyPreflight(probes: PreflightProbes): PreflightResult {
     ingressMode: decideIngressMode(probes),
     probes,
     failures,
+    unknownHost: null,
   };
 }

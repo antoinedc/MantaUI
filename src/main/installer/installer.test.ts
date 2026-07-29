@@ -106,6 +106,33 @@ describe("preflightBox", () => {
     expect(r.failures[0].action).toMatch(/ssh-add|authorized_keys/);
   });
 
+  it("classifies a never-seen host as unknown-host and surfaces the fingerprint (BET-361)", async () => {
+    const responses = happyLinuxProbes({
+      [PROBE_KEYS.REACHABILITY]: {
+        code: 255,
+        stderr: [
+          "The authenticity of host 'box (203.0.113.5)' can't be established.",
+          "ED25519 key fingerprint is SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=.",
+          "Host key verification failed.",
+        ].join("\n"),
+      },
+    });
+    const r = await preflightBox("dev", { spawn: makeProbeSpawn(responses) });
+    expect(r.ok).toBe(false);
+    expect(r.probes.reachability).toBe("unknown-host");
+    expect(r.probes.hostFingerprint).toEqual({
+      algo: "ED25519",
+      sha256: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=",
+    });
+    expect(r.unknownHost).toEqual({
+      algo: "ED25519",
+      sha256: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=",
+    });
+    // Short-circuited — no OS/unsupported noise on top of the trust prompt.
+    expect(r.failures).toHaveLength(1);
+    expect(r.failures[0].cause).toMatch(/not yet trusted/);
+  });
+
   it("classifies tailscale-running → ingressMode=tailscale (wins over macOS)", async () => {
     const responses = happyLinuxProbes({
       [PROBE_KEYS.OS]: { code: 0, stdout: "Darwin\narm64\n23.0.0\n" },

@@ -80,6 +80,7 @@ const installerState = vi.hoisted(() => ({
     ingressMode: "public-tls" as const,
     probes: {
       reachability: "ok" as const,
+      hostFingerprint: null,
       os: { id: "linux" as const, arch: "x64" as const, release: "6.5.0" },
       passwordlessSudo: true,
       tailscale: { running: false, ipv4: null },
@@ -87,6 +88,7 @@ const installerState = vi.hoisted(() => ({
       alreadyInstalled: false,
     },
     failures: [],
+    unknownHost: null,
   })),
   runInstall: vi.fn(() => ({
     // Resolves immediately so the handler's fire-and-forget `.finally()`
@@ -96,6 +98,12 @@ const installerState = vi.hoisted(() => ({
     done: Promise.resolve({ code: 0, signal: null }),
     cancel: vi.fn(),
   })),
+}));
+
+// BET-361: trustHost writes the host key to known_hosts. Stubbed here so
+// the handler test never touches ssh-keyscan or the filesystem.
+const knownHostsState = vi.hoisted(() => ({
+  trustHost: vi.fn(async () => ({ ok: true as const, line: "box ssh-ed25519 AAAA" })),
 }));
 
 /** Flush the microtask queue so handlers.ts's fire-and-forget
@@ -111,6 +119,10 @@ vi.mock("./installer.js", () => ({
   preflightBox: installerState.preflightBox,
   runInstall: installerState.runInstall,
   DEFAULT_SSH_CONFIG_PATH: "/dev/null",
+}));
+
+vi.mock("./knownHosts.js", () => ({
+  trustHost: knownHostsState.trustHost,
 }));
 
 // Also stub the small support module the handlers pull in but never call
@@ -129,6 +141,7 @@ beforeEach(() => {
   mintState.mintAndClaim.mockClear();
   installerState.preflightBox.mockClear();
   installerState.runInstall.mockClear();
+  knownHostsState.trustHost.mockClear();
 });
 
 describe("registerInstallerHandlers — mint-and-claim (BET-372)", () => {
@@ -185,6 +198,7 @@ describe("registerInstallerHandlers — mint-and-claim (BET-372)", () => {
         IPC.installerState,
         IPC.installerStart,
         IPC.installerCancel,
+        IPC.installerTrustHost,
         IPC.installerMintAndClaim,
         IPC.installerGetDiagnostics,
       ]),
@@ -204,6 +218,7 @@ function failedPreflightFixture(cause: string): PreflightResult {
     ingressMode: "no-root",
     probes: {
       reachability: "unreachable",
+      hostFingerprint: null,
       os: { id: "unknown", arch: "unknown", release: null },
       passwordlessSudo: false,
       tailscale: { running: false, ipv4: null },
@@ -211,6 +226,7 @@ function failedPreflightFixture(cause: string): PreflightResult {
       alreadyInstalled: false,
     },
     failures: [{ cause, action: "Check the alias resolves." }],
+    unknownHost: null,
   };
 }
 
@@ -257,6 +273,187 @@ describe("registerInstallerHandlers — installerStart preflight fold (BET-383)"
     };
     expect(state.preflight?.ok).toBe(false);
     expect(state.preflight?.failures[0].cause).toMatch(/Could not connect/);
+  });
+});
+
+// BET-361: a never-seen host pauses the install for a trust decision.
+// The handler must (a) emit a `fingerprint` event, (b) hold the slot while
+// waiting, (c) resume into runInstall after a Trust answer + successful
+// trustHost, and (d) abort with preflight-failed on a decline.
+describe("registerInstallerHandlers — fingerprint pause/resume (BET-361)", () => {
+  function unknownHostPreflight(): PreflightResult {
+    return {
+      ok: false,
+      ingressMode: "no-root",
+      probes: {
+        reachability: "unknown-host",
+        hostFingerprint: {
+          algo: "ED25519",
+          sha256: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=",
+        },
+        os: { id: "unknown", arch: "unknown", release: null },
+        passwordlessSudo: false,
+        tailscale: { running: false, ipv4: null },
+        clockSkewSeconds: 0,
+        alreadyInstalled: false,
+      },
+      failures: [
+        {
+          cause: "This host's identity is not yet trusted.",
+          action: "Review the host key fingerprint and choose Trust to continue, or pick a different host.",
+        },
+      ],
+      unknownHost: {
+        algo: "ED25519",
+        sha256: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=",
+      },
+    };
+  }
+
+  it("emits a fingerprint event, then resumes into runInstall after Trust", async () => {
+    installerState.preflightBox
+      .mockResolvedValueOnce(unknownHostPreflight())
+      .mockResolvedValueOnce({
+        // Second preflight (after trust) — the host key is now known.
+        ok: true,
+        ingressMode: "public-tls",
+        probes: {
+          reachability: "ok",
+          hostFingerprint: null,
+          os: { id: "linux", arch: "x64", release: "6.5.0" },
+          passwordlessSudo: true,
+          tailscale: { running: false, ipv4: null },
+          clockSkewSeconds: 0,
+          alreadyInstalled: false,
+        },
+        failures: [],
+        unknownHost: null,
+      });
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const trustHandler = ipcState.handlers.get(IPC.installerTrustHost);
+    const stateHandler = ipcState.handlers.get(IPC.installerState);
+
+    // installerStart does not resolve until the trust loop finishes — drive
+    // it without awaiting so we can answer the prompt mid-flight.
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+
+    // Let the preflight + fingerprint event land.
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // While paused, installerState reports the trust wait.
+    const paused = (await stateHandler!(null, undefined)) as {
+      waitingForTrust: boolean;
+      trustHandleId: string | null;
+      pendingFingerprint: { algo: string; sha256: string } | null;
+    };
+    expect(paused.waitingForTrust).toBe(true);
+    expect(paused.trustHandleId).toMatch(/^install-/);
+    expect(paused.pendingFingerprint?.algo).toBe("ED25519");
+
+    // A fingerprint event was pushed to the renderer.
+    const fpEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "fingerprint",
+    ) as [string, { kind: string; handleId: string; fingerprint: { algo: string } }];
+    expect(fpEvent).toBeDefined();
+    expect(fpEvent[1].fingerprint.algo).toBe("ED25519");
+    const handleId = fpEvent[1].handleId;
+
+    // runInstall has NOT started yet — the install is paused.
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+
+    // User clicks Trust.
+    await trustHandler!(null, { handleId, trust: true });
+    await startP;
+
+    // trustHost wrote the host key, preflight re-ran, and the install started.
+    expect(knownHostsState.trustHost).toHaveBeenCalledTimes(1);
+    expect(installerState.preflightBox).toHaveBeenCalledTimes(2);
+    expect(installerState.runInstall).toHaveBeenCalledTimes(1);
+
+    // The trust wait is cleared.
+    const after = (await stateHandler!(null, undefined)) as { waitingForTrust: boolean };
+    expect(after.waitingForTrust).toBe(false);
+
+    await flushMicrotasks();
+  });
+
+  it("aborts with preflight-failed on a decline (Trust=false), never starts the install", async () => {
+    installerState.preflightBox.mockResolvedValueOnce(unknownHostPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const trustHandler = ipcState.handlers.get(IPC.installerTrustHost);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const fpEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "fingerprint",
+    ) as [string, { handleId: string }];
+    await trustHandler!(null, { handleId: fpEvent[1].handleId, trust: false });
+    await startP;
+
+    expect(knownHostsState.trustHost).not.toHaveBeenCalled();
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+    const failed = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "preflight-failed",
+    ) as [string, { kind: string; failures: { cause: string }[] }];
+    expect(failed).toBeDefined();
+    expect(failed[1].failures[0].cause).toMatch(/not yet trusted/);
+  });
+
+  it("refuses a second install while a trust prompt is paused", async () => {
+    installerState.preflightBox.mockResolvedValueOnce(unknownHostPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const trustHandler = ipcState.handlers.get(IPC.installerTrustHost);
+
+    // Start the first install and let it pause.
+    void startHandler!(null, { alias: "dev" });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // A second start while paused must throw (single-active slot held).
+    await expect(
+      startHandler!(null, { alias: "dev2" }),
+    ).rejects.toThrow(/already in progress/);
+
+    // Clean up: answer the paused prompt so the slot is released.
+    const fpEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "fingerprint",
+    ) as [string, { handleId: string }];
+    await trustHandler!(null, { handleId: fpEvent[1].handleId, trust: false });
+    await flushMicrotasks();
+  });
+
+  it("installerCancel during the trust pause aborts the wait", async () => {
+    installerState.preflightBox.mockResolvedValueOnce(unknownHostPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const cancelHandler = ipcState.handlers.get(IPC.installerCancel);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const fpEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "fingerprint",
+    ) as [string, { handleId: string }];
+
+    await cancelHandler!(null, { handleId: fpEvent[1].handleId });
+    await startP;
+
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+    expect(knownHostsState.trustHost).not.toHaveBeenCalled();
+    const failed = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "preflight-failed",
+    );
+    expect(failed).toBeDefined();
   });
 });
 

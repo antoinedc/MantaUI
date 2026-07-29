@@ -11,6 +11,7 @@ import {
 function makeProbes(overrides: Partial<PreflightProbes> = {}): PreflightProbes {
   return {
     reachability: "ok",
+    hostFingerprint: null,
     os: { id: "linux", arch: "x64", release: "6.5.0" },
     passwordlessSudo: true,
     tailscale: { running: false, ipv4: null },

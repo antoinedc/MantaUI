@@ -42,7 +42,9 @@ import {
   classifyPreflight,
   type PreflightProbes,
   type PreflightResult,
+  type Reachability,
 } from "./preflight.js";
+import { parseFingerprint, isHostKeyVerificationFailure, type HostFingerprint } from "./fingerprint.js";
 import {
   foldChunk,
   buildStageSnapshot,
@@ -165,7 +167,8 @@ export async function preflightBox(
     probeAuthFile(alias, spawn),
   ]);
   const probes: PreflightProbes = {
-    reachability: reach,
+    reachability: reach.reachability,
+    hostFingerprint: reach.fingerprint,
     os: osRes,
     passwordlessSudo: sudoRes,
     tailscale: tsRes,
@@ -177,28 +180,54 @@ export async function preflightBox(
 
 // ---------- individual probes ----------
 
-async function probeReachability(alias: SshTarget, spawn?: SpawnFn): Promise<PreflightProbes["reachability"]> {
+// probeReachability returns BOTH the reachability verdict and, when ssh
+// offered a host-key fingerprint on a never-seen host, that fingerprint.
+// The fingerprint is what installerStart hands to the renderer's "Trust
+// this host" prompt (BET-361); without it the trust UI has nothing to show.
+type ReachabilityProbe = {
+  reachability: Reachability;
+  fingerprint: HostFingerprint | null;
+};
+
+async function probeReachability(alias: SshTarget, spawn?: SpawnFn): Promise<ReachabilityProbe> {
   // BatchMode=yes turns "no auth" into exit code 255 / stderr "Permission
   // denied (publickey)" — not a hang on a passphrase prompt.
   const r = await execRemote(alias, PROBE_REACHABILITY_CMD, {
     spawn,
     timeoutMs: 15_000,
   });
-  if (r.code === 0 && r.stdout.trim() === "ok") return "ok";
+  if (r.code === 0 && r.stdout.trim() === "ok") {
+    return { reachability: "ok", fingerprint: null };
+  }
+  // Never-seen host: ssh prints the fingerprint then fails with "Host key
+  // verification failed." Detect the fingerprint and surface it so the
+  // installer can pause for a trust decision instead of mislabeling this
+  // as a generic unreachable / auth-failed (BET-361).
+  const fp = parseFingerprint(r.stderr);
+  if (fp.found) {
+    return { reachability: "unknown-host", fingerprint: fp.fingerprint };
+  }
   // The two well-known BatchMode=yes failure modes:
   //   exit 255 + "Permission denied (publickey)" → auth-failed
   //   exit 255 + "Connection refused" / "No route to host" / "Could not
   //   resolve hostname" → unreachable
   if (r.code === 255 || r.code === null) {
+    if (isHostKeyVerificationFailure(r.stderr)) {
+      // Host-key refusal without a parseable fingerprint (rare ssh build):
+      // still unknown-host, but with no fingerprint to show — the trust UI
+      // cannot verify a key against nothing, so treat as unreachable and
+      // let the standard failure guidance surface.
+      return { reachability: "unreachable", fingerprint: null };
+    }
     const stderr = r.stderr;
     if (/Permission denied/i.test(stderr) || /publickey/i.test(stderr)) {
-      return "auth-failed";
+      return { reachability: "auth-failed", fingerprint: null };
     }
-    return "unreachable";
+    return { reachability: "unreachable", fingerprint: null };
   }
   // Any other exit → unreachable (network glitch mid-probe, ssh missing on
   // the box, etc.)
-  return "unreachable";
+  return { reachability: "unreachable", fingerprint: null };
 }
 
 async function probeOs(alias: SshTarget, spawn?: SpawnFn): Promise<PreflightProbes["os"]> {

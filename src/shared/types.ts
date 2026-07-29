@@ -1,5 +1,6 @@
 // Type-only, erased at compile time (preloadAccess.ts does the same).
 import type { PreflightResult, PreflightFailure } from "../main/installer/preflight.js";
+import type { HostFingerprint } from "../main/installer/fingerprint.js";
 
 // ----- Local app config -----
 // Source of truth for sessions/windows is tmux on the remote. We only persist
@@ -345,6 +346,16 @@ export type InstallerEvent =
       handleId: string;
       failures: PreflightFailure[];
     }
+  // Preflight hit a never-seen host: ssh offered a fingerprint and bailed
+  // (BatchMode=yes). The install PAUSES here — the renderer shows the
+  // fingerprint + a "Trust this host" button; the user's answer comes back
+  // via installerTrustHost. On trust, main writes the host key to
+  // ~/.ssh/known_hosts and re-runs preflight (BET-361).
+  | {
+      kind: "fingerprint";
+      handleId: string;
+      fingerprint: HostFingerprint;
+    }
   | {
       kind: "done";
       handleId: string;
@@ -361,6 +372,16 @@ export type InstallerState = {
   // Most recent preflight verdict, null before any install started — feeds
   // "Copy diagnostics" with the real values instead of a placeholder.
   preflight: PreflightResult | null;
+  // True while the install is PAUSED waiting for the user to trust an
+  // unknown host. The renderer re-shows the fingerprint prompt on remount
+  // when this is set (BET-361).
+  waitingForTrust: boolean;
+  // The handle id the paused trust prompt belongs to, or null. Lets a
+  // re-mounted renderer route its Trust/Cancel answer to the right install.
+  trustHandleId: string | null;
+  // The fingerprint being awaited, or null. Mirrors the `fingerprint` event
+  // payload so a remount recovers the prompt without a re-send.
+  pendingFingerprint: HostFingerprint | null;
 };
 
 // Desktop auto-update (electron-updater) payloads, shared by the preload
@@ -785,11 +806,17 @@ export const IPC = {
   installerMintAndClaim: "installer:mint-and-claim",
   installerState: "installer:state",
   installerGetDiagnostics: "installer:get-diagnostics",
+  // installerTrustHost (BET-361): the renderer's answer to a paused
+  // `fingerprint` event — trust=true writes the host key to
+  // ~/.ssh/known_hosts and resumes the install; trust=false (or a cancel)
+  // aborts with a preflight-failed event.
+  installerTrustHost: "installer:trust-host",
   // installerEvent is the main → renderer push channel (mirrors the
   // pairLinkReceived pattern). Payload is a discriminated union:
   //   { kind: "line", handleId, text }
   //   { kind: "stage", handleId, stage }
   //   { kind: "preflight-failed", handleId, failures }
+  //   { kind: "fingerprint", handleId, fingerprint }   (BET-361 — pause for trust)
   //   { kind: "done", handleId, code, signal }
   //   { kind: "error", handleId, message }
   installerEvent: "installer:event",

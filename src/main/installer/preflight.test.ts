@@ -10,6 +10,12 @@ import {
   targetLabel,
   type PreflightProbes,
 } from "./preflight.js";
+import type { HostFingerprint } from "./fingerprint.js";
+
+const SAMPLE_FP: HostFingerprint = {
+  algo: "ED25519",
+  sha256: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=",
+};
 
 const OK_OS_LINUX_X64 = {
   id: "linux" as const,
@@ -30,6 +36,7 @@ const OK_OS_DARWIN_ARM64 = {
 function makeProbes(overrides: Partial<PreflightProbes> = {}): PreflightProbes {
   return {
     reachability: "ok",
+    hostFingerprint: null,
     os: OK_OS_LINUX_X64,
     passwordlessSudo: true,
     tailscale: { running: false, ipv4: null },
@@ -245,5 +252,44 @@ describe("classifyPreflight", () => {
     const probes = makeProbes({ alreadyInstalled: true });
     const r = classifyPreflight(probes);
     expect(r.probes).toEqual(probes);
+  });
+});
+
+// BET-361: unknown-host reachability short-circuits into a trust-pause
+// signal, not a hard failure list. The OS/clock checks are meaningless
+// until the host can be reached and would otherwise pile on "unsupported
+// unknown/unknown" noise the user cannot act on before trusting.
+describe("classifyPreflight — unknown host (BET-361)", () => {
+  it("surfaces the fingerprint and a single guidance failure, no OS noise", () => {
+    const r = classifyPreflight(
+      makeProbes({
+        reachability: "unknown-host",
+        hostFingerprint: SAMPLE_FP,
+        os: { id: "unknown", arch: "unknown", release: null },
+      }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.unknownHost).toEqual(SAMPLE_FP);
+    expect(r.failures).toHaveLength(1);
+    expect(r.failures[0].cause).toMatch(/not yet trusted/);
+    // The unknown/unknown OS must NOT add a second failure here.
+    expect(r.failures.some((f) => /Unsupported target/.test(f.cause))).toBe(false);
+  });
+
+  it("still short-circuits when no fingerprint was parsed (degraded)", () => {
+    const r = classifyPreflight(
+      makeProbes({
+        reachability: "unknown-host",
+        hostFingerprint: null,
+      }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.unknownHost).toBeNull();
+    expect(r.failures).toHaveLength(1);
+  });
+
+  it("a normal (reachable) verdict leaves unknownHost null", () => {
+    const r = classifyPreflight(makeProbes());
+    expect(r.unknownHost).toBeNull();
   });
 });
