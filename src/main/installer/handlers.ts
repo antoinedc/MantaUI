@@ -15,7 +15,7 @@
 // from an earlier renderer (e.g. after a refresh) can no-op cleanly.
 
 import { ipcMain, type BrowserWindow } from "electron";
-import { IPC } from "../../shared/types.js";
+import { IPC, type AppConfig } from "../../shared/types.js";
 import {
   listSshHosts,
   preflightBox,
@@ -48,9 +48,17 @@ function pushTail(line: string): void {
 // registerInstallerHandlers — wire the IPC channels for the installer module.
 // `getWindow` resolves the BrowserWindow that should receive push events
 // (null → no push, no error — the renderer can re-mount and read state).
+// `persist` is the SAME config writer main uses for the manual claim path
+// (see src/main/index.ts `commit`). Injected here so the installer module
+// stays out of the main module's require graph — same constraint that
+// keeps the manual pairing path from accidentally inventing a second
+// writer (BET-355 constraint #4: one config writer).
 // ---------------------------------------------------------------------------
 
-export function registerInstallerHandlers(getWindow: () => BrowserWindow | null): void {
+export function registerInstallerHandlers(
+  getWindow: () => BrowserWindow | null,
+  persist: (patch: Partial<AppConfig>) => void,
+): void {
   ipcMain.handle(IPC.installerListHosts, () => listSshHosts(DEFAULT_SSH_CONFIG_PATH));
 
   ipcMain.handle(IPC.installerPreflight, async (_e, input: { alias: string }) => {
@@ -145,12 +153,7 @@ export function registerInstallerHandlers(getWindow: () => BrowserWindow | null)
     input: { alias: string; claimUrlOverride?: string },
   ) => {
     return mintAndClaim(input.alias, {
-      persist: (patch) => {
-        // Persist via main's existing config writer — same one the manual
-        // claim path uses (BET-355 constraint #4: one config writer).
-        const { commit } = require("../index.js");
-        commit(patch);
-      },
+      persist,
       claimUrlOverride: input.claimUrlOverride,
     });
   });
