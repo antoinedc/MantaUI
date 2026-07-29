@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rm, readFile, stat } from "node:fs/promises";
+import { rm, readFile, stat, writeFile } from "node:fs/promises";
 import {
   isValidToken,
   isValidPairingCode,
@@ -12,6 +12,7 @@ import {
   isPublicAssetPath,
   loadAuth,
   saveAuth,
+  deleteAuth,
   ensureAuth,
   createPairingRegistry,
   createAuthEngine,
@@ -414,6 +415,177 @@ test("claim rejects an expired code", () => {
   const r = eng.claim({ pairing_code });
   assert.equal(r.ok, false);
   assert.equal(r.status, 403);
+});
+
+// ----------------------------------------------------------------------------
+// auth engine — revoke (BET-357 §2: "remove this box from the device")
+// ----------------------------------------------------------------------------
+//
+// revoke() is the per-device "forget this box" handshake. The contract
+// (from the issue spec + the DELETE /auth/revoke handler in index.mjs):
+//
+//   no token presented           → 401 unauthorized
+//   token is not 32-hex          → 400 malformed token
+//   token is 32-hex but wrong    → 401 unauthorized
+//   token is 32-hex and matches  → 200, deletes box_token from
+//                                   ~/.manta/auth.json, mints a fresh
+//                                   identity in place so the engine's
+//                                   subsequent authorize/claim calls use
+//                                   the new token (the OLD one is dead
+//                                   from this instant).
+
+test("revoke: no token presented → 401", async () => {
+  const eng = createAuthEngine({ auth: AUTH });
+  const r = await eng.revoke({});
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 401);
+});
+
+test("revoke: empty-string token → 401", async () => {
+  const eng = createAuthEngine({ auth: AUTH });
+  const r = await eng.revoke({ token: "" });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 401);
+});
+
+test("revoke: malformed token (not 32-hex) → 400", async () => {
+  const eng = createAuthEngine({ auth: AUTH });
+  const r = await eng.revoke({ token: "not-32-hex" });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 400);
+  // The malformed path returns BEFORE the token compare — so the box's
+  // own token is NOT exposed to a malformed-token caller (no partial leak).
+  // We assert that by checking that the engine's authorize() gate still
+  // accepts the real token afterwards (no rotation happened).
+  const gate = eng.authorize({
+    method: "GET",
+    path: "/api/projects",
+    authorization: `Bearer ${AUTH.box_token}`,
+  });
+  assert.equal(gate.ok, true);
+});
+
+test("revoke: 32-hex token that doesn't match → 401, no rotation", async () => {
+  const eng = createAuthEngine({ auth: AUTH });
+  const wrong = "a".repeat(32);
+  const r = await eng.revoke({ token: wrong });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 401);
+  // Same leak guard as the malformed case: the engine's token is intact.
+  const gate = eng.authorize({
+    method: "GET",
+    path: "/api/projects",
+    authorization: `Bearer ${AUTH.box_token}`,
+  });
+  assert.equal(gate.ok, true);
+});
+
+test("revoke: valid token deletes box_token from auth.json (BET-357 §2)", async () => {
+  // Live FS round-trip: write a real auth.json, build the engine around it,
+  // revoke, and assert the file no longer authenticates the OLD token. The
+  // engine's in-memory state is also rotated (verified by subsequent
+  // authorize() calls).
+  const path = tmpPath("revoke-roundtrip");
+  const initial = { box_id: HEX32, box_token: HEX32B, created_at: 1000 };
+  await saveAuth(initial, path);
+  const eng = createAuthEngine({
+    auth: initial,
+    saveAuth: (a) => saveAuth(a, path),
+    deleteAuth: () => deleteAuth(path),
+  });
+
+  const r = await eng.revoke({ token: HEX32B });
+  assert.equal(r.ok, true);
+  assert.equal(isValidToken(r.box_id), true);
+  // The new box_id MUST differ from the old one — otherwise we'd be reusing
+  // the identity, which defeats the point of "remove this box".
+  assert.notEqual(r.box_id, HEX32);
+
+  // On-disk file: the OLD token must no longer authorize. We re-read the
+  // file (instead of trusting the in-memory mutation) so the test pins the
+  // actual persistence behavior, not just the engine's bookkeeping.
+  const onDisk = JSON.parse(await readFile(path, "utf-8"));
+  assert.equal(onDisk.box_id, r.box_id);
+  assert.notEqual(onDisk.box_token, HEX32B);
+  assert.equal(isValidToken(onDisk.box_token), true);
+
+  // In-memory rotation: subsequent authorize() with the OLD token fails.
+  const blocked = eng.authorize({
+    method: "GET",
+    path: "/api/projects",
+    authorization: `Bearer ${HEX32B}`,
+  });
+  assert.equal(blocked.ok, false);
+  // ...and the NEW token (whatever was just written) authorizes.
+  const ok2 = eng.authorize({
+    method: "GET",
+    path: "/api/projects",
+    authorization: `Bearer ${onDisk.box_token}`,
+  });
+  assert.equal(ok2.ok, true);
+
+  await rm(path, { force: true });
+});
+
+test("revoke: pair + claim after revoke returns the NEW identity, not the old one", async () => {
+  // End-to-end: a real revoke is followed by a fresh pair+claim. The claim
+  // must surface the new identity (so any device that re-pairs next gets a
+  // working token, not the dead old one). This pins the "next install mints
+  // a new one" semantics from the spec.
+  const path = tmpPath("revoke-claim-roundtrip");
+  const initial = { box_id: HEX32, box_token: HEX32B, created_at: 1000 };
+  await saveAuth(initial, path);
+  const eng = createAuthEngine({
+    auth: initial,
+    saveAuth: (a) => saveAuth(a, path),
+    deleteAuth: () => deleteAuth(path),
+  });
+
+  await eng.revoke({ token: HEX32B });
+
+  // Now mint a code and claim it — must yield the NEW token (which the
+  // engine wrote to disk during the revoke).
+  const { pairing_code } = eng.pair();
+  const claimed = eng.claim({ pairing_code });
+  assert.equal(claimed.ok, true);
+  assert.notEqual(claimed.box_token, HEX32B);
+  assert.equal(isValidToken(claimed.box_token), true);
+
+  await rm(path, { force: true });
+});
+
+test("revoke: clears any active pairing code (the old identity's code is moot)", async () => {
+  // Issue a code before revoke, then revoke. The pre-existing code must be
+  // invalidated — otherwise a code minted under the OLD identity would
+  // authorize the OLD token (which nothing holds anymore).
+  const eng = createAuthEngine({ auth: AUTH });
+  const { pairing_code: stale } = eng.pair();
+  assert.equal(eng.hasActivePairing(), true);
+
+  await eng.revoke({ token: AUTH.box_token });
+
+  assert.equal(eng.hasActivePairing(), false);
+  const staleClaim = eng.claim({ pairing_code: stale });
+  assert.equal(staleClaim.ok, false);
+});
+
+test("deleteAuth: idempotent — missing file is not an error", async () => {
+  const path = tmpPath("delete-missing");
+  // Should not throw, even though the file doesn't exist.
+  await deleteAuth(path);
+  await deleteAuth(path); // twice for good measure
+});
+
+test("deleteAuth: removes the file and the next loadAuth returns null", async () => {
+  const path = tmpPath("delete-roundtrip");
+  try {
+    await writeFile(path, JSON.stringify({ box_id: HEX32, box_token: HEX32B }), "utf-8");
+    assert.equal(loadAuth(path)?.box_token, HEX32B);
+    await deleteAuth(path);
+    assert.equal(loadAuth(path), null);
+  } finally {
+    await rm(path, { force: true });
+  }
 });
 
 // ----------------------------------------------------------------------------

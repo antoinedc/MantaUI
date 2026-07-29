@@ -31,7 +31,7 @@
 // the mobile QR scanner (M3) are separate issues; they consume /auth/pair +
 // /auth/claim built here.
 
-import { writeFile, rename, mkdir, chmod } from "node:fs/promises";
+import { writeFile, rename, mkdir, chmod, unlink } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
@@ -95,13 +95,20 @@ export function parseBearer(headerValue) {
 }
 
 // Decide whether a request path is EXEMPT from auth (reachable without a
-// box_token). Only the pairing handshake and the public webhook delivery leg
-// (which carries its own per-hook token+HMAC) are exempt. Everything else —
-// /rpc, /events, /pty, /api/*, /push/*, static assets — is gated.
+// box_token). Only the pairing handshake, the per-device revocation handshake,
+// and the public webhook delivery leg (which carries its own per-hook
+// token+HMAC) are exempt. Everything else — /rpc, /events, /pty, /api/*,
+// /push/*, static assets — is gated.
 //
 // Rationale for each exemption:
 //   /auth/pair, /auth/claim — bootstrap; you can't present a token you don't
 //     have yet. Rate-limited + code-gated instead.
+//   /auth/revoke            — per-device "remove this box" handshake (BET-357 §2).
+//     The caller MUST present a valid token, but the standard gate collapses
+//     malformed-token and missing-token into the same 401, which loses a
+//     useful signal for the desktop's classifier (400 vs 401). This route
+//     does its own validation (see authEngine.revoke), distinguishing shape
+//     errors from auth errors so the UI can surface a more actionable note.
 //   /pair, /pair/qr.png, /pair/logo.png — the pairing onboarding page; a
 //     visitor by definition has no token yet. The page carries no secrets
 //     (code is in the URL fragment; qr.png is a shape-validated encoder).
@@ -118,7 +125,7 @@ export function parseBearer(headerValue) {
 // caller's token is valid, so it must run through the gate.
 export function isExemptPath(path) {
   if (typeof path !== "string") return false;
-  if (path === "/auth/pair" || path === "/auth/claim") return true;
+  if (path === "/auth/pair" || path === "/auth/claim" || path === "/auth/revoke") return true;
   if (path === "/pair" || path === "/pair/qr.png" || path === "/pair/logo.png") return true;
   if (path === "/hook/" || path.startsWith("/hook/")) return true;
   if (path === "/pages/" || path.startsWith("/pages/")) return true;
@@ -280,6 +287,22 @@ export async function saveAuth(auth, path = STORE_PATH) {
   await atomicWrite(path, JSON.stringify(auth, null, 2), 0o600);
 }
 
+// Delete the persisted auth file. Idempotent — a missing file is not an error
+// (the caller is racing for "delete a box" semantics where concurrent revokes
+// are fine, and a not-yet-created store on a fresh install is irrelevant).
+// Used by revoke() to satisfy the BET-357 §2 contract: "the old box_token no
+// longer works" is enforced by regenerating a fresh identity (see revoke),
+// but the on-disk file is rewritten by the regenerate step so the store shape
+// stays consistent across revocation.
+export async function deleteAuth(path = STORE_PATH) {
+  try {
+    await unlink(path);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return;
+    throw e;
+  }
+}
+
 // Load the box identity, generating + persisting a fresh one on first run.
 // Returns { box_id, box_token, created_at }. I/O injectable for tests.
 export async function ensureAuth({
@@ -360,15 +383,23 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
  * only so an existing self-hoster who upgrades isn't instantly locked out of
  * their own box before they've paired. The DEFAULT is enforce=true.
  *
- * @param {object} deps { auth, enforce, ttlMs, now }
- *   auth    — { box_id, box_token } from ensureAuth()
- *   enforce — gate on (default true)
+ * @param {object} deps
+ *   auth        — { box_id, box_token, created_at } from ensureAuth()
+ *   enforce     — gate on (default true)
+ *   ttlMs       — pairing-code TTL (default 5 minutes)
+ *   now         — injectable clock for tests
+ *   saveAuth    — injectable writer (default saveAuth) for the post-revoke
+ *                 regenerate step
+ *   deleteAuth  — injectable unlink (default deleteAuth) for the post-revoke
+ *                 "wipe + regenerate" path. The default also runs in tests.
  */
 export function createAuthEngine({
   auth,
   enforce = true,
   ttlMs = PAIRING_TTL_MS,
   now = () => Date.now(),
+  saveAuth: saveAuthFn = saveAuth,
+  deleteAuth: deleteAuthFn = deleteAuth,
 } = {}) {
   if (!auth || !isValidToken(auth.box_id) || !isValidToken(auth.box_token)) {
     throw new Error("createAuthEngine: valid { box_id, box_token } required");
@@ -411,12 +442,71 @@ export function createAuthEngine({
     return { ok: true, box_token: auth.box_token, box_id: auth.box_id };
   }
 
+  // Handle DELETE /auth/revoke — "remove this box from the device that holds
+  // the current box_token". Three distinct failure shapes for the desktop's
+  // classifier (BET-357 §2):
+  //   • no token presented           → 401 (the standard "unauthorized")
+  //   • token is not 32-hex          → 400 (malformed; the device's own value
+  //                                    was wrong before it ever reached us)
+  //   • token is well-shaped but the box's own token is different → 401
+  //   • token matches                → delete the on-disk auth file, mint a
+  //                                    fresh identity (box_id + box_token),
+  //                                    and mutate the in-memory `auth` so the
+  //                                    next request — by ANY device — is
+  //                                    forced to pair+claim the new pair.
+  //                                    Returns 200.
+  // Why a fresh identity (not just a no-op-after-delete): a literal "delete
+  // the file" leaves the engine's `auth.box_token` stale until the server
+  // restarts and re-runs ensureAuth(); during that window the engine would
+  // still issue the OLD token from /auth/claim (because `claim` reads from the
+  // in-memory `auth`). Regenerating in place collapses the gap: the device
+  // that called revoke immediately loses access (its old token is dead) AND
+  // a fresh /auth/pair → /auth/claim returns the new token to whoever pairs
+  // next. This matches the spec's "next install mints a new one" semantics
+  // without leaving the engine in a "no token at all" stuck state.
+  async function revoke({ token } = {}) {
+    if (typeof token !== "string" || token === "") {
+      return { ok: false, status: 401, error: "unauthorized" };
+    }
+    if (!isValidToken(token)) {
+      return { ok: false, status: 400, error: "malformed token" };
+    }
+    if (!tokenMatches(auth.box_token, token)) {
+      return { ok: false, status: 401, error: "unauthorized" };
+    }
+    // Caller is the legitimate holder of the current box_token. Mint a fresh
+    // identity, write it, and swap it into the closed-over `auth` so the
+    // very next /authorize and /auth/claim use the new token. The OLD token
+    // is dead from this instant.
+    const fresh = {
+      box_id: genToken(),
+      box_token: genToken(),
+      created_at: now(),
+    };
+    // Clear any active pairing: the code minted under the old identity is
+    // moot now (it would authorize the old token, which nothing holds).
+    pairing.clear();
+    // Wipe the on-disk file first so a power-fail between writes can't leave
+    // a stale token behind, then write the fresh identity atomically. Best-
+    // effort on the unlink (an absent file is fine — the write below re-
+    // creates it).
+    await deleteAuthFn();
+    await saveAuthFn(fresh);
+    // Mutate the closed-over `auth` in place. The caller (index.mjs) holds a
+    // reference to the same object via `boxAuth`, so it sees the new values.
+    auth.box_id = fresh.box_id;
+    auth.box_token = fresh.box_token;
+    auth.created_at = fresh.created_at;
+    return { ok: true, box_id: fresh.box_id };
+  }
+
   return {
     box_id: auth.box_id,
     enforce,
     authorize,
     pair,
     claim,
+    revoke,
     // exposed for /auth/status and tests
     hasActivePairing: () => pairing.hasActive(),
     clearPairing: () => pairing.clear(),

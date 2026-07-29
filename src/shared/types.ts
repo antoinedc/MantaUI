@@ -615,6 +615,17 @@ export const IPC = {
   // and lets the mobile app scan it. Main owns the fetch over the SSH tunnel.
   // Result: { pairingCode, boxId, expiresAt } or { error }.
   authPair: "auth:pair",
+  // BET-357 §2: "Remove this box from the device that holds the current
+  // box_token". The desktop Settings → Connection → "Remove box" action
+  // triggers this channel. Main does DELETE <serverUrl>/auth/revoke with the
+  // current box_token as Bearer (see src/main/unpair.ts + src/server/auth.mjs
+  // revoke), then ALWAYS clears the local config entry — including the
+  // unreachable-box path, which still succeeds locally per the spec.
+  // Input: none (main reads serverUrl/boxToken from the live config). Result:
+  // an UnpairOutcome (src/shared/unpair.mjs) — a structured note that the
+  // renderer's Settings panel surfaces as either a clean success or a
+  // "remote revocation didn't happen, but local credentials are gone" note.
+  authUnpair: "auth:unpair",
 
   // ---- scheduled prompts (manta-server owned) ----
   // Schedules are a manta-SERVER concept (durable jobs fired by the always-on

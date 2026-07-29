@@ -102,6 +102,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [pairingExpiry, setPairingExpiry] = useState<Date | null>(null);
   const [pairingMinting, setPairingMinting] = useState(false);
 
+  // Remove-box (BET-357 §2): the in-flight flag plus the latest outcome so
+  // the Settings panel can render a structured note when remote revocation
+  // didn't reach the box (the unreachable-box fallback is honored regardless
+  // — the local config IS cleared, the note is just informational).
+  const [removingBox, setRemovingBox] = useState(false);
+  const [removeResult, setRemoveResult] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>("connection");
 
@@ -266,6 +276,74 @@ export function Settings({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // Remove this box (BET-357 §2): DELETE <serverUrl>/auth/revoke with the
+  // current box_token, then clear the local config entry regardless of the
+  // remote outcome (the unreachable-box path still succeeds locally per the
+  // spec). On a remote failure we surface a structured note so the user
+  // knows the box's own token is still alive until the next device re-pairs.
+  const removeBox = async () => {
+    if (removingBox) return;
+    // Native confirm — same simplicity the existing "Run setup again" uses
+    // for an irreversible action. The user is about to drop their pairing
+    // and any saved projects; we don't want a one-click accident.
+    const confirmed = window.confirm(
+      "Remove this box from the desktop?\n\n" +
+        "The desktop will forget its pairing and saved projects. " +
+        "If the box is reachable, its current token is also revoked. " +
+        "If the box is offline, the local credentials are cleared and the " +
+        "box's token will be rotated the next time it starts.\n\n" +
+        "Continue?",
+    );
+    if (!confirmed) return;
+    setRemovingBox(true);
+    setRemoveResult(null);
+    // authUnpair is a desktop-only IPC channel (mobile/web have no preload
+    // and therefore can't trigger a remote revoke) — null-check the bridge
+    // so the Settings panel still renders cleanly on those platforms.
+    const preload = getMantaPreload();
+    if (!preload?.authUnpair) {
+      setRemovingBox(false);
+      setRemoveResult({
+        ok: false,
+        message: "Removing a box is only supported in the desktop app.",
+      });
+      return;
+    }
+    try {
+      const outcome = await preload.authUnpair();
+      // Always reflect the cleared state in the store so subsequent Save
+      // calls don't try to re-persist the (now-empty) box identity.
+      await refresh().catch(() => {
+        /* refresh is best-effort; config.json is already cleared */
+      });
+      if (outcome.ok) {
+        // Clean exit: nothing to surface besides the dialog closing.
+        setRemoveResult({ ok: true, message: "" });
+        onClose();
+        return;
+      }
+      // Remote revocation didn't reach the box. The local credentials are
+      // gone — surface the UnpairOutcome.message so the user knows what
+      // happened (and can re-pair from scratch on next launch if they want
+      // to start over cleanly).
+      setRemoveResult({
+        ok: false,
+        message:
+          outcome.message ||
+          "The box's token could not be revoked remotely. Local credentials were cleared.",
+      });
+    } catch (e) {
+      // IPC crash — the local clear also didn't happen. Bail out without
+      // closing so the user can retry.
+      setRemoveResult({
+        ok: false,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setRemovingBox(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-bg z-50 flex">
       {/* Left sidebar navigation */}
@@ -401,6 +479,32 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     Run setup again
                   </button>
                 </div>
+              </div>
+
+              {/* Remove box (BET-357 §2): clears the local pairing triple and
+                  asks the box (when reachable) to revoke the current box_token.
+                  Always clears locally — the unreachable-box path is honored
+                  per the spec, with the UnpairOutcome surfaced as a note when
+                  remote revocation didn't reach the box. */}
+              <div className="border-t border-border pt-6">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-text-faint">
+                    Forget this box on the desktop. If the box is reachable,
+                    its current token is revoked too.
+                  </div>
+                  <button
+                    onClick={removeBox}
+                    disabled={removingBox}
+                    className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-red-400 hover:border-red-400 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                  >
+                    {removingBox ? "Removing…" : "Remove box"}
+                  </button>
+                </div>
+                {removeResult && !removeResult.ok && (
+                  <div className="text-sm text-amber-400 mt-3">
+                    {removeResult.message}
+                  </div>
+                )}
               </div>
             </div>
           )}

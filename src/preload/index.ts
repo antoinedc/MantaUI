@@ -12,6 +12,7 @@ import {
   type InstallerStageSnapshotRow,
 } from "../shared/types.js";
 import type { ClaimOutcome } from "../shared/claim.mjs";
+import type { UnpairOutcome } from "../shared/unpair.mjs";
 import type { PreflightResult } from "../main/installer/preflight.js";
 import type { SshHostEntry } from "../main/installer/sshConfig.js";
 
@@ -49,6 +50,16 @@ const api = {
   // { ok:false } result, NOT a rejected promise.
   authClaim: (input: AuthClaimInput): Promise<ClaimOutcome> =>
     ipcRenderer.invoke(IPC.authClaim, input),
+
+  // BET-357 §2: "Remove this box from the device that holds the current
+  // box_token". Main reads the live { serverUrl, boxToken } from config
+  // (never trusting a renderer-supplied copy — those would be stale the
+  // instant the config changes), DELETEs <serverUrl>/auth/revoke, and
+  // ALWAYS clears the local config entry as a single transactional step.
+  // The unreachable-box path therefore still succeeds locally; the
+  // UnpairOutcome is the structured note the Settings panel renders
+  // ("removed locally — remote revocation didn't reach the box").
+  authUnpair: (): Promise<UnpairOutcome> => ipcRenderer.invoke(IPC.authUnpair),
 
   clipboardWriteText: (text: string): Promise<void> =>
     ipcRenderer.invoke(IPC.clipboardWriteText, text),

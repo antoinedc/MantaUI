@@ -79,6 +79,11 @@ function makeFakePreload(): MantaPreload {
     })),
     installerGetDiagnostics: vi.fn(async () => ""),
     onInstallerEvent: vi.fn(() => vi.fn()),
+    // BET-357 §2: "remove this box" — desktop-only IPC, no-op on
+    // mobile/web. The fake matches the MantaPreload shape; per-method
+    // behavior is exercised by src/renderer/Settings.tsx + the main
+    // process unpairBox tests.
+    authUnpair: vi.fn(async () => ({ ok: true as const })),
   };
 }
 
