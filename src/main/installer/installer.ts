@@ -32,6 +32,7 @@ import {
   type SpawnFn,
 } from "./runner.js";
 import { parseSshConfig, type SshHostEntry } from "./sshConfig.js";
+import { isEmptySshTarget, type SshTarget } from "../../shared/sshTarget.js";
 import { isValidBoxToken } from "../../shared/transport.mjs";
 import {
   resolveChannel,
@@ -145,10 +146,10 @@ export type PreflightDeps = {
 };
 
 export async function preflightBox(
-  alias: string,
+  alias: SshTarget,
   deps: PreflightDeps = {},
 ): Promise<PreflightResult> {
-  if (typeof alias !== "string" || alias.trim() === "") {
+  if (isEmptySshTarget(alias)) {
     throw new Error("preflightBox: alias is required");
   }
   const spawn = deps.spawn;
@@ -176,7 +177,7 @@ export async function preflightBox(
 
 // ---------- individual probes ----------
 
-async function probeReachability(alias: string, spawn?: SpawnFn): Promise<PreflightProbes["reachability"]> {
+async function probeReachability(alias: SshTarget, spawn?: SpawnFn): Promise<PreflightProbes["reachability"]> {
   // BatchMode=yes turns "no auth" into exit code 255 / stderr "Permission
   // denied (publickey)" — not a hang on a passphrase prompt.
   const r = await execRemote(alias, PROBE_REACHABILITY_CMD, {
@@ -200,7 +201,7 @@ async function probeReachability(alias: string, spawn?: SpawnFn): Promise<Prefli
   return "unreachable";
 }
 
-async function probeOs(alias: string, spawn?: SpawnFn): Promise<PreflightProbes["os"]> {
+async function probeOs(alias: SshTarget, spawn?: SpawnFn): Promise<PreflightProbes["os"]> {
   const r = await execRemote(alias, PROBE_OS_CMD, { spawn, timeoutMs: 10_000 });
   if (r.code !== 0) {
     return { id: "unknown", arch: "unknown", release: null };
@@ -213,7 +214,7 @@ async function probeOs(alias: string, spawn?: SpawnFn): Promise<PreflightProbes[
   };
 }
 
-async function probeSudo(alias: string, spawn?: SpawnFn): Promise<boolean> {
+async function probeSudo(alias: SshTarget, spawn?: SpawnFn): Promise<boolean> {
   const r = await execRemote(alias, PROBE_SUDO_CMD, { spawn, timeoutMs: 10_000 });
   // `sudo -n true` exit 0 + no password prompt → passwordless sudo.
   // Anything else (exit != 0, or "password" in stderr) → not available.
@@ -221,7 +222,7 @@ async function probeSudo(alias: string, spawn?: SpawnFn): Promise<boolean> {
   return false;
 }
 
-async function probeTailscale(alias: string, spawn?: SpawnFn): Promise<PreflightProbes["tailscale"]> {
+async function probeTailscale(alias: SshTarget, spawn?: SpawnFn): Promise<PreflightProbes["tailscale"]> {
   const r = await execRemote(alias, PROBE_TAILSCALE_CMD, { spawn, timeoutMs: 10_000 });
   if (r.code !== 0 || r.stdout.trim() === "") {
     return { running: false, ipv4: null };
@@ -230,7 +231,7 @@ async function probeTailscale(alias: string, spawn?: SpawnFn): Promise<Preflight
   return parsed ?? { running: false, ipv4: null };
 }
 
-async function probeClock(alias: string, spawn?: SpawnFn): Promise<number> {
+async function probeClock(alias: SshTarget, spawn?: SpawnFn): Promise<number> {
   const local = Math.floor(Date.now() / 1000);
   const r = await execRemote(alias, PROBE_CLOCK_CMD, { spawn, timeoutMs: 10_000 });
   if (r.code !== 0) return 0;
@@ -239,7 +240,7 @@ async function probeClock(alias: string, spawn?: SpawnFn): Promise<number> {
   return local - remote;
 }
 
-async function probeAuthFile(alias: string, spawn?: SpawnFn): Promise<boolean> {
+async function probeAuthFile(alias: SshTarget, spawn?: SpawnFn): Promise<boolean> {
   const r = await execRemote(alias, PROBE_AUTH_FILE_CMD, { spawn, timeoutMs: 10_000 });
   return r.code === 0 && r.stdout.trim() === "INSTALLED";
 }
@@ -291,11 +292,11 @@ export type InstallHandle = {
 };
 
 export function runInstall(
-  alias: string,
+  alias: SshTarget,
   sink: InstallSink,
   deps: InstallDeps = {},
 ): InstallHandle {
-  if (typeof alias !== "string" || alias.trim() === "") {
+  if (isEmptySshTarget(alias)) {
     throw new Error("runInstall: alias is required");
   }
   // Local name `cfg` (not `channelConfig`) so it doesn't shadow the imported
@@ -391,10 +392,10 @@ export type MintAndClaimDeps = {
  * {pairing_code, box_id, serverUrl} block the desktop parses.
  */
 export async function mintAndClaim(
-  alias: string,
+  alias: SshTarget,
   deps: MintAndClaimDeps,
 ): Promise<ClaimOutcome> {
-  if (typeof alias !== "string" || alias.trim() === "") {
+  if (isEmptySshTarget(alias)) {
     throw new Error("mintAndClaim: alias is required");
   }
   if (typeof deps.persist !== "function") {

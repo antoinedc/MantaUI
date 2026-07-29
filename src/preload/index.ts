@@ -15,6 +15,7 @@ import type { ClaimOutcome } from "../shared/claim.mjs";
 import type { UnpairOutcome } from "../shared/unpair.mjs";
 import type { PreflightResult } from "../main/installer/preflight.js";
 import type { SshHostEntry } from "../main/installer/sshConfig.js";
+import type { SshTarget } from "../shared/sshTarget.js";
 
 // This is the OS-bridge + pairing SUBSET of the full `Api` contract
 // (`src/shared/api.ts`) — the methods the desktop preload runtime actually
@@ -194,7 +195,7 @@ const api = {
   // (line / stage / preflight-failed / done / error). The renderer matches
   // events to its handle id so an out-of-band cancel doesn't lose events
   // mid-flight.
-  installerStart: (input: { alias: string }): Promise<{ handleId: string }> =>
+  installerStart: (input: { alias: SshTarget }): Promise<{ handleId: string }> =>
     ipcRenderer.invoke(IPC.installerStart, input),
 
   // Cancel the in-flight install. Idempotent: safe to call on a stale
@@ -209,7 +210,7 @@ const api = {
   // renderer treats success and failure the same way regardless of which
   // entry point produced them.
   installerMintAndClaim: (input: {
-    alias: string;
+    alias: SshTarget;
     claimUrlOverride?: string;
   }): Promise<ClaimOutcome> =>
     ipcRenderer.invoke(IPC.installerMintAndClaim, input),

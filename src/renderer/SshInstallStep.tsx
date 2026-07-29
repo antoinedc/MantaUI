@@ -1,5 +1,5 @@
 // SshInstallStep.tsx — SSH installer harness for the desktop onboarding
-// "Connect your box" step (BET-355 / BET-382 / BET-383).
+// "Connect your box" step (BET-355 / BET-382 / BET-383 / BET-384).
 //
 // PairStep renders this component inline as the primary surface when an
 // SSH installer preload is available and no deep-link is pending. The
@@ -15,16 +15,33 @@
 // The six-row checklist is gone in favour of one status line over an
 // always-mounted, auto-scrolling log that collapses on success.
 //
-// All decision logic lives in the main-process installer module. This
-// component is React state + per-event dispatch + JSX, nothing more.
+// BET-384: the host list can be re-read without an app restart (the
+// `loadHosts()` callback backs both the mount effect and the refresh
+// button), and "Custom host…" is a permanent last entry in the SAME
+// `<select>` — there is exactly one host control, never a select-or-input
+// branch. Selecting it reveals a small panel (host/port/user/identity
+// file); `resolveInstallTarget` (src/shared/sshTarget.ts) turns whichever
+// branch is active into the single value installerStart /
+// installerMintAndClaim consume — this component assembles no target
+// string of its own.
+//
+// All decision logic lives in the main-process installer module (plus the
+// pure src/shared/sshTarget.ts target resolver). This component is React
+// state + per-event dispatch + JSX, nothing more.
 
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import {
   getMantaPreload,
   type InstallerEvent,
   type PreflightFailure,
 } from "./preloadAccess";
 import { currentStageInfo, type InstallStageId } from "../shared/installStages";
+import {
+  CUSTOM_HOST_VALUE,
+  resolveInstallTarget,
+  sshTargetLabel,
+  type HostFieldSelection,
+} from "../shared/sshTarget";
 
 const ACCENT = "#5A88FF";
 const DANGER = "#FF7A88";
@@ -34,6 +51,11 @@ const OK_GREEN = "#22C55E";
 // (handlers.ts LOG_TAIL_MAX); the renderer needs its own cap too, or a long
 // install grows the DOM without bound.
 const LOG_LINES_MAX = 500;
+
+// How long the count line's "· just now" suffix stays visible after a
+// manual refresh before decaying back to the plain count (BET-384 review
+// cycle 1 nit).
+const JUST_REFRESHED_DECAY_MS = 60_000;
 
 const INITIAL_STAGE: InstallStageId = "preflight";
 const INITIAL_STAGE_INFO = currentStageInfo(INITIAL_STAGE);
@@ -67,7 +89,24 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     [],
   );
   const [hostsLoaded, setHostsLoaded] = useState(false);
-  const [alias, setAlias] = useState("");
+  const [hostsLoading, setHostsLoading] = useState(false);
+  // True right after a manual refresh completes — flips the count line's
+  // suffix to "· just now" (BET-384). Decays back to false on its own
+  // (JUST_REFRESHED_DECAY_MS below) — review cycle 1 nit: a "just now"
+  // that never expires is worse than no timestamp at all.
+  const [justRefreshed, setJustRefreshed] = useState(false);
+  // The <select> value: a real alias, or CUSTOM_HOST_VALUE. Starts on the
+  // sentinel so the select always has a valid selected option (one of the
+  // custom option, which is always rendered) even before the first
+  // installerListHosts() response lands — no empty-string flash.
+  const [alias, setAlias] = useState(CUSTOM_HOST_VALUE);
+  // Custom-host panel fields (BET-384) — only read when alias ===
+  // CUSTOM_HOST_VALUE. Never persisted, never written to ~/.ssh/config.
+  const [customHost, setCustomHost] = useState("");
+  const [customPort, setCustomPort] = useState("");
+  const [customUser, setCustomUser] = useState("");
+  const [customIdentityFile, setCustomIdentityFile] = useState("");
+  const [targetError, setTargetError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [activeHandle, setActiveHandle] = useState<string | null>(null);
   const [stage, setStage] = useState<InstallStageId>(INITIAL_STAGE);
@@ -91,25 +130,89 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   const [claimError, setClaimError] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
-  // ---------- One-shot loads on mount ----------
+  // ---------- Host list load (mount + manual refresh share this) ----------
+  //
+  // BET-384: editing ~/.ssh/config used to require restarting the whole app
+  // because the list was read once in a mount effect with no way back in.
+  // `loadHosts()` is the single fetch both the mount effect and the
+  // refresh button call — re-reads the config and nothing else (no
+  // preflight, no re-check; there is nothing left to re-run since BET-383
+  // folded preflight into the install click).
+  const aliveRef = useRef(true);
   useEffect(() => {
-    let alive = true;
-    (async () => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+  // True once the FIRST load (success or failure) has completed. `alias`
+  // starts on CUSTOM_HOST_VALUE as a rendering bootstrap (see its own
+  // comment below) — that initial value is not a real user choice, so it
+  // must not be treated as "the user deliberately picked Custom host" the
+  // one time loadHosts's setAlias updater sees it. Caught while fixing the
+  // review cycle 1 Block: without this, a populated ~/.ssh/config would
+  // never auto-select the first alias — `prev === CUSTOM_HOST_VALUE` would
+  // always be true on that first pass and short-circuit before the
+  // list[0]-alias fallback ever ran.
+  const hasLoadedOnceRef = useRef(false);
+
+  const loadHosts = useCallback(
+    async (opts?: { manual?: boolean }) => {
+      setHostsLoading(true);
+      const isFirstLoad = !hasLoadedOnceRef.current;
       try {
         const list = await preload.installerListHosts();
-        if (!alive) return;
+        if (!aliveRef.current) return;
         setHosts(list);
-        setHostsLoaded(true);
-        if (list.length > 0 && list[0].alias) setAlias(list[0].alias);
+        setAlias((prev) => {
+          if (isFirstLoad) {
+            // Bootstrap pass: `prev` is just the initial sentinel, not a
+            // real selection — pick the first alias when the config has
+            // entries, or fall back to the sentinel (decision #3) when it
+            // doesn't.
+            return list.length > 0 ? list[0].alias : CUSTOM_HOST_VALUE;
+          }
+          // A later refresh: keep the current selection if it's still
+          // valid (still present in the refreshed list, or the custom
+          // sentinel — refresh never closes an open custom panel the user
+          // deliberately opened). Otherwise fall back the same way.
+          if (prev === CUSTOM_HOST_VALUE) return prev;
+          if (list.some((h) => h.alias === prev)) return prev;
+          return list.length > 0 ? list[0].alias : CUSTOM_HOST_VALUE;
+        });
+        if (opts?.manual) setJustRefreshed(true);
       } catch {
-        if (!alive) return;
-        setHostsLoaded(true);
+        if (!aliveRef.current) return;
+        // First-load failure: hosts/alias are already at their
+        // [] / CUSTOM_HOST_VALUE initial state, so there's nothing to
+        // reset — the empty-config UI (decision #3) falls out for free.
+        // A LATER refresh's failure must NOT discard whatever host list
+        // and selection were already on screen — a transient read error
+        // is not license to yank the panel open out from under the user
+        // (review cycle 1 nit).
+        if (isFirstLoad) {
+          setHosts([]);
+          setAlias(CUSTOM_HOST_VALUE);
+        }
+      } finally {
+        if (aliveRef.current) {
+          setHostsLoaded(true);
+          setHostsLoading(false);
+        }
+        hasLoadedOnceRef.current = true;
       }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [preload]);
+    },
+    [preload],
+  );
+
+  useEffect(() => {
+    void loadHosts();
+    // Mount-only — loadHosts is stable across the preload's lifetime (the
+    // preload accessor never changes after mount) and the refresh button
+    // calls it directly, so re-running this effect on every loadHosts
+    // identity change would just be the same fetch twice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Recover any in-flight install on mount (a page refresh mid-install
   // shouldn't strand the user), or a preflight failure the user hasn't
@@ -207,8 +310,38 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     return () => clearInterval(t);
   }, [running]);
 
+  // Decay "· just now" back to the plain count line after a while — a
+  // timestamp that never expires reads as wrong once enough time has
+  // actually passed (BET-384 review cycle 1 nit).
+  useEffect(() => {
+    if (!justRefreshed) return;
+    const t = setTimeout(() => setJustRefreshed(false), JUST_REFRESHED_DECAY_MS);
+    return () => clearTimeout(t);
+  }, [justRefreshed]);
+
   // ---------- Actions ----------
+
+  // Current host-picker selection in the shape resolveInstallTarget takes —
+  // one function, called wherever the resolved target is needed (BET-384:
+  // "the component contains no target-string assembly", only this
+  // pass-through into the pure resolver).
+  function currentSelection(): HostFieldSelection {
+    return {
+      alias,
+      host: customHost,
+      port: customPort,
+      user: customUser,
+      identityFile: customIdentityFile,
+    };
+  }
+
   async function startInstall() {
+    const resolved = resolveInstallTarget(currentSelection());
+    if (!resolved.ok) {
+      setTargetError(resolved.error);
+      return;
+    }
+    setTargetError(null);
     setInstallError(null);
     setPreflightFailure(null);
     setLines([]);
@@ -229,7 +362,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     // main process's response comes back.
     setRunning(true);
     try {
-      const { handleId } = await preload.installerStart({ alias: alias.trim() });
+      const { handleId } = await preload.installerStart({ alias: resolved.target });
       setActiveHandle(handleId);
     } catch (e) {
       setRunning(false);
@@ -243,11 +376,16 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   }
 
   async function runClaim() {
+    const resolved = resolveInstallTarget(currentSelection());
+    if (!resolved.ok) {
+      setClaimError(resolved.error);
+      return;
+    }
     setClaimRunning(true);
     setClaimError(null);
     try {
       const outcome = (await preload.installerMintAndClaim({
-        alias: alias.trim(),
+        alias: resolved.target,
       })) as { ok: boolean };
       if (outcome.ok) {
         // Mirror the manual PairStep onPaired — advances onboarding to
@@ -268,17 +406,26 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     // the time this button can be visible. No placeholder.
     const s = await preload.installerState();
     if (!s.preflight) return;
+    const resolved = resolveInstallTarget(currentSelection());
     const r = await preload.installerGetDiagnostics({
       preflight: s.preflight,
       stage,
       logTail: lines,
-      alias,
+      alias: resolved.ok ? sshTargetLabel(resolved.target) : alias,
     });
     await navigator.clipboard.writeText(r);
   }
 
   // ---------- Render ----------
-  const installDisabled = running || claimRunning || !alias.trim();
+  const installDisabled =
+    running || claimRunning || !resolveInstallTarget(currentSelection()).ok;
+  const hostCountLabel = hostsLoading
+    ? "reading ~/.ssh/config…"
+    : !hostsLoaded
+      ? ""
+      : hosts.length === 0
+        ? "No hosts in ~/.ssh/config"
+        : `${hosts.length} hosts from ~/.ssh/config${justRefreshed ? " · just now" : ""}`;
   // Keep the panel (status line + log) mounted through an install error too
   // — that's the log line the user needs most ("is it stuck, or just
   // slow?"). Only the preflight-failure card excludes it (nothing was
@@ -290,18 +437,27 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   return (
     <div className="space-y-5">
       {/* Host picker — PairStep owns the step-level heading + intro
-          (BET-382); this component drops straight into the picker. */}
+          (BET-382); this component drops straight into the picker.
+          BET-384: exactly one host control, always a <select> — "Custom
+          host…" is a permanent last option, present whether or not the
+          config has entries, never a second input rendered alongside it. */}
       <section className="space-y-2">
-        <label className="block text-sm font-medium" htmlFor="ssh-host">
-          Host
-        </label>
-        {hostsLoaded && hosts.length > 0 ? (
+        <div className="flex items-center justify-between gap-2">
+          <label className="text-sm font-medium" htmlFor="ssh-host">
+            Host
+          </label>
+          <span className="text-xs text-text-faint">{hostCountLabel}</span>
+        </div>
+        <div className="flex gap-2">
           <select
             id="ssh-host"
             value={alias}
-            onChange={(e) => setAlias(e.target.value)}
+            onChange={(e) => {
+              setAlias(e.target.value);
+              setTargetError(null);
+            }}
             disabled={running || claimRunning}
-            className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+            className="flex-1 min-w-0 rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
           >
             {hosts.map((h) => (
               <option key={h.alias} value={h.alias}>
@@ -309,24 +465,158 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 {h.patterns.length > 1 ? ` (${h.patterns.join(", ")})` : ""}
               </option>
             ))}
+            <option value={CUSTOM_HOST_VALUE}>Custom host…</option>
           </select>
-        ) : (
-          <input
-            id="ssh-host"
-            type="text"
-            value={alias}
-            onChange={(e) => setAlias(e.target.value)}
-            placeholder="user@box.example"
-            disabled={running || claimRunning}
-            className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-          />
+          <button
+            type="button"
+            onClick={() => void loadHosts({ manual: true })}
+            disabled={hostsLoading || running || claimRunning}
+            aria-label="Refresh host list"
+            title="Re-read ~/.ssh/config"
+            className="w-[34px] h-[34px] shrink-0 flex items-center justify-center rounded-md bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={`w-3.5 h-3.5${hostsLoading ? " animate-spin" : ""}`}
+              aria-hidden
+            >
+              <path d="M21 12a9 9 0 1 1-2.6-6.4" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Custom host panel — only rendered for the custom sentinel, AND
+            only once the host load has settled (review cycle 1 Block):
+            `alias` starts on the sentinel so the <select> always has a
+            valid selected option before installerListHosts() resolves,
+            but painting the panel during that window means a populated
+            ~/.ssh/config flashes the full four-field panel open and then
+            collapses once the real alias list lands. Gating on
+            `hostsLoaded` too keeps decision #3 intact — hostsLoaded is
+            true in both loadHosts' success and catch paths, so the
+            empty-config case still opens the panel pre-selected, exactly
+            as required — while a populated config never shows it before
+            the list is ready. No second host control ever coexists with
+            the select either way. */}
+        {hostsLoaded && alias === CUSTOM_HOST_VALUE && (
+          <div className="rounded-md border border-border bg-bg-soft p-3.5 space-y-2.5">
+            <div className="grid grid-cols-[1fr_90px] gap-2.5">
+              <div className="flex flex-col gap-1">
+                <label
+                  className="text-[11px] font-medium text-text-muted"
+                  htmlFor="ssh-custom-host"
+                >
+                  Host or IP
+                </label>
+                <input
+                  id="ssh-custom-host"
+                  type="text"
+                  placeholder="box.example.com"
+                  value={customHost}
+                  onChange={(e) => {
+                    setCustomHost(e.target.value);
+                    setTargetError(null);
+                  }}
+                  disabled={running || claimRunning}
+                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label
+                  className="text-[11px] font-medium text-text-muted"
+                  htmlFor="ssh-custom-port"
+                >
+                  Port
+                </label>
+                <input
+                  id="ssh-custom-port"
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="22"
+                  value={customPort}
+                  onChange={(e) => {
+                    setCustomPort(e.target.value);
+                    setTargetError(null);
+                  }}
+                  disabled={running || claimRunning}
+                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="flex flex-col gap-1">
+                <label
+                  className="text-[11px] font-medium text-text-muted"
+                  htmlFor="ssh-custom-user"
+                >
+                  User
+                </label>
+                <input
+                  id="ssh-custom-user"
+                  type="text"
+                  placeholder="root"
+                  value={customUser}
+                  onChange={(e) => {
+                    setCustomUser(e.target.value);
+                    setTargetError(null);
+                  }}
+                  disabled={running || claimRunning}
+                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label
+                  className="text-[11px] font-medium text-text-muted"
+                  htmlFor="ssh-custom-identity"
+                >
+                  Identity file
+                </label>
+                {/* No Browse button — MantaPreload exposes no native file
+                    dialog bridge today. A plain text input is the whole
+                    control until that IPC channel exists (follow-up
+                    filed, BET-384 doesn't add it). */}
+                <input
+                  id="ssh-custom-identity"
+                  type="text"
+                  placeholder="~/.ssh/id_ed25519"
+                  value={customIdentityFile}
+                  onChange={(e) => {
+                    setCustomIdentityFile(e.target.value);
+                    setTargetError(null);
+                  }}
+                  disabled={running || claimRunning}
+                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+              </div>
+            </div>
+            <p className="text-xs text-text-faint">
+              Leave a field empty to let OpenSSH decide. These are used for
+              this box only — your ~/.ssh/config is never written to.
+            </p>
+          </div>
         )}
-        {hostsLoaded && hosts.length === 0 && (
-          <p className="text-xs text-text-muted">
-            No hosts found in ~/.ssh/config. Type the SSH alias or
-            user@host:port directly above.
+
+        {/* Hoisted out of the custom panel (review cycle 1 nit): the panel
+            only renders for the custom branch, but resolveInstallTarget
+            can also reject the alias branch (defensive — unreachable
+            through this UI today since the <select>'s only values are a
+            parsed alias or the sentinel, but resolveInstallTarget is a
+            shared pure function and must not silently swallow a future
+            caller's bad input). Rendering the error here, outside the
+            panel, means it's never lost regardless of which branch
+            produced it. */}
+        {targetError && (
+          <p className="text-xs" style={{ color: DANGER }}>
+            {targetError}
           </p>
         )}
+
         <div className="flex gap-2 pt-2">
           <button
             onClick={startInstall}

@@ -31,6 +31,12 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { parseSshG, type ResolvedSshConnection } from "./sshResolved.js";
+import {
+  isEmptySshTarget,
+  sshTargetDestination,
+  sshTargetExtraArgs,
+  type SshTarget,
+} from "../../shared/sshTarget.js";
 
 export type SpawnFn = (
   command: string,
@@ -75,11 +81,11 @@ export type ExecRemoteResult = {
 };
 
 export async function execRemote(
-  alias: string,
+  alias: SshTarget,
   command: string,
   options: ExecRemoteOptions = {},
 ): Promise<ExecRemoteResult> {
-  if (typeof alias !== "string" || alias.trim() === "") {
+  if (isEmptySshTarget(alias)) {
     throw new Error("execRemote: alias is required");
   }
   if (typeof command !== "string" || command === "") {
@@ -146,11 +152,11 @@ export type RemoteStreamHandle = {
 };
 
 export function streamRemote(
-  alias: string,
+  alias: SshTarget,
   command: string,
   options: StreamRemoteOptions,
 ): RemoteStreamHandle {
-  if (typeof alias !== "string" || alias.trim() === "") {
+  if (isEmptySshTarget(alias)) {
     throw new Error("streamRemote: alias is required");
   }
   if (typeof command !== "string" || command === "") {
@@ -220,14 +226,33 @@ export async function probeSshG(
 // can SEE the safety controls in one place (BatchMode=yes is the load-bearing
 // one — it forces ssh to NEVER prompt, so a half-configured box fails the
 // preflight cleanly instead of hanging the renderer on a passphrase prompt).
-function buildArgs(alias: string, command: string, opts: RemoteOptions): string[] {
+//
+// A custom target (BET-384) contributes `-p` / `-i` via sshTargetExtraArgs —
+// this is the ONE place that turns a resolved SshTarget into argv, so an
+// alias and a custom host produce an identical argv shape apart from those
+// two flags and the destination itself.
+//
+// The `--` before the destination (review cycle 1 nit, defence in depth):
+// a custom target's Host-or-IP field is user-typed with no validation
+// against a leading `-`, and without a terminator ssh(1) reads a
+// destination like `-oProxyCommand=…` as another option rather than a
+// (bogus) hostname — verified empirically: `ssh -o … -oFoo=x true` fails
+// with "Bad configuration option: foobarbaz" (parsed as a flag), while
+// `ssh -o … -- -oFoo=x true` fails with "hostname contains invalid
+// characters" (correctly read as the destination). Not a live
+// vulnerability today (spawn runs without `shell: true`, so there's no
+// shell to inject into), but `--` closes the shape at zero cost and
+// covers both the alias and custom-target branches from this one site.
+function buildArgs(alias: SshTarget, command: string, opts: RemoteOptions): string[] {
   return [
     "-o",
     `ConnectTimeout=${opts.connectTimeoutSec ?? 10}`,
     "-o",
     "BatchMode=yes", // never prompt; non-zero exit on key auth failure
+    ...sshTargetExtraArgs(alias),
     ...(opts.forceTty ? ["-tt"] : []),
-    alias.trim(),
+    "--",
+    sshTargetDestination(alias),
     command,
   ];
 }
