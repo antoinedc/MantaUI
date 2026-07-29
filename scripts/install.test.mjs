@@ -1462,6 +1462,115 @@ test("install.sh waits for the box id before rendering the Caddy vhost (first-ru
 });
 
 // ----------------------------------------------------------------------------
+// `manta` CLI shim — MANTA_CHANNEL propagation (BET-386 review cycle 2)
+// ----------------------------------------------------------------------------
+//
+// The reviewer's Block: resolveConfig() deliberately never persists the
+// channel to disk (BET-370), so the ONLY way a later `manta pair` re-run (in
+// a fresh shell, with no MANTA_CHANNEL in its environment) can still learn
+// the install-time channel is if install.sh bakes it into the CLI shim it
+// drops on PATH — the same way it already bakes MANTA_HOME and NODE. Two
+// tests: a static-layout guard (the heredoc's shape) and a dynamic
+// behavioral test that actually executes the extracted, unmodified
+// production heredoc and proves the value reaches a child process's env.
+
+test("install.sh's manta CLI shim heredoc bakes + exports MANTA_CHANNEL before the exec (static layout)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const shimStart = src.indexOf('cat > "$MANTA_SHIM" <<SHIM');
+  const shimEnd = src.indexOf("\nSHIM", shimStart);
+  assert.ok(
+    shimStart !== -1 && shimEnd !== -1,
+    "could not locate the manta CLI shim heredoc in install.sh — did it move?",
+  );
+  const heredoc = src.slice(shimStart, shimEnd);
+  // Baked the same way MANTA_HOME/NODE already are (unescaped $, expanded
+  // at heredoc-write time against install.sh's own resolved value).
+  assert.match(heredoc, /^MANTA_CHANNEL="\$MANTA_CHANNEL"$/m);
+  // Exported so the execed manta-pair.mjs child process (which reads
+  // process.env.MANTA_CHANNEL) actually sees it — a plain shell var set by
+  // a piped-in env var is not automatically exported once reassigned via
+  // ${VAR:-default} at the OUTER install.sh level, and the shim itself
+  // starts a fresh, unexported local var when it's baked as a literal.
+  assert.match(heredoc, /^export MANTA_CHANNEL$/m);
+  // Both must appear BEFORE the case/exec so the export is in effect when
+  // `manta pair` runs.
+  const bakedAt = heredoc.search(/^MANTA_CHANNEL="\$MANTA_CHANNEL"$/m);
+  const exportedAt = heredoc.search(/^export MANTA_CHANNEL$/m);
+  const execAt = heredoc.indexOf('exec "\\$NODE"');
+  assert.ok(bakedAt < execAt && exportedAt < execAt, "MANTA_CHANNEL must be baked + exported before the exec");
+});
+
+test("install.sh's manta CLI shim propagates MANTA_CHANNEL to `manta pair` re-runs (dynamic, BET-386 review cycle 2)", () => {
+  // Extracts and executes the REAL, unmodified shim-writing block (between
+  // its two stable anchor lines) rather than a hand-copied duplicate, so a
+  // future edit to the real heredoc can't silently drift out of sync with
+  // this test. Runs it with a fake $HOME (so the shim writes into a temp
+  // dir, never ~/.local/bin) and a fake $NODE (a stub that just echoes
+  // whether MANTA_CHANNEL reached its environment, standing in for the
+  // real manta-pair.mjs/resolveConfig() which reads process.env.MANTA_CHANNEL).
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const startMarker = 'MANTA_BIN_DIR="$HOME/.local/bin"';
+  const endMarker = 'chmod +x "$MANTA_SHIM"';
+  const startIdx = src.indexOf(startMarker);
+  const endIdx = src.indexOf(endMarker, startIdx);
+  assert.ok(
+    startIdx !== -1 && endIdx !== -1,
+    "could not locate the manta CLI shim block in install.sh — did the anchor lines move?",
+  );
+  const block = src.slice(startIdx, endIdx + endMarker.length);
+
+  const dir = mkdtempSync(join(tmpdir(), "manta-shim-"));
+  try {
+    const fakeNode = join(dir, "fake-node");
+    writeFileSync(
+      fakeNode,
+      `#!/usr/bin/env bash\necho "MANTA_CHANNEL_SEEN=\${MANTA_CHANNEL:-<unset>}"\n`,
+      { mode: 0o755 },
+    );
+    const script = join(dir, "shim-test.sh");
+    writeFileSync(
+      script,
+      `#!/usr/bin/env bash
+set -euo pipefail
+HOME="${dir}"
+MANTA_HOME="/tmp/fake-manta-home"
+NODE="${fakeNode}"
+MANTA_CHANNEL="staging"
+${block}
+"\$MANTA_SHIM" pair
+`,
+      { mode: 0o755 },
+    );
+    const out = execSync(`bash ${script}`, { encoding: "utf8" });
+    // The child process (fake-node, standing in for manta-pair.mjs) saw
+    // MANTA_CHANNEL — the export actually worked, not just the assignment.
+    assert.match(out, /MANTA_CHANNEL_SEEN=staging/);
+
+    const shimContent = readFileSync(join(dir, ".local", "bin", "manta"), "utf-8");
+    assert.match(shimContent, /^MANTA_CHANNEL="staging"$/m);
+    assert.match(shimContent, /^export MANTA_CHANNEL$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install.sh's manta CLI shim defaults MANTA_CHANNEL to prod when unset at install time", () => {
+  // Mirrors resolveConfig()'s own "unset -> prod" fallback contract — the
+  // shim must never be unbound (set -u in the shim would otherwise crash
+  // `manta pair` on a box installed without MANTA_CHANNEL in its env).
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const startIdx = src.indexOf('MANTA_HOME="${MANTA_HOME:-$HOME/manta}"');
+  assert.ok(startIdx !== -1, "could not locate the MANTA_HOME resolution line in install.sh");
+  const nearby = src.slice(startIdx, startIdx + 600);
+  assert.match(
+    nearby,
+    /MANTA_CHANNEL="\$\{MANTA_CHANNEL:-prod\}"/,
+    "MANTA_CHANNEL must default to prod (same fallback as resolveConfig()) near the MANTA_HOME resolution",
+  );
+  assert.match(nearby, /export MANTA_CHANNEL/);
+});
+
+// ----------------------------------------------------------------------------
 // manifest_get — the bash helper install.sh uses to read key=value from the
 // release manifest BEFORE any node exists on the box.
 // ----------------------------------------------------------------------------
