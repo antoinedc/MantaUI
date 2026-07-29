@@ -11,29 +11,29 @@ import { vi } from "vitest";
 import type { SpawnFn } from "./runner.js";
 
 // ---------------------------------------------------------------------------
-// FakeChildProcess — a ChildProcess-shaped stand-in. stdout/stderr are
-// Readables we can push to; exit/error can be fired by the test; kill()
-// records how many times it was called. Implements the minimum surface the
-// runner touches. Used by runner.test.ts + installer.test.ts.
+// buildFakeChild — a ChildProcess-shaped fake: stdout/stderr are Readables
+// we can push to, and `exit` / `error` can be emitted by the test. `.kill()`
+// is recorded so cancel tests can assert on it. Implements the minimum
+// surface the runner touches. Used by both makeFakeChild (returns a
+// controlled handle) and makeProbeSpawn (returns the fake directly after
+// auto-emitting). ONE source so jscpd doesn't flag the duplication.
 // ---------------------------------------------------------------------------
 
-export type FakeChildHandle = {
-  // The fake process itself, typed loosely (a real ChildProcess has many
-  // fields we don't touch — using `any` keeps the test scaffolding clean).
-  // @ts-expect-error – deliberate: narrow intentionally to the SpawnFn shape.
-  child: Parameters<SpawnFn>[0] extends infer _X ? (infer _X) : never;
-  pushStdout: (s: string) => void;
-  pushStderr: (s: string) => void;
-  fireExit: (code: number | null, signal?: NodeJS.Signals) => void;
-  fireError: (err: Error) => void;
-  killCount: () => number;
+type FakeChild = {
+  stdout: Readable;
+  stderr: Readable;
+  emit: (event: string, ...args: unknown[]) => boolean;
+  kill: ReturnType<typeof vi.fn>;
+  on: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  once: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  stdio: unknown[];
 };
 
-export function makeFakeChild(): FakeChildHandle {
+function buildFakeChild(): FakeChild {
   const stdout = new Readable({ read() {} });
   const stderr = new Readable({ read() {} });
   const emitter = new EventEmitter();
-  const fake: any = {
+  return {
     stdio: ["ignore", stdout, stderr],
     stdout,
     stderr,
@@ -42,19 +42,32 @@ export function makeFakeChild(): FakeChildHandle {
     emit: emitter.emit.bind(emitter),
     kill: vi.fn(),
   };
+}
+
+export type FakeChildHandle = {
+  child: ReturnType<SpawnFn>;
+  pushStdout: (s: string) => void;
+  pushStderr: (s: string) => void;
+  fireExit: (code: number | null, signal?: NodeJS.Signals) => void;
+  fireError: (err: Error) => void;
+  killCount: () => number;
+};
+
+export function makeFakeChild(): FakeChildHandle {
+  const fake = buildFakeChild();
   return {
     child: fake as any,
-    pushStdout: (s) => stdout.push(Buffer.from(s)),
-    pushStderr: (s) => stderr.push(Buffer.from(s)),
-    fireExit: (code, signal) => emitter.emit("exit", code, signal ?? null),
-    fireError: (err) => emitter.emit("error", err),
+    pushStdout: (s) => fake.stdout.push(Buffer.from(s)),
+    pushStderr: (s) => fake.stderr.push(Buffer.from(s)),
+    fireExit: (code, signal) => fake.emit("exit", code, signal ?? null),
+    fireError: (err) => fake.emit("error", err),
     killCount: () => (fake.kill as ReturnType<typeof vi.fn>).mock.calls.length,
   };
 }
 
 // ---------------------------------------------------------------------------
 // makeProbeSpawn — a SpawnFn that pattern-matches the command line and
-// returns the matching response. Used by installer.test.ts to simulate
+// returns the matching fake response. Used by installer.test.ts to simulate
 // the six preflight probes + the install + the manta-pair mint.
 // ---------------------------------------------------------------------------
 
@@ -71,22 +84,11 @@ export function makeProbeSpawn(
       found !== undefined
         ? responses[found]
         : { code: 1, stdout: "", stderr: "unknown probe" };
-    const stdout = new Readable({ read() {} });
-    const stderr = new Readable({ read() {} });
-    const emitter = new EventEmitter();
-    const fake: any = {
-      stdio: ["ignore", stdout, stderr],
-      stdout,
-      stderr,
-      on: emitter.on.bind(emitter),
-      once: emitter.once.bind(emitter),
-      emit: emitter.emit.bind(emitter),
-      kill: vi.fn(),
-    };
+    const fake = buildFakeChild();
     setImmediate(() => {
-      if (r.stdout) stdout.push(Buffer.from(r.stdout));
-      if (r.stderr) stderr.push(Buffer.from(r.stderr));
-      emitter.emit("exit", r.code, null);
+      if (r.stdout) fake.stdout.push(Buffer.from(r.stdout));
+      if (r.stderr) fake.stderr.push(Buffer.from(r.stderr));
+      fake.emit("exit", r.code, null);
     });
     return fake as any;
   };
