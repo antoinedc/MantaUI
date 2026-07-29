@@ -77,7 +77,8 @@ export function makeProbeSpawn(
   responses: Record<string, ProbeResponse>,
 ): SpawnFn {
   return (_command, args) => {
-    // args layout: ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes", alias, command]
+    // args layout: ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes", "--", alias, command]
+    // (BET-384: "--" terminates option parsing before the destination)
     const cmd = args[args.length - 1];
     const found = Object.keys(responses).find((k) => cmd.includes(k));
     const r =

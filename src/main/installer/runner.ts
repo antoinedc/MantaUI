@@ -231,6 +231,18 @@ export async function probeSshG(
 // this is the ONE place that turns a resolved SshTarget into argv, so an
 // alias and a custom host produce an identical argv shape apart from those
 // two flags and the destination itself.
+//
+// The `--` before the destination (review cycle 1 nit, defence in depth):
+// a custom target's Host-or-IP field is user-typed with no validation
+// against a leading `-`, and without a terminator ssh(1) reads a
+// destination like `-oProxyCommand=…` as another option rather than a
+// (bogus) hostname — verified empirically: `ssh -o … -oFoo=x true` fails
+// with "Bad configuration option: foobarbaz" (parsed as a flag), while
+// `ssh -o … -- -oFoo=x true` fails with "hostname contains invalid
+// characters" (correctly read as the destination). Not a live
+// vulnerability today (spawn runs without `shell: true`, so there's no
+// shell to inject into), but `--` closes the shape at zero cost and
+// covers both the alias and custom-target branches from this one site.
 function buildArgs(alias: SshTarget, command: string, opts: RemoteOptions): string[] {
   return [
     "-o",
@@ -239,6 +251,7 @@ function buildArgs(alias: SshTarget, command: string, opts: RemoteOptions): stri
     "BatchMode=yes", // never prompt; non-zero exit on key auth failure
     ...sshTargetExtraArgs(alias),
     ...(opts.forceTty ? ["-tt"] : []),
+    "--",
     sshTargetDestination(alias),
     command,
   ];

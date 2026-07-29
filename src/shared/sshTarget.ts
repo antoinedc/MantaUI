@@ -106,9 +106,18 @@ export function resolveInstallTarget(
 /**
  * True when a target has no meaningful destination — the empty-alias /
  * empty-host case every runner.ts entry point rejects before spawning ssh.
+ *
+ * Every entry point this replaced did
+ * `typeof alias !== "string" || alias.trim() === ""` — deliberately
+ * defensive about a malformed caller (e.g. a bad IPC payload). Runtime
+ * values aren't guaranteed to match the static `SshTarget` type, so a
+ * non-string, non-object value (or `null`) must fail closed here too,
+ * not fall through to `target.host` and throw a TypeError one line later
+ * (review cycle 1 nit).
  */
 export function isEmptySshTarget(target: SshTarget): boolean {
   if (typeof target === "string") return target.trim() === "";
+  if (typeof target !== "object" || target === null) return true;
   return target.host.trim() === "";
 }
 

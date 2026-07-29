@@ -52,6 +52,11 @@ const OK_GREEN = "#22C55E";
 // install grows the DOM without bound.
 const LOG_LINES_MAX = 500;
 
+// How long the count line's "· just now" suffix stays visible after a
+// manual refresh before decaying back to the plain count (BET-384 review
+// cycle 1 nit).
+const JUST_REFRESHED_DECAY_MS = 60_000;
+
 const INITIAL_STAGE: InstallStageId = "preflight";
 const INITIAL_STAGE_INFO = currentStageInfo(INITIAL_STAGE);
 
@@ -85,9 +90,10 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   );
   const [hostsLoaded, setHostsLoaded] = useState(false);
   const [hostsLoading, setHostsLoading] = useState(false);
-  // Set once a manual refresh has completed at least once — flips the count
-  // line's suffix from nothing to "· just now" (BET-384). Never reset back:
-  // the whole point is "this is fresher than the initial mount load".
+  // True right after a manual refresh completes — flips the count line's
+  // suffix to "· just now" (BET-384). Decays back to false on its own
+  // (JUST_REFRESHED_DECAY_MS below) — review cycle 1 nit: a "just now"
+  // that never expires is worse than no timestamp at all.
   const [justRefreshed, setJustRefreshed] = useState(false);
   // The <select> value: a real alias, or CUSTOM_HOST_VALUE. Starts on the
   // sentinel so the select always has a valid selected option (one of the
@@ -139,21 +145,37 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       aliveRef.current = false;
     };
   }, []);
+  // True once the FIRST load (success or failure) has completed. `alias`
+  // starts on CUSTOM_HOST_VALUE as a rendering bootstrap (see its own
+  // comment below) — that initial value is not a real user choice, so it
+  // must not be treated as "the user deliberately picked Custom host" the
+  // one time loadHosts's setAlias updater sees it. Caught while fixing the
+  // review cycle 1 Block: without this, a populated ~/.ssh/config would
+  // never auto-select the first alias — `prev === CUSTOM_HOST_VALUE` would
+  // always be true on that first pass and short-circuit before the
+  // list[0]-alias fallback ever ran.
+  const hasLoadedOnceRef = useRef(false);
 
   const loadHosts = useCallback(
     async (opts?: { manual?: boolean }) => {
       setHostsLoading(true);
+      const isFirstLoad = !hasLoadedOnceRef.current;
       try {
         const list = await preload.installerListHosts();
         if (!aliveRef.current) return;
         setHosts(list);
-        // Keep the current selection if it's still valid (still present in
-        // the refreshed list, or the custom sentinel — refresh never closes
-        // an open custom panel). Otherwise fall back to the first alias, or
-        // the custom sentinel when the config yields nothing at all —
-        // decision #3: the dropdown still renders, Custom host… pre-selected,
-        // panel already open. One code path, not an either/or branch.
         setAlias((prev) => {
+          if (isFirstLoad) {
+            // Bootstrap pass: `prev` is just the initial sentinel, not a
+            // real selection — pick the first alias when the config has
+            // entries, or fall back to the sentinel (decision #3) when it
+            // doesn't.
+            return list.length > 0 ? list[0].alias : CUSTOM_HOST_VALUE;
+          }
+          // A later refresh: keep the current selection if it's still
+          // valid (still present in the refreshed list, or the custom
+          // sentinel — refresh never closes an open custom panel the user
+          // deliberately opened). Otherwise fall back the same way.
           if (prev === CUSTOM_HOST_VALUE) return prev;
           if (list.some((h) => h.alias === prev)) return prev;
           return list.length > 0 ? list[0].alias : CUSTOM_HOST_VALUE;
@@ -161,13 +183,23 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         if (opts?.manual) setJustRefreshed(true);
       } catch {
         if (!aliveRef.current) return;
-        setHosts([]);
-        setAlias(CUSTOM_HOST_VALUE);
+        // First-load failure: hosts/alias are already at their
+        // [] / CUSTOM_HOST_VALUE initial state, so there's nothing to
+        // reset — the empty-config UI (decision #3) falls out for free.
+        // A LATER refresh's failure must NOT discard whatever host list
+        // and selection were already on screen — a transient read error
+        // is not license to yank the panel open out from under the user
+        // (review cycle 1 nit).
+        if (isFirstLoad) {
+          setHosts([]);
+          setAlias(CUSTOM_HOST_VALUE);
+        }
       } finally {
         if (aliveRef.current) {
           setHostsLoaded(true);
           setHostsLoading(false);
         }
+        hasLoadedOnceRef.current = true;
       }
     },
     [preload],
@@ -277,6 +309,15 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     const t = setInterval(() => setElapsedSeconds((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, [running]);
+
+  // Decay "· just now" back to the plain count line after a while — a
+  // timestamp that never expires reads as wrong once enough time has
+  // actually passed (BET-384 review cycle 1 nit).
+  useEffect(() => {
+    if (!justRefreshed) return;
+    const t = setTimeout(() => setJustRefreshed(false), JUST_REFRESHED_DECAY_MS);
+    return () => clearTimeout(t);
+  }, [justRefreshed]);
 
   // ---------- Actions ----------
 
@@ -450,9 +491,20 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           </button>
         </div>
 
-        {/* Custom host panel — only rendered for the custom sentinel. No
-            second host control ever coexists with the select. */}
-        {alias === CUSTOM_HOST_VALUE && (
+        {/* Custom host panel — only rendered for the custom sentinel, AND
+            only once the host load has settled (review cycle 1 Block):
+            `alias` starts on the sentinel so the <select> always has a
+            valid selected option before installerListHosts() resolves,
+            but painting the panel during that window means a populated
+            ~/.ssh/config flashes the full four-field panel open and then
+            collapses once the real alias list lands. Gating on
+            `hostsLoaded` too keeps decision #3 intact — hostsLoaded is
+            true in both loadHosts' success and catch paths, so the
+            empty-config case still opens the panel pre-selected, exactly
+            as required — while a populated config never shows it before
+            the list is ready. No second host control ever coexists with
+            the select either way. */}
+        {hostsLoaded && alias === CUSTOM_HOST_VALUE && (
           <div className="rounded-md border border-border bg-bg-soft p-3.5 space-y-2.5">
             <div className="grid grid-cols-[1fr_90px] gap-2.5">
               <div className="flex flex-col gap-1">
@@ -547,12 +599,22 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               Leave a field empty to let OpenSSH decide. These are used for
               this box only — your ~/.ssh/config is never written to.
             </p>
-            {targetError && (
-              <p className="text-xs" style={{ color: DANGER }}>
-                {targetError}
-              </p>
-            )}
           </div>
+        )}
+
+        {/* Hoisted out of the custom panel (review cycle 1 nit): the panel
+            only renders for the custom branch, but resolveInstallTarget
+            can also reject the alias branch (defensive — unreachable
+            through this UI today since the <select>'s only values are a
+            parsed alias or the sentinel, but resolveInstallTarget is a
+            shared pure function and must not silently swallow a future
+            caller's bad input). Rendering the error here, outside the
+            panel, means it's never lost regardless of which branch
+            produced it. */}
+        {targetError && (
+          <p className="text-xs" style={{ color: DANGER }}>
+            {targetError}
+          </p>
         )}
 
         <div className="flex gap-2 pt-2">

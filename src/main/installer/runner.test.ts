@@ -16,7 +16,7 @@ import { makeFakeChild } from "./_testFixtures.js";
 // ---------------------------------------------------------------------------
 
 describe("execRemote", () => {
-  it("builds the canonical ssh argv (ConnectTimeout + BatchMode + alias + cmd)", async () => {
+  it("builds the canonical ssh argv (ConnectTimeout + BatchMode + -- + alias + cmd)", async () => {
     const captured: { command: string; args: string[] } = { command: "", args: [] };
     const fake = makeFakeChild();
     const spawn: SpawnFn = (command, args) => {
@@ -29,17 +29,45 @@ describe("execRemote", () => {
     setImmediate(() => fake.fireExit(0));
     const r = await p;
     expect(captured.command).toBe(SSH_BIN);
+    // `--` terminates option parsing before the destination (BET-384
+    // review cycle 1 nit — a leading-`-` destination must never be read
+    // as an ssh(1) flag). See buildArgs's comment for the empirical proof.
     expect(captured.args).toEqual([
       "-o",
       "ConnectTimeout=10",
       "-o",
       "BatchMode=yes",
+      "--",
       "dev",
       "echo hi",
     ]);
     expect(r.code).toBe(0);
     expect(r.stdout).toBe("");
     expect(r.stderr).toBe("");
+  });
+
+  it("puts -- immediately before the destination even with a custom target's -p/-i", async () => {
+    const captured: { args: string[] } = { args: [] };
+    const fake = makeFakeChild();
+    const p = execRemote(
+      { kind: "custom", host: "-oProxyCommand=evil", port: 2222, identityFile: "~/.ssh/id_x" },
+      "echo hi",
+      {
+        spawn: (_c, args) => {
+          captured.args = args;
+          return fake.child as any;
+        },
+      },
+    );
+    setImmediate(() => fake.fireExit(0));
+    await p;
+    const dashDashIndex = captured.args.indexOf("--");
+    expect(dashDashIndex).toBeGreaterThan(-1);
+    expect(captured.args[dashDashIndex + 1]).toBe("-oProxyCommand=evil");
+    // -p/-i land before --, never after (they're real ssh options, not
+    // part of the destination).
+    expect(captured.args.indexOf("-p")).toBeLessThan(dashDashIndex);
+    expect(captured.args.indexOf("-i")).toBeLessThan(dashDashIndex);
   });
 
   it("returns non-zero exit without throwing", async () => {
