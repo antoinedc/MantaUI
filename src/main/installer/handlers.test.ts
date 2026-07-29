@@ -113,13 +113,11 @@ vi.mock("./installer.js", () => ({
   DEFAULT_SSH_CONFIG_PATH: "/dev/null",
 }));
 
-// Also stub the small support modules the handlers pull in but never call
-// during the mint-and-claim path.
+// Also stub the small support module the handlers pull in but never call
+// during the mint-and-claim path. handlers.ts only imports a type from
+// stageMapper.js now (erased at compile time), so no mock needed for it.
 vi.mock("./diagnostics.js", () => ({
   buildDiagnostics: vi.fn(),
-}));
-vi.mock("./stageMapper.js", () => ({
-  currentStageInfo: vi.fn(() => ({ label: "Checking the box", index: 1, total: 6 })),
 }));
 
 import { IPC, type AppConfig } from "../../shared/types.js";

@@ -23,38 +23,20 @@
 // stage" + a sanitised copy of the line (ANSI stripped, no secrets). The
 // caller keeps the fold state between chunks so a landmark that happens to
 // straddle a chunk boundary still resolves on the next chunk.
+//
+// The stage order/labels themselves live in src/shared/installStages.ts —
+// re-exported here so every existing main-process import site is unchanged
+// — because the renderer needs the same source for its remount-recovery
+// status line (BET-383) and code under src/main/ isn't importable there.
 
-export type InstallStageId =
-  | "preflight"
-  | "download"
-  | "extract"
-  | "service"
-  | "pairing"
-  | "done";
+import {
+  INSTALL_STAGES,
+  STAGE_INDEX,
+  type InstallStage,
+  type InstallStageId,
+} from "../../shared/installStages.js";
 
-export type InstallStage = {
-  id: InstallStageId;
-  label: string;
-};
-
-/** Ordered list of stages — UI walks this to render the checklist. */
-export const INSTALL_STAGES: ReadonlyArray<InstallStage> = [
-  { id: "preflight", label: "Checking the box" },
-  { id: "download", label: "Download release" },
-  { id: "extract", label: "Installing files" },
-  { id: "service", label: "Starting the service" },
-  { id: "pairing", label: "Pairing with this app" },
-  { id: "done", label: "Done" },
-];
-
-const STAGE_INDEX: Record<InstallStageId, number> = {
-  preflight: 0,
-  download: 1,
-  extract: 2,
-  service: 3,
-  pairing: 4,
-  done: 5,
-};
+export { INSTALL_STAGES, type InstallStage, type InstallStageId };
 
 type Landmark = { re: RegExp; target: InstallStageId };
 
@@ -183,18 +165,4 @@ export function buildStageSnapshot(currentStage: InstallStageId): Array<{
     }
     return { id: s.id, label: s.label, state };
   });
-}
-
-/** The single status line the UI renders, e.g. "Checking the box… · 1 of 6". */
-export function currentStageInfo(currentStage: InstallStageId): {
-  label: string;
-  index: number; // 1-based position in INSTALL_STAGES
-  total: number;
-} {
-  const idx = STAGE_INDEX[currentStage];
-  return {
-    label: INSTALL_STAGES[idx].label,
-    index: idx + 1,
-    total: INSTALL_STAGES.length,
-  };
 }

@@ -338,14 +338,7 @@ export type InstallerStageSnapshotRow = {
 
 export type InstallerEvent =
   | { kind: "line"; handleId: string; text: string }
-  | {
-      kind: "stage";
-      handleId: string;
-      stage: InstallerStageSnapshotRow["id"];
-      label: string;
-      index: number;
-      total: number;
-    }
+  | { kind: "stage"; handleId: string; stage: InstallerStageSnapshotRow["id"] }
   // Preflight (phase 1, in main) failed — no install ever started.
   | {
       kind: "preflight-failed";
@@ -795,7 +788,7 @@ export const IPC = {
   // installerEvent is the main → renderer push channel (mirrors the
   // pairLinkReceived pattern). Payload is a discriminated union:
   //   { kind: "line", handleId, text }
-  //   { kind: "stage", handleId, stage, label, index, total }
+  //   { kind: "stage", handleId, stage }
   //   { kind: "preflight-failed", handleId, failures }
   //   { kind: "done", handleId, code, signal }
   //   { kind: "error", handleId, message }

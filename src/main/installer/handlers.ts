@@ -24,10 +24,7 @@ import {
   DEFAULT_SSH_CONFIG_PATH,
 } from "./installer.js";
 import { buildDiagnostics, type DiagnosticsInput } from "./diagnostics.js";
-import {
-  currentStageInfo,
-  type InstallStageId,
-} from "./stageMapper.js";
+import type { InstallStageId } from "./stageMapper.js";
 import type { PreflightResult } from "./preflight.js";
 
 // ---------------------------------------------------------------------------
@@ -110,15 +107,7 @@ export function registerInstallerHandlers(
         },
         onStage: (stage) => {
           activeStage = stage;
-          const info = currentStageInfo(stage);
-          send({
-            kind: "stage",
-            handleId,
-            stage,
-            label: info.label,
-            index: info.index,
-            total: info.total,
-          });
+          send({ kind: "stage", handleId, stage });
         },
       },
     );

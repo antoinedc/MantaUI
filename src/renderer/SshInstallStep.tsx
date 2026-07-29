@@ -22,9 +22,9 @@ import { useEffect, useState, useRef } from "react";
 import {
   getMantaPreload,
   type InstallerEvent,
-  type InstallerStageSnapshotRow,
   type PreflightFailure,
 } from "./preloadAccess";
+import { currentStageInfo, type InstallStageId } from "../shared/installStages";
 
 const ACCENT = "#5A88FF";
 const DANGER = "#FF7A88";
@@ -35,11 +35,8 @@ const OK_GREEN = "#22C55E";
 // install grows the DOM without bound.
 const LOG_LINES_MAX = 500;
 
-const INITIAL_STAGE: InstallerStageSnapshotRow["id"] = "preflight";
-// Mirrors stageMapper.ts's INSTALL_STAGES[0] — shown from click until the
-// first real "stage" event arrives.
-const INITIAL_STAGE_LABEL = "Checking the box";
-const TOTAL_STAGES = 6;
+const INITIAL_STAGE: InstallStageId = "preflight";
+const INITIAL_STAGE_INFO = currentStageInfo(INITIAL_STAGE);
 
 function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -73,10 +70,10 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   const [alias, setAlias] = useState("");
   const [running, setRunning] = useState(false);
   const [activeHandle, setActiveHandle] = useState<string | null>(null);
-  const [stage, setStage] = useState<InstallerStageSnapshotRow["id"]>(INITIAL_STAGE);
-  const [stageLabel, setStageLabel] = useState(INITIAL_STAGE_LABEL);
-  const [stageIndex, setStageIndex] = useState(1);
-  const [stageTotal, setStageTotal] = useState(TOTAL_STAGES);
+  const [stage, setStage] = useState<InstallStageId>(INITIAL_STAGE);
+  const [stageLabel, setStageLabel] = useState(INITIAL_STAGE_INFO.label);
+  const [stageIndex, setStageIndex] = useState(INITIAL_STAGE_INFO.index);
+  const [stageTotal, setStageTotal] = useState(INITIAL_STAGE_INFO.total);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [logOpen, setLogOpen] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
@@ -123,10 +120,12 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       const s = await preload.installerState();
       if (!alive) return;
       if (s.active) {
-        // Stage label/index snap to the next real "stage" event; the
-        // initial defaults are close enough for the brief recovery window.
+        const info = currentStageInfo(s.stage);
         setRunning(true);
         setStage(s.stage);
+        setStageLabel(info.label);
+        setStageIndex(info.index);
+        setStageTotal(info.total);
         setLines(s.logTail);
         setLogOpen(true);
       } else if (s.preflight && !s.preflight.ok) {
@@ -155,12 +154,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               : next;
           });
           break;
-        case "stage":
+        case "stage": {
+          const info = currentStageInfo(evt.stage);
           setStage(evt.stage);
-          setStageLabel(evt.label);
-          setStageIndex(evt.index);
-          setStageTotal(evt.total);
+          setStageLabel(info.label);
+          setStageIndex(info.index);
+          setStageTotal(info.total);
           break;
+        }
         case "preflight-failed":
           // Nothing was written to the box — the progress panel never
           // shows for this case.
@@ -219,9 +220,9 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     // filtering against a prior, now-dead handle.
     setActiveHandle(null);
     setStage(INITIAL_STAGE);
-    setStageLabel(INITIAL_STAGE_LABEL);
-    setStageIndex(1);
-    setStageTotal(TOTAL_STAGES);
+    setStageLabel(INITIAL_STAGE_INFO.label);
+    setStageIndex(INITIAL_STAGE_INFO.index);
+    setStageTotal(INITIAL_STAGE_INFO.total);
     setElapsedSeconds(0);
     setLogOpen(true);
     // Mount the progress panel immediately on click — no gap before the
