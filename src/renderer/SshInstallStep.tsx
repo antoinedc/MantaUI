@@ -435,8 +435,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   }
 
   async function cancelInstall() {
-    if (!activeHandle) return;
-    await preload.installerCancel({ handleId: activeHandle });
+    // During the fingerprint trust pause, activeHandle is still null
+    // (installerStart hasn't returned) — but the install IS in flight and
+    // the Cancel button is visible. Route through the trust-prompt's
+    // handleId so installerCancel reaches the main-process trust-wait
+    // abort instead of silently no-oping (BET-361 review cycle 1 Block).
+    const handleId = activeHandle ?? fingerprintPrompt?.handleId;
+    if (!handleId) return;
+    await preload.installerCancel({ handleId });
   }
 
   // BET-361: answer the paused fingerprint prompt. Trust → main writes the
