@@ -15,6 +15,7 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import { chooseUpdateSkewVariant, registerMountedTerminal, type MountedTerminal } from "./chatUtils";
+import { isCompatible } from "../shared/compatibility.mjs";
 import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
 import { ReconnectingBanner } from "./ReconnectingBanner";
@@ -352,8 +353,23 @@ export function App() {
   // never flash the blocking banner on a fresh launch. getServerVersion
   // is the same endpoint MobileSettings already calls for its display
   // — both consume the same `{version, minClient}` payload.
+  //
+  // BET-357 §3 (BET-366): also capture the box's current `version`
+  // (not just `minClient`) so we can run the desktop↔box compatibility
+  // matrix check (`isCompatible`). The matrix decides:
+  //   - "behind"       → box on the supported major but older than the
+  //                       desktop → show "Box needs upgrade" card with
+  //                       an action that fires the existing
+  //                       `server:update-apply` self-update path.
+  //   - "incompatible" → different major → show the supported-versions
+  //                       message (no in-app action bridges a wire-
+  //                       contract change).
+  //   - "match"        → hide the card.
+  // The `serverVersion` is the SAME field MobileSettings already reads
+  // for "Server vX.Y.Z" under the URL field — single source of truth.
   const [clientVersion, setClientVersion] = useState<string | null>(null);
   const [serverMinClient, setServerMinClient] = useState<string | null>(null);
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     void Promise.all([
@@ -367,11 +383,39 @@ export function App() {
       if (server && typeof server.minClient === "string") {
         setServerMinClient(server.minClient);
       }
+      if (server && typeof server.version === "string") {
+        setServerVersion(server.version);
+      }
     });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // Desktop↔box compatibility variant (BET-357 §3 / BET-366). Pure
+  // derivation off the two versions already on hand; `isCompatible`
+  // collapses missing input to "unknown" so we never show a misleading
+  // upgrade card mid-bootstrap.
+  const compatibilityVariant = isCompatible({
+    desktopVersion: clientVersion,
+    boxVersion: serverVersion,
+  });
+  // The compatibility card is dismissible (unlike the MIN_CLIENT skew
+  // banner above): the "behind" path has a clear one-click action the
+  // user can re-trigger from the Settings card, and the "incompatible"
+  // path is informational. The dismiss is local state — clearing it
+  // re-shows the card if the variant re-evaluates (e.g. the user fixes
+  // the box remotely and the next version poll flips the variant).
+  const [compatibilityDismissed, setCompatibilityDismissed] = useState(false);
+  // Reset the dismiss latch when the variant changes (e.g. box was
+  // upgraded remotely, version refetch flipped match → behind). The
+  // user shouldn't have to reload to see the new "behind" card.
+  useEffect(() => {
+    setCompatibilityDismissed(false);
+  }, [compatibilityVariant]);
+  const showCompatibilityCard =
+    !compatibilityDismissed &&
+    (compatibilityVariant === "behind" || compatibilityVariant === "incompatible");
 
   // Sidebar status for chat-mode windows. The PTY-pane poller
   // (src/main/status.ts) can't see chat-mode state — the holder pane
@@ -762,6 +806,70 @@ export function App() {
                 }
               }}
               dismissible={false}
+            />
+          )}
+        {/* Desktop↔box compatibility card (BET-357 §3 / BET-366). The
+            desktop and the box ship separately and will drift. This card
+            is the user's only signal that the box needs an upgrade, and
+            it stays dismissible because the "behind" path has a clear
+            one-click action and the "incompatible" path is informational
+            (no in-app action bridges a wire-contract change). The
+            variant comes from the pure `isCompatible` helper over the
+            desktop's own version (clientVersion, from
+            `getClientVersion`) and the box's reported version
+            (serverVersion, from `getServerVersion`). Both sources are
+            already in flight for the skew banner above — this card
+            reuses the same fetch, no second round-trip.
+
+            "match"/"unknown" → render nothing (mid-bootstrap never
+            flashes the card).
+
+            "behind" → "Box needs upgrade: <boxVersion>" with an
+            "Upgrade box" button that fires the existing
+            `server:update-apply` RPC — the same self-update path the
+            server-update-available prompt above uses. Do NOT write a
+            second update mechanism; this is wired into the existing
+            one intentionally.
+
+            "incompatible" → "This box (vX.Y.Z) is not supported by
+            this app (vA.B.C)." with a "Learn more" button that opens
+            the install docs — the user must upgrade one half manually
+            (different major = different RPC contract). */}
+        {!showOnboarding && showCompatibilityCard && (
+            <UpdateBar
+              text={
+                compatibilityVariant === "behind" ? (
+                  <>
+                    Box needs an upgrade:{" "}
+                    <span className="font-medium text-text">
+                      {serverVersion ?? "?"}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    This box (v
+                    <span className="font-medium text-text">
+                      {serverVersion ?? "?"}
+                    </span>
+                    ) is not supported by this app (v
+                    <span className="font-medium text-text">
+                      {clientVersion ?? "?"}
+                    </span>
+                    ).
+                  </>
+                )
+              }
+              actionLabel={
+                compatibilityVariant === "behind" ? "Upgrade box" : "Learn more"
+              }
+              onAction={() => {
+                if (compatibilityVariant === "behind") {
+                  void window.api.serverUpdateApply();
+                } else {
+                  void window.api.openExternal("https://mantaui.com/install");
+                }
+              }}
+              onDismiss={() => setCompatibilityDismissed(true)}
             />
           )}
         {/* Reconnecting banner (BET-365 / BET-357 §1): full-width bar above

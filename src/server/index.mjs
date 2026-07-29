@@ -42,6 +42,7 @@ import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { startOutboxPoller } from "./outbox.mjs";
 import { startServerUpdatePoller } from "./serverUpdate.mjs";
+import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
 import {
   createCapJob,
@@ -245,6 +246,12 @@ rpcHandlers = buildHandlers({
   authPair: () => authEngine.pair(),
   push,
   serverVersion: SERVER_VERSION,
+  // BET-366 reviewer return: production wiring for the
+  // `server:update-apply` IPC channel. The handler in rpc.mjs calls this
+  // with SELF_UPDATE_SCRIPT (resolved at module load from `import.meta.url`).
+  // The unit test in rpc.test.mjs passes a stub instead so the channel
+  // routing can be exercised without actually spawning a child.
+  runServerSelfUpdate,
 });
 
 // Server-update checker: polls https://mantaui.com/updates/server.json every

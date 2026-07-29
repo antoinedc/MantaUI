@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dispatch, buildHandlers } from "./rpc.mjs";
+import { dispatch, buildHandlers, SELF_UPDATE_SCRIPT } from "./rpc.mjs";
 
 test("dispatch routes a known channel to its handler with args", async () => {
   const handlers = { "echo:it": async (a, b) => ({ sum: a + b }) };
@@ -512,4 +512,75 @@ test("claude:login-cancel removes the session from the registry (BET-354)", asyn
   });
   assert.equal(status.ok, false);
   assert.equal(status.error, "unknown_session");
+});
+
+// ---- BET-357 §3 (BET-366): regression guard on the `server:update-apply` -----
+//
+// IPC channel routing. The issue's test bullet requires a fake-spawn test
+// asserting the desktop's "Upgrade box" button fires a chain that ends up
+// invoking the box's self-update. Two pieces:
+//
+//   1. `runServerSelfUpdate(SELF_UPDATE_SCRIPT)` spawns the script. This
+//      is covered directly in opencodeAdmin.test.mjs — the function takes
+//      the script path and spawns it detached + unref'd.
+//
+//   2. The `server:update-apply` IPC channel in rpc.mjs calls (1) with
+//      SELF_UPDATE_SCRIPT. Nothing in (1)'s tests covers this — a typo
+//      in the channel body, a rename of the constant, or a wrong path
+//      would slip past opencodeAdmin.test.mjs entirely because that
+//      suite never imports the RPC dispatcher.
+//
+// This test is the regression guard for (2). The IPC layer is what the
+// renderer's UpdateBar hits; if it stops invoking the self-update path,
+// the renderer's "Upgrade box" button is a silent no-op. The test stubs
+// `runServerSelfUpdate` via the new buildHandlers dep so the spawn
+// never actually fires — and asserts both the script path argument
+// (matched against the exported SELF_UPDATE_SCRIPT constant) AND the
+// return-value pass-through so a future refactor that breaks either
+// edge of the channel surfaces here.
+
+test("server:update-apply routes to runServerSelfUpdate with SELF_UPDATE_SCRIPT and returns its result", async () => {
+  const { deps } = makeDeps([]);
+  const spawnCalls = [];
+  deps.runServerSelfUpdate = async (scriptPath) => {
+    spawnCalls.push(scriptPath);
+    return { ok: true, pid: 9999 };
+  };
+  const handlers = buildHandlers(deps);
+  const result = await handlers["server:update-apply"]();
+  // Exactly one call, with the production script path constant. A typo
+  // in the channel body, a wrong path argument, or an accidental
+  // second call all break here.
+  assert.equal(spawnCalls.length, 1, "runServerSelfUpdate invoked exactly once");
+  assert.equal(
+    spawnCalls[0],
+    SELF_UPDATE_SCRIPT,
+    "channel passes the production SELF_UPDATE_SCRIPT — not a typo'd path",
+  );
+  // The channel returns whatever the spawn returns, so the renderer's
+  // `serverUpdateApply` IPC promise can await it. Today the UpdateBar
+  // is fire-and-forget, but the contract is "promise resolves to the
+  // spawn's verdict" — pin it so a future wrapper that drops the
+  // return value fails here.
+  assert.deepEqual(result, { ok: true, pid: 9999 });
+});
+
+test("server:update-apply propagates runServerSelfUpdate's failure result through the RPC", async () => {
+  // Defense-in-depth: when the spawn throws (script missing, no exec
+  // bit, EACCES), the channel must surface that to the caller as
+  // `{ ok: false, error }` — NOT as a thrown promise. A thrown
+  // promise would crash the RPC dispatcher (handleRpcRequest catches
+  // and returns 500), which the renderer treats as a transport error
+  // and never reaches the user-visible "couldn't upgrade" state.
+  const { deps } = makeDeps([]);
+  deps.runServerSelfUpdate = async () => ({
+    ok: false,
+    error: "spawn /abs/scripts/self-update.sh EACCES",
+  });
+  const handlers = buildHandlers(deps);
+  const result = await handlers["server:update-apply"]();
+  assert.deepEqual(result, {
+    ok: false,
+    error: "spawn /abs/scripts/self-update.sh EACCES",
+  });
 });
