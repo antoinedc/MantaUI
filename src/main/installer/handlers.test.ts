@@ -300,6 +300,8 @@ describe("registerInstallerHandlers — fingerprint pause/resume (BET-361)", () 
         tailscale: { running: false, ipv4: null },
         clockSkewSeconds: 0,
         alreadyInstalled: false,
+        windowsAgent: "not-windows",
+        keyFormat: "not-windows",
       },
       failures: [
         {
@@ -329,6 +331,8 @@ describe("registerInstallerHandlers — fingerprint pause/resume (BET-361)", () 
           tailscale: { running: false, ipv4: null },
           clockSkewSeconds: 0,
           alreadyInstalled: false,
+          windowsAgent: "not-windows",
+          keyFormat: "not-windows",
         },
         failures: [],
         unknownHost: null,
