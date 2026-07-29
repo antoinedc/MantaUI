@@ -42,6 +42,7 @@ import {
   sshTargetLabel,
   type HostFieldSelection,
 } from "../shared/sshTarget";
+import type { ClaimOutcome } from "../shared/claim.mjs";
 
 const ACCENT = "#5A88FF";
 const DANGER = "#FF7A88";
@@ -57,6 +58,16 @@ const LOG_LINES_MAX = 500;
 // cycle 1 nit).
 const JUST_REFRESHED_DECAY_MS = 60_000;
 
+// BET-390 amendment: the install's final act starts/restarts the box service,
+// and the auto-claim fires the instant the install process exits — so the
+// first mint can race a service that isn't listening on loopback yet. A
+// single retry after this wait fixes the observed non-deterministic failure;
+// the retry is bounded to one extra attempt and the final failure still
+// surfaces the real message. Only transient kinds (network / server_error)
+// are retried — a wrong_code or invalid_response won't be fixed by trying
+// again.
+const CLAIM_RETRY_DELAY_MS = 3_000;
+
 const INITIAL_STAGE: InstallStageId = "preflight";
 const INITIAL_STAGE_INFO = currentStageInfo(INITIAL_STAGE);
 
@@ -64,6 +75,17 @@ function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// BET-390: only failure kinds that can be caused by the box service not being
+// ready yet are worth a retry. A wrong/expired code or a malformed response
+// won't change on a second attempt.
+function isTransientClaimFailure(outcome: ClaimOutcome): boolean {
+  return !outcome.ok && (outcome.kind === "network" || outcome.kind === "server_error");
 }
 
 export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
@@ -384,15 +406,30 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     setClaimRunning(true);
     setClaimError(null);
     try {
-      const outcome = (await preload.installerMintAndClaim({
+      const outcome = await preload.installerMintAndClaim({
         alias: resolved.target,
-      })) as { ok: boolean };
+      });
       if (outcome.ok) {
         // Mirror the manual PairStep onPaired — advances onboarding to
         // step 2 exactly as a typed pairing code would.
         onPaired();
+        return;
+      }
+      // BET-390 amendment: a transient failure (the box service not yet
+      // listening) is retried once after a short wait. claimRunning stays
+      // true across the wait so the banner keeps reading "Pairing…".
+      if (isTransientClaimFailure(outcome)) {
+        await sleep(CLAIM_RETRY_DELAY_MS);
+        const retry = await preload.installerMintAndClaim({
+          alias: resolved.target,
+        });
+        if (retry.ok) {
+          onPaired();
+          return;
+        }
+        setClaimError(`Pairing failed: ${retry.message}`);
       } else {
-        setClaimError("Pairing failed — check the install log.");
+        setClaimError(`Pairing failed: ${outcome.message}`);
       }
     } catch (e) {
       setClaimError(e instanceof Error ? e.message : String(e));
@@ -713,9 +750,9 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       )}
 
       {/* Done / error / claim */}
-      {done && done.ok && (
+      {done && done.ok && !claimError && (
         <section className="text-sm" style={{ color: OK_GREEN }}>
-          Install finished successfully. {claimRunning ? "Pairing…" : "Paired."}
+          Install finished successfully. {claimRunning ? "Pairing…" : ""}
         </section>
       )}
       {done && !done.ok && (
@@ -749,8 +786,12 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         </section>
       )}
       {claimError && (
-        <section className="text-sm" style={{ color: DANGER }}>
-          {claimError}
+        <section className="text-sm space-y-1" style={{ color: DANGER }}>
+          <div>{claimError}</div>
+          <div>
+            Pair manually: run `manta pair` on the box and enter the 6-digit
+            code above.
+          </div>
         </section>
       )}
     </div>
