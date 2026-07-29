@@ -1,48 +1,46 @@
-// onboardingUtils.ts — pure step model + resume logic for the M6.2 desktop
-// onboarding flow (BET-49-T3). Framework-free so it's unit-testable in vitest
-// (see onboardingUtils.test.ts), exactly like chatUtils.ts. Onboarding.tsx owns
+// onboardingUtils.ts — pure step model + resume logic for the M6.6 desktop
+// onboarding flow (BET-356). Replaces the 4-step shell (BET-49-T3) with the
+// 2-step user-visible collapse: Connect (box picker) and (optionally) Connect
+// a provider — then success. Model and Project are no longer onboarding steps
+// (the default model is global config edited in Settings; the first project
+// is auto-created on pair success, no dedicated step).
+//
+// The step machine is reused — only the visible positions and labels change.
+// `resolveInitialStep` keeps the resumable property the existing flow had:
+// quitting mid-flow reopens at the first incomplete step rather than step 1.
+//
+// Pure + framework-free so it's unit-testable in vitest (see
+// onboardingUtils.test.ts), exactly like chatUtils.ts. Onboarding.tsx owns
 // all the React/DOM; this module owns the "which step are we on" decisions.
-//
-// The flow has four numbered steps plus a terminal success screen, matching
-// docs/onboarding/mockup.html:
-//
-//   1 Pair      → enter the 6-digit pairing code (persists boxToken/boxId/serverUrl)
-//   2 Providers → pick AI providers                (BET-49-T4)
-//   3 Model     → pick the default model           (BET-49-T4, persists defaultModel)
-//   4 Project   → create the first project         (BET-49-T5)
-//   success     → "You're all set!" → Open manta
-//
-// T2/T4/T5 land the per-step UIs; T3 owns this shell + the resume math so a
-// user who quits mid-flow reopens at the first INCOMPLETE step instead of
-// always restarting at step 1.
 
 import type { AppConfig } from "../shared/types";
 
-// The ordered numbered steps. `success` is the terminal screen after step 4,
+// The ordered numbered steps. `success` is the terminal screen after step 2,
 // kept out of this tuple so it never participates in progress-dot math.
-export const ONBOARDING_STEPS = [1, 2, 3, 4] as const;
+export const ONBOARDING_STEPS = [1, 2] as const;
 export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
 // Full navigable position: a numbered step OR the terminal success screen.
 export type OnboardingPosition = OnboardingStep | "success";
 
 export const FIRST_STEP: OnboardingStep = 1;
-export const LAST_STEP: OnboardingStep = 4;
+export const LAST_STEP: OnboardingStep = 2;
 
-// Human labels for the progress rail (mockup: Connect / Providers / Model / Project).
+// Human labels for the progress rail. Step 1 = "Connect" (the box picker is
+// the primary surface; the manual code form lives behind a disclosure there).
+// Step 2 = "Connect a provider" — the only step a user sees when their box
+// doesn't already have a connected provider; auto-skips when one is.
 export const STEP_LABELS: Record<OnboardingStep, string> = {
   1: "Connect",
-  2: "Providers",
-  3: "Model",
-  4: "Project",
+  2: "Connect a provider",
 };
 
-// Back navigation is available on steps 2–4 only (per mockup — step 1 has
-// "Skip setup" in the back slot instead, and success has no back).
+// Back navigation is available on step 2 only (per the two-step flow — step 1
+// has "Skip setup" in its back slot via the shell, and success has no back).
 export function canGoBack(pos: OnboardingPosition): boolean {
-  return pos === 2 || pos === 3 || pos === 4;
+  return pos === 2;
 }
 
-// The next position after `pos`. Step 4 → success; success stays success.
+// The next position after `pos`. Step 2 → success; success stays success.
 export function nextPosition(pos: OnboardingPosition): OnboardingPosition {
   if (pos === "success") return "success";
   if (pos >= LAST_STEP) return "success";
@@ -56,34 +54,25 @@ export function prevPosition(pos: OnboardingPosition): OnboardingPosition {
   return (pos - 1) as OnboardingStep;
 }
 
-// Resume: derive the first INCOMPLETE step from persisted config, so quitting
-// mid-flow reopens where the user left off rather than at step 1. The rule
-// mirrors what each step persists:
+// Resume: derive the first INCOMPLETE step from persisted config.
 //
-//   - No valid boxToken            → step 1 (still needs to pair)
-//   - Paired but no defaultModel   → step 2 (providers → model not chosen yet)
-//   - Model chosen but no projects → step 4 (needs a first project)
-//   - Everything present           → step 4 (last actionable step; the shell
-//                                     shows success only after an explicit
-//                                     "Create project" — we never auto-skip
-//                                     someone straight to the success screen on
-//                                     launch, since that would strand a fully
-//                                     configured user with nothing to do)
+// The previous 4-step resume math (paired but no model → step 2, model chosen
+// but no projects → step 4) collapses — both Model and Project are no longer
+// onboarding concerns. What we CAN tell from config alone is whether the box
+// is paired. Whether a provider is connected is a live box query, NOT a
+// config field, so we resolve to step 2 whenever paired and let the Provider
+// step's mount effect auto-advance past itself when a provider is already
+// connected. Net: re-entering onboarding on a paired box lands on step 2 for
+// at most one frame, then auto-skips to success — the user sees no flicker
+// because step 2's "ready" path is empty rendering.
 //
-// We intentionally resume to step 2 (Providers) rather than step 3 when paired
-// but model-less: the user hasn't chosen providers yet in that state, and step
-// 2 → 3 is a single Continue. `boxToken` validity uses the same 32-hex gate as
-// transport-mode detection (resolveTransportMode), so a malformed token doesn't
-// falsely advance the resume point.
+// The 32-hex boxToken gate mirrors the transport-mode detection in
+// `resolveTransportMode`, so a malformed token does not falsely advance the
+// resume point.
 export function resolveInitialStep(
   config: Partial<AppConfig> | null | undefined,
 ): OnboardingStep {
   const cfg = config && typeof config === "object" ? config : {};
   const paired = typeof cfg.boxToken === "string" && /^[0-9a-f]{32}$/.test(cfg.boxToken);
-  if (!paired) return 1;
-  const hasModel = !!cfg.defaultModel && !!cfg.defaultModel.modelID;
-  if (!hasModel) return 2;
-  const hasProject = Array.isArray(cfg.projects) && cfg.projects.length > 0;
-  if (!hasProject) return 4;
-  return 4;
+  return paired ? 2 : 1;
 }

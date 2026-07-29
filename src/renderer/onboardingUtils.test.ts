@@ -14,10 +14,10 @@ import type { AppConfig } from "../shared/types";
 const HEX32 = "0123456789abcdef0123456789abcdef";
 
 describe("onboarding step model", () => {
-  it("has four ordered numbered steps 1..4", () => {
-    expect([...ONBOARDING_STEPS]).toEqual([1, 2, 3, 4]);
+  it("has two ordered numbered steps 1..2", () => {
+    expect([...ONBOARDING_STEPS]).toEqual([1, 2]);
     expect(FIRST_STEP).toBe(1);
-    expect(LAST_STEP).toBe(4);
+    expect(LAST_STEP).toBe(2);
   });
 
   it("labels every numbered step", () => {
@@ -26,7 +26,7 @@ describe("onboarding step model", () => {
       expect(STEP_LABELS[s].length).toBeGreaterThan(0);
     }
     expect(STEP_LABELS[1]).toBe("Connect");
-    expect(STEP_LABELS[4]).toBe("Project");
+    expect(STEP_LABELS[2]).toBe("Connect a provider");
   });
 });
 
@@ -35,21 +35,17 @@ describe("canGoBack", () => {
     expect(canGoBack(1)).toBe(false);
     expect(canGoBack("success")).toBe(false);
   });
-  it("is true on steps 2, 3, 4", () => {
+  it("is true on step 2", () => {
     expect(canGoBack(2)).toBe(true);
-    expect(canGoBack(3)).toBe(true);
-    expect(canGoBack(4)).toBe(true);
   });
 });
 
 describe("nextPosition", () => {
   it("advances numbered steps", () => {
     expect(nextPosition(1)).toBe(2);
-    expect(nextPosition(2)).toBe(3);
-    expect(nextPosition(3)).toBe(4);
   });
-  it("step 4 → success", () => {
-    expect(nextPosition(4)).toBe("success");
+  it("step 2 → success", () => {
+    expect(nextPosition(2)).toBe("success");
   });
   it("success is terminal", () => {
     expect(nextPosition("success")).toBe("success");
@@ -59,8 +55,6 @@ describe("nextPosition", () => {
 describe("prevPosition", () => {
   it("goes back one numbered step", () => {
     expect(prevPosition(2)).toBe(1);
-    expect(prevPosition(3)).toBe(2);
-    expect(prevPosition(4)).toBe(3);
   });
   it("clamps at step 1", () => {
     expect(prevPosition(1)).toBe(1);
@@ -85,36 +79,14 @@ describe("resolveInitialStep", () => {
     expect(resolveInitialStep({ boxToken: HEX32.slice(0, 31) })).toBe(1);
   });
 
-  it("paired but no default model → step 2 (providers)", () => {
+  it("paired → step 2 (provider, auto-skips if already connected)", () => {
     expect(resolveInitialStep({ boxToken: HEX32 })).toBe(2);
     expect(resolveInitialStep({ boxToken: HEX32, projects: [] })).toBe(2);
-  });
-
-  it("a defaultModel with no modelID does not count as chosen", () => {
     expect(
       resolveInitialStep({
         boxToken: HEX32,
-        defaultModel: { providerID: "anthropic", modelID: "" },
+        defaultModel: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
       }),
     ).toBe(2);
-  });
-
-  it("paired + model but no projects → step 4 (first project)", () => {
-    expect(
-      resolveInitialStep({
-        boxToken: HEX32,
-        defaultModel: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
-      }),
-    ).toBe(4);
-  });
-
-  it("paired + model + a project → still step 4 (never auto-jumps to success)", () => {
-    expect(
-      resolveInitialStep({
-        boxToken: HEX32,
-        defaultModel: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
-        projects: [{ tmuxSession: "demo", defaultCwd: "~/projects/demo" }],
-      }),
-    ).toBe(4);
   });
 });

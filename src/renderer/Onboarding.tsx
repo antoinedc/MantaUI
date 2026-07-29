@@ -1,9 +1,44 @@
-import { useEffect, useRef, useState } from "react";
+// Onboarding.tsx — full-screen M6.6 onboarding shell (BET-356).
+//
+// Owns the full-screen container (no sidebar / header / footer), the progress
+// rail (numbered dots + connecting lines), fade+slide step transitions, and
+// the terminal success screen.
+//
+// The user-visible flow collapses from four steps (Pair → Providers → Model
+// → Project, BET-49) to two (Connect → Connect a provider, BET-356). Model
+// is global config (edited in Settings), and the first project is auto-
+// created on pair success — no dedicated onboarding step for either.
+//
+// Onboarding's responsibilities beyond the step machine:
+//
+//   1. Verify by working (BET-356 §4). After both steps complete (or after
+//      step 1 alone, when step 2 auto-skipped because a provider was
+//      already connected), `finalizeOnboarding` auto-creates the welcome
+//      project + chat window, sends a probe prompt, and waits for a real
+//      assistant response. An install that exits zero but cannot answer
+//      is a failure the user sees immediately, not later.
+//
+//   2. Failure and resumption (BET-356 §5). Every failure shows a plain-
+//      language cause + one action. The shell re-derives the resume point
+//      from config so a quit-mid-flow reopens at the first incomplete
+//      step (the underlying `resolveInitialStep` already has this
+//      property; the shell just re-uses it on every mount).
+//
+// Per-step bodies:
+//   - Step 1 (Connect)          → PairStep.tsx (SSH picker primary, manual
+//                                 disclosure secondary)
+//   - Step 2 (Connect provider) → ProvidersStep.tsx (auto-skips on mount
+//                                 when a provider is already connected)
+//   - Success                   → this file
+//
+// Those components own their own footers; the shell hides its generic
+// footer and lets each step drive advancement (`onPaired` / `onContinue`).
+
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ONBOARDING_STEPS,
   STEP_LABELS,
   LAST_STEP,
-  nextPosition,
   prevPosition,
   resolveInitialStep,
   type OnboardingPosition,
@@ -11,46 +46,21 @@ import {
 import { useStore } from "./store";
 import { PairStep } from "./PairStep";
 import { ProvidersStep } from "./ProvidersStep";
-import { ModelStep } from "./ModelStep";
-import { FirstProjectStep } from "./FirstProjectStep";
+import {
+  finalizeOnboarding,
+  hasConnectedProvider,
+  type VerifyApi,
+  type VerifyStore,
+} from "./onboardingVerify";
+import { installHttpTransport } from "./transportInstall";
 import { ArrowRight, CheckIcon } from "./onboardingUi";
 import mantaMark from "./assets/manta-mark-128.png";
 
-// Onboarding.tsx — full-screen M6.2 onboarding shell (BET-49-T3).
-//
-// Owns: the full-screen container (no sidebar / header / footer), the progress
-// rail (numbered dots + connecting lines, per docs/onboarding/mockup.html),
-// fade+slide step transitions, back navigation on steps 2–4, the "Skip setup"
-// escape hatch, and the terminal success screen.
-//
-// Does NOT own the per-step bodies:
-//   - Step 1 (Pair)          → BET-49-T2 (PairStep.tsx — mounted below)
-//   - Step 2 (Providers)     → BET-49-T4 (ProvidersStep.tsx — mounted below)
-//   - Step 3 (Model)         → BET-49-T4 (ModelStep.tsx — mounted below)
-//   - Step 4 (First project) → BET-49-T5 (FirstProjectStep.tsx — mounted below)
-// Those land as their own components mounted into the step-body slots below.
-// The step model + resume math live in onboardingUtils.ts (pure, tested).
-//
-// Every step owns its OWN footer (per docs/onboarding/mockup.html), because
-// each has a gated/side-effecting primary action the shell's generic goNext
-// footer can't express: Step 1's "Connect" runs the pairing claim and only
-// advances on success; Step 2's "Continue" is gated on ≥1 connected provider;
-// Step 3's "Continue" is gated on a model selection; Step 4's "Create project"
-// runs project creation and only advances (to success) once it succeeds. So the
-// shell hides its footer entirely and lets each step drive advancement
-// (onContinue/onPaired/onCreated → goNext), back-nav (onBack → goBack), and
-// skipping (onSkip → skip).
-//
-// Props:
-//   onDone — called when onboarding completes (success screen "Open manta") OR is
-//            skipped. The parent (App.tsx) re-reads config and drops back to the
-//            normal shell WITHOUT an app restart.
+const ACCENT = "#5A88FF"; // matches the app's Tailwind `accent` token
 
-const ACCENT = "#5A88FF"; // matches the app's Tailwind `accent` token (see tailwind.config)
-
-// One progress dot + (optionally) the connector leading into it.
+// Progress rail — one dot + connector per step. Reads every numbered step as
+// completed on the success screen.
 function ProgressRail({ current }: { current: OnboardingPosition }) {
-  // On the success screen every numbered step reads as completed.
   const activeIdx = current === "success" ? LAST_STEP + 1 : current;
   return (
     <div className="flex flex-col items-center">
@@ -105,6 +115,10 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
   );
 }
 
+// Props:
+//   onDone — called when onboarding completes (success screen "Open manta") OR
+//            is skipped. The parent (App.tsx) re-reads config and drops back
+//            to the normal shell WITHOUT an app restart.
 export function Onboarding({ onDone }: { onDone: () => void }) {
   // Derive the resume point once from the current config so a quit-mid-flow
   // reopens at the first incomplete step. Read straight from the store's
@@ -119,6 +133,101 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       : resolveInitialStep(useStore.getState().configSnapshot()),
   );
 
+  // Verification state — the orchestrator runs after a successful pair +
+  // (optional) provider step, before the success screen. The user sees an
+  // inline "Verifying your box…" panel while it polls; success replaces it
+  // with the "You're all set!" screen.
+  const [verifying, setVerifying] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+
+  // Pre-flight for everything that runs AFTER a successful pair: refresh
+  // the store from main's config + seed localStorage / swap window.api to
+  // httpApi. The SSH claim path persists credentials via main's commit()
+  // but does NOT seed localStorage or swap window.api to httpApi (only
+  // the manual path's claimBox does). Without this pre-flight, the
+  // window.api.opencode* / .tmuxNewSession / .opencodeProviderAuth calls
+  // in finalize + hasConnectedProvider fail — the preload has no such
+  // surface. The manual path's claimBox already did the install; this
+  // re-run is idempotent (localStorage entries + window.api swap).
+  const refreshAndInstallTransport = useCallback(async () => {
+    await useStore.getState().refresh();
+    const cfg = useStore.getState().configSnapshot();
+    if (
+      typeof cfg.boxToken === "string" &&
+      cfg.boxToken.length > 0 &&
+      typeof cfg.serverUrl === "string" &&
+      cfg.serverUrl.length > 0
+    ) {
+      installHttpTransport({
+        manta_server: cfg.serverUrl.replace(/\/+$/, ""),
+        manta_token: cfg.boxToken,
+      });
+    }
+  }, []);
+
+  // The post-pair orchestrator. Auto-creates the welcome project + chat
+  // window, sends a probe prompt, waits for a real assistant response. On
+  // success the shell advances to "success" so the user sees the
+  // terminal screen; on failure the error surfaces inline at the step
+  // that triggered it (the step's own onPaired/onContinue handler catches
+  // the throw via setVerifyError and stays put).
+  //
+  // Two call sites:
+  //   - onPaired (step 1): skips to step 2 if no provider is connected,
+  //     otherwise calls finalizeOnboarding directly. The "skip if no
+  //     provider" branch is the dual of ProvidersStep's mount-time
+  //     auto-skip, so either side arriving at finalizeOnboarding means
+  //     ≥1 provider is connected.
+  //   - onContinue (step 2): always calls finalizeOnboarding.
+  const finalize = useCallback(async () => {
+    setVerifying(true);
+    setVerifyError(null);
+    try {
+      await refreshAndInstallTransport();
+      await finalizeOnboarding({
+        api: window.api as unknown as VerifyApi,
+        store: useStore.getState() as unknown as VerifyStore,
+      });
+      setPos("success");
+    } catch (e) {
+      setVerifyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setVerifying(false);
+    }
+  }, [refreshAndInstallTransport]);
+
+  // Step 1 → step 2 (provider needed) OR step 1 → finalize (provider
+  // already connected). Detecting the latter before stepping forward keeps
+  // the user from blinking through an empty step-2 frame.
+  //
+  // refreshAndInstallTransport FIRST so the hasConnectedProvider probe
+  // (and the upcoming finalize) actually reach the box.
+  const onPaired = useCallback(async () => {
+    await refreshAndInstallTransport();
+    const connected = await hasConnectedProvider(
+      window.api as unknown as VerifyApi,
+    );
+    if (connected) {
+      await finalize();
+    } else {
+      setPos(2);
+    }
+  }, [refreshAndInstallTransport, finalize]);
+
+  // Step 2 → finalize (provider connect just landed → run the verify).
+  const onProviderContinue = useCallback(async () => {
+    await finalize();
+  }, [finalize]);
+
+  const goBack = () => setPos((p) => prevPosition(p));
+
+  // Skip: persist onboardingSkipped so the flow doesn't re-trigger on every
+  // launch of an otherwise-empty config, then hand control back to the shell.
+  const skip = async () => {
+    await useStore.getState().skipOnboarding();
+    onDone();
+  };
+
   // Deep-link pairing (BET-240): a link that arrives WHILE onboarding is
   // already open (e.g. user clicked the link from Terminal after the app
   // was running) must also jump to step 1.
@@ -128,34 +237,15 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   }, [pendingPairLink]);
 
   // Deep-link pairing: a manta:// link that SUCCEEDS must move the flow off
-  // step 1. App keeps this shell mounted through a latch after pairing (so
-  // steps 2-4 stay reachable), so without this the user sat on the pair form
-  // with the code field focused even though they were already paired — the
-  // "the link opens the app but does nothing" bug.
-  //
-  // Re-derive from the freshly re-read config rather than calling goNext():
-  // a re-pair from an already-configured box should land on the first step
-  // that's still incomplete, not blindly on step 2.
-  //
-  // The ref pins the mount-time value so this only fires on a claim that
-  // happens WHILE mounted. Firing on mount would clobber the step-1 forcing
-  // that `pendingPairLink` does for a FAILED link on an already-paired box.
+  // step 1. Re-derive from the freshly re-read config rather than calling
+  // goNext(): a re-pair from an already-configured box should land on the
+  // first step that's still incomplete, not blindly on step 2.
   const pairLinkClaims = useStore((s) => s.pairLinkClaims);
-  const claimsAtMount = useRef(pairLinkClaims);
+  const claimsAtMountRef = useRef(pairLinkClaims);
   useEffect(() => {
-    if (pairLinkClaims === claimsAtMount.current) return;
+    if (pairLinkClaims === claimsAtMountRef.current) return;
     setPos(resolveInitialStep(useStore.getState().configSnapshot()));
   }, [pairLinkClaims]);
-
-  const goNext = () => setPos((p) => nextPosition(p));
-  const goBack = () => setPos((p) => prevPosition(p));
-
-  // Skip: persist onboardingSkipped so the flow doesn't re-trigger on every
-  // launch of an otherwise-empty config, then hand control back to the shell.
-  const skip = async () => {
-    await useStore.getState().skipOnboarding();
-    onDone();
-  };
 
   const isSuccess = pos === "success";
 
@@ -176,48 +266,72 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         <div className="relative overflow-hidden">
           <div key={String(pos)} className="onboarding-step-enter">
             {isSuccess ? (
-              <div className="text-center py-5">
-                <div
-                  className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5"
-                  style={{ background: "rgba(34,197,94,0.1)" }}
-                >
-                  <CheckIcon className="w-7 h-7 text-green-400" />
-                </div>
-                <h2 className="text-2xl font-semibold mb-2">You're all set!</h2>
-                <p className="text-sm text-text-muted leading-relaxed max-w-sm mx-auto mb-7">
-                  Your server is connected, providers are configured, and your first project is
-                  ready. Start chatting with your AI assistant.
-                </p>
-                <button
-                  onClick={onDone}
-                  className="inline-flex items-center gap-2 px-6 py-2.5 rounded-md text-sm font-medium text-bg"
-                  style={{ background: ACCENT }}
-                >
-                  Open Manta
-                  <ArrowRight />
-                </button>
-              </div>
+              <SuccessPanel onOpen={onDone} />
             ) : pos === 1 ? (
-              // Step 1 (Pair) owns its own footer (Skip setup + Connect), so it
-              // gets goNext/skip directly and the shell footer is suppressed
-              // below. A successful claim advances; skip drops to the app.
-              <PairStep onPaired={goNext} onSkip={skip} />
+              <PairStep onPaired={onPaired} onSkip={skip} />
             ) : pos === 2 ? (
-              // Step 2 (Providers) owns its footer (Back + gated Continue).
-              <ProvidersStep onBack={goBack} onContinue={goNext} />
-            ) : pos === 4 ? (
-              // Step 4 (First project) owns its footer (Back + gated Create
-              // project). onCreated advances to the success screen.
-              <FirstProjectStep onBack={goBack} onCreated={goNext} />
+              <ProvidersStep
+                onBack={goBack}
+                onContinue={onProviderContinue}
+              />
             ) : null}
           </div>
-          {/* ModelStep stays mounted across Step 3 ↔ Step 4 so a return to
-              Step 3 fires the `active` refetch (BET-315). The component
-              returns null while inactive, and the explicit `pos === 4` guard
-              above keeps Step 3 from rendering alongside it. */}
-          <ModelStep active={pos === 3} onBack={goBack} onContinue={goNext} />
         </div>
+
+        {/* Verification overlay — sits below the step body so it doesn't
+            obscure the active step's controls. Only visible mid-finalize. */}
+        {verifying && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mt-6 rounded-md border border-border bg-bg-soft px-4 py-3 text-sm text-text-muted flex items-center gap-3"
+          >
+            <span
+              aria-hidden
+              className="inline-block w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin"
+            />
+            Verifying your box…
+          </div>
+        )}
+        {verifyError && (
+          <div
+            role="alert"
+            className="mt-6 rounded-md border px-4 py-3 text-sm"
+            style={{ borderColor: "#FF7A88", color: "#FF7A88" }}
+          >
+            {verifyError}
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
+
+// The terminal success screen — moved out of Onboarding's render body so the
+// step-body slot above stays readable. "Open Manta" hands control back to
+// the parent; App.tsx drops back to the normal shell on onDone.
+function SuccessPanel({ onOpen }: { onOpen: () => void }) {
+  return (
+    <div className="text-center py-5">
+      <div
+        className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5"
+        style={{ background: "rgba(34,197,94,0.1)" }}
+      >
+        <CheckIcon className="w-7 h-7 text-green-400" />
+      </div>
+      <h2 className="text-2xl font-semibold mb-2">You're all set!</h2>
+      <p className="text-sm text-text-muted leading-relaxed max-w-sm mx-auto mb-7">
+        Your box is paired, a provider is connected, and your first project is
+        ready. Start chatting with your AI assistant.
+      </p>
+      <button
+        onClick={onOpen}
+        className="inline-flex items-center gap-2 px-6 py-2.5 rounded-md text-sm font-medium text-bg"
+        style={{ background: ACCENT }}
+      >
+        Open Manta
+        <ArrowRight />
+      </button>
     </div>
   );
 }

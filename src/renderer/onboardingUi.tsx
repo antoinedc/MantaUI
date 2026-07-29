@@ -1,10 +1,10 @@
-// onboardingUi.tsx — shared React presentation primitives for the M6.2 desktop
-// onboarding flow (BET-49-T3/T4). These are the pieces that were previously
-// copy-pasted verbatim across Onboarding.tsx / ProvidersStep.tsx / ModelStep.tsx
-// (the step-nav arrow/check/plus SVGs and the Back+Continue footer). Extracting
-// them here kills the duplication-gate clones and gives every step one source of
-// truth for the nav chrome. Pure step-model logic still lives in onboardingUtils.ts;
-// this module owns only the small shared JSX.
+// onboardingUi.tsx — shared React presentation primitives for the desktop
+// onboarding flow. These are the pieces that were previously copy-pasted
+// verbatim across Onboarding.tsx and the per-step bodies (the step-nav
+// arrow/check/plus SVGs and the Back+Continue footer). Extracting them
+// here kills the duplication-gate clones and gives every step one source
+// of truth for the nav chrome. Pure step-model logic still lives in
+// onboardingUtils.ts; this module owns only the small shared JSX.
 
 const ACCENT = "#5A88FF";
 
