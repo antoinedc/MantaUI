@@ -31,6 +31,7 @@ import {
 } from "./capExecutor.js";
 import { checkForUpdates } from "./autoUpdate.js";
 import { titleBarOptions } from "./windowChrome.js";
+import { registerInstallerHandlers } from "./installer/handlers.js";
 import { IPC, type AppConfig, type AuthClaimInput } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -401,5 +402,12 @@ function registerHandlers(): void {
   ipcMain.handle(IPC.authClaim, (_e, input: AuthClaimInput) =>
     claimPairing(input, (patch) => commit(patch)),
   );
+
+  // BET-355 (Stage 4): SSH installer flow. The channels exposed by
+  // registerInstallerHandlers are the renderer's ONLY handle on the
+  // installer module — main owns the SSH connection from start to
+  // pairing-success, and the connection dies at pairing time. The
+  // renderer never touches ssh itself (no preload API for it).
+  registerInstallerHandlers(() => mainWindow);
 
 }

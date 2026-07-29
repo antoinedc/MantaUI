@@ -9,6 +9,29 @@ import {
   type AutoUpdateErrorInfo,
 } from "../shared/types.js";
 import type { ClaimOutcome } from "../shared/claim.mjs";
+import type { PreflightResult } from "../main/installer/preflight.js";
+import type { InstallStageId } from "../main/installer/stageMapper.js";
+import type { SshHostEntry } from "../main/installer/sshConfig.js";
+
+// Discriminated union for events streamed from main → renderer while an
+// install is in flight. Mirrors the patterns main/installer/handlers.ts
+// pushes via webContents.send(IPC.installerEvent, …).
+export type InstallerEvent =
+  | { kind: "line"; handleId: string; text: string }
+  | {
+      kind: "stage";
+      handleId: string;
+      stage: InstallStageId;
+      snapshot: Array<{ id: InstallStageId; label: string; state: "done" | "active" | "pending" }>;
+    }
+  | { kind: "done"; handleId: string; code: number | null; signal: NodeJS.Signals | null; ok: boolean }
+  | { kind: "error"; handleId: string; message: string };
+
+export type InstallerState = {
+  active: boolean;
+  stage: InstallStageId;
+  logTail: string[];
+};
 
 // This is the OS-bridge + pairing SUBSET of the full `Api` contract
 // (`src/shared/api.ts`) — the methods the desktop preload runtime actually
@@ -154,6 +177,80 @@ const api = {
     const listener = (_: unknown, info: AutoUpdateErrorInfo) => cb(info);
     ipcRenderer.on(IPC.autoUpdateError, listener);
     return () => ipcRenderer.removeListener(IPC.autoUpdateError, listener);
+  },
+
+  // ---- SSH installer (BET-355 — Stage 4) ----
+  // Preload bridge for the renderer's "install a new box via SSH" flow.
+  // Every method here is one IPC round-trip; events come back via
+  // onInstallerEvent below (same subscribe/unsubscribe pattern as the
+  // pairLink / screenshotDetected / autoUpdate* listeners). The renderer
+  // holds the only SshHostEntry alias it passes to installStart; the
+  // installer module owns the resulting ssh child process.
+
+  // Read ~/.ssh/config and return the pickable aliases (Host * is skipped).
+  installerListHosts: (): Promise<SshHostEntry[]> =>
+    ipcRenderer.invoke(IPC.installerListHosts),
+
+  // Run all six preflight probes over SSH (silent reachability, OS/arch,
+  // passwordless sudo, tailscale, clock skew, already-installed) and
+  // return the classified verdict. NEVER throws on a normal failure —
+  // unreachable / auth-failed / unsupported-OS all return as structured
+  // failures[] the UI renders inline.
+  installerPreflight: (input: { alias: string }): Promise<PreflightResult> =>
+    ipcRenderer.invoke(IPC.installerPreflight, input),
+
+  // Start the install over SSH. Returns immediately with a handle id; the
+  // actual install streams back via onInstallerEvent (line / stage / done
+  // / error). The renderer matches events to its handle id so an out-of-
+  // band cancel doesn't lose events mid-flight.
+  installerStart: (input: { alias: string }): Promise<{ handleId: string }> =>
+    ipcRenderer.invoke(IPC.installerStart, input),
+
+  // Cancel the in-flight install. Idempotent: safe to call on a stale
+  // handle id, on an already-done handle, or twice in a row.
+  installerCancel: (input: { handleId: string }): Promise<void> =>
+    ipcRenderer.invoke(IPC.installerCancel, input),
+
+  // Mint a fresh pairing code over the existing SSH connection + claim it
+  // via the box's public URL. Persists credentials through main's existing
+  // claim path (single config writer, per BET-355 constraint #4). The
+  // ClaimOutcome has the same shape as the manual PairStep claim — the
+  // renderer treats success and failure the same way regardless of which
+  // entry point produced them.
+  installerMintAndClaim: (input: {
+    alias: string;
+    claimUrlOverride?: string;
+  }): Promise<ClaimOutcome> =>
+    ipcRenderer.invoke(IPC.installerMintAndClaim, input),
+
+  // Returns { active, stage, logTail } — the renderer calls this on mount
+  // to recover the current install state after a page refresh (the install
+  // survives the renderer's remount; only its display needs rehydrating).
+  installerState: (): Promise<InstallerState> =>
+    ipcRenderer.invoke(IPC.installerState),
+
+  // Build a redacted diagnostics blob for the "Copy diagnostics" action.
+  // Pure: takes the preflight + stage + log tail, returns the text blob.
+  // Redaction (BET-355 §6) strips 32-hex tokens, 6-digit codes, ssh-key
+  // paths, host fingerprints, and Authorization: Bearer values.
+  installerGetDiagnostics: (input: {
+    preflight: PreflightResult;
+    stage: InstallStageId;
+    logTail: string[];
+    alias?: string;
+  }): Promise<string> => ipcRenderer.invoke(IPC.installerGetDiagnostics, input),
+
+  // Push events from main while an install is in flight. Returns an
+  // unsubscribe function (same pattern as onAutoUpdateAvailable above).
+  // The renderer dispatches on `event.kind`:
+  //   "line"  → append to log display
+  //   "stage" → update the checklist + which stage is "active"
+  //   "done"  → install finished; ok=true → call installerMintAndClaim
+  //   "error" → install failed; show failure + offer "Copy diagnostics"
+  onInstallerEvent: (cb: (event: InstallerEvent) => void): (() => void) => {
+    const listener = (_: unknown, event: InstallerEvent) => cb(event);
+    ipcRenderer.on(IPC.installerEvent, listener);
+    return () => ipcRenderer.removeListener(IPC.installerEvent, listener);
   },
 };
 

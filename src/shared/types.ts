@@ -689,6 +689,56 @@ export const IPC = {
   // round-trip to the box.
   pluginsSetEnabled: "plugins:set-enabled",  // (value: boolean) → void
   pluginsGetEnabled: "plugins:get-enabled",  // () → boolean
+
+  // ---- SSH installer (BET-355 — Stage 4) ----
+  // The desktop can drive a box install over SSH — pick a host alias from
+  // the user's ssh_config, watch preflight + install progress, end up paired
+  // with no terminal interaction. The whole flow lives in src/main/installer/
+  // (the architectural rule: SSH is installer-only, never reachable from the
+  // running app). Channels are the renderer's only handle on the installer
+  // module; events stream back on `installerEvent`.
+  //
+  // Renderer's view of the world:
+  //   listHosts        → SshHostEntry[]  — populate the alias picker
+  //   preflight({alias})→ PreflightResult — show "proceed / branch / fail"
+  //                                      with structured failures[] (cause
+  //                                      + action per failure)
+  //   installStart({alias})
+  //                   → { handleId }   — kicks off the install; the renderer
+  //                                      listens to `installerEvent` for
+  //                                      per-line + per-stage events until
+  //                                      the install exits
+  //   installCancel({handleId})
+  //                   → void          — SIGTERM the in-flight install; safe
+  //                                      even if the handle is already done
+  //   installMintAndClaim({alias, claimUrlOverride?})
+  //                   → ClaimOutcome   — runs `manta pair` over SSH on the
+  //                                      already-installed box, claims the
+  //                                      resulting code, and persists the
+  //                                      box credentials through the
+  //                                      existing claim path (single
+  //                                      config writer per BET-355
+  //                                      constraint #4).
+  //   installState()  → { active, stage } — renderer queries on mount to
+  //                                       recover the current install state
+  //                                       after a page refresh.
+  //   installGetDiagnostics({preflight, stage, logTail, alias})
+  //                   → string         — redacted diagnostics blob for the
+  //                                      "Copy diagnostics" action.
+  installerListHosts: "installer:list-hosts",
+  installerPreflight: "installer:preflight",
+  installerStart: "installer:start",
+  installerCancel: "installer:cancel",
+  installerMintAndClaim: "installer:mint-and-claim",
+  installerState: "installer:state",
+  installerGetDiagnostics: "installer:get-diagnostics",
+  // installerEvent is the main → renderer push channel (mirrors the
+  // pairLinkReceived pattern). Payload is a discriminated union:
+  //   { kind: "line",  handleId, text }
+  //   { kind: "stage", handleId, stage, snapshot }
+  //   { kind: "done",  handleId, code, signal }
+  //   { kind: "error", handleId, message }
+  installerEvent: "installer:event",
 } as const;
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the

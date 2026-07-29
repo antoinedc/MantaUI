@@ -50,6 +50,35 @@ function makeFakePreload(): MantaPreload {
     onAutoUpdateAvailable: vi.fn(() => vi.fn()),
     onAutoUpdateDownloaded: vi.fn(() => vi.fn()),
     onAutoUpdateError: vi.fn(() => vi.fn()),
+    // BET-355 (Stage 4): SSH installer bridge. Minimal vi.fn stubs — the
+    // method shapes matter for the type contract; per-method behaviour is
+    // exercised by the installer's own unit tests + the renderer's
+    // SshInstallStep component test (smoke-only here).
+    installerListHosts: vi.fn(async () => []),
+    installerPreflight: vi.fn(async () => ({
+      ok: false,
+      ingressMode: "public-tls" as const,
+      probes: {
+        reachability: "unreachable" as const,
+        os: { id: "unknown" as const, arch: "unknown" as const, release: null },
+        passwordlessSudo: false,
+        tailscale: { running: false, ipv4: null },
+        clockSkewSeconds: 0,
+        alreadyInstalled: false,
+      },
+      failures: [],
+      warnings: [],
+    })),
+    installerStart: vi.fn(async () => ({ handleId: "fake-handle" })),
+    installerCancel: vi.fn(async () => {}),
+    installerMintAndClaim: vi.fn(async () => ({ ok: false })),
+    installerState: vi.fn(async () => ({
+      active: false,
+      stage: "preflight" as const,
+      logTail: [],
+    })),
+    installerGetDiagnostics: vi.fn(async () => ""),
+    onInstallerEvent: vi.fn(() => vi.fn()),
   };
 }
 
