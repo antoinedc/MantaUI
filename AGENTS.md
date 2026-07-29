@@ -2301,6 +2301,43 @@ APNs via `POST gateway.mantaui.com/push` with a `gateway_token` it got back
 from `POST /register` at install time. Web Push (VAPID, for the PWA) stays
 box-local and unchanged — it doesn't touch the gateway.
 
+### Staging channel — ON DEMAND ONLY, never auto-fires (BET-371)
+
+A parallel `staging/` subtree on the SAME prod webroot (`/var/www/mantaui/staging/...`),
+served as `https://mantaui.com/staging/...` from the existing Caddy vhost —
+no new host, no DNS, no TLS cert. Staging is **manual-only**: it never fires on
+a push, merge, or tag. Tag triggers (`web-v*`, `server-v*`, `mac-v*`) keep
+meaning **prod**; staging is triggered by hand after the spec change lands.
+
+**URL layout** (one prefix, three artifact dirs, mirroring prod):
+| Artifact | prod destination | staging destination |
+|---|---|---|
+| `install.sh`, `llms-install.md` | `/var/www/mantaui/` | `/var/www/mantaui/staging/` |
+| server tarballs + manifest | `/var/www/mantaui/releases/` | `/var/www/mantaui/staging/releases/` |
+| desktop update feed + DMG | `/var/www/mantaui/updates/` | `/var/www/mantaui/staging/updates/` |
+| desktop canonical download | `Manta-latest.dmg` (under `downloads/`) | `Manta-Staging-latest.dmg` (under `staging/downloads/`) |
+
+**Triggers (three commands, no new workflow files):**
+```
+# Website — current main → /var/www/mantaui/staging
+gh workflow run website-deploy.yml -f channel=staging
+# Server tarballs — rebuilds all arches natively + publishes
+gh workflow run server-tarball-deploy.yml -f channel=staging
+# Desktop DMG — Codemagic REST API (no GitHub action); overrides MANTA_CHANNEL=staging
+CMK=$(secret_provide CODEMAGIC_API_KEY)
+curl -s -X POST -H "x-auth-token: $(cat $CMK)" -H "Content-Type: application/json" \
+  -d '{"appId":"6a5bfe08d7050a29d2f33802","workflowId":"mac-desktop","branch":"main",\
+       "environment":{"variables":{"MANTA_CHANNEL":"staging"}}}' \
+  https://api.codemagic.io/builds
+```
+Each workflow carries a `/staging/` guard step that fails RED if `channel=staging`
+and the resolved destination path lacks `/staging/` — a staging run that
+silently writes to prod is the only dangerous failure mode, and the guard makes
+it impossible rather than unlikely. The mac-desktop build's overlay
+(`electron-builder.staging.yml`, created in BET-370) changes appId +
+productName + URL scheme + update-feed URL + dmg filename so staging can
+install side-by-side with prod on the same Mac.
+
 ### Prod box topology (why deploys are shaped this way)
 
 - **Prod box** `root@91.107.196.2` (Hetzner "manta"), zone `mantaui.com`.
