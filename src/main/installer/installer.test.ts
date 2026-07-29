@@ -168,7 +168,7 @@ describe("runInstall", () => {
     ).toThrow(/alias is required/);
   });
 
-  it("runs `bash -lc 'curl -fsSL <url> | bash'` over SSH with -tt", async () => {
+  it("runs `bash -lc 'curl -fsSL <url> | MANTA_RELEASE_HOST=<host> bash'` over SSH with -tt", async () => {
     const fake = makeFakeChild();
     const { spawn, captured } = capturingSpawn(fake);
     const handle = runInstall("dev", {}, { spawn });
@@ -176,9 +176,43 @@ describe("runInstall", () => {
     await handle.done;
     expect(captured.args).toContain("-tt");
     expect(captured.args).toContain("dev");
+    // Channel-aware install command (BET-370): the install.sh URL + release
+    // host flow from the channel config (test env falls through to dev,
+    // whose installShUrl + releaseHost match the prod defaults per the
+    // BET-370 spec table — staging-specific values are pinned in
+    // src/shared/channel.test.ts and don't need to be re-asserted here).
     expect(captured.args[captured.args.length - 1]).toMatch(
-      /curl -fsSL .* \| bash/,
+      /curl -fsSL https:\/\/mantaui\.com\/install\.sh/,
     );
+    expect(captured.args[captured.args.length - 1]).toMatch(
+      /MANTA_RELEASE_HOST=https:\/\/mantaui\.com/,
+    );
+    expect(captured.args[captured.args.length - 1]).toMatch(/\sbash'$/);
+  });
+
+  // BET-370 channel assertions: the installShUrl test seam overrides the
+  // URL only — releaseHost stays channel-derived. The two come from the
+  // same channel record in production; here we just verify that the
+  // orchestrator threads installShUrl verbatim into the curl invocation.
+  it("honours deps.installShUrl while still passing the channel's release host", async () => {
+    const fake = makeFakeChild();
+    const { spawn, captured } = capturingSpawn(fake);
+    const handle = runInstall(
+      "dev",
+      {},
+      {
+        spawn,
+        installShUrl: "https://mantaui.com/staging/install.sh",
+      },
+    );
+    setImmediate(() => fake.fireExit(0));
+    await handle.done;
+    const cmd = captured.args[captured.args.length - 1];
+    expect(cmd).toContain("curl -fsSL https://mantaui.com/staging/install.sh");
+    // releaseHost still flows from the channel (test env = dev = prod
+    // default), not from the installShUrl override — the channel is the
+    // single source of truth per the spec.
+    expect(cmd).toContain("MANTA_RELEASE_HOST=https://mantaui.com");
   });
 
   it("invokes onLine + onStage as the log advances through milestones", async () => {

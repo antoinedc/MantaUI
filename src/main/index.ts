@@ -33,9 +33,31 @@ import {
 import { checkForUpdates } from "./autoUpdate.js";
 import { titleBarOptions } from "./windowChrome.js";
 import { registerInstallerHandlers } from "./installer/handlers.js";
+import {
+  resolveChannel,
+  channelConfig,
+} from "../shared/channel.mjs";
 import { IPC, type AppConfig, type AuthClaimInput } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
+
+// Build-channel plumbing (BET-370). The baked value comes from electron-vite's
+// `define` (electron.vite.config.ts) — the ambient declaration lives in
+// src/main/buildDefines.d.ts. `resolveChannel` enforces the rule:
+//   isPackaged === false → "dev"  (npm run dev has no notion of release)
+//   otherwise             → bakedChannel if valid, else "prod" (never throws)
+// All per-channel values (userDataDir, appName, urlScheme, ...) flow through
+// `channelConfig(CHANNEL)` — there is no per-channel branch anywhere in this
+// file.
+const BAKED_CHANNEL =
+  typeof __MANTA_CHANNEL__ === "string" ? __MANTA_CHANNEL__ : "prod";
+const CHANNEL = resolveChannel(app.isPackaged, BAKED_CHANNEL);
+const CHANNEL_CONFIG = channelConfig(CHANNEL);
+// URL prefix used to recognise this channel's deep-link at every entry point
+// (warm open-url, second-instance argv, cold-start process.argv). Built from
+// the channel config — never a literal — so a future channel inherits the
+// pattern without touching this file.
+const PAIR_PREFIX = `${CHANNEL_CONFIG.urlScheme}://`;
 
 let mainWindow: BrowserWindow | null = null;
 let config: AppConfig = { projects: [] };
@@ -176,28 +198,33 @@ function createWindow(): void {
 
 // Pin userData to a stable directory BEFORE setName() (Electron otherwise
 // derives it from the app name, which would repoint it whenever the name
-// changes). Dev uses a SEPARATE directory so `npm run dev` runs fully isolated
-// from a packaged install — its own config.json, pairing, sessions, settings.
-app.setPath("userData", join(app.getPath("appData"), app.isPackaged ? "manta" : "manta-dev"));
+// changes). Per-channel: dev uses `manta-dev`, staging uses `manta-staging`,
+// prod uses `manta` — so each channel's install runs fully isolated from
+// the others (its own config.json, pairing, sessions, settings).
+app.setPath("userData", join(app.getPath("appData"), CHANNEL_CONFIG.userDataDir));
 
 // ---------------------------------------------------------------------------
-// manta:// deep-link pairing (protocol handler).
+// <scheme>:// deep-link pairing (protocol handler). The scheme name comes
+// from the build channel — prod registers `manta`, staging `manta-staging`,
+// dev `manta-dev` — so an OS can hand the same URL prefix to whichever
+// channel owns it.
+//
 // Registration + capture live in main; parsing/validation happens renderer-
 // side with the same parsePairPayload the PairStep paste field uses, so
 // there is exactly ONE parser for the wire format.
 //
-// ONLY the packaged app registers the scheme — an OS scheme can be owned by
-// one app, so the dev build (`npm run dev`) must not fight the packaged app
-// for it. In dev, pairing is done by pasting the 6-digit code manually.
+// All three channels register. Dev's `manta-dev://` registration is
+// best-effort and warm-only (rule 6): npm run dev reuses the shared
+// node_modules/electron bundle, so the scheme resolves to generic Electron
+// and `npm install` clobbers it. Register anyway — warm delivery to a
+// running dev instance works, and the registration is harmless.
 // ---------------------------------------------------------------------------
-if (app.isPackaged) {
-  app.setAsDefaultProtocolClient("manta");
-}
+app.setAsDefaultProtocolClient(CHANNEL_CONFIG.urlScheme);
 
 let pendingPairUrl: string | null = null;
 
 function deliverPairLink(url: string): void {
-  if (typeof url !== "string" || !url.startsWith("manta://")) return;
+  if (typeof url !== "string" || !url.startsWith(PAIR_PREFIX)) return;
   if (mainWindow && !mainWindow.webContents.isLoading()) {
     mainWindow.webContents.send(IPC.pairLinkReceived, url);
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -227,7 +254,7 @@ if (!gotSingleInstanceLock) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
-    const url = argv.find((a) => a.startsWith("manta://"));
+    const url = argv.find((a) => a.startsWith(PAIR_PREFIX));
     if (url) deliverPairLink(url);
   });
 }
@@ -237,8 +264,15 @@ if (!gotSingleInstanceLock) {
 // builds — the source name on OS notifications (otherwise the renderer's
 // Web Notification API attributes them to the bundle, i.e. "Electron" in dev).
 // `appUserModelId` does the equivalent for Windows toast attribution.
-app.setName("Manta UI");
-app.setAppUserModelId("com.antoinedc.mantaui");
+app.setName(CHANNEL_CONFIG.appName);
+// Windows toast attribution: per-channel AUMID so a prod and a staging install
+// on the same Windows box don't share a single taskbar group / notification
+// source. Dev falls back to the prod id because the spec marks dev's
+// electron-builder appId "n/a" (dev never builds), which leaves no value to
+// source from the table — same effective behaviour as before this PR.
+app.setAppUserModelId(
+  CHANNEL_CONFIG.electronBuilderAppId ?? "com.antoinedc.mantaui",
+);
 
 app.whenReady().then(() => {
   config = loadConfig();
@@ -259,7 +293,7 @@ app.whenReady().then(() => {
   mainWindow?.webContents.once("did-finish-load", () => {
     // Deep-link cold start: macOS parked the URL in pendingPairUrl (open-url
     // fires pre-ready); Windows/Linux pass it in this process's argv.
-    const argvPairUrl = process.argv.find((a) => a.startsWith("manta://")) ?? null;
+    const argvPairUrl = process.argv.find((a) => a.startsWith(PAIR_PREFIX)) ?? null;
     const coldPairUrl = pendingPairUrl ?? argvPairUrl;
     pendingPairUrl = null;
     if (coldPairUrl) {

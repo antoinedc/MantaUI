@@ -42,13 +42,6 @@ export type SpawnFn = (
 // every supported platform (macOS, Linux, Windows 10 1809+).
 export const SSH_BIN = process.env.MANTA_SSH_BIN ?? "ssh";
 
-// Where install.sh is hosted. The install.sh itself is versioned through the
-// release manifest (BET-205 WP5), but install.sh is referenced by stable URL
-// (it downloads the versioned tarball at runtime). The desktop shells out to
-// exactly this URL so the code path on the box is identical to what the user
-// would type by hand.
-export const DEFAULT_INSTALL_SH_URL = "https://mantaui.com/install.sh";
-
 // Shared option shape for both the one-shot and streaming variants.
 export type RemoteOptions = {
   /** Force a remote PTY (-tt). Defaults to false — preflight probes do not

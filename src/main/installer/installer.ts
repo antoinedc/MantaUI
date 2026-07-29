@@ -28,12 +28,15 @@ import { join } from "node:path";
 import {
   execRemote,
   streamRemote,
-  DEFAULT_INSTALL_SH_URL,
   type ExecRemoteResult,
   type SpawnFn,
 } from "./runner.js";
 import { parseSshConfig, type SshHostEntry } from "./sshConfig.js";
 import { isValidBoxToken } from "../../shared/transport.mjs";
+import {
+  resolveChannel,
+  channelConfig,
+} from "../../shared/channel.mjs";
 import {
   classifyPreflight,
   type PreflightProbes,
@@ -49,6 +52,36 @@ import type { ClaimOutcome } from "../../shared/claim.mjs";
 import type { AppConfig } from "../../shared/types.js";
 
 export type { SpawnFn } from "./runner.js";
+
+// Build-channel plumbing (BET-370). Same baked global as src/main/index.ts
+// reads — the `define` injection lives in electron.vite.config.ts and the
+// ambient declaration in src/main/buildDefines.d.ts. The install command
+// the orchestrator runs is channel-specific (install.sh URL + release host),
+// so it must resolve the channel here too. `resolveChannel` is the one rule;
+// everything below is a `channelConfig(CHANNEL).…` lookup.
+//
+// Computed lazily (via `resolveChannelConfig()`) rather than at module load:
+// the orchestrator's unit tests stub `spawn` and never load Electron, so a
+// top-level `app.isPackaged` read would crash before any test runs. The
+// `app` lookup is a runtime `require("electron")` that succeeds in
+// production (Electron is the host process) and yields `undefined` in the
+// vitest environment; in that case we resolve as `isPackaged=false` which
+// falls through to the dev channel — a no-op for tests that override
+// `installShUrl` directly.
+const BAKED_CHANNEL =
+  typeof __MANTA_CHANNEL__ === "string" ? __MANTA_CHANNEL__ : "prod";
+
+function resolveChannelConfig() {
+  let isPackaged = false;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const electron = require("electron") as { app?: { isPackaged?: boolean } };
+    isPackaged = electron.app?.isPackaged === true;
+  } catch {
+    // require("electron") threw — Electron is not the host. Treat as dev.
+  }
+  return channelConfig(resolveChannel(isPackaged, BAKED_CHANNEL));
+}
 
 // Default location of the user's SSH config. ~/.ssh/config on macOS / Linux;
 // the same path on Windows 10 1809+ (OpenSSH ships in the box). The
@@ -71,11 +104,18 @@ const PROBE_CLOCK_CMD = "bash -lc 'date -u +%s'";
 const PROBE_AUTH_FILE_CMD =
   "bash -lc 'test -f ~/.manta/auth.json && echo INSTALLED || echo FRESH'";
 
-// The one-line install command. This is EXACTLY what a user would type by
-// hand (`curl -fsSL https://mantaui.com/install.sh | bash`) — no desktop-
-// specific variant, no forked install.sh, per BET-355 constraint #1.
-function buildInstallCommand(installShUrl: string): string {
-  return `bash -lc 'curl -fsSL ${installShUrl} | bash'`;
+// The one-line install command. `installShUrl` and `releaseHost` come from
+// the current build channel (CHANNEL_CONFIG) — the orchestrator only knows
+// about SSH; the channel lives in src/shared/channel.mjs and is injected
+// here via the module-level CHANNEL constant.
+//
+// MANTA_RELEASE_HOST is passed unconditionally on every channel. For prod
+// the value is identical to install.sh's own default, so there is no
+// behaviour change; for staging the box fetches the staging manifest +
+// tarball, which is the entire point of the channel split. The single
+// command shape keeps the wire-format tests trivial (BET-370 §Tests).
+function buildInstallCommand(installShUrl: string, releaseHost: string): string {
+  return `bash -lc 'curl -fsSL ${installShUrl} | MANTA_RELEASE_HOST=${releaseHost} bash'`;
 }
 
 // ===========================================================================
@@ -258,14 +298,19 @@ export function runInstall(
   if (typeof alias !== "string" || alias.trim() === "") {
     throw new Error("runInstall: alias is required");
   }
-  const installShUrl = deps.installShUrl ?? DEFAULT_INSTALL_SH_URL;
+  // Local name `cfg` (not `channelConfig`) so it doesn't shadow the imported
+  // `channelConfig` function for the rest of this module — a future reader
+  // scanning the call sites should be able to tell "is this a record or a
+  // function?" at a glance (N1 from the reviewer).
+  const cfg = resolveChannelConfig();
+  const installShUrl = deps.installShUrl ?? cfg.installShUrl;
   // We force a remote PTY (-tt) so install.sh's color codes survive (the
   // POC addendum documents this: install.sh's log/ok/warn helpers emit
   // CSI color sequences, and we want them to land in stdout so the stage
   // mapper's prefix-matching still works after we strip them).
   //
   // TERM=xterm-256color is inherited from this process; nothing to set here.
-  const handle = streamRemote(alias, buildInstallCommand(installShUrl), {
+  const handle = streamRemote(alias, buildInstallCommand(installShUrl, cfg.releaseHost), {
     forceTty: true,
     spawn: deps.spawn,
     onStdout: (chunk) => pumpChunk(chunk, "stdout", sink),

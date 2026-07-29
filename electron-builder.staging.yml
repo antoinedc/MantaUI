@@ -1,0 +1,42 @@
+# electron-builder overlay for the STAGING channel (BET-370).
+#
+# Loaded by electron-builder via `electron-builder --config electron-builder.staging.yml`.
+# Inherits everything from electron-builder.yml (signing, notarization, mac/win/linux
+# targets, file exclusions, npmRebuild:false, entitlements, ...). Only the deltas:
+#
+#   - appId      — different bundle id so staging can install side-by-side with prod
+#                  on the same Mac / Windows box (one app per appId per OS).
+#   - productName — different display name + menu-bar label + dock label.
+#   - protocols   — different URL scheme (manta-staging) so the OS routes a
+#                  manta-staging:// link to the staging build, not the prod build
+#                  the user might also have installed.
+#   - publish.url — staging app reads its auto-update feed from the /staging path;
+#                  electron-updater's "generic" provider polls this and offers an
+#                  in-app upgrade.
+#   - mac.artifactName — base inherits `${productName}-${version}-${arch}.dmg` which
+#                  would produce a filename containing spaces and parentheses
+#                  ("Manta UI (Staging)-0.0.17-arm64.dmg"). That breaks the
+#                  scp / sha256sum steps in scripts/release/publish.sh. Override
+#                  to a hyphenated, no-space filename.
+#
+# Everything else (entitlements, hardenedRuntime, target arch, notarize:true,
+# win nsis signing posture, linux AppImage executableName, files exclusion of
+# node-pty, extraMetadata.main, ...) is INHERITED — do not redeclare any of it
+# here. A duplicated mac: block, for example, would silently shadow the
+# inherited one and break notarization.
+
+extends: electron-builder.yml
+appId: com.antoinedc.mantaui.staging
+productName: Manta UI (Staging)
+
+protocols:
+  - name: MantaUI Pairing (Staging)
+    schemes:
+      - manta-staging
+
+publish:
+  provider: generic
+  url: https://mantaui.com/staging/updates
+
+mac:
+  artifactName: "Manta-UI-Staging-${version}-${arch}.dmg"
