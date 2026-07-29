@@ -185,16 +185,10 @@ export function buildStageSnapshot(currentStage: InstallStageId): Array<{
   });
 }
 
-/**
- * The single status line the UI renders — CURRENT stage's label + 1-based
- * position + total (e.g. "Checking the box… · 1 of 6"). Derives from the
- * same INSTALL_STAGES/STAGE_INDEX the checklist uses — one source, no
- * duplicated label table in the renderer.
- */
+/** The single status line the UI renders, e.g. "Checking the box… · 1 of 6". */
 export function currentStageInfo(currentStage: InstallStageId): {
   label: string;
-  /** 1-based position in INSTALL_STAGES. */
-  index: number;
+  index: number; // 1-based position in INSTALL_STAGES
   total: number;
 } {
   const idx = STAGE_INDEX[currentStage];

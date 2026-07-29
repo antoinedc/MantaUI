@@ -1,5 +1,4 @@
-// Type-only cross-import (erased at compile time — same pattern already
-// used by src/renderer/preloadAccess.ts) — one shape, not a duplicated copy.
+// Type-only, erased at compile time (preloadAccess.ts does the same).
 import type { PreflightResult, PreflightFailure } from "../main/installer/preflight.js";
 
 // ----- Local app config -----
@@ -339,9 +338,6 @@ export type InstallerStageSnapshotRow = {
 
 export type InstallerEvent =
   | { kind: "line"; handleId: string; text: string }
-  // BET-383: one status line, not a six-row checklist — carries the CURRENT
-  // stage's precomputed label + 1-based position + total (from
-  // stageMapper's currentStageInfo, the single label source).
   | {
       kind: "stage";
       handleId: string;
@@ -350,8 +346,7 @@ export type InstallerEvent =
       index: number;
       total: number;
     }
-  // Preflight is phase 1 of the install, run in main. A failure here means
-  // no install ever started — no `activeHandle`, nothing spawned.
+  // Preflight (phase 1, in main) failed — no install ever started.
   | {
       kind: "preflight-failed";
       handleId: string;
@@ -369,14 +364,9 @@ export type InstallerEvent =
 export type InstallerState = {
   active: boolean;
   stage: InstallerStageSnapshotRow["id"];
-  // Same precomputed label/position/total as the "stage" event — lets a
-  // remounted renderer recover the status line without its own label table.
-  stageLabel: string;
-  stageIndex: number;
-  stageTotal: number;
   logTail: string[];
-  // Most recent preflight verdict, null before any install started. Feeds
-  // "Copy diagnostics" with real probe values instead of a placeholder.
+  // Most recent preflight verdict, null before any install started — feeds
+  // "Copy diagnostics" with the real values instead of a placeholder.
   preflight: PreflightResult | null;
 };
 
@@ -777,12 +767,9 @@ export const IPC = {
   // Renderer's view of the world:
   //   listHosts        → SshHostEntry[]  — populate the alias picker
   //   installStart({alias})
-  //                   → { handleId }   — runs preflight as phase 1 in the
-  //                                      MAIN process, then (if it passes)
-  //                                      kicks off the install; the renderer
-  //                                      listens to `installerEvent` for
-  //                                      per-line + per-stage events until
-  //                                      the install exits
+  //                   → { handleId }   — runs preflight (phase 1, in main)
+  //                                      then the install; renderer listens
+  //                                      to `installerEvent` until it exits.
   //   installCancel({handleId})
   //                   → void          — SIGTERM the in-flight install; safe
   //                                      even if the handle is already done
@@ -795,9 +782,7 @@ export const IPC = {
   //                                      config writer per BET-355
   //                                      constraint #4).
   //   installState()  → { active, stage, logTail, preflight } — renderer
-  //                                       queries on mount to recover the
-  //                                       current install state after a
-  //                                       page refresh.
+  //                                       queries on mount to recover state.
   //   installGetDiagnostics({preflight, stage, logTail, alias})
   //                   → string         — redacted diagnostics blob for the
   //                                      "Copy diagnostics" action.
@@ -809,11 +794,11 @@ export const IPC = {
   installerGetDiagnostics: "installer:get-diagnostics",
   // installerEvent is the main → renderer push channel (mirrors the
   // pairLinkReceived pattern). Payload is a discriminated union:
-  //   { kind: "line",           handleId, text }
-  //   { kind: "stage",          handleId, stage, label, index, total }
+  //   { kind: "line", handleId, text }
+  //   { kind: "stage", handleId, stage, label, index, total }
   //   { kind: "preflight-failed", handleId, failures }
-  //   { kind: "done",           handleId, code, signal }
-  //   { kind: "error",          handleId, message }
+  //   { kind: "done", handleId, code, signal }
+  //   { kind: "error", handleId, message }
   installerEvent: "installer:event",
 } as const;
 

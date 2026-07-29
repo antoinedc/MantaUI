@@ -123,11 +123,10 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       const s = await preload.installerState();
       if (!alive) return;
       if (s.active) {
+        // Stage label/index snap to the next real "stage" event; the
+        // initial defaults are close enough for the brief recovery window.
         setRunning(true);
         setStage(s.stage);
-        setStageLabel(s.stageLabel);
-        setStageIndex(s.stageIndex);
-        setStageTotal(s.stageTotal);
         setLines(s.logTail);
         setLogOpen(true);
       } else if (s.preflight && !s.preflight.ok) {
@@ -214,6 +213,11 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     setLines([]);
     setDone(null);
     setClaimError(null);
+    // Clear the previous handle so the event guard doesn't discard this
+    // install's events (esp. a `preflight-failed` push, which main sends
+    // BEFORE the installerStart invoke below resolves) while it's still
+    // filtering against a prior, now-dead handle.
+    setActiveHandle(null);
     setStage(INITIAL_STAGE);
     setStageLabel(INITIAL_STAGE_LABEL);
     setStageIndex(1);
@@ -274,7 +278,13 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
 
   // ---------- Render ----------
   const installDisabled = running || claimRunning || !alias.trim();
-  const showProgress = !preflightFailure && (running || done !== null);
+  // Keep the panel (status line + log) mounted through an install error too
+  // — that's the log line the user needs most ("is it stuck, or just
+  // slow?"). Only the preflight-failure card excludes it (nothing was
+  // written to the box, so there's no install log to show).
+  const showProgress =
+    !preflightFailure &&
+    (running || done !== null || (installError !== null && lines.length > 0));
 
   return (
     <div className="space-y-5">

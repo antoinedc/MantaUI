@@ -61,9 +61,6 @@ function makeFakePreload(): MantaPreload {
     installerState: vi.fn(async () => ({
       active: false,
       stage: "preflight" as const,
-      stageLabel: "Checking the box",
-      stageIndex: 1,
-      stageTotal: 6,
       logTail: [],
       preflight: null,
     })),

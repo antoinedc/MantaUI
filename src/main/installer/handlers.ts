@@ -39,9 +39,7 @@ let activeStage: InstallStageId = "preflight";
 const logTail: string[] = [];
 const LOG_TAIL_MAX = 200;
 let nextHandleSeq = 0;
-// Most recent preflight verdict (BET-383: preflight is phase 1 of the
-// install, run here in main). Read back by IPC.installerState so a
-// remounted renderer, and "Copy diagnostics", see the real result.
+// Most recent preflight verdict, read back by IPC.installerState.
 let activePreflight: PreflightResult | null = null;
 
 function pushTail(line: string): void {
@@ -66,18 +64,12 @@ export function registerInstallerHandlers(
 ): void {
   ipcMain.handle(IPC.installerListHosts, () => listSshHosts(DEFAULT_SSH_CONFIG_PATH));
 
-  ipcMain.handle(IPC.installerState, () => {
-    const info = currentStageInfo(activeStage);
-    return {
-      active: activeHandle !== null,
-      stage: activeStage,
-      stageLabel: info.label,
-      stageIndex: info.index,
-      stageTotal: info.total,
-      logTail: [...logTail],
-      preflight: activePreflight,
-    };
-  });
+  ipcMain.handle(IPC.installerState, () => ({
+    active: activeHandle !== null,
+    stage: activeStage,
+    logTail: [...logTail],
+    preflight: activePreflight,
+  }));
 
   ipcMain.handle(IPC.installerStart, async (_e, input: { alias: string }) => {
     if (activeHandle !== null) {
