@@ -391,7 +391,15 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
  *   saveAuth    — injectable writer (default saveAuth) for the post-revoke
  *                 regenerate step
  *   deleteAuth  — injectable unlink (default deleteAuth) for the post-revoke
- *                 "wipe + regenerate" path. The default also runs in tests.
+ *                 "wipe + regenerate" path.
+ *
+ * DANGER — the saveAuth/deleteAuth DEFAULTS target the real box store
+ * (~/.manta/auth.json). Only index.mjs, which owns that store, may rely on
+ * them. Any other caller (tests above all) MUST inject its own writers: a
+ * revoke() with a matching token silently rotates the identity of the machine
+ * running the code, which locks every already-paired device and every
+ * manta-native AI tool out of the box until it re-pairs. See the `engine()`
+ * helper in auth.test.mjs.
  */
 export function createAuthEngine({
   auth,
