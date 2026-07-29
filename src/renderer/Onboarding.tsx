@@ -165,59 +165,71 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     }
   }, []);
 
-  // The post-pair orchestrator. Auto-creates the welcome project + chat
-  // window, sends a probe prompt, waits for a real assistant response. On
-  // success the shell advances to "success" so the user sees the
-  // terminal screen; on failure the error surfaces inline at the step
-  // that triggered it (the step's own onPaired/onContinue handler catches
-  // the throw via setVerifyError and stays put).
-  //
-  // Two call sites:
-  //   - onPaired (step 1): skips to step 2 if no provider is connected,
-  //     otherwise calls finalizeOnboarding directly. The "skip if no
-  //     provider" branch is the dual of ProvidersStep's mount-time
-  //     auto-skip, so either side arriving at finalizeOnboarding means
-  //     ≥1 provider is connected.
-  //   - onContinue (step 2): always calls finalizeOnboarding.
-  const finalize = useCallback(async () => {
+  // The ONE place that manages verifying/verifyError. Every async onboarding
+  // phase goes through it — a phase that throws surfaces inline and the user
+  // stays put, never a silent stall.
+  const runPhase = useCallback(async (fn: () => Promise<void>) => {
     setVerifying(true);
     setVerifyError(null);
     try {
-      await refreshAndInstallTransport();
-      await finalizeOnboarding({
-        api: window.api as unknown as VerifyApi,
-        store: useStore.getState() as unknown as VerifyStore,
-      });
-      setPos("success");
+      await fn();
     } catch (e) {
       setVerifyError(e instanceof Error ? e.message : String(e));
     } finally {
       setVerifying(false);
     }
+  }, []);
+
+  // The post-pair orchestrator body WITHOUT state management — runPhase owns
+  // that. Auto-creates the welcome project + chat window, sends a probe
+  // prompt, waits for a real assistant response. On success the shell
+  // advances to "success". Kept separate from runPhase so onPaired can run
+  // it inline without nesting two runPhase calls (which would clear
+  // verifying early).
+  //
+  // Two entry points route here through runPhase:
+  //   - onPaired (step 1): skips to step 2 if no provider is connected,
+  //     otherwise runs doFinalize. The "skip if no provider" branch is the
+  //     dual of ProvidersStep's mount-time auto-skip, so either side
+  //     arriving at finalizeOnboarding means ≥1 provider is connected.
+  //   - onProviderContinue (step 2): always runs doFinalize.
+  const doFinalize = useCallback(async () => {
+    await refreshAndInstallTransport();
+    await finalizeOnboarding({
+      api: window.api as unknown as VerifyApi,
+      store: useStore.getState() as unknown as VerifyStore,
+    });
+    setPos("success");
   }, [refreshAndInstallTransport]);
 
-  // Step 1 → step 2 (provider needed) OR step 1 → finalize (provider
+  // Step 1 → step 2 (provider needed) OR step 1 → doFinalize (provider
   // already connected). Detecting the latter before stepping forward keeps
   // the user from blinking through an empty step-2 frame.
   //
   // refreshAndInstallTransport FIRST so the hasConnectedProvider probe
-  // (and the upcoming finalize) actually reach the box.
-  const onPaired = useCallback(async () => {
-    await refreshAndInstallTransport();
-    const connected = await hasConnectedProvider(
-      window.api as unknown as VerifyApi,
-    );
-    if (connected) {
-      await finalize();
-    } else {
-      setPos(2);
-    }
-  }, [refreshAndInstallTransport, finalize]);
+  // (and the upcoming finalize) actually reach the box. The whole body runs
+  // inside runPhase so a rejection surfaces inline instead of stalling.
+  const onPaired = useCallback(
+    () =>
+      runPhase(async () => {
+        await refreshAndInstallTransport();
+        const connected = await hasConnectedProvider(
+          window.api as unknown as VerifyApi,
+        );
+        if (connected) {
+          await doFinalize();
+        } else {
+          setPos(2);
+        }
+      }),
+    [runPhase, refreshAndInstallTransport, doFinalize],
+  );
 
   // Step 2 → finalize (provider connect just landed → run the verify).
-  const onProviderContinue = useCallback(async () => {
-    await finalize();
-  }, [finalize]);
+  const onProviderContinue = useCallback(() => runPhase(doFinalize), [
+    runPhase,
+    doFinalize,
+  ]);
 
   const goBack = () => setPos((p) => prevPosition(p));
 
