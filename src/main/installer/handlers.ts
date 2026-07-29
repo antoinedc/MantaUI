@@ -25,6 +25,7 @@ import {
 } from "./installer.js";
 import { buildDiagnostics, type DiagnosticsInput } from "./diagnostics.js";
 import { trustHost } from "./knownHosts.js";
+import { createAskpassSession, type AskpassSession } from "./askpass.js";
 import type { InstallStageId } from "./stageMapper.js";
 import type { PreflightResult } from "./preflight.js";
 import type { HostFingerprint } from "./fingerprint.js";
@@ -60,6 +61,32 @@ let trustDeferred: {
 // enough that a user reading the fingerprint isn't rushed; short enough
 // that a forgotten tab doesn't hold the single-active slot forever.
 const TRUST_WAIT_TIMEOUT_MS = 5 * 60_000;
+
+// BET-360: when preflight (BatchMode=yes) returns auth-failed because the
+// key is passphrase-protected and not in ssh-agent, the install PAUSES here
+// waiting for the renderer's passphrase input. The deferred is resolved by
+// the installerAskpassRespond handler (passphrase string) or rejected by
+// installerCancel / a timeout (both → null = cancelled). `waitingForPassphrase`
+// is mirrored into installerState so a renderer remount re-shows the prompt.
+let waitingForPassphrase: { handleId: string; prompt: string } | null = null;
+let passphraseDeferred: {
+  resolve: (passphrase: string | null) => void;
+} | null = null;
+const PASSPHRASE_WAIT_TIMEOUT_MS = 5 * 60_000;
+
+// The active askpass session (temp dir + helper script + passphrase file).
+// Created when the user enters a passphrase; persists through the preflight
+// retry + install + claim so every ssh invocation reuses the cached
+// passphrase without re-prompting. Cleaned up on claim success, install
+// failure, cancel, or a new install start.
+let activeAskpass: AskpassSession | null = null;
+
+function cleanupAskpass(): void {
+  if (activeAskpass) {
+    activeAskpass.cleanup();
+    activeAskpass = null;
+  }
+}
 
 function pushTail(line: string): void {
   logTail.push(line);
@@ -98,6 +125,34 @@ async function awaitTrustDecision(
   });
 }
 
+// awaitPassphrase — pause the install while the renderer shows a passphrase
+// input. Resolves with the passphrase string, or null if the user cancelled
+// / the wait timed out. A null resolution is rejection-free so the caller
+// has a single path: null → abort with the original auth-failed guidance.
+async function awaitPassphrase(
+  handleId: string,
+  prompt: string,
+  send: (payload: unknown) => void,
+): Promise<string | null> {
+  waitingForPassphrase = { handleId, prompt };
+  send({ kind: "passphrase", handleId, prompt });
+  return new Promise<string | null>((resolve) => {
+    let settled = false;
+    const finish = (passphrase: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      waitingForPassphrase = null;
+      passphraseDeferred = null;
+      resolve(passphrase);
+    };
+    const timer = setTimeout(() => finish(null), PASSPHRASE_WAIT_TIMEOUT_MS);
+    passphraseDeferred = {
+      resolve: (p) => finish(p),
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // registerInstallerHandlers — wire the IPC channels for the installer module.
 // `getWindow` resolves the BrowserWindow that should receive push events
@@ -125,18 +180,25 @@ export function registerInstallerHandlers(
     waitingForTrust: waitingForTrust !== null,
     trustHandleId: waitingForTrust?.handleId ?? null,
     pendingFingerprint: waitingForTrust?.fingerprint ?? null,
+    // BET-360: mirror the passphrase-pause so a renderer remount re-shows
+    // the passphrase prompt.
+    waitingForPassphrase: waitingForPassphrase !== null,
+    passphraseHandleId: waitingForPassphrase?.handleId ?? null,
   }));
 
   ipcMain.handle(IPC.installerStart, async (_e, input: { alias: SshTarget }) => {
-    if (activeHandle !== null || waitingForTrust !== null) {
+    if (activeHandle !== null || waitingForTrust !== null || waitingForPassphrase !== null) {
       // Single-active constraint — refuse to start a second install. The
-      // trust-pause counts as "in progress": a paused install holds the
-      // slot until the user answers (BET-361).
+      // trust-pause and passphrase-pause both count as "in progress": a
+      // paused install holds the slot until the user answers (BET-361/360).
       throw new Error("an install is already in progress");
     }
     if (input?.alias === undefined || isEmptySshTarget(input.alias)) {
       throw new Error("alias is required");
     }
+    // Clear any stale askpass session from a previous (failed/cancelled)
+    // install — the passphrase temp file must not survive across installs.
+    cleanupAskpass();
     // Alias branch stays a trimmed string (unchanged); a custom target
     // (BET-384) is already normalized by resolveInstallTarget on the
     // renderer side, so there's nothing further to trim on an object.
@@ -195,6 +257,42 @@ export function registerInstallerHandlers(
       preflight = await preflightBox(alias);
       activePreflight = preflight;
     }
+
+    // BET-360: auth-failed on a reachable, trusted host means the key is
+    // passphrase-protected and not in ssh-agent. Pause for a passphrase,
+    // then re-run preflight with SSH_ASKPASS enabled. A cancel / timeout
+    // (null passphrase) aborts with the original auth-failed guidance —
+    // nothing was written to the box. We do NOT loop: a second auth-failed
+    // after askpass (wrong passphrase) is a normal preflight-failed.
+    if (!preflight.ok && preflight.probes.reachability === "auth-failed") {
+      const passphrase = await awaitPassphrase(
+        handleId,
+        "Enter the passphrase for your SSH key:",
+        send,
+      );
+      if (passphrase === null) {
+        send({ kind: "preflight-failed", handleId, failures: preflight.failures });
+        return { handleId };
+      }
+      const session = createAskpassSession(passphrase);
+      activeAskpass = session;
+      try {
+        preflight = await preflightBox(alias, { askpassEnv: session.env });
+        activePreflight = preflight;
+      } catch {
+        session.cleanup();
+        activeAskpass = null;
+        send({ kind: "preflight-failed", handleId, failures: preflight.failures });
+        return { handleId };
+      }
+      if (!preflight.ok) {
+        session.cleanup();
+        activeAskpass = null;
+        send({ kind: "preflight-failed", handleId, failures: preflight.failures });
+        return { handleId };
+      }
+    }
+
     if (!preflight.ok) {
       send({ kind: "preflight-failed", handleId, failures: preflight.failures });
       return { handleId };
@@ -212,6 +310,7 @@ export function registerInstallerHandlers(
           send({ kind: "stage", handleId, stage });
         },
       },
+      { askpassEnv: activeAskpass?.env },
     );
     activeHandle = { handleId, cancel: handle.cancel };
     // Fire-and-forget the done promise — we push the done event ourselves
@@ -226,6 +325,11 @@ export function registerInstallerHandlers(
           signal: r.signal,
           ok: r.code === 0,
         });
+        // On a FAILED install, the SSH connection is no longer needed —
+        // clean up the askpass session immediately. On success, keep it
+        // alive for the mint+claim phase (installerMintAndClaim cleans up
+        // after a successful claim).
+        if (r.code !== 0) cleanupAskpass();
       })
       .catch((err: unknown) => {
         send({
@@ -233,6 +337,7 @@ export function registerInstallerHandlers(
           handleId,
           message: err instanceof Error ? err.message : String(err),
         });
+        cleanupAskpass();
       })
       .finally(() => {
         // Only clear if THIS handle is still the active one — a cancel-then-
@@ -248,6 +353,13 @@ export function registerInstallerHandlers(
 
   ipcMain.handle(IPC.installerCancel, (_e, input: { handleId: string }) => {
     if (typeof input?.handleId !== "string" || input.handleId === "") return;
+    // BET-360: cancel during the passphrase-pause aborts the wait (treated
+    // as "cancelled" → null passphrase → the install aborts with the
+    // original auth-failed guidance). No child to SIGTERM yet.
+    if (waitingForPassphrase?.handleId === input.handleId && passphraseDeferred) {
+      passphraseDeferred.resolve(null);
+      return;
+    }
     // BET-361: cancel during the trust-pause aborts the wait (treated as
     // "not trusted" — the install never started, so there's no child to
     // SIGTERM).
@@ -257,6 +369,7 @@ export function registerInstallerHandlers(
     }
     if (activeHandle?.handleId === input.handleId) {
       activeHandle.cancel();
+      cleanupAskpass();
     }
     // If handleId doesn't match the active handle (already done / cancelled
     // / a stale renderer): no-op. cancel is idempotent by design.
@@ -271,14 +384,35 @@ export function registerInstallerHandlers(
     trustDeferred.resolve({ trust: input.trust });
   });
 
+  ipcMain.handle(
+    IPC.installerAskpassRespond,
+    (_e, input: { handleId: string; passphrase: string | null }) => {
+      if (typeof input?.handleId !== "string" || input.handleId === "") return;
+      // No paused passphrase prompt, or a stale renderer: no-op.
+      if (!waitingForPassphrase || !passphraseDeferred) return;
+      if (waitingForPassphrase.handleId !== input.handleId) return;
+      // null or empty string → user cancelled. A non-empty string → the
+      // passphrase to decrypt the SSH key.
+      const pw = input.passphrase;
+      passphraseDeferred.resolve(pw && pw.length > 0 ? pw : null);
+    },
+  );
+
   ipcMain.handle(IPC.installerMintAndClaim, async (
     _e,
     input: { alias: SshTarget; claimUrlOverride?: string },
   ) => {
-    return mintAndClaim(input.alias, {
+    const result = await mintAndClaim(input.alias, {
       persist,
       claimUrlOverride: input.claimUrlOverride,
+      askpassEnv: activeAskpass?.env,
     });
+    // After a successful claim the SSH connection is no longer needed —
+    // the app switches to HTTP. Clean up the askpass session (temp dir +
+    // passphrase file). On failure, keep it so the user can retry the
+    // claim without re-entering the passphrase.
+    if (result.ok) cleanupAskpass();
+    return result;
   });
 
   ipcMain.handle(IPC.installerGetDiagnostics, (_e, input: DiagnosticsInput) => {

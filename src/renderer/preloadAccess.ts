@@ -143,6 +143,14 @@ export interface MantaPreload {
   // host key to ~/.ssh/known_hosts and resumes; trust=false aborts.
   installerTrustHost(input: { handleId: string; trust: boolean }): Promise<void>;
 
+  // BET-360: answer a paused `passphrase` event. passphrase=non-empty →
+  // main creates an SSH_ASKPASS session and re-runs preflight; passphrase=
+  // null → the user cancelled → the install aborts.
+  installerAskpassRespond(input: {
+    handleId: string;
+    passphrase: string | null;
+  }): Promise<void>;
+
   // Mint a fresh pairing code over the existing SSH connection + claim it
   // via the box's public URL. Returns the SAME ClaimOutcome shape as the
   // manual PairStep claim — the renderer treats success and failure the

@@ -30,6 +30,7 @@ import {
   execLocal,
   streamRemote,
   type ExecRemoteResult,
+  type ExecRemoteOptions,
   type SpawnFn,
 } from "./runner.js";
 import { parseSshConfig, type SshHostEntry } from "./sshConfig.js";
@@ -162,6 +163,11 @@ export type PreflightDeps = {
   /** Override the local home directory for tests (defaults to os.homedir()).
    *  The key-format probe reads ~/.ssh/id_* under this path. */
   homeDir?: string;
+  /** Askpass env vars (BET-360). When set, probes run WITHOUT BatchMode so
+   *  ssh can invoke the SSH_ASKPASS helper for a passphrase-protected key.
+   *  Only the askpass retry path sets this (after the first preflight
+   *  returned auth-failed and the user entered a passphrase). */
+  askpassEnv?: Record<string, string>;
 };
 
 export async function preflightBox(
@@ -172,6 +178,15 @@ export async function preflightBox(
     throw new Error("preflightBox: alias is required");
   }
   const spawn = deps.spawn;
+  // Build the shared ssh options once — every probe gets the same askpass
+  // env (if any) so a passphrase-protected key works across all six probes
+  // without re-prompting (the passphrase is cached in the askpass temp file
+  // for the whole session). `allowPrompt` is derived from askpassEnv so
+  // BatchMode=yes is dropped only on the retry path.
+  const probeOpts: { spawn?: SpawnFn; askpassEnv?: Record<string, string> } = {
+    spawn,
+    askpassEnv: deps.askpassEnv,
+  };
   // Run the six remote probes in parallel — they're independent and each
   // bounded by execRemote's timeoutMs. The two Windows probes inspect the
   // LOCAL machine (no SSH round-trip) and run alongside; on non-Windows
@@ -187,12 +202,12 @@ export async function preflightBox(
     winAgentRes,
     keyFmtRes,
   ] = await Promise.all([
-    probeReachability(alias, spawn),
-    probeOs(alias, spawn),
-    probeSudo(alias, spawn),
-    probeTailscale(alias, spawn),
-    probeClock(alias, spawn),
-    probeAuthFile(alias, spawn),
+    probeReachability(alias, probeOpts),
+    probeOs(alias, probeOpts),
+    probeSudo(alias, probeOpts),
+    probeTailscale(alias, probeOpts),
+    probeClock(alias, probeOpts),
+    probeAuthFile(alias, probeOpts),
     probeWindowsAgent(deps),
     probeKeyFormat(deps),
   ]);
@@ -221,13 +236,28 @@ type ReachabilityProbe = {
   fingerprint: HostFingerprint | null;
 };
 
-async function probeReachability(alias: SshTarget, spawn?: SpawnFn): Promise<ReachabilityProbe> {
+// Shared options for the remote probes — each probe gets the same askpass
+// env (if any) so a passphrase-protected key works across all six probes
+// without re-prompting. `allowPrompt` is derived from askpassEnv so
+// BatchMode=yes is dropped only on the retry path.
+type ProbeOpts = {
+  spawn?: SpawnFn;
+  askpassEnv?: Record<string, string>;
+};
+
+function probeExecOpts(opts: ProbeOpts, timeoutMs: number): ExecRemoteOptions {
+  return {
+    spawn: opts.spawn,
+    timeoutMs,
+    env: opts.askpassEnv,
+    allowPrompt: !!opts.askpassEnv,
+  };
+}
+
+async function probeReachability(alias: SshTarget, opts: ProbeOpts): Promise<ReachabilityProbe> {
   // BatchMode=yes turns "no auth" into exit code 255 / stderr "Permission
   // denied (publickey)" — not a hang on a passphrase prompt.
-  const r = await execRemote(alias, PROBE_REACHABILITY_CMD, {
-    spawn,
-    timeoutMs: 15_000,
-  });
+  const r = await execRemote(alias, PROBE_REACHABILITY_CMD, probeExecOpts(opts, 15_000));
   if (r.code === 0 && r.stdout.trim() === "ok") {
     return { reachability: "ok", fingerprint: null };
   }
@@ -262,8 +292,8 @@ async function probeReachability(alias: SshTarget, spawn?: SpawnFn): Promise<Rea
   return { reachability: "unreachable", fingerprint: null };
 }
 
-async function probeOs(alias: SshTarget, spawn?: SpawnFn): Promise<PreflightProbes["os"]> {
-  const r = await execRemote(alias, PROBE_OS_CMD, { spawn, timeoutMs: 10_000 });
+async function probeOs(alias: SshTarget, opts: ProbeOpts): Promise<PreflightProbes["os"]> {
+  const r = await execRemote(alias, PROBE_OS_CMD, probeExecOpts(opts, 10_000));
   if (r.code !== 0) {
     return { id: "unknown", arch: "unknown", release: null };
   }
@@ -275,16 +305,16 @@ async function probeOs(alias: SshTarget, spawn?: SpawnFn): Promise<PreflightProb
   };
 }
 
-async function probeSudo(alias: SshTarget, spawn?: SpawnFn): Promise<boolean> {
-  const r = await execRemote(alias, PROBE_SUDO_CMD, { spawn, timeoutMs: 10_000 });
+async function probeSudo(alias: SshTarget, opts: ProbeOpts): Promise<boolean> {
+  const r = await execRemote(alias, PROBE_SUDO_CMD, probeExecOpts(opts, 10_000));
   // `sudo -n true` exit 0 + no password prompt → passwordless sudo.
   // Anything else (exit != 0, or "password" in stderr) → not available.
   if (r.code === 0) return !/password/i.test(r.stderr);
   return false;
 }
 
-async function probeTailscale(alias: SshTarget, spawn?: SpawnFn): Promise<PreflightProbes["tailscale"]> {
-  const r = await execRemote(alias, PROBE_TAILSCALE_CMD, { spawn, timeoutMs: 10_000 });
+async function probeTailscale(alias: SshTarget, opts: ProbeOpts): Promise<PreflightProbes["tailscale"]> {
+  const r = await execRemote(alias, PROBE_TAILSCALE_CMD, probeExecOpts(opts, 10_000));
   if (r.code !== 0 || r.stdout.trim() === "") {
     return { running: false, ipv4: null };
   }
@@ -292,17 +322,17 @@ async function probeTailscale(alias: SshTarget, spawn?: SpawnFn): Promise<Prefli
   return parsed ?? { running: false, ipv4: null };
 }
 
-async function probeClock(alias: SshTarget, spawn?: SpawnFn): Promise<number> {
+async function probeClock(alias: SshTarget, opts: ProbeOpts): Promise<number> {
   const local = Math.floor(Date.now() / 1000);
-  const r = await execRemote(alias, PROBE_CLOCK_CMD, { spawn, timeoutMs: 10_000 });
+  const r = await execRemote(alias, PROBE_CLOCK_CMD, probeExecOpts(opts, 10_000));
   if (r.code !== 0) return 0;
   const remote = Number(r.stdout.trim());
   if (!Number.isFinite(remote)) return 0;
   return local - remote;
 }
 
-async function probeAuthFile(alias: SshTarget, spawn?: SpawnFn): Promise<boolean> {
-  const r = await execRemote(alias, PROBE_AUTH_FILE_CMD, { spawn, timeoutMs: 10_000 });
+async function probeAuthFile(alias: SshTarget, opts: ProbeOpts): Promise<boolean> {
+  const r = await execRemote(alias, PROBE_AUTH_FILE_CMD, probeExecOpts(opts, 10_000));
   return r.code === 0 && r.stdout.trim() === "INSTALLED";
 }
 
@@ -385,6 +415,11 @@ function parseTailscaleJson(text: string): PreflightProbes["tailscale"] | null {
 export type InstallDeps = {
   spawn?: SpawnFn;
   installShUrl?: string;
+  /** Askpass env vars (BET-360). When set, the install stream runs without
+   *  BatchMode so ssh can invoke the SSH_ASKPASS helper for a passphrase-
+   *  protected key. The session is created by the installer handler after
+   *  the user enters a passphrase; it persists through the install + claim. */
+  askpassEnv?: Record<string, string>;
 };
 
 export type InstallSink = {
@@ -422,6 +457,8 @@ export function runInstall(
   const handle = streamRemote(alias, buildInstallCommand(installShUrl, cfg.releaseHost, cfg.id), {
     forceTty: true,
     spawn: deps.spawn,
+    env: deps.askpassEnv,
+    allowPrompt: !!deps.askpassEnv,
     onStdout: (chunk) => pumpChunk(chunk, "stdout", sink),
     onStderr: (chunk) => pumpChunk(chunk, "stderr", sink),
   });
@@ -486,6 +523,11 @@ export type MintAndClaimDeps = {
   /** Optional override for the box's claim URL — defaults to the serverUrl
    *  parsed out of `manta pair` output. */
   claimUrlOverride?: string;
+  /** Askpass env vars (BET-360). When set, the `manta pair` SSH call runs
+   *  without BatchMode so a passphrase-protected key can be decrypted via
+   *  the SSH_ASKPASS helper. The session is owned by the installer handler
+   *  and cleaned up after the claim resolves. */
+  askpassEnv?: Record<string, string>;
 };
 
 /**
@@ -513,6 +555,8 @@ export async function mintAndClaim(
   const fetched = await execRemote(alias, "bash -lc 'manta pair'", {
     spawn,
     timeoutMs: 30_000,
+    env: deps.askpassEnv,
+    allowPrompt: !!deps.askpassEnv,
   });
   if (fetched.code !== 0) {
     return {

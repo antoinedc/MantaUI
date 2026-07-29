@@ -55,6 +55,7 @@ const mintState = vi.hoisted(() => ({
       deps: {
         persist: (patch: unknown) => void;
         claimUrlOverride?: string;
+        askpassEnv?: Record<string, string>;
       },
     ) => {
       // Simulate the post-claim persist that mintAndClaim performs on the
@@ -75,7 +76,10 @@ const mintState = vi.hoisted(() => ({
 }));
 
 const installerState = vi.hoisted(() => ({
-  preflightBox: vi.fn(async (): Promise<PreflightResult> => ({
+  preflightBox: vi.fn(async (
+    _alias?: unknown,
+    _deps?: unknown,
+  ): Promise<PreflightResult> => ({
     ok: true,
     ingressMode: "public-tls" as const,
     probes: {
@@ -92,7 +96,11 @@ const installerState = vi.hoisted(() => ({
     failures: [],
     unknownHost: null,
   })),
-  runInstall: vi.fn(() => ({
+  runInstall: vi.fn((
+    _alias?: unknown,
+    _sink?: unknown,
+    _deps?: unknown,
+  ) => ({
     // Resolves immediately so the handler's fire-and-forget `.finally()`
     // clears the module's `activeHandle` before the next test runs —
     // otherwise every later `installerStart` call in this file sees a
@@ -106,6 +114,20 @@ const installerState = vi.hoisted(() => ({
 // the handler test never touches ssh-keyscan or the filesystem.
 const knownHostsState = vi.hoisted(() => ({
   trustHost: vi.fn(async () => ({ ok: true as const, line: "box ssh-ed25519 AAAA" })),
+}));
+
+// BET-360: createAskpassSession creates a temp dir + helper script. Stubbed
+// so the handler test never touches the filesystem; cleanup is a spy so we
+// can assert it fires on the right paths.
+const askpassState = vi.hoisted(() => ({
+  createAskpassSession: vi.fn((_passphrase: string) => ({
+    env: {
+      SSH_ASKPASS: "/tmp/fake-askpass.sh",
+      SSH_ASKPASS_REQUIRE: "force",
+      MANTA_ASKPASS_FILE: "/tmp/fake-passphrase",
+    },
+    cleanup: vi.fn(),
+  })),
 }));
 
 /** Flush the microtask queue so handlers.ts's fire-and-forget
@@ -127,6 +149,10 @@ vi.mock("./knownHosts.js", () => ({
   trustHost: knownHostsState.trustHost,
 }));
 
+vi.mock("./askpass.js", () => ({
+  createAskpassSession: askpassState.createAskpassSession,
+}));
+
 // Also stub the small support module the handlers pull in but never call
 // during the mint-and-claim path. handlers.ts only imports a type from
 // stageMapper.js now (erased at compile time), so no mock needed for it.
@@ -144,6 +170,7 @@ beforeEach(() => {
   installerState.preflightBox.mockClear();
   installerState.runInstall.mockClear();
   knownHostsState.trustHost.mockClear();
+  askpassState.createAskpassSession.mockClear();
 });
 
 describe("registerInstallerHandlers — mint-and-claim (BET-372)", () => {
@@ -201,6 +228,7 @@ describe("registerInstallerHandlers — mint-and-claim (BET-372)", () => {
         IPC.installerStart,
         IPC.installerCancel,
         IPC.installerTrustHost,
+        IPC.installerAskpassRespond,
         IPC.installerMintAndClaim,
         IPC.installerGetDiagnostics,
       ]),
@@ -464,6 +492,253 @@ describe("registerInstallerHandlers — fingerprint pause/resume (BET-361)", () 
     expect(failed).toBeDefined();
   });
 });
+
+// BET-360: a passphrase-protected key (not in ssh-agent) pauses the install
+// for a passphrase, then re-runs preflight + install with SSH_ASKPASS.
+describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () => {
+  function authFailedPreflight(): PreflightResult {
+    return {
+      ok: false,
+      ingressMode: "no-root",
+      probes: {
+        reachability: "auth-failed",
+        hostFingerprint: null,
+        os: { id: "unknown", arch: "unknown", release: null },
+        passwordlessSudo: false,
+        tailscale: { running: false, ipv4: null },
+        clockSkewSeconds: 0,
+        alreadyInstalled: false,
+        windowsAgent: "not-windows",
+        keyFormat: "not-windows",
+      },
+      failures: [
+        {
+          cause: "SSH key authentication was rejected.",
+          action:
+            "Make sure your key is loaded (ssh-add) and listed in the box's ~/.ssh/authorized_keys.",
+        },
+      ],
+      unknownHost: null,
+    };
+  }
+
+  function okPreflight(): PreflightResult {
+    return {
+      ok: true,
+      ingressMode: "public-tls",
+      probes: {
+        reachability: "ok",
+        hostFingerprint: null,
+        os: { id: "linux", arch: "x64", release: "6.5.0" },
+        passwordlessSudo: true,
+        tailscale: { running: false, ipv4: null },
+        clockSkewSeconds: 0,
+        alreadyInstalled: false,
+        windowsAgent: "not-windows",
+        keyFormat: "not-windows",
+      },
+      failures: [],
+      unknownHost: null,
+    };
+  }
+
+  it("emits a passphrase event, creates an askpass session, re-runs preflight, and starts the install with askpassEnv", async () => {
+    installerState.preflightBox
+      .mockResolvedValueOnce(authFailedPreflight())
+      .mockResolvedValueOnce(okPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const respondHandler = ipcState.handlers.get(IPC.installerAskpassRespond);
+    const stateHandler = ipcState.handlers.get(IPC.installerState);
+
+    // installerStart does not resolve until the askpass loop finishes — drive
+    // it without awaiting so we can answer the prompt mid-flight.
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // While paused, installerState reports the passphrase wait.
+    const paused = (await stateHandler!(null, undefined)) as {
+      waitingForPassphrase: boolean;
+      passphraseHandleId: string | null;
+    };
+    expect(paused.waitingForPassphrase).toBe(true);
+    expect(paused.passphraseHandleId).toMatch(/^install-/);
+
+    // A passphrase event was pushed to the renderer.
+    const pwEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "passphrase",
+    ) as [string, { kind: string; handleId: string; prompt: string }];
+    expect(pwEvent).toBeDefined();
+    expect(pwEvent[1].prompt).toMatch(/passphrase/i);
+    const handleId = pwEvent[1].handleId;
+
+    // runInstall has NOT started yet — the install is paused.
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+
+    // User enters a passphrase and submits.
+    await respondHandler!(null, { handleId, passphrase: "hunter2" });
+    await startP;
+
+    // An askpass session was created with the user's passphrase.
+    expect(askpassState.createAskpassSession).toHaveBeenCalledTimes(1);
+    expect(askpassState.createAskpassSession).toHaveBeenCalledWith("hunter2");
+
+    // Preflight was called twice: once with no askpass, once with askpassEnv.
+    expect(installerState.preflightBox).toHaveBeenCalledTimes(2);
+    const [, secondCallArgs] = installerState.preflightBox.mock.calls[1];
+    expect(secondCallArgs).toEqual({ askpassEnv: expect.objectContaining({ SSH_ASKPASS_REQUIRE: "force" }) });
+
+    // runInstall was called with askpassEnv.
+    expect(installerState.runInstall).toHaveBeenCalledTimes(1);
+    const [, , installDeps] = installerState.runInstall.mock.calls[0];
+    expect(installDeps).toEqual({ askpassEnv: expect.objectContaining({ SSH_ASKPASS_REQUIRE: "force" }) });
+
+    // The passphrase wait is cleared.
+    const after = (await stateHandler!(null, undefined)) as { waitingForPassphrase: boolean };
+    expect(after.waitingForPassphrase).toBe(false);
+
+    await flushMicrotasks();
+  });
+
+  it("aborts with preflight-failed on a cancel (passphrase=null), never creates a session or starts the install", async () => {
+    installerState.preflightBox.mockResolvedValueOnce(authFailedPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const respondHandler = ipcState.handlers.get(IPC.installerAskpassRespond);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const pwEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "passphrase",
+    ) as [string, { kind: string; handleId: string }];
+    await respondHandler!(null, { handleId: pwEvent[1].handleId, passphrase: null });
+    await startP;
+
+    expect(askpassState.createAskpassSession).not.toHaveBeenCalled();
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+    const failed = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "preflight-failed",
+    ) as [string, { kind: string; failures: { cause: string }[] }];
+    expect(failed).toBeDefined();
+    expect(failed[1].failures[0].cause).toMatch(/authentication was rejected/);
+  });
+
+  it("cleans up the askpass session when the second preflight still fails (wrong passphrase)", async () => {
+    installerState.preflightBox
+      .mockResolvedValueOnce(authFailedPreflight())
+      .mockResolvedValueOnce(authFailedPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const respondHandler = ipcState.handlers.get(IPC.installerAskpassRespond);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const pwEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "passphrase",
+    ) as [string, { kind: string; handleId: string }];
+    await respondHandler!(null, { handleId: pwEvent[1].handleId, passphrase: "wrong" });
+    await startP;
+
+    // Session was created but then cleaned up (preflight still failed).
+    expect(askpassState.createAskpassSession).toHaveBeenCalledTimes(1);
+    const session = askpassState.createAskpassSession.mock.results[0].value;
+    expect(session.cleanup).toHaveBeenCalledTimes(1);
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+  });
+
+  it("installerCancel during the passphrase pause aborts the wait", async () => {
+    installerState.preflightBox.mockResolvedValueOnce(authFailedPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const cancelHandler = ipcState.handlers.get(IPC.installerCancel);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const pwEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "passphrase",
+    ) as [string, { kind: string; handleId: string }];
+
+    await cancelHandler!(null, { handleId: pwEvent[1].handleId });
+    await startP;
+
+    expect(askpassState.createAskpassSession).not.toHaveBeenCalled();
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+    const failed = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "preflight-failed",
+    );
+    expect(failed).toBeDefined();
+  });
+
+  it("refuses a second install while a passphrase prompt is paused", async () => {
+    installerState.preflightBox.mockResolvedValueOnce(authFailedPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const respondHandler = ipcState.handlers.get(IPC.installerAskpassRespond);
+
+    void startHandler!(null, { alias: "dev" });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    await expect(
+      startHandler!(null, { alias: "dev2" }),
+    ).rejects.toThrow(/already in progress/);
+
+    // Clean up: answer the paused prompt.
+    const pwEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "passphrase",
+    ) as [string, { kind: string; handleId: string }];
+    await respondHandler!(null, { handleId: pwEvent[1].handleId, passphrase: null });
+    await flushMicrotasks();
+  });
+
+  it("installerMintAndClaim passes askpassEnv and cleans up on success", async () => {
+    // Simulate a completed install with an active askpass session by running
+    // the full flow up to the install start, then calling mintAndClaim.
+    installerState.preflightBox
+      .mockResolvedValueOnce(authFailedPreflight())
+      .mockResolvedValueOnce(okPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const respondHandler = ipcState.handlers.get(IPC.installerAskpassRespond);
+    const claimHandler = ipcState.handlers.get(IPC.installerMintAndClaim);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const pwEvent = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "passphrase",
+    ) as [string, { kind: string; handleId: string }];
+    await respondHandler!(null, { handleId: pwEvent[1].handleId, passphrase: "hunter2" });
+    await startP;
+
+    // The askpass session is active.
+    const session = askpassState.createAskpassSession.mock.results[0].value;
+    expect(session.cleanup).not.toHaveBeenCalled();
+
+    // Claim succeeds → mintAndClaim receives askpassEnv, session is cleaned up.
+    await claimHandler!(null, { alias: "dev" });
+    const [, claimDeps] = mintState.mintAndClaim.mock.calls[0];
+    expect(claimDeps.askpassEnv).toEqual(
+      expect.objectContaining({ SSH_ASKPASS_REQUIRE: "force" }),
+    );
+    expect(session.cleanup).toHaveBeenCalledTimes(1);
+
+    await flushMicrotasks();
+  });
+});
+
 
 // Source-level guard: the handlers.ts file MUST NOT pull main's index.js
 // back into the installer module's require graph. This catches a future

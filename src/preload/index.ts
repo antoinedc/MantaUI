@@ -211,6 +211,15 @@ const api = {
   installerTrustHost: (input: { handleId: string; trust: boolean }): Promise<void> =>
     ipcRenderer.invoke(IPC.installerTrustHost, input),
 
+  // BET-360: the renderer's answer to a paused `passphrase` event.
+  // passphrase=non-empty → main creates an askpass session (SSH_ASKPASS
+  // helper + temp passphrase file) and re-runs preflight; passphrase=null
+  // → the user cancelled → the install aborts with a preflight-failed event.
+  installerAskpassRespond: (input: {
+    handleId: string;
+    passphrase: string | null;
+  }): Promise<void> => ipcRenderer.invoke(IPC.installerAskpassRespond, input),
+
   // Mint a fresh pairing code over the existing SSH connection + claim it
   // via the box's public URL. Persists credentials through main's existing
   // claim path (single config writer, per BET-355 constraint #4). The
