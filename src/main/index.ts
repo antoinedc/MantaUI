@@ -265,7 +265,14 @@ if (!gotSingleInstanceLock) {
 // Web Notification API attributes them to the bundle, i.e. "Electron" in dev).
 // `appUserModelId` does the equivalent for Windows toast attribution.
 app.setName(CHANNEL_CONFIG.appName);
-app.setAppUserModelId("com.antoinedc.mantaui");
+// Windows toast attribution: per-channel AUMID so a prod and a staging install
+// on the same Windows box don't share a single taskbar group / notification
+// source. Dev falls back to the prod id because the spec marks dev's
+// electron-builder appId "n/a" (dev never builds), which leaves no value to
+// source from the table — same effective behaviour as before this PR.
+app.setAppUserModelId(
+  CHANNEL_CONFIG.electronBuilderAppId ?? "com.antoinedc.mantaui",
+);
 
 app.whenReady().then(() => {
   config = loadConfig();

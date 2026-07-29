@@ -298,15 +298,19 @@ export function runInstall(
   if (typeof alias !== "string" || alias.trim() === "") {
     throw new Error("runInstall: alias is required");
   }
-  const channelConfig = resolveChannelConfig();
-  const installShUrl = deps.installShUrl ?? channelConfig.installShUrl;
+  // Local name `cfg` (not `channelConfig`) so it doesn't shadow the imported
+  // `channelConfig` function for the rest of this module — a future reader
+  // scanning the call sites should be able to tell "is this a record or a
+  // function?" at a glance (N1 from the reviewer).
+  const cfg = resolveChannelConfig();
+  const installShUrl = deps.installShUrl ?? cfg.installShUrl;
   // We force a remote PTY (-tt) so install.sh's color codes survive (the
   // POC addendum documents this: install.sh's log/ok/warn helpers emit
   // CSI color sequences, and we want them to land in stdout so the stage
   // mapper's prefix-matching still works after we strip them).
   //
   // TERM=xterm-256color is inherited from this process; nothing to set here.
-  const handle = streamRemote(alias, buildInstallCommand(installShUrl, channelConfig.releaseHost), {
+  const handle = streamRemote(alias, buildInstallCommand(installShUrl, cfg.releaseHost), {
     forceTty: true,
     spawn: deps.spawn,
     onStdout: (chunk) => pumpChunk(chunk, "stdout", sink),
