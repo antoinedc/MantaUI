@@ -1,6 +1,6 @@
 // PairingQR — renders a QR code image for mobile device pairing.
 //
-// The QR encodes the CANONICAL box-form `manta://pair?box=<boxId>&code=<6-digit>`
+// The QR encodes the CANONICAL box-form `<scheme>://pair?box=<boxId>&code=<6-digit>`
 // payload produced by the SHARED `buildPairPayload` helper
 // (src/renderer/mobile/pairPayload.ts). BET-237 removed the deprecated
 // serverUrl / id forms — `parsePairPayload` rejects anything other than
@@ -14,9 +14,25 @@
 //
 // This is a desktop-only feature (BET-80). The mobile app consumes the same
 // URL scheme but generates the QR on the desktop side.
+//
+// BET-373 (channel-aware wire format): the QR uses THIS channel's URL scheme
+// (`channelConfig(__MANTA_CHANNEL__).urlScheme`, the same source the main
+// process uses to register `setAsDefaultProtocolClient(...)` and to build
+// `PAIR_PREFIX`). A staging desktop scans a QR with `manta-staging://…` so
+// the OS routes the open back to staging, not to whichever channel got
+// registered last for `manta://`. `__MANTA_CHANNEL__` is baked into the
+// renderer at build time (electron.vite.config.ts renderer `define`).
 
 import { useEffect, useMemo, useState } from "react";
 import { buildPairPayload } from "./mobile/pairPayload";
+import { channelConfig } from "../shared/channel.mjs";
+
+// Channel-aware scheme for the QR prefix. The baked `__MANTA_CHANNEL__`
+// comes from the renderer `define` (electron.vite.config.ts); channelConfig
+// does the same unknown-id → prod fallback the main process relies on, so a
+// stale/garbage baked value still produces a usable scheme rather than
+// throwing at render time.
+const PAIR_SCHEME = channelConfig(__MANTA_CHANNEL__).urlScheme;
 
 // Lazy-load qrcode so the renderer doesn't pay the bundle cost if this
 // component is never rendered (Settings is a modal, only open on demand).
@@ -38,7 +54,9 @@ export function PairingQR({
   const url = useMemo(() => {
     // Canonical box-form payload — shared with the install heredoc, `manta pair`
     // output, and the mobile deep-link parser. Single source: pairPayload.ts.
-    return buildPairPayload({ boxId, code: pairingCode });
+    // BET-373: `PAIR_SCHEME` keys the QR to this channel's OS-registered URL
+    // scheme so the OS routes the open back to the channel that scanned it.
+    return buildPairPayload({ boxId, code: pairingCode }, PAIR_SCHEME);
   }, [boxId, pairingCode]);
 
   useEffect(() => {

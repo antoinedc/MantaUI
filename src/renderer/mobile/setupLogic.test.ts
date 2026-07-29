@@ -8,6 +8,12 @@ import {
   prefillFromPairLink,
 } from "./setupLogic";
 import { boxDirectUrl } from "../../shared/transport.mjs";
+import { CHANNELS, CHANNEL_IDS } from "../../shared/channel.mjs";
+
+// BET-373 (review cycle 1): every channel's scheme, derived from the table
+// (not hardcoded) so a fourth channel automatically extends this coverage —
+// same pattern pairPayload.test.ts uses for the parser/builder themselves.
+const SCHEMES = CHANNEL_IDS.map((id) => CHANNELS[id].urlScheme);
 
 const VALID_BOX = "7f3a9c1e0b8d4a62f1c9e5b7d0a4f8c2"; // 32 hex
 const BAD_BOX = "not-a-box";
@@ -267,5 +273,41 @@ describe("prefillFromPairLink (BET-335 deep-link prefill)", () => {
     // refused.
     const link = `manta://pair?box=${VALID_BOX}&code=123456&server=${encodeURIComponent("https://attacker.example.com")}`;
     expect(prefillFromPairLink(link)).toBeNull();
+  });
+
+  // BET-373 (review cycle 1): PairStep.tsx reads `pendingPairLink` from the
+  // store AFTER App.tsx already accepted it under the channel's own scheme
+  // (App.tsx's PAIR_PARSE_SCHEME). Regression coverage for the Block: this
+  // second parse MUST be given the same scheme, or a staging/dev pair link
+  // is silently dropped one step after being correctly routed by the OS.
+  describe("BET-373: per-channel scheme survives the prefill step", () => {
+    for (const scheme of SCHEMES) {
+      it(`prefills {boxId, code} for a ${scheme}:// link when called with scheme="${scheme}"`, () => {
+        const link = `${scheme}://pair?box=${VALID_BOX}&code=123456`;
+        expect(prefillFromPairLink(link, scheme)).toEqual({
+          boxId: VALID_BOX,
+          code: "123456",
+        });
+      });
+    }
+
+    it("drops the payload when called with the default scheme for a non-prod link (the bug this PR fixes)", () => {
+      // Documents the exact failure the reviewer found: App.tsx accepts a
+      // manta-staging:// link under its channel scheme and stores the raw
+      // URL; calling prefillFromPairLink WITHOUT threading that same scheme
+      // through (the pre-fix call site) falls back to "manta" and returns
+      // null — the staging pair form renders empty.
+      const staging = `manta-staging://pair?box=${VALID_BOX}&code=123456`;
+      expect(prefillFromPairLink(staging)).toBeNull();
+      expect(prefillFromPairLink(staging, "manta-staging")).toEqual({
+        boxId: VALID_BOX,
+        code: "123456",
+      });
+    });
+
+    it("rejects a link built for a DIFFERENT channel's scheme (defensive boundary)", () => {
+      const link = `manta-dev://pair?box=${VALID_BOX}&code=123456`;
+      expect(prefillFromPairLink(link, "manta-staging")).toBeNull();
+    });
   });
 });

@@ -20,7 +20,17 @@ import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { parsePairPayload } from "./mobile/pairPayload";
+import { channelConfig } from "../shared/channel.mjs";
 import type { AvailableLauncher } from "../shared/types";
+
+// BET-373 (channel-aware wire format): the deep-link URL the OS hands this
+// app is, by construction, addressed to THIS channel's URL scheme
+// (the same scheme the main process registered via
+// `setAsDefaultProtocolClient(CHANNEL_CONFIG.urlScheme)`). Parsing with
+// that scheme enforces the boundary defensively — a `manta-staging://…`
+// link can never be misclaimed by a `manta://`-registered app, and a
+// `manta://` link can never silently pass through a staging build.
+const PAIR_PARSE_SCHEME = channelConfig(__MANTA_CHANNEL__).urlScheme;
 
 export function App() {
   const {
@@ -251,7 +261,7 @@ export function App() {
     const pre = getMantaPreload();
     if (!pre?.onPairLink) return;
     return pre.onPairLink((url) => {
-      const payload = parsePairPayload(url);
+      const payload = parsePairPayload(url, PAIR_PARSE_SCHEME);
       if (!payload) {
         // Malformed / legacy-shape link (e.g. an old box still minting the
         // `id=`/`token=` form). The OS still LAUNCHED us for the manta://
