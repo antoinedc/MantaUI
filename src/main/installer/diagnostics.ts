@@ -99,6 +99,8 @@ export function redactLine(line: string): string {
  *     tailscale: running=false ipv4=null
  *     clockSkewSeconds: …
  *     alreadyInstalled: …
+ *     windowsAgent: …
+ *     keyFormat: …
  *   ## Install log (tail)
  *   <sanitised line 1>
  *   <sanitised line 2>
@@ -129,7 +131,7 @@ export function buildDiagnostics(input: DiagnosticsInput): string {
   }
   const probes = p.probes;
   out.push(
-    `probes: reachability=${probes.reachability} os=${probes.os.id}/${probes.os.arch} release=${probes.os.release ?? "unknown"} passwordlessSudo=${probes.passwordlessSudo} tailscale=running=${probes.tailscale.running} ipv4=${probes.tailscale.ipv4 ?? "null"} clockSkewSeconds=${probes.clockSkewSeconds} alreadyInstalled=${probes.alreadyInstalled}`,
+    `probes: reachability=${probes.reachability} os=${probes.os.id}/${probes.os.arch} release=${probes.os.release ?? "unknown"} passwordlessSudo=${probes.passwordlessSudo} tailscale=running=${probes.tailscale.running} ipv4=${probes.tailscale.ipv4 ?? "null"} clockSkewSeconds=${probes.clockSkewSeconds} alreadyInstalled=${probes.alreadyInstalled} windowsAgent=${probes.windowsAgent} keyFormat=${probes.keyFormat}`,
   );
   out.push("## Install log (tail)");
   if (input.logTail.length === 0) {

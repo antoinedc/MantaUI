@@ -17,6 +17,8 @@ function makeProbes(overrides: Partial<PreflightProbes> = {}): PreflightProbes {
     tailscale: { running: false, ipv4: null },
     clockSkewSeconds: 0,
     alreadyInstalled: false,
+    windowsAgent: "not-windows",
+    keyFormat: "not-windows",
     ...overrides,
   };
 }
@@ -113,6 +115,8 @@ describe("buildDiagnostics", () => {
     expect(blob).toContain("ok: true");
     expect(blob).toContain("ingressMode: public-tls");
     expect(blob).toContain("alreadyInstalled=true");
+    expect(blob).toContain("windowsAgent=not-windows");
+    expect(blob).toContain("keyFormat=not-windows");
     expect(blob).toContain("[REDACTED:pairing-code]");
     expect(blob).toContain("## Install log (tail)");
   });

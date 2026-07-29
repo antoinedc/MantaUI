@@ -27,6 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   execRemote,
+  execLocal,
   streamRemote,
   type ExecRemoteResult,
   type SpawnFn,
@@ -155,6 +156,12 @@ export function listSshHosts(sshConfigPath: string = DEFAULT_SSH_CONFIG_PATH): S
 
 export type PreflightDeps = {
   spawn?: SpawnFn;
+  /** Override the local platform for tests (defaults to process.platform).
+   *  The Windows probes are skipped unless this is `win32`. */
+  platform?: string;
+  /** Override the local home directory for tests (defaults to os.homedir()).
+   *  The key-format probe reads ~/.ssh/id_* under this path. */
+  homeDir?: string;
 };
 
 export async function preflightBox(
@@ -165,16 +172,29 @@ export async function preflightBox(
     throw new Error("preflightBox: alias is required");
   }
   const spawn = deps.spawn;
-  // Run the five probes in parallel — they're independent and each bounded
-  // by execRemote's timeoutMs. We collect the structured results and pass
-  // them to classifyPreflight.
-  const [reach, osRes, sudoRes, tsRes, clockRes, authFileRes] = await Promise.all([
+  // Run the six remote probes in parallel — they're independent and each
+  // bounded by execRemote's timeoutMs. The two Windows probes inspect the
+  // LOCAL machine (no SSH round-trip) and run alongside; on non-Windows
+  // they short-circuit to `not-windows` for free. We collect the structured
+  // results and pass them to classifyPreflight.
+  const [
+    reach,
+    osRes,
+    sudoRes,
+    tsRes,
+    clockRes,
+    authFileRes,
+    winAgentRes,
+    keyFmtRes,
+  ] = await Promise.all([
     probeReachability(alias, spawn),
     probeOs(alias, spawn),
     probeSudo(alias, spawn),
     probeTailscale(alias, spawn),
     probeClock(alias, spawn),
     probeAuthFile(alias, spawn),
+    probeWindowsAgent(deps),
+    probeKeyFormat(deps),
   ]);
   const probes: PreflightProbes = {
     reachability: reach.reachability,
@@ -184,6 +204,8 @@ export async function preflightBox(
     tailscale: tsRes,
     clockSkewSeconds: clockRes,
     alreadyInstalled: authFileRes,
+    windowsAgent: winAgentRes,
+    keyFormat: keyFmtRes,
   };
   return classifyPreflight(probes);
 }
@@ -282,6 +304,53 @@ async function probeClock(alias: SshTarget, spawn?: SpawnFn): Promise<number> {
 async function probeAuthFile(alias: SshTarget, spawn?: SpawnFn): Promise<boolean> {
   const r = await execRemote(alias, PROBE_AUTH_FILE_CMD, { spawn, timeoutMs: 10_000 });
   return r.code === 0 && r.stdout.trim() === "INSTALLED";
+}
+
+// ---------- Windows client-side probes (BET-362) ----------
+//
+// These inspect the LOCAL machine running the desktop app, not the remote
+// box. The OpenSSH Agent service is disabled by default on Windows 10/11,
+// and PuTTYgen writes .ppk keys OpenSSH cannot read — both surface as a
+// generic "Permission denied (publickey)" with no hint of the real cause.
+// They only ever classify into failures when SSH auth already failed (see
+// classifyPreflight), so a working Windows setup is never blocked.
+
+// `ssh-add -l` exit codes: 0 = identities listed, 1 = no identities,
+// 2 = agent not running / not accessible ("Could not open a connection to
+// your authentication agent"). A spawn failure (ssh-add not on PATH) is
+// treated as no-agent — the user has no usable agent either way.
+async function probeWindowsAgent(deps: PreflightDeps): Promise<PreflightProbes["windowsAgent"]> {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") return "not-windows";
+  const r = await execLocal("ssh-add", ["-l"], { spawn: deps.spawn, timeoutMs: 5_000 });
+  if (r.code === 0 && r.stdout.trim() !== "") return "ok";
+  if (r.code === 1) return "no-identities";
+  return "no-agent";
+}
+
+// The default identity files OpenSSH tries on its own (in order). A .ppk
+// file in any of these slots is the classic PuTTYgen trap — OpenSSH can't
+// parse it and falls through to "Permission denied (publickey)". We detect
+// it by the `PuTTY-User-Key-File-2:` magic header rather than spawning
+// `ssh-keygen -l -f …` (the issue's simpler proxy) — pure fs, no spawn,
+// and catches the format even before ssh tries to load it.
+const DEFAULT_KEY_FILES = ["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"];
+
+async function probeKeyFormat(deps: PreflightDeps): Promise<PreflightProbes["keyFormat"]> {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") return "not-windows";
+  const sshDir = join(deps.homeDir ?? homedir(), ".ssh");
+  for (const name of DEFAULT_KEY_FILES) {
+    const p = join(sshDir, name);
+    if (!existsSync(p)) continue;
+    try {
+      const head = readFileSync(p, "utf8").split(/\r?\n/, 1)[0] ?? "";
+      if (/^PuTTY-User-Key-File-2:/.test(head.trim())) return "putty";
+    } catch {
+      // Unreadable file — not a format we can classify; skip it.
+    }
+  }
+  return "ok";
 }
 
 // parseTailscaleJson — minimal `tailscale status --json` extractor. We only

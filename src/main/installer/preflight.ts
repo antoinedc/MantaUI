@@ -44,6 +44,29 @@ export type TailscaleState = {
   ipv4: string | null;
 };
 
+// Windows-only client-side probes (BET-362). Unlike every other probe these
+// inspect the LOCAL machine running the desktop app, not the remote box —
+// the OpenSSH Agent service and PuTTY-format keys are Windows-client quirks
+// that surface as an SSH auth failure with no actionable hint. They are
+// `not-windows` on every non-Win32 host so the Unix flow is untouched.
+export type WindowsAgentState =
+  /** Not a Windows host — probe skipped, never produces a failure. */
+  | "not-windows"
+  /** `ssh-add -l` exited 0 with at least one identity listed. */
+  | "ok"
+  /** Agent reachable but lists no identities (exit 1). */
+  | "no-identities"
+  /** Agent not running / not accessible (exit 2 or spawn failure). */
+  | "no-agent";
+
+export type KeyFormatState =
+  /** Not a Windows host — probe skipped, never produces a failure. */
+  | "not-windows"
+  /** No default ~/.ssh/id_* key is in PuTTY (.ppk) format. */
+  | "ok"
+  /** At least one default ~/.ssh/id_* key has the `PuTTY-User-Key-File-2:` header. */
+  | "putty";
+
 export type PreflightProbes = {
   reachability: Reachability;
   /** The host-key fingerprint ssh offered on a never-seen host, when
@@ -59,6 +82,10 @@ export type PreflightProbes = {
   clockSkewSeconds: number;
   /** `~/.manta/auth.json` already exists on the box. */
   alreadyInstalled: boolean;
+  /** Local OpenSSH agent state (Windows-only; `not-windows` elsewhere). */
+  windowsAgent: WindowsAgentState;
+  /** Local default key format (Windows-only; `not-windows` elsewhere). */
+  keyFormat: KeyFormatState;
 };
 
 // ---------- Ingress mode (mirrors install.sh:1160 + 1031) ----------
@@ -166,6 +193,12 @@ const CLOCK_SKEW_FAIL_SECONDS = 60;
  *   - already installed         → not a failure — installer is idempotent
  *                                  and re-runnable, so this is a no-op signal,
  *                                  echoed in `probes` for diagnostics only
+ *   - Windows client quirks     → on a Windows host, when auth already failed,
+ *                                  a PuTTY-format key / disabled agent / empty
+ *                                  agent each add a structured failure with the
+ *                                  Windows-specific fix (BET-362). Never fire
+ *                                  when auth succeeded — a working setup must
+ *                                  not be blocked by an unused .ppk file.
  *   - everything else            → ok
  */
 export function classifyPreflight(probes: PreflightProbes): PreflightResult {
@@ -236,6 +269,36 @@ export function classifyPreflight(probes: PreflightProbes): PreflightResult {
   // alreadyInstalled is NOT a failure or a warning — install.sh is
   // idempotent and already says so in its own log. The probe is still
   // echoed in `probes` for diagnostics.
+
+  // Windows client-side checks (BET-362). Both the disabled OpenSSH Agent
+  // service and a PuTTY-format key manifest as the auth-failed reachability
+  // above, with no hint of the real cause. We only surface them when auth
+  // actually failed: a working Windows setup (unencrypted OpenSSH key, or a
+  // key the agent already holds) reaches `ok` and must NOT be blocked by a
+  // stray .ppk file sitting unused in ~/.ssh. Gating on auth-failed keeps
+  // every Windows check a hard failure (BET-383: no soft-warning channel)
+  // without aborting an install that would have succeeded.
+  if (probes.reachability === "auth-failed") {
+    if (probes.keyFormat === "putty") {
+      failures.push({
+        cause: "PuTTY-format key detected.",
+        action:
+          "Convert the key with PuTTYgen (Conversions → Export OpenSSH key), then `ssh-add` it — OpenSSH cannot read .ppk files.",
+      });
+    }
+    if (probes.windowsAgent === "no-agent") {
+      failures.push({
+        cause: "The OpenSSH Authentication Agent service is not running.",
+        action:
+          "Enable the OpenSSH Authentication Agent service: services.msc → OpenSSH Authentication Agent → Startup type: Automatic, then `ssh-add` your key.",
+      });
+    } else if (probes.windowsAgent === "no-identities") {
+      failures.push({
+        cause: "No SSH identities are loaded in the agent.",
+        action: "Run `ssh-add <path-to-key>` to load your key into the OpenSSH agent.",
+      });
+    }
+  }
 
   return {
     ok: failures.length === 0,
