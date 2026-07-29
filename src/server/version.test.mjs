@@ -153,7 +153,15 @@ async function startVersionServer(version) {
     box_token: HEY_HEX32,
     version: 1,
   };
-  const authEngine = createAuthEngine({ auth: boxAuth, enforce: true });
+  // saveAuth/deleteAuth are stubbed for the same reason: their defaults write
+  // the real ~/.manta/auth.json, so any future revoke() here would rotate the
+  // identity of the machine running the suite.
+  const authEngine = createAuthEngine({
+    auth: boxAuth,
+    enforce: true,
+    saveAuth: async () => {},
+    deleteAuth: async () => {},
+  });
 
   return new Promise((resolve) => {
     const server = createServer((req, res) => {

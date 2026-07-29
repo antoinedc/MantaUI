@@ -189,7 +189,7 @@ test("authorizationForRequest: no header + no query token → empty", () => {
 });
 
 test("authorizationForRequest result feeds authorize() end-to-end", () => {
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   // valid ?token= on /events → authorized
   const okAuth = authorizationForRequest("/events", "", AUTH.box_token);
   assert.equal(eng.authorize({ method: "GET", path: "/events", authorization: okAuth }).ok, true);
@@ -313,13 +313,35 @@ test("issuing a new code supersedes the prior one", () => {
 
 const AUTH = { box_id: HEX32, box_token: HEX32B, created_at: 0 };
 
+// SAFETY — build engines through this helper, never `createAuthEngine` directly.
+//
+// createAuthEngine's saveAuth/deleteAuth default to the REAL box store
+// (~/.manta/auth.json). revoke() with a MATCHING token therefore unlinks that
+// file and mints a fresh identity in it — so a revoke test written without
+// injection rotates the box_id/box_token of whatever machine runs the suite.
+// That is not hypothetical: on the dev box (which also hosts the self-hosted CI
+// runner) every `npm test` regenerated the identity on disk while the running
+// manta-server kept the old token in memory, so each manta-native AI tool —
+// they re-read auth.json per call — started failing "unauthorized" while the
+// paired UI, holding the in-memory token, kept working. The no-op writers below
+// keep every engine's persistence side-effects off the real filesystem; the
+// two round-trip tests that DO need persistence pass their own tmp-path
+// writers through `opts`.
+function engine(opts = {}) {
+  return createAuthEngine({
+    saveAuth: async () => {},
+    deleteAuth: async () => {},
+    ...opts,
+  });
+}
+
 test("createAuthEngine requires a valid identity", () => {
   assert.throws(() => createAuthEngine({ auth: null }));
   assert.throws(() => createAuthEngine({ auth: { box_id: "bad", box_token: HEX32 } }));
 });
 
 test("authorize gates data routes without a valid token", () => {
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   // no token → 401
   let r = eng.authorize({ method: "GET", path: "/api/projects", authorization: "" });
   assert.equal(r.ok, false);
@@ -341,7 +363,7 @@ test("authorize gates data routes without a valid token", () => {
 });
 
 test("authorize allows exempt + preflight + public-asset paths without a token", () => {
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   assert.equal(eng.authorize({ method: "OPTIONS", path: "/api/projects" }).ok, true);
   assert.equal(eng.authorize({ method: "GET", path: "/auth/pair" }).ok, true);
   assert.equal(eng.authorize({ method: "POST", path: "/auth/claim" }).ok, true);
@@ -363,7 +385,7 @@ test("authorize allows exempt + preflight + public-asset paths without a token",
 });
 
 test("authorize allows everything when enforcement is disabled", () => {
-  const eng = createAuthEngine({ auth: AUTH, enforce: false });
+  const eng = engine({ auth: AUTH, enforce: false });
   assert.equal(eng.authorize({ method: "GET", path: "/api/projects", authorization: "" }).ok, true);
   assert.equal(eng.authorize({ method: "POST", path: "/rpc/tmux", authorization: "" }).ok, true);
 });
@@ -373,7 +395,7 @@ test("authorize allows everything when enforcement is disabled", () => {
 // ----------------------------------------------------------------------------
 
 test("pair mints a code + box_id; claim exchanges a valid code for the token", () => {
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   const p = eng.pair();
   assert.equal(p.ok, true);
   assert.equal(isValidPairingCode(p.pairing_code), true);
@@ -386,7 +408,7 @@ test("pair mints a code + box_id; claim exchanges a valid code for the token", (
 });
 
 test("claim is one-time and rejects reused / wrong / malformed codes", () => {
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   const { pairing_code } = eng.pair();
 
   // reused code → 403
@@ -409,7 +431,7 @@ test("claim is one-time and rejects reused / wrong / malformed codes", () => {
 
 test("claim rejects an expired code", () => {
   let t = 0;
-  const eng = createAuthEngine({ auth: AUTH, ttlMs: 100, now: () => t });
+  const eng = engine({ auth: AUTH, ttlMs: 100, now: () => t });
   const { pairing_code } = eng.pair();
   t = 200; // past TTL
   const r = eng.claim({ pairing_code });
@@ -435,21 +457,21 @@ test("claim rejects an expired code", () => {
 //                                   from this instant).
 
 test("revoke: no token presented → 401", async () => {
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   const r = await eng.revoke({});
   assert.equal(r.ok, false);
   assert.equal(r.status, 401);
 });
 
 test("revoke: empty-string token → 401", async () => {
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   const r = await eng.revoke({ token: "" });
   assert.equal(r.ok, false);
   assert.equal(r.status, 401);
 });
 
 test("revoke: malformed token (not 32-hex) → 400", async () => {
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   const r = await eng.revoke({ token: "not-32-hex" });
   assert.equal(r.ok, false);
   assert.equal(r.status, 400);
@@ -466,7 +488,7 @@ test("revoke: malformed token (not 32-hex) → 400", async () => {
 });
 
 test("revoke: 32-hex token that doesn't match → 401, no rotation", async () => {
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   const wrong = "a".repeat(32);
   const r = await eng.revoke({ token: wrong });
   assert.equal(r.ok, false);
@@ -488,7 +510,7 @@ test("revoke: valid token deletes box_token from auth.json (BET-357 §2)", async
   const path = tmpPath("revoke-roundtrip");
   const initial = { box_id: HEX32, box_token: HEX32B, created_at: 1000 };
   await saveAuth(initial, path);
-  const eng = createAuthEngine({
+  const eng = engine({
     auth: initial,
     saveAuth: (a) => saveAuth(a, path),
     deleteAuth: () => deleteAuth(path),
@@ -535,7 +557,7 @@ test("revoke: pair + claim after revoke returns the NEW identity, not the old on
   const path = tmpPath("revoke-claim-roundtrip");
   const initial = { box_id: HEX32, box_token: HEX32B, created_at: 1000 };
   await saveAuth(initial, path);
-  const eng = createAuthEngine({
+  const eng = engine({
     auth: initial,
     saveAuth: (a) => saveAuth(a, path),
     deleteAuth: () => deleteAuth(path),
@@ -558,7 +580,7 @@ test("revoke: clears any active pairing code (the old identity's code is moot)",
   // Issue a code before revoke, then revoke. The pre-existing code must be
   // invalidated — otherwise a code minted under the OLD identity would
   // authorize the OLD token (which nothing holds anymore).
-  const eng = createAuthEngine({ auth: AUTH });
+  const eng = engine({ auth: AUTH });
   const { pairing_code: stale } = eng.pair();
   assert.equal(eng.hasActivePairing(), true);
 
