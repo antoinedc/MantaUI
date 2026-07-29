@@ -4,8 +4,16 @@ import {
   buildPairPayload,
   type PairPayload,
 } from "./pairPayload";
+import { CHANNELS, CHANNEL_IDS } from "../../shared/channel.mjs";
 
 const BOX = "0123456789abcdef0123456789abcdef"; // 32 hex
+
+// Every channel in the table — drives the per-channel test loops below so
+// adding a fourth channel automatically extends coverage. The pairing wire
+// format only depends on urlScheme, but looping the table makes a future
+// PR that drops `manta` or adds a fourth scheme (e.g. "qa") impossible
+// without updating the test.
+const SCHEMES = CHANNEL_IDS.map((id) => CHANNELS[id].urlScheme);
 
 describe("parsePairPayload", () => {
   describe("boxId form (direct claim against the box's own hostname)", () => {
@@ -63,6 +71,61 @@ describe("parsePairPayload", () => {
       expect(
         parsePairPayload(`manta://pair?box=${BOX}&token=847291`),
       ).toEqual({ boxId: BOX, code: "847291" });
+    });
+  });
+
+  // BET-373: every channel's scheme is a legal pair-link prefix. The
+  // wire format is identical across channels — same query, same code,
+  // same server= gate — only the scheme prefix differs because that's
+  // what the OS uses to identify which app to deliver the link to.
+  describe("BET-373: per-channel scheme acceptance", () => {
+    for (const scheme of SCHEMES) {
+      it(`accepts ${scheme}://pair?... when configured with scheme="${scheme}"`, () => {
+        expect(
+          parsePairPayload(
+            `${scheme}://pair?box=${BOX}&code=847291`,
+            scheme,
+          ),
+        ).toEqual({ boxId: BOX, code: "847291" });
+      });
+
+      it(`accepts ${scheme}://pair?... with the URL-form Chromium-layout fallback (BET-240)`, () => {
+        // The "pair" segment lands in pathname (Chromium) — the parser's
+        // path-branch must still recover it for the channel's scheme.
+        // Pin it per-channel so a future PR that only fixes one scheme's
+        // URL parser can't slip through.
+        const raw = `${scheme}://pair?box=${BOX}&code=847291`;
+        expect(parsePairPayload(raw, scheme)).toEqual({
+          boxId: BOX,
+          code: "847291",
+        });
+      });
+
+      it(`rejects ${scheme}://pair?... when the parser is configured for a DIFFERENT scheme`, () => {
+        // The OS shouldn't have routed a `<scheme-A>://` link to a
+        // `<scheme-B>://`-registered app in the first place, but the
+        // parser enforces the same boundary defensively. A wrong-scheme
+        // payload is refused outright (NOT silently re-accepted under
+        // the parser's own scheme — that fallback would be the very
+        // mis-delivery the per-channel boundary is supposed to prevent).
+        for (const otherScheme of SCHEMES) {
+          if (otherScheme === scheme) continue;
+          expect(
+            parsePairPayload(
+              `${scheme}://pair?box=${BOX}&code=847291`,
+              otherScheme,
+            ),
+          ).toBeNull();
+        }
+      });
+    }
+
+    it("the three schemes from CHANNELS are pairwise distinct (no future channel silently merges)", () => {
+      // Sanity check on the SCHEMES list — loop above iterates these, so
+      // any drift here would silently skip a channel. A `Set` of size 3
+      // is the cheap pin that catches a copy-paste typo in CHANNELS.
+      expect(new Set(SCHEMES).size).toBe(SCHEMES.length);
+      expect(SCHEMES.length).toBe(3);
     });
   });
 
@@ -233,6 +296,34 @@ describe("buildPairPayload", () => {
     const empty = buildPairPayload({ boxId: BOX, code: "847291", serverUrl: "" });
     expect(empty).not.toContain("server=");
   });
+
+  // BET-373: per-channel emission. The builder picks up the caller's
+  // `scheme` arg verbatim — no derivation, no fallback chain — so the
+  // OS-registered scheme and the wire-format scheme can never disagree.
+  describe("BET-373: per-channel emission", () => {
+    for (const scheme of SCHEMES) {
+      it(`emits ${scheme}://pair?... when scheme="${scheme}"`, () => {
+        expect(
+          buildPairPayload({ boxId: BOX, code: "847291" }, scheme),
+        ).toBe(`${scheme}://pair?box=${encodeURIComponent(BOX)}&code=847291`);
+      });
+
+      it(`appends &server=<…> on the channel's scheme when scheme="${scheme}"`, () => {
+        // BET-336 + BET-373 together: the Tailscale pair link carries a
+        // server URL AND a channel-aware scheme prefix. Pin both ends so
+        // a future PR that loses the scheme arg on the server path can't
+        // quietly regress.
+        expect(
+          buildPairPayload(
+            { boxId: BOX, code: "847291", serverUrl: "http://100.64.1.5:8787" },
+            scheme,
+          ),
+        ).toBe(
+          `${scheme}://pair?box=${encodeURIComponent(BOX)}&code=847291&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
+        );
+      });
+    }
+  });
 });
 
 describe("round-trip", () => {
@@ -248,6 +339,30 @@ describe("round-trip", () => {
     ];
     for (const p of cases) {
       expect(parsePairPayload(buildPairPayload(p))).toEqual(p);
+    }
+  });
+
+  // BET-373: round-trip per channel. The query is scheme-agnostic — the
+  // same `{boxId, code, serverUrl}` shape comes out no matter which
+  // scheme the build side picked, and a parse with the matching scheme
+  // recovers it.
+  describe("BET-373: build → parse round-trip per channel", () => {
+    for (const scheme of SCHEMES) {
+      it(`parsePairPayload(buildPairPayload(p, "${scheme}"), "${scheme}") deep-equals p`, () => {
+        const cases: PairPayload[] = [
+          { boxId: BOX, code: "111111" },
+          { boxId: BOX, code: "000000" },
+          { boxId: BOX, code: "987654" },
+          { boxId: BOX, code: "111111", serverUrl: "http://100.64.1.5:8787" },
+          { boxId: BOX, code: "000000", serverUrl: "http://192.168.1.10:8787" },
+          { boxId: BOX, code: "987654", serverUrl: "https://mybox.ts.net" },
+        ];
+        for (const p of cases) {
+          expect(
+            parsePairPayload(buildPairPayload(p, scheme), scheme),
+          ).toEqual(p);
+        }
+      });
     }
   });
 });

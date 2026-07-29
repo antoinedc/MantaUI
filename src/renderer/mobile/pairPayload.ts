@@ -8,7 +8,12 @@
 // (Caddy on the box reverse-proxies 127.0.0.1:8787). The only live payload
 // shape is the box form:
 //   • Custom scheme (primary — what the desktop panel + install heredoc render):
-//       manta://pair?box=<box_id>&code=<6-digit>
+//       <scheme>://pair?box=<box_id>&code=<6-digit>
+//       scheme ∈ {manta, manta-staging, manta-dev} — the box + desktop emit
+//       the scheme their CHANNEL registered with the OS as a URL handler
+//       (BET-370 channel table; BET-373 thread this through pair links so
+//       staging-desktop users scanning a staging-box QR land in staging, not
+//       whatever other channel happened to register `manta://` last).
 //   • Deferred-deeplink https form (Branch/Firebase style):
 //       https://<host>/m/<payload>?box=<box_id>&code=<6-digit>
 //
@@ -22,6 +27,16 @@
 // never silently drop the parameter and fall back to the public hostname
 // — that fallback is exactly the "crafted link points the app at an
 // attacker's server" attack the gate prevents).
+//
+// BET-373 (channel-aware wire format): the parser and builder accept a
+// `scheme` arg (default "manta" — unchanged wire shape for callers that
+// don't care about channels). The parser only accepts the configured
+// scheme (the receiver's own URL handler), so a `manta-staging://pair?…`
+// link cannot accidentally be claimed by a `manta://`-registered app —
+// the OS shouldn't have routed it there in the first place, but the
+// parser enforces the same boundary defensively. The build side picks
+// up the channel's scheme via `channelConfig(channel).urlScheme` (the
+// single source of truth, shared with the box emitter).
 //
 // The validation contract (32-hex boxId shape, 6-digit code, private
 // server URL) is SINGLE-SOURCED: we delegate to normalizeCode
@@ -69,15 +84,29 @@ function coerceBoxId(raw: string): string | null {
 
 /**
  * Parse a raw scanned/deeplinked string into a PairPayload, or null for any
- * malformed / foreign input: not a manta pair URL, missing box, or code not
- * exactly 6 digits. Whitespace is trimmed.
+ * malformed / foreign input: not the expected pair URL (wrong scheme, wrong
+ * host segment), missing box, or code not exactly 6 digits. Whitespace is
+ * trimmed.
  *
  * Accepts the box form only (`box` + `code`, or `box` + `token` — the code
- * param has both spellings) and both URL shapes (custom `manta://pair` scheme
- * and the `https://host/m/...` deferred-deeplink form). The deprecated
- * `server=` and `id=` addressing forms are intentionally rejected.
+ * param has both spellings) and both URL shapes (custom `<scheme>://pair`
+ * — see `scheme` below — and the `https://host/m/...` deferred-deeplink
+ * form). The deprecated `server=` and `id=` addressing forms are
+ * intentionally rejected.
+ *
+ * BET-373 (channel-aware wire format): the custom-scheme half only accepts
+ * the configured `scheme` (default "manta" — unchanged for legacy callers).
+ * The OS hands a URL to the app whose registered scheme matches, so a
+ * `manta://` link landing in a `manta-staging://`-registered app would
+ * already be a routing bug — but the parser enforces the same boundary
+ * defensively so a wrong-channel payload can't sneak through. The query is
+ * scheme-agnostic: the same `{boxId, code, serverUrl}` shape comes out
+ * regardless of which scheme was used to deliver it.
  */
-export function parsePairPayload(raw: string): PairPayload | null {
+export function parsePairPayload(
+  raw: string,
+  scheme: string = "manta",
+): PairPayload | null {
   const input = String(raw ?? "").trim();
   if (!input) return null;
 
@@ -89,22 +118,25 @@ export function parsePairPayload(raw: string): PairPayload | null {
   }
 
   // Only two families are pairing payloads:
-  //   • manta://pair?...          (custom scheme; host is "pair")
-  //   • https://<host>/m/...    (deferred deeplink; path starts with /m/ or /m)
-  const isMantaScheme = url.protocol === "manta:";
+  //   • <scheme>://pair?...      (custom scheme; host is "pair")
+  //   • https://<host>/m/...   (deferred deeplink; path starts with /m/ or /m)
+  // BET-373: the custom-scheme family now keys off the caller's `scheme`
+  // arg (channel-aware), not a hardcoded `manta:` literal.
+  const isChannelScheme = url.protocol === `${scheme}:`;
   const isHttps = url.protocol === "https:" || url.protocol === "http:";
   const isDeferredPath = /^\/m(\/|$)/.test(url.pathname);
 
-  if (isMantaScheme) {
-    // manta://pair — the "pair" authority segment lands in DIFFERENT URL fields
-    // depending on the engine, because `manta:` is a NON-SPECIAL scheme:
+  if (isChannelScheme) {
+    // <scheme>://pair — the "pair" authority segment lands in DIFFERENT URL
+    // fields depending on the engine, because custom schemes are
+    // NON-SPECIAL schemes:
     //   • Node's URL           → url.hostname === "pair", pathname === ""
     //   • Chromium (renderer)  → url.hostname === "",     pathname === "//pair"
     // The parser originally checked only `url.hostname === "pair"`, which is
     // true in Node (where the unit tests run) but FALSE in the packaged
-    // Electron renderer — so every real deep-link / pasted manta:// link was
-    // rejected in-app with "Couldn't read that pair link". Accept the segment
-    // from either field (BET-240 regression).
+    // Electron renderer — so every real deep-link / pasted <scheme>:// link
+    // was rejected in-app with "Couldn't read that pair link". Accept the
+    // segment from either field (BET-240 regression).
     const host = url.hostname;
     const pathSeg = url.pathname.replace(/^\/+/, ""); // "//pair" → "pair"
     if (host !== "pair" && pathSeg !== "pair") return null;
@@ -148,11 +180,18 @@ export function parsePairPayload(raw: string): PairPayload | null {
 /**
  * Inverse of parsePairPayload: produce the canonical box-form custom-scheme
  * string
- *   manta://pair?box=<url-encoded box_id>&code=<code>
+ *   <scheme>://pair?box=<url-encoded box_id>&code=<code>
  * Used as a round-trip oracle in tests and by the desktop QR panel +
  * install.sh heredoc. The boxId is URL-encoded so reserved characters
  * survive the query (32-hex has none today, but the encoder is the safe
  * default).
+ *
+ * BET-373 (channel-aware wire format): the `scheme` arg (default "manta")
+ * lets the emitter pick the channel's own URL scheme — `manta://` for prod,
+ * `manta-staging://` for staging, `manta-dev://` for dev — so the OS
+ * routes the link back to the channel that scanned it. Callers should
+ * pass `channelConfig(channel).urlScheme` (src/shared/channel.mjs) so
+ * the literal lives in exactly one place.
  *
  * BET-336: when the payload carries a `serverUrl` (Tailscale pair link),
  * a `server=<url-encoded serverUrl>` query param is appended so the
@@ -161,8 +200,8 @@ export function parsePairPayload(raw: string): PairPayload | null {
  * helper with server URLs that have already passed `isPrivateServerUrl`,
  * so we do NOT re-validate here (the constructor is a thin encoder).
  */
-export function buildPairPayload(p: PairPayload): string {
-  const base = `manta://pair?box=${encodeURIComponent(p.boxId)}&code=${p.code}`;
+export function buildPairPayload(p: PairPayload, scheme: string = "manta"): string {
+  const base = `${scheme}://pair?box=${encodeURIComponent(p.boxId)}&code=${p.code}`;
   if (p.serverUrl) {
     return `${base}&server=${encodeURIComponent(p.serverUrl)}`;
   }

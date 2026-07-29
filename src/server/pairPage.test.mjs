@@ -11,11 +11,19 @@ import {
   HEX32_RE,
   CODE_RE,
   validatePairQrQuery,
+  resolveBoxChannel,
   renderPairQr,
   readPairAsset,
 } from "./pairPage.mjs";
+import { CHANNELS, CHANNEL_IDS } from "../shared/channel.mjs";
 
 const HEX32 = "0123456789abcdef0123456789abcdef";
+
+// Same per-channel iteration pattern as pairPayload.test.ts: drive the
+// per-scheme tests off the channel table so adding a fourth channel
+// automatically extends coverage (and a future PR that drops a scheme
+// from CHANNELS has to update the test alongside it).
+const SCHEMES = CHANNEL_IDS.map((id) => CHANNELS[id].urlScheme);
 
 // ---------------------------------------------------------------------------
 // HEX32_RE / CODE_RE
@@ -35,6 +43,57 @@ test("CODE_RE accepts exactly 6 digits", () => {
   assert.equal(CODE_RE.test("12345"), false);
   assert.equal(CODE_RE.test("1234567"), false);
   assert.equal(CODE_RE.test("abcdef"), false);
+});
+
+// ---------------------------------------------------------------------------
+// resolveBoxChannel — the env → channel table lookup
+// ---------------------------------------------------------------------------
+
+test("resolveBoxChannel falls back to the prod channel when MANTA_CHANNEL is unset", () => {
+  const prev = process.env.MANTA_CHANNEL;
+  delete process.env.MANTA_CHANNEL;
+  try {
+    assert.equal(resolveBoxChannel(), CHANNELS.prod);
+  } finally {
+    if (prev !== undefined) process.env.MANTA_CHANNEL = prev;
+  }
+});
+
+test("resolveBoxChannel honors MANTA_CHANNEL=staging → CHANNELS.staging", () => {
+  const prev = process.env.MANTA_CHANNEL;
+  process.env.MANTA_CHANNEL = "staging";
+  try {
+    assert.equal(resolveBoxChannel(), CHANNELS.staging);
+  } finally {
+    if (prev !== undefined) process.env.MANTA_CHANNEL = prev;
+    else delete process.env.MANTA_CHANNEL;
+  }
+});
+
+test("resolveBoxChannel honors MANTA_CHANNEL=dev → CHANNELS.dev", () => {
+  const prev = process.env.MANTA_CHANNEL;
+  process.env.MANTA_CHANNEL = "dev";
+  try {
+    assert.equal(resolveBoxChannel(), CHANNELS.dev);
+  } finally {
+    if (prev !== undefined) process.env.MANTA_CHANNEL = prev;
+    else delete process.env.MANTA_CHANNEL;
+  }
+});
+
+test("resolveBoxChannel falls back to prod for an unrecognised MANTA_CHANNEL value (never throws)", () => {
+  // Same defensive rule as resolveChannel in shared/channel.mjs — a bad
+  // box deploy must still mint a working QR, not throw at request time.
+  // The pair page is auth-exempt and on the critical pairing path; a
+  // crash there would brick the install.
+  const prev = process.env.MANTA_CHANNEL;
+  process.env.MANTA_CHANNEL = "garbage";
+  try {
+    assert.equal(resolveBoxChannel(), CHANNELS.prod);
+  } finally {
+    if (prev !== undefined) process.env.MANTA_CHANNEL = prev;
+    else delete process.env.MANTA_CHANNEL;
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -161,6 +220,125 @@ test("validatePairQrQuery rejects a PUBLIC server URL (BET-336, crafted-link gua
   });
   assert.equal(r.ok, false);
   assert.match(r.error, /private\/tailnet/);
+});
+
+// ---------------------------------------------------------------------------
+// validatePairQrQuery — channel-aware scheme (BET-373)
+//
+// The renderer + desktop pair-link path now keys off the channel table
+// (src/shared/channel.mjs). These tests pin every channel's emitted
+// payload and the env-driven default that ties the box to its own scheme.
+// ---------------------------------------------------------------------------
+
+test("validatePairQrQuery honors an explicit scheme arg for every channel (BET-373)", () => {
+  for (const scheme of SCHEMES) {
+    const r = validatePairQrQuery({ box: HEX32, code: "847291" }, scheme);
+    assert.equal(r.ok, true, `scheme=${scheme} should accept valid input`);
+    assert.equal(
+      r.payload,
+      `${scheme}://pair?box=${HEX32}&code=847291`,
+      `scheme=${scheme} should emit <scheme>://pair?…`,
+    );
+  }
+});
+
+test("validatePairQrQuery honors an explicit scheme arg with &server= appended (BET-336 + BET-373)", () => {
+  // BET-336 + BET-373 together: a channel-aware scheme plus a Tailscale
+  // server URL. Pin both ends so a future PR that drops the scheme arg
+  // can't quietly regress.
+  for (const scheme of SCHEMES) {
+    const r = validatePairQrQuery(
+      { box: HEX32, code: "847291", server: "http://100.64.1.5:8787" },
+      scheme,
+    );
+    assert.equal(r.ok, true, `scheme=${scheme} should accept valid input`);
+    assert.equal(
+      r.payload,
+      `${scheme}://pair?box=${HEX32}&code=847291&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
+      `scheme=${scheme} should emit <scheme>://pair?…&server=<encoded>`,
+    );
+  }
+});
+
+test("validatePairQrQuery defaults to the box's MANTA_CHANNEL scheme when no scheme arg is passed (BET-373)", () => {
+  // Drive every channel through env + delete so the env-driven default
+  // is pinned for ALL three channels. Pin the expected payload prefix to
+  // the env-driven channel so a future PR that loses the channel lookup
+  // (and silently falls back to manta://) fails this test for the
+  // staging + dev channels.
+  const prev = process.env.MANTA_CHANNEL;
+  try {
+    for (const id of CHANNEL_IDS) {
+      process.env.MANTA_CHANNEL = id;
+      const r = validatePairQrQuery({ box: HEX32, code: "847291" });
+      assert.equal(r.ok, true, `channel=${id} should accept valid input`);
+      assert.equal(
+        r.payload,
+        `${CHANNELS[id].urlScheme}://pair?box=${HEX32}&code=847291`,
+        `channel=${id} (env) should default to ${CHANNELS[id].urlScheme}://`,
+      );
+    }
+  } finally {
+    if (prev !== undefined) process.env.MANTA_CHANNEL = prev;
+    else delete process.env.MANTA_CHANNEL;
+  }
+});
+
+test("validatePairQrQuery defaults to manta:// when MANTA_CHANNEL is unset (BET-373 back-compat)", () => {
+  // The "no channel configured" path must still mint a valid
+  // `manta://pair?…` QR — pre-BET-373 boxes (which have no MANTA_CHANNEL
+  // env at all) keep working without any installer change. Pin the
+  // behavior so a future PR that re-routes an unset channel to dev
+  // (or anywhere else) breaks loudly here.
+  const prev = process.env.MANTA_CHANNEL;
+  delete process.env.MANTA_CHANNEL;
+  try {
+    const r = validatePairQrQuery({ box: HEX32, code: "847291" });
+    assert.equal(r.ok, true);
+    assert.equal(r.payload, `manta://pair?box=${HEX32}&code=847291`);
+  } finally {
+    if (prev !== undefined) process.env.MANTA_CHANNEL = prev;
+  }
+});
+
+test("validatePairQrQuery defaults to manta:// when MANTA_CHANNEL is unrecognised (BET-373 defensive fallback)", () => {
+  // Same defensive rule as resolveChannel — a mis-configured box must
+  // still mint a working QR. The pair page is auth-exempt and on the
+  // critical pairing path; a crash there would brick the install.
+  const prev = process.env.MANTA_CHANNEL;
+  process.env.MANTA_CHANNEL = "garbage";
+  try {
+    const r = validatePairQrQuery({ box: HEX32, code: "847291" });
+    assert.equal(r.ok, true);
+    assert.equal(r.payload, `manta://pair?box=${HEX32}&code=847291`);
+  } finally {
+    if (prev !== undefined) process.env.MANTA_CHANNEL = prev;
+    else delete process.env.MANTA_CHANNEL;
+  }
+});
+
+test("validatePairQrQuery: explicit scheme arg beats MANTA_CHANNEL env (BET-373 caller override)", () => {
+  // Pin the precedence: an explicit `scheme` arg from the caller wins
+  // over the env-driven default. Tests use this to drive each scheme
+  // without mutating the env; production callers (index.mjs) DON'T
+  // override and therefore pick up the env-driven channel.
+  const prev = process.env.MANTA_CHANNEL;
+  process.env.MANTA_CHANNEL = "staging";
+  try {
+    const r = validatePairQrQuery(
+      { box: HEX32, code: "847291" },
+      "manta-dev",
+    );
+    assert.equal(r.ok, true);
+    assert.equal(
+      r.payload,
+      `manta-dev://pair?box=${HEX32}&code=847291`,
+      "explicit scheme must override env-derived default",
+    );
+  } finally {
+    if (prev !== undefined) process.env.MANTA_CHANNEL = prev;
+    else delete process.env.MANTA_CHANNEL;
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -49,6 +49,16 @@ export default defineConfig({
       __MANTA_AXIOM_TOKEN__: JSON.stringify(process.env.MANTA_AXIOM_TOKEN ?? ""),
       __MANTA_AXIOM_DATASET__: JSON.stringify(process.env.MANTA_AXIOM_DATASET ?? "manta"),
       __APP_VERSION__: JSON.stringify(pkg.version ?? "0.0.0"),
+      // BET-370 + BET-373: bake the channel id into the renderer bundle so
+      // pairPayload.ts (and any future renderer-side consumer) can pull the
+      // channel's URL scheme through `channelConfig(__MANTA_CHANNEL__)`.
+      // Mirrors the main-process baking — same source (process.env), same
+      // fallback ("prod"). The mobile renderer bundle bakes the SAME global
+      // (electron.vite.config.mobile.ts) so the ambient type is satisfied in
+      // both targets; mobile currently always uses the prod scheme because
+      // the mobile app does not yet have a channel concept (a separate
+      // effort per BET-373's out-of-scope list).
+      __MANTA_CHANNEL__: JSON.stringify(process.env.MANTA_CHANNEL ?? "prod"),
     },
     build: {
       rollupOptions: {
