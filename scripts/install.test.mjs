@@ -4127,6 +4127,24 @@ test("install.sh: scripts/systemd/*.service carries @@AGENT_PATH@@ placeholder (
   }
 });
 
+test("install.sh: scripts/systemd/manta-server.service + scripts/launchd/com.mantaui.server.plist carry @@MANTA_CHANNEL@@ placeholder (BET-392)", () => {
+  // Belt-and-braces: without the placeholder in the template, install.sh's
+  // sed substitution has nothing to replace and the box's own server
+  // process would silently fall back to resolveBoxChannel()'s "prod"
+  // default on every install, regardless of MANTA_CHANNEL.
+  const serverUnit = readFileSync(join(__dirname, "systemd", "manta-server.service"), "utf-8");
+  assert.match(serverUnit, /Environment=MANTA_CHANNEL=@@MANTA_CHANNEL@@/);
+  const serverPlist = readFileSync(join(__dirname, "launchd", "com.mantaui.server.plist"), "utf-8");
+  assert.match(serverPlist, /<key>MANTA_CHANNEL<\/key>\s*<string>@@MANTA_CHANNEL@@<\/string>/);
+  // opencode-serve.service / com.mantaui.opencode.plist are NOT
+  // pair-link-emitting processes — MANTA_CHANNEL is deliberately scoped to
+  // manta-server only.
+  const opencodeUnit = readFileSync(join(__dirname, "systemd", "opencode-serve.service"), "utf-8");
+  assert.doesNotMatch(opencodeUnit, /MANTA_CHANNEL/);
+  const opencodePlist = readFileSync(join(__dirname, "launchd", "com.mantaui.opencode.plist"), "utf-8");
+  assert.doesNotMatch(opencodePlist, /MANTA_CHANNEL/);
+});
+
 test("install.sh systemd render: AGENT_PATH substitution materialises ~/.local/bin in both units (BET-353)", () => {
   // Pin the Linux render: install.sh substitutes @@AGENT_PATH@@ via the
   // lib's render-systemd-unit call (opencode-serve.service) AND via the
@@ -4156,7 +4174,8 @@ NODE="node"
 MANTA_PORT="8787"
 TAILNET_IP=""
 OPENCODE_BIN="/usr/local/bin/opencode"
-export MANTA_HOME NODE MANTA_PORT TAILNET_IP OPENCODE_BIN
+MANTA_CHANNEL="staging"
+export MANTA_HOME NODE MANTA_PORT TAILNET_IP OPENCODE_BIN MANTA_CHANNEL
 OC_UNIT_SRC="\${INSTALL_SH%/*}/systemd/opencode-serve.service"
 SERVER_UNIT_SRC="\${INSTALL_SH%/*}/systemd/manta-server.service"
 
@@ -4174,6 +4193,7 @@ sed \\
   -e "s|@@MANTA_PORT@@|\$MANTA_PORT|g" \\
   -e "s|@@MANTA_TAILNET_HOST@@|\${TAILNET_IP:-}|g" \\
   -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
+  -e "s|@@MANTA_CHANNEL@@|\${MANTA_CHANNEL:-prod}|g" \\
   "\$SERVER_UNIT_SRC" > "${SERVER_RENDERED}"
 
 echo "SYSTEMD_RENDER_DONE=1"
@@ -4192,6 +4212,52 @@ echo "SYSTEMD_RENDER_DONE=1"
       // service can't find `claude` for credential refresh.
       assert.match(text, new RegExp(`${homeRe}/\\.local/bin`));
     }
+    // BET-392: manta-server.service (not opencode-serve.service — MANTA_CHANNEL
+    // is only relevant to the pairing-QR-emitting process) must carry the
+    // resolved channel so resolveBoxChannel() sees it at runtime, not the
+    // "unset -> prod" fallback.
+    const serverText = readFileSync(SERVER_RENDERED, "utf-8");
+    assert.doesNotMatch(serverText, /@@MANTA_CHANNEL@@/, "unsubstituted @@MANTA_CHANNEL@@ leaked into manta-server.service");
+    assert.match(serverText, /Environment=MANTA_CHANNEL=staging/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install.sh systemd render: MANTA_CHANNEL defaults to prod when unset (BET-392)", () => {
+  // Mirrors the MANTA_PORT/MANTA_TAILNET_HOST default-substitution coverage:
+  // an install that never sets MANTA_CHANNEL must still render a valid unit
+  // with the "prod" fallback baked in, not a literal @@MANTA_CHANNEL@@ token.
+  const dir = mkdtempSync(join(tmpdir(), "manta-systemd-channel-default-"));
+  try {
+    const SERVER_RENDERED = join(dir, "server-rendered.service");
+    const out = runMain({
+      stubs: `
+INSTALL_SH="${INSTALL_SH}"
+export INSTALL_SH
+MANTA_HOME="/tmp/fake-manta-home"
+NODE="node"
+MANTA_PORT="8787"
+TAILNET_IP=""
+unset MANTA_CHANNEL
+export MANTA_HOME NODE MANTA_PORT TAILNET_IP
+SERVER_UNIT_SRC="\${INSTALL_SH%/*}/systemd/manta-server.service"
+sed \\
+  -e "s|@@MANTA_HOME@@|\$MANTA_HOME|g" \\
+  -e "s|@@NODE_BIN@@|\$NODE|g" \\
+  -e "s|@@MANTA_PORT@@|\$MANTA_PORT|g" \\
+  -e "s|@@MANTA_TAILNET_HOST@@|\${TAILNET_IP:-}|g" \\
+  -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
+  -e "s|@@MANTA_CHANNEL@@|\${MANTA_CHANNEL:-prod}|g" \\
+  "\$SERVER_UNIT_SRC" > "${SERVER_RENDERED}"
+echo "SYSTEMD_CHANNEL_DEFAULT_DONE=1"
+`,
+      preBody: `: # run stubs above`,
+    });
+    assert.match(out, /SYSTEMD_CHANNEL_DEFAULT_DONE=1/);
+    const text = readFileSync(SERVER_RENDERED, "utf-8");
+    assert.doesNotMatch(text, /@@MANTA_CHANNEL@@/, "unsubstituted @@MANTA_CHANNEL@@ leaked into manta-server.service");
+    assert.match(text, /Environment=MANTA_CHANNEL=prod/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -4266,7 +4332,8 @@ MANTA_PORT="8787"
 TAILNET_IP="100.64.1.5"
 OPENCODE_BIN="/usr/local/bin/opencode"
 AUTH_DIR="/tmp/fake-manta-home/.manta"
-export MANTA_HOME NODE MANTA_PORT TAILNET_IP OPENCODE_BIN AUTH_DIR
+MANTA_CHANNEL="staging"
+export MANTA_HOME NODE MANTA_PORT TAILNET_IP OPENCODE_BIN AUTH_DIR MANTA_CHANNEL
 SERVER_PLIST_SRC="\${INSTALL_SH%/*}/launchd/com.mantaui.server.plist"
 export SERVER_PLIST_SRC
 sed \\
@@ -4277,6 +4344,7 @@ sed \\
   -e "s|@@OPENCODE_BIN@@|\${OPENCODE_BIN:-}|g" \\
   -e "s|@@AUTH_DIR@@|\$AUTH_DIR|g" \\
   -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
+  -e "s|@@MANTA_CHANNEL@@|\${MANTA_CHANNEL:-prod}|g" \\
   "\$SERVER_PLIST_SRC" > "${rendered}"
 echo "SUBST_DONE=1"
 `,
@@ -4295,6 +4363,10 @@ echo "SUBST_DONE=1"
     assert.match(text, /<string>8787<\/string>/);
     assert.match(text, /<string>100\.64\.1\.5<\/string>/);
     assert.match(text, /\/tmp\/fake-manta-home\/\.manta\/server\.log/);
+    // BET-392: MANTA_CHANNEL must land in EnvironmentVariables so
+    // resolveBoxChannel() sees the install's actual channel, not the
+    // "unset -> prod" fallback.
+    assert.match(text, /<key>MANTA_CHANNEL<\/key>\s*<string>staging<\/string>/);
     // PATH must be materialised: launchd hands an agent only
     // /usr/bin:/bin:/usr/sbin:/sbin, so a Homebrew tmux is invisible to
     // manta-server and every tmux call fails on a real Mac box.
@@ -4344,6 +4416,7 @@ sed \\
   -e "s|@@OPENCODE_BIN@@|\${OPENCODE_BIN:-}|g" \\
   -e "s|@@AUTH_DIR@@|\$AUTH_DIR|g" \\
   -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
+  -e "s|@@MANTA_CHANNEL@@|\${MANTA_CHANNEL:-prod}|g" \\
   "\$OC_PLIST_SRC" > "${rendered}"
 echo "EMPTY_SUBST_DONE=1"
 `,
@@ -4386,6 +4459,9 @@ test("scripts/launchd/*.plist XML is well-formed (BET-277 lint gate)", () => {
   // tailnet listener keeps working after the supervisor swap. Pin the
   // key so a future rename doesn't silently break the tailnet path.
   assert.match(server, /<key>MANTA_TAILNET_HOST<\/key>/);
+  // BET-392: the server plist must carry MANTA_CHANNEL so resolveBoxChannel()
+  // (src/server/pairPage.mjs) sees the install's actual channel at runtime.
+  assert.match(server, /<key>MANTA_CHANNEL<\/key>/);
 });
 
 // ----------------------------------------------------------------------------

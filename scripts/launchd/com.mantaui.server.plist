@@ -39,6 +39,15 @@
     <string>127.0.0.1</string>
     <key>MANTA_MOBILE_PORT</key>
     <string>@@MANTA_PORT@@</string>
+    <!-- BET-392: the box's own long-lived server process reads MANTA_CHANNEL
+         to pick the pair-link URL scheme it emits from /pair/qr.png
+         (resolveBoxChannel() in src/server/pairPage.mjs, BET-373). Without
+         this key the process only ever sees the "prod" fallback regardless
+         of what channel the box was actually installed for. install.sh
+         substitutes the value it resolved for THIS install (default prod)
+         — see MANTA_CHANNEL in main(). -->
+    <key>MANTA_CHANNEL</key>
+    <string>@@MANTA_CHANNEL@@</string>
     <!-- Optional second listener bound to the Tailscale interface (BET-266).
          Set to a Tailscale IPv4 by install.sh on the tailnet ingress path;
          left empty on the public path so the server's tailnet listener is

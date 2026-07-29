@@ -67,6 +67,12 @@
 #   MANTA_REPO_URL      git URL the deploy is initialised against for `scripts/self-update.sh`
 #                       (default https://github.com/antoinedc/MantaUI.git)
 #   MANTA_HOME          where code is unpacked (default ~/manta)
+#   MANTA_CHANNEL       build channel — prod|staging|dev (default prod). Baked
+#                       into the manta-server systemd unit / LaunchAgent plist
+#                       as Environment/EnvironmentVariables so the box's own
+#                       long-lived process resolves the right pair-link URL
+#                       scheme (resolveBoxChannel() in src/server/pairPage.mjs,
+#                       BET-373). Not persisted anywhere.
 #   MANTA_MOBILE_PORT   server port (default 8787)
 #   MANTA_VERSION       version to fetch when MANTA_TARBALL_URL is unset (default: latest)
 #   MANTA_GATEWAY_BASE  push-gateway base URL (default https://gateway.mantaui.com)
@@ -545,6 +551,13 @@ main() {
   # ---------------------------------------------------------------------------
   MANTA_HOME="${MANTA_HOME:-$HOME/manta}"
   AUTH_DIR="$HOME/.manta"
+  # BET-392: resolve + export MANTA_CHANNEL here (same "unset/unrecognised ->
+  # prod" fallback resolveBoxChannel() applies) so it's available below when
+  # the manta-server systemd unit / LaunchAgent plist get rendered. Not
+  # persisted to disk — channel is a property of the build/install, not
+  # box state.
+  MANTA_CHANNEL="${MANTA_CHANNEL:-prod}"
+  export MANTA_CHANNEL
 
   rm -rf "$MANTA_HOME.prev"
   if [ -d "$MANTA_HOME" ]; then mv "$MANTA_HOME" "$MANTA_HOME.prev"; fi
@@ -832,6 +845,7 @@ main() {
       -e "s|@@OPENCODE_BIN@@|${OPENCODE_BIN:-}|g" \
       -e "s|@@AUTH_DIR@@|$AUTH_DIR|g" \
       -e "s|@@AGENT_PATH@@|$(launchd_agent_path)|g" \
+      -e "s|@@MANTA_CHANNEL@@|${MANTA_CHANNEL:-prod}|g" \
       "$src" > "$dest"
     local uid; uid="$(id -u)"
     # bootout first (ignore failure if not loaded), then bootstrap for a clean
@@ -1056,6 +1070,7 @@ main() {
       -e "s|@@MANTA_PORT@@|$MANTA_PORT|g" \
       -e "s|@@MANTA_TAILNET_HOST@@|$TAILNET_IP|g" \
       -e "s|@@AGENT_PATH@@|$(launchd_agent_path)|g" \
+      -e "s|@@MANTA_CHANNEL@@|${MANTA_CHANNEL:-prod}|g" \
       "$UNIT_SRC" > "$UNIT_DIR/manta-server.service"
 
     # Survive logout/reboot without an active session.
