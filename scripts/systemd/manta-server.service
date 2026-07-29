@@ -27,6 +27,13 @@ WorkingDirectory=@@MANTA_HOME@@
 ExecStart=@@NODE_BIN@@ @@MANTA_HOME@@/src/server/index.mjs
 Environment=MANTA_MOBILE_HOST=127.0.0.1
 Environment=MANTA_MOBILE_PORT=@@MANTA_PORT@@
+# BET-392: the box's own long-lived server process reads MANTA_CHANNEL to
+# pick the pair-link URL scheme it emits from /pair/qr.png
+# (resolveBoxChannel() in src/server/pairPage.mjs, BET-373). Without this,
+# the process only ever sees the "prod" fallback regardless of what channel
+# the box was actually installed for. install.sh substitutes the value it
+# resolved for THIS install (default prod) — see MANTA_CHANNEL in main().
+Environment=MANTA_CHANNEL=@@MANTA_CHANNEL@@
 # Same PATH the LaunchAgent plists get — systemd --user services inherit a
 # minimal default PATH that excludes ~/.local/bin (claude CLI) and Homebrew
 # dirs (tmux). Without this, `tmux:new-session` ENOENTs and
