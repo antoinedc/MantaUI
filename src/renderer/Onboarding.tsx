@@ -223,10 +223,15 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
   // Skip: persist onboardingSkipped so the flow doesn't re-trigger on every
   // launch of an otherwise-empty config, then hand control back to the shell.
+  // Reserved for future Settings-driven "Skip setup" re-runs (BET-382 §A.3);
+  // today the renderer's `Skip setup` button is gone, so the only caller is
+  // a future Settings affordance that hasn't landed yet. `void skip;` keeps
+  // the function referenced for TS while we wait.
   const skip = async () => {
     await useStore.getState().skipOnboarding();
     onDone();
   };
+  void skip;
 
   // Deep-link pairing (BET-240): a link that arrives WHILE onboarding is
   // already open (e.g. user clicked the link from Terminal after the app
@@ -268,7 +273,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             {isSuccess ? (
               <SuccessPanel onOpen={onDone} />
             ) : pos === 1 ? (
-              <PairStep onPaired={onPaired} onSkip={skip} />
+              <PairStep onPaired={onPaired} />
             ) : pos === 2 ? (
               <ProvidersStep
                 onBack={goBack}
