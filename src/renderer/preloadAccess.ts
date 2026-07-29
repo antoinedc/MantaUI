@@ -5,7 +5,7 @@ import type {
   AutoUpdateErrorInfo,
 } from "../shared/types.js";
 import type { InstallerEvent, InstallerState } from "../shared/types.js";
-import type { PreflightResult } from "../main/installer/preflight.js";
+import type { PreflightResult, PreflightFailure } from "../main/installer/preflight.js";
 import type { SshHostEntry } from "../main/installer/sshConfig.js";
 import type { InstallerStageSnapshotRow } from "../shared/types.js";
 import type { UnpairOutcome } from "../shared/unpair.mjs";
@@ -15,7 +15,7 @@ import type { UnpairOutcome } from "../shared/unpair.mjs";
 // `MantaPreload` consumers below. The types live in src/shared/types.ts so
 // they can be imported by both preload AND renderer (two tsconfigs) without
 // crossing the process boundary.
-export type { InstallerEvent, InstallerState, InstallerStageSnapshotRow };
+export type { InstallerEvent, InstallerState, InstallerStageSnapshotRow, PreflightFailure };
 
 /**
  * OS-integration affordances exposed by the Electron preload bridge.
@@ -125,16 +125,12 @@ export interface MantaPreload {
   // skipped). The renderer's host picker reads this on mount.
   installerListHosts(): Promise<SshHostEntry[]>;
 
-  // Run the preflight probes (silent reachability, OS/arch, passwordless
-  // sudo, tailscale, clock skew, already-installed) over SSH for the chosen
-  // alias. Returns the structured PreflightResult; failures[] carries
-  // plain-language cause + one suggested action per failure.
-  installerPreflight(input: { alias: string }): Promise<PreflightResult>;
-
-  // Kick off the install. Returns the handle id the renderer uses to match
-  // incoming installerEvent pushes. The install itself streams back via
-  // onInstallerEvent below; this method itself resolves as soon as the
-  // spawn succeeds (typically <100ms).
+  // Kick off the install. Preflight (silent reachability, OS/arch,
+  // passwordless sudo, tailscale, clock skew, already-installed) runs as
+  // phase 1 of this call, in main (BET-383) — there is no separate
+  // preflight channel. Returns the handle id the renderer uses to match
+  // incoming installerEvent pushes; a failed preflight is reported via a
+  // `preflight-failed` installerEvent, not a rejection.
   installerStart(input: { alias: string }): Promise<{ handleId: string }>;
 
   // SIGTERM the in-flight install. Idempotent: safe on a stale handle id

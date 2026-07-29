@@ -92,8 +92,6 @@ export function redactLine(line: string): string {
  *   failures:
  *     - cause: <text>
  *       action: <text>
- *   warnings:
- *     - <text>
  *   probes:
  *     reachability: <…>
  *     os: linux/x64 release=…
@@ -128,14 +126,6 @@ export function buildDiagnostics(input: DiagnosticsInput): string {
     }
   } else {
     out.push("failures: []");
-  }
-  if (p.warnings.length > 0) {
-    out.push("warnings:");
-    for (const w of p.warnings) {
-      out.push(`  - ${redactLine(w.message)}`);
-    }
-  } else {
-    out.push("warnings: []");
   }
   const probes = p.probes;
   out.push(

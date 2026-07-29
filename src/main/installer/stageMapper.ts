@@ -39,11 +39,11 @@ export type InstallStage = {
 
 /** Ordered list of stages — UI walks this to render the checklist. */
 export const INSTALL_STAGES: ReadonlyArray<InstallStage> = [
-  { id: "preflight", label: "Preflight" },
+  { id: "preflight", label: "Checking the box" },
   { id: "download", label: "Download release" },
-  { id: "extract", label: "Extract + atomic swap" },
-  { id: "service", label: "Install + start service" },
-  { id: "pairing", label: "Pair with the desktop" },
+  { id: "extract", label: "Installing files" },
+  { id: "service", label: "Starting the service" },
+  { id: "pairing", label: "Pairing with this app" },
   { id: "done", label: "Done" },
 ];
 
@@ -183,4 +183,24 @@ export function buildStageSnapshot(currentStage: InstallStageId): Array<{
     }
     return { id: s.id, label: s.label, state };
   });
+}
+
+/**
+ * The single status line the UI renders — CURRENT stage's label + 1-based
+ * position + total (e.g. "Checking the box… · 1 of 6"). Derives from the
+ * same INSTALL_STAGES/STAGE_INDEX the checklist uses — one source, no
+ * duplicated label table in the renderer.
+ */
+export function currentStageInfo(currentStage: InstallStageId): {
+  label: string;
+  /** 1-based position in INSTALL_STAGES. */
+  index: number;
+  total: number;
+} {
+  const idx = STAGE_INDEX[currentStage];
+  return {
+    label: INSTALL_STAGES[idx].label,
+    index: idx + 1,
+    total: INSTALL_STAGES.length,
+  };
 }

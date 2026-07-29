@@ -18,6 +18,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import type { PreflightResult } from "./preflight.js";
 
 // --- electron mock ----------------------------------------------------------
 //
@@ -73,11 +74,42 @@ const mintState = vi.hoisted(() => ({
   ),
 }));
 
+const installerState = vi.hoisted(() => ({
+  preflightBox: vi.fn(async (): Promise<PreflightResult> => ({
+    ok: true,
+    ingressMode: "public-tls" as const,
+    probes: {
+      reachability: "ok" as const,
+      os: { id: "linux" as const, arch: "x64" as const, release: "6.5.0" },
+      passwordlessSudo: true,
+      tailscale: { running: false, ipv4: null },
+      clockSkewSeconds: 0,
+      alreadyInstalled: false,
+    },
+    failures: [],
+  })),
+  runInstall: vi.fn(() => ({
+    // Resolves immediately so the handler's fire-and-forget `.finally()`
+    // clears the module's `activeHandle` before the next test runs —
+    // otherwise every later `installerStart` call in this file sees a
+    // still-active install and throws.
+    done: Promise.resolve({ code: 0, signal: null }),
+    cancel: vi.fn(),
+  })),
+}));
+
+/** Flush the microtask queue so handlers.ts's fire-and-forget
+ * `handle.done.then(...).finally(...)` chain (which resets module state)
+ * has actually run before the next assertion/test. */
+async function flushMicrotasks(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 vi.mock("./installer.js", () => ({
   mintAndClaim: mintState.mintAndClaim,
   listSshHosts: vi.fn(),
-  preflightBox: vi.fn(),
-  runInstall: vi.fn(),
+  preflightBox: installerState.preflightBox,
+  runInstall: installerState.runInstall,
   DEFAULT_SSH_CONFIG_PATH: "/dev/null",
 }));
 
@@ -87,7 +119,7 @@ vi.mock("./diagnostics.js", () => ({
   buildDiagnostics: vi.fn(),
 }));
 vi.mock("./stageMapper.js", () => ({
-  buildStageSnapshot: vi.fn(),
+  currentStageInfo: vi.fn(() => ({ label: "Checking the box", index: 1, total: 6 })),
 }));
 
 import { IPC, type AppConfig } from "../../shared/types.js";
@@ -97,6 +129,8 @@ beforeEach(() => {
   ipcState.handlers.clear();
   ipcState.ipcMainHandle.mockClear();
   mintState.mintAndClaim.mockClear();
+  installerState.preflightBox.mockClear();
+  installerState.runInstall.mockClear();
 });
 
 describe("registerInstallerHandlers — mint-and-claim (BET-372)", () => {
@@ -150,7 +184,6 @@ describe("registerInstallerHandlers — mint-and-claim (BET-372)", () => {
     expect(registeredChannels).toEqual(
       expect.arrayContaining([
         IPC.installerListHosts,
-        IPC.installerPreflight,
         IPC.installerState,
         IPC.installerStart,
         IPC.installerCancel,
@@ -158,6 +191,74 @@ describe("registerInstallerHandlers — mint-and-claim (BET-372)", () => {
         IPC.installerGetDiagnostics,
       ]),
     );
+    // BET-383: there is exactly one entry point for starting an install —
+    // the renderer never calls preflight directly, and the standalone
+    // channel no longer exists at all (not merely unregistered).
+    expect(IPC).not.toHaveProperty("installerPreflight");
+  });
+});
+
+// Minimal fixture — only the fields classifyPreflight/the assertions below
+// actually read, kept in one place so the two tests don't each hand-roll it.
+function failedPreflightFixture(cause: string): PreflightResult {
+  return {
+    ok: false,
+    ingressMode: "no-root",
+    probes: {
+      reachability: "unreachable",
+      os: { id: "unknown", arch: "unknown", release: null },
+      passwordlessSudo: false,
+      tailscale: { running: false, ipv4: null },
+      clockSkewSeconds: 0,
+      alreadyInstalled: false,
+    },
+    failures: [{ cause, action: "Check the alias resolves." }],
+  };
+}
+
+// BET-383: preflight folded into installerStart as phase 1, run in main.
+describe("registerInstallerHandlers — installerStart preflight fold (BET-383)", () => {
+  it("a passing preflight proceeds to runInstall and returns a handleId", async () => {
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const handler = ipcState.handlers.get(IPC.installerStart);
+
+    const out = (await handler!(null, { alias: "dev" })) as { handleId: string };
+    expect(installerState.preflightBox).toHaveBeenCalledWith("dev");
+    expect(installerState.runInstall).toHaveBeenCalledTimes(1);
+    expect(out.handleId).toMatch(/^install-/);
+    const kinds = win.webContents.send.mock.calls.map((c) => (c[1] as { kind: string }).kind);
+    expect(kinds).not.toContain("preflight-failed");
+    // Let the mocked `done` promise resolve so activeHandle clears before
+    // the next test starts a new install.
+    await flushMicrotasks();
+  });
+
+  it("a failing preflight never calls runInstall, emits preflight-failed, and installerState echoes the real verdict", async () => {
+    installerState.preflightBox.mockResolvedValueOnce(
+      failedPreflightFixture("Could not connect to the host over SSH."),
+    );
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const stateHandler = ipcState.handlers.get(IPC.installerState);
+
+    await startHandler!(null, { alias: "dev" });
+
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+    const [, payload] = win.webContents.send.mock.calls[0] as [string, {
+      kind: string;
+      failures: Array<{ cause: string }>;
+    }];
+    expect(payload.kind).toBe("preflight-failed");
+    expect(payload.failures[0].cause).toMatch(/Could not connect/);
+
+    // No placeholder — the real verdict comes back from installerState too.
+    const state = (await stateHandler!(null, undefined)) as {
+      preflight: PreflightResult | null;
+    };
+    expect(state.preflight?.ok).toBe(false);
+    expect(state.preflight?.failures[0].cause).toMatch(/Could not connect/);
   });
 });
 

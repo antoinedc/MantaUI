@@ -89,10 +89,11 @@ describe("redactLine", () => {
 
 describe("buildDiagnostics", () => {
   it("emits a stable, paste-friendly shape", () => {
+    // alreadyInstalled is not a failure (BET-383) — a happy-path preflight
+    // with it set should still classify ok:true.
     const pf = classifyPreflight(
       makeProbes({
         alreadyInstalled: true,
-        clockSkewSeconds: 90,
       }),
     );
     const blob = buildDiagnostics({

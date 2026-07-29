@@ -25,9 +25,10 @@ import {
 } from "./installer.js";
 import { buildDiagnostics, type DiagnosticsInput } from "./diagnostics.js";
 import {
-  buildStageSnapshot,
+  currentStageInfo,
   type InstallStageId,
 } from "./stageMapper.js";
+import type { PreflightResult } from "./preflight.js";
 
 // ---------------------------------------------------------------------------
 // Per-install state (single-active; the renderer can re-mount and recover)
@@ -38,6 +39,10 @@ let activeStage: InstallStageId = "preflight";
 const logTail: string[] = [];
 const LOG_TAIL_MAX = 200;
 let nextHandleSeq = 0;
+// Most recent preflight verdict (BET-383: preflight is phase 1 of the
+// install, run here in main). Read back by IPC.installerState so a
+// remounted renderer, and "Copy diagnostics", see the real result.
+let activePreflight: PreflightResult | null = null;
 
 function pushTail(line: string): void {
   logTail.push(line);
@@ -61,15 +66,18 @@ export function registerInstallerHandlers(
 ): void {
   ipcMain.handle(IPC.installerListHosts, () => listSshHosts(DEFAULT_SSH_CONFIG_PATH));
 
-  ipcMain.handle(IPC.installerPreflight, async (_e, input: { alias: string }) => {
-    return preflightBox(input.alias);
+  ipcMain.handle(IPC.installerState, () => {
+    const info = currentStageInfo(activeStage);
+    return {
+      active: activeHandle !== null,
+      stage: activeStage,
+      stageLabel: info.label,
+      stageIndex: info.index,
+      stageTotal: info.total,
+      logTail: [...logTail],
+      preflight: activePreflight,
+    };
   });
-
-  ipcMain.handle(IPC.installerState, () => ({
-    active: activeHandle !== null,
-    stage: activeStage,
-    logTail: [...logTail],
-  }));
 
   ipcMain.handle(IPC.installerStart, async (_e, input: { alias: string }) => {
     if (activeHandle !== null) {
@@ -80,16 +88,29 @@ export function registerInstallerHandlers(
     if (typeof input?.alias !== "string" || input.alias.trim() === "") {
       throw new Error("alias is required");
     }
+    const alias = input.alias.trim();
     const handleId = `install-${++nextHandleSeq}-${Date.now()}`;
     activeStage = "preflight";
     logTail.length = 0;
+    activePreflight = null;
     const win = getWindow();
     const send = (payload: unknown) => {
       if (!win || win.isDestroyed()) return;
       win.webContents.send(IPC.installerEvent, payload);
     };
+
+    // Phase 1 — preflight, run here in main. A failure aborts before
+    // anything is written to the box: activeHandle stays unset, runInstall
+    // is never called, nothing is spawned.
+    const preflight = await preflightBox(alias);
+    activePreflight = preflight;
+    if (!preflight.ok) {
+      send({ kind: "preflight-failed", handleId, failures: preflight.failures });
+      return { handleId };
+    }
+
     const handle = runInstall(
-      input.alias,
+      alias,
       {
         onLine: (line) => {
           pushTail(line);
@@ -97,11 +118,14 @@ export function registerInstallerHandlers(
         },
         onStage: (stage) => {
           activeStage = stage;
+          const info = currentStageInfo(stage);
           send({
             kind: "stage",
             handleId,
             stage,
-            snapshot: buildStageSnapshot(stage),
+            label: info.label,
+            index: info.index,
+            total: info.total,
           });
         },
       },

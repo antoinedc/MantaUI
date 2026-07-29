@@ -184,18 +184,16 @@ const api = {
   installerListHosts: (): Promise<SshHostEntry[]> =>
     ipcRenderer.invoke(IPC.installerListHosts),
 
-  // Run all six preflight probes over SSH (silent reachability, OS/arch,
-  // passwordless sudo, tailscale, clock skew, already-installed) and
-  // return the classified verdict. NEVER throws on a normal failure —
-  // unreachable / auth-failed / unsupported-OS all return as structured
-  // failures[] the UI renders inline.
-  installerPreflight: (input: { alias: string }): Promise<PreflightResult> =>
-    ipcRenderer.invoke(IPC.installerPreflight, input),
-
-  // Start the install over SSH. Returns immediately with a handle id; the
-  // actual install streams back via onInstallerEvent (line / stage / done
-  // / error). The renderer matches events to its handle id so an out-of-
-  // band cancel doesn't lose events mid-flight.
+  // Start the install over SSH. Preflight (silent reachability, OS/arch,
+  // passwordless sudo, tailscale, clock skew, already-installed) runs as
+  // phase 1 of this call, in main (BET-383) — there is no separate
+  // preflight channel. A failed preflight aborts before anything is
+  // written to the box and is reported via onInstallerEvent as a
+  // `preflight-failed` event, not as a rejection. Returns immediately with
+  // a handle id; the actual install streams back via onInstallerEvent
+  // (line / stage / preflight-failed / done / error). The renderer matches
+  // events to its handle id so an out-of-band cancel doesn't lose events
+  // mid-flight.
   installerStart: (input: { alias: string }): Promise<{ handleId: string }> =>
     ipcRenderer.invoke(IPC.installerStart, input),
 

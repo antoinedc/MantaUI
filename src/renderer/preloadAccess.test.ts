@@ -55,27 +55,17 @@ function makeFakePreload(): MantaPreload {
     // exercised by the installer's own unit tests + the renderer's
     // SshInstallStep component test (smoke-only here).
     installerListHosts: vi.fn(async () => []),
-    installerPreflight: vi.fn(async () => ({
-      ok: false,
-      ingressMode: "public-tls" as const,
-      probes: {
-        reachability: "unreachable" as const,
-        os: { id: "unknown" as const, arch: "unknown" as const, release: null },
-        passwordlessSudo: false,
-        tailscale: { running: false, ipv4: null },
-        clockSkewSeconds: 0,
-        alreadyInstalled: false,
-      },
-      failures: [],
-      warnings: [],
-    })),
     installerStart: vi.fn(async () => ({ handleId: "fake-handle" })),
     installerCancel: vi.fn(async () => {}),
     installerMintAndClaim: vi.fn(async () => ({ ok: false })),
     installerState: vi.fn(async () => ({
       active: false,
       stage: "preflight" as const,
+      stageLabel: "Checking the box",
+      stageIndex: 1,
+      stageTotal: 6,
       logTail: [],
+      preflight: null,
     })),
     installerGetDiagnostics: vi.fn(async () => ""),
     onInstallerEvent: vi.fn(() => vi.fn()),

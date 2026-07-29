@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import {
   foldChunk,
   buildStageSnapshot,
+  currentStageInfo,
   stripAnsi,
   INSTALL_STAGES,
   type InstallStageId,
@@ -138,5 +139,22 @@ describe("buildStageSnapshot", () => {
   it("labels match INSTALL_STAGES so the checklist UI doesn't drift", () => {
     const snap = buildStageSnapshot("pairing");
     expect(snap.map((s) => s.label)).toEqual(INSTALL_STAGES.map((s) => s.label));
+  });
+});
+
+describe("currentStageInfo — BET-383 single status line", () => {
+  it("resolves every stage's label + 1-based index + total from INSTALL_STAGES", () => {
+    INSTALL_STAGES.forEach((s, i) => {
+      expect(currentStageInfo(s.id)).toEqual({
+        label: s.label,
+        index: i + 1,
+        total: INSTALL_STAGES.length,
+      });
+    });
+  });
+
+  it("uses the renamed labels (preflight → 'Checking the box', terminal 'done')", () => {
+    expect(currentStageInfo("preflight").label).toBe("Checking the box");
+    expect(currentStageInfo("done")).toEqual({ label: "Done", index: 6, total: 6 });
   });
 });

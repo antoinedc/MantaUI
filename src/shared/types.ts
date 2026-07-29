@@ -1,3 +1,7 @@
+// Type-only cross-import (erased at compile time — same pattern already
+// used by src/renderer/preloadAccess.ts) — one shape, not a duplicated copy.
+import type { PreflightResult, PreflightFailure } from "../main/installer/preflight.js";
+
 // ----- Local app config -----
 // Source of truth for sessions/windows is tmux on the remote. We only persist
 // per-project UI metadata locally (defaultCwd, eventually color/sort/etc).
@@ -335,11 +339,23 @@ export type InstallerStageSnapshotRow = {
 
 export type InstallerEvent =
   | { kind: "line"; handleId: string; text: string }
+  // BET-383: one status line, not a six-row checklist — carries the CURRENT
+  // stage's precomputed label + 1-based position + total (from
+  // stageMapper's currentStageInfo, the single label source).
   | {
       kind: "stage";
       handleId: string;
       stage: InstallerStageSnapshotRow["id"];
-      snapshot: InstallerStageSnapshotRow[];
+      label: string;
+      index: number;
+      total: number;
+    }
+  // Preflight is phase 1 of the install, run in main. A failure here means
+  // no install ever started — no `activeHandle`, nothing spawned.
+  | {
+      kind: "preflight-failed";
+      handleId: string;
+      failures: PreflightFailure[];
     }
   | {
       kind: "done";
@@ -353,7 +369,15 @@ export type InstallerEvent =
 export type InstallerState = {
   active: boolean;
   stage: InstallerStageSnapshotRow["id"];
+  // Same precomputed label/position/total as the "stage" event — lets a
+  // remounted renderer recover the status line without its own label table.
+  stageLabel: string;
+  stageIndex: number;
+  stageTotal: number;
   logTail: string[];
+  // Most recent preflight verdict, null before any install started. Feeds
+  // "Copy diagnostics" with real probe values instead of a placeholder.
+  preflight: PreflightResult | null;
 };
 
 // Desktop auto-update (electron-updater) payloads, shared by the preload
@@ -752,11 +776,10 @@ export const IPC = {
   //
   // Renderer's view of the world:
   //   listHosts        → SshHostEntry[]  — populate the alias picker
-  //   preflight({alias})→ PreflightResult — show "proceed / branch / fail"
-  //                                      with structured failures[] (cause
-  //                                      + action per failure)
   //   installStart({alias})
-  //                   → { handleId }   — kicks off the install; the renderer
+  //                   → { handleId }   — runs preflight as phase 1 in the
+  //                                      MAIN process, then (if it passes)
+  //                                      kicks off the install; the renderer
   //                                      listens to `installerEvent` for
   //                                      per-line + per-stage events until
   //                                      the install exits
@@ -771,14 +794,14 @@ export const IPC = {
   //                                      existing claim path (single
   //                                      config writer per BET-355
   //                                      constraint #4).
-  //   installState()  → { active, stage } — renderer queries on mount to
-  //                                       recover the current install state
-  //                                       after a page refresh.
+  //   installState()  → { active, stage, logTail, preflight } — renderer
+  //                                       queries on mount to recover the
+  //                                       current install state after a
+  //                                       page refresh.
   //   installGetDiagnostics({preflight, stage, logTail, alias})
   //                   → string         — redacted diagnostics blob for the
   //                                      "Copy diagnostics" action.
   installerListHosts: "installer:list-hosts",
-  installerPreflight: "installer:preflight",
   installerStart: "installer:start",
   installerCancel: "installer:cancel",
   installerMintAndClaim: "installer:mint-and-claim",
@@ -786,10 +809,11 @@ export const IPC = {
   installerGetDiagnostics: "installer:get-diagnostics",
   // installerEvent is the main → renderer push channel (mirrors the
   // pairLinkReceived pattern). Payload is a discriminated union:
-  //   { kind: "line",  handleId, text }
-  //   { kind: "stage", handleId, stage, snapshot }
-  //   { kind: "done",  handleId, code, signal }
-  //   { kind: "error", handleId, message }
+  //   { kind: "line",           handleId, text }
+  //   { kind: "stage",          handleId, stage, label, index, total }
+  //   { kind: "preflight-failed", handleId, failures }
+  //   { kind: "done",           handleId, code, signal }
+  //   { kind: "error",          handleId, message }
   installerEvent: "installer:event",
 } as const;
 
