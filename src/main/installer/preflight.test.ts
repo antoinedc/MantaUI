@@ -42,6 +42,8 @@ function makeProbes(overrides: Partial<PreflightProbes> = {}): PreflightProbes {
     tailscale: { running: false, ipv4: null },
     clockSkewSeconds: 0,
     alreadyInstalled: false,
+    windowsAgent: "not-windows",
+    keyFormat: "not-windows",
     ...overrides,
   };
 }
@@ -291,5 +293,114 @@ describe("classifyPreflight — unknown host (BET-361)", () => {
   it("a normal (reachable) verdict leaves unknownHost null", () => {
     const r = classifyPreflight(makeProbes());
     expect(r.unknownHost).toBeNull();
+  });
+});
+
+// ===========================================================================
+// Windows client-side checks (BET-362)
+// ===========================================================================
+
+describe("classifyPreflight — Windows client probes (BET-362)", () => {
+  it("non-Windows probes never produce a failure, even on auth-failed", () => {
+    const r = classifyPreflight(
+      makeProbes({ reachability: "auth-failed" }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.failures).toHaveLength(1);
+    expect(r.failures[0].cause).toMatch(/SSH key authentication was rejected/);
+    expect(r.failures[0].action).toMatch(/ssh-add|authorized_keys/);
+  });
+
+  it("PuTTY-format key + auth-failed → 'PuTTY-format key detected' failure", () => {
+    const r = classifyPreflight(
+      makeProbes({
+        reachability: "auth-failed",
+        keyFormat: "putty",
+        windowsAgent: "ok",
+      }),
+    );
+    expect(r.ok).toBe(false);
+    const causes = r.failures.map((f) => f.cause);
+    expect(causes).toContain("PuTTY-format key detected.");
+    const putty = r.failures.find((f) => f.cause.includes("PuTTY"));
+    expect(putty?.action).toMatch(/PuTTYgen.*Export OpenSSH/i);
+    expect(putty?.action).toMatch(/ssh-add/);
+  });
+
+  it("disabled SSH Agent (no-agent) + auth-failed → services.msc hint", () => {
+    const r = classifyPreflight(
+      makeProbes({
+        reachability: "auth-failed",
+        windowsAgent: "no-agent",
+        keyFormat: "ok",
+      }),
+    );
+    expect(r.ok).toBe(false);
+    const agent = r.failures.find((f) =>
+      f.cause.includes("Authentication Agent service is not running"),
+    );
+    expect(agent).toBeDefined();
+    expect(agent?.action).toMatch(/services\.msc.*OpenSSH Authentication Agent.*Automatic/s);
+  });
+
+  it("agent running but empty (no-identities) + auth-failed → ssh-add hint", () => {
+    const r = classifyPreflight(
+      makeProbes({
+        reachability: "auth-failed",
+        windowsAgent: "no-identities",
+        keyFormat: "ok",
+      }),
+    );
+    expect(r.ok).toBe(false);
+    const idents = r.failures.find((f) =>
+      f.cause.includes("No SSH identities are loaded"),
+    );
+    expect(idents).toBeDefined();
+    expect(idents?.action).toMatch(/ssh-add/);
+  });
+
+  it("does NOT fire Windows failures when auth succeeded (working setup)", () => {
+    // A .ppk file sitting unused in ~/.ssh must not block an install that
+    // authenticates fine via another key — gating on auth-failed is the
+    // load-bearing rule.
+    const r = classifyPreflight(
+      makeProbes({
+        reachability: "ok",
+        keyFormat: "putty",
+        windowsAgent: "no-agent",
+      }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.failures).toEqual([]);
+  });
+
+  it("surfaces all applicable Windows failures at once (putty + no-agent)", () => {
+    const r = classifyPreflight(
+      makeProbes({
+        reachability: "auth-failed",
+        keyFormat: "putty",
+        windowsAgent: "no-agent",
+      }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.failures).toHaveLength(3); // generic auth + putty + no-agent
+    const causes = r.failures.map((f) => f.cause);
+    expect(causes.some((c) => /SSH key authentication was rejected/.test(c))).toBe(true);
+    expect(causes.some((c) => c.includes("PuTTY-format key detected"))).toBe(true);
+    expect(
+      causes.some((c) => c.includes("Authentication Agent service is not running")),
+    ).toBe(true);
+  });
+
+  it("Windows probes are echoed in diagnostics even when auth succeeds", () => {
+    const probes = makeProbes({
+      reachability: "ok",
+      windowsAgent: "no-agent",
+      keyFormat: "putty",
+    });
+    const r = classifyPreflight(probes);
+    expect(r.ok).toBe(true);
+    expect(r.probes.windowsAgent).toBe("no-agent");
+    expect(r.probes.keyFormat).toBe("putty");
   });
 });

@@ -2,7 +2,7 @@
 // orchestrator tests. All I/O is stubbed (spawn + fetch); no real SSH.
 
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -21,6 +21,7 @@ import {
   happyLinuxProbes,
   capturingSpawn,
   PROBE_KEYS,
+  type ProbeResponse,
 } from "./_testFixtures.js";
 
 // ===========================================================================
@@ -185,6 +186,166 @@ describe("preflightBox", () => {
     expect(r.probes.alreadyInstalled).toBe(true);
     expect(r.ok).toBe(true);
     expect(r.failures).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// preflightBox — Windows client-side probes (BET-362)
+// ===========================================================================
+
+// A SpawnFn that handles the LOCAL `ssh-add -l` call (command === "ssh-add")
+// with a fixed response and delegates every other (ssh) call to the remote
+// probe stub. The agent response is keyed by exit code: 0 = identities
+// listed, 1 = no identities, 2 = agent not running.
+function windowsSpawn(
+  agentResponse: { code: number; stdout?: string; stderr?: string },
+  remoteResponses: Record<string, ProbeResponse>,
+): SpawnFn {
+  const remoteSpawn = makeProbeSpawn(remoteResponses);
+  return (command, args, options) => {
+    if (command === "ssh-add") {
+      const fake = makeFakeChild();
+      setImmediate(() => {
+        if (agentResponse.stdout) fake.pushStdout(agentResponse.stdout);
+        if (agentResponse.stderr) fake.pushStderr(agentResponse.stderr);
+        fake.fireExit(agentResponse.code);
+      });
+      return fake.child as any;
+    }
+    return remoteSpawn(command, args, options);
+  };
+}
+
+describe("preflightBox — Windows probes", () => {
+  it("skips the Windows probes on a non-Windows platform", async () => {
+    const r = await preflightBox("dev", {
+      spawn: makeProbeSpawn(happyLinuxProbes()),
+      platform: "linux",
+    });
+    expect(r.probes.windowsAgent).toBe("not-windows");
+    expect(r.probes.keyFormat).toBe("not-windows");
+    expect(r.ok).toBe(true);
+  });
+
+  it("detects a PuTTY-format default key and fails when auth failed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "manta-ssh-"));
+    try {
+      mkdirSync(join(dir, ".ssh"), { recursive: true });
+      writeFileSync(join(dir, ".ssh", "id_rsa"), "PuTTY-User-Key-File-2: ssh-rsa\n...");
+      const responses = happyLinuxProbes({
+        [PROBE_KEYS.REACHABILITY]: {
+          code: 255,
+          stderr: "Permission denied (publickey).",
+        },
+      });
+      const r = await preflightBox("dev", {
+        spawn: windowsSpawn({ code: 0, stdout: "ssh-rsa ... agent\n" }, responses),
+        platform: "win32",
+        homeDir: dir,
+      });
+      expect(r.probes.keyFormat).toBe("putty");
+      expect(r.ok).toBe(false);
+      expect(
+        r.failures.some((f) => f.cause.includes("PuTTY-format key detected")),
+      ).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects a disabled SSH Agent (exit 2) and surfaces the services.msc hint", async () => {
+    const responses = happyLinuxProbes({
+      [PROBE_KEYS.REACHABILITY]: {
+        code: 255,
+        stderr: "Permission denied (publickey).",
+      },
+    });
+    const r = await preflightBox("dev", {
+      spawn: windowsSpawn(
+        { code: 2, stderr: "Could not open a connection to your authentication agent" },
+        responses,
+      ),
+      platform: "win32",
+    });
+    expect(r.probes.windowsAgent).toBe("no-agent");
+    expect(r.ok).toBe(false);
+    expect(
+      r.failures.some((f) => f.action.includes("services.msc")),
+    ).toBe(true);
+  });
+
+  it("detects an empty agent (exit 1) and surfaces the ssh-add hint", async () => {
+    const responses = happyLinuxProbes({
+      [PROBE_KEYS.REACHABILITY]: {
+        code: 255,
+        stderr: "Permission denied (publickey).",
+      },
+    });
+    const r = await preflightBox("dev", {
+      spawn: windowsSpawn({ code: 1, stderr: "The agent has no identities." }, responses),
+      platform: "win32",
+    });
+    expect(r.probes.windowsAgent).toBe("no-identities");
+    expect(r.ok).toBe(false);
+    expect(
+      r.failures.some((f) => f.cause.includes("No SSH identities are loaded")),
+    ).toBe(true);
+  });
+
+  it("does NOT fail when auth succeeded, even with a stray .ppk key present", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "manta-ssh-"));
+    try {
+      // A .ppk file AND a working OpenSSH key — auth succeeds, so the
+      // PuTTY file must not block the install.
+      mkdirSync(join(dir, ".ssh"), { recursive: true });
+      writeFileSync(join(dir, ".ssh", "id_rsa"), "PuTTY-User-Key-File-2: ssh-rsa\n...");
+      writeFileSync(join(dir, ".ssh", "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----\n...");
+      const r = await preflightBox("dev", {
+        spawn: windowsSpawn({ code: 0, stdout: "256 SHA256:... (ED25519)\n" }, happyLinuxProbes()),
+        platform: "win32",
+        homeDir: dir,
+      });
+      expect(r.probes.keyFormat).toBe("putty");
+      expect(r.probes.windowsAgent).toBe("ok");
+      expect(r.ok).toBe(true);
+      expect(r.failures).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a missing ~/.ssh dir as key-format ok (no default key to misread)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "manta-ssh-empty-"));
+    try {
+      const r = await preflightBox("dev", {
+        spawn: windowsSpawn({ code: 2, stderr: "no agent" }, happyLinuxProbes()),
+        platform: "win32",
+        homeDir: dir,
+      });
+      expect(r.probes.keyFormat).toBe("ok");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies an OpenSSH-format default key as ok", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "manta-ssh-openssh-"));
+    try {
+      mkdirSync(join(dir, ".ssh"), { recursive: true });
+      writeFileSync(
+        join(dir, ".ssh", "id_ed25519"),
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nblah\n-----END OPENSSH PRIVATE KEY-----\n",
+      );
+      const r = await preflightBox("dev", {
+        spawn: windowsSpawn({ code: 0, stdout: "256 SHA256:... (ED25519)\n" }, happyLinuxProbes()),
+        platform: "win32",
+        homeDir: dir,
+      });
+      expect(r.probes.keyFormat).toBe("ok");
+      expect(r.ok).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -94,11 +94,46 @@ export async function execRemote(
   const spawn = options.spawn ?? nodeSpawn;
   const args: string[] = buildArgs(alias, command, options);
   const child = spawn(SSH_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
+  return collectChild(child, options.timeoutMs ?? 30_000);
+}
+
+// execLocal — run one LOCAL command (no ssh wrapping) and return its outcome.
+//
+// Used by the Windows client-side preflight probes (BET-362): `ssh-add -l`
+// inspects the local OpenSSH agent, which is a property of the desktop
+// machine, not the remote box. Same SpawnFn injection + timeout shape as
+// execRemote so tests stub it identically. This is the ONE place a non-ssh
+// binary is spawned in this module; it stays here so all spawning remains
+// centralized (runner.ts is the spawn layer for the installer).
+export async function execLocal(
+  command: string,
+  args: string[],
+  options: { spawn?: SpawnFn; timeoutMs?: number } = {},
+): Promise<ExecRemoteResult> {
+  if (typeof command !== "string" || command === "") {
+    throw new Error("execLocal: command is required");
+  }
+  const spawn = options.spawn ?? nodeSpawn;
+  const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+  return collectChild(child, options.timeoutMs ?? 30_000);
+}
+
+// collectChild — shared stdout/stderr collection + timeout + exit/error
+// handling for a spawned ChildProcess. Both execRemote (ssh-wrapped) and
+// execLocal (bare local command) route through here so the collection logic
+// lives in ONE place (the duplication gate would otherwise flag the copy).
+//
+// Does NOT throw on non-zero exit — the caller classifies the meaning. A
+// timeout stamps a marker on stderr BEFORE killing so a caller can tell a
+// timeout from a clean non-zero exit.
+async function collectChild(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<ExecRemoteResult> {
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
   if (child.stdout) child.stdout.on("data", (c: Buffer) => stdoutChunks.push(c));
   if (child.stderr) child.stderr.on("data", (c: Buffer) => stderrChunks.push(c));
-  const timeoutMs = options.timeoutMs ?? 30_000;
   const { code, signal } = await new Promise<{
     code: number | null;
     signal: NodeJS.Signals | null;
