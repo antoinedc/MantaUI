@@ -136,7 +136,9 @@ export function PermissionCard({
       style={{ borderColor: "rgb(var(--warn-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
-        <Shield size={16} aria-hidden="true" style={{ color: "var(--warn)" }} />
+        <span style={{ color: "var(--warn)" }} className="inline-flex items-center">
+          <Shield size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">
           {perm.fromJobName ? `${perm.fromJobName} · ` : ""}Permission needed
         </span>
@@ -224,7 +226,9 @@ export function QuestionCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
-        <HelpCircle size={16} aria-hidden="true" style={{ color: "var(--accent)" }} />
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <HelpCircle size={16} aria-hidden="true" />
+        </span>
         <span className="text-text font-medium">
           {request.fromJobName ? `${request.fromJobName} · ` : ""}Question
         </span>

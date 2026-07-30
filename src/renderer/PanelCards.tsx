@@ -61,7 +61,9 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <Clock size={16} aria-hidden="true" style={{ color: "var(--accent)" }} />
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Clock size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">Scheduled</span>
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
@@ -161,7 +163,9 @@ export const WebhooksCard = memo(function WebhooksCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <Webhook size={16} aria-hidden="true" style={{ color: "var(--accent)" }} />
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Webhook size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">Webhooks</span>
         {hooks.length > 0 && <span className="text-text-faint">· {hooks.length}</span>}
         <button
@@ -300,7 +304,9 @@ export const SecretsCard = memo(function SecretsCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1.5">
-        <Key size={16} aria-hidden="true" style={{ color: "var(--accent)" }} />
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Key size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">Secrets</span>
         {secrets.length > 0 && <span className="text-text-faint">· {secrets.length}</span>}
         <button
@@ -485,7 +491,9 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <Bot size={16} aria-hidden="true" style={{ color: "var(--accent)" }} />
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Bot size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">Background jobs</span>
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
