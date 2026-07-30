@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
@@ -6,6 +6,7 @@ import { SubscriptionsCard } from "./SubscriptionsCard";
 import { PairingQR, PairingCountdown } from "./PairingQR";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
+import { applyTheme, type ThemePref } from "./theme";
 import type {
   AuthPairResult,
   AvailableLauncher,
@@ -44,6 +45,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     shareAnalytics,
     worktreePerSession,
     worktreeCleanOnClose,
+    theme,
     refresh,
   } = useStore();
 
@@ -70,6 +72,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // General fields (General tab)
   const [autoRename, setAutoRename] = useState(autoRenameSessions);
   const [analytics, setAnalytics] = useState(shareAnalytics);
+  // BET-409: theme preference. Seeded from the store, applied LIVE on click
+  // (instant visual feedback via applyTheme), persisted on Save. On unmount
+  // without a save, the cleanup reverts the preview to the persisted value.
+  const [themePref, setThemePref] = useState<ThemePref>(theme);
+  const persistedThemeRef = useRef<ThemePref>(theme);
+  persistedThemeRef.current = theme;
 
   // Plugins fields (Plugins tab — replaces the v1 Capability executor
   // block on the Files tab). The toggle is OFF by default; toggling takes
@@ -127,9 +135,20 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setVoiceCmdModel(voiceCommandModel);
     setLauncherFlagValues(launcherFlags ?? {});
     setAnalytics(shareAnalytics);
+    setThemePref(theme);
     setWorktreeOn(worktreePerSession);
     setWorktreeClean(worktreeCleanOnClose);
-  }, [skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, shareAnalytics, worktreePerSession, worktreeCleanOnClose]);
+  }, [skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, shareAnalytics, worktreePerSession, worktreeCleanOnClose, theme]);
+
+  // BET-409: revert any unsaved theme preview when Settings closes without a
+  // save. On Save, refresh() updates the store (and thus the ref) to the new
+  // value BEFORE unmount, so the revert is a no-op; on Cancel the ref still
+  // holds the old value and the preview rolls back.
+  useEffect(() => {
+    return () => {
+      applyTheme(persistedThemeRef.current);
+    };
+  }, []);
 
   // Seed the Mac-local `pluginsEnabled` toggle from the desktop's config
   // (BET-207). The store mirrors the BOX config (via httpApi.configGet),
@@ -217,6 +236,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
         voiceCommandModel: voiceCmdModel.trim(),
         shareAnalytics: analytics,
         launcherFlags: launcherFlagValues,
+        // BET-409: persisted theme preference (the live preview was already
+        // applied on click; this just pins it to config.json).
+        theme: themePref,
         // BET-246: per-session worktree defaults — global settings only;
         // the per-window override lives in Sidebar's new-session dialog.
         worktreePerSession: worktreeOn,
@@ -913,6 +935,44 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {activeTab === "general" && (
             <div className="max-w-2xl space-y-6">
               <div>
+                <h3 className="text-base font-semibold mb-4">Theme</h3>
+                {/* Three segmented options. Applied live on click (applyTheme)
+                    so the user sees the change immediately; persisted on Save.
+                    "System" follows the OS and re-themes live when it flips. */}
+                <div
+                  role="group"
+                  aria-label="Theme"
+                  className="inline-flex rounded-lg border border-border overflow-hidden"
+                >
+                  {(["system", "light", "dark"] as ThemePref[]).map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => {
+                        setThemePref(opt);
+                        applyTheme(opt);
+                      }}
+                      className={`px-4 py-1.5 text-sm capitalize transition-colors border-r border-border last:border-r-0 ${
+                        themePref === opt
+                          ? "bg-accent"
+                          : "text-text-muted hover:text-text hover:bg-bg-elev"
+                      }`}
+                      style={
+                        themePref === opt
+                          ? { color: "var(--on-accent)" }
+                          : undefined
+                      }
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+                <span className="block text-xs text-text-faint mt-2">
+                  System follows your OS appearance and re-themes live.
+                </span>
+              </div>
+
+              <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">Auto-rename sessions</h3>
                 <label className="flex items-start gap-3 text-sm cursor-pointer">
                   <input

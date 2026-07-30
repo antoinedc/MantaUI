@@ -15,6 +15,7 @@ import remarkGfm from "remark-gfm";
 import type { Components as MarkdownComponents } from "react-markdown";
 import { getMantaPreload } from "./preloadAccess";
 import { CopyButton } from "./CopyButton";
+import { useResolvedTheme } from "./theme";
 
 // Streamed-fence resilience: while a code block is still streaming, the
 // closing ``` hasn't arrived yet. Without a recovery step, remark sees the
@@ -258,6 +259,14 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
     PRISM_LANG_ALIAS[normalized] ??
     (PRISM_SUPPORTED.has(normalized) ? (normalized as Language) : undefined);
 
+  // BET-409: pick the Prism theme for the resolved app theme. vsDark in dark,
+  // github in light. The hook re-renders this memoized block live when the
+  // theme flips (OS change in system mode, or a Settings switch) so existing
+  // code blocks re-tint without a transcript refetch. Background is forced
+  // transparent below in both themes so bg-bg-soft shows through.
+  const resolvedTheme = useResolvedTheme();
+  const prismTheme = resolvedTheme === "light" ? themes.github : themes.vsDark;
+
   // Oversized block: render plain (no Prism) to keep the UI responsive.
   const tooLarge =
     cleaned.length > CODEBLOCK_MAX_CHARS ||
@@ -285,14 +294,15 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
         </pre>
       ) : (
         <Highlight
-          theme={themes.vsDark}
+          theme={prismTheme}
           code={cleaned}
           language={resolved ?? ("text" as Language)}
         >
           {({ tokens, getLineProps, getTokenProps }) => (
             <pre
               className="px-2 py-1.5 pr-7 text-[12px] overflow-x-auto max-w-full whitespace-pre"
-              // vsDark's default bg would override our bg-bg-soft — disable it.
+              // The Prism theme's default bg would override bg-bg-soft — disable
+              // it in both themes so the card surface shows through.
               style={{ background: "transparent" }}
             >
               <code>

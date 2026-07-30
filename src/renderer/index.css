@@ -101,6 +101,65 @@ html, body, #root {
   --accent-soft-rgb: 23 64 174;
 }
 
+/* Light theme (BET-409). The core palette below is the WCAG-verified block
+   from the issue — values are exact, do not retune (sub-issue 04 splits the
+   intentionally-collapsed tokens). --accent is the hue (borders/tints);
+   --accent-solid is the DARKER fill behind --on-accent text so white-on-blue
+   clears 4.5:1 on thin glyphs. Use --accent-solid for filled buttons /
+   checkboxes / radios, never --accent.
+
+   The -rgb channel vars and --accent-soft are NOT in the issue's palette
+   block but the dark theme defines them and tailwind.config.js + existing
+   var() consumers (bg-accent, border-border, text-text, bg-accent-soft,
+   rgb(var(--danger-rgb)/…)) read them in BOTH themes. Omitting them here
+   would make every Tailwind colour class and every -rgb expression resolve
+   to nothing in light mode, so they are derived 1:1 from the listed values. */
+[data-theme="light"] {
+  --canvas: #FAF9F7;
+  --panel: #F2F0EC;
+  --card: #FFFFFF;
+  --raised: #EAE7E1;
+  --inset: #F5F3EF;
+  --border-subtle: #E8E4DD;
+  --border: #DAD5CC;
+  --border-strong: #857C6E;
+  --tx1: #1A1815;
+  --tx2: #48433C;
+  --tx3: #665F55;
+  --tx4: #8A8275;
+  --accent: #2E6BFF;
+  --accent-tx: #1F55D6;
+  --accent-solid: #1F55D6;
+  --on-accent: #FFFFFF;
+  --accent-soft: #1F55D6;
+  --ok: #0A7A53;
+  --warn: #8A5A08;
+  --danger: #BE2F3C;
+  --info: #0B6E85;
+  --ok-bg: #0A7A5314;
+  --warn-bg: #8A5A0814;
+  --danger-bg: #BE2F3C14;
+  --accent-bg: #2E6BFF14;
+  --fill: rgba(26, 24, 21, .035);
+  --fill-hover: rgba(26, 24, 21, .06);
+  --fill-active: rgba(26, 24, 21, .09);
+  --diff-add: #E4F4E9;
+  --diff-del: #FCEAEC;
+
+  --ok-rgb: 10 122 83;
+  --warn-rgb: 138 90 8;
+  --danger-rgb: 190 47 60;
+  --info-rgb: 11 110 133;
+
+  --canvas-rgb: 250 249 247;
+  --panel-rgb: 242 240 236;
+  --card-rgb: 255 255 255;
+  --border-rgb: 218 213 204;
+  --tx1-rgb: 26 24 21;
+  --accent-rgb: 46 107 255;
+  --accent-soft-rgb: 31 85 214;
+}
+
 /* Trailing spacer inside any header row that reaches the top-right of the
    window. Zero-width off Windows. */
 .titlebar-inset-right {

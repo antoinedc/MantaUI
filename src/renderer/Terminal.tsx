@@ -8,6 +8,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { getMantaPreload } from "./preloadAccess";
 import { IS_MAC } from "./platform";
 import { terminalShortcut } from "./chatUtils";
+import { useResolvedTheme } from "./theme";
 
 /**
  * Handle an OSC 52 escape sequence: decode the base64 payload and write the
@@ -85,6 +86,13 @@ export function Terminal({ sessionKey, cwd, active, launcher, tmuxTarget }: Prop
   // dragenter/leave fire for nested elements too — count depth so we only
   // hide the overlay when the cursor truly leaves the terminal area.
   const dragDepth = useRef(0);
+
+  // BET-409: the terminal pane stays dark in BOTH themes (no light xterm
+  // theme). In light mode the pane is a fixed #0B1020 so a dark inset surface
+  // reads deliberately inside a light window; in dark it uses --inset. The
+  // surrounding chrome (sidebar/header/composer) follows the theme normally.
+  // The hook re-themes the pane live when the app theme flips.
+  const resolvedTheme = useResolvedTheme();
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -433,7 +441,14 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
     >
       <div
         ref={containerRef}
-        className="h-full w-full bg-bg outline-none"
+        className="h-full w-full outline-none"
+        style={{
+          // BET-409: terminal stays dark in both themes — fixed #0B1020 in
+          // light, var(--inset) in dark — framed as an inset surface.
+          background: resolvedTheme === "light" ? "#0B1020" : "var(--inset)",
+          border: "1px solid var(--border)",
+          boxShadow: "inset 0 1px 0 rgba(255, 255, 255, .04)",
+        }}
         onMouseDown={() => termRef.current?.focus()}
       />
       {(dragOver || uploading) && (

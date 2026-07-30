@@ -9,6 +9,7 @@ import type {
 import type { ConnectionState } from "../shared/net/state.js";
 import { clientToken } from "./api/httpApi";
 import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
+import { applyTheme, type ThemePref } from "./theme";
 
 // Background-delegation jobs, keyed by the job's child opencode session id.
 // The renderer learns which sidebar windows are jobs (and their per-row
@@ -166,6 +167,12 @@ type State = {
   // nothing to Axiom (desktop renderer + server). Mobile always ships
   // regardless. Mirror of AppConfig.shareAnalytics.
   shareAnalytics: boolean;
+  // BET-409: colour theme preference. "system" follows the OS and re-themes
+  // live; "light"/"dark" pin. Mirror of AppConfig.theme. applyConfig pushes
+  // the resolved value to <html data-theme> via applyTheme so every config
+  // load (desktop refresh, mobile pairing, Settings save) keeps the DOM in
+  // sync — not just the initial boot application in main.tsx.
+  theme: ThemePref;
   projects: Project[];
   activeProjectName: string | null;
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
@@ -359,6 +366,7 @@ export const useStore = create<State>((set, get) => ({
   voiceTranscriptionModel: "",
   voiceCommandModel: "",
   shareAnalytics: true,
+  theme: "system",
   projects: [],
   activeProjectName: null,
   activeWindowByProject: {},
@@ -474,7 +482,7 @@ export const useStore = create<State>((set, get) => ({
     await get().refresh();
   },
 
-  applyConfig: (c) =>
+  applyConfig: (c) => {
     set({
       loaded: true,
       serverUrl: c.serverUrl ?? "",
@@ -496,7 +504,20 @@ export const useStore = create<State>((set, get) => ({
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       voiceCommandModel: c.voiceCommandModel ?? "",
       shareAnalytics: c.shareAnalytics ?? true,
-    }),
+      theme:
+        c.theme === "light" || c.theme === "dark" || c.theme === "system"
+          ? c.theme
+          : "system",
+    });
+    // BET-409: keep <html data-theme> in sync with every config load (desktop
+    // refresh, mobile post-pairing refresh, Settings save) — not just the
+    // initial boot application in main.tsx.
+    applyTheme(
+      c.theme === "light" || c.theme === "dark" || c.theme === "system"
+        ? c.theme
+        : "system",
+    );
+  },
 
   applyPairing: (p) =>
     set({ serverUrl: p.serverUrl, boxId: p.boxId, boxToken: p.boxToken }),

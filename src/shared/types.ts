@@ -164,6 +164,13 @@ export type AppConfig = {
   // authored YAML files; each step runs an arbitrary shell command with the
   // user's UID, so the user MUST vet every plugin they install.
   pluginsEnabled?: boolean;
+  // BET-409: colour theme. "system" (default) follows the OS prefers-color-scheme
+  // media query and re-themes live when it changes; "light"/"dark" pin the theme.
+  // Resolved in src/renderer/main.tsx (data-theme on <html>) and live-managed by
+  // src/renderer/theme.ts. Settings → General exposes the three options; sub-issue
+  // 14 relocates the control. Rides the generic configGet/configUpdate path — no
+  // dedicated IPC channel. Absent → "system".
+  theme?: "system" | "light" | "dark";
 };
 
 // ----- Live tmux state -----
