@@ -43,13 +43,15 @@ section in `AGENTS.md` and the per-channel value table in
 (`web-v*`, `server-v*`, `mac-v*`) keep meaning prod; staging is triggered
 by hand after the spec change lands.
 
-`install.sh` is served **byte-identical** across channels (no build-time
-substitution — `scripts/release/publish.sh` copies the same file to both
-`/var/www/mantaui/` and `/var/www/mantaui/staging/`). The staging URL
-signals "staging" to a human, but once piped into bash the script has no
-way to recover the URL it was fetched from — it falls back to
-`MANTA_CHANNEL=${MANTA_CHANNEL:-prod}`. So the canonical staging
-curl-install command exports the channel explicitly:
+`install.sh` is one file in the repo, served **byte-identical** across
+channels (no build-time substitution): prod's copy is synced to
+`/var/www/mantaui/install.sh` by `scripts/release/publish.sh`; staging's
+copy is synced to `/var/www/mantaui/staging/install.sh` by the
+`website-deploy.yml` workflow (`channel=staging`, see the "Staging channel"
+section in `AGENTS.md`). The staging URL signals "staging" to a human, but
+once piped into bash the script has no way to recover the URL it was
+fetched from — it falls back to `MANTA_CHANNEL=${MANTA_CHANNEL:-prod}`. So
+the canonical staging curl-install command exports the channel explicitly:
 
 ```
 curl -fsSL https://mantaui.com/staging/install.sh | MANTA_CHANNEL=staging bash
