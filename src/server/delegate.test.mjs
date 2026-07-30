@@ -11,6 +11,8 @@ import {
   sweepDelegateJobs,
   deleteJob,
   MAX_RUNNING_JOBS,
+  relatedSessionIds,
+  jobNameForSession,
 } from "./delegate.mjs";
 
 // ----------------------------------------------------------------------------
@@ -526,4 +528,57 @@ test("finishJob is idempotent for an already-terminal job", async () => {
   assert.equal(res.ok, true);
   assert.equal(res.alreadyTerminal, true);
   assert.equal(h.delivered.length, 0);
+});
+
+// ----------------------------------------------------------------------------
+// relatedSessionIds / jobNameForSession — BET-380 ownership helpers
+//
+// Pure functions used by opencode.mjs listPermissions/listQuestions to widen
+// their session filter so a background job's asks surface in the PARENT's
+// panel. Non-terminal = "running"; terminal (done/failed/stopped) jobs are
+// excluded so a finished job's stale asks don't leak into the parent panel.
+// ----------------------------------------------------------------------------
+
+function jobRecord(overrides) {
+  return {
+    id: "j1",
+    name: "fix-login",
+    parentSessionID: "ses_parent",
+    childSessionID: "ses_child",
+    status: "running",
+    ...overrides,
+  };
+}
+
+test("relatedSessionIds returns children of running jobs only, not terminal ones", () => {
+  const jobs = [
+    jobRecord({ id: "a", childSessionID: "child_a", status: "running" }),
+    jobRecord({ id: "b", childSessionID: "child_b", status: "done", finishedAt: 1 }),
+    jobRecord({ id: "c", childSessionID: "child_c", status: "failed", finishedAt: 2 }),
+    jobRecord({ id: "d", childSessionID: "child_d", status: "stopped", finishedAt: 3 }),
+    jobRecord({ id: "e", childSessionID: "child_e", status: "running", parentSessionID: "ses_other" }),
+  ];
+  const related = relatedSessionIds("ses_parent", jobs);
+  assert.deepEqual(related, ["child_a"], "only the running job's child id is returned");
+});
+
+test("relatedSessionIds returns an empty array for an unknown parent", () => {
+  const jobs = [jobRecord({ id: "a", childSessionID: "child_a", status: "running" })];
+  assert.deepEqual(relatedSessionIds("ses_unknown", jobs), []);
+  assert.deepEqual(relatedSessionIds("", jobs), []);
+  assert.deepEqual(relatedSessionIds("ses_parent", []), []);
+  assert.deepEqual(relatedSessionIds("ses_parent", null), []);
+});
+
+test("jobNameForSession returns the job name, and null when unknown or terminal", () => {
+  const jobs = [
+    jobRecord({ id: "a", childSessionID: "child_a", name: "fix-the-bug", status: "running" }),
+    jobRecord({ id: "b", childSessionID: "child_b", name: "done-job", status: "done", finishedAt: 1 }),
+  ];
+  assert.equal(jobNameForSession("child_a", jobs), "fix-the-bug");
+  assert.equal(jobNameForSession("child_b", jobs), null, "terminal job is not owned");
+  assert.equal(jobNameForSession("child_unknown", jobs), null);
+  assert.equal(jobNameForSession("", jobs), null);
+  assert.equal(jobNameForSession("child_a", []), null);
+  assert.equal(jobNameForSession("child_a", null), null);
 });

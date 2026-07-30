@@ -401,14 +401,25 @@ export function buildHandlers({
     // Scope the list to the session's directory — opencode returns [] for a
     // non-default-directory session on the unscoped endpoint, so an unpassed
     // sessionId made the PermissionCard never appear on mobile (turn hangs).
-    "opencode:permissions": (sessionId) => oc.listPermissions(sessionId),
+    // The job records are passed so the server can widen the filter to
+    // non-terminal background-job child sessions and stamp `fromJobName`
+    // (BET-380): a job's asks surface in the PARENT's panel.
+    "opencode:permissions": async (sessionId) => {
+      const jobs = await delegate.listJobs();
+      return oc.listPermissions(sessionId, jobs);
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply, sessionId })
     // → args[0] = { requestId, reply, sessionId }; opencode.mjs replyPermission expects same shape
     "opencode:permission-reply": (input) => oc.replyPermission(input),
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestions, sessionId?)  → args[0] = sessionId
-    "opencode:questions": (sessionId) => oc.listQuestions(sessionId),
+    // Job records passed so a background job's questions surface in the
+    // parent's panel with `fromJobName` (BET-380) — see opencode:permissions.
+    "opencode:questions": async (sessionId) => {
+      const jobs = await delegate.listJobs();
+      return oc.listQuestions(sessionId, jobs);
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers, sessionId })
     // → opencode.mjs replyQuestion expects { requestId, answers, sessionId }

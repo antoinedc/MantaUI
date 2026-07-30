@@ -1533,3 +1533,164 @@ test("subscribeEvents default (no eagerDirectories) opens NO scoped stream at st
     _setEventStreamTransport(null);
   }
 });
+
+// ---------------------------------------------------------------------------
+// BET-380: listPermissions/listQuestions widen to background-job child sessions
+//
+// A background delegation job runs in its own opencode session (a git worktree
+// directory). Its asks must surface in the PARENT's panel. The list functions
+// accept the job records, widen the filter to the parent OR any non-terminal
+// child, fetch each child's directory (the parent's scoped query does not
+// return the child's asks), and stamp `fromJobName` on job-origin records.
+// ---------------------------------------------------------------------------
+
+test("listPermissions widens to a running job child and stamps fromJobName (separate directory)", async () => {
+  _resetSessionDirectoryCache();
+  const jobs = [
+    {
+      id: "j1",
+      name: "fix-login",
+      parentSessionID: "ses_parent",
+      childSessionID: "ses_child",
+      status: "running",
+    },
+  ];
+  await withMockFetch(
+    async (url) => {
+      const u = String(url);
+      // Parent + child directories are distinct; both lazy-fetched.
+      if (u === "http://127.0.0.1:4096/session/ses_parent") {
+        return new Response(JSON.stringify({ id: "ses_parent", directory: "/proj" }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u === "http://127.0.0.1:4096/session/ses_child") {
+        return new Response(JSON.stringify({ id: "ses_child", directory: "/proj/wt" }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u.startsWith("http://127.0.0.1:4096/permission?directory=")) {
+        // Parent dir returns parent + an unrelated session; child dir returns
+        // the child's ask.
+        if (u.includes("directory=%2Fproj%2Fwt")) {
+          return new Response(
+            JSON.stringify([
+              { id: "per_child", sessionID: "ses_child", permission: "Bash", reply: null },
+            ]),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify([
+            { id: "per_parent", sessionID: "ses_parent", permission: "Write", reply: null },
+            { id: "per_other", sessionID: "ses_other", permission: "Bash", reply: null },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const result = await listPermissions("ses_parent", jobs);
+      assert.equal(result.length, 2, "parent + child asks, unrelated dropped");
+      const childRec = result.find((r) => r.sessionID === "ses_child");
+      const parentRec = result.find((r) => r.sessionID === "ses_parent");
+      assert.equal(childRec.fromJobName, "fix-login", "child record stamped with job name");
+      assert.equal(parentRec.fromJobName, undefined, "parent's own record is not stamped");
+      assert.equal(result.find((r) => r.sessionID === "ses_other"), undefined, "unrelated session dropped");
+    },
+  );
+});
+
+test("listQuestions widens to a running job child and stamps fromJobName", async () => {
+  _resetSessionDirectoryCache();
+  const jobs = [
+    {
+      id: "j1",
+      name: "add-tests",
+      parentSessionID: "ses_parent",
+      childSessionID: "ses_child",
+      status: "running",
+    },
+  ];
+  await withMockFetch(
+    async (url) => {
+      const u = String(url);
+      if (u === "http://127.0.0.1:4096/session/ses_parent") {
+        return new Response(JSON.stringify({ id: "ses_parent", directory: "/proj" }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u === "http://127.0.0.1:4096/session/ses_child") {
+        return new Response(JSON.stringify({ id: "ses_child", directory: "/proj/wt" }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u.startsWith("http://127.0.0.1:4096/question?directory=")) {
+        if (u.includes("directory=%2Fproj%2Fwt")) {
+          return new Response(
+            JSON.stringify([
+              { id: "que_child", sessionID: "ses_child", questions: [{ question: "which?" }] },
+            ]),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify([
+            { id: "que_parent", sessionID: "ses_parent", questions: [{ question: "ok?" }] },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const result = await listQuestions("ses_parent", jobs);
+      assert.equal(result.length, 2);
+      const childRec = result.find((r) => r.sessionID === "ses_child");
+      assert.equal(childRec.fromJobName, "add-tests");
+      assert.equal(result.find((r) => r.sessionID === "ses_parent").fromJobName, undefined);
+    },
+  );
+});
+
+test("listPermissions excludes terminal jobs' children and does not fetch their directory", async () => {
+  _resetSessionDirectoryCache();
+  const jobs = [
+    {
+      id: "j1",
+      name: "done-job",
+      parentSessionID: "ses_parent",
+      childSessionID: "ses_child",
+      status: "done",
+      finishedAt: 1,
+    },
+  ];
+  let fetchedChild = false;
+  await withMockFetch(
+    async (url) => {
+      const u = String(url);
+      if (u === "http://127.0.0.1:4096/session/ses_parent") {
+        return new Response(JSON.stringify({ id: "ses_parent", directory: "/proj" }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u === "http://127.0.0.1:4096/session/ses_child") {
+        fetchedChild = true;
+        return new Response(JSON.stringify({ id: "ses_child", directory: "/proj/wt" }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u.startsWith("http://127.0.0.1:4096/permission?directory=")) {
+        return new Response(
+          JSON.stringify([
+            { id: "per_parent", sessionID: "ses_parent", permission: "Write", reply: null },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const result = await listPermissions("ses_parent", jobs);
+      assert.equal(result.length, 1, "only the parent's own record");
+      assert.equal(result[0].sessionID, "ses_parent");
+      assert.equal(result[0].fromJobName, undefined);
+      assert.equal(fetchedChild, false, "terminal job's child directory is not fetched");
+    },
+  );
+});
