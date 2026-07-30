@@ -712,33 +712,9 @@ describe("setPendingPairLink (BET-240 deep-link pairing)", () => {
   });
 });
 
-describe("deep-link claim outcome (stuck-on-pair-step regression)", () => {
+describe("deep-link pairing error", () => {
   beforeEach(() => {
-    useStore.setState({ pairLinkClaims: 0, pairLinkError: null, pendingPairLink: null });
-  });
-
-  it("notePairLinkClaimed bumps the counter so a mounted Onboarding re-derives", () => {
-    useStore.getState().notePairLinkClaimed();
-    expect(useStore.getState().pairLinkClaims).toBe(1);
-  });
-
-  it("REGRESSION: the counter changes identity on EVERY claim — a second link is not a no-op", () => {
-    // A boolean would latch true here and the second deep link would never
-    // move the flow off step 1 (the exact shape of the original bug).
-    useStore.getState().notePairLinkClaimed();
-    const first = useStore.getState().pairLinkClaims;
-    useStore.getState().notePairLinkClaimed();
-    expect(useStore.getState().pairLinkClaims).toBe(first + 1);
-  });
-
-  it("a successful claim clears the stale pending link + error from an earlier failure", () => {
-    useStore.setState({
-      pendingPairLink: "manta://pair?box=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code=111111",
-      pairLinkError: "That code has expired.",
-    });
-    useStore.getState().notePairLinkClaimed();
-    expect(useStore.getState().pendingPairLink).toBeNull();
-    expect(useStore.getState().pairLinkError).toBeNull();
+    useStore.setState({ pairLinkError: null, pendingPairLink: null });
   });
 
   it("setPairLinkError carries the failure reason, and null consumes it", () => {

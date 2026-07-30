@@ -34,7 +34,7 @@
 // Those components own their own footers; the shell hides its generic
 // footer and lets each step drive advancement (`onPaired` / `onContinue`).
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ONBOARDING_STEPS,
   STEP_LABELS,
@@ -252,17 +252,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   useEffect(() => {
     if (pendingPairLink) setPos(1);
   }, [pendingPairLink]);
-
-  // Deep-link pairing: a manta:// link that SUCCEEDS must move the flow off
-  // step 1. Re-derive from the freshly re-read config rather than calling
-  // goNext(): a re-pair from an already-configured box should land on the
-  // first step that's still incomplete, not blindly on step 2.
-  const pairLinkClaims = useStore((s) => s.pairLinkClaims);
-  const claimsAtMountRef = useRef(pairLinkClaims);
-  useEffect(() => {
-    if (pairLinkClaims === claimsAtMountRef.current) return;
-    setPos(resolveInitialStep(useStore.getState().configSnapshot()));
-  }, [pairLinkClaims]);
 
   const isSuccess = pos === "success";
 
