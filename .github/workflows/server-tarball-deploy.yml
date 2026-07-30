@@ -95,6 +95,12 @@ jobs:
       releases_dir: ${{ steps.resolve.outputs.releases_dir }}
       site: ${{ steps.resolve.outputs.site }}
     steps:
+      # The resolve step imports src/shared/channel.mjs to read releaseHost
+      # from the ONE per-channel table, so the repo must be checked out here.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - id: resolve
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -106,12 +112,20 @@ jobs:
           else
             channel="${INPUT_CHANNEL:-staging}"
           fi
+          # releases_dir is a filesystem path on the prod box, NOT a per-channel
+          # app value — it stays hardcoded here and does not belong in
+          # channel.mjs.
           if [ "$channel" = "staging" ]; then
             releases_dir="/var/www/mantaui/staging/releases"
-            site="https://mantaui.com/staging"
           else
             releases_dir="/var/www/mantaui/releases"
-            site="https://mantaui.com"
+          fi
+          # releaseHost comes from the ONE per-channel table
+          # (src/shared/channel.mjs) — never hardcode a second copy here.
+          site="$(node -e 'import("./src/shared/channel.mjs").then(m => process.stdout.write(m.channelConfig(process.argv[1]).releaseHost))' "$channel")"
+          if [ -z "$site" ]; then
+            echo "::error::could not resolve releaseHost for channel=${channel}"
+            exit 1
           fi
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "releases_dir=$releases_dir" >> "$GITHUB_OUTPUT"
@@ -284,6 +298,13 @@ jobs:
             fi
           done
 
+          # This URL is EXACTLY what scripts/install.sh builds
+          # (scripts/install.sh:507 — `curl -fsSL "$host/releases/manta-${version}.txt"`
+          # with host="${MANTA_RELEASE_HOST:-…}" and version defaulting to "latest"):
+          #   "$MANTA_RELEASE_HOST/releases/manta-latest.txt"
+          # with MANTA_RELEASE_HOST = channelConfig(<channel>).releaseHost (== $SITE).
+          # If this fetch 404s, no box on this channel can install. Do not
+          # relax it, and do not re-derive the filename from a variable.
           echo "▸ Fetch served manta-latest.txt and assert version"
           served=$(curl -fsSL "$SITE/releases/manta-latest.txt")
           served_version=$(printf '%s\n' "$served" | grep '^version=' | head -n1 | cut -d= -f2-)
