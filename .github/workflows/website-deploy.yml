@@ -65,6 +65,12 @@ jobs:
       webroot: ${{ steps.resolve.outputs.webroot }}
       site: ${{ steps.resolve.outputs.site }}
     steps:
+      # The resolve step imports src/shared/channel.mjs to read releaseHost
+      # from the ONE per-channel table, so the repo must be checked out here.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - id: resolve
         name: Resolve channel + destinations
         env:
@@ -77,12 +83,20 @@ jobs:
           else
             channel="${INPUT_CHANNEL:-staging}"
           fi
+          # webroot is a filesystem path on the prod box, NOT a per-channel
+          # app value — it stays hardcoded here and does not belong in
+          # channel.mjs.
           if [ "$channel" = "staging" ]; then
             webroot="/var/www/mantaui/staging"
-            site="https://mantaui.com/staging"
           else
             webroot="/var/www/mantaui"
-            site="https://mantaui.com"
+          fi
+          # releaseHost comes from the ONE per-channel table
+          # (src/shared/channel.mjs) — never hardcode a second copy here.
+          site="$(node -e 'import("./src/shared/channel.mjs").then(m => process.stdout.write(m.channelConfig(process.argv[1]).releaseHost))' "$channel")"
+          if [ -z "$site" ]; then
+            echo "::error::could not resolve releaseHost for channel=${channel}"
+            exit 1
           fi
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "webroot=$webroot" >> "$GITHUB_OUTPUT"
@@ -104,10 +118,6 @@ jobs:
             exit 1
           fi
           echo "✓ guard passed (channel=$CHANNEL, WEBROOT=$WEBROOT)"
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Deploy static web assets
         env:
