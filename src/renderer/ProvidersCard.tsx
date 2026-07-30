@@ -137,7 +137,7 @@ export function ProvidersCard() {
         then enable the ones you want in the model picker.
       </div>
 
-      {globalError && <div className="text-xs text-red-400">{globalError}</div>}
+      {globalError && <div className="text-xs text-danger">{globalError}</div>}
 
       {(endpoints ?? []).map((ep) => (
         <div key={ep.id} className="border border-border rounded p-2 space-y-1">
@@ -163,7 +163,7 @@ export function ProvidersCard() {
             </button>
           </div>
           {discoverError[ep.id] && (
-            <div className="text-[10px] text-red-400">{discoverError[ep.id]}</div>
+            <div className="text-[10px] text-danger">{discoverError[ep.id]}</div>
           )}
           {(discovered[ep.id] ?? ep.enabledModels.map((id) => ({ id }))).map((m) => (
             <label key={m.id} className="flex items-center gap-2 text-xs cursor-pointer">

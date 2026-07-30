@@ -546,7 +546,7 @@ export function MobileSettings({ onClose }: Props) {
                 Not getting notifications? Re-subscribe
               </button>
             )}
-            {pushErr && <div className="text-xs text-red-400">{pushErr}</div>}
+            {pushErr && <div className="text-xs text-danger">{pushErr}</div>}
           </section>
         )}
 
@@ -601,7 +601,7 @@ export function MobileSettings({ onClose }: Props) {
         </section>
 
         {savedToast && (
-          <div className="text-center text-xs text-green-400">Saved</div>
+          <div className="text-center text-xs text-ok">Saved</div>
         )}
       </div>
     </div>

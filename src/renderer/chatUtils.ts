@@ -223,10 +223,38 @@ export function formatClockTime(ms: number | null | undefined): string {
 }
 
 export function ctxStageColor(pct: number): string {
-  if (pct < 50) return "#22C79A"; // green-500
-  if (pct < 75) return "#F7C15A"; // yellow-500
-  if (pct < 90) return "#F0A934"; // orange-500
-  return "#F0505F"; // red-500
+  if (pct < 50) return cssVar("--ok"); // green
+  if (pct < 75) return cssVar("--warn"); // yellow
+  if (pct < 90) return cssVar("--warn"); // orange
+  return cssVar("--danger"); // red
+}
+
+// ===== Theme token access from JS =====
+//
+// Inline styles and pure helpers (bulletStyle, ctxStageColor, cache colours,
+// mobile status dots, voice mic) need a token's resolved value rather than a
+// `var(--…)` string. cssVar reads the CSS custom property off the root element
+// so the value follows the active theme. In non-DOM contexts (unit tests in
+// node/jsdom, where getComputedStyle returns "" for custom properties) it
+// falls back to the literal value the token held at the time of this rename —
+// keeping tests green without re-asserting hex at every call site. The
+// fallback map lives here (a .ts module) so no .tsx file carries a hex
+// literal (BET-408 acceptance: `grep '#[0-9A-Fa-f]{6}' src/renderer --include=*.tsx`
+// returns only Terminal.tsx).
+const TOKEN_FALLBACK: Record<string, string> = {
+  "--ok": "#22C79A",
+  "--warn": "#F0A934",
+  "--danger": "#F0505F",
+  "--info": "#22BEE0",
+  "--tx4": "#5C6578",
+};
+
+export function cssVar(name: string): string {
+  if (typeof document !== "undefined" && document.documentElement) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    if (v) return v;
+  }
+  return TOKEN_FALLBACK[name] ?? "";
 }
 
 // ===== Streamed-text flush boundaries =====

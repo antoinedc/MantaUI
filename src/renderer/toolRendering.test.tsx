@@ -7,6 +7,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { bulletStyle } from "./ToolCall";
+import { cssVar } from "./chatUtils";
 import { ToolCall } from "./ToolCall";
 import {
   installMockApi,
@@ -39,21 +40,21 @@ function taskPart(input: Record<string, unknown> = {}): OpencodePart {
 describe("bulletStyle", () => {
   it("grey, no pulse for non-tool parts", () => {
     const text = { type: "text", text: "hi" } as unknown as OpencodePart;
-    expect(bulletStyle(text)).toEqual({ color: "#5C6578", pulse: false });
+    expect(bulletStyle(text)).toEqual({ color: cssVar("--tx4"), pulse: false });
   });
 
   it("green, no pulse for a completed tool", () => {
-    expect(bulletStyle(toolPart("completed"))).toEqual({ color: "#22C79A", pulse: false });
+    expect(bulletStyle(toolPart("completed"))).toEqual({ color: cssVar("--ok"), pulse: false });
   });
 
   it("red, no pulse for an errored tool", () => {
-    expect(bulletStyle(toolPart("error"))).toEqual({ color: "#F0505F", pulse: false });
+    expect(bulletStyle(toolPart("error"))).toEqual({ color: cssVar("--danger"), pulse: false });
   });
 
   it("grey + pulse for running / pending / unknown-active tools", () => {
-    expect(bulletStyle(toolPart("running"))).toEqual({ color: "#5C6578", pulse: true });
-    expect(bulletStyle(toolPart("pending"))).toEqual({ color: "#5C6578", pulse: true });
-    expect(bulletStyle(toolPart(undefined))).toEqual({ color: "#5C6578", pulse: true });
+    expect(bulletStyle(toolPart("running"))).toEqual({ color: cssVar("--tx4"), pulse: true });
+    expect(bulletStyle(toolPart("pending"))).toEqual({ color: cssVar("--tx4"), pulse: true });
+    expect(bulletStyle(toolPart(undefined))).toEqual({ color: cssVar("--tx4"), pulse: true });
   });
 });
 

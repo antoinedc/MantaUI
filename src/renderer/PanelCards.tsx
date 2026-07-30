@@ -19,7 +19,7 @@ import type {
   WebhookMeta,
 } from "../shared/types";
 import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
-import { CLAUDE_ORANGE, MetaBadge } from "./chatShared";
+import { MetaBadge } from "./chatShared";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
 // scheduled prompts (created by the AI's `schedule` opencode tool) with a
@@ -57,10 +57,10 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
     <div
       ref={cardRef}
       className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
-      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: CLAUDE_ORANGE }}>⏰</span>
+        <span style={{ color: "var(--accent)" }}>⏰</span>
         <span className="text-text">Scheduled</span>
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
@@ -72,7 +72,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
         </button>
       </div>
       {error ? (
-        <div className="text-red-400 break-words">{error}</div>
+        <div className="text-danger break-words">{error}</div>
       ) : jobs.length === 0 ? (
         <div className="text-text-muted">No scheduled tasks in this session.</div>
       ) : (
@@ -93,7 +93,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
                       <span
                         className="shrink-0 truncate"
                         title="Next run"
-                        style={{ color: CLAUDE_ORANGE }}
+                        style={{ color: "var(--accent)" }}
                       >
                         · next {next}
                       </span>
@@ -102,7 +102,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
                 </div>
                 <button
                   onClick={() => onDelete(j.id)}
-                  className="shrink-0 px-2 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30 text-[11px]"
+                  className="shrink-0 px-2 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30 text-[11px]"
                   title="Cancel this scheduled task"
                 >
                   Cancel
@@ -156,10 +156,10 @@ export const WebhooksCard = memo(function WebhooksCard({
     <div
       ref={cardRef}
       className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
-      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: CLAUDE_ORANGE }}>🪝</span>
+        <span style={{ color: "var(--accent)" }}>🪝</span>
         <span className="text-text">Webhooks</span>
         {hooks.length > 0 && <span className="text-text-faint">· {hooks.length}</span>}
         <button
@@ -171,7 +171,7 @@ export const WebhooksCard = memo(function WebhooksCard({
         </button>
       </div>
       {error ? (
-        <div className="text-red-400 break-words">{error}</div>
+        <div className="text-danger break-words">{error}</div>
       ) : hooks.length === 0 ? (
         <div className="text-text-muted">
           No webhooks in this session. Ask the agent to create one (e.g. “have
@@ -217,7 +217,7 @@ export const WebhooksCard = memo(function WebhooksCard({
                 </div>
                 <button
                   onClick={() => onDelete(h.id)}
-                  className="shrink-0 px-2 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30 text-[11px]"
+                  className="shrink-0 px-2 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30 text-[11px]"
                   title="Revoke this webhook (further POSTs will 404)"
                 >
                   Revoke
@@ -294,10 +294,10 @@ export const SecretsCard = memo(function SecretsCard({
   return (
     <div
       className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
-      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1.5">
-        <span style={{ color: CLAUDE_ORANGE }}>🔑</span>
+        <span style={{ color: "var(--accent)" }}>🔑</span>
         <span className="text-text">Secrets</span>
         {secrets.length > 0 && <span className="text-text-faint">· {secrets.length}</span>}
         <button
@@ -320,7 +320,7 @@ export const SecretsCard = memo(function SecretsCard({
             autoCapitalize="off"
             autoCorrect="off"
             className={`min-w-0 flex-1 rounded border bg-bg px-1.5 py-1 font-mono text-text outline-none ${
-              key && !keyValid ? "border-red-500/60" : "border-border"
+              key && !keyValid ? "border-danger/60" : "border-border"
             }`}
           />
           <select
@@ -361,20 +361,20 @@ export const SecretsCard = memo(function SecretsCard({
             onClick={submit}
             disabled={!canSave}
             className="shrink-0 px-2 py-1 rounded border disabled:opacity-40"
-            style={{ borderColor: CLAUDE_ORANGE + "88", color: CLAUDE_ORANGE }}
+            style={{ borderColor: "rgb(var(--accent-rgb) / 0.53)", color: "var(--accent)" }}
             title="Store this secret on the box"
           >
             {saving ? "saving…" : "Save"}
           </button>
         </div>
         {key && !keyValid && (
-          <div className="text-red-400 text-[11px]">
+          <div className="text-danger text-[11px]">
             Key must start with a letter/underscore, then letters/digits/underscores (max 64).
           </div>
         )}
       </div>
 
-      {error && <div className="text-red-400 break-words mb-1">{error}</div>}
+      {error && <div className="text-danger break-words mb-1">{error}</div>}
 
       {/* Existing secrets (metadata only — no values) */}
       {secrets.length === 0 ? (
@@ -413,7 +413,7 @@ export const SecretsCard = memo(function SecretsCard({
               </div>
               <button
                 onClick={() => onDelete(s.id)}
-                className="shrink-0 px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30"
+                className="shrink-0 px-1.5 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30"
                 title="Delete this secret"
               >
                 ✕
@@ -477,10 +477,10 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
     <div
       ref={cardRef}
       className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
-      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: CLAUDE_ORANGE }}>⚙</span>
+        <span style={{ color: "var(--accent)" }}>⚙</span>
         <span className="text-text">Background jobs</span>
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
@@ -492,7 +492,7 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
         </button>
       </div>
       {error ? (
-        <div className="text-red-400 break-words">{error}</div>
+        <div className="text-danger break-words">{error}</div>
       ) : jobs.length === 0 ? (
         <div className="text-text-muted">
           No background jobs in this session. Ask the agent to delegate
@@ -531,7 +531,7 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
                       : formatJobSummary(j)}
                   </div>
                   {dirtyRow === j.id && (
-                    <div className="text-amber-400 text-[11px]">
+                    <div className="text-warn text-[11px]">
                       worktree has uncommitted changes — open it and commit or
                       discard first
                     </div>
@@ -540,7 +540,7 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
                 {j.status === "running" && (
                   <button
                     onClick={() => onStop(j.id)}
-                    className="shrink-0 px-2 py-0.5 rounded text-amber-400 hover:bg-amber-500/10 border border-amber-500/30 text-[11px]"
+                    className="shrink-0 px-2 py-0.5 rounded text-warn hover:bg-warn-bg border border-warn/30 text-[11px]"
                     title="Stop this job (aborts the session; window + worktree kept)"
                   >
                     Stop
@@ -559,7 +559,7 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
                         setTimeout(() => setDirtyRow((r) => (r === j.id ? null : r)), 6000);
                       }
                     }}
-                    className="shrink-0 px-2 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30 text-[11px]"
+                    className="shrink-0 px-2 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30 text-[11px]"
                     title="Delete this job (removes the window + worktree; refuses a dirty worktree)"
                   >
                     Delete

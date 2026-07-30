@@ -562,12 +562,12 @@ export function ConnectProvider({
         )}
 
       {phase.kind === "done" && (
-        <div className="text-green-400">Connected.</div>
+        <div className="text-ok">Connected.</div>
       )}
 
       {phase.kind === "failed" && (
         <div className="space-y-1.5">
-          <div className="text-red-400 break-words">{phase.message}</div>
+          <div className="text-danger break-words">{phase.message}</div>
           <button
             onClick={retry}
             className="px-2 py-1 border border-border rounded text-text-muted hover:text-text"
@@ -685,7 +685,7 @@ const CredentialInput = memo(function CredentialInput({
           {submitting ? "…" : submitLabel}
         </button>
       </div>
-      {error && <div className="text-red-400 text-[11px] break-words">{error}</div>}
+      {error && <div className="text-danger text-[11px] break-words">{error}</div>}
     </div>
   );
 });
@@ -796,7 +796,7 @@ function ClaudeLoginBlock({
           {/* Live terminal pane — renders the raw escape sequences from
               `claude auth login`. Sized small enough to live inside the
               connect card without dominating the onboarding step. */}
-          <div className="rounded border border-border overflow-hidden h-40 bg-[#0B1020]">
+          <div className="rounded border border-border overflow-hidden h-40 bg-[var(--inset)]">
             <Terminal
               sessionKey={ptySessionKey}
               cwd={cwd}

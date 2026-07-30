@@ -95,7 +95,7 @@ export function SubscriptionsCard() {
         </div>
       </div>
 
-      {error && <div className="text-xs text-red-400 break-words">{error}</div>}
+      {error && <div className="text-xs text-danger break-words">{error}</div>}
 
       {(statuses ?? []).map((s) => (
         <div key={s.id} className="border border-border rounded p-2 space-y-1.5">
@@ -109,7 +109,7 @@ export function SubscriptionsCard() {
                 <span
                   aria-hidden
                   className={`inline-block w-1.5 h-1.5 rounded-full ${
-                    s.connected ? "bg-green-400" : "bg-text-faint"
+                    s.connected ? "bg-ok" : "bg-text-faint"
                   }`}
                 />
                 <span>{describeSubscriptionStatus(s)}</span>
@@ -121,7 +121,7 @@ export function SubscriptionsCard() {
                   <button
                     onClick={() => void disconnect(s.id)}
                     disabled={busy !== null}
-                    className="px-2 py-1 text-xs bg-red-900/30 border border-red-800 rounded text-red-300 hover:text-red-200 disabled:opacity-40"
+                    className="px-2 py-1 text-xs bg-danger-bg border border-danger rounded text-danger hover:text-danger disabled:opacity-40"
                   >
                     {busy === s.id ? "…" : "Disconnect"}
                   </button>

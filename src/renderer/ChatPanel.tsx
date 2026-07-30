@@ -38,7 +38,6 @@ import {
   type StaleCacheResult,
 } from "./chatUtils";
 import {
-  CLAUDE_ORANGE,
   appendPromptHistory,
   guessMime,
   mimeToInputMode,
@@ -1722,11 +1721,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         <div
           className="absolute inset-2 z-30 pointer-events-none rounded-lg border-2 border-dashed flex items-center justify-center"
           style={{
-            borderColor: CLAUDE_ORANGE,
-            backgroundColor: CLAUDE_ORANGE + "11",
+            borderColor: "var(--accent)",
+            backgroundColor: "var(--accent-bg)",
           }}
         >
-          <span className="text-sm text-text" style={{ color: CLAUDE_ORANGE }}>
+          <span className="text-sm text-text" style={{ color: "var(--accent)" }}>
             Drop to attach
           </span>
         </div>
@@ -1959,12 +1958,12 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {/* that dispatches `manta-open-subscriptions` — a no-op until the */}
       {/* Settings → AI → Subscriptions card lands (BET-314). */}
       {sendError && (
-        <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-[12px] text-red-300 bg-red-900/20 border border-red-500/30 rounded break-words flex items-start gap-2">
+        <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-[12px] text-danger bg-danger-bg border border-danger/30 rounded break-words flex items-start gap-2">
           <span className="flex-1">⚠ {sendError}</span>
           {authReconnect && (
             <button
               onClick={openAuthReconnect}
-              className="text-red-300 hover:text-red-100 underline leading-none px-1"
+              className="text-danger hover:text-danger underline leading-none px-1"
               title={`Reconnect ${authReconnect}`}
             >
               Reconnect
@@ -1972,7 +1971,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           )}
           <button
             onClick={() => setSendError(null)}
-            className="text-red-300 hover:text-red-200 leading-none px-1"
+            className="text-danger hover:text-danger leading-none px-1"
             title="Dismiss"
           >
             ×

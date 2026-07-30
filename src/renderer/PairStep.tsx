@@ -37,8 +37,8 @@ import { SshInstallStep } from "./SshInstallStep";
 import { getMantaPreload } from "./preloadAccess";
 import { channelConfig } from "../shared/channel.mjs";
 
-const ACCENT = "#5A88FF"; // matches Onboarding.tsx + the app's accent token
-const DANGER = "#FF7A88"; // inline error text (no dedicated tailwind token)
+const ACCENT = "var(--accent)"; // the app's accent token
+const DANGER = "var(--danger)"; // inline error text
 const SERVER_URL_ERROR = "Server URL must start with http:// or https://";
 
 // BET-373 (review cycle 1): the pending pair link stored by App.tsx was

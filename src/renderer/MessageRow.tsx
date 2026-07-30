@@ -25,7 +25,6 @@ import {
   type TruncationKind,
 } from "./chatUtils";
 import {
-  CLAUDE_ORANGE,
   pastVerbFor,
   SPINNER_VERBS,
   type TokenUsage,
@@ -64,7 +63,7 @@ export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | nu
   return (
     <div className={`shrink-0 px-4 pb-3 text-xs ${atBottom ? "pt-0" : "pt-1"}`}>
       <div>
-        <span style={{ color: CLAUDE_ORANGE }}>
+        <span style={{ color: "var(--accent)" }}>
           <span className="inline-block animate-pulse">✻</span>{" "}
           {verb.current}…
         </span>{" "}
@@ -113,11 +112,11 @@ export const ActiveTodos = memo(function ActiveTodos({ todos }: { todos: Array<R
         let textCls = "text-text-muted";
         if (isInProgress) {
           icon = "■";
-          iconColor = CLAUDE_ORANGE;
+          iconColor = "var(--warn)";
           textCls = "text-text font-semibold";
         } else if (isCompleted) {
           icon = "✓";
-          iconColor = "#22C79A";
+          iconColor = "var(--ok)";
           textCls = "text-text-faint";
         } else if (isCancelled) {
           icon = "⊘";
@@ -349,7 +348,7 @@ export const MessageRow = memo(function MessageRow({
         <div className="-ml-[8px] mt-3 -mb-3 text-[13px] text-text-muted">
           {turnDurationMs != null && (
             <>
-              <span style={{ color: CLAUDE_ORANGE }}>✻</span>{" "}
+              <span style={{ color: "var(--accent)" }}>✻</span>{" "}
               {pastVerbFor(msg.info.id)} for {formatDuration(turnDurationMs)}
             </>
           )}
@@ -358,15 +357,15 @@ export const MessageRow = memo(function MessageRow({
               {turnDurationMs != null && (
                 <span className="text-text-faint mx-1.5">·</span>
               )}
-              {/* File-chip-style pill tinted with CLAUDE_ORANGE — visually */}
+              {/* File-chip-style pill tinted with the warn token — visually */}
               {/* coherent with CompactionCard / RetryCard / QuestionCard, */}
               {/* the existing "something needs your attention" color. */}
               <span
                 className="rounded-md border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1"
                 style={{
-                  borderColor: CLAUDE_ORANGE + "55",
-                  backgroundColor: CLAUDE_ORANGE + "11",
-                  color: CLAUDE_ORANGE,
+                  borderColor: "rgb(var(--warn-rgb) / 0.33)",
+                  backgroundColor: "var(--warn-bg)",
+                  color: "var(--warn)",
                 }}
                 title={describeTruncation(truncation).hint}
               >

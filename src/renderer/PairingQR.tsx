@@ -78,7 +78,7 @@ export function PairingQR({
 
   if (error) {
     return (
-      <div className="text-xs text-red-400 p-2">
+      <div className="text-xs text-danger p-2">
         QR generation failed: {error}
       </div>
     );
@@ -125,7 +125,7 @@ export function PairingCountdown({ expiry }: { expiry: Date }) {
 
   if (remaining <= 0) {
     return (
-      <div className="text-xs text-red-400">
+      <div className="text-xs text-danger">
         Expired. Generate a new code.
       </div>
     );
@@ -136,7 +136,7 @@ export function PairingCountdown({ expiry }: { expiry: Date }) {
   const isLow = remaining < 60;
 
   return (
-    <div className={`text-xs ${isLow ? "text-red-400" : "text-text-muted"}`}>
+    <div className={`text-xs ${isLow ? "text-danger" : "text-text-muted"}`}>
       Expires in {minutes}:{seconds.toString().padStart(2, "0")}
     </div>
   );

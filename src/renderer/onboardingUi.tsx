@@ -6,7 +6,7 @@
 // of truth for the nav chrome. Pure step-model logic still lives in
 // onboardingUtils.ts; this module owns only the small shared JSX.
 
-const ACCENT = "#5A88FF";
+const ACCENT = "var(--accent)";
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 

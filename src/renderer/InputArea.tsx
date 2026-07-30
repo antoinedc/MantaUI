@@ -24,7 +24,6 @@ import {
   type StaleCacheResult,
 } from "./chatUtils";
 import {
-  CLAUDE_ORANGE,
   type ModelSelection,
   type TokenUsage,
 } from "./chatShared";
@@ -272,7 +271,7 @@ export function InputArea({
       <div
         className={
           voiceActive
-            ? "border-t border-red-500 animate-pulse shadow-[0_0_6px_rgba(239,68,68,0.6)]"
+            ? "border-t border-danger animate-pulse shadow-[0_0_6px_rgb(var(--danger-rgb)/0.6)]"
             : refreshing
               ? "manta-loading-divider"
               : "border-t border-text/25"
@@ -287,7 +286,7 @@ export function InputArea({
       <div className="manta-composer-input-row px-4 py-3 flex items-start gap-2">
         <span
           className="select-none pt-px shrink-0"
-          style={{ color: voiceActive ? "#FF7A88" : CLAUDE_ORANGE }}
+          style={{ color: voiceActive ? "var(--danger)" : "var(--accent)" }}
           title={
             voiceActive
               ? voiceProcessing
@@ -392,7 +391,7 @@ export function InputArea({
       <div
         className={
           voiceActive
-            ? "border-t border-red-500 animate-pulse shadow-[0_0_6px_rgba(239,68,68,0.6)]"
+            ? "border-t border-danger animate-pulse shadow-[0_0_6px_rgb(var(--danger-rgb)/0.6)]"
             : "border-t border-text/25"
         }
       />
@@ -478,7 +477,7 @@ export function InputArea({
           className={
             "px-1.5 py-px rounded " +
             (chatAutoAllow
-              ? "text-red-300 hover:text-red-200"
+              ? "text-danger hover:text-danger"
               : "text-text-faint hover:text-text-muted")
           }
           title={

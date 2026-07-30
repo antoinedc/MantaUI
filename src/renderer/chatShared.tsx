@@ -13,10 +13,6 @@
 import { createContext, type ReactNode } from "react";
 import type { OpencodeMessage, OpencodeModel } from "../shared/types";
 
-// Claude's bullet/spinner accent. Inlined (not in tailwind config) so we only
-// brand the chat panel without touching the rest of manta's blue accent.
-export const CLAUDE_ORANGE = "#d97757";
-
 // In-flight attachments tracked alongside the textarea content. Each chip
 // rendered above the input maps to one entry; `status` drives the chip
 // appearance (uploading spinner vs. ready vs. error).
@@ -402,7 +398,7 @@ export function MetaBadge({
 }) {
   const toneClass =
     tone === "danger"
-      ? "text-red-400 border-red-500/30"
+      ? "text-danger border-danger/30"
       : "text-text-faint border-border";
   return (
     <span className={"shrink-0 rounded border px-1 text-[10px] " + toneClass} title={title}>

@@ -13,7 +13,6 @@ import { Highlight, themes, type Language } from "prism-react-renderer";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components as MarkdownComponents } from "react-markdown";
-import { CLAUDE_ORANGE } from "./chatShared";
 import { getMantaPreload } from "./preloadAccess";
 import { CopyButton } from "./CopyButton";
 
@@ -83,7 +82,7 @@ const MD_COMPONENTS: MarkdownComponents = {
         target="_blank"
         rel="noreferrer"
         className="underline"
-        style={{ color: CLAUDE_ORANGE }}
+        style={{ color: "var(--accent-tx)" }}
         onClick={(e) => {
           const preload = getMantaPreload();
           if (preload && href) {
