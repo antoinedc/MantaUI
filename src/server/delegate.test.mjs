@@ -13,6 +13,8 @@ import {
   MAX_RUNNING_JOBS,
   relatedSessionIds,
   jobNameForSession,
+  createJobsCache,
+  createDelegateEngine,
 } from "./delegate.mjs";
 
 // ----------------------------------------------------------------------------
@@ -581,4 +583,106 @@ test("jobNameForSession returns the job name, and null when unknown or terminal"
   assert.equal(jobNameForSession("", jobs), null);
   assert.equal(jobNameForSession("child_a", []), null);
   assert.equal(jobNameForSession("child_a", null), null);
+});
+
+// ----------------------------------------------------------------------------
+// createJobsCache — TTL + invalidation (BET-403 nit 2)
+// ----------------------------------------------------------------------------
+
+test("createJobsCache serves a cached load within the TTL window", async () => {
+  let loadCount = 0;
+  const load = async () => { loadCount += 1; return [{ id: "a", status: "running" }]; };
+  let nowMs = 1000;
+  const cache = createJobsCache({ load, ttlMs: 2000, now: () => nowMs });
+
+  const a = await cache.get();
+  const b = await cache.get();
+  assert.equal(loadCount, 1, "second get within TTL hits the cache");
+  assert.deepEqual(a, b);
+
+  nowMs = 4000; // past TTL
+  await cache.get();
+  assert.equal(loadCount, 2, "expired entry re-loads");
+});
+
+test("createJobsCache invalidate forces the next get to reload", async () => {
+  let loadCount = 0;
+  const load = async () => { loadCount += 1; return [{ id: "a" }]; };
+  const cache = createJobsCache({ load, ttlMs: 100000, now: () => 0 });
+  await cache.get();
+  await cache.get();
+  assert.equal(loadCount, 1);
+  cache.invalidate();
+  await cache.get();
+  assert.equal(loadCount, 2, "invalidate busts the cache even inside TTL");
+});
+
+// ----------------------------------------------------------------------------
+// createDelegateEngine.cachedListJobs — filter + invalidation on mutation
+// (BET-403 nit 2). The permissions/questions RPC handlers read jobs through
+// this path instead of re-reading delegate-jobs.json on every call.
+// ----------------------------------------------------------------------------
+
+function engineHarness(initialJobs = []) {
+  let jobs = initialJobs.map((j) => ({ ...j }));
+  let loadCount = 0;
+  const deps = {
+    load: async () => { loadCount += 1; return jobs.map((j) => ({ ...j })); },
+    save: async (next) => { jobs = next.map((j) => ({ ...j })); },
+    publish: () => {},
+    deliver: async () => ({ delivered: true }),
+    listMessages: async () => [],
+    gitRun: async () => ({ stdout: "" }),
+    now: () => 1_700_000_000_000,
+  };
+  const engine = createDelegateEngine(deps);
+  return { engine, get loadCount() { return loadCount; }, get jobs() { return jobs; }, setJobs(n) { jobs = n.map((j) => ({ ...j })); } };
+}
+
+test("cachedListJobs mirrors listJobs filter semantics", async () => {
+  const h = engineHarness([
+    { id: "1", parentSessionID: "ses_p", childSessionID: "c1", status: "running", name: "job1" },
+    { id: "2", parentSessionID: "ses_other", childSessionID: "c2", status: "running", name: "job2" },
+  ]);
+  const all = await h.engine.cachedListJobs();
+  assert.equal(all.length, 2);
+  const narrowed = await h.engine.cachedListJobs({ sessionID: "ses_p" });
+  assert.deepEqual(narrowed.map((j) => j.id), ["1"]);
+});
+
+test("cachedListJobs serves the cache across repeated reads", async () => {
+  const h = engineHarness([{ id: "1", status: "running" }]);
+  await h.engine.cachedListJobs();
+  await h.engine.cachedListJobs();
+  await h.engine.cachedListJobs();
+  // One load to warm the cache; subsequent reads hit it (TTL not elapsed).
+  assert.equal(h.loadCount, 1);
+});
+
+test("cachedListJobs returns copies, not the live store array", async () => {
+  const h = engineHarness([{ id: "1", status: "running" }]);
+  const a = await h.engine.cachedListJobs();
+  a[0].mutated = true;
+  const b = await h.engine.cachedListJobs();
+  assert.equal(b[0].mutated, undefined, "caller mutations must not leak into the cache");
+});
+
+test("a mutation invalidates the cache so the next cachedListJobs reloads", async () => {
+  const h = engineHarness([{ id: "1", status: "running" }]);
+  await h.engine.cachedListJobs();
+  const warmCount = h.loadCount; // 1: cache warm
+  // stopJob on a running job transitions it to "stopped" (one internal load)
+  // and busts the cache via the engine's withInvalidate wrapper.
+  await h.engine.stopJob("1");
+  const afterMutation = h.loadCount;
+  assert.equal(afterMutation, warmCount + 1, "stopJob performed its own load");
+
+  // First read after invalidation must reload and reflect the new status.
+  const jobs = await h.engine.cachedListJobs();
+  assert.equal(h.loadCount, afterMutation + 1, "cache was invalidated → reloaded");
+  assert.equal(jobs[0].status, "stopped");
+
+  // Second read hits the now-warm cache (no further load).
+  await h.engine.cachedListJobs();
+  assert.equal(h.loadCount, afterMutation + 1, "cache served the second read");
 });

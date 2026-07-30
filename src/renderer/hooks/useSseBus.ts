@@ -689,13 +689,22 @@ export function useSseBus(params: {
         setQuestions((prev) =>
           applyQuestionEvent(prev, ev.type, props, sessionId, relatedSessionIdsRef.current) as QuestionRequest[],
         );
-        // Re-fetch so the fromJobName-stamped record (server-side only) replaces
-        // the live record — the live event payload carries no job name. The
-        // server filter is now scoped to the viewed session + its job children,
-        // so the GET no longer stacks unrelated backlog (BET-380). Mirrors the
-        // permission path, which already refreshes on permission.asked.
+        // Re-fetch ONLY when the ask originates from a background job the
+        // viewed session owns: the live event payload carries no job name, so
+        // the GET must replace the live record with the server-stamped
+        // fromJobName one (BET-380). For the viewed session's OWN questions the
+        // live payload is already complete, so the round-trip was wasted work
+        // (BET-403 nit 1). A job-origin ask is one whose sessionID is a known
+        // related child (applyQuestionEvent already gated acceptance on the
+        // same set, so an unknown child is dropped before reaching here).
         if (ev.type === "question.asked") {
-          void refreshQuestions();
+          const isJobOrigin =
+            evSessionID.length > 0 &&
+            evSessionID !== sessionId &&
+            relatedSessionIdsRef.current.has(evSessionID);
+          if (isJobOrigin) {
+            void refreshQuestions();
+          }
         }
         if (ev.type === "question.replied" || ev.type === "question.rejected") {
           scheduleRefetch();

@@ -405,7 +405,7 @@ export function buildHandlers({
     // non-terminal background-job child sessions and stamp `fromJobName`
     // (BET-380): a job's asks surface in the PARENT's panel.
     "opencode:permissions": async (sessionId) => {
-      const jobs = await delegate.listJobs();
+      const jobs = delegate ? await delegate.cachedListJobs() : [];
       return oc.listPermissions(sessionId, jobs);
     },
 
@@ -417,7 +417,7 @@ export function buildHandlers({
     // Job records passed so a background job's questions surface in the
     // parent's panel with `fromJobName` (BET-380) — see opencode:permissions.
     "opencode:questions": async (sessionId) => {
-      const jobs = await delegate.listJobs();
+      const jobs = delegate ? await delegate.cachedListJobs() : [];
       return oc.listQuestions(sessionId, jobs);
     },
 
