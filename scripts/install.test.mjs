@@ -31,6 +31,7 @@ import {
   formatProviderDetection,
   DEFAULT_PROVIDERS,
   OPENCODE_CLAUDE_AUTH_PLUGIN,
+  CLAUDE_AUTH_FAMILY,
   DEFAULT_PORT,
   DEFAULT_RELEASE_HOST,
   DESKTOP_DMG_URL,
@@ -942,6 +943,82 @@ test("mergeOpencodeConfig is null/undefined safe (treated as empty)", () => {
   assert.equal(b.corrupt, false);
   assert.deepEqual(a.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
   assert.deepEqual(b.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+// ----------------------------------------------------------------------------
+// mergeOpencodeConfig — family-aware REPLACE (BET-319)
+// ----------------------------------------------------------------------------
+//
+// The Claude auth plugin is a single logical family: every variant shares
+// the prefix `opencode-claude-auth`. The merge now REPLACES an existing
+// variant with the target instead of appending alongside it (which used to
+// leave both variants loaded — the dev-box bug). The target defaults to
+// `@latest`; dev/CI boxes pass an explicit `-bui` target via the CLI bridge
+// (MANTA_CLAUDE_AUTH_PLUGIN env var). These tests pin the family behavior;
+// the default-target path is covered by the 10 cases above.
+
+const BUI_PLUGIN = "opencode-claude-auth-bui@1.5.4-bui.1";
+
+test("mergeOpencodeConfig family-replaces -bui -> @latest (default target)", () => {
+  const before = JSON.stringify({ plugin: [BUI_PLUGIN] }, null, 2) + "\n";
+  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
+  assert.equal(corrupt, false);
+  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig family-replaces @latest -> -bui (explicit target)", () => {
+  const before = JSON.stringify({ plugin: [OPENCODE_CLAUDE_AUTH_PLUGIN] }, null, 2) + "\n";
+  const { text, corrupt, plugin } = mergeOpencodeConfig(before, BUI_PLUGIN);
+  assert.equal(corrupt, false);
+  assert.deepEqual(plugin, [BUI_PLUGIN]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, [BUI_PLUGIN]);
+});
+
+test("mergeOpencodeConfig family-replace preserves unrelated plugins", () => {
+  const before = JSON.stringify(
+    { plugin: ["some-other-plugin", BUI_PLUGIN] },
+    null,
+    2,
+  ) + "\n";
+  const { text, plugin } = mergeOpencodeConfig(before);
+  // Only the family member is replaced; the unrelated plugin stays first.
+  assert.deepEqual(plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig is idempotent with an explicit target", () => {
+  const before = JSON.stringify({ plugin: ["unrelated"] }, null, 2) + "\n";
+  const first = mergeOpencodeConfig(before, BUI_PLUGIN);
+  const second = mergeOpencodeConfig(first.text, BUI_PLUGIN);
+  assert.equal(second.text, first.text);
+  assert.deepEqual(second.plugin, ["unrelated", BUI_PLUGIN]);
+});
+
+test("mergeOpencodeConfig collapses both variants to a single target", () => {
+  // The dev box's current state: both -bui and @latest present.
+  const before = JSON.stringify(
+    { plugin: [BUI_PLUGIN, OPENCODE_CLAUDE_AUTH_PLUGIN] },
+    null,
+    2,
+  ) + "\n";
+  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
+  assert.equal(corrupt, false);
+  // Both family members collapse to the single default target.
+  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("CLAUDE_AUTH_FAMILY prefix matches both plugin variants", () => {
+  // Guard against an accidental rename that would silently stop recognizing
+  // a variant and re-introduce the double-load bug.
+  assert.equal(OPENCODE_CLAUDE_AUTH_PLUGIN.startsWith(CLAUDE_AUTH_FAMILY), true);
+  assert.equal(BUI_PLUGIN.startsWith(CLAUDE_AUTH_FAMILY), true);
+  assert.equal("some-other-plugin".startsWith(CLAUDE_AUTH_FAMILY), false);
 });
 
 // ----------------------------------------------------------------------------

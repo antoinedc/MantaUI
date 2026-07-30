@@ -784,10 +784,18 @@ main() {
   mkdir -p "$OPENCODE_CONFIG_DIR"
   OPENCODE_CONFIG_BACKUP="$OPENCODE_CONFIG.pre-manta"
   if [ -f "$OPENCODE_CONFIG" ]; then
-    log "Seeding opencode-claude-auth plugin (merging into existing $OPENCODE_CONFIG)…"
+    if [ -n "$MANTA_CLAUDE_AUTH_PLUGIN" ]; then
+      log "Seeding Claude auth plugin (override: $MANTA_CLAUDE_AUTH_PLUGIN) — merging into existing $OPENCODE_CONFIG…"
+    else
+      log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — merging into existing $OPENCODE_CONFIG…"
+    fi
     existing="$(cat "$OPENCODE_CONFIG" 2>/dev/null || true)"
   else
-    log "Seeding opencode-claude-auth plugin (no existing $OPENCODE_CONFIG — creating)…"
+    if [ -n "$MANTA_CLAUDE_AUTH_PLUGIN" ]; then
+      log "Seeding Claude auth plugin (override: $MANTA_CLAUDE_AUTH_PLUGIN) — no existing $OPENCODE_CONFIG, creating…"
+    else
+      log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — no existing $OPENCODE_CONFIG, creating…"
+    fi
     existing=""
   fi
   merged="$(printf '%s' "$existing" | "$NODE" "$LIB" merge-opencode-config 2>/tmp/opencode-merge.err)" \
