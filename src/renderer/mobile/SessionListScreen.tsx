@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Settings, Plus } from "lucide-react";
 import { useStore } from "../store";
 import type { Project, TmuxWindow } from "../../shared/types";
 import { MobileCreateSheet } from "./MobileCreateSheet";
@@ -161,19 +162,19 @@ export function SessionListScreen({
           ↻
         </button>
         <button
-          className="mobile-tap text-text-muted text-xl leading-none"
+          className="mobile-tap text-text-muted leading-none"
           onClick={onOpenSettings}
           aria-label="Settings"
           title="Settings"
         >
-          ⚙
+          <Settings size={20} aria-hidden="true" />
         </button>
         <button
-          className="mobile-tap rounded-lg bg-accent-soft text-white text-xl"
+          className="mobile-tap rounded-lg bg-accent-soft text-white leading-none"
           onClick={onPlus}
           aria-label="New"
         >
-          +
+          <Plus size={20} aria-hidden="true" />
         </button>
       </div>
       <div className="flex-1 overflow-auto py-2">

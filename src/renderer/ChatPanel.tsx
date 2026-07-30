@@ -14,6 +14,7 @@
 // shim that surface).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { X } from "lucide-react";
 import type {
   OpencodeModel,
   QuestionRequest,
@@ -1940,10 +1941,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
                   <span className="italic flex-1 truncate">{msg}</span>
                   <button
                     onClick={() => setMessageQueue((q) => q.filter((_, j) => j !== i))}
-                    className="ml-1 text-text-faint hover:text-text leading-none shrink-0"
+                    className="ml-1 text-text-faint hover:text-text leading-none shrink-0 inline-flex items-center"
                     title="Remove from queue"
+                    aria-label="Remove from queue"
                   >
-                    ×
+                    <X size={14} aria-hidden="true" />
                   </button>
                 </div>
               ))}
@@ -1971,10 +1973,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           )}
           <button
             onClick={() => setSendError(null)}
-            className="text-danger hover:text-danger leading-none px-1"
+            className="text-danger hover:text-danger leading-none px-1 inline-flex items-center"
             title="Dismiss"
+            aria-label="Dismiss error"
           >
-            ×
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
       )}
@@ -1997,10 +2000,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           </button>
           <button
             onClick={() => setScreenshotToast(null)}
-            className="shrink-0 text-text-faint hover:text-text leading-none"
+            className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center"
             title="Dismiss"
+            aria-label="Dismiss screenshot toast"
           >
-            ×
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
       )}
@@ -2040,10 +2044,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           )}
           <button
             onClick={() => setAgentFileToast(null)}
-            className="shrink-0 text-text-faint hover:text-text leading-none"
+            className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center"
             title="Dismiss"
+            aria-label="Dismiss file toast"
           >
-            ×
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
       )}
@@ -2054,10 +2059,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           <pre className="flex-1 whitespace-pre-wrap font-mono">{systemNotice}</pre>
           <button
             onClick={() => setSystemNotice(null)}
-            className="text-text-faint hover:text-text leading-none"
+            className="text-text-faint hover:text-text leading-none inline-flex items-center"
             title="Dismiss"
+            aria-label="Dismiss notice"
           >
-            ×
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
       )}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
@@ -389,9 +390,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-end p-4 border-b border-border">
           <button
             onClick={onClose}
-            className="text-text-muted hover:text-text text-sm px-3 py-1.5 rounded hover:bg-bg-elev transition-colors"
+            className="text-text-muted hover:text-text text-sm px-3 py-1.5 rounded hover:bg-bg-elev transition-colors inline-flex items-center"
+            aria-label="Close settings"
           >
-            ✕
+            <X size={16} aria-hidden="true" />
           </button>
           {/* Trailing spacer — Windows paints min/max/close over the top-right
               of the window; this keeps the ✕ from sitting under them.
@@ -601,10 +603,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       </code>
                       <button
                         onClick={() => removeRegistryUrl(url)}
-                        className="text-sm text-text-faint hover:text-text px-2"
+                        className="text-sm text-text-faint hover:text-text px-2 inline-flex items-center"
                         title="Remove"
+                        aria-label="Remove registry URL"
                       >
-                        ✕
+                        <X size={14} aria-hidden="true" />
                       </button>
                     </div>
                   ))}

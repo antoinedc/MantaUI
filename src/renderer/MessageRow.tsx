@@ -14,6 +14,7 @@
 // module cycle.
 
 import { memo, useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { OpencodeMessage } from "../shared/types";
 import {
   describeTruncation,
@@ -175,8 +176,8 @@ const UserCommandBar = memo(function UserCommandBar({
         title={expanded ? "Collapse" : "Show expanded prompt"}
       >
         <span className="text-text-quiet select-none shrink-0">›</span>
-        <span className="text-text-quiet select-none shrink-0 text-[10px] w-3">
-          {expanded ? "▾" : "▸"}
+        <span className="text-text-quiet shrink-0 w-3 inline-flex items-center">
+          {expanded ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
         </span>
         <span className="font-mono text-text shrink-0">/{name}</span>
         {trimmedArgs && (

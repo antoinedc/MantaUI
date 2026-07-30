@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { X } from "lucide-react";
 import type { ProviderEndpoint, DiscoverResult } from "../shared/types";
 
 type Draft = { id: string; name: string; baseURL: string; apiKey: string };
@@ -156,10 +157,11 @@ export function ProvidersCard() {
             <button
               onClick={() => removeEndpoint(ep)}
               disabled={busy === ep.id}
-              className="text-xs text-text-faint hover:text-text px-1"
+              className="text-xs text-text-faint hover:text-text px-1 inline-flex items-center"
               title="Remove endpoint"
+              aria-label="Remove endpoint"
             >
-              ✕
+              <X size={14} aria-hidden="true" />
             </button>
           </div>
           {discoverError[ep.id] && (

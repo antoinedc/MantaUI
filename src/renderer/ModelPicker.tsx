@@ -8,6 +8,7 @@
 // prompt_async falls back to opencode's default.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection } from "./chatShared";
 import { formatModelContextSize } from "./chatUtils";
@@ -104,7 +105,7 @@ export function ModelPicker({
         title="Pick model for next prompt"
       >
         <span className="truncate">{label ?? <span className="opacity-60">opencode</span>}</span>
-        <span className="text-text-faint text-[9px]">▾</span>
+        <ChevronDown size={12} aria-hidden="true" />
       </button>
       {open && (
         <div
