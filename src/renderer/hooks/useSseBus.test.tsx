@@ -629,3 +629,81 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
     expect(promptCalls.length).toBe(1);
   });
 });
+
+// BET-403 nit 1 — gate the question.asked refetch to job-origin asks only.
+// The parent session's own question.asked carries a complete live payload, so
+// the GET round-trip was wasted work. A job-origin ask (sessionID is a known
+// related child) still refetches so the server-stamped fromJobName replaces
+// the live record.
+describe("useSseBus question.asked refetch gating (BET-403)", () => {
+  let api: MockApi;
+  let bus: MockEventBus;
+  let h: Harness | null = null;
+
+  beforeEach(() => {
+    resetStore();
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("does NOT refetch questions for the viewed session's own question.asked", async () => {
+    ({ api, bus } = installMockApi());
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const before = (api.calls.opencodeQuestions ?? []).length;
+
+    await emitAndFlush(bus, h, {
+      type: "question.asked",
+      properties: {
+        sessionID: "ses_test",
+        id: "que_1",
+        tool: { messageID: "msg_1", callID: "toolu_1" },
+        questions: [["pick one"]],
+      },
+    });
+
+    const after = (api.calls.opencodeQuestions ?? []).length;
+    expect(after).toBe(before);
+  });
+
+  it("DOES refetch questions for a background-job child's question.asked", async () => {
+    // Seed the related-id set: a server record carrying fromJobName for a
+    // child session. server.connected triggers refreshQuestions, which both
+    // populates the set and records one opencodeQuestions call.
+    ({ api, bus } = installMockApi({
+      opencodeQuestions: async () => [
+        {
+          id: "que_child",
+          sessionID: "ses_child",
+          fromJobName: "fix-the-bug",
+          questions: [["pick one"]],
+        },
+      ],
+    }));
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await emitAndFlush(bus, h, { type: "server.connected", properties: {} });
+    const seeded = (api.calls.opencodeQuestions ?? []).length;
+    expect(seeded).toBeGreaterThanOrEqual(1);
+
+    // A job-origin ask (child session is in the related set) must refetch so
+    // the fromJobName-stamped record replaces the live one.
+    await emitAndFlush(bus, h, {
+      type: "question.asked",
+      properties: {
+        sessionID: "ses_child",
+        id: "que_child_live",
+        tool: { messageID: "msg_c", callID: "toolu_c" },
+        questions: [["pick one"]],
+      },
+    });
+
+    const after = (api.calls.opencodeQuestions ?? []).length;
+    expect(after).toBeGreaterThan(seeded);
+  });
+});

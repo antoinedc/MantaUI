@@ -74,6 +74,39 @@ function genId() {
 }
 
 // ---------------------------------------------------------------------------
+// Jobs cache (BET-403 nit 2)
+// ---------------------------------------------------------------------------
+// `opencode:permissions` / `opencode:questions` only need the job list to
+// compute ownership (relatedSessionIds / jobNameForSession), which depends on
+// status/parentSessionID/childSessionID/name — fields that only change on a
+// job lifecycle transition. Reading the delegate-jobs.json file on every RPC
+// was wasted work for a single-user box; this wraps the load in a short-TTL
+// in-memory cache that is also invalidated by every engine mutation
+// (startJob/stopJob/deleteJob/observeEvent/sweep). The activity poller's
+// 10s saves mutate `activity` only (ownership-irrelevant), so it intentionally
+// does NOT invalidate — the cache stays warm through activity ticks.
+//
+// `delegate:list` (the UI jobs card) bypasses the cache and reads fresh, so a
+// `delegate.updated`-driven refetch still shows live status instantly.
+export function createJobsCache({ load = loadJobs, ttlMs = 2000, now = () => Date.now() } = {}) {
+  let cached = null;
+  let expiresAt = 0;
+  return {
+    async get() {
+      const t = now();
+      if (cached !== null && t < expiresAt) return cached;
+      cached = await load();
+      expiresAt = t + ttlMs;
+      return cached;
+    },
+    invalidate() {
+      cached = null;
+      expiresAt = 0;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Pure helpers (exported for unit tests)
 // ---------------------------------------------------------------------------
 
@@ -818,14 +851,37 @@ export async function deleteJob(id, deps = {}) {
 
 export function createDelegateEngine(deps) {
   const sawBusy = new Map();
+  const jobsCache = createJobsCache({
+    load: deps.load ?? (() => loadJobs(deps.storePath ?? STORE_PATH)),
+  });
+  // Invalidate the cache after any mutation so the next ownership read sees
+  // fresh status. Wrapping the bound methods (rather than poking the pure
+  // fns) keeps the pure functions testable and untouched (BET-403 nit 2).
+  const invalidate = () => jobsCache.invalidate();
+  const withInvalidate = (fn) => async (...args) => {
+    const r = await fn(...args);
+    invalidate();
+    return r;
+  };
   const bound = {
-    startJob: (input) => startJob(input, deps),
-    stopJob: (id) => stopJob(id, deps),
-    deleteJob: (id) => deleteJob(id, deps),
+    startJob: withInvalidate((input) => startJob(input, deps)),
+    stopJob: withInvalidate((id) => stopJob(id, deps)),
+    deleteJob: withInvalidate((id) => deleteJob(id, deps)),
+    observeEvent: withInvalidate((evt) => observeEvent(evt, deps, sawBusy)),
+    sweep: withInvalidate(() => sweepDelegateJobs(deps)),
     listJobs: (filter) => listJobs(filter, deps),
+    // Cached read for the permissions/questions RPC handlers (BET-403 nit 2).
+    // Mirrors listJobs' filter semantics (no filter → all jobs; sessionID →
+    // narrow to that parent's children) but serves from the TTL cache. The
+    // UI jobs card uses the uncached `listJobs` so it stays live.
+    cachedListJobs: async (filter = {}) => {
+      const jobs = await jobsCache.get();
+      if (filter?.sessionID === undefined) return jobs.map((j) => ({ ...j }));
+      return jobs
+        .filter((j) => j.parentSessionID === filter.sessionID)
+        .map((j) => ({ ...j }));
+    },
     getJob: (id) => getJob(id, deps),
-    observeEvent: (evt) => observeEvent(evt, deps, sawBusy),
-    sweep: () => sweepDelegateJobs(deps),
     startSweeper: (opts) => startSweeper(deps, opts),
     startActivityPoller: (opts) => startActivityPoller(deps, opts),
   };
