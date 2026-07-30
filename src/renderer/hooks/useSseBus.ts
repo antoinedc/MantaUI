@@ -200,6 +200,12 @@ export function useSseBus(params: {
   useEffect(() => {
     questionsRef.current = questions;
   }, [questions]);
+  // Background-job child session ids the viewed session owns — learned from
+  // the GET refresh results (every record carrying fromJobName carries its
+  // own sessionID). Used by applyQuestionEvent so a job's live question.asked
+  // event is accepted into the parent's panel. Reset per session. The
+  // renderer never queries the job list to compute ownership (BET-380).
+  const relatedSessionIdsRef = useRef<Set<string>>(new Set());
   const [stepTokens, setStepTokens] = useState<(TokenUsage & { cost: number }) | null>(null);
   const [compactionState, setCompactionState] = useState<{
     reason: string;
@@ -285,9 +291,19 @@ export function useSseBus(params: {
     try {
       const perms = await window.api.opencodePermissions?.(sessionId);
       if (Array.isArray(perms)) {
-        // Filter to the viewed session so a cumulative workspace-wide GET
-        // can't stack unrelated backlog — symmetric with refreshQuestions.
-        setPermissions(perms.filter((p) => p.sessionID === sessionId));
+        // The server now returns the viewed session's requests PLUS any
+        // non-terminal background-job child's, each stamped with fromJobName.
+        // Drop the client-side sessionID narrow so a job's asks surface in
+        // the parent's panel (BET-380). Learn the related-id set from the
+        // records that carry fromJobName.
+        const related = new Set<string>();
+        for (const p of perms) {
+          if (p.fromJobName && typeof p.sessionID === "string") {
+            related.add(p.sessionID);
+          }
+        }
+        relatedSessionIdsRef.current = related;
+        setPermissions(perms);
       }
     } catch { /* non-fatal */ }
   }, [sessionId]);
@@ -296,15 +312,22 @@ export function useSseBus(params: {
     try {
       const qs = await window.api.opencodeQuestions?.(sessionId);
       if (Array.isArray(qs)) {
-        // Mirror ChatPanel's original hydrate + sessionID-filter: hydrateQuestion
-        // copies the server's `que_…` id into `requestId` (required for reply),
-        // and the filter keeps only the viewed session's questions so a
-        // cumulative workspace-wide GET doesn't stack unrelated backlog.
-        setQuestions(
-          qs
-            .filter((q) => q.sessionID === sessionId)
-            .map(hydrateQuestion) as QuestionRequest[],
-        );
+        // hydrateQuestion copies the server's `que_…` id into `requestId`
+        // (required for reply) and fromJobName through for the card prefix.
+        // The server filter already narrows to the viewed session + its
+        // non-terminal job children, so no client-side sessionID narrow is
+        // needed (BET-380). Fold any newly-seen job child ids into the
+        // related-id set so live question.asked events from those sessions
+        // are accepted by applyQuestionEvent.
+        const related = new Set(relatedSessionIdsRef.current);
+        const hydrated = qs.map(hydrateQuestion) as QuestionRequest[];
+        for (const q of hydrated) {
+          if (q.fromJobName && typeof q.sessionID === "string") {
+            related.add(q.sessionID);
+          }
+        }
+        relatedSessionIdsRef.current = related;
+        setQuestions(hydrated);
       }
     } catch { /* non-fatal */ }
   }, [sessionId]);
@@ -336,6 +359,10 @@ export function useSseBus(params: {
 
   // SSE effect
   useEffect(() => {
+    // The related-id set is per-viewed-session (learned from the GET refresh
+    // results). Clear it on session switch so a prior session's job children
+    // can't accept live question.asked events for the new session (BET-380).
+    relatedSessionIdsRef.current = new Set();
     // Drain-abort helper
     const maybeDrainQueuedPrompt = () => {
       if (!shouldAbortForQueuedDrain(messageQueueRef.current.length, drainAbortRef.current)) {
@@ -656,12 +683,20 @@ export function useSseBus(params: {
         // Payload-driven live update (restored from BET-64 refactor regression).
         // Applying the event payload directly (a) hydrates `requestId` from the
         // asked payload so submit can send the reply, (b) upserts by callID so
-        // re-asks don't stack, and (c) filters to the viewed session — instead
-        // of re-polling GET /question which returns ALL cumulatively-pending
-        // questions for the workspace and dropped the requestId + filter.
+        // re-asks don't stack, and (c) accepts the viewed session OR a known
+        // background-job child (via the related-id set) so a job's ask surfaces
+        // in the parent's panel (BET-380).
         setQuestions((prev) =>
-          applyQuestionEvent(prev, ev.type, props, sessionId) as QuestionRequest[],
+          applyQuestionEvent(prev, ev.type, props, sessionId, relatedSessionIdsRef.current) as QuestionRequest[],
         );
+        // Re-fetch so the fromJobName-stamped record (server-side only) replaces
+        // the live record — the live event payload carries no job name. The
+        // server filter is now scoped to the viewed session + its job children,
+        // so the GET no longer stacks unrelated backlog (BET-380). Mirrors the
+        // permission path, which already refreshes on permission.asked.
+        if (ev.type === "question.asked") {
+          void refreshQuestions();
+        }
         if (ev.type === "question.replied" || ev.type === "question.rejected") {
           scheduleRefetch();
         }

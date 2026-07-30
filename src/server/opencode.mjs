@@ -26,6 +26,7 @@ import {
   defaultCredentialsValidator,
   restoreFromBackup,
 } from "./claudeAuth.mjs";
+import { relatedSessionIds, jobNameForSession } from "./delegate.mjs";
 
 const REMOTE_PORT = 4096;
 
@@ -730,6 +731,39 @@ function extractAssistantText(msgs) {
 // Permission flow (Write/Edit/Bash approval)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Background-job request surfacing (BET-380)
+//
+// A background delegation job runs in its OWN opencode session (a git worktree,
+// or the parent cwd when not a repo). Its permission/question requests must
+// surface in the PARENT's panel so the user can answer them — otherwise the
+// job hangs until the 30-minute sweeper kills it. Ownership is determined
+// server-side from the job records (src/server/delegate.mjs): the renderer
+// never recomputes it.
+//
+// `listPermissions`/`listQuestions` accept the parent's sessionID plus the
+// current job records, widen their filter to the parent OR any non-terminal
+// job child session, and stamp `fromJobName` on each record that came from a
+// job. `fromJobName` is the ONLY new field — the renderer keys everything off
+// its presence.
+//
+// opencode's /permission and /question are `?directory=`-scoped, and a job's
+// child session lives in a DIFFERENT directory than the parent, so the parent's
+// scoped query does not return the child's asks. Each related child's directory
+// is fetched and merged in (best-effort) before the single filter pass. The
+// allowed-id set is built ONCE per call, before filtering — never per record.
+// ---------------------------------------------------------------------------
+
+function buildAllowedSessionSet(sessionId, jobs) {
+  if (!sessionId) return null;
+  return new Set([sessionId, ...relatedSessionIds(sessionId, jobs)]);
+}
+
+function stampFromJobName(record, jobs) {
+  const name = jobNameForSession(record?.sessionID, jobs);
+  return name ? { ...record, fromJobName: name } : record;
+}
+
 /** List all pending tool-use permissions.
  *  Scoped to the session's directory when sessionId is provided. opencode's
  *  WorkspaceRoutingMiddleware makes the UNSCOPED endpoint return [] for
@@ -737,23 +771,46 @@ function extractAssistantText(msgs) {
  *  PermissionCard never appears on mobile and the turn hangs forever (the
  *  live `per_…` is sitting in the server's pending map, we just can't see
  *  it). Mirrors listQuestions above + desktop listPermissions.
+ *
+ *  When `jobs` is passed, the filter is widened to the requested session OR
+ *  any non-terminal background-job child session, and each record from a job
+ *  is stamped with `fromJobName` (BET-380). The child's directory is fetched
+ *  separately and merged, because a job runs in its own directory.
  *  @param {string} [sessionId]
- *  @returns {Promise<Array<{ id: string, sessionID: string, permission: string, ... }>>}
+ *  @param {Array<{childSessionID?:string, parentSessionID?:string, status?:string, name?:string}>} [jobs]
+ *  @returns {Promise<Array<{ id: string, sessionID: string, permission: string, fromJobName?: string, ... }>>}
  */
-export async function listPermissions(sessionId) {
+export async function listPermissions(sessionId, jobs = []) {
+  const allowed = buildAllowedSessionSet(sessionId, jobs);
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
   const res = await ocFetch(apiUrl(`/permission${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listPermissions ${res.status}: ${await res.text()}`);
   }
   const all = await res.json();
-  // opencode's /permission endpoint is `?directory=`-scoped, not session-scoped:
-  // a directory can hold pending permissions from multiple sessions. Filter
-  // down to the requested sessionID so callers never see cross-session leaks.
-  if (sessionId && Array.isArray(all)) {
-    return all.filter((p) => p.sessionID === sessionId);
+  let list = Array.isArray(all) ? all : [];
+  // Pull in each related child job's directory — a job runs in its own
+  // directory, so the parent's scoped query never includes its asks.
+  if (allowed) {
+    for (const childId of relatedSessionIds(sessionId, jobs)) {
+      try {
+        const childDirQ = await getSessionDirectoryQuery(childId);
+        const childRes = await ocFetch(apiUrl(`/permission${childDirQ}`));
+        if (childRes.ok) {
+          const childAll = await childRes.json();
+          if (Array.isArray(childAll)) list = list.concat(childAll);
+        }
+      } catch {
+        /* best-effort: a failed child fetch does not discard the rest */
+      }
+    }
+    // Filter to the allowed-id set (parent + non-terminal children) so
+    // cross-session leaks from the directory-wide responses are dropped.
+    return list
+      .filter((p) => allowed.has(p.sessionID))
+      .map((p) => stampFromJobName(p, jobs));
   }
-  return all;
+  return list;
 }
 
 /** Approve or deny a permission request.
@@ -786,24 +843,42 @@ export async function replyPermission({ requestId, reply, sessionId }) {
  *  from the correct workspace are returned. Without scoping, opencode returns
  *  questions for the default workspace only — causing the QuestionCard to
  *  never appear for non-default sessions and the agent to hang forever.
+ *
+ *  When `jobs` is passed, the filter is widened to the requested session OR
+ *  any non-terminal background-job child session, and each record from a job
+ *  is stamped with `fromJobName` (BET-380). The child's directory is fetched
+ *  separately and merged, because a job runs in its own directory.
  *  @param {string} [sessionId]
- *  @returns {Promise<Array<{ id: string, sessionID: string, questions: Array<...>, ... }>>}
+ *  @param {Array<{childSessionID?:string, parentSessionID?:string, status?:string, name?:string}>} [jobs]
+ *  @returns {Promise<Array<{ id: string, sessionID: string, questions: Array<...>, fromJobName?: string, ... }>>}
  */
-export async function listQuestions(sessionId) {
+export async function listQuestions(sessionId, jobs = []) {
+  const allowed = buildAllowedSessionSet(sessionId, jobs);
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
   const res = await ocFetch(apiUrl(`/question${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listQuestions ${res.status}: ${await res.text()}`);
   }
   const all = await res.json();
-  // opencode's /question endpoint is `?directory=`-scoped, not session-scoped:
-  // a directory can hold pending questions from multiple sessions (including
-  // orphan/subagent sessions). Filter down to the requested sessionID so
-  // callers never see cross-session leaks or stale/orphan asks.
-  if (sessionId && Array.isArray(all)) {
-    return all.filter((q) => q.sessionID === sessionId);
+  let list = Array.isArray(all) ? all : [];
+  if (allowed) {
+    for (const childId of relatedSessionIds(sessionId, jobs)) {
+      try {
+        const childDirQ = await getSessionDirectoryQuery(childId);
+        const childRes = await ocFetch(apiUrl(`/question${childDirQ}`));
+        if (childRes.ok) {
+          const childAll = await childRes.json();
+          if (Array.isArray(childAll)) list = list.concat(childAll);
+        }
+      } catch {
+        /* best-effort: a failed child fetch does not discard the rest */
+      }
+    }
+    return list
+      .filter((q) => allowed.has(q.sessionID))
+      .map((q) => stampFromJobName(q, jobs));
   }
-  return all;
+  return list;
 }
 
 /**

@@ -136,6 +136,37 @@ export function deriveName(prompt) {
   return slugify(words || "background");
 }
 
+/**
+ * The childSessionIDs of every NON-TERMINAL job whose parentSessionID matches.
+ * Used by opencode.mjs listPermissions/listQuestions to widen their session
+ * filter so a background job's permission/question requests surface in the
+ * PARENT's panel (BET-380). Terminal jobs are excluded: once a job is done/
+ * failed/stopped its session is no longer interactive and its stale asks must
+ * not be pulled into the parent's panel. Pure.
+ */
+export function relatedSessionIds(parentSessionID, jobs) {
+  if (!parentSessionID || !Array.isArray(jobs)) return [];
+  return jobs
+    .filter((j) => j.parentSessionID === parentSessionID && j.status === "running")
+    .map((j) => j.childSessionID)
+    .filter((sid) => typeof sid === "string" && sid.length > 0);
+}
+
+/**
+ * The job name for a given childSessionID, or null when the session is not a
+ * known running job. Used by opencode.mjs to stamp `fromJobName` on each
+ * permission/question record so the renderer can prefix the card header with
+ * `<job name> · ` (BET-380). Only running jobs are considered — a terminal
+ * job's session is no longer owned. Pure.
+ */
+export function jobNameForSession(childSessionID, jobs) {
+  if (!childSessionID || !Array.isArray(jobs)) return null;
+  const job = jobs.find(
+    (j) => j.childSessionID === childSessionID && j.status === "running",
+  );
+  return job ? (job.name ?? null) : null;
+}
+
 // Find the tmux session that owns a given opencode sessionID. Mirrors the
 // renderer's resolveSessionOwner (src/renderer/store.ts) — the server-side
 // equivalent the spec calls for. Returns { tmuxSession, windowIndex, cwd } or

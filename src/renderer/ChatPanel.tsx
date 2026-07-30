@@ -771,14 +771,23 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   }, [sessionId, rejectAllPendingQuestions]);
 
   const replyPermission = useCallback(
-    async (requestId: string, reply: "once" | "always" | "reject") => {
+    async (
+      requestId: string,
+      reply: "once" | "always" | "reject",
+      recordSessionId?: string,
+    ) => {
       // Optimistically drop this request so the card disappears immediately.
       setPermissions((prev) => prev.filter((p) => p.id !== requestId));
       // Clear the sidebar attention dot immediately — the SSE round-trip can
       // be missed, leaving the red `!` stuck.
       useStore.getState().setChatAttention(sessionId, null);
+      // Route the reply to the request's OWN session, not the panel's. A
+      // background job's permission lives on the job's child session; the
+      // record carries that sessionID. Fall back to the viewed session for
+      // the panel's own requests (BET-380 decision #8).
+      const sid = recordSessionId ?? sessionId;
       try {
-        await window.api.opencodePermissionReply(requestId, reply, sessionId);
+        await window.api.opencodePermissionReply(requestId, reply, sid);
       } catch (e) {
         setSendError(String((e as Error)?.message ?? e));
         refreshPermissions();
@@ -1740,7 +1749,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             <PermissionCard
               key={p.id}
               perm={p}
-              onReply={(reply) => replyPermission(p.id, reply)}
+              onReply={(reply) => replyPermission(p.id, reply, p.sessionID)}
             />
           ))}
         </div>

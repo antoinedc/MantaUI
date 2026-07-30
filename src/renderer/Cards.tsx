@@ -137,7 +137,9 @@ export function PermissionCard({
     >
       <div className="flex items-center gap-2 mb-1">
         <span style={{ color: CLAUDE_ORANGE }}>✻</span>
-        <span className="text-text">Permission needed</span>
+        <span className="text-text">
+          {perm.fromJobName ? `${perm.fromJobName} · ` : ""}Permission needed
+        </span>
         <span className="text-text-faint">· {perm.permission}</span>
       </div>
       {detail && (
@@ -223,7 +225,9 @@ export function QuestionCard({
     >
       <div className="flex items-center gap-2 mb-2">
         <span style={{ color: CLAUDE_ORANGE }}>?</span>
-        <span className="text-text font-medium">Question</span>
+        <span className="text-text font-medium">
+          {request.fromJobName ? `${request.fromJobName} · ` : ""}Question
+        </span>
         <button
           onClick={onReject}
           className="ml-auto text-text-faint hover:text-text leading-none"
