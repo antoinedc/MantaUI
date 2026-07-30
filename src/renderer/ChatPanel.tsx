@@ -1896,23 +1896,25 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
                 });
             }}
             onDelete={(id) => {
-              window.api
+              return window.api
                 .delegateDelete(id)
                 .then((res) => {
                   // Dirty worktree refusal: engine returns {ok:false,
-                  // reason:"dirty"} and keeps the record. The card surfaces
-                  // the inline message via its own per-row state keyed on the
-                  // record still being present after refresh.
+                  // reason:"dirty"} and keeps the record. The card reads the
+                  // returned result to show the inline refusal message; here
+                  // we just refresh (the record stays).
                   if (res && res.ok === false && res.reason === "dirty") {
                     setJobsError(null);
                   } else {
                     setJobs((prev) => prev.filter((j) => j.id !== id));
                   }
                   void refreshJobs();
+                  return res;
                 })
                 .catch((e: unknown) => {
                   setJobsError(e instanceof Error ? e.message : "delete failed");
                   void refreshJobs();
+                  return { ok: false };
                 });
             }}
             onOpen={(job) => {

@@ -445,7 +445,10 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
   jobs: DelegateJob[];
   error: string | null;
   onStop: (id: string) => void;
-  onDelete: (id: string) => void;
+  // onDelete returns the engine's result so the card can show the inline
+  // dirty-worktree refusal message ONLY when delete was actually refused
+  // ({ok:false, reason:"dirty"}), not on every click.
+  onDelete: (id: string) => Promise<{ ok: boolean; reason?: string } | void> | void;
   onOpen: (job: DelegateJob) => void;
   onClose: () => void;
 }) {
@@ -545,14 +548,16 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
                 )}
                 {terminal && (
                   <button
-                    onClick={() => {
-                      onDelete(j.id);
-                      // The dirty-refusal is reported via the onDelete
-                      // callback's effect on the jobs list (the record is
-                      // kept). Optimistically mark the row so the inline
-                      // message shows until the next refresh confirms.
-                      setDirtyRow(j.id);
-                      setTimeout(() => setDirtyRow((r) => (r === j.id ? null : r)), 4000);
+                    onClick={async () => {
+                      const res = await onDelete(j.id);
+                      // Show the inline refusal ONLY when the engine kept the
+                      // record because the worktree was dirty. A successful
+                      // delete removes the row on the next refresh, so this
+                      // never flashes on success.
+                      if (res && res.ok === false && res.reason === "dirty") {
+                        setDirtyRow(j.id);
+                        setTimeout(() => setDirtyRow((r) => (r === j.id ? null : r)), 6000);
+                      }
                     }}
                     className="shrink-0 px-2 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30 text-[11px]"
                     title="Delete this job (removes the window + worktree; refuses a dirty worktree)"
