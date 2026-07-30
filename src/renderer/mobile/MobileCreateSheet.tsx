@@ -277,7 +277,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
               <button
                 onClick={() => createProject("all")}
                 disabled={creating}
-                className="px-3 py-2.5 bg-accent text-bg rounded font-semibold disabled:opacity-50"
+                className="px-3 py-2.5 bg-accent-solid text-on-accent rounded font-semibold disabled:opacity-50"
               >
                 Yes, one per worktree
               </button>
@@ -361,7 +361,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
                     : createSession
                 }
                 disabled={creating || !name.trim()}
-                className="px-3 py-2.5 bg-accent text-bg rounded font-semibold disabled:opacity-50"
+                className="px-3 py-2.5 bg-accent-solid text-on-accent rounded font-semibold disabled:opacity-50"
               >
                 {creating
                   ? "Creating…"

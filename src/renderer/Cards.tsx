@@ -255,10 +255,10 @@ export function QuestionCard({
                     className={[
                       "px-2 py-0.5 rounded border text-[12px] transition-colors",
                       isSelected
-                        ? "text-bg border-transparent"
+                        ? "text-on-accent border-transparent"
                         : "text-text border-border-strong hover:bg-bg-soft",
                     ].join(" ")}
-                    style={isSelected ? { backgroundColor: "var(--accent)" } : undefined}
+                    style={isSelected ? { backgroundColor: "var(--accent-solid)" } : undefined}
                   >
                     {opt.label}
                   </button>
@@ -309,8 +309,8 @@ export function QuestionCard({
         <button
           onClick={handleSubmit}
           disabled={!canSubmit}
-          className="px-2 py-0.5 rounded text-bg disabled:opacity-40"
-          style={{ backgroundColor: "var(--accent)" }}
+          className="px-2 py-0.5 rounded text-on-accent disabled:opacity-40"
+          style={{ backgroundColor: "var(--accent-solid)" }}
         >
           Submit
         </button>

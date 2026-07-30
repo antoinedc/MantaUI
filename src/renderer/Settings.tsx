@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
@@ -6,9 +6,15 @@ import { SubscriptionsCard } from "./SubscriptionsCard";
 import { PairingQR, PairingCountdown } from "./PairingQR";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
+import { applyTheme, type ThemePref } from "./theme";
+import { TtlToggle } from "./TtlToggle";
+import {
+  useLaunchers,
+  updateLauncherFlag,
+  useRegistryUrls,
+} from "./settingsShared";
 import type {
   AuthPairResult,
-  AvailableLauncher,
   PluginRegistryRow,
 } from "../shared/types";
 
@@ -44,18 +50,25 @@ export function Settings({ onClose }: { onClose: () => void }) {
     shareAnalytics,
     worktreePerSession,
     worktreeCleanOnClose,
+    theme,
     refresh,
   } = useStore();
 
   // AI fields (AI tab)
   // Note: the model list, default model, and toggles for Main/Sub all live
   // inside `ModelsCard` now (BET-215) — Settings no longer owns that state.
-  const [registryUrls, setRegistryUrls] = useState<string[]>(skillRegistryUrls ?? []);
-  const [newRegistryUrl, setNewRegistryUrl] = useState("");
+  const {
+    registryUrls,
+    setRegistryUrls,
+    newRegistryUrl,
+    setNewRegistryUrl,
+    addRegistryUrl,
+    removeRegistryUrl,
+  } = useRegistryUrls(skillRegistryUrls ?? []);
   const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
   // AI CLI TUI launch options (BET-138 refinement) — flags for launchers
   // detected on this box (e.g. Claude Code's --dangerously-skip-permissions).
-  const [availableLaunchers, setAvailableLaunchers] = useState<AvailableLauncher[]>([]);
+  const [availableLaunchers] = useLaunchers();
   const [launcherFlagValues, setLauncherFlagValues] =
     useState<Record<string, Record<string, boolean>>>(launcherFlags ?? {});
 
@@ -70,6 +83,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // General fields (General tab)
   const [autoRename, setAutoRename] = useState(autoRenameSessions);
   const [analytics, setAnalytics] = useState(shareAnalytics);
+  // BET-409: theme preference. Seeded from the store, applied LIVE on click
+  // (instant visual feedback via applyTheme), persisted on Save. On unmount
+  // without a save, the cleanup reverts the preview to the persisted value.
+  const [themePref, setThemePref] = useState<ThemePref>(theme);
+  const persistedThemeRef = useRef<ThemePref>(theme);
+  persistedThemeRef.current = theme;
 
   // Plugins fields (Plugins tab — replaces the v1 Capability executor
   // block on the Files tab). The toggle is OFF by default; toggling takes
@@ -127,9 +146,20 @@ export function Settings({ onClose }: { onClose: () => void }) {
     setVoiceCmdModel(voiceCommandModel);
     setLauncherFlagValues(launcherFlags ?? {});
     setAnalytics(shareAnalytics);
+    setThemePref(theme);
     setWorktreeOn(worktreePerSession);
     setWorktreeClean(worktreeCleanOnClose);
-  }, [skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, shareAnalytics, worktreePerSession, worktreeCleanOnClose]);
+  }, [skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, shareAnalytics, worktreePerSession, worktreeCleanOnClose, theme]);
+
+  // BET-409: revert any unsaved theme preview when Settings closes without a
+  // save. On Save, refresh() updates the store (and thus the ref) to the new
+  // value BEFORE unmount, so the revert is a no-op; on Cancel the ref still
+  // holds the old value and the preview rolls back.
+  useEffect(() => {
+    return () => {
+      applyTheme(persistedThemeRef.current);
+    };
+  }, []);
 
   // Seed the Mac-local `pluginsEnabled` toggle from the desktop's config
   // (BET-207). The store mirrors the BOX config (via httpApi.configGet),
@@ -140,23 +170,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
     const preload = getMantaPreload();
     if (!preload?.pluginsGetEnabled) return; // mobile/web has no preload
     preload.pluginsGetEnabled().then(setPluginsOn).catch(() => {});
-  }, []);
-
-  // Fetch which AI CLI TUIs are set up on this box (non-fatal — an empty list
-  // just hides the launch-options section). Guarded like App.tsx: on an
-  // unpaired / mid-onboarding desktop boot, window.api is still the raw preload
-  // OS-bridge subset (no launchersList) until the http-mode transport swap in
-  // main.tsx completes, so a bare call throws synchronously (the .catch never
-  // sees it — the access itself is the crash).
-  useEffect(() => {
-    if (!window.api.launchersList) {
-      setAvailableLaunchers([]);
-      return;
-    }
-    window.api
-      .launchersList()
-      .then((list) => setAvailableLaunchers(list))
-      .catch(() => {});
   }, []);
 
   // Fetch the installed-plugins list when the Plugins tab is open, and
@@ -188,12 +201,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
   }, [activeTab]);
 
   const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
-    const l = availableLaunchers.find((x) => x.id === launcherId);
-    if (!l) return;
-    setLauncherFlagValues((prev) => ({
-      ...prev,
-      [launcherId]: { ...resolveLauncherFlags(l.flags, prev[launcherId]), [flagKey]: checked },
-    }));
+    setLauncherFlagValues((prev) =>
+      updateLauncherFlag(availableLaunchers, launcherId, flagKey, checked, prev),
+    );
   };
 
   const [saving, setSaving] = useState(false);
@@ -217,6 +227,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
         voiceCommandModel: voiceCmdModel.trim(),
         shareAnalytics: analytics,
         launcherFlags: launcherFlagValues,
+        // BET-409: persisted theme preference (the live preview was already
+        // applied on click; this just pins it to config.json).
+        theme: themePref,
         // BET-246: per-session worktree defaults — global settings only;
         // the per-window override lives in Sidebar's new-session dialog.
         worktreePerSession: worktreeOn,
@@ -242,17 +255,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
     }
     setSaving(false);
     onClose();
-  };
-
-  const addRegistryUrl = () => {
-    const url = newRegistryUrl.trim();
-    if (!url || registryUrls.includes(url)) return;
-    setRegistryUrls([...registryUrls, url]);
-    setNewRegistryUrl("");
-  };
-
-  const removeRegistryUrl = (url: string) => {
-    setRegistryUrls(registryUrls.filter((u) => u !== url));
   };
 
   // Mint a one-time pairing code for mobile device pairing. The code is valid
@@ -522,30 +524,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
               <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">Prompt cache TTL</h3>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setTtl("5m")}
-                    className={`flex-1 px-4 py-2 text-sm rounded border ${
-                      ttl === "5m"
-                        ? "bg-accent text-bg border-accent"
-                        : "bg-bg-soft text-text-muted border-border hover:text-text"
-                    }`}
-                  >
-                    5 minutes
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTtl("1h")}
-                    className={`flex-1 px-4 py-2 text-sm rounded border ${
-                      ttl === "1h"
-                        ? "bg-accent text-bg border-accent"
-                        : "bg-bg-soft text-text-muted border-border hover:text-text"
-                    }`}
-                  >
-                    1 hour (default)
-                  </button>
-                </div>
+                <TtlToggle ttl={ttl} setTtl={setTtl} />
                 <div className="text-xs text-text-faint mt-2">
                   How long Anthropic keeps a session's prompt cache warm between
                   requests. Used to predict when a session has gone stale and show
@@ -913,6 +892,44 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {activeTab === "general" && (
             <div className="max-w-2xl space-y-6">
               <div>
+                <h3 className="text-base font-semibold mb-4">Theme</h3>
+                {/* Three segmented options. Applied live on click (applyTheme)
+                    so the user sees the change immediately; persisted on Save.
+                    "System" follows the OS and re-themes live when it flips. */}
+                <div
+                  role="group"
+                  aria-label="Theme"
+                  className="inline-flex rounded-lg border border-border overflow-hidden"
+                >
+                  {(["system", "light", "dark"] as ThemePref[]).map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => {
+                        setThemePref(opt);
+                        applyTheme(opt);
+                      }}
+                      className={`px-4 py-1.5 text-sm capitalize transition-colors border-r border-border last:border-r-0 ${
+                        themePref === opt
+                          ? "bg-accent-solid"
+                          : "text-text-muted hover:text-text hover:bg-bg-elev"
+                      }`}
+                      style={
+                        themePref === opt
+                          ? { color: "var(--on-accent)" }
+                          : undefined
+                      }
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+                <span className="block text-xs text-text-faint mt-2">
+                  System follows your OS appearance and re-themes live.
+                </span>
+              </div>
+
+              <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">Auto-rename sessions</h3>
                 <label className="flex items-start gap-3 text-sm cursor-pointer">
                   <input
@@ -983,7 +1000,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <button
               onClick={save}
               disabled={saving}
-              className="px-4 py-2 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
+              className="px-4 py-2 text-sm bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {saving ? "Saving…" : "Save"}
             </button>

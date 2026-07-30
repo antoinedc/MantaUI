@@ -37,7 +37,7 @@ import type { SubscriptionStatus } from "../shared/types";
 import { ConnectProvider } from "./ConnectProvider";
 import { StepFooter } from "./onboardingUi";
 
-const ACCENT = "var(--accent)";
+const ACCENT_SOLID = "var(--accent-solid)";
 const DANGER = "var(--danger)";
 const SUCCESS = "var(--ok)";
 
@@ -346,8 +346,8 @@ function CustomForm({
         type="button"
         onClick={() => void onSubmit()}
         disabled={busy || !draft.id.trim() || !draft.baseURL.trim()}
-        className="inline-flex items-center gap-2 px-3.5 py-2 rounded-md text-sm font-medium text-bg transition-opacity disabled:opacity-40"
-        style={{ background: ACCENT }}
+        className="inline-flex items-center gap-2 px-3.5 py-2 rounded-md text-sm font-medium text-on-accent transition-opacity disabled:opacity-40"
+        style={{ background: ACCENT_SOLID }}
       >
         {busy ? "Adding…" : "Add provider"}
       </button>

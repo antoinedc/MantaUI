@@ -10,6 +10,7 @@ import type { Api } from "../shared/api";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { installHttpTransport, setWindowApi } from "./transportInstall";
 import { pickDemoLayout } from "./demoLayout";
+import { applyTheme } from "./theme";
 
 // Demo mode (BET-302): `?demo` in the URL swaps the real httpApi for a
 // fixture-backed transport and skips pairing / config / credential logic
@@ -71,6 +72,9 @@ async function bootDemo(): Promise<void> {
   // side effects don't diverge. Tag follows the rendered shell so logs and
   // UI agree.
   void initRendererLogging(renderDesktop ? "desktop" : "mobile");
+  // BET-409: demo has no config — default to "system" so the demo shell still
+  // follows the OS (and re-themes live) without needing a configGet.
+  applyTheme();
   // Same React render as the real paths — the demoApi satisfies the Api
   // contract, so App / MobileApp render identically against the fixture.
   ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -90,6 +94,12 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
   // completes.
   try {
     const config = await realPreload.configGet();
+    // BET-409: apply the resolved theme as early as possible (before React
+    // mounts) so the first paint is already on the correct theme and a
+    // light-OS user doesn't flash the dark HTML default. The store's
+    // applyConfig re-applies on subsequent config refreshes; this call wins
+    // the first paint.
+    applyTheme(config.theme);
     const seed = desktopHttpClientSeed(config);
     if (seed) {
       // Sole transport-install path (BET-254) — also called from PairStep on
@@ -100,6 +110,8 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
     }
   } catch (e) {
     console.warn("[bui] configGet failed at entry:", e);
+    // No config → default to "system" (follows OS) so the shell still themes.
+    applyTheme();
   }
 }
 
@@ -132,6 +144,11 @@ async function boot(): Promise<void> {
     // configGet; no MobileSettings UI per the spec — preference is set
     // once on desktop. Mobile always ships regardless.
     void initRendererLogging("mobile");
+    // BET-409: apply "system" immediately so a light-OS phone doesn't flash
+    // the dark HTML default before the (async, post-pairing) configGet lands.
+    // The store's applyConfig re-applies the box's configured theme once
+    // MobileApp's refresh() resolves.
+    applyTheme();
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(

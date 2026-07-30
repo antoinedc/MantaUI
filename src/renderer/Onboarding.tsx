@@ -56,7 +56,8 @@ import { installHttpTransport } from "./transportInstall";
 import { ArrowRight, CheckIcon } from "./onboardingUi";
 import mantaMark from "./assets/manta-mark-128.png";
 
-const ACCENT = "var(--accent)"; // the app's accent token
+const ACCENT = "var(--accent)"; // the app's accent token (borders/tints)
+const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409: darker in light for AA)
 
 // Progress rail — one dot + connector per step. Reads every numbered step as
 // completed on the success screen.
@@ -83,12 +84,12 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
                     ? { background: "var(--card)", color: "var(--tx4)", border: "1.5px solid var(--border)" }
                     : state === "active"
                       ? {
-                          background: ACCENT,
+                          background: ACCENT_SOLID,
                           color: "var(--on-accent)",
                           border: `1.5px solid ${ACCENT}`,
                           boxShadow: `0 0 0 4px rgba(124,156,255,0.15)`,
                         }
-                      : { background: ACCENT, color: "var(--on-accent)", border: `1.5px solid ${ACCENT}` }
+                      : { background: ACCENT_SOLID, color: "var(--on-accent)", border: `1.5px solid ${ACCENT}` }
                 }
               >
                 {state === "completed" ? <CheckIcon className="w-3.5 h-3.5" /> : step}
@@ -332,8 +333,8 @@ function SuccessPanel({ onOpen }: { onOpen: () => void }) {
       </p>
       <button
         onClick={onOpen}
-        className="inline-flex items-center gap-2 px-6 py-2.5 rounded-md text-sm font-medium text-bg"
-        style={{ background: ACCENT }}
+        className="inline-flex items-center gap-2 px-6 py-2.5 rounded-md text-sm font-medium text-on-accent"
+        style={{ background: ACCENT_SOLID }}
       >
         Open Manta
         <ArrowRight />

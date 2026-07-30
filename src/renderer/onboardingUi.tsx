@@ -6,7 +6,7 @@
 // of truth for the nav chrome. Pure step-model logic still lives in
 // onboardingUtils.ts; this module owns only the small shared JSX.
 
-const ACCENT = "var(--accent)";
+const ACCENT_SOLID = "var(--accent-solid)";
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 
@@ -109,8 +109,8 @@ export function StepFooter({
         type="button"
         onClick={onContinue}
         disabled={continueDisabled}
-        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md text-sm font-medium text-bg transition-opacity disabled:opacity-40"
-        style={{ background: ACCENT }}
+        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md text-sm font-medium text-on-accent transition-opacity disabled:opacity-40"
+        style={{ background: ACCENT_SOLID }}
       >
         {continueLabel}
         <ArrowRight />

@@ -41,7 +41,7 @@ body,
   inset: 0;
   display: flex;
   flex-direction: column;
-  background: #0B1020;
+  background: var(--canvas);
   transition: transform 220ms ease;
   will-change: transform;
   /* Defense-in-depth against horizontal rubber-band scroll on iOS Safari /
@@ -67,7 +67,7 @@ body,
   padding: 10px 16px;
   margin: 0 8px 6px;
   border-radius: 12px;
-  background: #12182F;
+  background: var(--panel);
   border: 1px solid transparent;
   /* Cap so the row never exceeds the screen width even if a child fails to
      shrink (e.g. tmux session name too long; the truncate child needs a
@@ -77,8 +77,8 @@ body,
   box-sizing: border-box;
 }
 .mobile-row:active {
-  border-color: #33406B;
-  background: #171F3A;
+  border-color: var(--border-strong);
+  background: var(--card);
 }
 .mobile-dot {
   width: 9px;
@@ -98,7 +98,7 @@ body,
      without safe-area support (desktop browsers, older Android). Mirrors the
      bottom inset already applied on `.mobile-body`. */
   padding: max(env(safe-area-inset-top), 8px) 12px 8px;
-  border-bottom: 1px solid #253055;
+  border-bottom: 1px solid var(--border);
   flex: none;
 }
 .mobile-tap {
@@ -188,8 +188,8 @@ body,
   line-height: 1;
   /* Subtle by default: muted glyph, no fill, no shadow — reads as a quiet
      affordance to the right of the chatbox rather than a primary FAB.
-     #5C6578 == Tailwind theme `text-faint` (see tailwind.config.js). */
-  color: #A7B1C4;
+     var(--tx2) == Tailwind theme `text-muted` (see tailwind.config.js). */
+  color: var(--tx2);
   background: transparent;
   border: none;
   user-select: none;
@@ -198,29 +198,29 @@ body,
 }
 .mobile-ptt-fab:active {
   transform: scale(0.9);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--fill-hover);
 }
 .mobile-ptt-fab--recording {
-  color: #fff;
-  background: #F0505F;
+  color: rgb(255 255 255);
+  background: var(--danger);
   animation: mobile-ptt-pulse 1.1s ease-in-out infinite;
 }
 .mobile-ptt-fab--busy {
-  color: #fff;
-  background: #5C6578;
+  color: rgb(255 255 255);
+  background: var(--tx3);
   cursor: progress;
 }
 .mobile-ptt-fab--error {
-  color: #fff;
-  background: #F0505F;
+  color: rgb(255 255 255);
+  background: var(--danger);
 }
 @keyframes mobile-ptt-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55);
+    box-shadow: 0 0 0 0 rgb(var(--danger-rgb) / 0.55);
   }
   50% {
-    box-shadow: 0 0 0 10px rgba(239, 68, 68, 0);
+    box-shadow: 0 0 0 10px rgb(var(--danger-rgb) / 0);
   }
 }
 /* Reserve space at the right of the input row so the textarea (flex-1) stops
@@ -382,7 +382,7 @@ body,
 }
 .mobile-sheet {
   width: 100%;
-  background: #12182F;
+  background: var(--panel);
   border-top-left-radius: 16px;
   border-top-right-radius: 16px;
   padding: 8px 8px max(env(safe-area-inset-bottom), 12px);
@@ -392,14 +392,14 @@ body,
   text-align: left;
   padding: 14px 16px;
   border-radius: 10px;
-  color: #F8FAFC;
+  color: var(--tx1);
   font-size: 15px;
 }
 .mobile-sheet button:active {
-  background: #171F3A;
+  background: var(--card);
 }
 .mobile-sheet button.danger {
-  color: #FF7A88;
+  color: var(--danger);
 }
 
 /* Key bar docked above the on-screen keyboard (chat mode, BET-259). On
@@ -415,8 +415,8 @@ body,
   align-items: center;
   gap: 6px;
   padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
-  background: #10162B;
-  border-top: 1px solid #253055;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
   position: relative;
   z-index: 40;
   flex: none;
@@ -427,17 +427,17 @@ body,
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #171F3A;
-  border: 1px solid #33406B;
+  background: var(--card);
+  border: 1px solid var(--border-strong);
   border-radius: 7px;
-  color: #F8FAFC;
+  color: var(--tx1);
   font-size: 13px;
   font-weight: 600;
   font-family: ui-monospace, Menlo, monospace;
 }
-.mobile-kbar-key:active { background: #1E2747; }
+.mobile-kbar-key:active { background: var(--raised); }
 .mobile-kbar-key--wide { min-width: 52px; }
-.mobile-kbar-key--danger { color: #F0505F; }
+.mobile-kbar-key--danger { color: var(--danger); }
 .mobile-kbar-spacer { flex: 1; }
 
 /* Spinner rotation for ConnectingScreen. A @keyframes is global (not a
