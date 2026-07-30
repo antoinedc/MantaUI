@@ -244,7 +244,7 @@ If zero drift, stay silent (no digest).
 
 - WORKSPACE = `Better UI` · WORKSPACE_ID = `264c89bb-4659-4570-af7b-5f8daaf87985`
 - RUNTIME = `Opencode (alphaclaw)` (`7ea2dd82-2171-443c-9012-f20364e5edcb`)
-- PM_AGENT = `manta-pm` · REVIEWER = `manta-reviewer` · IMPLEMENTER = `better-ui-dev`
+- PM_AGENT = `manta-pm` · REVIEWER = `manta-reviewer` · IMPLEMENTER = `manta-dev`
 - HUMAN = `@antoinedc`
 - VOLUME = `/mnt/HC_Volume_*/multica_workspaces/264c89bb-4659-4570-af7b-5f8daaf87985`
 - Thresholds: HUNG=15m-silent (fast-HUNG via run-messages; 30m absolute) · QUEUE=10m · RERUN_CAP=2/6h · MAX_ACTIONS/tick=5 · PM_COOLDOWN=15m · DISK_WARN=85% · DISK_CRIT=92% · STALE_WORKDIR=90m · DAILY_SWEEP=9:00 UTC · DAILY_FLAG_CAP=10 · NOOP_RERUN_CAP=1
