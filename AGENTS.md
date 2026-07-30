@@ -881,6 +881,65 @@ peers/notify. Key facts:
   resolveSecret precedence, materializedPath, CRUD round-trip, provideSecret
   writes 0600 + returns path-not-value — 21). Pure/IO-injected logic only.
 
+## Background delegation — MantaUI-native AI tool (`src/server/delegate.mjs`)
+
+The sixth **MantaUI-native opencode tool**: the remote AI can kick off a
+long-running task in a BACKGROUND opencode session (its own git worktree +
+chat-mode tmux window) so the main conversation is NOT blocked, and the
+result is delivered back as a separate later message when the job finishes.
+Same "MantaUI tools" pattern as schedule/serve-page/peers/notify/secrets
+(`docs/manta-tools-scheduler.md`). Key facts:
+
+- **Global opencode tool**, `docs/opencode-tools/delegate.ts`, **COPIED** (not
+  symlinked — same `@opencode-ai/plugin` gotcha) to
+  `~/.config/opencode/tools/delegate.ts`. Three exports → `delegate`,
+  `delegate_list`, `delegate_stop`. Guidance appended to
+  `~/.config/opencode/AGENTS.md` from `docs/opencode-tools/AGENTS.md`
+  (## MantaUI background delegation). **Install/update =
+  `systemctl --user restart opencode-serve`.**
+- **Thin registrar** — `fetch`es manta-server (no SSH hop). `delegate` POSTs
+  `/api/delegate {prompt, model?, sessionID, directory}` → `{ok, id, job}`;
+  `delegate_list` GETs `/api/delegate?sessionID=`; `delegate_stop` POSTs
+  `/api/delegate/:id/stop`. `execute` returns promptly; the engine owns the
+  lifecycle.
+- **Background vs. blocking is the model's choice.** `delegate`'s description
+  steers mode selection: use it for long-running independent work you do NOT
+  need the answer to continue (research, broad refactor, test-suite
+  run-and-fix); use the ordinary built-in `task` tool when you need the
+  answer first. Both modes coexist. Every job costs a full extra model
+  session, so the description forbids speculative fan-out and nested jobs.
+- **The "you do NOT have the result yet" return string is load-bearing.**
+  `delegate` returns immediately with the job's name + id and an explicit
+  reminder that the result is NOT available yet and will arrive as a later
+  message — the model must not report or guess the job's findings before
+  then (this is the exact bug Claude Code had to fix). Do not soften it.
+- **Server-owned engine** (`src/server/delegate.mjs`, dependency-injected
+  pure logic + injected I/O, mirrors `capabilities.mjs`): startJob creates a
+  worktree → new chat-mode window (stamps `@manta-session-id`) → records the
+  job `running` → injects the opening prompt. Completion is detected from
+  the opencode event firehose via `observeEvent` (first idle AFTER a seen
+  busy, per-job `sawBusy` flag — stops a stray pre-prompt idle completing the
+  job instantly). `finishJob` assembles the result (last assistant text +
+  `filesChanged`) and delivers the completion to the parent session through
+  the shared prompt-delivery engine (`src/server/promptDelivery.mjs`), which
+  defers until the parent is idle so a notice never aborts the parent's turn.
+- **Cap of five concurrent `running` jobs** box-wide (`MAX_RUNNING_JOBS`);
+  a sixth is refused with a clear error (do not retry). No `queued` state —
+  a job either starts immediately or is refused. Running jobs older than 30
+  min become `failed "timed out after 30 minutes"` (sweeper). Terminal jobs
+  retained 7 days or 50 records, whichever bites first; the window +
+  worktree are NEVER removed by the sweeper — only by an explicit delete.
+- **No `peers`-style status/inspect tool here** — background jobs are
+  ordinary sibling sessions, so `peers_inspect` already covers "what is that
+  job doing", and the tool description says so. `delegate_list` is for
+  answering a user's "what's running?" question, not for waiting (do NOT
+  poll).
+- Jobs appear in the sidebar as ordinary sessions (their own window).
+- Tests: `src/server/delegate.test.mjs` (startJob undo-on-failure,
+  nesting/cap refusal, observeEvent completion ordering, finishJob result
+  assembly, buildJobPrompt/buildCompletionText, sweep retention, stop/delete
+  — pure/IO-injected logic only, no live HTTP/tmux).
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what

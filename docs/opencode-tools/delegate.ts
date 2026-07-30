@@ -1,0 +1,177 @@
+// manta-native `delegate` tool — global opencode custom tool.
+//
+// Install on the opencode host (the Linux box that runs manta-server + opencode):
+//   mkdir -p ~/.config/opencode/tools
+//   cp <repo>/docs/opencode-tools/delegate.ts ~/.config/opencode/tools/delegate.ts
+// then `systemctl --user restart opencode-serve` so opencode re-scans tools/.
+//
+// This tool is a THIN registrar. It POSTs the request to manta-server
+// (127.0.0.1:8787, same box — no SSH hop), which owns the background job
+// engine (`src/server/delegate.mjs`): it creates a git worktree + a new
+// chat-mode tmux window + opencode session, injects the prompt, detects
+// completion from the opencode event stream, and delivers the result back to
+// THIS (parent) session as a later message — WITHOUT blocking the current
+// reply. execute() returns promptly; manta-server owns the lifecycle.
+//
+// This file is a COPY, never a symlink: opencode resolves a tool's imports
+// relative to the file's REAL path, so a symlink back into the repo (no
+// node_modules there) fails to resolve `@opencode-ai/plugin` and the tool
+// silently never registers. Copy it into ~/.config/opencode/tools/.
+//
+// See docs/opencode-tools/AGENTS.md (## MantaUI background delegation) for the
+// background-vs-blocking rule and the general "manta tools" pattern
+// (docs/manta-tools-scheduler.md).
+
+import { tool } from "@opencode-ai/plugin";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
+
+// manta-server enforces `Authorization: Bearer <box_token>` on every /api route
+// (M1 auth gate — src/server/auth.mjs). These tools run on the SAME box as the
+// same user as manta-server, so they read the token straight from the server's
+// own auth store (~/.manta/auth.json, 0600). Re-read on every call (one
+// tiny local file) so a token rotation never requires an opencode-serve
+// restart. MANTA_BOX_TOKEN env overrides for tests/dev.
+function boxToken(): string | null {
+  const fromEnv = process.env.MANTA_BOX_TOKEN;
+  if (fromEnv) return fromEnv;
+  try {
+    const raw = readFileSync(join(homedir(), ".manta", "auth.json"), "utf-8");
+    const tok = JSON.parse(raw)?.box_token;
+    return typeof tok === "string" && /^[0-9a-f]{32}$/.test(tok) ? tok : null;
+  } catch {
+    return null; // no store yet (auth disabled / first run) → send no header
+  }
+}
+
+function authHeaders(body?: unknown): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (body) headers["content-type"] = "application/json";
+  const tok = boxToken();
+  if (tok) headers["authorization"] = `Bearer ${tok}`;
+  return headers;
+}
+
+const z = tool.schema;
+
+async function call(method: string, path: string, body?: unknown): Promise<any> {
+  const res = await fetch(`${MANTA_SERVER}${path}`, {
+    method,
+    headers: authHeaders(body),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let json: any = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = { error: text };
+  }
+  if (!res.ok) {
+    throw new Error(json?.error || `manta-server ${res.status}`);
+  }
+  return json;
+}
+
+export const delegate = tool({
+  description: [
+    "Start a long-running task as a BACKGROUND job in its own opencode session and",
+    "git worktree, so the main conversation is NOT blocked. Use this when the work",
+    "is long-running, independent, and you do NOT need its answer to continue your",
+    "current reply — research, a broad refactor, an investigation, or a test-suite",
+    "run-and-fix. Use the ordinary built-in `task` tool instead when you need the",
+    "answer before you can carry on, for example finding where something lives so",
+    "you can then edit it. Every background job costs a full extra model session;",
+    "do not fan out speculatively. The job starts with NO knowledge of this",
+    "conversation — put everything it needs in the prompt. It works in its own git",
+    "worktree and commits to its own branch; it never pushes, merges, or touches",
+    "this checkout. This tool returns IMMEDIATELY and you do NOT have its result",
+    "yet — completion arrives on its own as a separate later message; do not",
+    "report or guess the job's findings before then, and do not poll. To see what a",
+    "running job is doing, use `peers_inspect`, not a list call in a loop. At most",
+    "five background jobs may run at once. Do not start a background job from inside",
+    "another background job.",
+  ].join(" "),
+  args: {
+    prompt: z
+      .string()
+      .describe(
+        "The full task prompt for the background job. The job's session has no " +
+          "knowledge of this conversation, so include everything it needs: the " +
+          "goal, the relevant files/paths, constraints, and what 'done' looks like.",
+      ),
+    model: z
+      .string()
+      .optional()
+      .describe(
+        "Optional free-text model id for the job's session, passed straight " +
+          "through to the box. When omitted the job uses the box's default model. " +
+          "Not validated client-side.",
+      ),
+  },
+  async execute(args, context) {
+    const res = await call("POST", "/api/delegate", {
+      prompt: args.prompt,
+      model: args.model,
+      sessionID: context.sessionID,
+      directory: context.directory,
+    });
+    const name = res?.job?.name ?? res?.name ?? "background";
+    const id = res?.job?.id ?? res?.id ?? "";
+    return (
+      `Started background job "${name}" (id ${id}). It runs in its own session and\n` +
+      "worktree; the main conversation is not blocked. You do NOT have its results yet\n" +
+      "— they will arrive as a separate message when it finishes. Do not report or\n" +
+      "guess its findings before then."
+    );
+  },
+});
+
+export const delegate_list = tool({
+  description: [
+    "List the background jobs belonging to THIS session (jobs it started, plus any",
+    "still running). Use this to answer a user's \"what's running?\" / \"what",
+    "background jobs did I start?\" question — NOT to wait for a job to finish.",
+    "Completion arrives on its own as a separate later message, so do not call this",
+    "in a poll loop. Each entry has id, name, status (running/done/failed/stopped),",
+    "branch, worktree, activity, and timestamps. To see what a running job is",
+    "actually doing, use `peers_inspect` on that session.",
+  ].join(" "),
+  args: {},
+  async execute(_args, context) {
+    const res = await call(
+      "GET",
+      `/api/delegate?sessionID=${encodeURIComponent(context.sessionID ?? "")}`,
+    );
+    const jobs = Array.isArray(res?.jobs) ? res.jobs : [];
+    if (jobs.length === 0) return "No background jobs for this session.";
+    const lines = jobs.map((j: any) => {
+      const parts = [`${j?.id ?? ""}`, `"${j?.name ?? ""}"`, j?.status ?? "?"];
+      if (j?.branch) parts.push(`branch=${j.branch}`);
+      if (j?.worktree) parts.push(`worktree`);
+      return parts.join(" ");
+    });
+    return `Background jobs (${jobs.length}):\n` + lines.join("\n");
+  },
+});
+
+export const delegate_stop = tool({
+  description: [
+    "Stop a running background job by id. Aborts the job's opencode session, marks",
+    "it `stopped`, and delivers a short completion notice to this session. The job's",
+    "tmux window and git worktree are kept (use the UI to delete them). Only stops",
+    "jobs that are currently `running`. Find the id with `delegate_list`.",
+  ].join(" "),
+  args: {
+    id: z
+      .string()
+      .describe("The background job id (8-char hex) to stop, from `delegate_list`."),
+  },
+  async execute(args) {
+    await call("POST", `/api/delegate/${encodeURIComponent(args.id)}/stop`);
+    return `Stopped background job "${args.id}".`;
+  },
+});
