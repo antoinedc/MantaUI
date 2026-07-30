@@ -484,13 +484,21 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
     });
   }
 
-  it("aborts and drains at the next completed tool part, not at full idle", async () => {
+  // Shared 4-line setup prologue for the drain tests: install the mock API
+  // with a no-op opencodePrompt, reset the store, mount ChatPanel, and flush.
+  // Returns the harness so each test's `h =` assignment keeps TS narrowing.
+  async function mountDrainHarness(): Promise<Harness> {
     ({ api, bus } = installMockApi({
       opencodePrompt: () => Promise.resolve({ ok: true }),
     }));
     resetStore();
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
+    const harness = mount(<ChatPanel {...PROPS} />);
+    await harness.flush();
+    return harness;
+  }
+
+  it("aborts and drains at the next completed tool part, not at full idle", async () => {
+    h = await mountDrainHarness();
 
     // Turn is already running.
     await emitAndFlush(bus, h, {
@@ -519,12 +527,7 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
   });
 
   it("does not abort on a running (non-boundary) tool part", async () => {
-    ({ api, bus } = installMockApi({
-      opencodePrompt: () => Promise.resolve({ ok: true }),
-    }));
-    resetStore();
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
+    h = await mountDrainHarness();
 
     await emitAndFlush(bus, h, {
       type: "session.status",
@@ -546,12 +549,7 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
   });
 
   it("does not drain the parent queue on a subagent child's tool completion", async () => {
-    ({ api, bus } = installMockApi({
-      opencodePrompt: () => Promise.resolve({ ok: true }),
-    }));
-    resetStore();
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
+    h = await mountDrainHarness();
 
     // Register a subagent child session under the main session.
     await emitAndFlush(bus, h, {
@@ -591,12 +589,7 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
   // effect is the sole owner. If a duplicate is ever reintroduced this test
   // sees two opencodePrompt calls for "second message".
   it("submits a queued message exactly once when it drains (no double send)", async () => {
-    ({ api, bus } = installMockApi({
-      opencodePrompt: () => Promise.resolve({ ok: true }),
-    }));
-    resetStore();
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
+    h = await mountDrainHarness();
 
     // Turn running; queue a second message mid-turn.
     await emitAndFlush(bus, h, {
