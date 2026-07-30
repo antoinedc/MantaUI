@@ -96,9 +96,6 @@ export type TaskContextValue = {
   // (never fetched) — TaskBody shows a spinner or "expand to load" depending
   // on fetchState.
   childMessages: Map<string, OpencodeMessage[]>;
-  // "loading" while the initial fetch is in flight; "error" if it failed
-  // (TaskBody renders a small retry hint). Absent = idle.
-  childFetchState: Map<string, "loading" | "error">;
   // Live child running/idle from session.status / session.idle events.
   // Overrides the parent's stale `state.status` for the running pulse.
   liveStatus: Map<string, "running" | "idle">;

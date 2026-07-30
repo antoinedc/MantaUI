@@ -32,7 +32,6 @@ import {
   buildTitlePromptInput,
   buildTitleInstruction,
   sanitizeGeneratedTitle,
-  hydrateQuestion,
   classifyScrollForPin,
   detectCommandFromText,
   formatBytes,
@@ -234,6 +233,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     retryInfo,
     compactionState,
     rejectAllPendingQuestions,
+    refreshPermissions,
+    refreshQuestions,
   } = useSseBus({
     sessionId,
     cwd,
@@ -323,17 +324,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const agentFileToast = useStore((s) => s.agentFileToast);
   const setAgentFileToast = useStore((s) => s.setAgentFileToast);
   const [agentFileSaving, setAgentFileSaving] = useState(false);
-  // Per-child loading/error state for the lazy fetch on expand.
-  const [childFetchState] = useState<
-    Map<string, "loading" | "error">
-  >(() => new Map());
-  // Ref mirrors of the child-state maps so `toggleTaskExpand` can read
+  // Ref mirror of the child-status map so `toggleTaskExpand` can read
   // current values synchronously without taking them as deps.
-  const childFetchStateRef = useRef<Map<string, "loading" | "error">>(new Map());
   const liveChildStatusRef = useRef<Map<string, "running" | "idle">>(new Map());
-  useEffect(() => {
-    childFetchStateRef.current = childFetchState;
-  }, [childFetchState]);
   useEffect(() => {
     liveChildStatusRef.current = liveChildStatus;
   }, [liveChildStatus]);
@@ -360,33 +353,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       clearInterval(branchPoll);
     };
   }, [sessionId, cwd, refreshBranch]);
-
-  // Refresh permissions list. Called on any permission event.
-  const refreshPermissions = useCallback(() => {
-    window.api
-      .opencodePermissions(sessionId)
-      .then((all) =>
-        setPermissions(all.filter((p) => p.sessionID === sessionId)),
-      )
-      .catch(() => { /* keep last-known */ });
-  }, [sessionId]);
-
-  // Refresh question list. Called on any question event.
-  // `hydrateQuestion` normalizes the server's QuestionRequest shape — in
-  // particular, it copies the server's `id` (the `que_…`) into our `requestId`
-  // field, which is required for the reply handler.
-  const refreshQuestions = useCallback(() => {
-    window.api
-      .opencodeQuestions(sessionId)
-      .then((all) =>
-        setQuestions(
-          all
-            .filter((q) => q.sessionID === sessionId)
-            .map(hydrateQuestion) as QuestionRequest[],
-        ),
-      )
-      .catch(() => { /* keep last-known — v2-only endpoint */ });
-  }, [sessionId]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -1669,7 +1635,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       expanded: expandedTasks,
       toggle: toggleTaskExpand,
       childMessages,
-      childFetchState,
       liveStatus: liveChildStatus,
       showThinking,
     }),
@@ -1677,7 +1642,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       expandedTasks,
       toggleTaskExpand,
       childMessages,
-      childFetchState,
       liveChildStatus,
       showThinking,
     ],
