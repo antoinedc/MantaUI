@@ -338,52 +338,27 @@ export async function deliverWebhook(
 // ---------------------------------------------------------------------------
 
 /**
- * Build the stateful delivery engine used by index.mjs. Tracks per-session busy
- * state from the opencode event stream (observeEvent), owns the rate limiter and
- * the defer-until-idle queue, and exposes deliver() for the public /hook route.
+ * Build the stateful delivery engine used by index.mjs. Owns the per-token
+ * rate limiter and delegates busy-tracking + the defer-until-idle queue to
+ * the SHARED prompt-delivery engine (src/server/promptDelivery.mjs), which
+ * every prompt sender now routes through (BET-375). `deliver` exposes the
+ * webhook route's `{ok, status, queued}` shape (preserving the 202-queued
+ * branch); `observeEvent` is a pass-through to the shared engine so the
+ * opencode pump calls it once for all senders.
  *
- * @param {object} deps { sendPrompt, publish, storePath, now }
+ * @param {object} deps
+ * @param {(args:{sessionId:string, text:string})=>Promise<unknown>} deps.sendPrompt
+ *        Raw opencode injector, used for the non-busy direct-delivery path.
+ * @param {{isBusy:(sessionId:string)=>boolean, observeEvent:(evt:unknown)=>void, deliver:(args:{sessionId:string, text:string})=>Promise<unknown>}} deps.delivery
+ *        The shared prompt-delivery engine — supplies busy state, the defer
+ *        queue (via deliver), and the event observer.
+ * @param {object} deps.publish
+ * @param {string} [deps.storePath]
+ * @param {() => number} [deps.now]
  */
-export function createWebhookEngine({ sendPrompt, publish, storePath, now = () => Date.now() } = {}) {
+export function createWebhookEngine({ sendPrompt, delivery, publish, storePath, now = () => Date.now() } = {}) {
   const path = storePath ?? STORE_PATH;
-  const busy = new Set(); // sessionIDs currently running a turn
-  const pending = new Map(); // sessionID -> [text, ...] queued while busy
   const take = createRateLimiter({ now });
-
-  async function drain(sessionID) {
-    const queue = pending.get(sessionID);
-    if (!queue || queue.length === 0) return;
-    pending.delete(sessionID);
-    for (const text of queue) {
-      try {
-        await sendPrompt({ sessionId: sessionID, text });
-      } catch (e) {
-        console.warn(`[webhook] deferred send for ${sessionID} failed:`, e?.message ?? e);
-      }
-    }
-  }
-
-  // Observe the opencode event firehose to know which sessions are busy. Mirrors
-  // App.tsx's running derivation:
-  //   session.status{status.type:"busy"|"retry"} → busy
-  //   session.status{status.type:"idle"} / session.idle / session.error → idle
-  function observeEvent(evt) {
-    const sid = evt?.properties?.sessionID;
-    if (typeof sid !== "string" || !sid) return;
-    if (evt.type === "session.idle" || evt.type === "session.error") {
-      if (busy.delete(sid)) void drain(sid);
-      else void drain(sid); // also drain if we never saw a busy (defensive)
-      return;
-    }
-    if (evt.type === "session.status") {
-      const t = evt.properties?.status?.type;
-      if (t === "busy" || t === "retry") busy.add(sid);
-      else if (t === "idle") {
-        busy.delete(sid);
-        void drain(sid);
-      }
-    }
-  }
 
   function deliver({ token, rawBody, signatureHeader }) {
     return deliverWebhook(
@@ -395,15 +370,16 @@ export function createWebhookEngine({ sendPrompt, publish, storePath, now = () =
         publish,
         now,
         take,
-        isBusy: (sid) => busy.has(sid),
+        isBusy: (sid) => delivery.isBusy(sid),
         enqueue: (sid, text) => {
-          const q = pending.get(sid) ?? [];
-          q.push(text);
-          pending.set(sid, q);
+          // Route the deferred webhook through the shared engine so the
+          // queued prompt drains in FIFO order alongside any other sender's
+          // deferred prompt for the same session.
+          void delivery.deliver({ sessionId: sid, text });
         },
       },
     );
   }
 
-  return { deliver, observeEvent };
+  return { deliver, observeEvent: delivery.observeEvent };
 }

@@ -65,6 +65,7 @@ import {
 } from "./servePage.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
+import { createPromptDelivery } from "./promptDelivery.mjs";
 import {
   createWebhookEngine,
   createHook,
@@ -160,16 +161,30 @@ const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
 // eslint-disable-next-line no-unused-vars
 const { stop: stopOutboxPoller } = startOutboxPoller(bus, { intervalMs: 3000 });
 
+// Shared prompt-delivery engine (BET-375). ONE instance, shared by every
+// sender that injects a prompt into an opencode session: the scheduled-prompt
+// poller, the capability-job notifier, peer messages, and inbound webhooks.
+// It tracks per-session busy state from the opencode event firehose
+// (observeEvent, called in the pump below) and DEFERS a delivery when its
+// target session is mid-turn — so a scheduled tick, a peer agent, a plugin
+// job finishing, or an external webhook can NEVER abort the user's in-flight
+// model turn. See src/server/promptDelivery.mjs.
+const promptDelivery = createPromptDelivery({
+  sendPrompt: (args) => oc.sendPrompt(args),
+});
+
 // Scheduled-prompt engine: durable jobs in ~/.manta/schedule.json, fired
-// by re-submitting the stored prompt into its opencode session via
-// oc.sendPrompt — the scheduled work then streams into the user's open
-// ChatPanel as a new turn. Server-owned (survives Mac-app-close / reboot).
-// The remote AI creates jobs via the global opencode `schedule` tool →
-// POST /api/schedule (below). See src/server/schedule.mjs + docs/.
+// by re-submitting the stored prompt into its opencode session — the
+// scheduled work then streams into the user's open ChatPanel as a new turn.
+// Server-owned (survives Mac-app-close / reboot). The remote AI creates jobs
+// via the global opencode `schedule` tool → POST /api/schedule (below). See
+// src/server/schedule.mjs + docs/. Delivery routes through the shared
+// prompt-delivery engine so a firing while the session is busy is deferred,
+// not aborted.
 // eslint-disable-next-line no-unused-vars
 const { stop: stopSchedulePoller } = startSchedulePoller(
   {
-    sendPrompt: (args) => oc.sendPrompt(args),
+    sendPrompt: (args) => promptDelivery.deliver(args),
     publish: (evt) => bus.publish(evt),
   },
   { intervalMs: 30000 },
@@ -178,26 +193,28 @@ const { stop: stopSchedulePoller } = startSchedulePoller(
 // Capability-job sweeper: same shape as startSchedulePoller — fails out stale
 // `running` jobs (30 min) and expired `queued` jobs (24h), then prunes terminal
 // jobs past retention/cap. Notifies the originating session on every
-// transition via the SAME oc.sendPrompt leg the scheduler uses, so the user
-// sees a fresh turn when a job times out. See src/server/capabilities.mjs +
-// docs/mantaui-plugins.md §Layer 1.
+// transition, so the user sees a fresh turn when a job times out. See
+// src/server/capabilities.mjs + docs/mantaui-plugins.md §Layer 1.
 // Capability-job completion → opencode session notification. Wired via
 // src/server/capNotifier.mjs (see that file for why the field translation
 // lives in one place). Shared by the sweeper and the /api/cap/:id/done REST
-// handler below — one definition, two callers.
+// handler below — one definition, two callers. The notifier routes through
+// the shared prompt-delivery engine so a completion notice defers while busy.
+const capNotify = (args) => notifyCapSession(args, { deliver: promptDelivery.deliver });
 // eslint-disable-next-line no-unused-vars
 const { stop: stopCapSweeper } = startCapSweeper({
   publish: (evt) => bus.publish(evt),
-  notifySession: notifyCapSession,
+  notifySession: capNotify,
 });
 
 // Inbound webhook engine: external actors POST to the public /hook/<token>
 // route (below) to wake a chat session with an event — the push counterpart to
-// the schedule poller. The engine owns the rate limiter + the defer-until-idle
-// queue, and tracks per-session busy state from the opencode event firehose
-// (observeEvent, called in the pump below). See src/server/webhooks.mjs + docs.
+// the schedule poller. The engine owns the per-token rate limiter and delegates
+// busy-tracking + the defer-until-idle queue to the shared prompt-delivery
+// engine. See src/server/webhooks.mjs + docs.
 const webhookEngine = createWebhookEngine({
   sendPrompt: (args) => oc.sendPrompt(args),
+  delivery: promptDelivery,
   publish: (evt) => bus.publish(evt),
 });
 
@@ -319,8 +336,14 @@ try {
 
 // eslint-disable-next-line no-unused-vars
 const stopOpencodePump = oc.subscribeEvents((evt) => {
-  // Track per-session busy state for the webhook defer-until-idle queue. Cheap,
-  // runs for every event; never throws into the pump.
+  // Track per-session busy state for the defer-until-idle queue shared by all
+  // prompt senders (schedule, capability, peer, webhook). Cheap, runs for
+  // every event; never throws into the pump.
+  try {
+    promptDelivery.observeEvent(evt);
+  } catch (e) {
+    console.warn("[promptDelivery] observeEvent failed:", e?.message ?? e);
+  }
   try {
     webhookEngine.observeEvent(evt);
   } catch (e) {
@@ -1026,7 +1049,7 @@ const handleRequest = async (req, res) => {
             { status: body?.status, result: body?.result, error: body?.error },
             {
               ...BUS_PUBLISH_DEPS,
-              notifySession: notifyCapSession,
+              notifySession: capNotify,
             },
           );
           if (!result.ok) {
@@ -1356,12 +1379,15 @@ const handleRequest = async (req, res) => {
       }
       if (req.method === "POST") {
         const body = await readJsonBody(req);
-        const result = await sendPeerMessage({
-          sessionID: body?.sessionID,
-          directory: body?.directory,
-          target: body?.target,
-          message: body?.message,
-        });
+        const result = await sendPeerMessage(
+          {
+            sessionID: body?.sessionID,
+            directory: body?.directory,
+            target: body?.target,
+            message: body?.message,
+          },
+          { sendPrompt: (args) => promptDelivery.deliver(args) },
+        );
         if (!result.ok) {
           respondJson(res, 400, { error: result.error });
           return;
