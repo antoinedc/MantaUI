@@ -10,6 +10,14 @@ import type { ConnectionState } from "../shared/net/state.js";
 import { clientToken } from "./api/httpApi";
 import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
 
+// Background-delegation jobs, keyed by the job's child opencode session id.
+// The renderer learns which sidebar windows are jobs (and their per-row
+// activity summary) from this slice. It is fed by a single app-level 10s poll
+// in App.tsx / MobileApp.tsx that calls window.api.delegateList() (no-arg =
+// all jobs) — exactly one poll, shared by desktop and mobile. The renderer
+// never computes the activity text; it renders the `activity` field verbatim.
+export type JobRow = { name: string; status: string; activity: string };
+
 // Cap on simultaneous in-flight requests for the startup opencode fan-outs
 // (`replayChatAttention`, `backfillLastMessageTimes`) — see BET-135.
 const OPENCODE_FANOUT_CONCURRENCY = 4;
@@ -179,6 +187,10 @@ type State = {
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
   // sessionName -> windowIndex -> status
   status: Record<string, Record<number, WindowStatusUI>>;
+  // Background-delegation jobs keyed by childSessionID (BET-381). Drives the
+  // sidebar's per-row activity second line (desktop + mobile). Fed by the
+  // single app-level 10s poll — see JobRow comment above.
+  jobs: Record<string, JobRow>;
   // Single global screenshot toast — see ScreenshotToast type comment.
   screenshotToast: ScreenshotToast | null;
   // Single global agent-file toast: a file the remote AI pushed to its outbox.
@@ -265,6 +277,10 @@ type State = {
   // onboarding shell can advance without a full config re-read.
   applyPairing: (p: { serverUrl: string; boxId: string; boxToken: string }) => void;
   applyStatusBatch: (batch: WindowStatus[]) => void;
+  // Replace the jobs slice from an app-level poll (BET-381). Accepts the raw
+  // DelegateJob[] from delegateList() and reduces it to the minimal
+  // {name,status,activity} map keyed by childSessionID.
+  setJobs: (jobs: { childSessionID: string | null; name: string; status: string; activity: string | null }[]) => void;
   // Chat-mode running state driven by opencode SSE (session.status /
   // session.idle / session.error). The PTY-pane poller can't see chat
   // windows' state — the holder runs `sleep infinity`, not claude — so
@@ -369,6 +385,7 @@ export const useStore = create<State>((set, get) => ({
   activeProjectName: null,
   activeWindowByProject: {},
   status: {},
+  jobs: {},
   screenshotToast: null,
   agentFileToast: null,
   updatePrompt: null,
@@ -589,6 +606,20 @@ export const useStore = create<State>((set, get) => ({
         }
       }
       return { status: next };
+    }),
+
+  setJobs: (jobs) =>
+    set(() => {
+      const next: Record<string, JobRow> = {};
+      for (const j of jobs) {
+        if (!j.childSessionID) continue;
+        next[j.childSessionID] = {
+          name: j.name,
+          status: j.status,
+          activity: j.activity ?? "",
+        };
+      }
+      return { jobs: next };
     }),
 
   setChatRunning: (sessionId, running) =>

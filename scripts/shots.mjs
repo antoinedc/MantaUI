@@ -215,11 +215,13 @@ async function prepareShot(page, shot) {
 }
 
 // Common "open the sidebar row for project X" interaction. The desktop
-// sidebar renders project rows as <div class="..."><span>{w.name}</span>...
-// The text content of w.name is unique within the sidebar; we click the
-// ancestor container via a chain of Playwright locators.
+// sidebar renders window rows; the name lives in a `.truncate` span (BET-381
+// split the old `flex-1 truncate` into a `flex-1` flex-col wrapper holding an
+// inner `.truncate` name span + an optional activity line). Clicking the
+// inner name span bubbles to the row div's onClick. `.truncate:has-text`
+// matches both the old single-span shape and the new wrapper+inner shape.
 async function clickDesktopSession(page, windowName) {
-  const row = page.locator(`.flex-1.truncate:has-text("${windowName}")`).first();
+  const row = page.locator(`.truncate:has-text("${windowName}")`).first();
   await row.click();
 }
 

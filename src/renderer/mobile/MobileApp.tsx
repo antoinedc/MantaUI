@@ -191,6 +191,26 @@ export function MobileApp() {
     void useStore.getState().runBackgroundSync();
   }, [chatSessionKey]);
 
+  // Background-delegation jobs (BET-381): identical app-level 10s poll as
+  // App.tsx — feeds the store's `jobs` slice that drives the mobile session
+  // list's per-row activity secondary line. ONE poll, shared shape.
+  useEffect(() => {
+    if (!window.api.delegateList) return;
+    const tick = () => {
+      window.api
+        .delegateList()
+        .then((list) => {
+          useStore.getState().setJobs(Array.isArray(list) ? list : []);
+        })
+        .catch(() => {
+          /* server unreachable — leave the prior jobs map */
+        });
+    };
+    tick();
+    const poll = setInterval(tick, 10_000);
+    return () => clearInterval(poll);
+  }, []);
+
   // Sidebar status for chat-mode windows (mirror of the desktop App.tsx
   // listener; same logic, same store actions). The mobile server's PTY
   // poller has the same blindspot as desktop status.ts — capture-pane

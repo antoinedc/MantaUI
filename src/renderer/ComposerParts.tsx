@@ -15,14 +15,18 @@ import { ALT_KEY } from "./platform";
 // here so its live count is always visible next to the composer.
 export function SessionToolbar({
   scheduleCount,
+  jobsCount,
   onSchedules,
   onSecrets,
   onWebhooks,
+  onJobs,
 }: {
   scheduleCount: number;
+  jobsCount: number;
   onSchedules: () => void;
   onSecrets: () => void;
   onWebhooks: () => void;
+  onJobs: () => void;
 }) {
   return (
     <span className="manta-session-toolbar flex items-center gap-1 text-[10px]">
@@ -46,6 +50,13 @@ export function SessionToolbar({
         title="View / revoke inbound webhooks (external events that wake this session)"
       >
         🪝 webhooks
+      </button>
+      <button
+        onClick={onJobs}
+        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
+        title="View / stop / delete background delegation jobs"
+      >
+        ⚙ jobs{jobsCount > 0 ? ` (${jobsCount})` : ""}
       </button>
     </span>
   );

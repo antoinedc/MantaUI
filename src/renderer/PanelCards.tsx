@@ -11,8 +11,14 @@
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useRef, useState } from "react";
-import type { ScheduledJob, SecretMeta, SecretScope, WebhookMeta } from "../shared/types";
-import { describeCron, describeNextRun } from "./chatUtils";
+import type {
+  DelegateJob,
+  ScheduledJob,
+  SecretMeta,
+  SecretScope,
+  WebhookMeta,
+} from "../shared/types";
+import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
 import { CLAUDE_ORANGE, MetaBadge } from "./chatShared";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
@@ -415,6 +421,157 @@ export const SecretsCard = memo(function SecretsCard({
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+});
+
+// BackgroundJobsCard — pinned card above the composer listing this session's
+// background delegation jobs (started by the AI's `delegate` opencode tool).
+// Each row shows name, status, activity (running jobs only), and for finished
+// jobs the branch + files-changed count. Buttons: stop (running), delete
+// (terminal), open (all — selects the job's window in the sidebar). Mirrors
+// ScheduledTasksCard exactly: same wrapper markup, same deferred
+// click-outside listener, same memoisation. See docs/manta-tools-delegate.md
+// + src/server/delegate.mjs.
+export const BackgroundJobsCard = memo(function BackgroundJobsCard({
+  jobs,
+  error,
+  onStop,
+  onDelete,
+  onOpen,
+  onClose,
+}: {
+  jobs: DelegateJob[];
+  error: string | null;
+  onStop: (id: string) => void;
+  // onDelete returns the engine's result so the card can show the inline
+  // dirty-worktree refusal message ONLY when delete was actually refused
+  // ({ok:false, reason:"dirty"}), not on every click.
+  onDelete: (id: string) => Promise<{ ok: boolean; reason?: string } | void> | void;
+  onOpen: (job: DelegateJob) => void;
+  onClose: () => void;
+}) {
+  // Click-outside-to-dismiss — same guard as ScheduledTasksCard so a mis-tap
+  // on the close button doesn't land on a row's stop/delete.
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  // Per-row dirty-refusal message: when delete is refused because the
+  // worktree has uncommitted changes, the engine returns {ok:false,
+  // reason:"dirty"} and keeps the record. We surface an inline message on
+  // that row rather than a toast. No force option (by design).
+  const [dirtyRow, setDirtyRow] = useState<string | null>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (cardRef.current && !cardRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    const t = setTimeout(() => document.addEventListener("mousedown", onDown), 0);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [onClose]);
+  const runningCount = jobs.filter((j) => j.status === "running").length;
+  return (
+    <div
+      ref={cardRef}
+      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color: CLAUDE_ORANGE }}>⚙</span>
+        <span className="text-text">Background jobs</span>
+        {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
+        <button
+          onClick={onClose}
+          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted text-[14px]"
+          title="Close (or click outside)"
+        >
+          ×
+        </button>
+      </div>
+      {error ? (
+        <div className="text-red-400 break-words">{error}</div>
+      ) : jobs.length === 0 ? (
+        <div className="text-text-muted">
+          No background jobs in this session. Ask the agent to delegate
+          long-running work (e.g. “run the test suite and fix failures in the
+          background”).
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1.5 max-h-[40vh] overflow-y-auto">
+          {jobs.map((j) => {
+            const terminal = j.status !== "running";
+            return (
+              <div key={j.id} className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => onOpen(j)}
+                      className="text-text truncate hover:underline text-left"
+                      title={`Open “${j.name}” in the sidebar`}
+                    >
+                      {j.name}
+                    </button>
+                    <MetaBadge
+                      tone={
+                        j.status === "failed" || j.status === "stopped"
+                          ? "danger"
+                          : "neutral"
+                      }
+                      title={`Status: ${j.status}`}
+                    >
+                      {j.status}
+                    </MetaBadge>
+                  </div>
+                  <div className="text-text-faint text-[11px] truncate">
+                    {j.status === "running"
+                      ? j.activity || "running…"
+                      : formatJobSummary(j)}
+                  </div>
+                  {dirtyRow === j.id && (
+                    <div className="text-amber-400 text-[11px]">
+                      worktree has uncommitted changes — open it and commit or
+                      discard first
+                    </div>
+                  )}
+                </div>
+                {j.status === "running" && (
+                  <button
+                    onClick={() => onStop(j.id)}
+                    className="shrink-0 px-2 py-0.5 rounded text-amber-400 hover:bg-amber-500/10 border border-amber-500/30 text-[11px]"
+                    title="Stop this job (aborts the session; window + worktree kept)"
+                  >
+                    Stop
+                  </button>
+                )}
+                {terminal && (
+                  <button
+                    onClick={async () => {
+                      const res = await onDelete(j.id);
+                      // Show the inline refusal ONLY when the engine kept the
+                      // record because the worktree was dirty. A successful
+                      // delete removes the row on the next refresh, so this
+                      // never flashes on success.
+                      if (res && res.ok === false && res.reason === "dirty") {
+                        setDirtyRow(j.id);
+                        setTimeout(() => setDirtyRow((r) => (r === j.id ? null : r)), 6000);
+                      }
+                    }}
+                    className="shrink-0 px-2 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30 text-[11px]"
+                    title="Delete this job (removes the window + worktree; refuses a dirty worktree)"
+                  >
+                    Delete
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {runningCount === 0 && jobs.length > 0 && (
+        <div className="text-text-faint text-[11px] mt-1">No running jobs.</div>
       )}
     </div>
   );

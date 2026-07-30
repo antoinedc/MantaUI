@@ -451,6 +451,20 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                     >
                       Webhooks
                     </button>
+                    <button
+                      onClick={() => {
+                        // Open the BackgroundJobsCard inside ChatPanel via the
+                        // window CustomEvent bridge (mirror of manta-open-schedules).
+                        window.dispatchEvent(
+                          new CustomEvent("manta-open-jobs", {
+                            detail: { sessionId: sid },
+                          }),
+                        );
+                        closeSheet();
+                      }}
+                    >
+                      Background jobs
+                    </button>
                     <button className="danger" onClick={deleteSession}>
                       Delete session
                     </button>

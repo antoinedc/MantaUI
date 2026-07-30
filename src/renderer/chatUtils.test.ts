@@ -75,6 +75,8 @@ import {
   AUTH_PROVIDER_LABELS,
   terminalMountKey,
   registerMountedTerminal,
+  isJobRow,
+  formatJobSummary,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -3561,5 +3563,65 @@ describe("authErrorAdvice", () => {
     expect(AUTH_PROVIDER_LABELS.anthropic).toBe("Claude");
     expect(AUTH_PROVIDER_LABELS.openai).toBe("Codex");
     expect(AUTH_PROVIDER_LABELS["kimi-for-coding"]).toBe("Kimi");
+  });
+});
+
+describe("isJobRow", () => {
+  const jobs = {
+    ses_a: { name: "fix-login", status: "running", activity: "editing auth.ts" },
+    ses_b: { name: "add-tests", status: "done", activity: "" },
+  };
+
+  it("returns true when the window's opencodeSessionId is in the jobs map", () => {
+    expect(isJobRow(jobs, "ses_a")).toBe(true);
+    expect(isJobRow(jobs, "ses_b")).toBe(true);
+  });
+
+  it("returns false for an unrelated session id", () => {
+    expect(isJobRow(jobs, "ses_other")).toBe(false);
+  });
+
+  it("returns false when opencodeSessionId is null (a claude-TUI window)", () => {
+    expect(isJobRow(jobs, null)).toBe(false);
+  });
+
+  it("returns false when opencodeSessionId is undefined", () => {
+    expect(isJobRow(jobs, undefined)).toBe(false);
+  });
+
+  it("returns false for an empty jobs map", () => {
+    expect(isJobRow({}, "ses_a")).toBe(false);
+  });
+});
+
+describe("formatJobSummary", () => {
+  it("formats branch + files-changed count for a finished job with a worktree", () => {
+    expect(
+      formatJobSummary({ branch: "fix-login", filesChanged: 3, worktree: "/tmp/wt" }),
+    ).toBe("fix-login · 3 files changed");
+  });
+
+  it("uses the singular 'file' for a single changed file", () => {
+    expect(
+      formatJobSummary({ branch: "fix-login", filesChanged: 1, worktree: "/tmp/wt" }),
+    ).toBe("fix-login · 1 file changed");
+  });
+
+  it("omits the branch when there is no worktree (ran in the parent cwd)", () => {
+    expect(formatJobSummary({ branch: null, filesChanged: 5, worktree: null })).toBe(
+      "5 files changed",
+    );
+  });
+
+  it("omits the branch when worktree is set but branch is null", () => {
+    expect(formatJobSummary({ branch: null, filesChanged: 2, worktree: "/tmp/wt" })).toBe(
+      "2 files changed",
+    );
+  });
+
+  it("treats null filesChanged as 0", () => {
+    expect(
+      formatJobSummary({ branch: "fix-login", filesChanged: null, worktree: "/tmp/wt" }),
+    ).toBe("fix-login · 0 files changed");
   });
 });
