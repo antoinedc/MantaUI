@@ -789,16 +789,16 @@ main() {
   # override). The `:-` default keeps the test safe when the var is unset.
   if [ -f "$OPENCODE_CONFIG" ]; then
     if [ -n "${MANTA_CLAUDE_AUTH_PLUGIN:-}" ]; then
-      log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — merging into existing $OPENCODE_CONFIG…"
+      log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — merging into existing ${OPENCODE_CONFIG}…"
     else
-      log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — merging into existing $OPENCODE_CONFIG…"
+      log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — merging into existing ${OPENCODE_CONFIG}…"
     fi
     existing="$(cat "$OPENCODE_CONFIG" 2>/dev/null || true)"
   else
     if [ -n "${MANTA_CLAUDE_AUTH_PLUGIN:-}" ]; then
-      log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — no existing $OPENCODE_CONFIG, creating…"
+      log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — no existing ${OPENCODE_CONFIG}, creating…"
     else
-      log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — no existing $OPENCODE_CONFIG, creating…"
+      log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — no existing ${OPENCODE_CONFIG}, creating…"
     fi
     existing=""
   fi

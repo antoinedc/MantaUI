@@ -1428,6 +1428,37 @@ test("install.sh guards every MANTA_CLAUDE_AUTH_PLUGIN use against set -u (BET-3
   );
 });
 
+test("install.sh brace-delimits every $VAR adjacent to the … ellipsis (BET-319 bash 3.2 regression)", () => {
+  // macOS ships bash 3.2, which under a UTF-8 locale absorbs the multibyte
+  // `…` (U+2026) bytes into the variable-name lookup when `$VAR` is directly
+  // followed by `…` with no delimiter. The resulting name (`VAR…`) is unset
+  // → `set -u` fires → installer crashes on every macOS install. `bash -n`
+  // doesn't catch this (parse-only, locale-independent). The fix is to
+  // brace-delimit: `${VAR}…`. Lines 825/854 already follow this convention;
+  // this test pins it for the whole file.
+  //
+  // We flag any non-comment line where `$IDENT` (not `${IDENT}`) is
+  // immediately followed by `…` — i.e. a bare expansion abutting the
+  // ellipsis with no brace or other delimiter between them.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const lines = src.split("\n");
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*#/.test(line)) continue; // skip comment lines
+    // Match `$IDENT…` where IDENT is a bash identifier (letters, digits,
+    // underscore) and the `$` is NOT immediately followed by `{`. The `…`
+    // must directly follow the identifier with no intervening delimiter.
+    const bare = /\$([A-Za-z_][A-Za-z0-9_]*)…/.test(line);
+    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `install.sh has bare \$VAR adjacent to the multibyte … ellipsis (bash 3.2 set -u crash):\n${offenders.join("\n")}`,
+  );
+});
+
 test("install.sh defines detect_tailscale_ip BEFORE every call site (BET-267 review regression)", () => {
   // Regression guard for the BET-267 review finding: bash does NOT forward-
   // reference function definitions within the same function body, so a
