@@ -370,7 +370,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                   className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
                 />
                 {renameError && (
-                  <div className="text-xs text-red-400">{renameError}</div>
+                  <div className="text-xs text-danger">{renameError}</div>
                 )}
                 <div className="flex gap-2">
                   <button

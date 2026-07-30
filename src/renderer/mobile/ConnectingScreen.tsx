@@ -51,7 +51,7 @@ export function ConnectingScreen({ host, failed, onRetry, onCancel }: Props) {
             style={{
               width: 46,
               height: 46,
-              background: "linear-gradient(140deg,#FF7A88,#7a1f2a)",
+              background: "linear-gradient(140deg, var(--danger), color-mix(in srgb, var(--danger) 35%, black))",
             }}
             aria-hidden
           >
@@ -86,8 +86,8 @@ export function ConnectingScreen({ host, failed, onRetry, onCancel }: Props) {
             style={{
               width: 46,
               height: 46,
-              background: "linear-gradient(140deg,#5A88FF,#1740AE)",
-              boxShadow: "0 6px 18px rgba(90,136,255,.3)",
+              background: "linear-gradient(140deg, var(--accent), var(--accent-soft))",
+              boxShadow: "0 6px 18px rgb(var(--accent-rgb) / 0.3)",
             }}
             aria-hidden
           >
@@ -115,10 +115,10 @@ export function ConnectingScreen({ host, failed, onRetry, onCancel }: Props) {
         {host && (
           <div className="inline-flex items-center gap-2 rounded-full bg-bg-soft border border-border px-3.5 py-1.5 text-xs text-text-muted">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <rect x="4" y="4" width="16" height="7" rx="1.5" stroke="#A7B1C4" strokeWidth="1.6" />
-              <rect x="4" y="14" width="16" height="6" rx="1.5" stroke="#A7B1C4" strokeWidth="1.6" />
-              <circle cx="7.5" cy="7.5" r=".9" fill="#A7B1C4" />
-              <circle cx="7.5" cy="17" r=".9" fill="#A7B1C4" />
+              <rect x="4" y="4" width="16" height="7" rx="1.5" stroke="var(--tx2)" strokeWidth="1.6" />
+              <rect x="4" y="14" width="16" height="6" rx="1.5" stroke="var(--tx2)" strokeWidth="1.6" />
+              <circle cx="7.5" cy="7.5" r=".9" fill="var(--tx2)" />
+              <circle cx="7.5" cy="17" r=".9" fill="var(--tx2)" />
             </svg>
             direct <span className="font-mono text-[11px] text-text-faint">{host}</span>
           </div>
@@ -151,7 +151,7 @@ function Spinner() {
         className="absolute inset-0 rounded-full"
         style={{
           border: "3px solid transparent",
-          borderTopColor: "#5A88FF",
+          borderTopColor: "var(--accent)",
           animation: "manta-spin 0.9s linear infinite",
         }}
         aria-hidden
@@ -161,7 +161,7 @@ function Spinner() {
         style={{
           inset: 10,
           border: "3px solid transparent",
-          borderRightColor: "rgba(90,136,255,.4)",
+          borderRightColor: "rgb(var(--accent-rgb) / 0.4)",
           animation: "manta-spin 1.4s linear infinite reverse",
         }}
         aria-hidden

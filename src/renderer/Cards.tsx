@@ -11,7 +11,6 @@
 import { useState } from "react";
 import type { PermissionRequest, QuestionRequest } from "../shared/types";
 import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
-import { CLAUDE_ORANGE } from "./chatShared";
 
 // ===== Retry card =====
 
@@ -30,10 +29,10 @@ export function RetryCard({
   return (
     <div
       className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
-      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: CLAUDE_ORANGE }}>↻</span>
+        <span style={{ color: "var(--accent)" }}>↻</span>
         <span className="text-text">{headline}</span>
         {info.attempt > 0 && (
           <span className="text-text-faint">· attempt {info.attempt}</span>
@@ -74,10 +73,10 @@ export function CompactionCard({
   return (
     <div
       className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
-      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: CLAUDE_ORANGE }}>
+        <span style={{ color: "var(--accent)" }}>
           <span className={isRunning ? "inline-block animate-pulse" : "inline-block"}>
             ✻
           </span>
@@ -133,10 +132,10 @@ export function PermissionCard({
   return (
     <div
       className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
-      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+      style={{ borderColor: "rgb(var(--warn-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: CLAUDE_ORANGE }}>✻</span>
+        <span style={{ color: "var(--warn)" }}>✻</span>
         <span className="text-text">
           {perm.fromJobName ? `${perm.fromJobName} · ` : ""}Permission needed
         </span>
@@ -156,7 +155,7 @@ export function PermissionCard({
           <button
             onClick={() => onReply("always")}
             className="px-2 py-0.5 rounded text-bg"
-            style={{ backgroundColor: CLAUDE_ORANGE }}
+            style={{ backgroundColor: "var(--warn)" }}
             title={`Always allow ${alwaysScope}`}
           >
             Always allow {alwaysScope}
@@ -164,7 +163,7 @@ export function PermissionCard({
         )}
         <button
           onClick={() => onReply("reject")}
-          className="px-2 py-0.5 rounded text-red-400 hover:bg-red-500/10 border border-red-500/30"
+          className="px-2 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30"
         >
           Reject
         </button>
@@ -221,10 +220,10 @@ export function QuestionCard({
   return (
     <div
       className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
-      style={{ borderColor: CLAUDE_ORANGE + "55" }}
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-2">
-        <span style={{ color: CLAUDE_ORANGE }}>?</span>
+        <span style={{ color: "var(--accent)" }}>?</span>
         <span className="text-text font-medium">
           {request.fromJobName ? `${request.fromJobName} · ` : ""}Question
         </span>
@@ -259,7 +258,7 @@ export function QuestionCard({
                         ? "text-bg border-transparent"
                         : "text-text border-border-strong hover:bg-bg-soft",
                     ].join(" ")}
-                    style={isSelected ? { backgroundColor: CLAUDE_ORANGE } : undefined}
+                    style={isSelected ? { backgroundColor: "var(--accent)" } : undefined}
                   >
                     {opt.label}
                   </button>
@@ -311,7 +310,7 @@ export function QuestionCard({
           onClick={handleSubmit}
           disabled={!canSubmit}
           className="px-2 py-0.5 rounded text-bg disabled:opacity-40"
-          style={{ backgroundColor: CLAUDE_ORANGE }}
+          style={{ backgroundColor: "var(--accent)" }}
         >
           Submit
         </button>

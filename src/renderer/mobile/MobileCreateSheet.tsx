@@ -272,7 +272,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
                 </li>
               ))}
             </ul>
-            {error && <div className="text-xs text-red-400">{error}</div>}
+            {error && <div className="text-xs text-danger">{error}</div>}
             <div className="flex flex-col gap-2">
               <button
                 onClick={() => createProject("all")}
@@ -351,7 +351,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
               </div>
             )}
 
-            {error && <div className="text-xs text-red-400">{error}</div>}
+            {error && <div className="text-xs text-danger">{error}</div>}
 
             <div className="flex flex-col gap-2 pt-1">
               <button

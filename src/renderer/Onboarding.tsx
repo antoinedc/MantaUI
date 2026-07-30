@@ -56,7 +56,7 @@ import { installHttpTransport } from "./transportInstall";
 import { ArrowRight, CheckIcon } from "./onboardingUi";
 import mantaMark from "./assets/manta-mark-128.png";
 
-const ACCENT = "#5A88FF"; // matches the app's Tailwind `accent` token
+const ACCENT = "var(--accent)"; // the app's accent token
 
 // Progress rail — one dot + connector per step. Reads every numbered step as
 // completed on the success screen.
@@ -73,22 +73,22 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
               {i > 0 && (
                 <div
                   className="h-0.5 w-12 sm:w-16 transition-colors"
-                  style={{ background: step <= activeIdx ? ACCENT : "#253055" }}
+                  style={{ background: step <= activeIdx ? ACCENT : "var(--border)" }}
                 />
               )}
               <div
                 className="w-8 h-8 rounded-full flex items-center justify-center text-[13px] font-semibold transition-all shrink-0"
                 style={
                   state === "inactive"
-                    ? { background: "#171F3A", color: "#5C6578", border: "1.5px solid #253055" }
+                    ? { background: "var(--card)", color: "var(--tx4)", border: "1.5px solid var(--border)" }
                     : state === "active"
                       ? {
                           background: ACCENT,
-                          color: "#0B1020",
+                          color: "var(--on-accent)",
                           border: `1.5px solid ${ACCENT}`,
                           boxShadow: `0 0 0 4px rgba(124,156,255,0.15)`,
                         }
-                      : { background: ACCENT, color: "#0B1020", border: `1.5px solid ${ACCENT}` }
+                      : { background: ACCENT, color: "var(--on-accent)", border: `1.5px solid ${ACCENT}` }
                 }
               >
                 {state === "completed" ? <CheckIcon className="w-3.5 h-3.5" /> : step}
@@ -104,7 +104,7 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
             <div
               key={step}
               className="text-xs text-center min-w-[60px]"
-              style={{ color: isActive ? "#A7B1C4" : "#5C6578", fontWeight: isActive ? 500 : 400 }}
+              style={{ color: isActive ? "var(--tx2)" : "var(--tx4)", fontWeight: isActive ? 500 : 400 }}
             >
               {STEP_LABELS[step]}
             </div>
@@ -303,7 +303,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           <div
             role="alert"
             className="mt-6 rounded-md border px-4 py-3 text-sm"
-            style={{ borderColor: "#FF7A88", color: "#FF7A88" }}
+            style={{ borderColor: "var(--danger)", color: "var(--danger)" }}
           >
             {verifyError}
           </div>
@@ -323,7 +323,7 @@ function SuccessPanel({ onOpen }: { onOpen: () => void }) {
         className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5"
         style={{ background: "rgba(34,197,94,0.1)" }}
       >
-        <CheckIcon className="w-7 h-7 text-green-400" />
+        <CheckIcon className="w-7 h-7 text-ok" />
       </div>
       <h2 className="text-2xl font-semibold mb-2">You're all set!</h2>
       <p className="text-sm text-text-muted leading-relaxed max-w-sm mx-auto mb-7">

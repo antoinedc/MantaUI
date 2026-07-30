@@ -10,6 +10,7 @@ import {
   formatDuration,
   formatClockTime,
   ctxStageColor,
+  cssVar,
   filterCommands,
   dedupeAgainstBuiltins,
   ASSUMED_CONTEXT_TOKENS,
@@ -266,24 +267,24 @@ describe("formatClockTime", () => {
 // ===== ctxStageColor =====
 
 describe("ctxStageColor", () => {
-  it("returns green below 50%", () => {
-    expect(ctxStageColor(0)).toBe("#22C79A");
-    expect(ctxStageColor(49)).toBe("#22C79A");
+  it("returns ok below 50%", () => {
+    expect(ctxStageColor(0)).toBe(cssVar("--ok"));
+    expect(ctxStageColor(49)).toBe(cssVar("--ok"));
   });
 
-  it("returns yellow from 50% to 74%", () => {
-    expect(ctxStageColor(50)).toBe("#F7C15A");
-    expect(ctxStageColor(74)).toBe("#F7C15A");
+  it("returns warn from 50% to 74%", () => {
+    expect(ctxStageColor(50)).toBe(cssVar("--warn"));
+    expect(ctxStageColor(74)).toBe(cssVar("--warn"));
   });
 
-  it("returns orange from 75% to 89%", () => {
-    expect(ctxStageColor(75)).toBe("#F0A934");
-    expect(ctxStageColor(89)).toBe("#F0A934");
+  it("returns warn from 75% to 89%", () => {
+    expect(ctxStageColor(75)).toBe(cssVar("--warn"));
+    expect(ctxStageColor(89)).toBe(cssVar("--warn"));
   });
 
-  it("returns red from 90% and above", () => {
-    expect(ctxStageColor(90)).toBe("#F0505F");
-    expect(ctxStageColor(100)).toBe("#F0505F");
+  it("returns danger from 90% and above", () => {
+    expect(ctxStageColor(90)).toBe(cssVar("--danger"));
+    expect(ctxStageColor(100)).toBe(cssVar("--danger"));
   });
 });
 

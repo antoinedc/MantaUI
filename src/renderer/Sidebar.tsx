@@ -742,7 +742,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                     e.stopPropagation();
                     setConfirmDeleteFor({ kind: "project", project: p.tmuxSession });
                   }}
-                  className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-red-400 leading-none"
+                  className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none"
                   title="Close project"
                 >
                   ×
@@ -834,7 +834,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                                     },
                               );
                             }}
-                            className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-red-400 text-xs leading-none"
+                            className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger text-xs leading-none"
                             title="Close session"
                           >
                             ×
@@ -996,10 +996,10 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
           const cls = classifyCacheAge(status.lastMessageAt!, now, ttlMs);
           const color =
             cls === "fresh"
-              ? "text-emerald-400/70"
+              ? "text-ok/70"
               : cls === "aging"
-                ? "text-amber-400/80"
-                : "text-red-400/80";
+                ? "text-warn/80"
+                : "text-danger/80";
           // Stale ages are low-signal for old idle sessions: hide by default,
           // reveal on row hover. Reuses the same group-hover pattern as the
           // row's close button (the row <div> carries the `group` class).
@@ -1026,10 +1026,10 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
           : "Waiting on permission — click to approve or deny";
       return (
         <span
-          className="flex items-center gap-0.5 text-[10px] text-red-400 leading-none"
+          className="flex items-center gap-0.5 text-[10px] text-danger leading-none"
           title={tooltip}
         >
-          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+          <span className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />
           <span className="font-bold tabular-nums">{glyph}</span>
         </span>
       );
@@ -1042,7 +1042,7 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
         <span className="flex items-center gap-1 leading-none">
           {ageLabel}
           <span
-            className="w-1.5 h-1.5 rounded-full bg-amber-400"
+            className="w-1.5 h-1.5 rounded-full bg-warn"
             title="Finished — click to view"
           />
         </span>
@@ -1122,7 +1122,7 @@ function ConfirmDelete({
             e.stopPropagation();
             onKill();
           }}
-          className="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-300 hover:bg-red-500/30"
+          className="text-xs px-2 py-0.5 rounded bg-danger-bg text-danger hover:bg-danger-bg"
           title="kill the tmux session/window on the remote"
         >
           Kill on server
@@ -1169,7 +1169,7 @@ function ConfirmWorktreeDirty({
             e.stopPropagation();
             onRemove();
           }}
-          className="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-300 hover:bg-red-500/30"
+          className="text-xs px-2 py-0.5 rounded bg-danger-bg text-danger hover:bg-danger-bg"
           title="git worktree remove --force (discards uncommitted changes)"
         >
           Remove

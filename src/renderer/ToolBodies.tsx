@@ -8,7 +8,7 @@
 
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import { resolveToolOutput } from "./chatUtils";
-import { CLAUDE_ORANGE, type ToolState } from "./chatShared";
+import { type ToolState } from "./chatShared";
 import { CopyButton } from "./CopyButton";
 
 // Renders a tool's `output` string. If it looks like a unified diff (starts
@@ -192,7 +192,7 @@ export function TodoWriteBody({ state }: { state: ToolState }) {
                 : "text-text-muted";
         return (
           <div key={i} className={`flex gap-2 ${cls}`}>
-            <span className="select-none shrink-0" style={{ color: status === "in_progress" ? CLAUDE_ORANGE : undefined }}>
+            <span className="select-none shrink-0" style={{ color: status === "in_progress" ? "var(--warn)" : undefined }}>
               {icon}
             </span>
             <span className="flex-1 whitespace-pre-wrap break-words">{content}</span>
@@ -213,7 +213,7 @@ export function WebFetchBody({ state }: { state: ToolState }) {
       {url && (
         <div className="text-text-faint break-all">
           <span className="select-none">→ </span>
-          <span style={{ color: CLAUDE_ORANGE }}>{url}</span>
+          <span style={{ color: "var(--accent-tx)" }}>{url}</span>
         </div>
       )}
       {output && <CollapsibleCode body={output} maxLines={15} />}
@@ -322,16 +322,16 @@ export function UnifiedDiff({ text }: { text: string }) {
         if (line.startsWith("+") && !line.startsWith("+++")) {
           // Saturated green block. Text stays the same bright cream as body
           // copy — color comes from the bg, not the text.
-          bg = "bg-green-700/55";
-          signCls = "text-green-300";
-          lnCls = "text-green-300/70";
+          bg = "bg-[var(--diff-add)]";
+          signCls = "text-ok";
+          lnCls = "text-ok/70";
           sign = "+";
           body = line.slice(1);
           ln = newLine++;
         } else if (line.startsWith("-") && !line.startsWith("---")) {
-          bg = "bg-red-700/55";
-          signCls = "text-red-300";
-          lnCls = "text-red-300/70";
+          bg = "bg-[var(--diff-del)]";
+          signCls = "text-danger";
+          lnCls = "text-danger/70";
           sign = "−";
           body = line.slice(1);
           ln = oldLine++;

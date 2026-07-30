@@ -107,8 +107,8 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
             style={{
               width: 56,
               height: 56,
-              background: "linear-gradient(140deg, #5A88FF, #1740AE)",
-              boxShadow: "0 8px 24px rgba(90,136,255,.25)",
+              background: "linear-gradient(140deg, var(--accent), var(--accent-soft))",
+              boxShadow: "0 8px 24px rgb(var(--accent-rgb) / 0.25)",
             }}
             aria-hidden
           >
@@ -181,7 +181,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                 width: 40,
                 height: 4,
                 borderRadius: 3,
-                background: "#33406B",
+                background: "var(--border-strong)",
                 margin: "6px auto 10px",
               }}
             />
@@ -274,14 +274,14 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                       }
                       className="w-full rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 text-sm outline-none focus:border-accent disabled:opacity-60"
                       style={{
-                        borderColor: serverUrlInvalid ? "#FF7A88" : undefined,
+                        borderColor: serverUrlInvalid ? "var(--danger)" : undefined,
                       }}
                     />
                     {serverUrlInvalid && (
                       <div
                         id="mobile-setup-server-url-err"
                         role="alert"
-                        className="text-red-400 text-xs"
+                        className="text-danger text-xs"
                       >
                         {SERVER_URL_ERROR}
                       </div>
@@ -291,7 +291,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
               </div>
 
               {error && (
-                <div role="alert" className="text-red-400 text-sm">
+                <div role="alert" className="text-danger text-sm">
                   {error}
                 </div>
               )}
@@ -319,18 +319,18 @@ function PairStatusBanner({
   const map = {
     pairing: {
       text: "QR scanned. Connecting…",
-      color: "#5A88FF",
-      bg: "rgba(90,136,255,.12)",
+      color: "var(--accent)",
+      bg: "var(--accent-bg)",
     },
     failed: {
       text: "Pairing failed. The code may have expired. Generate a new one and scan again.",
-      color: "#FF7A88",
-      bg: "rgba(255,122,136,.10)",
+      color: "var(--danger)",
+      bg: "var(--danger-bg)",
     },
     invalid: {
       text: "That QR code was not recognized. Make sure you scanned the pairing QR from the desktop app.",
-      color: "#FF7A88",
-      bg: "rgba(255,122,136,.10)",
+      color: "var(--danger)",
+      bg: "var(--danger-bg)",
     },
   }[status];
   return (

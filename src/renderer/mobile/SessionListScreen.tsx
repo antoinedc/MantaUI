@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useStore } from "../store";
 import type { Project, TmuxWindow } from "../../shared/types";
 import { MobileCreateSheet } from "./MobileCreateSheet";
-import { classifyCacheAge, formatAge, isJobRow, selectCacheTtlMs } from "../chatUtils";
+import { classifyCacheAge, formatAge, isJobRow, selectCacheTtlMs, cssVar } from "../chatUtils";
 import { nowMs } from "../clock";
 
 type Props = {
@@ -15,9 +15,9 @@ type Props = {
 };
 
 function dotColor(running: boolean, attention: boolean): string {
-  if (attention) return "#F0A934";
-  if (running) return "#22C79A";
-  return "#5C6578";
+  if (attention) return cssVar("--warn");
+  if (running) return cssVar("--ok");
+  return cssVar("--tx4");
 }
 
 function typeLabel(w: TmuxWindow, running: boolean, attention: boolean): string {
@@ -30,9 +30,9 @@ function typeLabel(w: TmuxWindow, running: boolean, attention: boolean): string 
 // BET-119: same color mapping as the desktop Sidebar's StatusIndicator —
 // keep the class strings in sync if either changes.
 function ageColorClass(cls: "fresh" | "aging" | "stale"): string {
-  if (cls === "fresh") return "text-emerald-400/70";
-  if (cls === "aging") return "text-amber-400/80";
-  return "text-red-400/80";
+  if (cls === "fresh") return "text-ok/70";
+  if (cls === "aging") return "text-warn/80";
+  return "text-danger/80";
 }
 
 function SessionRow({

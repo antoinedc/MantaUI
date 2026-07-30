@@ -21,7 +21,26 @@ export default {
         accent: {
           DEFAULT: "rgb(var(--accent-rgb) / <alpha-value>)",
           soft: "rgb(var(--accent-soft-rgb) / <alpha-value>)",
+          tx: "var(--accent-tx)",
+          bg: "var(--accent-bg)",
         },
+        ok: {
+          DEFAULT: "rgb(var(--ok-rgb) / <alpha-value>)",
+          bg: "var(--ok-bg)",
+        },
+        warn: {
+          DEFAULT: "rgb(var(--warn-rgb) / <alpha-value>)",
+          bg: "var(--warn-bg)",
+        },
+        danger: {
+          DEFAULT: "rgb(var(--danger-rgb) / <alpha-value>)",
+          bg: "var(--danger-bg)",
+        },
+        info: {
+          DEFAULT: "rgb(var(--info-rgb) / <alpha-value>)",
+        },
+        inset: "var(--inset)",
+        raised: "var(--raised)",
       },
       fontFamily: {
         mono: ["JetBrains Mono", "SF Mono", "Menlo", "Consolas", "monospace"],

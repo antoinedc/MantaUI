@@ -7,7 +7,7 @@
 
 import { useRef } from "react";
 import type { VoiceMode, VoicePhase } from "./voice";
-import { CLAUDE_ORANGE, type Attachment, type TypeaheadRow } from "./chatShared";
+import { type Attachment, type TypeaheadRow } from "./chatShared";
 import { ALT_KEY } from "./platform";
 
 // SessionToolbar — footer affordances. fork / compact / delete moved out of the
@@ -82,7 +82,7 @@ export function AttachmentStrip({
       {attachments.map((a) => {
         const color =
           a.status === "error"
-            ? "text-red-300 border-red-500/30"
+            ? "text-danger border-danger/30"
             : a.status === "uploading"
               ? "text-text-faint border-border"
               : "text-text border-border-strong";
@@ -93,14 +93,14 @@ export function AttachmentStrip({
             title={a.status === "error" ? a.errorMsg : a.remotePath}
           >
             {a.status === "uploading" && (
-              <span className="inline-block animate-spin" style={{ color: CLAUDE_ORANGE }}>
+              <span className="inline-block animate-spin" style={{ color: "var(--accent)" }}>
                 ↻
               </span>
             )}
             <span className="truncate max-w-[200px]">{a.filename}</span>
             <button
               onClick={() => onRemove(a.id)}
-              className="text-text-faint hover:text-red-300 leading-none px-0.5"
+              className="text-text-faint hover:text-danger leading-none px-0.5"
               title="Remove"
             >
               ×
@@ -145,11 +145,11 @@ export function TypeaheadPopup({
           return (
             <div
               key={`warn:${idx}`}
-              className="px-2 py-1 flex items-center gap-2 text-red-300 bg-red-900/15 cursor-default"
+              className="px-2 py-1 flex items-center gap-2 text-danger bg-danger-bg cursor-default"
             >
               <span className="truncate flex-1">{row.primary}</span>
               {row.secondary && (
-                <span className="text-red-400/70 truncate max-w-[50%] text-[11px]">
+                <span className="text-danger/70 truncate max-w-[50%] text-[11px]">
                   {row.secondary}
                 </span>
               )}
@@ -339,9 +339,9 @@ export function MicButton({
         (busy
           ? "text-accent cursor-progress"
           : recording
-            ? "text-red-400 animate-pulse"
+            ? "text-danger animate-pulse"
             : phase === "error"
-              ? "text-red-400 hover:text-red-300"
+              ? "text-danger hover:text-danger"
               : "text-text-faint hover:text-text-muted")
       }
       style={{ touchAction: "none" }}  // suppress mobile pull-to-refresh

@@ -37,9 +37,9 @@ import type { SubscriptionStatus } from "../shared/types";
 import { ConnectProvider } from "./ConnectProvider";
 import { StepFooter } from "./onboardingUi";
 
-const ACCENT = "#5A88FF";
-const DANGER = "#FF7A88";
-const SUCCESS = "#22C79A";
+const ACCENT = "var(--accent)";
+const DANGER = "var(--danger)";
+const SUCCESS = "var(--ok)";
 
 // Continue gate: at least one provider must be connected. Mirrors the
 // gate ProvidersStep has had since BET-315 (the `status` action is the
@@ -197,7 +197,7 @@ export function ProvidersStep({
                     <span
                       aria-hidden
                       className={`inline-block w-1.5 h-1.5 rounded-full ${
-                        s.connected ? "bg-green-400" : "bg-text-faint"
+                        s.connected ? "bg-ok" : "bg-text-faint"
                       }`}
                     />
                     <span>{s.connected ? "connected" : "not connected"}</span>

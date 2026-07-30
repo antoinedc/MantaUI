@@ -22,7 +22,7 @@
 // stability, so passing it through as a prop keeps that identity intact.
 
 import type { OpencodeMessage, QuestionRequest } from "../shared/types";
-import { CLAUDE_ORANGE, TaskContext, type TaskContextValue } from "./chatShared";
+import { TaskContext, type TaskContextValue } from "./chatShared";
 import { ActiveTodos, MessageRow } from "./MessageRow";
 import { QuestionCard } from "./Cards";
 
@@ -65,7 +65,7 @@ export function Transcript({
         <div className="flex flex-col justify-end min-h-full">
           {messages.length === 0 ? (
             <div className="text-text-faint">
-              <span style={{ color: CLAUDE_ORANGE }}>✻</span>{" "}
+              <span style={{ color: "var(--accent)" }}>✻</span>{" "}
               Welcome. Type a message below to start.
             </div>
           ) : (

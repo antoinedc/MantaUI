@@ -9,7 +9,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OpencodeModel } from "../shared/types";
-import { CLAUDE_ORANGE, type ModelSelection } from "./chatShared";
+import { type ModelSelection } from "./chatShared";
 import { formatModelContextSize } from "./chatUtils";
 
 export function ModelPicker({
@@ -120,7 +120,7 @@ export function ModelPicker({
               (modelOverride == null ? "text-text" : "text-text-muted")
             }
           >
-            <span className="mr-1" style={{ color: modelOverride == null ? CLAUDE_ORANGE : "transparent" }}>●</span>
+            <span className="mr-1" style={{ color: modelOverride == null ? "var(--accent)" : "transparent" }}>●</span>
             Server default
           </button>
           {!groups && (
@@ -149,7 +149,7 @@ export function ModelPicker({
                       }
                     >
                       <span className="truncate flex items-center gap-1">
-                        <span style={{ color: isActive(m) ? CLAUDE_ORANGE : "transparent" }}>●</span>
+                        <span style={{ color: isActive(m) ? "var(--accent)" : "transparent" }}>●</span>
                         <span>{m.name}</span>
                       </span>
                       {formatModelContextSize(m.limit?.context) ? (
@@ -170,7 +170,7 @@ export function ModelPicker({
                           (isActive(m, v.id) ? "text-text" : "text-text-faint")
                         }
                       >
-                        <span style={{ color: isActive(m, v.id) ? CLAUDE_ORANGE : "transparent" }}>●</span>{" "}
+                        <span style={{ color: isActive(m, v.id) ? "var(--accent)" : "transparent" }}>●</span>{" "}
                         @{v.id}
                       </button>
                     ))}

@@ -31,9 +31,9 @@ function modelKey(providerID: string, id: string): string {
 }
 
 const TIER_CLASS: Record<string, string> = {
-  fast: "bg-green-900/20 text-green-400",
-  balanced: "bg-blue-900/20 text-blue-400",
-  deep: "bg-purple-900/20 text-purple-400",
+  fast: "bg-ok-bg text-ok",
+  balanced: "bg-accent-bg text-accent-tx",
+  deep: "bg-accent-bg text-accent-tx",
 };
 
 // iOS-style toggle switch used by the Main + Sub columns. Consolidates the
@@ -306,7 +306,7 @@ export function ModelsCard() {
         )}
       </div>
 
-      {globalError && <div className="text-xs text-red-400">{globalError}</div>}
+      {globalError && <div className="text-xs text-danger">{globalError}</div>}
       {loading && <div className="text-xs text-text-faint">Loading models…</div>}
 
       <input
@@ -393,7 +393,7 @@ export function ModelsCard() {
                       className="appearance-none w-4 h-4 rounded-full border-[1.5px] border-border-strong bg-bg cursor-pointer checked:border-accent checked:bg-accent disabled:opacity-30 disabled:cursor-not-allowed relative"
                       style={
                         isDefault
-                          ? { backgroundColor: "var(--accent, #5A88FF)", borderColor: "var(--accent, #5A88FF)" }
+                          ? { backgroundColor: "var(--accent)", borderColor: "var(--accent)" }
                           : undefined
                       }
                     />
@@ -432,7 +432,7 @@ export function ModelsCard() {
           </button>
         ) : (
           <div className="space-y-2">
-            <div className="text-xs text-amber-400">
+            <div className="text-xs text-warn">
               Restarting opencode applies subagent changes but STOPS all
               running opencode sessions — any in-progress turns will be
               interrupted. Continue?
@@ -441,7 +441,7 @@ export function ModelsCard() {
               <button
                 onClick={() => void doRestart()}
                 disabled={restarting}
-                className="px-3 py-1 text-xs bg-red-900/30 border border-red-800 rounded text-red-300 hover:text-red-200 disabled:opacity-40"
+                className="px-3 py-1 text-xs bg-danger-bg border border-danger rounded text-danger hover:text-danger disabled:opacity-40"
               >
                 {restarting ? "Restarting…" : "Restart"}
               </button>
@@ -456,7 +456,7 @@ export function ModelsCard() {
           </div>
         )}
         {restartResult && (
-          <div className={`text-xs ${restartResult.ok ? "text-green-400" : "text-red-400"}`}>
+          <div className={`text-xs ${restartResult.ok ? "text-ok" : "text-danger"}`}>
             {restartResult.message}
           </div>
         )}

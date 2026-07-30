@@ -83,7 +83,7 @@ export function PairingScreen({ onPaired }: Props) {
           />
 
           {state.error && (
-            <div role="alert" className="text-red-400 text-sm">
+            <div role="alert" className="text-danger text-sm">
               {state.error}
             </div>
           )}

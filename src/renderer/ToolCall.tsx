@@ -18,8 +18,9 @@ import {
   formatTokens,
   resolveToolOutput,
   summarizeChildSession,
+  cssVar,
 } from "./chatUtils";
-import { CLAUDE_ORANGE, MetaBadge, TaskContext, type ToolState } from "./chatShared";
+import { MetaBadge, TaskContext, type ToolState } from "./chatShared";
 import { renderMarkdown } from "./MarkdownBody";
 import { MessageRow } from "./MessageRow";
 import {
@@ -44,13 +45,13 @@ export function formatFileDiff(additions: number, deletions: number): React.Reac
   if (additions > 0 && deletions > 0) {
     return (
       <>
-        <span className="text-green-400">{aLead}</span>,{" "}
-        <span className="text-red-400">{dTail}</span>
+        <span className="text-ok">{aLead}</span>,{" "}
+        <span className="text-danger">{dTail}</span>
       </>
     );
   }
-  if (additions > 0) return <span className="text-green-400">{aLead}</span>;
-  if (deletions > 0) return <span className="text-red-400">{dLead}</span>;
+  if (additions > 0) return <span className="text-ok">{aLead}</span>;
+  if (deletions > 0) return <span className="text-danger">{dLead}</span>;
   return null;
 }
 
@@ -58,13 +59,13 @@ export function formatFileDiff(additions: number, deletions: number): React.Reac
 // blink grey while running/pending, turn green on completion, red on error.
 export function bulletStyle(part: OpencodePart): { color: string; pulse: boolean } {
   if (part.type !== "tool") {
-    return { color: "#5C6578", pulse: false };           // text/other: grey
+    return { color: cssVar("--tx4"), pulse: false };           // text/other: grey
   }
   const status = String(((part as Record<string, unknown>).state as { status?: string } | undefined)?.status ?? "");
-  if (status === "completed") return { color: "#22C79A", pulse: false }; // green
-  if (status === "error") return { color: "#F0505F", pulse: false };     // red
+  if (status === "completed") return { color: cssVar("--ok"), pulse: false }; // green
+  if (status === "error") return { color: cssVar("--danger"), pulse: false };     // red
   // "running" / "pending" / unknown-but-active → blinking grey
-  return { color: "#5C6578", pulse: true };
+  return { color: cssVar("--tx4"), pulse: true };
 }
 
 // Memoized so re-renders of a memo'd MessageRow whose parts haven't
@@ -123,7 +124,7 @@ export const AssistantPart = memo(function AssistantPart({
       <div className="whitespace-pre-wrap break-words text-text-muted italic">
         <div className="flex">
           <span className="select-none w-4 shrink-0">
-            <span style={{ color: CLAUDE_ORANGE, opacity: 0.6 }}>✻ </span>
+            <span style={{ color: "var(--accent)", opacity: 0.6 }}>✻ </span>
           </span>
           <div className="flex-1 min-w-0">
             <div className="text-text-faint not-italic mb-1">Thinking…</div>
@@ -144,7 +145,7 @@ export const AssistantPart = memo(function AssistantPart({
     return (
       <div className="flex text-text-faint text-xs">
         <span className="select-none w-4 shrink-0">
-          <span style={{ color: CLAUDE_ORANGE, opacity: 0.6 }}>⎿ </span>
+          <span style={{ color: "var(--accent)", opacity: 0.6 }}>⎿ </span>
         </span>
         <div className="flex-1 min-w-0">
           {files.length === 0
@@ -162,7 +163,7 @@ export const AssistantPart = memo(function AssistantPart({
     return (
       <div className="flex text-text-faint text-xs">
         <span className="select-none w-4 shrink-0">
-          <span style={{ color: CLAUDE_ORANGE, opacity: 0.6 }}>⎿ </span>
+          <span style={{ color: "var(--accent)", opacity: 0.6 }}>⎿ </span>
         </span>
         <div className="flex-1 min-w-0">
           <span className="text-text-muted">{filename || "(file)"}</span>
@@ -175,7 +176,7 @@ export const AssistantPart = memo(function AssistantPart({
   return (
     <div className="flex text-text-faint">
       <span className="select-none w-4 shrink-0">
-        <span style={{ color: CLAUDE_ORANGE, opacity: 0.5 }}>○ </span>
+        <span style={{ color: "var(--accent)", opacity: 0.5 }}>○ </span>
       </span>
       <div className="flex-1 min-w-0 text-xs">[{part.type}]</div>
     </div>
@@ -354,10 +355,10 @@ function TaskBody({ state }: { state: ToolState }) {
 
   const statusColor =
     effectiveStatus === "completed"
-      ? "#22C79A"
+      ? cssVar("--ok")
       : effectiveStatus === "error"
-        ? "#F0505F"
-        : "#5C6578"; // running / pending / unknown
+        ? cssVar("--danger")
+        : cssVar("--tx4"); // running / pending / unknown
   const statusPulse = effectiveStatus === "running" || effectiveStatus === "pending";
 
   const onToggle = ctx ? () => ctx.toggle(info.childSessionId) : null;
@@ -414,9 +415,8 @@ function TaskBody({ state }: { state: ToolState }) {
             {info.truncated && (
               <>
                 <span>·</span>
-                {/* Inline hex matches `CACHE_WRITE_COLOR` / the truncation
-                    badge elsewhere; the theme has no `warning` token. */}
-                <span style={{ color: "#F0A934" }}>⚠ truncated</span>
+                {/* Matches the truncation badge elsewhere (warn token). */}
+                <span style={{ color: "var(--warn)" }}>⚠ truncated</span>
               </>
             )}
           </div>

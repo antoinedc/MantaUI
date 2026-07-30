@@ -67,6 +67,31 @@ html, body, #root {
   --on-accent: #0B1020;
   --accent-soft: #1740AE;
 
+  /* Semantic tokens (BET-408). Values are today's exact hex/rgba literals —
+     a 1:1 rename, no retune. The -bg variants are pre-alpha'd fills; the base
+     ok/warn/danger/info colours carry -rgb channel vars so Tailwind alpha
+     modifiers (border-danger/30) and inline rgb(var(--tok-rgb)/<a>) work. */
+  --ok: #22C79A;
+  --warn: #F0A934;
+  --danger: #F0505F;
+  --info: #22BEE0;
+  --ok-bg: #22C79A1f;
+  --warn-bg: #F0A9341f;
+  --danger-bg: #F0505F1f;
+  --accent-bg: #5A88FF1f;
+  --fill: rgba(255, 255, 255, .04);
+  --fill-hover: rgba(255, 255, 255, .07);
+  --fill-active: rgba(255, 255, 255, .10);
+  --inset: #070B16;
+  --raised: #1D2647;
+  --diff-add: #12351f;
+  --diff-del: #3a1720;
+
+  --ok-rgb: 34 199 154;
+  --warn-rgb: 240 169 52;
+  --danger-rgb: 240 80 95;
+  --info-rgb: 34 190 224;
+
   --canvas-rgb: 11 16 32;
   --panel-rgb: 18 24 47;
   --card-rgb: 23 31 58;
@@ -124,9 +149,9 @@ html, body, #root {
   height: 1px;
   background-image: linear-gradient(
     90deg,
-    rgba(217, 119, 87, 0.15),
-    rgba(217, 119, 87, 0.85),
-    rgba(217, 119, 87, 0.15)
+    color-mix(in srgb, var(--accent) 15%, transparent),
+    color-mix(in srgb, var(--accent) 85%, transparent),
+    color-mix(in srgb, var(--accent) 15%, transparent)
   );
   background-size: 200% 100%;
   background-repeat: no-repeat;

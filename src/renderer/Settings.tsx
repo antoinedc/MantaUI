@@ -458,7 +458,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     </button>
                   </div>
                 ) : (
-                  <div className="text-sm text-red-400">
+                  <div className="text-sm text-danger">
                     {pairing.error}
                   </div>
                 )}
@@ -495,13 +495,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   <button
                     onClick={removeBox}
                     disabled={removingBox}
-                    className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-red-400 hover:border-red-400 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                    className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-danger hover:border-danger disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
                   >
                     {removingBox ? "Removing…" : "Remove box"}
                   </button>
                 </div>
                 {removeResult && !removeResult.ok && (
-                  <div className="text-sm text-amber-400 mt-3">
+                  <div className="text-sm text-warn mt-3">
                     {removeResult.message}
                   </div>
                 )}
@@ -825,7 +825,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">Installed plugins</h3>
                 {pluginsError ? (
-                  <div className="text-sm text-red-400 break-words">
+                  <div className="text-sm text-danger break-words">
                     Failed to load: {pluginsError}
                   </div>
                 ) : plugins === null ? (
@@ -848,11 +848,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             {p.name}
                           </span>
                           {p.valid ? (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-900/20 text-green-400">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-ok-bg text-ok">
                               valid
                             </span>
                           ) : (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900/20 text-red-400 break-all">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-danger-bg text-danger break-all">
                               parse error: {p.error}
                             </span>
                           )}
@@ -968,7 +968,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         {/* Footer with Save/Cancel */}
         <div className="border-t border-border p-4">
           {saveError && (
-            <div className="text-sm text-red-400 mb-3">
+            <div className="text-sm text-danger mb-3">
               Couldn't save: {saveError}
             </div>
           )}

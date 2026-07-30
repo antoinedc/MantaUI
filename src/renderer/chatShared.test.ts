@@ -5,7 +5,6 @@
 // switching the whole file to jsdom is safe.
 import { describe, it, expect, beforeEach } from "vitest";
 import {
-  CLAUDE_ORANGE,
   SPINNER_VERBS,
   SPINNER_VERBS_PAST,
   pastVerbFor,
@@ -28,12 +27,6 @@ import type { OpencodeModel } from "../shared/types";
 function model(caps: unknown): OpencodeModel {
   return { capabilities: caps } as unknown as OpencodeModel;
 }
-
-describe("CLAUDE_ORANGE", () => {
-  it("is a stable hex accent", () => {
-    expect(CLAUDE_ORANGE).toBe("#d97757");
-  });
-});
 
 describe("spinner verbs", () => {
   it("present/past pools are the same length and index-aligned", () => {

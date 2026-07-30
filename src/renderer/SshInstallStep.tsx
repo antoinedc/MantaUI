@@ -44,9 +44,9 @@ import {
 } from "../shared/sshTarget";
 import type { ClaimOutcome } from "../shared/claim.mjs";
 
-const ACCENT = "#5A88FF";
-const DANGER = "#FF7A88";
-const OK_GREEN = "#22C55E";
+const ACCENT = "var(--accent)";
+const DANGER = "var(--danger)";
+const OK_GREEN = "var(--ok)";
 
 // Keep the last N log lines only — main already caps its own tail at 200
 // (handlers.ts LOG_TAIL_MAX); the renderer needs its own cap too, or a long
@@ -804,7 +804,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             onClick={startInstall}
             disabled={installDisabled}
             className="px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50"
-            style={{ background: ACCENT, color: "#0B1020" }}
+            style={{ background: ACCENT, color: "var(--on-accent)" }}
           >
             {running ? "Installing…" : "Install & pair"}
           </button>
@@ -916,7 +916,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 <button
                   onClick={() => void trustHostDecision(true)}
                   className="px-3 py-1.5 rounded-md text-sm font-medium"
-                  style={{ background: ACCENT, color: "#0B1020" }}
+                  style={{ background: ACCENT, color: "var(--on-accent)" }}
                 >
                   Trust &amp; continue
                 </button>
@@ -966,7 +966,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                     type="submit"
                     disabled={passphraseInput.length === 0}
                     className="px-3 py-1.5 rounded-md text-sm font-medium disabled:opacity-40"
-                    style={{ background: ACCENT, color: "#0B1020" }}
+                    style={{ background: ACCENT, color: "var(--on-accent)" }}
                   >
                     Unlock &amp; continue
                   </button>
