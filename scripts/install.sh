@@ -783,16 +783,20 @@ main() {
   OPENCODE_CONFIG="$OPENCODE_CONFIG_DIR/opencode.jsonc"
   mkdir -p "$OPENCODE_CONFIG_DIR"
   OPENCODE_CONFIG_BACKUP="$OPENCODE_CONFIG.pre-manta"
+  # ${MANTA_CLAUDE_AUTH_PLUGIN:-} — the installer runs under `set -u`, so the
+  # bare expansion of an unset var is a hard error (the macOS CI job caught
+  # this: every public install crashes because end users never set the
+  # override). The `:-` default keeps the test safe when the var is unset.
   if [ -f "$OPENCODE_CONFIG" ]; then
-    if [ -n "$MANTA_CLAUDE_AUTH_PLUGIN" ]; then
-      log "Seeding Claude auth plugin (override: $MANTA_CLAUDE_AUTH_PLUGIN) — merging into existing $OPENCODE_CONFIG…"
+    if [ -n "${MANTA_CLAUDE_AUTH_PLUGIN:-}" ]; then
+      log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — merging into existing $OPENCODE_CONFIG…"
     else
       log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — merging into existing $OPENCODE_CONFIG…"
     fi
     existing="$(cat "$OPENCODE_CONFIG" 2>/dev/null || true)"
   else
-    if [ -n "$MANTA_CLAUDE_AUTH_PLUGIN" ]; then
-      log "Seeding Claude auth plugin (override: $MANTA_CLAUDE_AUTH_PLUGIN) — no existing $OPENCODE_CONFIG, creating…"
+    if [ -n "${MANTA_CLAUDE_AUTH_PLUGIN:-}" ]; then
+      log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — no existing $OPENCODE_CONFIG, creating…"
     else
       log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — no existing $OPENCODE_CONFIG, creating…"
     fi

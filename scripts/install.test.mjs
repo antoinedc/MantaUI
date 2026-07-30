@@ -1399,6 +1399,35 @@ test("install.sh is bash-syntax-clean (bash -n)", () => {
   }
 });
 
+test("install.sh guards every MANTA_CLAUDE_AUTH_PLUGIN use against set -u (BET-319 regression)", () => {
+  // install.sh runs under `set -euo pipefail`. The first BET-319 iteration
+  // referenced $MANTA_CLAUDE_AUTH_PLUGIN directly inside `[ -n "$VAR" ]`,
+  // which — because end-user installs NEVER set the override — crashed the
+  // installer for every public install on macOS + Linux (the advisory CI job
+  // caught it; `npm test` doesn't execute the shell). `bash -n` parses but
+  // does not execute, so it cannot catch an unset-variable expansion. This
+  // static guard pins the fix: every NON-COMMENT reference to the var must
+  // use the `${VAR:-}` default-expansion form (or be inside a branch that is
+  // only reached after a `:-` guard already proved it set).
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const lines = src.split("\n");
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*#/.test(line)) continue; // skip comment lines
+    // A bare `$MANTA_CLAUDE_AUTH_PLUGIN` or `"$MANTA_CLAUDE_AUTH_PLUGIN"`
+    // (no `${...:-}` form) is the bug. The safe form is `${MANTA_CLAUDE_AUTH_PLUGIN:-}`.
+    // We detect a bare expansion as `$VAR` NOT immediately followed by `{`.
+    const bare = /\$MANTA_CLAUDE_AUTH_PLUGIN(?!\{)/.test(line);
+    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `install.sh references MANTA_CLAUDE_AUTH_PLUGIN without the \${VAR:-} set -u guard:\n${offenders.join("\n")}`,
+  );
+});
+
 test("install.sh defines detect_tailscale_ip BEFORE every call site (BET-267 review regression)", () => {
   // Regression guard for the BET-267 review finding: bash does NOT forward-
   // reference function definitions within the same function body, so a
