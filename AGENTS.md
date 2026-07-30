@@ -1712,8 +1712,6 @@ ChatPanel:
   while expanded; ALSO refetched on re-expand when the child is still
   running (the cached snapshot would otherwise be stale until the next
   live event hits the now-expanded card).
-- `childFetchState: Map<childId, "loading"|"error">` — drives the
-  spinner / retry hint in collapsed-but-pending state.
 - `liveChildStatus: Map<childId, "running"|"idle">` — overrides the
   parent's stale `state.status` snapshot for the header badge.
 - `expandedTasks: Set<childId>` + `expandedTasksRef` mirror — the SSE
