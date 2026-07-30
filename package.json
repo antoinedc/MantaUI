@@ -23,6 +23,7 @@
     "video": "cd video && npm install && npm run build"
   },
   "dependencies": {
+    "lucide-react": "^1.28.0",
     "node-pty": "^1.0.0",
     "node-sqlite3-wasm": "^0.8.59",
     "prism-react-renderer": "^2.4.1",
