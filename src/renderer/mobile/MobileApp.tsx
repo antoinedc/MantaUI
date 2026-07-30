@@ -12,6 +12,8 @@ import { AuthRequiredError, ServerNotConfiguredError, triggerResumeReconnect } f
 import { shouldReconnectOnAppStateChange } from "../chatUtils";
 import { getCapacitorApp, handlePairUrl } from "./deepLink";
 import { dlog, dwarn } from "./debugLog";
+import { UpdateBar } from "../UpdateBar";
+import { useCompatibilityCard } from "../hooks/useCompatibilityCard";
 
 type Nav =
   | { screen: "list" }
@@ -57,6 +59,7 @@ export function MobileApp() {
   const setScreenshotToast = useStore((s) => s.setScreenshotToast);
   const setAgentFileToast = useStore((s) => s.setAgentFileToast);
   const projects = useStore((s) => s.projects);
+  const compatibility = useCompatibilityCard();
 
   const [nav, setNav] = useState<Nav>({ screen: "list" });
   const [bootError, setBootError] = useState<string | null>(null);
@@ -696,6 +699,43 @@ export function MobileApp() {
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
     >
+      {compatibility.showCard && (
+        <UpdateBar
+          text={
+            compatibility.variant === "behind" ? (
+              <>
+                Box needs an upgrade:{" "}
+                <span className="font-medium text-text">
+                  {compatibility.serverVersion ?? "?"}
+                </span>
+              </>
+            ) : (
+              <>
+                This box (v
+                <span className="font-medium text-text">
+                  {compatibility.serverVersion ?? "?"}
+                </span>
+                ) is not supported by this app (v
+                <span className="font-medium text-text">
+                  {compatibility.clientVersion ?? "?"}
+                </span>
+                ).
+              </>
+            )
+          }
+          actionLabel={
+            compatibility.variant === "behind" ? "Upgrade box" : "Learn more"
+          }
+          onAction={() => {
+            if (compatibility.variant === "behind") {
+              void window.api.serverUpdateApply();
+            } else {
+              void window.api.openExternal("https://mantaui.com/install");
+            }
+          }}
+          onDismiss={compatibility.dismiss}
+        />
+      )}
       <div className="mobile-stack">
         <div
           className={
