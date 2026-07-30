@@ -10,6 +10,7 @@ import {
   type InstallerEvent,
   type InstallerState,
   type InstallerStageSnapshotRow,
+  type OpenFileResult,
 } from "../shared/types.js";
 import type { ClaimOutcome } from "../shared/claim.mjs";
 import type { UnpairOutcome } from "../shared/unpair.mjs";
@@ -113,6 +114,13 @@ const api = {
 
   revealInFolder: (localPath: string): Promise<void> =>
     ipcRenderer.invoke(IPC.revealInFolder, localPath),
+
+  // BET-387: native file picker (single file, defaults to ~/.ssh/). Used by
+  // the custom-host SSH installer panel's "Identity file" Browse button.
+  // Returns { canceled:true } on a cancel / no-selection close. Mirrors
+  // peekRemoteFile / revealInFolder — OS-integration-only, never on window.api.
+  dialogShowOpenFile: (): Promise<OpenFileResult> =>
+    ipcRenderer.invoke(IPC.dialogShowOpenFile),
 
   // BET-207: `pluginsEnabled` is a Mac-machine-local toggle — read/write
   // goes through main's local handlers (commit() → Mac-local config) so
