@@ -3,6 +3,21 @@
 #
 #   curl -fsSL https://mantaui.com/install.sh | bash
 #
+# Staging channel (QA/internal only — see docs/releasing.md "Staging install"
+# and the channel table in src/shared/channel.mjs, BET-370):
+#
+#   curl -fsSL https://mantaui.com/staging/install.sh | MANTA_CHANNEL=staging bash
+#
+# install.sh is served byte-identical across channels (no build-time
+# substitution — see scripts/release/publish.sh), so the URL alone signals
+# "staging" to a human but the script itself has no way to know that once
+# piped into bash. You MUST export MANTA_CHANNEL=staging too: without it the
+# script defaults to prod (MANTA_CHANNEL=${MANTA_CHANNEL:-prod} below),
+# points at the prod release host, and prints a manta:// (not
+# manta-staging://) pair link at the end. The desktop app's SSH orchestrator
+# and any operator who manually exports MANTA_CHANNEL are the two callers
+# that already set this correctly (BET-386).
+#
 # On a fresh Linux box: gets manta-server running under systemd --user and
 # prints a 6-digit pairing code to enter in the desktop app.
 #

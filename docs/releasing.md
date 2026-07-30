@@ -34,6 +34,48 @@ In order. No decisions, no extra steps:
 
 Done.
 
+## Staging install
+
+Staging is a parallel `staging/` subtree on the same prod webroot,
+served as `https://mantaui.com/staging/...` (see the "Staging channel"
+section in `AGENTS.md` and the per-channel value table in
+`src/shared/channel.mjs`, BET-370). It is **manual-only** — tag triggers
+(`web-v*`, `server-v*`, `mac-v*`) keep meaning prod; staging is triggered
+by hand after the spec change lands.
+
+`install.sh` is served **byte-identical** across channels (no build-time
+substitution — `scripts/release/publish.sh` copies the same file to both
+`/var/www/mantaui/` and `/var/www/mantaui/staging/`). The staging URL
+signals "staging" to a human, but once piped into bash the script has no
+way to recover the URL it was fetched from — it falls back to
+`MANTA_CHANNEL=${MANTA_CHANNEL:-prod}`. So the canonical staging
+curl-install command exports the channel explicitly:
+
+```
+curl -fsSL https://mantaui.com/staging/install.sh | MANTA_CHANNEL=staging bash
+```
+
+Without `MANTA_CHANNEL=staging` the script defaults to prod: it pulls the
+tarball from the prod release host (`https://mantaui.com/releases/...`) and
+prints a `manta://` (not `manta-staging://`) pair link at the end — a
+staging URL that behaves identically to prod, including a prod pair-link
+scheme baked into the `manta` CLI shim and the manta-server systemd unit.
+
+The two callers that already set this correctly (BET-386):
+
+- **The desktop app's SSH orchestrator** (`src/main/installer/installer.ts`)
+  resolves the build channel and passes `MANTA_CHANNEL=<channel>` in the
+  same curl-pipe command as `MANTA_RELEASE_HOST`.
+- **An operator who manually exports `MANTA_CHANNEL`** before running or
+  piping `install.sh` — i.e. the command above.
+
+The raw `curl -fsSL https://mantaui.com/staging/install.sh | bash` path
+(without the env var) is the only gap: it's internal/QA-only (BET-370
+scoped "nothing about the box" out, and the primary user-facing paths —
+the SSH-orchestrated desktop install and prod's default curl command — are
+unaffected), so this section exists to close it before anyone writes a
+staging curl-install doc elsewhere.
+
 ## Rollback
 
 The atomic pointer is `manta-latest.txt` (the combined manifest), not
