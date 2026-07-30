@@ -21,6 +21,7 @@ export default {
         accent: {
           DEFAULT: "rgb(var(--accent-rgb) / <alpha-value>)",
           soft: "rgb(var(--accent-soft-rgb) / <alpha-value>)",
+          solid: "var(--accent-solid)",
           tx: "var(--accent-tx)",
           bg: "var(--accent-bg)",
         },
@@ -41,6 +42,7 @@ export default {
         },
         inset: "var(--inset)",
         raised: "var(--raised)",
+        "on-accent": "var(--on-accent)",
       },
       fontFamily: {
         mono: ["JetBrains Mono", "SF Mono", "Menlo", "Consolas", "monospace"],

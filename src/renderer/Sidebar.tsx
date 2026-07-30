@@ -644,7 +644,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 <button
                   onClick={() => createProject("all")}
                   disabled={creating}
-                  className="text-xs px-2 py-1 bg-accent text-bg rounded hover:opacity-90 disabled:opacity-50"
+                  className="text-xs px-2 py-1 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
                 >
                   Yes, one per worktree
                 </button>
@@ -670,7 +670,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 <button
                   onClick={() => createProject("auto")}
                   disabled={creating}
-                  className="text-xs px-2 py-1 bg-accent text-bg rounded hover:opacity-90 disabled:opacity-50"
+                  className="text-xs px-2 py-1 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
                 >
                   {creating ? "Checking…" : "Create"}
                 </button>
@@ -898,7 +898,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                       <div className="flex gap-2">
                         <button
                           onClick={createSession}
-                          className="text-xs px-2 py-0.5 bg-accent text-bg rounded hover:opacity-90"
+                          className="text-xs px-2 py-0.5 bg-accent-solid text-on-accent rounded hover:opacity-90"
                         >
                           Create
                         </button>

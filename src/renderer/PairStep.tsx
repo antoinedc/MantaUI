@@ -37,7 +37,7 @@ import { SshInstallStep } from "./SshInstallStep";
 import { getMantaPreload } from "./preloadAccess";
 import { channelConfig } from "../shared/channel.mjs";
 
-const ACCENT = "var(--accent)"; // the app's accent token
+const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409 AA)
 const DANGER = "var(--danger)"; // inline error text
 const SERVER_URL_ERROR = "Server URL must start with http:// or https://";
 
@@ -303,8 +303,8 @@ function ManualPairForm({
         <button
           type="submit"
           disabled={!connectEnabled}
-          className="inline-flex items-center gap-2 px-5 py-2 rounded-md text-sm font-medium text-bg transition-opacity disabled:opacity-40"
-          style={{ background: ACCENT }}
+          className="inline-flex items-center gap-2 px-5 py-2 rounded-md text-sm font-medium text-on-accent transition-opacity disabled:opacity-40"
+          style={{ background: ACCENT_SOLID }}
         >
           {submitting ? "Connecting…" : "Connect"}
         </button>

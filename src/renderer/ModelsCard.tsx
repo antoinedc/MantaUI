@@ -68,7 +68,7 @@ function Switch({ checked, disabled, onChange, "aria-label": ariaLabel }: Switch
         <span
           className={`absolute top-[2px] w-[12px] h-[12px] rounded-full transition-transform ${
             checked
-              ? "translate-x-[12px] bg-accent"
+              ? "translate-x-[12px] bg-accent-solid"
               : "translate-x-[2px] bg-text-faint"
           }`}
         />
@@ -390,10 +390,10 @@ export function ModelsCard() {
                       disabled={!isMain || isBusy}
                       onChange={() => void setDefault(m.providerID, m.id)}
                       title={isMain ? "Set as default main model" : "Enable Main first"}
-                      className="appearance-none w-4 h-4 rounded-full border-[1.5px] border-border-strong bg-bg cursor-pointer checked:border-accent checked:bg-accent disabled:opacity-30 disabled:cursor-not-allowed relative"
+                      className="appearance-none w-4 h-4 rounded-full border-[1.5px] border-border-strong bg-bg cursor-pointer checked:border-accent checked:bg-accent-solid disabled:opacity-30 disabled:cursor-not-allowed relative"
                       style={
                         isDefault
-                          ? { backgroundColor: "var(--accent)", borderColor: "var(--accent)" }
+                          ? { backgroundColor: "var(--accent-solid)", borderColor: "var(--accent)" }
                           : undefined
                       }
                     />

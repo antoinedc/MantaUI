@@ -550,7 +550,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     onClick={() => setTtl("5m")}
                     className={`flex-1 px-4 py-2 text-sm rounded border ${
                       ttl === "5m"
-                        ? "bg-accent text-bg border-accent"
+                        ? "bg-accent-solid text-on-accent border-accent"
                         : "bg-bg-soft text-text-muted border-border hover:text-text"
                     }`}
                   >
@@ -561,7 +561,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     onClick={() => setTtl("1h")}
                     className={`flex-1 px-4 py-2 text-sm rounded border ${
                       ttl === "1h"
-                        ? "bg-accent text-bg border-accent"
+                        ? "bg-accent-solid text-on-accent border-accent"
                         : "bg-bg-soft text-text-muted border-border hover:text-text"
                     }`}
                   >
@@ -954,7 +954,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       }}
                       className={`px-4 py-1.5 text-sm capitalize transition-colors border-r border-border last:border-r-0 ${
                         themePref === opt
-                          ? "bg-accent"
+                          ? "bg-accent-solid"
                           : "text-text-muted hover:text-text hover:bg-bg-elev"
                       }`}
                       style={
@@ -1043,7 +1043,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <button
               onClick={save}
               disabled={saving}
-              className="px-4 py-2 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
+              className="px-4 py-2 text-sm bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {saving ? "Saving…" : "Save"}
             </button>

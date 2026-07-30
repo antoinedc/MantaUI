@@ -45,6 +45,7 @@ import {
 import type { ClaimOutcome } from "../shared/claim.mjs";
 
 const ACCENT = "var(--accent)";
+const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409 AA)
 const DANGER = "var(--danger)";
 const OK_GREEN = "var(--ok)";
 
@@ -804,7 +805,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             onClick={startInstall}
             disabled={installDisabled}
             className="px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50"
-            style={{ background: ACCENT, color: "var(--on-accent)" }}
+            style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
           >
             {running ? "Installing…" : "Install & pair"}
           </button>
@@ -884,7 +885,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               className="h-full"
               style={{
                 width: `${(stageIndex / stageTotal) * 100}%`,
-                background: done && !done.ok ? DANGER : ACCENT,
+                background: done && !done.ok ? DANGER : ACCENT_SOLID,
               }}
             />
           </div>
@@ -916,7 +917,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 <button
                   onClick={() => void trustHostDecision(true)}
                   className="px-3 py-1.5 rounded-md text-sm font-medium"
-                  style={{ background: ACCENT, color: "var(--on-accent)" }}
+                  style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
                 >
                   Trust &amp; continue
                 </button>
@@ -966,7 +967,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                     type="submit"
                     disabled={passphraseInput.length === 0}
                     className="px-3 py-1.5 rounded-md text-sm font-medium disabled:opacity-40"
-                    style={{ background: ACCENT, color: "var(--on-accent)" }}
+                    style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
                   >
                     Unlock &amp; continue
                   </button>

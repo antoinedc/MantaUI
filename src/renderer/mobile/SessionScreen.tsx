@@ -375,7 +375,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                 <div className="flex gap-2">
                   <button
                     onClick={commitRename}
-                    className="flex-1 px-3 py-2 bg-accent text-bg rounded font-semibold"
+                    className="flex-1 px-3 py-2 bg-accent-solid text-on-accent rounded font-semibold"
                     style={{ textAlign: "center" }}
                   >
                     Save

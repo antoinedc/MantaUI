@@ -425,7 +425,7 @@ export function MobileSettings({ onClose }: Props) {
               onClick={() => setTtl("5m")}
               className={`flex-1 px-3 py-2 text-sm rounded border ${
                 ttl === "5m"
-                  ? "bg-accent text-bg border-accent"
+                  ? "bg-accent-solid text-on-accent border-accent"
                   : "bg-bg-soft text-text-muted border-border"
               }`}
             >
@@ -436,7 +436,7 @@ export function MobileSettings({ onClose }: Props) {
               onClick={() => setTtl("1h")}
               className={`flex-1 px-3 py-2 text-sm rounded border ${
                 ttl === "1h"
-                  ? "bg-accent text-bg border-accent"
+                  ? "bg-accent-solid text-on-accent border-accent"
                   : "bg-bg-soft text-text-muted border-border"
               }`}
             >
@@ -593,7 +593,7 @@ export function MobileSettings({ onClose }: Props) {
             <button
               onClick={addRegistryUrl}
               disabled={!newRegistryUrl.trim()}
-              className="px-3 py-2 text-sm bg-accent text-bg rounded disabled:opacity-40"
+              className="px-3 py-2 text-sm bg-accent-solid text-on-accent rounded disabled:opacity-40"
             >
               Add
             </button>
