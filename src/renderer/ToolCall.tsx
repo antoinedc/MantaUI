@@ -339,7 +339,6 @@ function TaskBody({ state }: { state: ToolState }) {
   }
   const isExpanded = ctx?.expanded.has(info.childSessionId) ?? false;
   const childMsgs = childMsgsForSummary;
-  const childFetch = ctx?.childFetchState.get(info.childSessionId);
   const liveState = ctx?.liveStatus.get(info.childSessionId);
   // Prefer live SSE status over the parent's transcript snapshot (which
   // lags by one refetch cycle). Maps "running" → still going, "idle" →
@@ -428,14 +427,6 @@ function TaskBody({ state }: { state: ToolState }) {
           followed by the final output. While loading, a small spinner. */}
       {isExpanded && (
         <div className="mt-1 ml-4 pl-3 border-l-2 border-border">
-          {childFetch === "loading" && !childMsgs && (
-            <div className="text-text-faint italic">Loading subagent transcript…</div>
-          )}
-          {childFetch === "error" && !childMsgs && (
-            // Inline hex — theme has no `error` token; matches bulletStyle()'s
-            // red used for failed tool calls.
-            <div style={{ color: "#F0505F" }}>Failed to load subagent transcript.</div>
-          )}
           {childMsgs && childMsgs.length > 0 && (
             <div className="flex flex-col gap-2">
               {childMsgs.map((m) => (

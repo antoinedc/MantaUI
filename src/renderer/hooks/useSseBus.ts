@@ -285,7 +285,9 @@ export function useSseBus(params: {
     try {
       const perms = await window.api.opencodePermissions?.(sessionId);
       if (Array.isArray(perms)) {
-        setPermissions(perms);
+        // Filter to the viewed session so a cumulative workspace-wide GET
+        // can't stack unrelated backlog — symmetric with refreshQuestions.
+        setPermissions(perms.filter((p) => p.sessionID === sessionId));
       }
     } catch { /* non-fatal */ }
   }, [sessionId]);
