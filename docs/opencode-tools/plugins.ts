@@ -14,7 +14,7 @@
 // job queue (src/server/capabilities.mjs) and the plugin registry
 // (src/server/plugins.mjs). The tools do NOT block on plugin runs:
 // plugin_run returns immediately with the job id, and a completion turn is
-// injected back into this session when the Mac executor finishes.
+// injected back into this session when the desktop executor finishes.
 //
 // A "plugin" is a YAML manifest at ~/.manta/plugins/<name>.yaml on the
 // machine the user wants to drive (today: host:"desktop" — the connected
