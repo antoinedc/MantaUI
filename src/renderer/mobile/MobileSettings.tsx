@@ -3,7 +3,13 @@ import { useStore } from "../store";
 import { ProvidersCard } from "../ProvidersCard";
 import { SubscriptionsCard } from "../SubscriptionsCard";
 import { resolveLauncherFlags } from "../chatShared";
-import type { AvailableLauncher, OpencodeModel } from "../../shared/types";
+import { TtlToggle } from "../TtlToggle";
+import {
+  useLaunchers,
+  updateLauncherFlag,
+  useRegistryUrls,
+} from "../settingsShared";
+import type { OpencodeModel } from "../../shared/types";
 import {
   isPushSupported,
   pushPermission,
@@ -66,10 +72,14 @@ export function MobileSettings({ onClose }: Props) {
     modelID: string;
   } | null>(defaultModel ?? null);
   const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
-  const [registryUrls, setRegistryUrls] = useState<string[]>(
-    skillRegistryUrls ?? [],
-  );
-  const [newRegistryUrl, setNewRegistryUrl] = useState("");
+  const {
+    registryUrls,
+    setRegistryUrls,
+    newRegistryUrl,
+    setNewRegistryUrl,
+    addRegistryUrl,
+    removeRegistryUrl,
+  } = useRegistryUrls(skillRegistryUrls ?? []);
   const [models, setModels] = useState<OpencodeModel[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedToast, setSavedToast] = useState(false);
@@ -78,7 +88,7 @@ export function MobileSettings({ onClose }: Props) {
   const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
   const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
   // AI CLI TUI launch options (BET-138 refinement) — mirrors desktop Settings.
-  const [availableLaunchers, setAvailableLaunchers] = useState<AvailableLauncher[]>([]);
+  const [availableLaunchers] = useLaunchers();
   const [launcherFlagValues, setLauncherFlagValues] =
     useState<Record<string, Record<string, boolean>>>(launcherFlags ?? {});
 
@@ -170,19 +180,6 @@ export function MobileSettings({ onClose }: Props) {
       .catch(() => {});
   }, []);
 
-  // Which AI CLI TUIs are set up on this box — non-fatal, an empty list just
-  // hides the launch-options section below.
-  useEffect(() => {
-    if (!window.api.launchersList) {
-      setAvailableLaunchers([]);
-      return;
-    }
-    window.api
-      .launchersList()
-      .then((list) => setAvailableLaunchers(list))
-      .catch(() => {});
-  }, []);
-
   // Server version (BET-180) — fetch once on mount so the URL section can
   // render `Server vX.Y.Z` below its hint. In-process via the
   // `server:version` RPC channel; failure stays null → "?" placeholder.
@@ -194,12 +191,9 @@ export function MobileSettings({ onClose }: Props) {
   }, []);
 
   const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
-    const l = availableLaunchers.find((x) => x.id === launcherId);
-    if (!l) return;
-    setLauncherFlagValues((prev) => ({
-      ...prev,
-      [launcherId]: { ...resolveLauncherFlags(l.flags, prev[launcherId]), [flagKey]: checked },
-    }));
+    setLauncherFlagValues((prev) =>
+      updateLauncherFlag(availableLaunchers, launcherId, flagKey, checked, prev),
+    );
   };
 
   const save = async () => {
@@ -235,16 +229,6 @@ export function MobileSettings({ onClose }: Props) {
     } finally {
       setSaving(false);
     }
-  };
-
-  const addRegistryUrl = () => {
-    const url = newRegistryUrl.trim();
-    if (!url || registryUrls.includes(url)) return;
-    setRegistryUrls([...registryUrls, url]);
-    setNewRegistryUrl("");
-  };
-  const removeRegistryUrl = (url: string) => {
-    setRegistryUrls(registryUrls.filter((u) => u !== url));
   };
 
   return (
@@ -419,30 +403,7 @@ export function MobileSettings({ onClose }: Props) {
           <label className="block text-[11px] uppercase tracking-wider text-text-muted">
             Prompt cache TTL
           </label>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setTtl("5m")}
-              className={`flex-1 px-3 py-2 text-sm rounded border ${
-                ttl === "5m"
-                  ? "bg-accent-solid text-on-accent border-accent"
-                  : "bg-bg-soft text-text-muted border-border"
-              }`}
-            >
-              5 minutes
-            </button>
-            <button
-              type="button"
-              onClick={() => setTtl("1h")}
-              className={`flex-1 px-3 py-2 text-sm rounded border ${
-                ttl === "1h"
-                  ? "bg-accent-solid text-on-accent border-accent"
-                  : "bg-bg-soft text-text-muted border-border"
-              }`}
-            >
-              1 hour
-            </button>
-          </div>
+          <TtlToggle ttl={ttl} setTtl={setTtl} compact />
           <div className="text-xs text-text-faint">
             Must match opencode's <code className="text-text-muted">cache_control.ttl</code> —
             manta only uses this to predict when a chat has gone stale (drives

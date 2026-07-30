@@ -7,9 +7,14 @@ import { PairingQR, PairingCountdown } from "./PairingQR";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
 import { applyTheme, type ThemePref } from "./theme";
+import { TtlToggle } from "./TtlToggle";
+import {
+  useLaunchers,
+  updateLauncherFlag,
+  useRegistryUrls,
+} from "./settingsShared";
 import type {
   AuthPairResult,
-  AvailableLauncher,
   PluginRegistryRow,
 } from "../shared/types";
 
@@ -52,12 +57,18 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // AI fields (AI tab)
   // Note: the model list, default model, and toggles for Main/Sub all live
   // inside `ModelsCard` now (BET-215) — Settings no longer owns that state.
-  const [registryUrls, setRegistryUrls] = useState<string[]>(skillRegistryUrls ?? []);
-  const [newRegistryUrl, setNewRegistryUrl] = useState("");
+  const {
+    registryUrls,
+    setRegistryUrls,
+    newRegistryUrl,
+    setNewRegistryUrl,
+    addRegistryUrl,
+    removeRegistryUrl,
+  } = useRegistryUrls(skillRegistryUrls ?? []);
   const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
   // AI CLI TUI launch options (BET-138 refinement) — flags for launchers
   // detected on this box (e.g. Claude Code's --dangerously-skip-permissions).
-  const [availableLaunchers, setAvailableLaunchers] = useState<AvailableLauncher[]>([]);
+  const [availableLaunchers] = useLaunchers();
   const [launcherFlagValues, setLauncherFlagValues] =
     useState<Record<string, Record<string, boolean>>>(launcherFlags ?? {});
 
@@ -161,23 +172,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
     preload.pluginsGetEnabled().then(setPluginsOn).catch(() => {});
   }, []);
 
-  // Fetch which AI CLI TUIs are set up on this box (non-fatal — an empty list
-  // just hides the launch-options section). Guarded like App.tsx: on an
-  // unpaired / mid-onboarding desktop boot, window.api is still the raw preload
-  // OS-bridge subset (no launchersList) until the http-mode transport swap in
-  // main.tsx completes, so a bare call throws synchronously (the .catch never
-  // sees it — the access itself is the crash).
-  useEffect(() => {
-    if (!window.api.launchersList) {
-      setAvailableLaunchers([]);
-      return;
-    }
-    window.api
-      .launchersList()
-      .then((list) => setAvailableLaunchers(list))
-      .catch(() => {});
-  }, []);
-
   // Fetch the installed-plugins list when the Plugins tab is open, and
   // re-fetch every 10s while it stays open (the ScheduledTasksCard poll
   // pattern — no bus event because the Mac executor publishes via PUT,
@@ -207,12 +201,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
   }, [activeTab]);
 
   const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
-    const l = availableLaunchers.find((x) => x.id === launcherId);
-    if (!l) return;
-    setLauncherFlagValues((prev) => ({
-      ...prev,
-      [launcherId]: { ...resolveLauncherFlags(l.flags, prev[launcherId]), [flagKey]: checked },
-    }));
+    setLauncherFlagValues((prev) =>
+      updateLauncherFlag(availableLaunchers, launcherId, flagKey, checked, prev),
+    );
   };
 
   const [saving, setSaving] = useState(false);
@@ -264,17 +255,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
     }
     setSaving(false);
     onClose();
-  };
-
-  const addRegistryUrl = () => {
-    const url = newRegistryUrl.trim();
-    if (!url || registryUrls.includes(url)) return;
-    setRegistryUrls([...registryUrls, url]);
-    setNewRegistryUrl("");
-  };
-
-  const removeRegistryUrl = (url: string) => {
-    setRegistryUrls(registryUrls.filter((u) => u !== url));
   };
 
   // Mint a one-time pairing code for mobile device pairing. The code is valid
@@ -544,30 +524,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
               <div className="border-t border-border pt-6">
                 <h3 className="text-base font-semibold mb-4">Prompt cache TTL</h3>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setTtl("5m")}
-                    className={`flex-1 px-4 py-2 text-sm rounded border ${
-                      ttl === "5m"
-                        ? "bg-accent-solid text-on-accent border-accent"
-                        : "bg-bg-soft text-text-muted border-border hover:text-text"
-                    }`}
-                  >
-                    5 minutes
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTtl("1h")}
-                    className={`flex-1 px-4 py-2 text-sm rounded border ${
-                      ttl === "1h"
-                        ? "bg-accent-solid text-on-accent border-accent"
-                        : "bg-bg-soft text-text-muted border-border hover:text-text"
-                    }`}
-                  >
-                    1 hour (default)
-                  </button>
-                </div>
+                <TtlToggle ttl={ttl} setTtl={setTtl} />
                 <div className="text-xs text-text-faint mt-2">
                   How long Anthropic keeps a session's prompt cache warm between
                   requests. Used to predict when a session has gone stale and show
