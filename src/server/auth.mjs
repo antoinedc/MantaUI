@@ -31,11 +31,10 @@
 // the mobile QR scanner (M3) are separate issues; they consume /auth/pair +
 // /auth/claim built here.
 
-import { writeFile, rename, mkdir, chmod, unlink } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
-import { join, dirname } from "node:path";
 import { statePath } from "../shared/paths.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 const STORE_PATH = statePath("auth.json");
 
@@ -251,39 +250,29 @@ function genPairingCode() {
 }
 
 // ---------------------------------------------------------------------------
-// Store (atomic write + 0600, same shape as webhooks.mjs / secrets.mjs)
+// Store (atomic write + 0600 via jsonStore.mjs — single source of truth)
 // ---------------------------------------------------------------------------
-
-async function atomicWrite(path, data, mode) {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, data, { mode });
-  await chmod(tmp, mode).catch(() => {});
-  await rename(tmp, path);
-}
 
 // Load the persisted { box_id, box_token, created_at }. Returns null if the
 // file is missing or corrupt (caller then generates a fresh identity).
 export function loadAuth(path = STORE_PATH) {
-  try {
-    if (existsSync(path)) {
-      const parsed = JSON.parse(readFileSync(path, "utf-8"));
-      if (isValidToken(parsed?.box_id) && isValidToken(parsed?.box_token)) {
-        return {
-          box_id: parsed.box_id,
-          box_token: parsed.box_token,
-          created_at: parsed.created_at ?? null,
-        };
-      }
-    }
-  } catch {
-    // corrupt/unreadable → regenerate rather than crash the server.
+  const parsed = readJsonSync(path, null);
+  if (
+    parsed &&
+    isValidToken(parsed.box_id) &&
+    isValidToken(parsed.box_token)
+  ) {
+    return {
+      box_id: parsed.box_id,
+      box_token: parsed.box_token,
+      created_at: parsed.created_at ?? null,
+    };
   }
   return null;
 }
 
 export async function saveAuth(auth, path = STORE_PATH) {
-  await mkdir(dirname(path), { recursive: true });
-  await atomicWrite(path, JSON.stringify(auth, null, 2), 0o600);
+  await writeJsonAtomic(path, JSON.stringify(auth, null, 2), { mode: 0o600 });
 }
 
 // Delete the persisted auth file. Idempotent — a missing file is not an error

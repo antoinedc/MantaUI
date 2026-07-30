@@ -30,10 +30,9 @@
 // I/O INJECTION: authPath + fetchImpl + env + gatewayBase are all injectable
 // so unit tests never touch the real filesystem or hit a live gateway.
 
-import { writeFile, rename, mkdir, chmod } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 const DEFAULT_GATEWAY_BASE = "https://gateway.mantaui.com";
 // Same path auth.mjs uses (STORE_PATH). Mirror here so this module has no
@@ -42,24 +41,17 @@ const DEFAULT_GATEWAY_BASE = "https://gateway.mantaui.com";
 // module that's already past its first use.
 export const DEFAULT_AUTH_PATH = statePath("auth.json");
 
-async function atomicWrite(path, data, mode) {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, data, { mode });
-  await chmod(tmp, mode).catch(() => {});
-  await rename(tmp, path);
-}
+// Atomic reads/writes route through jsonStore.mjs (single source of truth for
+// the temp-file-then-rename dance). `writeJsonAtomic` takes already-serialized
+// bytes, creates the parent dir, and applies 0600 when `mode` is supplied —
+// matching the security-critical auth.json contract.
 
 // Pure helper (tested). Read the persisted auth.json. Returns null on a
 // missing file or a corrupt payload — the caller decides what to do next
 // (treats "no auth at all" as "not registered yet").
 export function loadAuthFile(path) {
-  try {
-    if (!existsSync(path)) return null;
-    const parsed = JSON.parse(readFileSync(path, "utf-8"));
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
+  const parsed = readJsonSync(path, null);
+  return parsed && typeof parsed === "object" ? parsed : null;
 }
 
 // The box's own public base URL, or "" when the box has no reachable
@@ -194,8 +186,7 @@ export async function registerWithGateway({
   }
   if (changed) {
     try {
-      await mkdir(dirname(authPath), { recursive: true });
-      await atomicWrite(authPath, JSON.stringify(next, null, 2), 0o600);
+      await writeJsonAtomic(authPath, JSON.stringify(next, null, 2), { mode: 0o600 });
     } catch (e) {
       logger.warn?.(`[gateway-register] failed to persist auth.json: ${String(e?.message ?? e)}`);
       return { ok: false, skipped: "persist_failed" };
