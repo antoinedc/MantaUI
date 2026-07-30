@@ -19,8 +19,7 @@
 #   dist/manta-<v>-linux-arm64.tar.gz   → <RELEASES_DIR>/
 #   dist/manta-<v>-darwin-arm64.tar.gz  → <RELEASES_DIR>/
 #   dist/manta-<v>.txt                  → <RELEASES_DIR>/
-#   (then cp manta-<v>.txt → manta-latest.txt  for prod,
-#    or   cp manta-<v>.txt → manta-staging-latest.txt for staging — atomicity)
+#   (then cp manta-<v>.txt → manta-latest.txt — LAST, for atomicity)
 #
 # BUILD HOST CHOICE
 #   GitHub-hosted ubuntu-latest (x64) + ubuntu-24.04-arm (linux-arm64) +
@@ -38,14 +37,13 @@
 #   verbatim.
 #
 # ATOMICITY
-#   tarballs + versioned manifest are uploaded FIRST; the channel's *-latest.txt
-#   pointer (manta-latest.txt for prod, manta-staging-latest.txt for staging)
-#   is copied LAST. A client therefore either sees the OLD pointer (and the
+#   tarballs + versioned manifest are uploaded FIRST; manta-latest.txt is
+#   copied LAST. A client therefore either sees the OLD pointer (and the
 #   OLD tarballs are still served) OR the NEW pointer (and the NEW tarballs are
 #   already uploaded). Drift between manifest and tarballs is impossible.
 #   (Same rule publish.sh documents — generalized to both arches via a loop.)
-#   Staging refreshes its OWN pointer only — it must NEVER overwrite the prod
-#   manta-latest.txt.
+#   Channel separation is by directory (RELEASES_DIR), enforced by the
+#   /staging/ guard above — both channels publish the same filename.
 #
 # VERIFY
 #   After publish, fail red on:
@@ -259,24 +257,17 @@ jobs:
           echo "▸ Uploading ${manifest}"
           $SCP "$manifest" "$PROD_HOST:$RELEASES_DIR/"
 
-          # Channel-specific pointer. prod refreshes manta-latest.txt (the
-          # canonical install.sh pointer). staging refreshes
-          # manta-staging-latest.txt — it MUST NOT touch prod's latest.txt,
-          # or every install.sh fetch returns a staging build to a prod user.
-          channel="${{ needs.resolve.outputs.channel }}"
-          if [ "$channel" = "staging" ]; then
-            pointer="manta-staging-latest.txt"
-          else
-            pointer="manta-latest.txt"
-          fi
-          echo "▸ Publishing ${pointer} (LAST — atomicity)"
-          $SSH "$PROD_HOST" "cd $RELEASES_DIR && cp -f manta-${VERSION}.txt ${pointer}"
+          # Pointer is ALWAYS manta-latest.txt — install.sh appends
+          # /releases/manta-latest.txt to whatever MANTA_RELEASE_HOST it is
+          # given, and has no channel concept. The channel lives in
+          # RELEASES_DIR (guarded above), never in the filename.
+          echo "▸ Publishing manta-latest.txt (LAST — atomicity)"
+          $SSH "$PROD_HOST" "cd $RELEASES_DIR && cp -f manta-${VERSION}.txt manta-latest.txt"
 
       - name: Verify deploy (both arches)
         env:
           VERSION: ${{ steps.vars.outputs.version }}
           SITE: ${{ needs.resolve.outputs.site }}
-          CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: |
           set -euo pipefail
           fail=0
@@ -293,14 +284,8 @@ jobs:
             fi
           done
 
-          # Channel-specific *-latest.txt pointer — same atomicity invariant.
-          if [ "$CHANNEL" = "staging" ]; then
-            pointer="manta-staging-latest.txt"
-          else
-            pointer="manta-latest.txt"
-          fi
-          echo "▸ Fetch served ${pointer} and assert version"
-          served=$(curl -fsSL "$SITE/releases/${pointer}")
+          echo "▸ Fetch served manta-latest.txt and assert version"
+          served=$(curl -fsSL "$SITE/releases/manta-latest.txt")
           served_version=$(printf '%s\n' "$served" | grep '^version=' | head -n1 | cut -d= -f2-)
           if [ "$served_version" != "$VERSION" ]; then
             echo "::error::served version='${served_version}' expected='${VERSION}'"
