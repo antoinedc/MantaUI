@@ -25,13 +25,20 @@ const SCHEMA_PATH = join(ROOT, "website/schema/meta.json");
 const SITEMAP_PATH = join(ROOT, "website/sitemap.xml");
 
 function lastmodIsoFor(relFile) {
+  // Always emit UTC so re-running the generator on any machine/CI timezone
+  // produces byte-identical output. `%cI` carries the committer's stored
+  // timezone offset, which varies across machines and dirties sitemap.xml on
+  // every test run; `%ct` is a timezone-independent unix epoch we normalize
+  // to an ISO-8601 UTC string (`...Z`).
   try {
-    const iso = execFileSync(
+    const unix = execFileSync(
       "git",
-      ["log", "-1", "--format=%cI", "--", relFile],
+      ["log", "-1", "--format=%ct", "--", relFile],
       { cwd: ROOT, encoding: "utf8" },
     ).trim();
-    return iso || new Date().toISOString();
+    const sec = Number(unix);
+    if (!Number.isFinite(sec) || sec <= 0) return new Date().toISOString();
+    return new Date(sec * 1000).toISOString();
   } catch {
     return new Date().toISOString();
   }
