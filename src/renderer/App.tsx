@@ -910,7 +910,7 @@ export function App() {
             {/* side, leaving an orphan dot trailing the cwd). */}
             {activeCwd && (
               <>
-                <span className="text-text-faint shrink-0">·</span>
+                <span className="text-text-quiet shrink-0">·</span>
                 <span
                   className="text-text-faint min-w-0 truncate"
                   style={{ direction: "rtl", textAlign: "left" }}

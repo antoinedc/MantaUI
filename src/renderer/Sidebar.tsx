@@ -704,7 +704,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 className="group flex items-center gap-1 px-1 py-1 rounded text-xs uppercase tracking-wider text-text-muted hover:text-text cursor-pointer select-none"
                 onClick={() => toggleCollapse(p.tmuxSession)}
               >
-                <span className="w-3 text-center text-text-faint">
+                <span className="w-3 text-center text-text-quiet">
                   {isCollapsed ? "▸" : "▾"}
                 </span>
                 {renameTarget?.kind === "project" && renameTarget.old === p.tmuxSession ? (

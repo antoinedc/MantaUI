@@ -174,8 +174,8 @@ const UserCommandBar = memo(function UserCommandBar({
         className="flex items-baseline gap-2 w-full text-left hover:bg-bg-elev/40 -mx-1 px-1 rounded transition-colors"
         title={expanded ? "Collapse" : "Show expanded prompt"}
       >
-        <span className="text-text-faint select-none shrink-0">›</span>
-        <span className="text-text-faint select-none shrink-0 text-[10px] w-3">
+        <span className="text-text-quiet select-none shrink-0">›</span>
+        <span className="text-text-quiet select-none shrink-0 text-[10px] w-3">
           {expanded ? "▾" : "▸"}
         </span>
         <span className="font-mono text-text shrink-0">/{name}</span>
@@ -299,7 +299,7 @@ export const MessageRow = memo(function MessageRow({
             />
           ) : (
             <div className="-mx-4 px-4 py-0.5 bg-bg-soft flex">
-              <span className="text-text-faint select-none mr-2 shrink-0">›</span>
+              <span className="text-text-quiet select-none mr-2 shrink-0">›</span>
               <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-text">
                 {text}
               </span>
@@ -355,7 +355,7 @@ export const MessageRow = memo(function MessageRow({
           {truncation != null && (
             <>
               {turnDurationMs != null && (
-                <span className="text-text-faint mx-1.5">·</span>
+                <span className="text-text-quiet mx-1.5">·</span>
               )}
               {/* File-chip-style pill tinted with the warn token — visually */}
               {/* coherent with CompactionCard / RetryCard / QuestionCard, */}
