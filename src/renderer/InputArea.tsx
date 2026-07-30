@@ -283,7 +283,7 @@ export function InputArea({
       {/* Esc to cancel); the visible feedback is the pulsing border above + */}
       {/* below this row. On mobile the mic lives in the floating PTT FAB */}
       {/* above the composer (rendered at the top of this wrapper). */}
-      <div className="manta-composer-input-row px-4 py-3 flex items-start gap-2">
+      <div className="manta-composer-input-row px-4 pt-3 flex items-start gap-2">
         <span
           className="select-none pt-px shrink-0"
           style={{ color: voiceActive ? "var(--danger)" : "var(--accent)" }}
@@ -471,7 +471,7 @@ export function InputArea({
       </div>
       {/* Trust toggle — its own line, more visible when ON. Below the footer */}
       {/* so it doesn't crowd the model/hints row. */}
-      <div className="manta-composer-trust px-4 pb-2 flex items-center text-[10px]">
+      <div className="manta-composer-trust px-4 pb-3 flex items-center text-[10px]">
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={
