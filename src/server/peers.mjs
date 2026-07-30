@@ -344,6 +344,13 @@ export async function inspectPeer({ sessionID, directory, target }, deps = {}) {
 // peer agent. Only chat-mode peers (opencodeSessionId set) can receive a
 // message; a claude-TUI peer has no opencode session to inject into.
 //
+// The injected `sendPrompt` is wired in src/server/index.mjs (the /api/peers
+// POST handler) to the shared prompt-delivery engine
+// (src/server/promptDelivery.mjs), so a peer message that lands while the
+// target session is mid-turn is DEFERRED until idle rather than aborting the
+// peer's in-flight model turn (BET-375). This module stays ignorant of busy
+// state — the single injected delivery function handles it.
+//
 // deps.listProjects / deps.sendPrompt are injectable for tests; they default
 // to the live tmux + opencode implementations.
 export async function sendPeerMessage({ sessionID, directory, target, message }, deps = {}) {

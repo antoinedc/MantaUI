@@ -2,8 +2,14 @@
 // process on the Linux box). The remote AI calls the global opencode `schedule`
 // tool (docs/opencode-tools/schedule.ts), which POSTs to manta-server's
 // /api/schedule. Jobs are stored here durably and fired by a periodic tick that
-// re-submits the prompt into the SAME opencode session via oc.sendPrompt — the
-// scheduled work then streams back into the user's open ChatPanel as a new turn.
+// re-submits the prompt into the SAME opencode session — the scheduled work
+// then streams back into the user's open ChatPanel as a new turn.
+//
+// The injected `sendPrompt` is wired in src/server/index.mjs to the shared
+// prompt-delivery engine (src/server/promptDelivery.mjs), so a firing that
+// lands while the target session is mid-turn is DEFERRED until idle rather
+// than aborting the user's in-flight model turn (BET-375). This module stays
+// ignorant of busy state — the single injected delivery function handles it.
 //
 // Server-owned (NOT duplicated in desktop main) so jobs survive Mac-app-close,
 // session navigation, and box reboot. This is strictly more durable than Claude
