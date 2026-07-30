@@ -876,7 +876,7 @@ export function App() {
             onRetryNow={() => window.api.connectionRetryNow()}
           />
         )}
-        <div className="titlebar-drag h-10 border-b border-border flex items-center px-3 gap-2 min-w-0">
+        <div className="titlebar-drag h-12 border-b border-border flex items-center px-4 gap-2 min-w-0">
           <div className="text-xs text-text-muted flex items-center gap-2 min-w-0">
             {activeProjectName && (
               <span className="text-text-faint shrink-0">

@@ -268,9 +268,9 @@ export const MessageRow = memo(function MessageRow({
     const fileParts = msg.parts.filter((p) => p.type === "file");
     if (!text && fileParts.length === 0) return null;
     return stampedRow(
-      <div>
+      <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
         {fileParts.length > 0 && (
-          <div className="flex flex-wrap gap-1 mb-1 text-[11px]">
+          <div className="flex flex-wrap gap-1 text-[11px]">
             {fileParts.map((p) => {
               const raw = p as Record<string, unknown>;
               const url = typeof raw.url === "string" ? raw.url : "";
@@ -328,24 +328,21 @@ export const MessageRow = memo(function MessageRow({
   if (visibleParts.length === 0) return null;
 
   return stampedRow(
-    <div className="space-y-2">
+    <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
       {visibleParts.map((p, i) => (
         <AssistantPart key={p.id} part={p} first={i === 0} showThinking={showThinking} />
       ))}
       {/* Turn-level duration footer — only on the FINAL assistant message */}
-      {/* of a turn. -ml-[14px] breaks 14px out of the 16px px-4 padding, */}
-      {/* leaving a 2px gap between the sidebar edge and the ✻ glyph. */}
+      {/* of a turn. -ml-[8px] places the ✻ glyph halfway between the panel's */}
+      {/* left edge (where the transcript's padding starts) and the assistant */}
+      {/* bullet column. Vertical spacing is now owned by the turn wrapper's */}
+      {/* `gap: var(--block-gap)` (BET-411) — no per-child mt/mb. */}
       {/* Truncation badge piggy-backs onto the same line when both are set */}
       {/* (most common case: end-of-turn truncation). For mid-turn step */}
       {/* truncations there's no duration footer, so the badge renders on */}
       {/* its own row using the same baseline style. */}
       {(turnDurationMs != null || truncation != null) && (
-        // -ml-[8px] places the ✻ glyph halfway between the panel's left edge
-        // (where the transcript's px-4 padding starts at x=16) and the
-        // assistant bullet column (x=16 inside the padding). 16 - 8 = 8 from
-        // edge ≈ midway between sidebar and bullet. mt-3 adds breathing room
-        // above so it doesn't crowd the last assistant part.
-        <div className="-ml-[8px] mt-3 -mb-3 text-[13px] text-text-muted">
+        <div className="-ml-[8px] text-[13px] text-text-muted">
           {turnDurationMs != null && (
             <>
               <span style={{ color: "var(--accent)" }}>✻</span>{" "}

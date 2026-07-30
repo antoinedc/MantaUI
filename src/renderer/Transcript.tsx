@@ -60,7 +60,11 @@ export function Transcript({
   onRejectQuestion,
 }: TranscriptProps) {
   return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
+    <div
+      ref={scrollRef}
+      className="flex-1 overflow-y-auto overflow-x-hidden"
+      style={{ padding: "var(--sp-6) var(--sp-4)" }}
+    >
       <TaskContext.Provider value={taskContextValue}>
         <div className="flex flex-col justify-end min-h-full">
           {messages.length === 0 ? (
@@ -69,7 +73,7 @@ export function Transcript({
               Welcome. Type a message below to start.
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="flex flex-col" style={{ gap: "var(--turn-gap)" }}>
               {messages.map((m, idx) => {
                 const isLastInTranscript =
                   idx === messages.length - 1 && m.info.role === "assistant";

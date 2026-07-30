@@ -97,26 +97,31 @@ const MD_COMPONENTS: MarkdownComponents = {
       </a>
     );
   },
-  h1: ({ children }) => <div className="text-base font-semibold text-text mt-2 mb-1">{children}</div>,
-  h2: ({ children }) => <div className="text-sm font-semibold text-text mt-2 mb-1">{children}</div>,
-  h3: ({ children }) => <div className="text-sm font-medium text-text mt-2 mb-1">{children}</div>,
-  h4: ({ children }) => <div className="text-sm font-medium text-text mt-1 mb-0.5">{children}</div>,
+  // BET-411: block-level elements no longer set their own vertical margins.
+  // The turn wrapper's `gap: var(--block-gap)` owns the spacing between
+  // every sibling block (paragraph, list, blockquote, table, heading, code
+  // block), so a new block type inherits the correct gap and cannot opt out.
+  // Heading top-spacing (22/18/14px above) is sub-issue 07's job; until then
+  // headings ride the uniform block-gap.
+  h1: ({ children }) => <div className="text-base font-semibold text-text">{children}</div>,
+  h2: ({ children }) => <div className="text-sm font-semibold text-text">{children}</div>,
+  h3: ({ children }) => <div className="text-sm font-medium text-text">{children}</div>,
+  h4: ({ children }) => <div className="text-sm font-medium text-text">{children}</div>,
   // Tight list rendering: GFM "loose" lists (blank lines between items)
-  // wrap each li's content in a <p>. Without [&_p]:m-0 the inner paragraphs
-  // each add an mb, stacking up to large gaps. We collapse those margins
-  // inside list items so the visual spacing is driven only by space-y-* on
-  // the ul/ol parent.
-  ul: ({ children }) => <ul className="my-1 ml-2 list-disc list-inside space-y-0.5 [&_p]:m-0">{children}</ul>,
-  ol: ({ children }) => <ol className="my-1 ml-2 list-decimal list-inside space-y-0.5 [&_p]:m-0">{children}</ol>,
+  // wrap each li's content in a <p>. [&_p]:m-0 collapses those inner
+  // paragraphs so the visual spacing is driven only by space-y-* on the
+  // ul/ol parent. The list's own spacing to its siblings is the turn gap.
+  ul: ({ children }) => <ul className="ml-2 list-disc list-inside space-y-0.5 [&_p]:m-0">{children}</ul>,
+  ol: ({ children }) => <ol className="ml-2 list-decimal list-inside space-y-0.5 [&_p]:m-0">{children}</ol>,
   li: ({ children }) => <li className="text-text">{children}</li>,
-  p: ({ children }) => <div className="mb-1 last:mb-0">{children}</div>,
+  p: ({ children }) => <div>{children}</div>,
   blockquote: ({ children }) => (
-    <blockquote className="border-l-2 border-border pl-3 my-1 text-text-muted italic">
+    <blockquote className="border-l-2 border-border pl-3 text-text-muted italic">
       {children}
     </blockquote>
   ),
   table: ({ children }) => (
-    <div className="my-2 overflow-x-auto max-w-full">
+    <div className="overflow-x-auto max-w-full">
       <table className="text-[12px] border-collapse">{children}</table>
     </div>
   ),
@@ -128,7 +133,7 @@ const MD_COMPONENTS: MarkdownComponents = {
   td: ({ children }) => (
     <td className="border border-border px-2 py-0.5 text-text">{children}</td>
   ),
-  hr: () => <hr className="my-2 border-border" />,
+  hr: () => <hr className="border-border" />,
 };
 
 // Above this many characters, skip the react-markdown AST parse entirely and
@@ -275,7 +280,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
     countLines(cleaned) > CODEBLOCK_MAX_LINES;
 
   return (
-    <div className="my-2 rounded border border-border bg-bg-soft overflow-hidden relative">
+    <div className="rounded border border-border bg-bg-soft overflow-hidden relative">
       {lang && (
         <div className="px-2 py-0.5 text-[10px] text-text-faint border-b border-border bg-bg-elev pr-7">
           {lang}
