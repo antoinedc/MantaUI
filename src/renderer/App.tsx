@@ -15,7 +15,7 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import { chooseUpdateSkewVariant, registerMountedTerminal, type MountedTerminal } from "./chatUtils";
-import { isCompatible } from "../shared/compatibility.mjs";
+import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
 import { ReconnectingBanner } from "./ReconnectingBanner";
@@ -401,55 +401,14 @@ export function App() {
   //   - "match"        → hide the card.
   // The `serverVersion` is the SAME field MobileSettings already reads
   // for "Server vX.Y.Z" under the URL field — single source of truth.
-  const [clientVersion, setClientVersion] = useState<string | null>(null);
-  const [serverMinClient, setServerMinClient] = useState<string | null>(null);
-  const [serverVersion, setServerVersion] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void Promise.all([
-      window.api.getClientVersion?.().catch(() => null),
-      window.api.getServerVersion?.().catch(() => null),
-    ]).then(([client, server]) => {
-      if (cancelled) return;
-      if (client && typeof client.version === "string") {
-        setClientVersion(client.version);
-      }
-      if (server && typeof server.minClient === "string") {
-        setServerMinClient(server.minClient);
-      }
-      if (server && typeof server.version === "string") {
-        setServerVersion(server.version);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Desktop↔box compatibility variant (BET-357 §3 / BET-366). Pure
-  // derivation off the two versions already on hand; `isCompatible`
-  // collapses missing input to "unknown" so we never show a misleading
-  // upgrade card mid-bootstrap.
-  const compatibilityVariant = isCompatible({
-    desktopVersion: clientVersion,
-    boxVersion: serverVersion,
-  });
-  // The compatibility card is dismissible (unlike the MIN_CLIENT skew
-  // banner above): the "behind" path has a clear one-click action the
-  // user can re-trigger from the Settings card, and the "incompatible"
-  // path is informational. The dismiss is local state — clearing it
-  // re-shows the card if the variant re-evaluates (e.g. the user fixes
-  // the box remotely and the next version poll flips the variant).
-  const [compatibilityDismissed, setCompatibilityDismissed] = useState(false);
-  // Reset the dismiss latch when the variant changes (e.g. box was
-  // upgraded remotely, version refetch flipped match → behind). The
-  // user shouldn't have to reload to see the new "behind" card.
-  useEffect(() => {
-    setCompatibilityDismissed(false);
-  }, [compatibilityVariant]);
-  const showCompatibilityCard =
-    !compatibilityDismissed &&
-    (compatibilityVariant === "behind" || compatibilityVariant === "incompatible");
+  const {
+    clientVersion,
+    serverVersion,
+    serverMinClient,
+    variant: compatibilityVariant,
+    showCard: showCompatibilityCard,
+    dismiss,
+  } = useCompatibilityCard();
 
   // Sidebar status for chat-mode windows. The PTY-pane poller
   // (src/main/status.ts) can't see chat-mode state — the holder pane
@@ -903,7 +862,7 @@ export function App() {
                   void window.api.openExternal("https://mantaui.com/install");
                 }
               }}
-              onDismiss={() => setCompatibilityDismissed(true)}
+              onDismiss={dismiss}
             />
           )}
         {/* Reconnecting banner (BET-365 / BET-357 §1): full-width bar above
