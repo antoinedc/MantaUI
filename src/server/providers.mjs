@@ -10,11 +10,12 @@
 // This slice only adds the HTTP path. The RPC layer serves both (SSH + HTTP)
 // until SSH is removed.
 
-import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { reconcileSubagents } from "../shared/subagentSync.mjs";
+import { writeJsonAtomic } from "./jsonStore.mjs";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (ported from src/main/providers.ts)
@@ -78,14 +79,10 @@ const normBaseURL = (u) => stripUrlUserinfo(u).replace(/\/$/, "");
 // mobile server IS the box, so we read/write it directly (no SSH hop).
 const OPENCODE_JSONC = join(homedir(), ".config", "opencode", "opencode.jsonc");
 
-// Atomic write helper: write to a temp file then rename over the target.
-// rename(2) is atomic on the same filesystem, so a crash mid-write cannot
-// leave the destination file truncated or empty.
-async function atomicWrite(path, data) {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
-}
+// Atomic writes route through jsonStore.mjs (single source of truth for the
+// temp-file-then-rename dance). The READ path stays here because opencode.jsonc
+// is JSONC (// comments), which the plain-JSON readJsonSync can't parse — the
+// comment-stripping readRemoteConfig below is the JSONC-aware loader.
 
 /**
  * Strip // line comments from JSONC without eating // inside strings.
@@ -353,8 +350,7 @@ export async function discoverModelsForEndpoint(baseURL, apiKey, readConfig = re
 async function writeOpencodeJsonc(cfg) {
   const content = JSON.stringify(cfg, null, 2);
   try {
-    await mkdir(dirname(OPENCODE_JSONC), { recursive: true });
-    await atomicWrite(OPENCODE_JSONC, content);
+    await writeJsonAtomic(OPENCODE_JSONC, content);
     return { ok: true };
   } catch (e) {
     console.warn("[providers] write failed:", e);

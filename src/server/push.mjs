@@ -40,11 +40,10 @@
 // lives in firePush / the subscription helpers.
 
 import webpush from "web-push";
-import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import * as tmux from "./tmux.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 const DIR = statePath();
 const VAPID_PATH = join(DIR, "vapid.json");
@@ -57,12 +56,9 @@ const APNS_TOKENS_PATH = join(DIR, "apns-tokens.json");
 // VAPID `subject` must be a mailto: or https: URI identifying the sender.
 const VAPID_SUBJECT = "mailto:app@mantaui.com";
 
-async function atomicWrite(path, data) {
-  await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
-}
+// Atomic reads/writes route through jsonStore.mjs (single source of truth for
+// the temp-file-then-rename dance). `writeJsonAtomic` takes already-serialized
+// bytes and creates the parent dir, matching the old per-store copy.
 
 // ---------------------------------------------------------------------------
 // VAPID keys — load once, generate + persist on first run.
@@ -72,17 +68,11 @@ let _vapid = null;
 
 async function ensureVapid() {
   if (_vapid) return _vapid;
-  try {
-    if (existsSync(VAPID_PATH)) {
-      _vapid = JSON.parse(await readFile(VAPID_PATH, "utf-8"));
-    }
-  } catch {
-    _vapid = null;
-  }
+  _vapid = readJsonSync(VAPID_PATH, null);
   if (!_vapid?.publicKey || !_vapid?.privateKey) {
     _vapid = webpush.generateVAPIDKeys();
     try {
-      await atomicWrite(VAPID_PATH, JSON.stringify(_vapid, null, 2));
+      await writeJsonAtomic(VAPID_PATH, JSON.stringify(_vapid, null, 2));
     } catch (e) {
       console.warn("[push] failed to persist VAPID keys:", e?.message ?? e);
     }
@@ -102,19 +92,12 @@ export async function getVapidPublic() {
 // ---------------------------------------------------------------------------
 
 async function loadSubs() {
-  try {
-    if (existsSync(SUBS_PATH)) {
-      const arr = JSON.parse(await readFile(SUBS_PATH, "utf-8"));
-      return Array.isArray(arr) ? arr : [];
-    }
-  } catch {
-    /* corrupt file → start empty rather than crash the pump */
-  }
-  return [];
+  const arr = readJsonSync(SUBS_PATH, []);
+  return Array.isArray(arr) ? arr : [];
 }
 
 async function saveSubs(subs) {
-  await atomicWrite(SUBS_PATH, JSON.stringify(subs, null, 2));
+  await writeJsonAtomic(SUBS_PATH, JSON.stringify(subs, null, 2));
 }
 
 /** Add (or replace by endpoint) a PushSubscription. */
@@ -149,19 +132,12 @@ export async function removeSubscription(endpoint) {
 // ---------------------------------------------------------------------------
 
 async function loadApnsTokens(path = APNS_TOKENS_PATH) {
-  try {
-    if (existsSync(path)) {
-      const arr = JSON.parse(await readFile(path, "utf-8"));
-      return Array.isArray(arr) ? arr : [];
-    }
-  } catch {
-    /* corrupt file → start empty */
-  }
-  return [];
+  const arr = readJsonSync(path, []);
+  return Array.isArray(arr) ? arr : [];
 }
 
 async function saveApnsTokens(tokens, path = APNS_TOKENS_PATH) {
-  await atomicWrite(path, JSON.stringify(tokens, null, 2));
+  await writeJsonAtomic(path, JSON.stringify(tokens, null, 2));
 }
 
 /** Upsert a device token. De-dupes by token value; updates registeredAt.
@@ -769,18 +745,13 @@ const GATEWAY_BASE = process.env.MANTA_GATEWAY_BASE || "https://gateway.mantaui.
 const AUTH_PATH = statePath("auth.json");
 
 async function readBoxGatewayIdentity() {
-  try {
-    if (!existsSync(AUTH_PATH)) return null;
-    const raw = await readFile(AUTH_PATH, "utf-8");
-    const parsed = JSON.parse(raw);
-    const box_id = typeof parsed?.box_id === "string" ? parsed.box_id : null;
-    const gateway_token =
-      typeof parsed?.gateway_token === "string" ? parsed.gateway_token : null;
-    if (!box_id || !gateway_token) return null;
-    return { box_id, gateway_token };
-  } catch {
-    return null;
-  }
+  const parsed = readJsonSync(AUTH_PATH, null);
+  if (!parsed) return null;
+  const box_id = typeof parsed.box_id === "string" ? parsed.box_id : null;
+  const gateway_token =
+    typeof parsed.gateway_token === "string" ? parsed.gateway_token : null;
+  if (!box_id || !gateway_token) return null;
+  return { box_id, gateway_token };
 }
 
 // Test hooks — let unit tests inject fakes without touching globals.

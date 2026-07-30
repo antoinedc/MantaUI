@@ -8,12 +8,13 @@
 // are no-ops documented below.
 
 import { run } from "./tmux.mjs";
-import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { statePath, expandTilde } from "../shared/paths.mjs";
 import { deriveWorktree, isWorktreeDirtyError } from "../shared/worktree.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 // ============================================================
 // Config persistence (real implementation — renderer depends on it)
@@ -31,14 +32,10 @@ import { deriveWorktree, isWorktreeDirtyError } from "../shared/worktree.mjs";
 
 const CONFIG_PATH = statePath("config.json");
 
-// atomicWrite — write to a temp file then rename over the target.
-// rename(2) is atomic on the same filesystem, so a crash mid-write
-// cannot leave the destination file truncated or empty.
-async function atomicWrite(path, data) {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
-}
+// atomic writes route through jsonStore.mjs (single source of truth for the
+// temp-file-then-rename dance). `writeJsonAtomic` takes already-serialized
+// bytes, so it works for the config JSON and the plain-text ~/.tmux.conf
+// rewrites alike.
 
 const DEFAULT_CONFIG = {
   projects: [],
@@ -53,30 +50,24 @@ let _config = null;
 
 async function getConfig() {
   if (_config) return _config;
-  try {
-    if (existsSync(CONFIG_PATH)) {
-      const raw = await readFile(CONFIG_PATH, "utf-8");
-      const parsed = JSON.parse(raw);
-      // Migrate old project shape (id/name) → { tmuxSession, defaultCwd }
-      if (parsed.projects) {
-        parsed.projects = parsed.projects.map((p) => {
-          if (p.tmuxSession) return p;
-          return { tmuxSession: p.name ?? "untitled", defaultCwd: p.defaultCwd ?? "~" };
-        });
-      }
-      _config = { ...DEFAULT_CONFIG, ...parsed };
-    } else {
-      _config = { ...DEFAULT_CONFIG };
+  const parsed = readJsonSync(CONFIG_PATH, null);
+  if (parsed) {
+    // Migrate old project shape (id/name) → { tmuxSession, defaultCwd }
+    if (parsed.projects) {
+      parsed.projects = parsed.projects.map((p) => {
+        if (p.tmuxSession) return p;
+        return { tmuxSession: p.name ?? "untitled", defaultCwd: p.defaultCwd ?? "~" };
+      });
     }
-  } catch {
+    _config = { ...DEFAULT_CONFIG, ...parsed };
+  } else {
     _config = { ...DEFAULT_CONFIG };
   }
   return _config;
 }
 
 async function saveConfig(cfg) {
-  await mkdir(dirname(CONFIG_PATH), { recursive: true });
-  await atomicWrite(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+  await writeJsonAtomic(CONFIG_PATH, JSON.stringify(cfg, null, 2));
   _config = cfg;
 }
 
@@ -365,10 +356,10 @@ export async function tmuxSetupConfig() {
   if (!current.includes(MANTA_BEGIN)) {
     // Backup original if not already backed up
     if (current && !existsSync(tmuxConfBak)) {
-      await atomicWrite(tmuxConfBak, current);
+      await writeJsonAtomic(tmuxConfBak, current);
     }
     // Append manta block (full-file rewrite — atomic to avoid blank tmux.conf on crash)
-    await atomicWrite(tmuxConf, current + MANTA_BLOCK);
+    await writeJsonAtomic(tmuxConf, current + MANTA_BLOCK);
     // Try to source it into the live tmux server (best-effort)
     await run("tmux", ["source-file", tmuxConf]).catch(() => {});
   }
@@ -383,7 +374,7 @@ export async function tmuxRestoreConfig() {
   if (existsSync(tmuxConfBak)) {
     // Restore original backup (full-file rewrite — atomic to avoid blank tmux.conf on crash)
     const original = await readFile(tmuxConfBak, "utf-8");
-    await atomicWrite(tmuxConf, original);
+    await writeJsonAtomic(tmuxConf, original);
   } else {
     // Strip manta block in place (full-file rewrite — atomic)
     try {
@@ -393,7 +384,7 @@ export async function tmuxRestoreConfig() {
         new RegExp(`\\n?${escapeRegex(MANTA_BEGIN)}[\\s\\S]*?${escapeRegex(MANTA_END)}\\n?`, "g"),
         "",
       );
-      await atomicWrite(tmuxConf, stripped);
+      await writeJsonAtomic(tmuxConf, stripped);
     } catch { /* no config to restore */ }
   }
 
