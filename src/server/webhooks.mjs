@@ -26,11 +26,9 @@
 // Server-owned + durable (survives Mac-app-close / reboot), same pattern as
 // schedule.mjs / secrets.mjs. Store: ~/.manta/webhooks.json (0600).
 
-import { readFile, writeFile, rename, mkdir, chmod } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, createHmac, timingSafeEqual } from "node:crypto";
-import { join, dirname } from "node:path";
 import { statePath } from "../shared/paths.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 const STORE_PATH = statePath("webhooks.json");
 
@@ -150,28 +148,13 @@ export function deliveryUrl(token, base = process.env.MANTA_PUBLIC_URL || "https
 // Store (atomic write + 0600, same shape as schedule.mjs / secrets.mjs)
 // ---------------------------------------------------------------------------
 
-async function atomicWrite(path, data, mode) {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, data, { mode });
-  await chmod(tmp, mode).catch(() => {});
-  await rename(tmp, path);
-}
-
 export function loadHooks(path = STORE_PATH) {
-  try {
-    if (existsSync(path)) {
-      const parsed = JSON.parse(readFileSync(path, "utf-8"));
-      return Array.isArray(parsed?.hooks) ? parsed.hooks : [];
-    }
-  } catch {
-    // corrupt/unreadable → start empty rather than crash the server.
-  }
-  return [];
+  const parsed = readJsonSync(path, {});
+  return Array.isArray(parsed?.hooks) ? parsed.hooks : [];
 }
 
 export async function saveHooks(hooks, path = STORE_PATH) {
-  await mkdir(dirname(path), { recursive: true });
-  await atomicWrite(path, JSON.stringify({ hooks }, null, 2), 0o600);
+  await writeJsonAtomic(path, JSON.stringify({ hooks }, null, 2), { mode: 0o600 });
 }
 
 function genId() {

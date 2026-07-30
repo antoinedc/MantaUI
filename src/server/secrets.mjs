@@ -28,11 +28,11 @@
 // schedule.mjs / servePage.mjs. Store: ~/.manta/secrets.json (0600).
 // Materialized files: ~/.manta-secrets/ (dir 0700, files 0600).
 
-import { readFile, writeFile, rename, mkdir, chmod, rm } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { writeFile, mkdir, chmod, rm } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { statePath, secretsRoot } from "../shared/paths.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 const STORE_PATH = statePath("secrets.json");
 // Where `secret_provide` writes the materialized value files. Shared secrets go
@@ -141,32 +141,13 @@ export function materializedPath(entry, dir = SECRETS_DIR) {
 // Store (atomic write + 0600, same shape as schedule.mjs / servePage.mjs)
 // ---------------------------------------------------------------------------
 
-async function atomicWrite(path, data, mode) {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, data, { mode });
-  // writeFile's mode is only applied on create; chmod is belt-and-suspenders
-  // in case the tmp file pre-existed with looser perms.
-  await chmod(tmp, mode).catch(() => {});
-  await rename(tmp, path);
-}
-
 export function loadSecrets(path = STORE_PATH) {
-  try {
-    if (existsSync(path)) {
-      const parsed = JSON.parse(readFileSync(path, "utf-8"));
-      return Array.isArray(parsed?.secrets) ? parsed.secrets : [];
-    }
-  } catch {
-    // corrupt/unreadable → start empty rather than crash the server. The file
-    // is never auto-overwritten unless a mutation happens, so a transient read
-    // error doesn't destroy data.
-  }
-  return [];
+  const parsed = readJsonSync(path, {});
+  return Array.isArray(parsed?.secrets) ? parsed.secrets : [];
 }
 
 export async function saveSecrets(secrets, path = STORE_PATH) {
-  await mkdir(dirname(path), { recursive: true });
-  await atomicWrite(path, JSON.stringify({ secrets }, null, 2), 0o600);
+  await writeJsonAtomic(path, JSON.stringify({ secrets }, null, 2), { mode: 0o600 });
 }
 
 function genId() {
