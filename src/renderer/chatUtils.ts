@@ -2473,3 +2473,38 @@ function isAuthErrorName(
     msg,
   );
 }
+
+// ===== Background delegation job rows (BET-381) =====
+//
+// Pure helpers for the sidebar / mobile session list second line and the jobs
+// management card. The renderer never computes the activity text itself — it
+// comes from the job record's `activity` field (server-computed on a 10s
+// poll, no model call). These helpers only decide WHETHER a window is a job
+// row and format a finished job's summary line.
+
+// A window is a job row when the jobs map has an entry for its opencode
+// session id. False for ordinary chat/terminal windows and when the window
+// has no opencode session id (a claude-TUI window).
+export function isJobRow(
+  jobs: Record<string, { name: string; status: string; activity: string }>,
+  opencodeSessionId: string | null | undefined,
+): boolean {
+  if (!opencodeSessionId) return false;
+  return Object.prototype.hasOwnProperty.call(jobs, opencodeSessionId);
+}
+
+// Format a finished job's summary line from its branch + files-changed count.
+// Used by the jobs management card for terminal (done/failed/stopped) rows.
+// The no-worktree case (job ran in the parent cwd, worktree null) renders
+// without a branch. `filesChanged` null/undefined → "0 files".
+export function formatJobSummary(job: {
+  branch?: string | null;
+  filesChanged?: number | null;
+  worktree?: string | null;
+}): string {
+  const files =
+    job.filesChanged == null ? 0 : Math.max(0, Math.floor(job.filesChanged));
+  const filesLabel = `${files} file${files === 1 ? "" : "s"} changed`;
+  if (!job.worktree || !job.branch) return filesLabel;
+  return `${job.branch} · ${filesLabel}`;
+}

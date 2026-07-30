@@ -54,7 +54,7 @@ import {
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
-import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
+import { BackgroundJobsCard, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
 import { useTranscriptState } from "./hooks/useTranscriptState";
@@ -156,6 +156,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     webhookError,
     setWebhookError,
     refreshWebhooks,
+    showJobs,
+    setShowJobs,
+    jobs,
+    setJobs,
+    jobsError,
+    setJobsError,
+    refreshJobs,
   } = resources;
   const setChatSubagents = useStore((s) => s.setChatSubagents);
   // Prompt-history navigation (Up/Down cycles past prompts, terminal-style) is
@@ -1870,6 +1877,54 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
+      {/* Background-jobs management card. Toggled by the ⚙ toolbar button */}
+      {/* (desktop) or the ⋯ sheet (mobile). Jobs are started by the AI's */}
+      {/* `delegate` opencode tool; the card only lists / stops / deletes. */}
+      {showJobs && (
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <BackgroundJobsCard
+            jobs={jobs}
+            error={jobsError}
+            onClose={() => setShowJobs(false)}
+            onStop={(id) => {
+              window.api
+                .delegateStop(id)
+                .then(() => refreshJobs())
+                .catch((e: unknown) => {
+                  setJobsError(e instanceof Error ? e.message : "stop failed");
+                  void refreshJobs();
+                });
+            }}
+            onDelete={(id) => {
+              window.api
+                .delegateDelete(id)
+                .then((res) => {
+                  // Dirty worktree refusal: engine returns {ok:false,
+                  // reason:"dirty"} and keeps the record. The card surfaces
+                  // the inline message via its own per-row state keyed on the
+                  // record still being present after refresh.
+                  if (res && res.ok === false && res.reason === "dirty") {
+                    setJobsError(null);
+                  } else {
+                    setJobs((prev) => prev.filter((j) => j.id !== id));
+                  }
+                  void refreshJobs();
+                })
+                .catch((e: unknown) => {
+                  setJobsError(e instanceof Error ? e.message : "delete failed");
+                  void refreshJobs();
+                });
+            }}
+            onOpen={(job) => {
+              if (job.tmuxSession != null && job.windowIndex != null) {
+                useStore.getState().setActive(job.tmuxSession, job.windowIndex);
+              }
+              setShowJobs(false);
+            }}
+          />
+        </div>
+      )}
+
       {running && (
         <>
           <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
@@ -2044,9 +2099,11 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
         scheduleCount={schedules.length}
+        jobsCount={jobs.filter((j) => j.status === "running").length}
         onSchedules={() => setShowSchedules((v) => !v)}
         onSecrets={() => setShowSecrets((v) => !v)}
         onWebhooks={() => setShowWebhooks((v) => !v)}
+        onJobs={() => setShowJobs((v) => !v)}
         typeaheadOpen={typeahead != null && typeaheadRows.length > 0}
         typeaheadExactMatch={(() => {
           if (!typeahead || typeaheadRows.length === 0) return false;

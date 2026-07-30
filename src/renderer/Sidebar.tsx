@@ -8,7 +8,7 @@ import {
 import { useStore, type WindowStatusUI } from "./store";
 import { nowMs } from "./clock";
 import type { Project, WorktreeInfo } from "../shared/types";
-import { classifyCacheAge, formatAge, selectCacheTtlMs } from "./chatUtils";
+import { classifyCacheAge, formatAge, isJobRow, selectCacheTtlMs } from "./chatUtils";
 import { MOD_KEY } from "./platform";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
@@ -40,6 +40,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     activeProjectName,
     activeWindowByProject,
     status,
+    jobs,
     setActive,
     refresh,
     backgroundSyncing,
@@ -784,23 +785,34 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                               size="window"
                             />
                           ) : (
-                            <span
-                              className="flex-1 truncate"
-                              onDoubleClick={(e) => {
-                                e.stopPropagation();
-                                startRename(
-                                  {
-                                    kind: "window",
-                                    project: p.tmuxSession,
-                                    index: w.index,
-                                    old: w.name,
-                                  },
-                                  w.name,
-                                );
-                              }}
-                              title="Double-click to rename"
-                            >
-                              {w.name}
+                            <span className="flex-1 min-w-0 flex flex-col">
+                              <span
+                                className="truncate"
+                                onDoubleClick={(e) => {
+                                  e.stopPropagation();
+                                  startRename(
+                                    {
+                                      kind: "window",
+                                      project: p.tmuxSession,
+                                      index: w.index,
+                                      old: w.name,
+                                    },
+                                    w.name,
+                                  );
+                                }}
+                                title="Double-click to rename"
+                              >
+                                {w.name}
+                              </span>
+                              {isJobRow(jobs, w.opencodeSessionId) &&
+                                jobs[w.opencodeSessionId as string]?.activity && (
+                                  <span
+                                    className="text-text-faint text-[10px] truncate leading-tight"
+                                    title={jobs[w.opencodeSessionId as string]!.activity}
+                                  >
+                                    {jobs[w.opencodeSessionId as string]!.activity}
+                                  </span>
+                                )}
                             </span>
                           )}
                           <StatusIndicator

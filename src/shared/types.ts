@@ -715,6 +715,21 @@ export const IPC = {
   webhookList: "webhook:list", // (sessionId?) → WebhookMeta[]
   webhookDelete: "webhook:delete", // (id) → { deleted: boolean }
 
+  // ---- background delegation jobs (manta-server owned) ----
+  // Background jobs are started by the AI's global `delegate` opencode tool
+  // (POST /api/delegate); the UI only LISTS / STOPS / DELETES via these
+  // channels (no create channel — see src/server/rpc.mjs). Each job is a real
+  // chat-mode tmux window + opencode session in its own git worktree, so it
+  // already appears in the sidebar; the jobs card manages the lifecycle and
+  // the per-row activity summary. Desktop + mobile both reach the server
+  // store over /rpc (httpApi). list returns the full job record; stop aborts
+  // the child session and marks the job `stopped`; delete removes the tmux
+  // window + worktree (force:false — refuses a dirty worktree with
+  // {ok:false, reason:"dirty"}) and drops the record.
+  delegateList: "delegate:list", // (sessionId?) → DelegateJob[]
+  delegateStop: "delegate:stop", // (id) → { ok: boolean, error?: string, reason?: string }
+  delegateDelete: "delegate:delete", // (id) → { ok: boolean, error?: string, reason?: string }
+
   // ---- APNs native-push registration (BET-181) ----
   // iOS Capacitor app registers its APNs device token so the server can
   // fan out native pushes alongside Web Push (VAPID). Server-side store
@@ -908,6 +923,38 @@ export type ScheduledJob = {
   directory: string;
   createdAt: number;
   lastFiredMinute: string | null;
+};
+
+// A background-delegation job record (manta store: ~/.manta/delegate-jobs.json).
+// Mirrors the shape persisted by src/server/delegate.mjs. The UI reads this
+// via the `delegate:list` RPC channel (filtered by parent session when a
+// sessionId is passed); stop/delete via `delegate:stop` / `delegate:delete`.
+// `status` is "running" | "done" | "failed" | "stopped". `activity` is the
+// per-row summary the server computes on a 10s poll (no model call) — the
+// renderer renders it verbatim and never computes it. `worktree`/`branch` are
+// null when the parent cwd was not a git repo (the job ran in the parent cwd).
+export type DelegateJobStatus = "running" | "done" | "failed" | "stopped";
+export type DelegateJob = {
+  id: string; // 8-char hex
+  name: string; // slug of the first 4 words of the prompt
+  prompt: string;
+  model: string | null;
+  parentSessionID: string; // the opencode session that called delegate
+  parentDirectory: string;
+  childSessionID: string | null; // the job's own opencode session (null until created)
+  tmuxSession: string | null;
+  windowIndex: number | null;
+  worktree: string | null; // absolute path, or null (not a git repo)
+  branch: string | null;
+  baseSha: string | null;
+  status: DelegateJobStatus;
+  activity: string | null; // server-computed one-line summary (running jobs only)
+  createdAt: number;
+  startedAt: number;
+  finishedAt: number | null;
+  result: string | null; // last assistant text (done only)
+  error: string | null; // failure / stop / timeout reason
+  filesChanged: number | null; // committed + uncommitted (done only)
 };
 
 // ----- Agent → laptop file push (outbox) -----

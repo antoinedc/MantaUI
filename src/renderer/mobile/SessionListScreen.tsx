@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useStore } from "../store";
 import type { Project, TmuxWindow } from "../../shared/types";
 import { MobileCreateSheet } from "./MobileCreateSheet";
-import { classifyCacheAge, formatAge, selectCacheTtlMs } from "../chatUtils";
+import { classifyCacheAge, formatAge, isJobRow, selectCacheTtlMs } from "../chatUtils";
 import { nowMs } from "../clock";
 
 type Props = {
@@ -46,6 +46,7 @@ function SessionRow({
 }) {
   const status = useStore((s) => s.status[project.tmuxSession]?.[w.index]);
   const cacheTtl = useStore((s) => s.cacheTtl);
+  const jobs = useStore((s) => s.jobs);
   const running = status?.running ?? false;
   const attention = status?.attention ?? false;
   const isBlockingAttention =
@@ -55,6 +56,13 @@ function SessionRow({
   // "needs you" in the type label above).
   const showAge =
     status?.lastMessageAt != null && !running && !isBlockingAttention;
+  // Background-job rows replace the secondary line's text with the job's
+  // activity summary (server-computed, rendered verbatim). The activity is
+  // faint single-line; the age label is dropped for job rows (the activity
+  // is the more useful signal). Mirrors the desktop Sidebar second line.
+  const jobActivity = isJobRow(jobs, w.opencodeSessionId)
+    ? jobs[w.opencodeSessionId as string]?.activity ?? ""
+    : "";
   return (
     <button
       className="mobile-row w-full text-left"
@@ -70,8 +78,8 @@ function SessionRow({
           {w.name}
         </span>
         <span className="block text-text-muted text-xs truncate">
-          {typeLabel(w, running, attention)}
-          {showAge && (
+          {jobActivity || typeLabel(w, running, attention)}
+          {!jobActivity && showAge && (
             <span
               className={`tabular-nums ${ageColorClass(classifyCacheAge(status!.lastMessageAt!, nowMs(), selectCacheTtlMs(cacheTtl)))}`}
             >

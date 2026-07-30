@@ -226,6 +226,30 @@ export function App() {
     void useStore.getState().runBackgroundSync();
   }, [chatSessionKey]);
 
+  // Background-delegation jobs (BET-381): a single app-level 10s poll feeds
+  // the store's `jobs` slice (keyed by childSessionID), which drives the
+  // sidebar's per-row activity second line on BOTH desktop and mobile. ONE
+  // poll, owned here (not in ChatPanel or Sidebar) so mobile and desktop
+  // share it. delegateList() with no arg returns ALL jobs; the per-session
+  // card list is a separate fetch in useSessionResources. The renderer never
+  // computes activity text — it renders the `activity` field verbatim.
+  useEffect(() => {
+    if (!window.api.delegateList) return;
+    const tick = () => {
+      window.api
+        .delegateList()
+        .then((list) => {
+          useStore.getState().setJobs(Array.isArray(list) ? list : []);
+        })
+        .catch(() => {
+          /* server unreachable — leave the prior jobs map; the card surfaces errors */
+        });
+    };
+    tick();
+    const poll = setInterval(tick, 10_000);
+    return () => clearInterval(poll);
+  }, []);
+
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
   // used to register its own listener, so a single detection fanned out into
   // N toasts (one per mounted chat). Now the toast lives in the store, the

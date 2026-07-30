@@ -3,6 +3,7 @@ import type {
   AppConfig,
   AuthClaimInput,
   AuthPairResult,
+  DelegateJob,
   DesktopNotifyPayload,
   OpencodeAgent,
   OpencodeCommand,
@@ -277,6 +278,17 @@ export interface Api {
   // via the global `webhook` opencode tool, not a UI channel.
   webhookList(sessionId?: string): Promise<WebhookMeta[]>;
   webhookDelete(id: string): Promise<{ deleted: boolean }>;
+
+  // Background delegation jobs (manta-server owned). list returns the full
+  // job records (filtered by parent session when sessionId is passed; all
+  // jobs when omitted — the app-level sidebar poll uses the no-arg form).
+  // stop aborts the child session and marks the job `stopped`. delete removes
+  // the tmux window + worktree (force:false) and drops the record; a dirty
+  // worktree is refused with {ok:false, reason:"dirty"} and the record kept.
+  // No create channel — jobs are started by the AI's `delegate` opencode tool.
+  delegateList(sessionId?: string): Promise<DelegateJob[]>;
+  delegateStop(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
+  delegateDelete(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
 
   // APNs native-push registration (BET-181). The iOS Capacitor app calls this
   // on startup (after permission grant) with the device token returned by

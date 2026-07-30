@@ -2,6 +2,7 @@ import {
   IPC,
   type AgentFileReady,
   type AuthPairResult,
+  type DelegateJob,
   type DesktopNotifyPayload,
   type OpencodeEvent,
   type OpencodeProviderAuthRequest,
@@ -893,6 +894,17 @@ export const httpApi: Api = {
   // -- inbound webhooks (manta-server owned; in-process on mobile) --
   webhookList: (sessionId) => rpc(IPC.webhookList, sessionId),
   webhookDelete: (id) => rpc(IPC.webhookDelete, id),
+
+  // -- background delegation jobs (manta-server owned; in-process on mobile) --
+  // list returns the full job records (the engine always returns an array;
+  // a no-engine fallback returns {jobs:[]} which we normalize). No create
+  // channel — the AI starts jobs via the global `delegate` opencode tool.
+  delegateList: (sessionId) =>
+    rpc<DelegateJob[] | { jobs: DelegateJob[] }>(IPC.delegateList, sessionId).then(
+      (r) => (Array.isArray(r) ? r : Array.isArray(r?.jobs) ? r.jobs : []),
+    ),
+  delegateStop: (id) => rpc(IPC.delegateStop, id),
+  delegateDelete: (id) => rpc(IPC.delegateDelete, id),
 
   // -- APNs native-push registration (BET-181) --
   // iOS Capacitor app registers its APNs device token via the standard 6-site
