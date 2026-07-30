@@ -4,10 +4,24 @@ export default {
   theme: {
     extend: {
       colors: {
-        bg: { DEFAULT: "#0B1020", elev: "#12182F", soft: "#171F3A" },
-        border: { DEFAULT: "#253055", strong: "#33406B" },
-        text: { DEFAULT: "#F8FAFC", muted: "#A7B1C4", faint: "#5C6578" },
-        accent: { DEFAULT: "#5A88FF", soft: "#1740AE" },
+        bg: {
+          DEFAULT: "rgb(var(--canvas-rgb) / <alpha-value>)",
+          elev: "rgb(var(--panel-rgb) / <alpha-value>)",
+          soft: "rgb(var(--card-rgb) / <alpha-value>)",
+        },
+        border: {
+          DEFAULT: "rgb(var(--border-rgb) / <alpha-value>)",
+          strong: "var(--border-strong)",
+        },
+        text: {
+          DEFAULT: "rgb(var(--tx1-rgb) / <alpha-value>)",
+          muted: "var(--tx2)",
+          faint: "var(--tx3)",
+        },
+        accent: {
+          DEFAULT: "rgb(var(--accent-rgb) / <alpha-value>)",
+          soft: "rgb(var(--accent-soft-rgb) / <alpha-value>)",
+        },
       },
       fontFamily: {
         mono: ["JetBrains Mono", "SF Mono", "Menlo", "Consolas", "monospace"],
