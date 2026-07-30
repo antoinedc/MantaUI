@@ -194,6 +194,7 @@ export function buildHandlers({
   push,
   serverVersion,
   runServerSelfUpdate,
+  delegate,
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -714,6 +715,20 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.scheduleDelete, id)  → args[0] = id
     "schedule:delete": (id) =>
       scheduleDeleteJob(id, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- background jobs (manta-server owned; in-process on mobile) ----
+    // Mirror of the /api/delegate REST surface for the renderer. Jobs are
+    // CREATED by the AI tool (Stage 3), NOT by the UI — there is deliberately
+    // no `delegate:create` channel. list/stop/delete route to the engine
+    // wired in src/server/index.mjs (createDelegateEngine). Stop/delete
+    // publish delegate.updated so a future UI card refetches live.
+    // preload: ipcRenderer.invoke(IPC.delegateList, sessionId) → args[0] = sessionId?
+    "delegate:list": (sessionId) =>
+      delegate ? delegate.listJobs({ sessionID: sessionId || undefined }) : { jobs: [] },
+    // preload: ipcRenderer.invoke(IPC.delegateStop, id) → args[0] = id
+    "delegate:stop": (id) => (delegate ? delegate.stopJob(id) : { ok: false, error: "no engine" }),
+    // preload: ipcRenderer.invoke(IPC.delegateDelete, id) → args[0] = id
+    "delegate:delete": (id) => (delegate ? delegate.deleteJob(id) : { ok: false, error: "no engine" }),
 
     // ---- secrets (manta-server owned; in-process on mobile) ----
     // Mirror of desktop IPC.secretsList / secretsSet / secretsDelete. The store

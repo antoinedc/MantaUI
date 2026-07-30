@@ -54,6 +54,7 @@ import {
   startCapSweeper,
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
+import { createDelegateEngine } from "./delegate.mjs";
 import {
   startCleanupPoller,
   registerPage,
@@ -218,6 +219,33 @@ const webhookEngine = createWebhookEngine({
   publish: (evt) => bus.publish(evt),
 });
 
+// Background-job engine (BET-378): durable jobs that run in their own
+// worktree + chat-mode window, detect completion from the opencode event
+// stream, and report their result back to the parent session (deferred until
+// the parent is idle via the shared prompt-delivery engine). See
+// src/server/delegate.mjs. Completion detection runs in the opencode pump
+// below (delegateEngine.observeEvent); the sweeper fails out stale running
+// jobs (30 min) and prunes terminal retention; the 10s activity poller
+// refreshes the `activity` summary for running jobs. The AI tool + UI are
+// Stage 3 — this server wiring is Stage 2 only.
+const delegateEngine = createDelegateEngine({
+  publish: (evt) => bus.publish(evt),
+  deliver: (args) => promptDelivery.deliver(args),
+  listProjects: () => tmux.listProjects(),
+  newWindow: (input) => tmux.newWindow(input),
+  killWindow: (input) => tmux.killWindow(input),
+  gitAddWorktree: (input) => local.gitAddWorktree(input),
+  gitRemoveWorktree: (input) => local.gitRemoveWorktree(input),
+  gitRun: (args) => tmux.run("git", args),
+  listMessages: (sid) => oc.listMessages(sid),
+  abortSession: (sid) => oc.abortSession(sid),
+  oc,
+});
+// eslint-disable-next-line no-unused-vars
+const { stop: stopDelegateSweeper } = delegateEngine.startSweeper();
+// eslint-disable-next-line no-unused-vars
+const { stop: stopDelegateActivityPoller } = delegateEngine.startActivityPoller();
+
 // Single-box auth gate (M1, job zero). Every request must carry the box_token
 // as `Authorization: Bearer <token>` except the pairing handshake (/auth/*) and
 // the public webhook delivery leg (/hook/<token>, self-authenticated). The box
@@ -263,6 +291,7 @@ rpcHandlers = buildHandlers({
   authPair: () => authEngine.pair(),
   push,
   serverVersion: SERVER_VERSION,
+  delegate: delegateEngine,
   // BET-366 reviewer return: production wiring for the
   // `server:update-apply` IPC channel. The handler in rpc.mjs calls this
   // with SELF_UPDATE_SCRIPT (resolved at module load from `import.meta.url`).
@@ -348,6 +377,11 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     webhookEngine.observeEvent(evt);
   } catch (e) {
     console.warn("[webhook] observeEvent failed:", e?.message ?? e);
+  }
+  try {
+    delegateEngine.observeEvent(evt);
+  } catch (e) {
+    console.warn("[delegate] observeEvent failed:", e?.message ?? e);
   }
   // Auto-recover expired Claude credentials (server-side; works with no client attached).
   oc.maybeRecoverCredentials(evt).catch(() => {});
@@ -1097,6 +1131,82 @@ const handleRequest = async (req, res) => {
         const host = url.searchParams.get("host") || undefined;
         const status = url.searchParams.get("status") || undefined;
         const jobs = await listCapJobs({ sessionID, host, status });
+        respondJson(res, 200, { jobs });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Background jobs (BET-378, server-side only) ----------
+  // POST   /api/delegate           body {prompt, model?, sessionID, directory}
+  //                               → 200 {ok, job} (400 refused: cap/nesting/bad input)
+  // GET    /api/delegate?sessionID= → {jobs:[...]} (jobs for that parent session)
+  // POST   /api/delegate/:id/stop  → 200 {ok} (409 not running / 404 not found)
+  // DELETE /api/delegate/:id       → 200 {ok} (409 dirty worktree → {error:"dirty"})
+  //
+  // Behind the existing Bearer auth gate (every route below the gate is
+  // gated wholesale). Jobs are created by the AI tool (Stage 3) — there is
+  // deliberately no `delegate:create` RPC channel; the UI only lists/stops/
+  // deletes via the delegate:* channels in rpc.mjs.
+  if (
+    path === "/api/delegate" ||
+    /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop))?$/.test(path)
+  ) {
+    const detailRe = /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop))?$/;
+    const detailMatch = path.match(detailRe);
+    try {
+      if (detailMatch) {
+        const [, id, action] = detailMatch;
+        if (action === "stop") {
+          if (req.method !== "POST") {
+            respondJson(res, 405, { error: "method not allowed" });
+            return;
+          }
+          const result = await delegateEngine.stopJob(id);
+          if (!result.ok) {
+            respondJson(res, 409, { error: result.error, status: result.status });
+            return;
+          }
+          respondJson(res, 200, { ok: true });
+          return;
+        }
+        // No action verb, DELETE /api/delegate/:id → delete the job.
+        if (req.method !== "DELETE") {
+          respondJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const result = await delegateEngine.deleteJob(id);
+        if (!result.ok) {
+          // Dirty worktree → keep worktree + record; 409 so the UI explains it.
+          respondJson(res, 409, { error: result.error, reason: result.reason });
+          return;
+        }
+        respondJson(res, 200, { ok: true });
+        return;
+      }
+      // Collection routes (/api/delegate): create + list.
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await delegateEngine.startJob({
+          prompt: body?.prompt,
+          model: body?.model,
+          parentSessionID: body?.sessionID,
+          parentDirectory: body?.directory,
+        });
+        if (!result.ok) {
+          respondJson(res, 400, { error: result.error });
+          return;
+        }
+        respondJson(res, 200, { ok: true, id: result.job.id, job: result.job });
+        return;
+      }
+      if (req.method === "GET") {
+        const sessionID = url.searchParams.get("sessionID") || undefined;
+        const jobs = await delegateEngine.listJobs({ sessionID });
         respondJson(res, 200, { jobs });
         return;
       }
