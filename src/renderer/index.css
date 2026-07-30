@@ -39,6 +39,43 @@ html, body, #root {
   );
 }
 
+/* Token substrate (BET-407). Colour literals moved out of tailwind.config.js
+   into CSS custom properties so a theme is one attribute on <html>. Values are
+   a 1:1 rename of the previous hardcoded literals — no retune. Sub-issue 03
+   adds a light block; sub-issue 04 splits the intentionally-collapsed tokens
+   (border-subtle/border, tx3/tx4, the three accent tokens).
+
+   Each colour that is used with a Tailwind alpha modifier (e.g. bg-accent/20)
+   is paired with a `-rgb` channel variable so `rgb(var(--tok-rgb) / <alpha>)`
+   can apply opacity. The hex `--tok` variables hold the same values for direct
+   use in hand-written CSS (e.g. the scrollbar below) and are the substrate
+   sub-issue 04 will split. */
+[data-theme="dark"] {
+  --canvas: #0B1020;
+  --panel: #12182F;
+  --card: #171F3A;
+  --border-subtle: #253055;
+  --border: #253055;
+  --border-strong: #33406B;
+  --tx1: #F8FAFC;
+  --tx2: #A7B1C4;
+  --tx3: #5C6578;
+  --tx4: #5C6578;
+  --accent: #5A88FF;
+  --accent-tx: #5A88FF;
+  --accent-solid: #5A88FF;
+  --on-accent: #0B1020;
+  --accent-soft: #1740AE;
+
+  --canvas-rgb: 11 16 32;
+  --panel-rgb: 18 24 47;
+  --card-rgb: 23 31 58;
+  --border-rgb: 37 48 85;
+  --tx1-rgb: 248 250 252;
+  --accent-rgb: 90 136 255;
+  --accent-soft-rgb: 23 64 174;
+}
+
 /* Trailing spacer inside any header row that reaches the top-right of the
    window. Zero-width off Windows. */
 .titlebar-inset-right {
@@ -106,5 +143,5 @@ html, body, #root {
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #253055; border-radius: 5px; }
-::-webkit-scrollbar-thumb:hover { background: #33406B; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
