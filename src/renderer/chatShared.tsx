@@ -92,9 +92,9 @@ export type ToolState = {
 export type TaskContextValue = {
   expanded: Set<string>;
   toggle: (childSessionId: string) => void;
-  // Lazy-loaded child transcripts. Map.get(childSessionId) may be undefined
-  // (never fetched) — TaskBody shows a spinner or "expand to load" depending
-  // on fetchState.
+  // Child transcripts. Map.get(childSessionId) may be undefined if the child
+  // has no cached messages yet; TaskBody renders its collapsed header only in
+  // that case (no separate loading/fetch state is tracked here).
   childMessages: Map<string, OpencodeMessage[]>;
   // Live child running/idle from session.status / session.idle events.
   // Overrides the parent's stale `state.status` for the running pulse.
