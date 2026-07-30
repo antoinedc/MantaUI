@@ -17,6 +17,10 @@ export default {
           DEFAULT: "rgb(var(--tx1-rgb) / <alpha-value>)",
           muted: "var(--tx2)",
           faint: "var(--tx3)",
+          // Decorative text only — sub-AA tier (--tx4, ~3:1). Never use for a
+          // timestamp, path, placeholder, or label. The contrast gate
+          // (src/shared/contrast.mjs) pins tx4 on canvas at 3:1. (BET-410)
+          quiet: "var(--tx4)",
         },
         accent: {
           DEFAULT: "rgb(var(--accent-rgb) / <alpha-value>)",

@@ -89,7 +89,7 @@ function SessionRow({
           )}
         </span>
       </span>
-      <span className="text-text-faint text-lg leading-none">›</span>
+      <span className="text-text-quiet text-lg leading-none">›</span>
     </button>
   );
 }
