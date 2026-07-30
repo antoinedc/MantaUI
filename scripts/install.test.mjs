@@ -31,6 +31,7 @@ import {
   formatProviderDetection,
   DEFAULT_PROVIDERS,
   OPENCODE_CLAUDE_AUTH_PLUGIN,
+  CLAUDE_AUTH_FAMILY,
   DEFAULT_PORT,
   DEFAULT_RELEASE_HOST,
   DESKTOP_DMG_URL,
@@ -945,6 +946,82 @@ test("mergeOpencodeConfig is null/undefined safe (treated as empty)", () => {
 });
 
 // ----------------------------------------------------------------------------
+// mergeOpencodeConfig — family-aware REPLACE (BET-319)
+// ----------------------------------------------------------------------------
+//
+// The Claude auth plugin is a single logical family: every variant shares
+// the prefix `opencode-claude-auth`. The merge now REPLACES an existing
+// variant with the target instead of appending alongside it (which used to
+// leave both variants loaded — the dev-box bug). The target defaults to
+// `@latest`; dev/CI boxes pass an explicit `-bui` target via the CLI bridge
+// (MANTA_CLAUDE_AUTH_PLUGIN env var). These tests pin the family behavior;
+// the default-target path is covered by the 10 cases above.
+
+const BUI_PLUGIN = "opencode-claude-auth-bui@1.5.4-bui.1";
+
+test("mergeOpencodeConfig family-replaces -bui -> @latest (default target)", () => {
+  const before = JSON.stringify({ plugin: [BUI_PLUGIN] }, null, 2) + "\n";
+  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
+  assert.equal(corrupt, false);
+  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig family-replaces @latest -> -bui (explicit target)", () => {
+  const before = JSON.stringify({ plugin: [OPENCODE_CLAUDE_AUTH_PLUGIN] }, null, 2) + "\n";
+  const { text, corrupt, plugin } = mergeOpencodeConfig(before, BUI_PLUGIN);
+  assert.equal(corrupt, false);
+  assert.deepEqual(plugin, [BUI_PLUGIN]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, [BUI_PLUGIN]);
+});
+
+test("mergeOpencodeConfig family-replace preserves unrelated plugins", () => {
+  const before = JSON.stringify(
+    { plugin: ["some-other-plugin", BUI_PLUGIN] },
+    null,
+    2,
+  ) + "\n";
+  const { text, plugin } = mergeOpencodeConfig(before);
+  // Only the family member is replaced; the unrelated plugin stays first.
+  assert.deepEqual(plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("mergeOpencodeConfig is idempotent with an explicit target", () => {
+  const before = JSON.stringify({ plugin: ["unrelated"] }, null, 2) + "\n";
+  const first = mergeOpencodeConfig(before, BUI_PLUGIN);
+  const second = mergeOpencodeConfig(first.text, BUI_PLUGIN);
+  assert.equal(second.text, first.text);
+  assert.deepEqual(second.plugin, ["unrelated", BUI_PLUGIN]);
+});
+
+test("mergeOpencodeConfig collapses both variants to a single target", () => {
+  // The dev box's current state: both -bui and @latest present.
+  const before = JSON.stringify(
+    { plugin: [BUI_PLUGIN, OPENCODE_CLAUDE_AUTH_PLUGIN] },
+    null,
+    2,
+  ) + "\n";
+  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
+  assert.equal(corrupt, false);
+  // Both family members collapse to the single default target.
+  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+  const after = JSON.parse(text);
+  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
+});
+
+test("CLAUDE_AUTH_FAMILY prefix matches both plugin variants", () => {
+  // Guard against an accidental rename that would silently stop recognizing
+  // a variant and re-introduce the double-load bug.
+  assert.equal(OPENCODE_CLAUDE_AUTH_PLUGIN.startsWith(CLAUDE_AUTH_FAMILY), true);
+  assert.equal(BUI_PLUGIN.startsWith(CLAUDE_AUTH_FAMILY), true);
+  assert.equal("some-other-plugin".startsWith(CLAUDE_AUTH_FAMILY), false);
+});
+
+// ----------------------------------------------------------------------------
 // fetchConnectedProviders / formatProviderDetection / DEFAULT_PROVIDERS
 // (BET-313) — the install-time per-provider detection summary. Pure helpers
 // that install.sh composes at the tail of a successful install. Pure tests
@@ -1320,6 +1397,66 @@ test("install.sh is bash-syntax-clean (bash -n)", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("install.sh guards every MANTA_CLAUDE_AUTH_PLUGIN use against set -u (BET-319 regression)", () => {
+  // install.sh runs under `set -euo pipefail`. The first BET-319 iteration
+  // referenced $MANTA_CLAUDE_AUTH_PLUGIN directly inside `[ -n "$VAR" ]`,
+  // which — because end-user installs NEVER set the override — crashed the
+  // installer for every public install on macOS + Linux (the advisory CI job
+  // caught it; `npm test` doesn't execute the shell). `bash -n` parses but
+  // does not execute, so it cannot catch an unset-variable expansion. This
+  // static guard pins the fix: every NON-COMMENT reference to the var must
+  // use the `${VAR:-}` default-expansion form (or be inside a branch that is
+  // only reached after a `:-` guard already proved it set).
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const lines = src.split("\n");
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*#/.test(line)) continue; // skip comment lines
+    // A bare `$MANTA_CLAUDE_AUTH_PLUGIN` or `"$MANTA_CLAUDE_AUTH_PLUGIN"`
+    // (no `${...:-}` form) is the bug. The safe form is `${MANTA_CLAUDE_AUTH_PLUGIN:-}`.
+    // We detect a bare expansion as `$VAR` NOT immediately followed by `{`.
+    const bare = /\$MANTA_CLAUDE_AUTH_PLUGIN(?!\{)/.test(line);
+    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `install.sh references MANTA_CLAUDE_AUTH_PLUGIN without the \${VAR:-} set -u guard:\n${offenders.join("\n")}`,
+  );
+});
+
+test("install.sh brace-delimits every $VAR adjacent to the … ellipsis (BET-319 bash 3.2 regression)", () => {
+  // macOS ships bash 3.2, which under a UTF-8 locale absorbs the multibyte
+  // `…` (U+2026) bytes into the variable-name lookup when `$VAR` is directly
+  // followed by `…` with no delimiter. The resulting name (`VAR…`) is unset
+  // → `set -u` fires → installer crashes on every macOS install. `bash -n`
+  // doesn't catch this (parse-only, locale-independent). The fix is to
+  // brace-delimit: `${VAR}…`. Lines 825/854 already follow this convention;
+  // this test pins it for the whole file.
+  //
+  // We flag any non-comment line where `$IDENT` (not `${IDENT}`) is
+  // immediately followed by `…` — i.e. a bare expansion abutting the
+  // ellipsis with no brace or other delimiter between them.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const lines = src.split("\n");
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*#/.test(line)) continue; // skip comment lines
+    // Match `$IDENT…` where IDENT is a bash identifier (letters, digits,
+    // underscore) and the `$` is NOT immediately followed by `{`. The `…`
+    // must directly follow the identifier with no intervening delimiter.
+    const bare = /\$([A-Za-z_][A-Za-z0-9_]*)…/.test(line);
+    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `install.sh has bare \$VAR adjacent to the multibyte … ellipsis (bash 3.2 set -u crash):\n${offenders.join("\n")}`,
+  );
 });
 
 test("install.sh defines detect_tailscale_ip BEFORE every call site (BET-267 review regression)", () => {
