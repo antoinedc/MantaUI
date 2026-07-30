@@ -17,13 +17,11 @@
 // box reboot — the SSE+catch-up plumbing on the executor side picks them up
 // when the desktop comes back.
 
-import { readFile, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { normalizeHost } from "../shared/pluginManifest.mjs";
-import { atomicWrite } from "./storeUtils.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (single source of truth — see docs/mantaui-plugins.md §Constants)
@@ -53,18 +51,12 @@ const MAX_TERMINAL_JOBS = 50;
 // ---------------------------------------------------------------------------
 
 export async function loadJobs(path = STORE_PATH) {
-  try {
-    if (!existsSync(path)) return [];
-    const parsed = JSON.parse(await readFile(path, "utf-8"));
-    return Array.isArray(parsed?.jobs) ? parsed.jobs : [];
-  } catch {
-    return []; // corrupt/unreadable → start empty rather than crash the server
-  }
+  const parsed = readJsonSync(path, {});
+  return Array.isArray(parsed?.jobs) ? parsed.jobs : [];
 }
 
 export async function saveJobs(jobs, path = STORE_PATH) {
-  await mkdir(dirname(path), { recursive: true });
-  await atomicWrite(path, JSON.stringify({ jobs }, null, 2));
+  await writeJsonAtomic(path, JSON.stringify({ jobs }, null, 2));
 }
 
 function genId() {

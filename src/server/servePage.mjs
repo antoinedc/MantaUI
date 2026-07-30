@@ -12,11 +12,12 @@
 // Pages expire after a configurable TTL (default 24h). A cleanup sweep
 // removes expired entries every 5 minutes.
 
-import { readFile, writeFile, rename, mkdir, copyFile, stat, rm } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { readFile, mkdir, copyFile, stat, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { statePath } from "../shared/paths.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 const STORE_PATH = statePath("serve-page.json");
 const PAGES_DIR = statePath("pages");
@@ -28,36 +29,16 @@ const DEFAULT_TTL_HOURS = 24;
 const CLEANUP_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
-// Atomic write — same pattern as local.mjs / schedule.mjs
-// ---------------------------------------------------------------------------
-
-async function atomicWrite(path, data) {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
-}
-
-// ---------------------------------------------------------------------------
 // Store — durable registry in ~/.manta/serve-page.json
 // ---------------------------------------------------------------------------
 
 export function loadPages(path = STORE_PATH) {
-  try {
-    if (existsSync(path)) {
-      const raw = readFileSync(path, "utf-8");
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed.pages) ? parsed.pages : [];
-    }
-  } catch {
-    // corrupt file — start fresh
-  }
-  return [];
+  const parsed = readJsonSync(path, {});
+  return Array.isArray(parsed.pages) ? parsed.pages : [];
 }
 
 export function savePages(pages, path = STORE_PATH) {
-  return mkdir(dirname(path), { recursive: true }).then(() =>
-    atomicWrite(path, JSON.stringify({ pages }, null, 2)),
-  );
+  return writeJsonAtomic(path, JSON.stringify({ pages }, null, 2));
 }
 
 // ---------------------------------------------------------------------------
