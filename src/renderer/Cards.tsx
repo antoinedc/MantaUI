@@ -28,10 +28,10 @@ export function RetryCard({
   const body = info.action?.message || info.message;
   return (
     <div
-      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      className="rounded-md border bg-bg-elev px-4 py-3 text-[12px]"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
-      <div className="flex items-center gap-2 mb-1">
+      <div className="flex items-center gap-2 mb-3">
         <span style={{ color: "var(--accent)" }}>↻</span>
         <span className="text-text">{headline}</span>
         {info.attempt > 0 && (
@@ -39,7 +39,7 @@ export function RetryCard({
         )}
       </div>
       {body && (
-        <div className="text-text-muted break-words mb-1">{body}</div>
+        <div className="text-text-muted break-words">{body}</div>
       )}
       {info.action?.link && (
         <div>
@@ -72,10 +72,10 @@ export function CompactionCard({
   const firstLine = state.text.split("\n").find((s) => s.trim()) ?? "";
   return (
     <div
-      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      className="rounded-md border bg-bg-elev px-4 py-3 text-[12px]"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
-      <div className="flex items-center gap-2 mb-1">
+      <div className="flex items-center gap-2 mb-3">
         <span style={{ color: "var(--accent)" }}>
           <span className={isRunning ? "inline-block animate-pulse" : "inline-block"}>
             ✻
@@ -131,10 +131,10 @@ export function PermissionCard({
 
   return (
     <div
-      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      className="rounded-md border bg-bg-elev px-4 py-3 text-[12px]"
       style={{ borderColor: "rgb(var(--warn-rgb) / 0.33)" }}
     >
-      <div className="flex items-center gap-2 mb-1">
+      <div className="flex items-center gap-2 mb-3">
         <span style={{ color: "var(--warn)" }}>✻</span>
         <span className="text-text">
           {perm.fromJobName ? `${perm.fromJobName} · ` : ""}Permission needed
@@ -142,7 +142,7 @@ export function PermissionCard({
         <span className="text-text-faint">· {perm.permission}</span>
       </div>
       {detail && (
-        <div className="text-text-muted break-all mb-2 font-mono">{detail}</div>
+        <div className="text-text-muted break-all mb-4 font-mono">{detail}</div>
       )}
       <div className="flex flex-wrap gap-2">
         <button
@@ -219,10 +219,10 @@ export function QuestionCard({
 
   return (
     <div
-      className="rounded-md border bg-bg-elev px-3 py-2 text-[12px]"
+      className="rounded-md border bg-bg-elev px-4 py-3 text-[12px]"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
-      <div className="flex items-center gap-2 mb-2">
+      <div className="flex items-center gap-2 mb-3">
         <span style={{ color: "var(--accent)" }}>?</span>
         <span className="text-text font-medium">
           {request.fromJobName ? `${request.fromJobName} · ` : ""}Question
@@ -297,9 +297,9 @@ export function QuestionCard({
         ))}
       </div>
 
-      <hr className="my-2 mx-2 border-border" />
+      <hr className="mx-2 border-border" />
 
-      <div className="mt-2 flex justify-end gap-2">
+      <div className="mt-4 flex justify-end gap-2">
         <button
           onClick={onReject}
           className="px-2 py-0.5 rounded text-text-faint hover:text-text border border-border"

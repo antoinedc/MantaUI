@@ -37,6 +37,33 @@ html, body, #root {
   --titlebar-inset-right: calc(
     100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)
   );
+
+  /* Spacing scale (BET-411). The 4px-grid steps matching the trimmed
+     Tailwind spacing scale from BET-407 (0, px, 1..12). Exposed as CSS
+     custom properties so hand-written layout rules (the transcript gap
+     rhythm below, and the surface sub-issues 08/09 that follow) read
+     spacing from one source — a value off the grid becomes impossible to
+     write in either Tailwind utilities or raw CSS. */
+  --sp-0: 0;
+  --sp-px: 1px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* Transcript vertical rhythm (BET-411). Two numbers govern the whole
+     transcript: --block-gap is the gap between ANY two sibling blocks
+     inside one turn (paragraph, tool card, diff, todo list — all equal);
+     --turn-gap is the gap between turns. Driven from the container's
+     `gap`, never from per-child margins, so a new block type inherits the
+     correct spacing and cannot opt out. */
+  --block-gap: var(--sp-3);
+  --turn-gap: var(--sp-6);
 }
 
 /* Token substrate (BET-407). Colour literals moved out of tailwind.config.js

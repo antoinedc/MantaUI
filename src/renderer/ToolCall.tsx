@@ -126,8 +126,8 @@ export const AssistantPart = memo(function AssistantPart({
           <span className="select-none w-4 shrink-0">
             <span style={{ color: "var(--accent)", opacity: 0.6 }}>✻ </span>
           </span>
-          <div className="flex-1 min-w-0">
-            <div className="text-text-faint not-italic mb-1">Thinking…</div>
+          <div className="flex-1 min-w-0 flex flex-col" style={{ gap: "var(--sp-1)" }}>
+            <div className="text-text-faint not-italic">Thinking…</div>
             <div>{text}</div>
           </div>
         </div>
@@ -214,7 +214,7 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
 
   const { color: bulletColor, pulse } = bulletStyle(part);
   return (
-    <div>
+    <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
       <div className="flex">
         <span className="select-none w-4 shrink-0">
           <span
@@ -240,7 +240,7 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
           )}
         </div>
       </div>
-      <div className="ml-4 mt-0.5">
+      <div className="ml-4">
         <ToolBody tool={rawTool} state={state} diffText={diffText} verbose={verbose} />
       </div>
     </div>
@@ -364,7 +364,7 @@ function TaskBody({ state }: { state: ToolState }) {
   const onToggle = ctx ? () => ctx.toggle(info.childSessionId) : null;
 
   return (
-    <div className="text-[12px] text-text-muted">
+    <div className="text-[12px] text-text-muted flex flex-col" style={{ gap: "var(--sp-1)" }}>
       {/* Header row: description + meta line. Click anywhere on the row to
           toggle when context is available. */}
       <div
@@ -426,7 +426,7 @@ function TaskBody({ state }: { state: ToolState }) {
       {/* Expanded body: child transcript (full fidelity, indented + bordered)
           followed by the final output. While loading, a small spinner. */}
       {isExpanded && (
-        <div className="mt-1 ml-4 pl-3 border-l-2 border-border">
+        <div className="ml-4 pl-3 border-l-2 border-border flex flex-col" style={{ gap: "var(--sp-2)" }}>
           {childMsgs && childMsgs.length > 0 && (
             <div className="flex flex-col gap-2">
               {childMsgs.map((m) => (
@@ -454,8 +454,8 @@ function TaskBody({ state }: { state: ToolState }) {
               Same visual treatment as the generic ToolOutput so users
               recognize "this is what the subagent returned to its parent". */}
           {info.output && effectiveStatus !== "running" && (
-            <div className="mt-2">
-              <div className="text-text-faint mb-1">Result:</div>
+            <div className="flex flex-col" style={{ gap: "var(--sp-1)" }}>
+              <div className="text-text-faint">Result:</div>
               <ToolOutput output={info.output} />
             </div>
           )}
