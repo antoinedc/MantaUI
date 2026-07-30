@@ -222,6 +222,59 @@ returns a job id immediately and a completion turn is injected into this
 session when the run finishes (or fails / times out at 30 min).
 
 **Do NOT poll in a loop.** Completion arrives automatically as a new turn
-from the originating opencode session. Use `plugin_status(id)` only when
-the user explicitly asks for mid-run progress, or after completion to
-inspect the log tail.
+from the originating opencode session. Use `plugin_status(id)` only when the
+user explicitly asks for mid-run progress, or after completion to inspect
+the log tail.
+
+## MantaUI background delegation
+
+You have `delegate`, `delegate_list`, and `delegate_stop` tools for running
+work in a BACKGROUND opencode session so the main conversation is NOT
+blocked. Use `delegate({ prompt, model? })` to start a job; it returns
+immediately and the job runs in its own session + git worktree. When the
+job finishes, its result arrives on its own as a separate later message —
+you do NOT have the result when `delegate` returns, so never report or
+guess the job's findings before that message lands.
+
+**Background vs. blocking — choose deliberately.** Reach for `delegate`
+when the work is long-running, independent, and you do NOT need its answer
+to continue your current reply — research, a broad refactor, an
+investigation, a test-suite run-and-fix. Use the ordinary built-in `task`
+tool instead when you need the answer before you can carry on (e.g.
+finding where something lives so you can then edit it). Both delegation
+modes coexist; you pick. Every background job costs a full extra model
+session, so do not fan out speculatively — and never start a background
+job from inside another background job.
+
+**The job starts with NO knowledge of this conversation.** Put everything
+it needs in the prompt: the goal, the relevant files/paths, constraints,
+and what "done" looks like. It works in its own git worktree and commits
+to its own branch; it never pushes, merges, or touches this checkout.
+
+- `delegate({ prompt: string, model?: string })` → starts a background
+  job. `model` is a free-text model id passed straight through; omit it to
+  use the box's default. Returns immediately with the job's name + id and
+  a reminder that the result is NOT available yet.
+- `delegate_list({})` → lists this session's background jobs (id, name,
+  status, branch, worktree, activity, timestamps). Use it to answer a
+  user's "what's running?" question — NOT to wait for a job to finish.
+- `delegate_stop({ id })` → stops a running job (aborts its session,
+  marks it `stopped`); the window + worktree are kept.
+
+**Do NOT poll.** Completion arrives as a later message on its own; calling
+`delegate_list` in a loop to "wait" is waste. To see what a running job is
+actually doing, use `peers_inspect` on that session — background jobs are
+ordinary sibling sessions, so `peers_inspect` already covers inspection
+and there is intentionally no separate status/inspect tool here.
+
+**Cap of five concurrent jobs** box-wide. A sixth is refused with a clear
+error — do not retry; either wait for one to finish or do the work
+yourself.
+
+Jobs appear in the sidebar as ordinary sessions (their own window), so you
+can watch them the same way you watch any session.
+
+**Install/update is a COPY, never a symlink.** Copy
+`docs/opencode-tools/delegate.ts` to `~/.config/opencode/tools/delegate.ts`
+and run `systemctl --user restart opencode-serve`. A symlinked tool fails
+to resolve `@opencode-ai/plugin` and silently never registers.
