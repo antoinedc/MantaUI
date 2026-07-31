@@ -38,7 +38,7 @@ A task is **not done** until:
 1. `npm run typecheck` passes with no errors.
 2. `npm test` passes all tests (renderer + server).
 3. For mobile changes: `cd mobile && npm run apk` builds successfully.
-4. For mobile changes: `npm run build:mobile` succeeds and `mobile/www/` is updated.
+4. For mobile changes: `npm run build:mobile` succeeds. Do NOT commit `mobile/www/` — it is a gitignored build artifact that CI publishes on merge to `main`.
 
 ## Known Issues
 

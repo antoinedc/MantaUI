@@ -42,11 +42,11 @@ session-state snapshot.
   `/api/*`), `rpc.mjs` (channel dispatch — the `window.api` contract server
   side), `tmux.mjs`, `opencode.mjs` (HTTP proxy to opencode on `127.0.0.1:4096`
   + SSE), `pty.mjs`, `events.mjs` (bus + SSE), `local.mjs` (config/git/fs),
-  `status.mjs`, `push.mjs`, `schedule.mjs`, `secrets.mjs`, `webhook.mjs`,
+  `status.mjs`, `push.mjs`, `schedule.mjs`, `secrets.mjs`, `webhooks.mjs`,
   `servePage.mjs`, `peers.mjs`, `outbox.mjs`, `auth.mjs`.
 - `src/renderer/` — React + xterm.js UI (desktop `App.tsx` + mobile
   `MobileApp.tsx`). `Terminal.tsx` is the only place that owns an xterm
-  instance. `ChatPanel.tsx` is the entire chat-mode UI (~4150 LoC).
+  instance. `ChatPanel.tsx` is the entire chat-mode UI (~2285 LoC).
   - `api/httpApi.ts` — implements the full `Api` contract over `/rpc` +
     `/events`. **This is the live data path on BOTH desktop and mobile.**
     `main.tsx` installs it as `window.api` when paired.
@@ -248,7 +248,7 @@ flight it forces every merge to invalidate every other PR, which is O(N²) rebas
 (TEN-617).
 
 Git-synced (since 2026-05-16). Single source of truth:
-`git@github.com:antoinedc/MantaUI.git` (private). Both the remote dev box
+`git@github.com:antoinedc/MantaUI.git` (public). Both the remote dev box
 (`dev@157.90.224.92:/home/dev/projects/better-ui`) and the Mac are clones
 tracking `origin/main`. **No more rsync** — push from whichever side you
 worked on, `git pull` on the other before starting. Commit as you go;
@@ -294,17 +294,11 @@ back → `__mantaPreload.writeTempAndOpen` writes to a Mac tmpfile and
 `window.open` path gets denied by `setWindowOpenHandler` in `main/index.ts`, so
 URLs silently no-op.
 
-**Hourly cleanup** of `~/.manta-uploads/`: a server-side poller in
-`src/server/uploads.mjs` (`startUploadCleanupPoller`, wired in
-`src/server/index.mjs`) sweeps the upload root hourly, deleting per-batch
-`<ts>` directories whose mtime is older than `uploadCleanupHours` (box-server
-config key, default 24, `0` disables cleanup), then `rmdir`s session dirs
-left empty. The poller runs box-server-side (the box is a persistent systemd
-service; the desktop is often offline) and reads the threshold via
-`configGet()` — the same channel `worktreePerSession` rides. Only batch dirs
-matching the timestamp shape (`/^[0-9]{6,20}$/`) are swept; stray files are
-left alone. The threshold is user-facing in Settings → Files ("Upload cleanup
-interval"). Worst-case staleness ≈ `uploadCleanupHours + 1h`.
+**Hourly cleanup** of `~/.manta-uploads/`: `find -mindepth 2 -maxdepth 2 -type d
+-mmin +N -exec rm -rf {} +` deletes per-batch `<ts>` directories, then prunes
+empty session dirs. Threshold is `uploadCleanupHours` in config (default 1,
+`0` disables). Sweep runs once at app load + every hour after; worst-case
+staleness ≈ `uploadCleanupHours + 1h`.
 
 **Agent → laptop push (outbox / download).** The reverse of drag-in: the remote
 AI drops a file into `~/.manta-outbox/` (optionally `~/.manta-outbox/<session>/`)
@@ -424,9 +418,8 @@ reintroduce `--protocol http2`.
 Client→server: `{type:"data",data}` or `{type:"resize",cols,rows}`.
 Server→client: raw PTY bytes.
 
-**Upload endpoint** (`POST /api/upload?session=NAME`): layout
-`~/.manta-uploads/<session>/<batch>/<file>`; cleaned by the hourly poller
-described above.
+**Upload endpoint** (`POST /api/upload?session=NAME`): unchanged layout
+(`~/.manta-uploads/<session>/<batch>/<file>`).
 
 **Capacitor wrapper** (`mobile/`): Android APK + iOS scaffold. `npm run apk`
 in `mobile/` builds the debug APK. `mobile/sync-web.sh` runs `build:mobile`
@@ -1315,7 +1308,7 @@ is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 | `src/server/rpc.mjs` | `/rpc` channel dispatch — the `window.api` contract, server side; `resolveProjectCwd` |
 | `src/server/index.mjs` | manta-server entry: `/rpc`, `/events` SSE, REST `/api/*`, WS `/pty`, auth gate |
 | `src/renderer/api/httpApi.ts` | the live `window.api` on desktop + mobile (`/rpc` + `/events`) |
-| `src/renderer/ChatPanel.tsx` | entire chat UI (~4150 LoC), intentionally monolithic |
+| `src/renderer/ChatPanel.tsx` | entire chat UI (~2285 LoC), intentionally monolithic |
 | `src/renderer/App.tsx` | mounts ChatPanels keyed by session id; owns the `onOpencodeEvent` fan-out |
 
 **AppConfig additions**: `opencodePort` (default 14096), `chatAutoAllow`
@@ -2826,33 +2819,6 @@ after a reassign the comment queued a second run of the agent it had just woken,
 and before a reassign it would wake the stalled agent being routed away from.
 Metadata writes are inert. Anything automated that touches an agent-assigned
 issue must account for this — a "harmless status comment" is an agent run.
-
-**A closed-unmerged PR is NOT evidence the work is missing — and the bot must
-never say it is.** GitHub closes a PR for two reasons that look identical in the
-webhook: someone abandoned it, or it was STACKED on a parent branch that merged
-(merging deletes the branch, which auto-closes every PR still targeting it).
-Stacking is routine here — an implementer splits a follow-up out of a parent and
-bases the follow-up on the parent so the PR diff is the delta only.
-
-`scripts/multica-pr-closed.mjs` (run by `multica-close-on-merge.yml`, pure core
-+ `scripts/multica-pr-closed.test.mjs`) tells them apart from evidence: it asks
-GitHub whether the base branch still exists and whether a PR for it merged.
-Merged PR → issue `done`. Stacked → a comment saying so, no status change.
-Abandoned → a comment saying so, no status change. **A failed probe classifies
-as stacked, not abandoned** — an unknown must never be reported as "the work is
-gone".
-
-Two invariants are locked by test, and both exist because breaking them costs an
-agent run: no comment ever contains the word "reopen", and every comment states
-that no status changed. The old wording ("Marking BET-N as still open — please
-reopen") landed on BET-429 seconds after its parent BET-421 merged; the PM read
-it as an instruction and dispatched an implementer to rebase and re-PR — but the
-parent had been sent back in review for exactly those gaps and had absorbed the
-child's whole scope, so the feature was already on `main`. **CI cannot decide
-that part**: duplicated CONTENT leaves the child's commits genuinely absent from
-`main`, so no cheap git test distinguishes "superseded" from "outstanding". The
-bot therefore states the facts and requires a human/PM check against `main`
-before anything is reopened.
 
 **`manta-ops` is NOT part of this.** It's an agent driven by a Multica autopilot
 that has been paused since 2026-07-21, so every recovery path its instructions
