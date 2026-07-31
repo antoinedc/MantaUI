@@ -16,7 +16,14 @@
 // inside the picker, not as a post-Create interstitial.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Folder as FolderIcon, GitBranch, Sparkles, Loader2 } from "lucide-react";
+import {
+  ChevronDown,
+  CornerUpRight,
+  Folder as FolderIcon,
+  GitBranch,
+  Loader2,
+  Paperclip,
+} from "lucide-react";
 import { useStore } from "./store";
 import { ModelPicker } from "./ModelPicker";
 import { MicButton } from "./ComposerParts";
@@ -26,7 +33,6 @@ import { useVoiceRecorder, type VoiceResult } from "./voice";
 import type { VoiceMode, VoicePhase } from "./voice";
 import type { OpencodeModel, WorktreeInfo } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
-import { ALT_KEY } from "./platform";
 
 type Props = {
   // null = new-project mode (creates a tmux session). A string = new-session
@@ -366,7 +372,8 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
     // which a redesign is expected to change.
     <div data-screen="welcome" className="h-full flex flex-col items-center justify-center px-8">
       <div className="w-full max-w-[680px] flex flex-col gap-4">
-        {/* Heading */}
+        {/* Heading — the only element centred on the screen; the chip row and
+            the controls row below are both left-aligned to the composer. */}
         <div className="text-center space-y-1">
           <h1 className="text-h1 font-semibold text-text">What's up next?</h1>
           <p className="text-body text-text-muted">
@@ -374,24 +381,27 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
           </p>
         </div>
 
-        {/* Chip row: folder + branch/worktree */}
-        <div className="flex items-center gap-2 justify-center">
+        {/* Chip row — folder, then branch + worktree as ONE segmented control
+            (shared border, no gap). Left-aligned: it reads as a property bar
+            belonging to the composer below, not a second heading. */}
+        <div className="flex items-center gap-2 self-start">
           <button
             onClick={() => setPickerOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-card text-meta text-text hover:border-border-strong"
+            className="inline-flex items-center gap-1.5 h-9 pl-3 pr-2 rounded-lg border border-border bg-card text-meta text-text hover:border-border-strong"
             title={cwd || "Choose a folder"}
           >
             <FolderIcon size={14} className="shrink-0 text-text-muted" aria-hidden="true" />
             <span className="truncate max-w-[200px] font-mono">{folderLabel}</span>
+            <ChevronDown size={14} className="shrink-0 text-text-faint" aria-hidden="true" />
           </button>
 
-          <div className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-border bg-card text-meta">
+          <div className="inline-flex items-center h-9 rounded-lg border border-border bg-card text-meta overflow-hidden">
             {wantWorktree && isGitRepo ? (
               // BET-417 §A: "Ticking worktree makes the branch field
               // editable." The typed value is passed as `name` to
               // gitAddWorktree, which deriveWorktree turns into the new
               // branch name.
-              <span className="inline-flex items-center gap-1">
+              <span className="inline-flex items-center gap-1 px-3 self-stretch">
                 <GitBranch size={14} className="shrink-0 text-text-muted" aria-hidden="true" />
                 <input
                   value={worktreeBranch}
@@ -403,16 +413,17 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
                 />
               </span>
             ) : branchName ? (
-              <span className="inline-flex items-center gap-1 text-text-muted">
+              <span className="inline-flex items-center gap-1 px-3 text-text-muted self-stretch">
                 <GitBranch size={14} className="shrink-0" aria-hidden="true" />
                 <span className="truncate max-w-[120px]">{branchName}</span>
               </span>
             ) : (
-              <span className="text-text-faint">no branch</span>
+              <span className="inline-flex items-center px-3 text-text-faint self-stretch">
+                no branch
+              </span>
             )}
-            <span className="text-text-quiet">|</span>
             <label
-              className={`inline-flex items-center gap-1 ${
+              className={`inline-flex items-center gap-1.5 pl-3 pr-3 self-stretch border-l border-border ${
                 isGitRepo ? "cursor-pointer" : "cursor-not-allowed opacity-50"
               }`}
               title={isGitRepo ? "Create in a fresh git worktree" : "not a git repository"}
@@ -429,10 +440,12 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
           </div>
         </div>
 
-        {/* Composer box */}
+        {/* Composer — a single tall input card. The submit affordance sits
+            INSIDE the input on the trailing edge, top-aligned, so the input
+            can grow downward without moving it. */}
         <div
           className={
-            "manta-composer-input-row rounded-xl border bg-card flex flex-col gap-2 px-4 py-3 " +
+            "manta-composer-input-row rounded-xl border bg-card flex items-start gap-2 px-4 py-3 " +
             (voiceRecording
               ? "manta-recording"
               : "border-border-strong")
@@ -446,46 +459,66 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             onKeyDown={onKeyDown}
             placeholder="Describe a task or ask a question"
             rows={3}
-            className="w-full bg-transparent border-0 text-body text-text outline-none resize-none placeholder:text-text-faint"
+            className="flex-1 w-full bg-transparent border-0 text-body text-text outline-none resize-none placeholder:text-text-faint"
             spellCheck={false}
           />
 
-          {/* Footer: model/effort + mic */}
-          <div className="flex items-center gap-2">
-            <ModelPicker
-              modelLabel={null}
-              models={models}
-              modelOverride={modelOverride}
-              defaultModel={serverDefault}
-              deactivatedMainModels={deactivatedMainModels}
-              onOpen={() => {}}
-              onSelect={(m) => setModelOverride(m)}
-            />
+          <button
+            onClick={() => void submit()}
+            disabled={sending || !input.trim()}
+            aria-label="Start a session"
+            title={
+              sending
+                ? "Starting…"
+                : input.trim()
+                  ? "Start a session"
+                  : "Describe a task to start"
+            }
+            className="mt-0.5 shrink-0 w-9 h-9 rounded-lg border border-border bg-panel text-text-muted inline-grid place-items-center hover:text-text hover:border-border-strong disabled:opacity-50"
+          >
+            {sending ? (
+              <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+            ) : (
+              <CornerUpRight size={16} aria-hidden="true" />
+            )}
+          </button>
+        </div>
 
-            <div className="ml-auto flex items-center gap-2">
-              {voiceEnabled && (
-                <MicButton
-                  phase={voicePhase}
-                  mode={voiceMode}
-                  onStart={(mode) => { voiceRecorder.start(mode); return Promise.resolve(); }}
-                  onStop={voiceRecorder.stop}
-                  onCancel={voiceRecorder.cancel}
-                />
-              )}
-              <button
-                onClick={() => void submit()}
-                disabled={sending || !input.trim()}
-                className="px-3 py-1.5 rounded-lg bg-accent-solid text-on-accent text-meta font-medium disabled:opacity-50 hover:opacity-90 inline-flex items-center gap-1.5"
-              >
-                {sending ? (
-                  <Loader2 size={14} className="animate-spin" aria-hidden="true" />
-                ) : (
-                  <Sparkles size={14} aria-hidden="true" />
-                )}
-                {sending ? "Starting…" : "Start"}
-              </button>
-            </div>
-          </div>
+        {/* Controls row — model ▸ effort, then attach + dictate. Left-aligned
+            to the composer. */}
+        <div className="flex items-center gap-2 self-start">
+          <ModelPicker
+            modelLabel={null}
+            models={models}
+            modelOverride={modelOverride}
+            defaultModel={serverDefault}
+            deactivatedMainModels={deactivatedMainModels}
+            onOpen={() => {}}
+            onSelect={(m) => setModelOverride(m)}
+            defaultLabel="Auto"
+          />
+
+          {/* Attach — no implementation on this screen yet (welcome is
+              create-first). Rendered disabled, per the UI-only constraint. */}
+          <button
+            type="button"
+            disabled
+            aria-label="Attach a file"
+            title="Attaching files is not available when starting a session"
+            className="shrink-0 w-9 h-9 rounded-lg border border-transparent inline-grid place-items-center text-text-faint disabled:cursor-not-allowed"
+          >
+            <Paperclip size={17} aria-hidden="true" />
+          </button>
+
+          {voiceEnabled && (
+            <MicButton
+              phase={voicePhase}
+              mode={voiceMode}
+              onStart={(mode) => { voiceRecorder.start(mode); return Promise.resolve(); }}
+              onStop={voiceRecorder.stop}
+              onCancel={voiceRecorder.cancel}
+            />
+          )}
         </div>
 
         {error && (
@@ -493,11 +526,6 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             {error}
           </div>
         )}
-
-        <div className="text-center text-label text-text-faint">
-          Press Enter to start · Shift+Enter for a new line · Esc to cancel
-          {voiceEnabled && ` · hold 🎙 to speak (${ALT_KEY} = command)`}
-        </div>
       </div>
 
       {pickerOpen && (
