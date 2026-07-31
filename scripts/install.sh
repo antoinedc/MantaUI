@@ -1542,9 +1542,17 @@ main() {
           # installs it. `cat` of a missing file yields empty stdin, which the
           # subcommand treats as "no Caddyfile yet" — so create/append/replace
           # are one code path, not three.
+          #
+          # The `( cat ... || true )` group is pipefail-load-bearing: without
+          # it, a missing Caddyfile makes `cat` exit non-zero and `set -o
+          # pipefail` fails the whole pipeline, routing to the warn/skip branch
+          # below instead of reaching install_root_file — so the create-from-
+          # scratch case (the box has Caddy but no main Caddyfile) would never
+          # write a vhost. `|| true` yields empty stdin + exit 0 while node's
+          # own render/validation exit code still propagates.
           CADDYFILE="/etc/caddy/Caddyfile"
           _caddyfile_tmp="$(mktemp)"
-          if ! cat "$CADDYFILE" 2>/dev/null \
+          if ! ( cat "$CADDYFILE" 2>/dev/null || true ) \
               | "$NODE" "$LIB" upsert-caddy-block --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" \
               > "$_caddyfile_tmp" 2>/tmp/manta-caddy-render.err; then
             warn "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err)"

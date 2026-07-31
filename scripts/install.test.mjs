@@ -5367,3 +5367,66 @@ test("install.sh no longer contains the stray-marker grep test or the SNIPPET in
   assert.doesNotMatch(src, /grep -q '\^# >>> manta >>>'/, "the marker-presence grep branch must be gone");
   assert.doesNotMatch(src, /--mode inline/, "the inline SNIPPET render in install.sh must be gone (upsert-caddy-block owns inline mode now)");
 });
+
+test("install.sh wraps the Caddyfile cat in `|| true` so a missing file can't trip pipefail (BET-441 regression)", () => {
+  // Review Block: under `set -o pipefail`, a missing /etc/caddy/Caddyfile
+  // made `cat` exit 1 and fail the whole pipeline, so the collapsed path
+  // routed to warn/`CADDY_E_SKIP` instead of the empty-stdin create case —
+  // a box with Caddy but no main Caddyfile would silently get no vhost.
+  // The `( cat ... || true )` group is what makes a missing file yield empty
+  // stdin + exit 0 while node's genuine exit code still propagates.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  // The guard must be present: a `( cat "$CADDYFILE" 2>/dev/null || true )`
+  // line that feeds the upsert pipeline. Require the `|| true` on the cat
+  // line itself — a bare `cat "$CADDYFILE" 2>/dev/null \` pipe (no guard)
+  // would reintroduce the bug.
+  const guardLine = src.split("\n").find((l) => /cat "\$CADDYFILE" 2>\/dev\/null \|\| true/.test(l));
+  assert.ok(guardLine, "the `cat \"$CADDYFILE\" 2>/dev/null || true` guard must exist so a missing Caddyfile yields empty stdin");
+  assert.match(
+    guardLine,
+    /^[ \t]*if ! \( cat "\$CADDYFILE" 2>\/dev\/null \|\| true \)[ \t]*\\$/,
+    "the cat guard must sit inside the `( ... || true )` group in the `if !` pipeline",
+  );
+  // No bare guarded cat anywhere — the only cat of the Caddyfile feeding the
+  // upsert pipeline carries `|| true`.
+  const bareCat = src.split("\n").filter((l) => /cat "\$CADDYFILE" 2>\/dev\/null[ \t]*\\$/.test(l));
+  assert.strictEqual(bareCat.length, 0, "no bare `cat \"$CADDYFILE\" 2>/dev/null` line may pipe into the upsert without `|| true`");
+});
+
+test("missing Caddyfile under pipefail yields empty stdin and a created block, not a skipped warn (BET-441 regression)", () => {
+  // Mirrors the reviewer's empirical reproduction: with `set -o pipefail`, the
+  // `( cat "$CADDYFILE" 2>/dev/null || true ) | node upsert-caddy-block` form
+  // must exit 0 for a MISSING file (empty stdin → create-from-scratch), whereas
+  // the unguarded `cat ... | node` form exits non-zero (the bug). We drive the
+  // whole pipeline in one bash so pipefail actually applies, and assert both
+  // the exit code and that empty stdin produces exactly the block.
+  const dir = mkdtempSync(join(tmpdir(), "manta-caddy-create-"));
+  const tmpOut = join(dir, "out");
+  const lib = join(__dirname, "install-lib.mjs");
+  const expected = blockFor();
+  try {
+    // Guarded form: a missing Caddyfile must exit 0 and write the block.
+    execSync(
+      `bash -o pipefail -c '( cat /nonexistent/Caddyfile-x 2>/dev/null || true ) | node "${lib}" upsert-caddy-block --box-id ${HEX32} --port 8787 > "${tmpOut}"'`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.equal(readFileSync(tmpOut, "utf-8"), expected, "missing Caddyfile must produce exactly the block via create-from-scratch");
+    // Un-guarded form (the bug being guarded against): a missing Caddyfile
+    // fails the pipeline under pipefail → node's empty-stdin create never runs
+    // and the file is never written. Pin that this failure mode is what the
+    // `|| true` exists to prevent, so the guard isn't silently dropped.
+    const unguardedOut = join(dir, "out-unguarded");
+    let unguardedExitedNonZero = false;
+    try {
+      execSync(
+        `bash -o pipefail -c 'cat /nonexistent/Caddyfile-x 2>/dev/null | node "${lib}" upsert-caddy-block --box-id ${HEX32} --port 8787 > "${unguardedOut}"'`,
+        { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+      );
+    } catch (e) {
+      unguardedExitedNonZero = true;
+    }
+    assert.ok(unguardedExitedNonZero, "the unguarded cat-pipe must fail under pipefail (proving the `|| true` is what keeps create-from-scratch alive)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
