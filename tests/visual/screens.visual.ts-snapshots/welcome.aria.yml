@@ -7,4 +7,5 @@
 - textbox "Describe a task or ask a question"
 - button "Start a session" [disabled]
 - button "Auto"
+- button "High" [disabled]
 - button "Attach a file" [disabled]

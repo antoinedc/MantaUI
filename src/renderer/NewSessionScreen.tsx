@@ -504,6 +504,9 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
               setModelOverride(m);
             }}
             labelOverride={modelTouched ? null : "Auto"}
+            separatePills
+            alwaysShowEffort
+            effortAccent
           />
 
           {/* Attach — no implementation on this screen yet (welcome is
