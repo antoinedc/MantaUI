@@ -62,7 +62,7 @@ export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | nu
   // message and the ✻ glyph. pb-3 matches it on the other side (12px
   // between context bar / ✻ line and the input divider).
   return (
-    <div className={`shrink-0 px-4 pb-3 text-xs ${atBottom ? "pt-0" : "pt-1"}`}>
+    <div className={`shrink-0 px-4 pb-3 text-meta font-mono ${atBottom ? "pt-0" : "pt-1"}`}>
       <div>
         <span style={{ color: "var(--accent)" }}>
           <span className="inline-block animate-pulse">✻</span>{" "}
@@ -100,7 +100,7 @@ export const ActiveTodos = memo(function ActiveTodos({ todos }: { todos: Array<R
   const summary = formatHiddenTodosSummary(hiddenPending, hiddenDone);
   const lastVisibleIdx = visible.length - 1;
   return (
-    <div className="px-4 pb-2 text-[13px]">
+    <div className="px-4 pb-2 text-label">
       {visible.map((t, i) => {
         const content = String(t.content ?? "");
         const status = String(t.status ?? "pending");
@@ -185,7 +185,7 @@ const UserCommandBar = memo(function UserCommandBar({
         )}
       </button>
       {expanded && (
-        <div className="mt-1 ml-6 pl-2 border-l border-border whitespace-pre-wrap break-words text-text-muted text-[12px]">
+        <div className="mt-1 ml-6 pl-2 border-l border-border whitespace-pre-wrap break-words text-text-muted text-code font-mono">
           {expandedText}
         </div>
       )}
@@ -245,7 +245,7 @@ export const MessageRow = memo(function MessageRow({
     <div className="group relative">
       {ts && (
         <span
-          className="pointer-events-none absolute left-0 -top-2 z-10 select-none whitespace-nowrap text-[10px] leading-none tabular-nums text-text-faint opacity-0 group-hover:opacity-60 transition-opacity"
+          className="pointer-events-none absolute left-0 -top-2 z-10 select-none whitespace-nowrap text-meta font-mono leading-none tabular-nums text-text-faint opacity-0 group-hover:opacity-60 transition-opacity"
           aria-hidden
         >
           {ts}
@@ -271,7 +271,7 @@ export const MessageRow = memo(function MessageRow({
     return stampedRow(
       <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
         {fileParts.length > 0 && (
-          <div className="flex flex-wrap gap-1 text-[11px]">
+          <div className="flex flex-wrap gap-1 text-label font-mono">
             {fileParts.map((p) => {
               const raw = p as Record<string, unknown>;
               const url = typeof raw.url === "string" ? raw.url : "";
@@ -343,7 +343,7 @@ export const MessageRow = memo(function MessageRow({
       {/* truncations there's no duration footer, so the badge renders on */}
       {/* its own row using the same baseline style. */}
       {(turnDurationMs != null || truncation != null) && (
-        <div className="-ml-[8px] text-[13px] text-text-muted">
+        <div className="-ml-[8px] text-code font-mono text-text-muted">
           {turnDurationMs != null && (
             <>
               <span style={{ color: "var(--accent)" }}>✻</span>{" "}
@@ -359,7 +359,7 @@ export const MessageRow = memo(function MessageRow({
               {/* coherent with CompactionCard / RetryCard / QuestionCard, */}
               {/* the existing "something needs your attention" color. */}
               <span
-                className="rounded-md border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1"
+                className="rounded-md border px-1.5 py-0.5 text-label inline-flex items-center gap-1"
                 style={{
                   borderColor: "rgb(var(--warn-rgb) / 0.33)",
                   backgroundColor: "var(--warn-bg)",

@@ -75,10 +75,10 @@ function SessionRow({
         style={{ background: dotColor(running, attention) }}
       />
       <span className="flex-1 min-w-0">
-        <span className="block text-text text-sm font-semibold truncate">
+        <span className="block text-text text-body font-semibold truncate">
           {w.name}
         </span>
-        <span className="block text-text-muted text-xs truncate">
+        <span className="block text-text-muted text-meta truncate">
           {jobActivity || typeLabel(w, running, attention)}
           {!jobActivity && showAge && (
             <span
@@ -139,10 +139,10 @@ export function SessionListScreen({
     <div className="mobile-screen">
       <div className="mobile-header">
         <div className="flex-1 flex items-center gap-2 min-w-0 px-1">
-          <span className="text-text font-bold text-base">Sessions</span>
+          <span className="text-text font-bold text-title">Sessions</span>
           {backgroundSyncing && (
             <span
-              className="flex items-center gap-1.5 text-[11px] text-text-faint"
+              className="flex items-center gap-1.5 text-label text-text-faint"
               title="Syncing session state…"
             >
               <span
@@ -179,7 +179,7 @@ export function SessionListScreen({
       </div>
       <div className="flex-1 overflow-auto py-2">
         {projects.length === 0 ? (
-          <div className="h-full flex items-center justify-center text-text-faint text-sm px-8 text-center">
+          <div className="h-full flex items-center justify-center text-text-faint text-body px-8 text-center">
             {serverUrl || boxId
               ? "No sessions yet. Tap + to create one."
               : "Server not configured."}
@@ -187,7 +187,7 @@ export function SessionListScreen({
         ) : (
           projects.map((p) => (
             <div key={p.tmuxSession}>
-              <div className="px-4 pt-3 pb-1 flex items-center justify-between text-[10px] uppercase tracking-wide text-text-faint">
+              <div className="px-4 pt-3 pb-1 flex items-center justify-between text-meta uppercase tracking-wide text-text-faint">
                 <span className="truncate">{p.tmuxSession}</span>
                 <button
                   className="mobile-tap text-text-faint -my-2"

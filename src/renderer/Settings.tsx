@@ -357,14 +357,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
             caption buttons (Windows) / traffic lights (macOS). */}
         <div className="titlebar-drag h-10 shrink-0" />
         <div className="p-4 border-b border-border">
-          <h2 className="text-lg font-semibold">Settings</h2>
+          <h2 className="text-title font-semibold">Settings</h2>
         </div>
         <nav className="flex-1 py-2">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`w-full text-left px-4 py-2 text-sm transition-colors ${
+              className={`w-full text-left px-4 py-2 text-body transition-colors ${
                 activeTab === tab.id
                   ? "bg-accent/10 text-accent border-r-2 border-accent"
                   : "text-text-muted hover:text-text hover:bg-bg-elev"
@@ -377,7 +377,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <div className="p-3 border-t border-border">
           <button
             onClick={onClose}
-            className="w-full text-left text-xs text-text-muted hover:text-text px-2 py-1 rounded hover:bg-bg-elev transition-colors"
+            className="w-full text-left text-meta text-text-muted hover:text-text px-2 py-1 rounded hover:bg-bg-elev transition-colors"
           >
             Close
           </button>
@@ -390,7 +390,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-end p-4 border-b border-border">
           <button
             onClick={onClose}
-            className="text-text-muted hover:text-text text-sm px-3 py-1.5 rounded hover:bg-bg-elev transition-colors inline-flex items-center"
+            className="text-text-muted hover:text-text text-body px-3 py-1.5 rounded hover:bg-bg-elev transition-colors inline-flex items-center"
             aria-label="Close settings"
           >
             <X size={16} aria-hidden="true" />
@@ -413,8 +413,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   is one-time, valid for ~5 minutes. A new code supersedes any
                   prior code. */}
               <div>
-                <h3 className="text-base font-semibold mb-4">Pair phone</h3>
-                <div className="text-sm text-text-faint mb-4">
+                <h3 className="text-title font-semibold mb-4">Pair phone</h3>
+                <div className="text-body text-text-faint mb-4">
                   Scan this QR with the MANTA mobile app to connect it to your box. The
                   code is one-time and valid for ~5 minutes. Generate a new code if the
                   old one expires.
@@ -423,7 +423,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   <button
                     onClick={mintPairingCode}
                     disabled={pairingMinting}
-                    className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {pairingMinting ? "Generating…" : "Generate pairing code"}
                   </button>
@@ -438,11 +438,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                         />
                       </div>
                       <div className="flex-1 space-y-2">
-                        <div className="text-sm">
+                        <div className="text-body">
                           <span className="text-text-muted">Code:</span>{" "}
                           <span className="font-mono text-text">{pairing.pairingCode}</span>
                         </div>
-                        <div className="text-sm">
+                        <div className="text-body">
                           <span className="text-text-muted">Box ID:</span>{" "}
                           <span className="font-mono text-text break-all" title={pairing.boxId}>
                             {pairing.boxId}
@@ -456,13 +456,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     <button
                       onClick={mintPairingCode}
                       disabled={pairingMinting}
-                      className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {pairingMinting ? "Generating…" : "Refresh code"}
                     </button>
                   </div>
                 ) : (
-                  <div className="text-sm text-danger">
+                  <div className="text-body text-danger">
                     {pairing.error}
                   </div>
                 )}
@@ -470,7 +470,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
               <div className="border-t border-border pt-6">
                 <div className="flex items-center justify-between">
-                  <div className="text-sm text-text-faint">
+                  <div className="text-body text-text-faint">
                     Re-run the guided setup (pairing, providers, first project).
                   </div>
                   <button
@@ -478,7 +478,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       void useStore.getState().relaunchOnboarding();
                       onClose();
                     }}
-                    className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text shrink-0"
+                    className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text shrink-0"
                   >
                     Run setup again
                   </button>
@@ -492,20 +492,20 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   remote revocation didn't reach the box. */}
               <div className="border-t border-border pt-6">
                 <div className="flex items-center justify-between">
-                  <div className="text-sm text-text-faint">
+                  <div className="text-body text-text-faint">
                     Forget this box on the desktop. If the box is reachable,
                     its current token is revoked too.
                   </div>
                   <button
                     onClick={removeBox}
                     disabled={removingBox}
-                    className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-danger hover:border-danger disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                    className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-danger hover:border-danger disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
                   >
                     {removingBox ? "Removing…" : "Remove box"}
                   </button>
                 </div>
                 {removeResult && !removeResult.ok && (
-                  <div className="text-sm text-warn mt-3">
+                  <div className="text-body text-warn mt-3">
                     {removeResult.message}
                   </div>
                 )}
@@ -525,9 +525,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <ModelsCard />
 
               <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">Prompt cache TTL</h3>
+                <h3 className="text-title font-semibold mb-4">Prompt cache TTL</h3>
                 <TtlToggle ttl={ttl} setTtl={setTtl} />
-                <div className="text-xs text-text-faint mt-2">
+                <div className="text-meta text-text-faint mt-2">
                   How long Anthropic keeps a session's prompt cache warm between
                   requests. Used to predict when a session has gone stale and show
                   "/clear to save Nk tokens" in the chat footer. manta doesn't set
@@ -558,8 +558,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   hint. */}
               {availableLaunchers.some((l) => l.flags.length > 0) && (
                 <div className="border-t border-border pt-6">
-                  <h3 className="text-base font-semibold mb-1">AI CLI launch options</h3>
-                  <div className="text-sm text-text-faint mb-4">
+                  <h3 className="text-title font-semibold mb-1">AI CLI launch options</h3>
+                  <div className="text-body text-text-faint mb-4">
                     Flags used when launching an AI CLI (e.g. Claude Code) directly in a
                     session's terminal. Only CLIs detected on this box are shown.
                   </div>
@@ -568,11 +568,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       .filter((l) => l.flags.length > 0)
                       .map((l) => (
                         <div key={l.id} className="space-y-2">
-                          <div className="text-sm font-medium text-text">{l.label}</div>
+                          <div className="text-body font-medium text-text">{l.label}</div>
                           {l.flags.map((f) => (
                             <label
                               key={f.key}
-                              className="flex items-start gap-3 text-sm cursor-pointer"
+                              className="flex items-start gap-3 text-body cursor-pointer"
                             >
                               <input
                                 type="checkbox"
@@ -590,20 +590,20 @@ export function Settings({ onClose }: { onClose: () => void }) {
               )}
 
               <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">Skill registries</h3>
-                <div className="text-sm text-text-faint mb-3">
+                <h3 className="text-title font-semibold mb-4">Skill registries</h3>
+                <div className="text-body text-text-faint mb-3">
                   Extra skill registry URLs fetched by opencode on startup. The default manta registry is
                   always included. Add your own to surface additional skills in the AI's toolset.
                 </div>
                 <div className="space-y-2">
                   {registryUrls.map((url) => (
                     <div key={url} className="flex items-center gap-2">
-                      <code className="flex-1 text-sm bg-bg-soft border border-border rounded px-3 py-2 text-text-muted truncate">
+                      <code className="flex-1 text-body bg-bg-soft border border-border rounded px-3 py-2 text-text-muted truncate">
                         {url}
                       </code>
                       <button
                         onClick={() => removeRegistryUrl(url)}
-                        className="text-sm text-text-faint hover:text-text px-2 inline-flex items-center"
+                        className="text-body text-text-faint hover:text-text px-2 inline-flex items-center"
                         title="Remove"
                         aria-label="Remove registry URL"
                       >
@@ -618,12 +618,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     value={newRegistryUrl}
                     onChange={(e) => setNewRegistryUrl(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && addRegistryUrl()}
-                    className="flex-1 bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+                    className="flex-1 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
                   />
                   <button
                     onClick={addRegistryUrl}
                     disabled={!newRegistryUrl.trim()}
-                    className="px-4 py-2 text-sm bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="px-4 py-2 text-body bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Add
                   </button>
@@ -636,8 +636,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {activeTab === "voice" && (
             <div className="max-w-2xl space-y-6">
               <div>
-                <h3 className="text-base font-semibold mb-4">Voice (Groq)</h3>
-                <div className="text-sm text-text-faint mb-4">
+                <h3 className="text-title font-semibold mb-4">Voice (Groq)</h3>
+                <div className="text-body text-text-faint mb-4">
                   Enables push-to-talk dictation in the chat composer. Press{" "}
                   <kbd className="text-text-muted">ctrl+m</kbd> to start recording — a
                   pulsing red ring appears around the input. Press{" "}
@@ -659,7 +659,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 </div>
                 <div className="space-y-3">
                   <div className="space-y-1">
-                    <label className="block text-xs uppercase tracking-wider text-text-muted">
+                    <label className="block text-micro font-semibold uppercase text-text-muted">
                       Groq API key
                     </label>
                     <input
@@ -669,12 +669,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       onChange={(e) => setGroqKey(e.target.value)}
                       autoComplete="off"
                       spellCheck={false}
-                      className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+                      className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <label className="block text-[10px] uppercase tracking-wider text-text-faint">
+                      <label className="block text-micro font-semibold uppercase text-text-faint">
                         Transcription model
                       </label>
                       <input
@@ -682,11 +682,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                         value={voiceTrModel}
                         onChange={(e) => setVoiceTrModel(e.target.value)}
                         spellCheck={false}
-                        className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+                        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="block text-[10px] uppercase tracking-wider text-text-faint">
+                      <label className="block text-micro font-semibold uppercase text-text-faint">
                         Command classifier model
                       </label>
                       <input
@@ -694,7 +694,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                         value={voiceCmdModel}
                         onChange={(e) => setVoiceCmdModel(e.target.value)}
                         spellCheck={false}
-                        className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+                        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
                       />
                     </div>
                   </div>
@@ -707,9 +707,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {activeTab === "files" && (
             <div className="max-w-2xl space-y-6">
               <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">Agent file delivery</h3>
+                <h3 className="text-title font-semibold mb-4">Agent file delivery</h3>
                 <div className="space-y-3">
-                  <label className="flex items-start gap-3 text-sm cursor-pointer">
+                  <label className="flex items-start gap-3 text-body cursor-pointer">
                     <input
                       type="checkbox"
                       checked={agentPush}
@@ -718,7 +718,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     />
                     <span>
                       Auto-save files the AI sends
-                      <span className="block text-xs text-text-faint mt-1">
+                      <span className="block text-meta text-text-faint mt-1">
                         When the AI drops a file in{" "}
                         <code className="text-text-muted">~/.manta-outbox</code> on the remote, save it to your
                         downloads folder without asking. Off = a toast asks before each file is saved.
@@ -726,7 +726,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     </span>
                   </label>
                   <div className="space-y-1">
-                    <label className="block text-xs uppercase tracking-wider text-text-muted">
+                    <label className="block text-micro font-semibold uppercase text-text-muted">
                       Downloads directory
                     </label>
                     <input
@@ -734,9 +734,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       placeholder="~/Downloads (default)"
                       value={dlDir}
                       onChange={(e) => setDlDir(e.target.value)}
-                      className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+                      className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
                     />
-                    <div className="text-xs text-text-faint">
+                    <div className="text-meta text-text-faint">
                       Destination for AI-sent files. Absolute path; leave empty for your OS Downloads folder.
                     </div>
                   </div>
@@ -746,9 +746,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   Two independent toggles, same markup as allowAgentPush.
                   Global-only — the per-window override lives in Sidebar. */}
               <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">Session worktrees</h3>
+                <h3 className="text-title font-semibold mb-4">Session worktrees</h3>
                 <div className="space-y-3">
-                  <label className="flex items-start gap-3 text-sm cursor-pointer">
+                  <label className="flex items-start gap-3 text-body cursor-pointer">
                     <input
                       type="checkbox"
                       checked={worktreeOn}
@@ -757,14 +757,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     />
                     <span>
                       Create git worktree for new sessions
-                      <span className="block text-xs text-text-faint mt-1">
+                      <span className="block text-meta text-text-faint mt-1">
                         When creating a new chat session in a project that's a git
                         repo, automatically branch a sibling worktree and start the
                         session on its own branch. Has no effect on non-git projects.
                       </span>
                     </span>
                   </label>
-                  <label className="flex items-start gap-3 text-sm cursor-pointer">
+                  <label className="flex items-start gap-3 text-body cursor-pointer">
                     <input
                       type="checkbox"
                       checked={worktreeClean}
@@ -773,7 +773,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     />
                     <span>
                       Remove worktree when a session is closed
-                      <span className="block text-xs text-text-faint mt-1">
+                      <span className="block text-meta text-text-faint mt-1">
                         Deletes the session's git worktree on close. Prompts
                         before discarding uncommitted changes.
                       </span>
@@ -788,8 +788,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {activeTab === "plugins" && (
             <div className="max-w-2xl space-y-6">
               <div>
-                <h3 className="text-base font-semibold mb-4">Run plugins on this machine</h3>
-                <label className="flex items-start gap-3 text-sm cursor-pointer">
+                <h3 className="text-title font-semibold mb-4">Run plugins on this machine</h3>
+                <label className="flex items-start gap-3 text-body cursor-pointer">
                   <input
                     type="checkbox"
                     checked={pluginsOn}
@@ -805,15 +805,15 @@ export function Settings({ onClose }: { onClose: () => void }) {
               </div>
 
               <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">Installed plugins</h3>
+                <h3 className="text-title font-semibold mb-4">Installed plugins</h3>
                 {pluginsError ? (
-                  <div className="text-sm text-danger break-words">
+                  <div className="text-body text-danger break-words">
                     Failed to load: {pluginsError}
                   </div>
                 ) : plugins === null ? (
-                  <div className="text-sm text-text-faint">Loading…</div>
+                  <div className="text-body text-text-faint">Loading…</div>
                 ) : plugins.length === 0 ? (
-                  <div className="text-sm text-text-faint">
+                  <div className="text-body text-text-faint">
                     No plugins installed yet. The AI can author them with{" "}
                     <code className="text-text-muted">plugin.write</code> when
                     this toggle is on.
@@ -826,19 +826,19 @@ export function Settings({ onClose }: { onClose: () => void }) {
                         className="border border-border rounded p-3 bg-bg-soft space-y-1"
                       >
                         <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-text">
+                          <span className="text-body font-medium text-text">
                             {p.name}
                           </span>
                           {p.valid ? (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-ok-bg text-ok">
+                            <span className="text-meta px-1.5 py-0.5 rounded bg-ok-bg text-ok">
                               valid
                             </span>
                           ) : (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-danger-bg text-danger break-all">
+                            <span className="text-meta px-1.5 py-0.5 rounded bg-danger-bg text-danger break-all">
                               parse error: {p.error}
                             </span>
                           )}
-                          <span className="ml-auto text-[10px] text-text-faint">
+                          <span className="ml-auto text-meta text-text-faint">
                             {p.stepCount} step{p.stepCount === 1 ? "" : "s"}
                             {p.timeoutMs != null
                               ? ` · ${formatTimeout(p.timeoutMs)}`
@@ -846,12 +846,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
                           </span>
                         </div>
                         {p.description && (
-                          <div className="text-xs text-text-muted">
+                          <div className="text-meta text-text-muted">
                             {p.description}
                           </div>
                         )}
                         {p.inputs.length > 0 && (
-                          <div className="text-[10px] text-text-faint">
+                          <div className="text-meta text-text-faint">
                             Inputs:{" "}
                             {p.inputs
                               .map(
@@ -883,7 +883,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       void preload.revealInFolder("~/.manta/plugins");
                     }
                   }}
-                  className="text-sm px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text"
+                  className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text"
                 >
                   Open plugins folder
                 </button>
@@ -895,7 +895,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {activeTab === "general" && (
             <div className="max-w-2xl space-y-6">
               <div>
-                <h3 className="text-base font-semibold mb-4">Theme</h3>
+                <h3 className="text-title font-semibold mb-4">Theme</h3>
                 {/* Three segmented options. Applied live on click (applyTheme)
                     so the user sees the change immediately; persisted on Save.
                     "System" follows the OS and re-themes live when it flips. */}
@@ -912,7 +912,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                         setThemePref(opt);
                         applyTheme(opt);
                       }}
-                      className={`px-4 py-1.5 text-sm capitalize transition-colors border-r border-border last:border-r-0 ${
+                      className={`px-4 py-1.5 text-body capitalize transition-colors border-r border-border last:border-r-0 ${
                         themePref === opt
                           ? "bg-accent-solid"
                           : "text-text-muted hover:text-text hover:bg-bg-elev"
@@ -927,14 +927,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     </button>
                   ))}
                 </div>
-                <span className="block text-xs text-text-faint mt-2">
+                <span className="block text-meta text-text-faint mt-2">
                   System follows your OS appearance and re-themes live.
                 </span>
               </div>
 
               <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">Auto-rename sessions</h3>
-                <label className="flex items-start gap-3 text-sm cursor-pointer">
+                <h3 className="text-title font-semibold mb-4">Auto-rename sessions</h3>
+                <label className="flex items-start gap-3 text-body cursor-pointer">
                   <input
                     type="checkbox"
                     checked={autoRename}
@@ -943,7 +943,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   />
                   <span>
                     Name sessions from the conversation
-                    <span className="block text-xs text-text-faint mt-1">
+                    <span className="block text-meta text-text-faint mt-1">
                       Every few turns, ask the model for a 1-2 word title and rename
                       the chat window to match the current work. Overwrites the
                       window name, including names you set by hand.
@@ -953,8 +953,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
               </div>
 
               <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">Share analytics</h3>
-                <label className="flex items-start gap-3 text-sm cursor-pointer">
+                <h3 className="text-title font-semibold mb-4">Share analytics</h3>
+                <label className="flex items-start gap-3 text-body cursor-pointer">
                   <input
                     type="checkbox"
                     checked={analytics}
@@ -963,7 +963,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   />
                   <span>
                     Share anonymized analytics
-                    <span className="block text-xs text-text-faint mt-1">
+                    <span className="block text-meta text-text-faint mt-1">
                       Sends app and error logs to help improve Manta UI. On by
                       default. Turn off to stop this instance — desktop and
                       server — from sending anything.
@@ -973,11 +973,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
               </div>
 
               <div className="border-t border-border pt-6">
-                <h3 className="text-base font-semibold mb-4">About</h3>
-                <div className="text-sm text-text-faint">
+                <h3 className="text-title font-semibold mb-4">About</h3>
+                <div className="text-body text-text-faint">
                   Manta UI v0.0.1
                 </div>
-                <div className="text-xs text-text-faint mt-2">
+                <div className="text-meta text-text-faint mt-2">
                   Desktop client for remote Claude Code sessions.
                 </div>
               </div>
@@ -988,7 +988,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         {/* Footer with Save/Cancel */}
         <div className="border-t border-border p-4">
           {saveError && (
-            <div className="text-sm text-danger mb-3">
+            <div className="text-body text-danger mb-3">
               Couldn't save: {saveError}
             </div>
           )}
@@ -996,14 +996,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <button
               onClick={onClose}
               disabled={saving}
-              className="px-4 py-2 text-sm text-text-muted hover:text-text disabled:opacity-40"
+              className="px-4 py-2 text-body text-text-muted hover:text-text disabled:opacity-40"
             >
               Cancel
             </button>
             <button
               onClick={save}
               disabled={saving}
-              className="px-4 py-2 text-sm bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
+              className="px-4 py-2 text-body bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {saving ? "Saving…" : "Save"}
             </button>

@@ -98,7 +98,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   const preloadOrNull = getMantaPreload();
   if (!preloadOrNull) {
     return (
-      <div className="text-center py-6 text-sm text-text-muted">
+      <div className="text-center py-6 text-body text-text-muted">
         The SSH installer is only available in the desktop app.
       </div>
     );
@@ -609,10 +609,10 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           config has entries, never a second input rendered alongside it. */}
       <section className="space-y-2">
         <div className="flex items-center justify-between gap-2">
-          <label className="text-sm font-medium" htmlFor="ssh-host">
+          <label className="text-body font-medium" htmlFor="ssh-host">
             Host
           </label>
-          <span className="text-xs text-text-faint">{hostCountLabel}</span>
+          <span className="text-meta text-text-faint">{hostCountLabel}</span>
         </div>
         <div className="flex gap-2">
           <select
@@ -623,7 +623,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               setTargetError(null);
             }}
             disabled={running || claimRunning}
-            className="flex-1 min-w-0 rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+            className="flex-1 min-w-0 rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
           >
             {hosts.map((h) => (
               <option key={h.alias} value={h.alias}>
@@ -675,7 +675,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             <div className="grid grid-cols-[1fr_90px] gap-2.5">
               <div className="flex flex-col gap-1">
                 <label
-                  className="text-[11px] font-medium text-text-muted"
+                  className="text-label font-medium text-text-muted"
                   htmlFor="ssh-custom-host"
                 >
                   Host or IP
@@ -690,12 +690,12 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                     setTargetError(null);
                   }}
                   disabled={running || claimRunning}
-                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
                 />
               </div>
               <div className="flex flex-col gap-1">
                 <label
-                  className="text-[11px] font-medium text-text-muted"
+                  className="text-label font-medium text-text-muted"
                   htmlFor="ssh-custom-port"
                 >
                   Port
@@ -711,14 +711,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                     setTargetError(null);
                   }}
                   disabled={running || claimRunning}
-                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
                 />
               </div>
             </div>
             <div className="flex flex-col gap-2.5">
               <div className="flex flex-col gap-1">
                 <label
-                  className="text-[11px] font-medium text-text-muted"
+                  className="text-label font-medium text-text-muted"
                   htmlFor="ssh-custom-user"
                 >
                   User
@@ -733,12 +733,12 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                     setTargetError(null);
                   }}
                   disabled={running || claimRunning}
-                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
                 />
               </div>
               <div className="flex flex-col gap-1">
                 <label
-                  className="text-[11px] font-medium text-text-muted"
+                  className="text-label font-medium text-text-muted"
                   htmlFor="ssh-custom-identity"
                 >
                   Identity file
@@ -760,7 +760,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                       setTargetError(null);
                     }}
                     disabled={running || claimRunning}
-                    className="flex-1 min-w-0 rounded-md bg-bg-elev px-3 py-2 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                    className="flex-1 min-w-0 rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
                   />
                   <button
                     type="button"
@@ -772,14 +772,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                       }
                     }}
                     disabled={running || claimRunning}
-                    className="shrink-0 px-3 py-2 rounded-md text-sm font-medium bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+                    className="shrink-0 px-3 py-2 rounded-md text-body font-medium bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
                   >
                     Browse
                   </button>
                 </div>
               </div>
             </div>
-            <p className="text-xs text-text-faint">
+            <p className="text-meta text-text-faint">
               Leave a field empty to let OpenSSH decide. These are used for
               this box only — your ~/.ssh/config is never written to.
             </p>
@@ -796,7 +796,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             panel, means it's never lost regardless of which branch
             produced it. */}
         {targetError && (
-          <p className="text-xs" style={{ color: DANGER }}>
+          <p className="text-meta" style={{ color: DANGER }}>
             {targetError}
           </p>
         )}
@@ -805,7 +805,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           <button
             onClick={startInstall}
             disabled={installDisabled}
-            className="px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50"
+            className="px-4 py-2 rounded-md text-body font-medium disabled:opacity-50"
             style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
           >
             {running ? "Installing…" : "Install & pair"}
@@ -813,7 +813,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           {running && (
             <button
               onClick={cancelInstall}
-              className="px-4 py-2 rounded-md text-sm font-medium"
+              className="px-4 py-2 rounded-md text-body font-medium"
               style={{ border: `1px solid ${DANGER}`, color: DANGER }}
             >
               Cancel
@@ -825,7 +825,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       {/* Preflight failure — checks ran before any write; must not read as
           a failed install. Never shown alongside the progress panel. */}
       {preflightFailure && (
-        <section className="space-y-2 text-sm">
+        <section className="space-y-2 text-body">
           <ul className="space-y-1">
             {preflightFailure.failures.map((f, i) => (
               <li
@@ -834,11 +834,11 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 style={{ border: `1px solid ${DANGER}`, color: DANGER }}
               >
                 <div className="font-medium">{f.cause}</div>
-                <div className="text-xs mt-0.5 opacity-80">{f.action}</div>
+                <div className="text-meta mt-0.5 opacity-80">{f.action}</div>
               </li>
             ))}
           </ul>
-          <p className="text-xs text-text-muted">
+          <p className="text-meta text-text-muted">
             Nothing was installed or changed on the box — the checks run
             before any write.
           </p>
@@ -849,7 +849,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           auto-scrolls, collapses to the single line on success. */}
       {showProgress && (
         <section className="space-y-2">
-          <div className="flex items-center gap-2 text-sm">
+          <div className="flex items-center gap-2 text-body">
             {done ? (
               <span aria-hidden style={{ color: done.ok ? OK_GREEN : DANGER }} className="inline-flex items-center">
                 {done.ok ? <Check size={14} aria-hidden="true" /> : <X size={14} aria-hidden="true" />}
@@ -873,7 +873,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             </span>
             <button
               onClick={() => setLogOpen((o) => !o)}
-              className="ml-auto text-xs text-text-muted hover:text-text inline-flex items-center gap-1"
+              className="ml-auto text-meta text-text-muted hover:text-text inline-flex items-center gap-1"
             >
               {logOpen ? <>Hide log <ChevronUp size={12} aria-hidden="true" /></> : <>Show log <ChevronDown size={12} aria-hidden="true" /></>}
             </button>
@@ -898,18 +898,18 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               className="rounded-md p-3.5 space-y-2.5"
               style={{ border: `1px solid ${ACCENT}` }}
             >
-              <div className="text-sm font-medium">Trust this host?</div>
-              <p className="text-xs text-text-muted">
+              <div className="text-body font-medium">Trust this host?</div>
+              <p className="text-meta text-text-muted">
                 The host's identity can't be verified yet. Its{" "}
                 {fingerprintPrompt.algo} key fingerprint is:
               </p>
               <code
-                className="block text-xs font-mono break-all rounded px-2 py-1.5 bg-bg-elev"
+                className="block text-meta font-mono break-all rounded px-2 py-1.5 bg-bg-elev"
                 style={{ color: ACCENT }}
               >
                 {fingerprintPrompt.sha256}
               </code>
-              <p className="text-xs text-text-faint">
+              <p className="text-meta text-text-faint">
                 Only trust this if you recognize the fingerprint (for example,
                 from your VPS console). The key is saved to
                 ~/.ssh/known_hosts so future connections skip this prompt.
@@ -917,14 +917,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               <div className="flex gap-2 pt-0.5">
                 <button
                   onClick={() => void trustHostDecision(true)}
-                  className="px-3 py-1.5 rounded-md text-sm font-medium"
+                  className="px-3 py-1.5 rounded-md text-body font-medium"
                   style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
                 >
                   Trust &amp; continue
                 </button>
                 <button
                   onClick={() => void trustHostDecision(false)}
-                  className="px-3 py-1.5 rounded-md text-sm font-medium"
+                  className="px-3 py-1.5 rounded-md text-body font-medium"
                   style={{ border: `1px solid ${DANGER}`, color: DANGER }}
                 >
                   Don't trust
@@ -941,8 +941,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               className="rounded-md p-3.5 space-y-2.5"
               style={{ border: `1px solid ${ACCENT}` }}
             >
-              <div className="text-sm font-medium">{passphrasePrompt.prompt}</div>
-              <p className="text-xs text-text-muted">
+              <div className="text-body font-medium">{passphrasePrompt.prompt}</div>
+              <p className="text-meta text-text-muted">
                 Your SSH key is passphrase-protected and not loaded in
                 ssh-agent. Enter the passphrase to decrypt it for this
                 install — it is used only in-memory and never stored.
@@ -960,14 +960,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                   onChange={(e) => setPassphraseInput(e.target.value)}
                   autoFocus
                   placeholder="Passphrase"
-                  className="w-full rounded-md px-3 py-2 text-sm bg-bg-elev"
+                  className="w-full rounded-md px-3 py-2 text-body bg-bg-elev"
                   style={{ border: `1px solid ${ACCENT}` }}
                 />
                 <div className="flex gap-2 pt-0.5">
                   <button
                     type="submit"
                     disabled={passphraseInput.length === 0}
-                    className="px-3 py-1.5 rounded-md text-sm font-medium disabled:opacity-40"
+                    className="px-3 py-1.5 rounded-md text-body font-medium disabled:opacity-40"
                     style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
                   >
                     Unlock &amp; continue
@@ -975,7 +975,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                   <button
                     type="button"
                     onClick={() => void submitPassphrase(false)}
-                    className="px-3 py-1.5 rounded-md text-sm font-medium"
+                    className="px-3 py-1.5 rounded-md text-body font-medium"
                     style={{ border: `1px solid ${DANGER}`, color: DANGER }}
                   >
                     Cancel
@@ -988,7 +988,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             <div
               ref={logRef}
               style={{ height: 172, overflowY: "auto" }}
-              className="rounded-md bg-bg-elev px-3 py-2 text-xs font-mono whitespace-pre-wrap"
+              className="rounded-md bg-bg-elev px-3 py-2 text-meta font-mono whitespace-pre-wrap"
             >
               {lines.join("\n")}
             </div>
@@ -998,13 +998,13 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
 
       {/* Done / error / claim */}
       {done && done.ok && !claimError && (
-        <section className="text-sm" style={{ color: OK_GREEN }}>
+        <section className="text-body" style={{ color: OK_GREEN }}>
           Install finished successfully. {claimRunning ? "Pairing…" : ""}
         </section>
       )}
       {done && !done.ok && (
         <section
-          className="text-sm space-y-2"
+          className="text-body space-y-2"
           style={{ color: DANGER }}
         >
           <div>
@@ -1013,7 +1013,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           </div>
           <button
             onClick={copyDiagnostics}
-            className="px-3 py-1.5 rounded-md text-xs"
+            className="px-3 py-1.5 rounded-md text-meta"
             style={{ border: `1px solid ${DANGER}`, color: DANGER }}
           >
             Copy diagnostics
@@ -1021,11 +1021,11 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         </section>
       )}
       {installError && (
-        <section className="text-sm" style={{ color: DANGER }}>
+        <section className="text-body" style={{ color: DANGER }}>
           {installError}
           <button
             onClick={copyDiagnostics}
-            className="ml-3 px-3 py-1.5 rounded-md text-xs"
+            className="ml-3 px-3 py-1.5 rounded-md text-meta"
             style={{ border: `1px solid ${DANGER}`, color: DANGER }}
           >
             Copy diagnostics
@@ -1033,7 +1033,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         </section>
       )}
       {claimError && (
-        <section className="text-sm space-y-1" style={{ color: DANGER }}>
+        <section className="text-body space-y-1" style={{ color: DANGER }}>
           <div>{claimError}</div>
           <div>
             Pair manually: run `manta pair` on the box and enter the 6-digit

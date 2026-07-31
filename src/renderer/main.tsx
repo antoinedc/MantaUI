@@ -2,6 +2,12 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { MobileApp } from "./mobile/MobileApp";
+// BET-413: self-host the two typefaces. Both are bundled by Vite (same-origin),
+// so no CSP change is needed — the CSP in index.html blocks remote fonts, and
+// these never leave our origin. Inter Variable for language (sans default),
+// JetBrains Mono Variable for code/paths/IDs/timers/diffs.
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
 import "./index.css";
 import "./mobile/mobile.css";
 import { httpApi } from "./api/httpApi";

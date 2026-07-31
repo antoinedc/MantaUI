@@ -143,7 +143,7 @@ export const AssistantPart = memo(function AssistantPart({
   if (part.type === "patch") {
     const files = ((part as Record<string, unknown>).files as string[] | undefined) ?? [];
     return (
-      <div className="flex text-text-faint text-xs">
+      <div className="flex text-text-faint text-code font-mono">
         <span className="select-none w-4 shrink-0">
           <span style={{ color: "var(--accent)", opacity: 0.6 }}>⎿ </span>
         </span>
@@ -161,7 +161,7 @@ export const AssistantPart = memo(function AssistantPart({
     const filename = String((part as Record<string, unknown>).filename ?? "");
     const mime = String((part as Record<string, unknown>).mime ?? "");
     return (
-      <div className="flex text-text-faint text-xs">
+      <div className="flex text-text-faint text-code font-mono">
         <span className="select-none w-4 shrink-0">
           <span style={{ color: "var(--accent)", opacity: 0.6 }}>⎿ </span>
         </span>
@@ -178,7 +178,7 @@ export const AssistantPart = memo(function AssistantPart({
       <span className="select-none w-4 shrink-0">
         <span style={{ color: "var(--accent)", opacity: 0.5 }}>○ </span>
       </span>
-      <div className="flex-1 min-w-0 text-xs">[{part.type}]</div>
+      <div className="flex-1 min-w-0 text-code font-mono">[{part.type}]</div>
     </div>
   );
 });
@@ -224,7 +224,7 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
             ●{" "}
           </span>
         </span>
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 font-mono">
           <span className="text-text">{toolName}</span>
           {state.title && (
             <span className="text-text-muted">({state.title})</span>
@@ -364,7 +364,7 @@ function TaskBody({ state }: { state: ToolState }) {
   const onToggle = ctx ? () => ctx.toggle(info.childSessionId) : null;
 
   return (
-    <div className="text-[12px] text-text-muted flex flex-col" style={{ gap: "var(--sp-1)" }}>
+    <div className="text-meta text-text-muted flex flex-col" style={{ gap: "var(--sp-1)" }}>
       {/* Header row: description + meta line. Click anywhere on the row to
           toggle when context is available. */}
       <div

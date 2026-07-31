@@ -248,7 +248,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
         style={{ padding: "16px 16px max(env(safe-area-inset-bottom), 16px)" }}
       >
         <div className="flex items-center justify-between mb-3">
-          <div className="text-text font-semibold text-sm">{titleText}</div>
+          <div className="text-text font-semibold text-body">{titleText}</div>
           <button
             onClick={onClose}
             className="mobile-tap text-text-muted leading-none inline-flex items-center"
@@ -261,11 +261,11 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
         {detectedWorktrees ? (
           // ---- Worktree confirm UI: identical decision the desktop offers ----
           <div className="space-y-3">
-            <div className="text-xs text-text-muted">
+            <div className="text-meta text-text-muted">
               Detected {detectedWorktrees.length} git worktrees. Open a session
               for each?
             </div>
-            <ul className="text-[11px] text-text-faint space-y-0.5 max-h-32 overflow-y-auto">
+            <ul className="text-label text-text-faint space-y-0.5 max-h-32 overflow-y-auto">
               {detectedWorktrees.map((w) => (
                 <li key={w.path} className="truncate">
                   <span className="text-text-muted">{worktreeName(w)}</span>
@@ -273,7 +273,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
                 </li>
               ))}
             </ul>
-            {error && <div className="text-xs text-danger">{error}</div>}
+            {error && <div className="text-meta text-danger">{error}</div>}
             <div className="flex flex-col gap-2">
               <button
                 onClick={() => createProject("all")}
@@ -302,7 +302,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
           // ---- Standard form (new-project OR new-session) ----
           <div className="space-y-3">
             <div className="space-y-1">
-              <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+              <label className="block text-micro font-semibold uppercase text-text-muted">
                 {nameLabel}
               </label>
               <input
@@ -313,13 +313,13 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
                 spellCheck={false}
                 autoCapitalize="off"
                 autoComplete="off"
-                className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+                className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
               />
             </div>
 
             {mode.kind === "new-project" && (
               <div className="space-y-1">
-                <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+                <label className="block text-micro font-semibold uppercase text-text-muted">
                   Default working directory
                 </label>
                 <input
@@ -329,7 +329,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
                   spellCheck={false}
                   autoCapitalize="off"
                   autoComplete="off"
-                  className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded font-mono focus:outline-none focus:border-accent"
+                  className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded font-mono focus:outline-none focus:border-accent"
                 />
                 {cwdMatches.length > 0 && (
                   // Tappable suggestions list — replaces the desktop's ghost-text
@@ -342,7 +342,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
                       <button
                         key={m}
                         onClick={() => pickCwd(m)}
-                        className="w-full text-left px-3 py-2 text-xs text-text-muted font-mono truncate hover:bg-bg-elev active:bg-bg-elev"
+                        className="w-full text-left px-3 py-2 text-meta text-text-muted font-mono truncate hover:bg-bg-elev active:bg-bg-elev"
                       >
                         {m}
                       </button>
@@ -352,7 +352,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
               </div>
             )}
 
-            {error && <div className="text-xs text-danger">{error}</div>}
+            {error && <div className="text-meta text-danger">{error}</div>}
 
             <div className="flex flex-col gap-2 pt-1">
               <button

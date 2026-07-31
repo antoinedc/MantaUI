@@ -54,7 +54,7 @@ export function UpdateBar({
   dismissible = true,
 }: UpdateBarProps) {
   return (
-    <div className="shrink-0 bg-accent/10 border-b border-accent/30 px-3 py-1.5 text-[12px] text-text flex items-center gap-2">
+    <div className="shrink-0 bg-accent/10 border-b border-accent/30 px-3 py-1.5 text-meta text-text flex items-center gap-2">
       <span className="flex-1 truncate">{text}</span>
       <button
         onClick={() => {

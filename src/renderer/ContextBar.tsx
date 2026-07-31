@@ -116,7 +116,7 @@ export function ContextBar({
         )}
       </span>
       <span
-        className="tabular-nums text-[12px] font-semibold"
+        className="tabular-nums text-meta font-mono font-semibold"
         style={{ color: fill }}
       >
         {pct}%
@@ -128,7 +128,7 @@ export function ContextBar({
         // user message will pay full rate + surcharge to re-warm exactly
         // these tokens; /clear avoids the bill entirely.
         <span
-          className="tabular-nums text-[11px] font-medium px-1.5 rounded-sm shrink-0"
+          className="tabular-nums text-label font-mono font-medium px-1.5 rounded-sm shrink-0"
           style={{
             color: CACHE_WRITE_COLOR,
             backgroundColor: `${CACHE_WRITE_COLOR}1f`,

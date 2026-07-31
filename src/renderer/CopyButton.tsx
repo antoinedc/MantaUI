@@ -44,7 +44,7 @@ export const CopyButton = memo(function CopyButton({
       aria-label="Copy"
       className={
         className ??
-        "text-[10px] text-text-faint hover:text-text px-1 rounded"
+        "text-meta text-text-faint hover:text-text px-1 rounded"
       }
     >
       {copied ? (

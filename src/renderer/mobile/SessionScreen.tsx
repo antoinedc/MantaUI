@@ -257,10 +257,10 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
           ‹
         </button>
         <div className="flex-1 min-w-0">
-          <div className="text-text font-bold text-sm truncate">{win.name}</div>
+          <div className="text-text font-bold text-body truncate">{win.name}</div>
           {sid ? (
             <select
-              className="mobile-tap text-text-faint text-xs bg-transparent"
+              className="mobile-tap text-text-faint text-meta bg-transparent"
               style={{ colorScheme: "dark" }}
               value={mode}
               onChange={(e) => setMode(e.target.value as SessionMode)}
@@ -274,7 +274,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
               ))}
             </select>
           ) : (
-            <div className="text-text-faint text-xs truncate">
+            <div className="text-text-faint text-meta truncate">
               {projectName} · terminal
             </div>
           )}
@@ -288,7 +288,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
             regardless. */}
         {!(sid && mode === "chat") && (
           <button
-            className="mobile-tap text-text-muted text-xs font-semibold px-2 border border-border rounded"
+            className="mobile-tap text-text-muted text-meta font-semibold px-2 border border-border rounded"
             onClick={sendEsc}
             aria-label="Send Esc to stop the agent"
             title="Esc"
@@ -354,7 +354,7 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
           <div className="mobile-sheet" onClick={(e) => e.stopPropagation()}>
             {renaming ? (
               <div className="space-y-3 p-2">
-                <div className="text-text font-semibold text-sm">
+                <div className="text-text font-semibold text-body">
                   Rename session
                 </div>
                 <input
@@ -368,10 +368,10 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                   spellCheck={false}
                   autoCapitalize="off"
                   autoComplete="off"
-                  className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+                  className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
                 />
                 {renameError && (
-                  <div className="text-xs text-danger">{renameError}</div>
+                  <div className="text-meta text-danger">{renameError}</div>
                 )}
                 <div className="flex gap-2">
                   <button

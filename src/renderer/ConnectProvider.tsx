@@ -376,7 +376,7 @@ export function ConnectProvider({
   }, [safeSetPhase]);
 
   return (
-    <div className="rounded-md border bg-bg-elev px-3 py-2 text-[12px] space-y-1.5">
+    <div className="rounded-md border bg-bg-elev px-3 py-2 text-meta space-y-1.5">
       <div className="flex items-center gap-2">
         <span className="text-text">Connect {label}</span>
         <span className="text-text-faint">{connectPhaseLabel(phase)}</span>
@@ -450,7 +450,7 @@ export function ConnectProvider({
               href={phase.consoleUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-text-muted underline decoration-dotted text-[11px]"
+              className="text-text-muted underline decoration-dotted text-label"
             >
               Get a key
             </a>
@@ -661,7 +661,7 @@ const CredentialInput = memo(function CredentialInput({
   };
   return (
     <div className="space-y-1">
-      <label className="block text-text-faint text-[11px]">{label}</label>
+      <label className="block text-text-faint text-label">{label}</label>
       <div className="flex flex-wrap gap-1.5">
         <input
           type={type}
@@ -687,7 +687,7 @@ const CredentialInput = memo(function CredentialInput({
           {submitting ? "…" : submitLabel}
         </button>
       </div>
-      {error && <div className="text-danger text-[11px] break-words">{error}</div>}
+      {error && <div className="text-danger text-label break-words">{error}</div>}
     </div>
   );
 });

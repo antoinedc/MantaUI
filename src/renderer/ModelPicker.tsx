@@ -97,7 +97,7 @@ export function ModelPicker({
   return (
     <div ref={rootRef} className="manta-model-picker relative min-w-0">
       <button
-        className="truncate text-[12px] text-text-muted hover:text-text flex items-center gap-1"
+        className="truncate text-meta text-text-muted hover:text-text flex items-center gap-1"
         onClick={() => {
           if (!open) onOpen();
           setOpen((v) => !v);
@@ -109,7 +109,7 @@ export function ModelPicker({
       </button>
       {open && (
         <div
-          className="manta-model-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded border border-border bg-bg-elev shadow-lg text-[12px]"
+          className="manta-model-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded border border-border bg-bg-elev shadow-lg text-meta"
         >
           <button
             onClick={() => {
@@ -132,7 +132,7 @@ export function ModelPicker({
           )}
           {groups?.map(([providerID, ms]) => (
             <div key={providerID} className="py-1">
-              <div className="px-2 py-0.5 text-[10px] uppercase tracking-wider text-text-faint">
+              <div className="px-2 py-0.5 text-micro font-semibold uppercase text-text-faint">
                 {providerID}
               </div>
               {ms.map((m) => {
@@ -154,7 +154,7 @@ export function ModelPicker({
                         <span>{m.name}</span>
                       </span>
                       {formatModelContextSize(m.limit?.context) ? (
-                        <span className="text-text-faint text-[10px] shrink-0">
+                        <span className="text-text-faint text-meta shrink-0">
                           {formatModelContextSize(m.limit?.context)}
                         </span>
                       ) : null}
@@ -167,7 +167,7 @@ export function ModelPicker({
                           setOpen(false);
                         }}
                         className={
-                          "w-full text-left pl-6 pr-2 py-0.5 hover:bg-bg-soft text-[11px] " +
+                          "w-full text-left pl-6 pr-2 py-0.5 hover:bg-bg-soft text-label " +
                           (isActive(m, v.id) ? "text-text" : "text-text-faint")
                         }
                       >

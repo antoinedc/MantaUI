@@ -29,7 +29,7 @@ export function RetryCard({
   const body = info.action?.message || info.message;
   return (
     <div
-      className="rounded-md border bg-bg-elev px-4 py-3 text-[12px]"
+      className="rounded-md border bg-bg-elev px-4 py-3 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
@@ -73,7 +73,7 @@ export function CompactionCard({
   const firstLine = state.text.split("\n").find((s) => s.trim()) ?? "";
   return (
     <div
-      className="rounded-md border bg-bg-elev px-4 py-3 text-[12px]"
+      className="rounded-md border bg-bg-elev px-4 py-3 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
@@ -132,7 +132,7 @@ export function PermissionCard({
 
   return (
     <div
-      className="rounded-md border bg-bg-elev px-4 py-3 text-[12px]"
+      className="rounded-md border bg-bg-elev px-4 py-3 text-meta"
       style={{ borderColor: "rgb(var(--warn-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
@@ -222,7 +222,7 @@ export function QuestionCard({
 
   return (
     <div
-      className="rounded-md border bg-bg-elev px-4 py-3 text-[12px]"
+      className="rounded-md border bg-bg-elev px-4 py-3 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
@@ -259,7 +259,7 @@ export function QuestionCard({
                     onClick={() => toggleOption(qIdx, opt.label, info.multiple ?? false)}
                     title={opt.description}
                     className={[
-                      "px-2 py-0.5 rounded border text-[12px] transition-colors",
+                      "px-2 py-0.5 rounded border text-meta transition-colors",
                       isSelected
                         ? "text-on-accent border-transparent"
                         : "text-text border-border-strong hover:bg-bg-soft",
@@ -297,7 +297,7 @@ export function QuestionCard({
                   handleSubmit();
                 }
               }}
-              className="mt-1.5 w-full rounded border border-border bg-transparent px-2 py-0.5 text-[12px] text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
+              className="mt-1.5 w-full rounded border border-border bg-transparent px-2 py-0.5 text-meta text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
             />
           </div>
         ))}

@@ -40,7 +40,7 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
     <div className="relative">
       <CopyButton
         text={output}
-        className="absolute top-1 right-1 z-10 text-[10px] text-text-faint hover:text-text px-1 rounded"
+        className="absolute top-1 right-1 z-10 text-meta text-text-faint hover:text-text px-1 rounded"
       />
       <pre
         ref={preRef}
@@ -49,7 +49,7 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
           pinnedRef.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 8;
         }}
-        className="text-[12px] bg-bg-soft border border-border rounded px-2 py-1 pr-7 max-h-64 overflow-auto whitespace-pre"
+        className="text-code font-mono bg-bg-soft border border-border rounded px-2 py-1 pr-7 max-h-64 overflow-auto whitespace-pre"
       >
         <code>{output}</code>
       </pre>
@@ -67,7 +67,7 @@ export function ReadBody({ state, verbose }: { state: ToolState; verbose: boolea
   const lineCount = body.split("\n").filter((l) => l.length > 0).length;
   if (!verbose) {
     return (
-      <div className="flex text-[12px] text-text-faint">
+      <div className="flex text-meta text-text-faint">
         <span className="select-none w-4 shrink-0">⎿</span>
         <span>Read {lineCount} line{lineCount === 1 ? "" : "s"} (ctrl+o to expand)</span>
       </div>
@@ -100,7 +100,7 @@ function ConnectorOutput({ body, maxLines }: { body: string; maxLines: number })
   // Take the tail (latest lines), not the head.
   const visible = lines.slice(lines.length - visibleCount);
   return (
-    <div className="text-[12px] font-mono leading-snug">
+    <div className="text-meta font-mono leading-snug">
       {hidden > 0 && (
         <div className="flex">
           <span className="select-none w-4 shrink-0 text-text-faint">⎿</span>
@@ -130,7 +130,7 @@ export function GlobBody({ state }: { state: ToolState }) {
   const output = state.output ?? "";
   const paths = output.split("\n").filter((l) => l.length > 0);
   return (
-    <div className="text-[12px] text-text-muted">
+    <div className="text-code font-mono text-text-muted">
       {pattern && (
         <div className="text-text-faint mb-1">
           pattern <span className="text-text-muted">{pattern}</span> · {paths.length} match
@@ -150,10 +150,10 @@ export function GrepBody({ state, verbose }: { state: ToolState; verbose: boolea
   const lines = output.split("\n").filter((l) => l.length > 0);
   if (!verbose) {
     return (
-      <div className="flex text-[12px] text-text-faint">
+      <div className="flex text-meta text-text-faint">
         <span className="select-none w-4 shrink-0">⎿</span>
         <span>
-          {pattern ? <>Searched <code className="text-accent">{pattern}</code> · </> : null}
+          {pattern ? <>Searched <code className="font-mono text-accent">{pattern}</code> · </> : null}
           {lines.length} hit{lines.length === 1 ? "" : "s"} (ctrl+o to expand)
         </span>
       </div>
@@ -170,7 +170,7 @@ export function TodoWriteBody({ state }: { state: ToolState }) {
   const todos = (input.todos as Array<Record<string, unknown>> | undefined) ?? [];
   if (todos.length === 0) return null;
   return (
-    <div className="text-[12px] space-y-0.5">
+    <div className="text-meta space-y-0.5">
       {todos.map((t, i) => {
         const content = String(t.content ?? "");
         const status = String(t.status ?? "pending");
@@ -209,7 +209,7 @@ export function WebFetchBody({ state }: { state: ToolState }) {
   const url = typeof input.url === "string" ? input.url : "";
   const output = resolveToolOutput(state);
   return (
-    <div className="text-[12px] space-y-1">
+    <div className="text-code font-mono space-y-1">
       {url && (
         <div className="text-text-faint break-all">
           <span className="select-none">→ </span>
@@ -230,14 +230,14 @@ function CollapsibleCode({ body, maxLines }: { body: string; maxLines: number })
   const shown = overflow ? lines.slice(0, maxLines).join("\n") : body;
   const hiddenCount = lines.length - maxLines;
   return (
-    <div className="text-[12px] bg-bg-soft border border-border rounded">
+    <div className="text-code font-mono bg-bg-soft border border-border rounded">
       <pre className="px-2 py-1 overflow-x-auto max-w-full whitespace-pre">
         <code>{shown}</code>
       </pre>
       {overflow && (
         <button
           onClick={() => setExpanded(true)}
-          className="block w-full text-left px-2 py-0.5 text-[10px] text-text-faint hover:text-text border-t border-border"
+          className="block w-full text-left px-2 py-0.5 text-meta text-text-faint hover:text-text border-t border-border"
         >
           + {hiddenCount} more line{hiddenCount === 1 ? "" : "s"}
         </button>
@@ -254,7 +254,7 @@ function CollapsiblePathList({ paths, maxLines }: { paths: string[]; maxLines: n
   const shown = overflow ? paths.slice(0, maxLines) : paths;
   const hiddenCount = paths.length - maxLines;
   return (
-    <div className="text-[12px] bg-bg-soft border border-border rounded">
+    <div className="text-code font-mono bg-bg-soft border border-border rounded">
       <div className="px-2 py-1 overflow-x-auto max-w-full">
         {shown.map((p, i) => (
           <div key={i} className="text-text-muted whitespace-pre">
@@ -265,7 +265,7 @@ function CollapsiblePathList({ paths, maxLines }: { paths: string[]; maxLines: n
       {overflow && (
         <button
           onClick={() => setExpanded(true)}
-          className="block w-full text-left px-2 py-0.5 text-[10px] text-text-faint hover:text-text border-t border-border"
+          className="block w-full text-left px-2 py-0.5 text-meta text-text-faint hover:text-text border-t border-border"
         >
           + {hiddenCount} more
         </button>

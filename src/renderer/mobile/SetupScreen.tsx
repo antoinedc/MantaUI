@@ -130,8 +130,8 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
             </svg>
           </div>
           <div className="flex flex-col gap-2">
-            <div className="text-text text-xl font-semibold">Pair your phone</div>
-            <div className="text-text-muted text-sm">
+            <div className="text-text text-display font-semibold">Pair your phone</div>
+            <div className="text-text-muted text-body">
               Connect this device to your MantaUI desktop app.
             </div>
           </div>
@@ -155,7 +155,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
 
         <button
           type="button"
-          className="mobile-tap text-accent text-sm font-medium"
+          className="mobile-tap text-accent text-body font-medium"
           onClick={() => setManualOpen(true)}
         >
           Manual setup
@@ -187,8 +187,8 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
               }}
             />
             <div className="flex flex-col gap-1 text-left mb-4">
-              <div className="text-text text-lg font-semibold">Manual setup</div>
-              <div className="text-text-muted text-xs leading-relaxed">
+              <div className="text-text text-title font-semibold">Manual setup</div>
+              <div className="text-text-muted text-meta leading-relaxed">
                 Enter the details shown under Settings &rsaquo; Connection in the desktop app.
                 Your phone will connect directly to your box.
               </div>
@@ -210,7 +210,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                   aria-invalid={
                     boxId.trim() !== "" && !isValidBoxToken(boxId.trim())
                   }
-                  className="w-full rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 text-sm font-mono outline-none focus:border-accent disabled:opacity-60"
+                  className="w-full rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 text-body font-mono outline-none focus:border-accent disabled:opacity-60"
                 />
               </Field>
 
@@ -230,7 +230,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                     setCode(normalizeCode(e.target.value));
                     setError(null);
                   }}
-                  className="w-full text-center tracking-[0.4em] text-2xl rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
+                  className="w-full text-center tracking-[0.4em] text-2xl font-mono rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
                 />
               </Field>
 
@@ -244,7 +244,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                   onClick={() => setAdvancedOpen((v) => !v)}
                   aria-expanded={advancedOpen}
                   aria-controls="mobile-setup-server-url"
-                  className="mobile-tap self-start text-xs text-text-muted inline-flex items-center gap-1"
+                  className="mobile-tap self-start text-meta text-text-muted inline-flex items-center gap-1"
                 >
                   {advancedOpen ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />} Advanced
                 </button>
@@ -252,7 +252,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                   <>
                     <label
                       htmlFor="mobile-setup-server-url"
-                      className="text-xs font-medium text-text-muted self-start"
+                      className="text-meta font-medium text-text-muted self-start"
                     >
                       Server URL
                     </label>
@@ -273,7 +273,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                       aria-describedby={
                         serverUrlInvalid ? "mobile-setup-server-url-err" : undefined
                       }
-                      className="w-full rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 text-sm outline-none focus:border-accent disabled:opacity-60"
+                      className="w-full rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 text-body outline-none focus:border-accent disabled:opacity-60"
                       style={{
                         borderColor: serverUrlInvalid ? "var(--danger)" : undefined,
                       }}
@@ -282,7 +282,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                       <div
                         id="mobile-setup-server-url-err"
                         role="alert"
-                        className="text-danger text-xs"
+                        className="text-danger text-meta"
                       >
                         {SERVER_URL_ERROR}
                       </div>
@@ -292,7 +292,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
               </div>
 
               {error && (
-                <div role="alert" className="text-danger text-sm">
+                <div role="alert" className="text-danger text-body">
                   {error}
                 </div>
               )}
@@ -337,7 +337,7 @@ function PairStatusBanner({
   return (
     <div
       role="status"
-      className="w-full max-w-xs rounded-xl px-4 py-3 text-[13px] leading-relaxed text-left"
+      className="w-full max-w-xs rounded-xl px-4 py-3 text-label leading-relaxed text-left"
       style={{ background: map.bg, color: map.color, border: `1px solid ${map.color}33` }}
     >
       {status === "pairing" && (
@@ -358,7 +358,7 @@ function DebugLogPanel() {
     <div className="w-full max-w-xs mt-1">
       <button
         type="button"
-        className="mobile-tap text-text-faint text-[11px] inline-flex items-center gap-1"
+        className="mobile-tap text-text-faint text-label inline-flex items-center gap-1"
         onClick={() => setOpen((v) => !v)}
       >
         {open ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />} Debug log ({entries.length})
@@ -366,7 +366,7 @@ function DebugLogPanel() {
       {open && (
         <div className="mt-2 rounded-lg border border-border bg-bg-elev p-2 text-left">
           <div
-            className="max-h-52 overflow-y-auto font-mono text-[10px] leading-snug text-text-muted"
+            className="max-h-52 overflow-y-auto font-mono text-meta leading-snug text-text-muted"
             style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}
           >
             {entries.length === 0 ? (
@@ -384,7 +384,7 @@ function DebugLogPanel() {
           <div className="flex gap-3 mt-2">
             <button
               type="button"
-              className="mobile-tap text-accent text-[11px]"
+              className="mobile-tap text-accent text-label"
               onClick={() => {
                 const text = getDebugLog()
                   .map((e) => `${new Date(e.t).toLocaleTimeString()} ${e.msg}`)
@@ -400,7 +400,7 @@ function DebugLogPanel() {
             </button>
             <button
               type="button"
-              className="mobile-tap text-text-faint text-[11px]"
+              className="mobile-tap text-text-faint text-label"
               onClick={() => clearDebugLog()}
             >
               Clear
@@ -416,12 +416,12 @@ function Step({ n, children }: { n: number; children: React.ReactNode }) {
   return (
     <div className="flex gap-3 items-start">
       <div
-        className="flex-none grid place-items-center rounded-full bg-accent-soft text-white text-xs font-bold"
+        className="flex-none grid place-items-center rounded-full bg-accent-soft text-white text-meta font-bold"
         style={{ width: 22, height: 22, marginTop: 1 }}
       >
         {n}
       </div>
-      <div className="text-text-muted text-[13px] leading-relaxed">{children}</div>
+      <div className="text-text-muted text-label leading-relaxed">{children}</div>
     </div>
   );
 }
@@ -429,7 +429,7 @@ function Step({ n, children }: { n: number; children: React.ReactNode }) {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-xs font-medium text-text-muted self-start">{label}</label>
+      <label className="text-meta font-medium text-text-muted self-start">{label}</label>
       {children}
     </div>
   );

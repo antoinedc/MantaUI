@@ -162,15 +162,15 @@ export function ProvidersStep({
 
   return (
     <div>
-      <h2 className="text-2xl font-semibold tracking-tight text-text mb-1.5">
+      <h2 className="text-display font-semibold tracking-tight text-text mb-1.5">
         Connect your subscriptions
       </h2>
-      <p className="text-sm text-text-muted leading-relaxed mb-6 max-w-md">
+      <p className="text-body text-text-muted leading-relaxed mb-6 max-w-md">
         Sign in with a subscription you already pay for. You can add more later.
       </p>
 
       {loadError && (
-        <div role="alert" className="text-sm mb-4" style={{ color: DANGER }}>
+        <div role="alert" className="text-body mb-4" style={{ color: DANGER }}>
           {loadError}{" "}
           <button
             onClick={() => void refresh()}
@@ -190,11 +190,11 @@ export function ProvidersStep({
             <div key={s.id} className="border border-border rounded p-2.5 space-y-1.5">
               <div className="flex items-center gap-2">
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm text-text truncate">
+                  <div className="text-body text-text truncate">
                     <span className="font-medium">{s.label}</span>
                     <span className="text-text-faint"> · {s.plan}</span>
                   </div>
-                  <div className="text-[11px] text-text-faint flex items-center gap-1.5 mt-0.5">
+                  <div className="text-label text-text-faint flex items-center gap-1.5 mt-0.5">
                     <span
                       aria-hidden
                       className={`inline-block w-1.5 h-1.5 rounded-full ${
@@ -206,7 +206,7 @@ export function ProvidersStep({
                 </div>
                 {isConnecting ? null : s.connected ? (
                   <span
-                    className="text-[11px] font-medium inline-flex items-center"
+                    className="text-label font-medium inline-flex items-center"
                     style={{ color: SUCCESS }}
                   >
                     <Check size={14} aria-hidden="true" />
@@ -215,7 +215,7 @@ export function ProvidersStep({
                   <button
                     onClick={() => setConnectingId(s.id)}
                     disabled={anyConnecting}
-                    className="px-2.5 py-1.5 text-xs bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                    className="px-2.5 py-1.5 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
                   >
                     Connect
                   </button>
@@ -233,7 +233,7 @@ export function ProvidersStep({
           );
         })}
         {statuses !== null && statuses.length === 0 && (
-          <div className="text-sm text-text-faint">
+          <div className="text-body text-text-faint">
             No providers available.
           </div>
         )}
@@ -243,7 +243,7 @@ export function ProvidersStep({
       <div className="mt-6">
         <button
           onClick={() => setShowCustom((v) => !v)}
-          className="text-xs text-text-muted underline decoration-dotted hover:text-text"
+          className="text-meta text-text-muted underline decoration-dotted hover:text-text"
         >
           {showCustom ? "Hide custom endpoint" : "Use your own API endpoint instead"}
         </button>
@@ -306,7 +306,7 @@ function CustomForm({
 
   return (
     <div className="rounded-md border border-border bg-bg-soft p-3 space-y-2.5">
-      <div className="text-[11px] uppercase tracking-wider text-text-faint">
+      <div className="text-micro font-semibold uppercase text-text-faint">
         Add a custom provider
       </div>
       <CustomInput
@@ -339,7 +339,7 @@ function CustomForm({
         onChange={(v) => set({ apiKey: v })}
       />
       {error && (
-        <div role="alert" className="text-xs" style={{ color: DANGER }}>
+        <div role="alert" className="text-meta" style={{ color: DANGER }}>
           {error}
         </div>
       )}
@@ -347,7 +347,7 @@ function CustomForm({
         type="button"
         onClick={() => void onSubmit()}
         disabled={busy || !draft.id.trim() || !draft.baseURL.trim()}
-        className="inline-flex items-center gap-2 px-3.5 py-2 rounded-md text-sm font-medium text-on-accent transition-opacity disabled:opacity-40"
+        className="inline-flex items-center gap-2 px-3.5 py-2 rounded-md text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
         style={{ background: ACCENT_SOLID }}
       >
         {busy ? "Adding…" : "Add provider"}
@@ -366,7 +366,7 @@ function CustomInput(props: {
 }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-[11px] text-text-muted">{props.label}</span>
+      <span className="text-label text-text-muted">{props.label}</span>
       <input
         type={props.type ?? "text"}
         autoComplete="off"
@@ -375,7 +375,7 @@ function CustomInput(props: {
         value={props.value}
         disabled={props.disabled}
         onChange={(e) => props.onChange(e.target.value)}
-        className="w-full rounded bg-bg border border-border px-2.5 py-2 text-sm text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
+        className="w-full rounded bg-bg border border-border px-2.5 py-2 text-body text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
       />
     </label>
   );
