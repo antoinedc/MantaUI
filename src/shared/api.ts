@@ -289,6 +289,17 @@ export interface Api {
   delegateList(sessionId?: string): Promise<DelegateJob[]>;
   delegateStop(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   delegateDelete(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
+  // BET-414: the box publishes a `delegate.updated` bus event whenever a job's
+  // status/activity changes (created, running, finished, stopped, deleted). The
+  // sidebar subscribes so a new job nests under its parent within ~1s instead
+  // of waiting for the 30s jobs poll. The payload mirrors the bus event
+  // ({ id, status, activity? }); subscribers typically just refetch
+  // delegateList() — the payload is a hint, not the full record. No-op on the
+  // preload bridge (used only pre-pairing, when no jobs exist) and on demoApi
+  // (Proxy fallback returns a no-op unsubscribe).
+  onDelegateUpdated(
+    cb: (payload: { id: string; status: string; activity?: string }) => void,
+  ): () => void;
 
   // APNs native-push registration (BET-181). The iOS Capacitor app calls this
   // on startup (after permission grant) with the device token returned by

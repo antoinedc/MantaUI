@@ -78,6 +78,12 @@ import {
   registerMountedTerminal,
   isJobRow,
   formatJobSummary,
+  windowPinId,
+  parsePinId,
+  resolvePin,
+  fuzzySessionScore,
+  computeJobNesting,
+  isNestedJobChild,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -3624,5 +3630,172 @@ describe("formatJobSummary", () => {
     expect(
       formatJobSummary({ branch: "fix-login", filesChanged: null, worktree: "/tmp/wt" }),
     ).toBe("fix-login · 0 files changed");
+  });
+});
+
+// ===== BET-414 sidebar helpers =====
+
+import type { Project } from "../shared/types";
+
+function mkProject(
+  tmuxSession: string,
+  windows: Array<{ index: number; name: string; opencodeSessionId?: string | null }>,
+): Project {
+  return {
+    tmuxSession,
+    defaultCwd: "~",
+    windows: windows.map((w) => ({
+      index: w.index,
+      name: w.name,
+      active: false,
+      paneCurrentPath: "",
+      opencodeSessionId: w.opencodeSessionId ?? null,
+    })),
+  } as Project;
+}
+
+describe("windowPinId / parsePinId / resolvePin", () => {
+  it("round-trips a tmuxSession/windowIndex pair", () => {
+    const id = windowPinId("better-ui", 3);
+    expect(id).toBe("better-ui/3");
+    expect(parsePinId(id)).toEqual({ tmuxSession: "better-ui", windowIndex: 3 });
+  });
+
+  it("rejects malformed pin ids", () => {
+    expect(parsePinId("nodash")).toBeNull();
+    expect(parsePinId("/leading")).toBeNull();
+    expect(parsePinId("trailing/")).toBeNull();
+    // Last slash wins; the last segment must be numeric. "a/b/3" → session "a/b".
+    expect(parsePinId("a/b/3")).toEqual({ tmuxSession: "a/b", windowIndex: 3 });
+    expect(parsePinId("a/b/c")).toBeNull();
+    expect(parsePinId("proj/notanumber")).toBeNull();
+    expect(parsePinId("proj/-1")).toBeNull();
+  });
+
+  it("resolves a live window and prunes stale ones", () => {
+    const projects = [mkProject("p", [{ index: 2, name: "w2" }])];
+    expect(resolvePin(projects, "p/2")?.window.index).toBe(2);
+    expect(resolvePin(projects, "p/9")).toBeNull();
+    expect(resolvePin(projects, "missing/2")).toBeNull();
+  });
+});
+
+describe("fuzzySessionScore", () => {
+  it("matches everything with score 1 on empty query", () => {
+    expect(fuzzySessionScore("", "auth", "better-ui")).toBe(1);
+  });
+
+  it("ranks contiguous substring matches above subsequence matches", () => {
+    const contig = fuzzySessionScore("auth", "auth-service", "better-ui");
+    const subseq = fuzzySessionScore("auh", "auth-service", "better-ui");
+    expect(contig).toBeGreaterThan(subseq);
+    expect(subseq).toBeGreaterThan(0);
+  });
+
+  it("ranks earlier substring matches higher", () => {
+    const early = fuzzySessionScore("log", "login", "a");
+    const late = fuzzySessionScore("log", "analog", "a");
+    expect(early).toBeGreaterThan(late);
+  });
+
+  it("matches across session + workspace boundary (subsequence)", () => {
+    // query "authbu" → "auth" from session, "bu" from workspace "bu-foo".
+    expect(fuzzySessionScore("authbu", "auth", "bu-foo")).toBeGreaterThan(0);
+  });
+
+  it("returns 0 when the query is not a subsequence", () => {
+    expect(fuzzySessionScore("xyz", "auth", "better-ui")).toBe(0);
+    expect(fuzzySessionScore("auth", "thau", "")).toBe(0); // order matters
+  });
+
+  it("is case-insensitive", () => {
+    expect(fuzzySessionScore("AUTH", "auth-service", "BETTER-UI")).toBeGreaterThan(0);
+  });
+});
+
+describe("computeJobNesting", () => {
+  const jobs = {
+    child1: { status: "running", parentSessionID: "parent", childSessionID: "child1" },
+    child2: { status: "running", parentSessionID: "parent", childSessionID: "child2" },
+    doneJob: { status: "done", parentSessionID: "parent", childSessionID: "doneChild" },
+    orphanJob: { status: "running", parentSessionID: "goneParent", childSessionID: "orphanChild" },
+  };
+
+  it("nests running job children under their parent window and hides them from top level", () => {
+    const project = mkProject("p", [
+      { index: 0, name: "parent", opencodeSessionId: "parent" },
+      { index: 1, name: "job1", opencodeSessionId: "child1" },
+      { index: 2, name: "job2", opencodeSessionId: "child2" },
+    ]);
+    const res = computeJobNesting(project, jobs, undefined);
+    expect([...res.hidden]).toEqual([1, 2]);
+    expect(res.children.get(0)).toEqual([1, 2]);
+    expect(res.orphans).toEqual([]);
+  });
+
+  it("filters terminal jobs out unless the user is viewing the child", () => {
+    const project = mkProject("p", [
+      { index: 0, name: "parent", opencodeSessionId: "parent" },
+      { index: 3, name: "done", opencodeSessionId: "doneChild" },
+    ]);
+    // Not viewing → terminal job dropped entirely.
+    let res = computeJobNesting(project, jobs, undefined);
+    expect(res.hidden.has(3)).toBe(false);
+    expect(res.children.has(0)).toBe(false);
+    // Viewing the terminal child → kept (nested under parent).
+    res = computeJobNesting(project, jobs, 3);
+    expect(res.hidden.has(3)).toBe(true);
+    expect(res.children.get(0)).toEqual([3]);
+  });
+
+  it("renders a running job at top level when its parent window is gone", () => {
+    const project = mkProject("p", [
+      { index: 5, name: "orphan", opencodeSessionId: "orphanChild" },
+    ]);
+    const res = computeJobNesting(project, jobs, undefined);
+    expect(res.orphans).toEqual([5]);
+    expect(res.hidden.has(5)).toBe(false);
+  });
+
+  it("ignores jobs whose child window is not in this project", () => {
+    const project = mkProject("p", [{ index: 0, name: "parent", opencodeSessionId: "parent" }]);
+    const res = computeJobNesting(project, jobs, undefined);
+    expect(res.hidden.size).toBe(0);
+    expect(res.orphans).toEqual([]);
+  });
+});
+
+describe("isNestedJobChild", () => {
+  const jobs = {
+    child1: { status: "running", parentSessionID: "parent", childSessionID: "child1" },
+    doneChild: { status: "done", parentSessionID: "parent", childSessionID: "doneChild" },
+  };
+
+  it("returns true for a running job whose parent exists", () => {
+    const project = mkProject("p", [
+      { index: 0, name: "parent", opencodeSessionId: "parent" },
+      { index: 1, name: "job", opencodeSessionId: "child1" },
+    ]);
+    expect(isNestedJobChild(jobs, "child1", project, undefined)).toBe(true);
+  });
+
+  it("returns false for a running job whose parent is gone (orphan, not nested)", () => {
+    const project = mkProject("p", [{ index: 1, name: "job", opencodeSessionId: "child1" }]);
+    expect(isNestedJobChild(jobs, "child1", project, undefined)).toBe(false);
+  });
+
+  it("returns false for a terminal job that is not being viewed", () => {
+    const project = mkProject("p", [
+      { index: 0, name: "parent", opencodeSessionId: "parent" },
+      { index: 2, name: "done", opencodeSessionId: "doneChild" },
+    ]);
+    expect(isNestedJobChild(jobs, "doneChild", project, undefined)).toBe(false);
+    expect(isNestedJobChild(jobs, "doneChild", project, 2)).toBe(true);
+  });
+
+  it("returns false for non-job windows", () => {
+    const project = mkProject("p", [{ index: 0, name: "plain", opencodeSessionId: "plain" }]);
+    expect(isNestedJobChild(jobs, "plain", project, undefined)).toBe(false);
+    expect(isNestedJobChild(jobs, null, project, undefined)).toBe(false);
   });
 });

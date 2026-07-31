@@ -226,13 +226,19 @@ export function App() {
     void useStore.getState().runBackgroundSync();
   }, [chatSessionKey]);
 
-  // Background-delegation jobs (BET-381): a single app-level 10s poll feeds
+  // Background-delegation jobs (BET-381): a single app-level poll feeds
   // the store's `jobs` slice (keyed by childSessionID), which drives the
   // sidebar's per-row activity second line on BOTH desktop and mobile. ONE
   // poll, owned here (not in ChatPanel or Sidebar) so mobile and desktop
   // share it. delegateList() with no arg returns ALL jobs; the per-session
   // card list is a separate fetch in useSessionResources. The renderer never
   // computes activity text — it renders the `activity` field verbatim.
+  //
+  // BET-414: the poll is now a 30s FALLBACK. The box publishes a
+  // `delegate.updated` bus event on every job status/activity change, and we
+  // subscribe to it here so a new job nests under its parent within ~1s
+  // instead of waiting up to 30s. The event payload is a hint (id/status);
+  // we refetch the full slice on every event so the store stays consistent.
   useEffect(() => {
     if (!window.api.delegateList) return;
     const tick = () => {
@@ -246,8 +252,16 @@ export function App() {
         });
     };
     tick();
-    const poll = setInterval(tick, 10_000);
-    return () => clearInterval(poll);
+    const poll = setInterval(tick, 30_000);
+    // Immediate refetch on delegate.updated — kills the old 10s nesting lag.
+    let off: (() => void) | null = null;
+    if (window.api.onDelegateUpdated) {
+      off = window.api.onDelegateUpdated(() => tick());
+    }
+    return () => {
+      clearInterval(poll);
+      if (off) off();
+    };
   }, []);
 
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
