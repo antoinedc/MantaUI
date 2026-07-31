@@ -522,16 +522,20 @@ async function main() {
   const baseURL = `http://127.0.0.1:${port}`;
   log(`serving ${serveDir} on ${baseURL}`);
 
-// Shared with the visual gate — ONE browser recipe (scripts/visual/harness.mjs).
+  // Shared with the visual gate — ONE browser recipe (scripts/visual/harness.mjs).
   // Was pinned to /usr/bin/google-chrome; Chrome 148 began refusing every
   // loopback navigation with ERR_ACCESS_DENIED, which took this script — and
   // therefore the drift gate in ci.yml, on the REQUIRED job — down for every
   // PR. Playwright's bundled Chromium is pinned by package-lock.json, so the
   // renderer these baselines hash can only change in a reviewed commit.
   const browser = await chromium.launch(LAUNCH_OPTIONS);
-  log(
-    `chromium ${(await browser.version().catch(() => "?"))} via ${chromium.executablePath()}`,
-  );
+  let browserVersion = "?";
+  try {
+    browserVersion = await browser.version();
+  } catch {
+    // Best-effort: never let version detection break the capture run.
+  }
+  log(`chromium ${browserVersion} via ${chromium.executablePath()}`);
 
   const producedPaths = {};
   try {
