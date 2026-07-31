@@ -25,6 +25,7 @@ import {
   hasWorktreeFanOut,
   isDimmedDir,
   parentPath,
+  worktreeBadge,
 } from "./folderPicker";
 
 type Props = {
@@ -55,11 +56,14 @@ export function FolderPickerModal({ initialPath, onSelect, onCancel }: Props) {
   const [suggestion, setSuggestion] = useState<string | null>(null);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
-  // Per-directory worktree probe is deferred — gitListWorktrees is one git
-  // call per row and the list is capped at 20 by fsListDirs. We probe on
-  // demand when the user clicks Select (the fan-out question is asked at
-  // commit time, not during browse, to keep the browse cheap). The badge
-  // on individual rows is a future enhancement.
+  // Per-directory worktree probe. Keyed by the row's full path; null = not
+  // probed yet / not a repo. We probe each row lazily after the listing
+  // loads, with a small concurrency cap to avoid hammering git. The badge
+  // ("⎇ N worktrees") shows on rows that have >1 worktree, so the user
+  // sees the fan-out option BEFORE committing (BET-417 §B).
+  const [worktreeCounts, setWorktreeCounts] = useState<
+    Record<string, WorktreeInfo[] | null>
+  >({});
   const [fanOut, setFanOut] = useState<FanOut>(null);
   const [gitState, setGitState] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -121,6 +125,7 @@ export function FolderPickerModal({ initialPath, onSelect, onCancel }: Props) {
   const listDir = async (dir: string) => {
     setLoading(true);
     setError(null);
+    setWorktreeCounts({});
     try {
       const matches = await window.api.fsListDirs(dir);
       const filtered = matches.filter((m) => m.startsWith(dir));
@@ -136,6 +141,26 @@ export function FolderPickerModal({ initialPath, onSelect, onCancel }: Props) {
       } catch {
         setGitState("");
       }
+      // Lazily probe each row for worktree fan-out (BET-417 §B). Probes run
+      // with concurrency 4 so a 20-row listing finishes in ~5 git calls
+      // instead of 20 sequential ones. Failures are silent (not a repo →
+      // no badge).
+      const probeRow = async (full: string) => {
+        try {
+          const wts = await window.api.gitListWorktrees(full);
+          setWorktreeCounts((prev) => ({ ...prev, [full]: wts }));
+        } catch {
+          setWorktreeCounts((prev) => ({ ...prev, [full]: null }));
+        }
+      };
+      const queue = [...built.map((r) => r.full)];
+      const workers = Array.from({ length: 4 }, async () => {
+        while (queue.length > 0) {
+          const full = queue.shift();
+          if (full) await probeRow(full);
+        }
+      });
+      void Promise.all(workers);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setRows([]);
@@ -331,6 +356,8 @@ export function FolderPickerModal({ initialPath, onSelect, onCancel }: Props) {
                 <div className="px-3 py-4 text-meta text-text-faint">No subfolders</div>
               )}
               {!loading && !error && rows.map((r) => {
+                const wtCount = worktreeCounts[r.full];
+                const badge = worktreeBadge(wtCount ?? null);
                 return (
                   <button
                     key={r.full}
@@ -344,6 +371,9 @@ export function FolderPickerModal({ initialPath, onSelect, onCancel }: Props) {
                   >
                     <FolderIcon size={14} className="shrink-0" aria-hidden="true" />
                     <span className="flex-1 min-w-0 truncate font-mono">{r.name}</span>
+                    {badge && (
+                      <span className="text-label text-accent-tx shrink-0">{badge}</span>
+                    )}
                   </button>
                 );
               })}
