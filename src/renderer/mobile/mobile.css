@@ -246,17 +246,13 @@ body,
   min-width: 0;
   row-gap: 4px;
 }
-/* Meta-footer stacking (mobile only). Desired reading order, top→bottom:
-     1. ⎇ branch
-     2. model ▾ · ctx % · stale-cache pill
-     3. bypass-permissions toggle
-   The footer's left span already wraps (rule above), but with all four chips
-   sharing one wrapping line the break point moved with the branch/model name
-   length, so the order looked unstable. Giving the branch chip a whole flex
-   line pins it. `max-width` also releases the desktop 160px clamp so the
-   branch can use the full line width before it truncates.
-   Hook class is stamped in InputArea.tsx; there is no desktop rule for it. */
-.mobile-body .manta-composer-branch {
+/* Meta-footer stacking (mobile only). The branch chip now lives in the
+   SessionHeader (BET-415), not the composer footer. On phone width the
+   header is a single row; the branch chip truncates with max-width so it
+   doesn't crowd the context pill + session menu. Hook class
+   `.manta-session-branch` is stamped on the chip in SessionHeader.tsx;
+   there is no desktop rule for it. */
+.mobile-body .manta-session-branch {
   flex-basis: 100%;
   max-width: 100%;
 }
@@ -353,8 +349,11 @@ body,
 /* Session-list & settings scrollers: their JSX uses `overflow-auto` which on
    iOS is bidirectional and rubber-bands horizontally when the content's
    intrinsic min-width matches viewport width to the pixel. We never want a
-   horizontal scroll on these screens — the rows are sized to fit. */
-.mobile-screen [class*="overflow-auto"] {
+   horizontal scroll on these screens — the rows are sized to fit.
+   Hook class `.manta-scroll-y` is stamped on the scroller roots in
+   SessionListScreen.tsx and MobileSettings.tsx (BET-415 — replaced the prior
+   positional `[class*="overflow-auto"]` selectors with this named hook). */
+.mobile-screen .manta-scroll-y {
   overflow-x: hidden;
 }
 
@@ -364,10 +363,10 @@ body,
    text-overflow:ellipsis; white-space:nowrap` — but a flex child only
    truncates if its flex parent allows it to shrink below intrinsic min
    (i.e. has `min-width: 0`). On phone width a long session name pushes
-   the row past the screen. Scope this strictly to the list scroller (the
-   `.mobile-screen [class*="overflow-auto"]` clamped above) so it can't
-   reach ChatPanel/Terminal subtrees inside SessionScreen's `.mobile-body`. */
-.mobile-screen [class*="overflow-auto"] .flex {
+   the row past the screen. Scope this strictly to the named scroll
+   container so it can't reach ChatPanel/Terminal subtrees inside
+   SessionScreen's `.mobile-body`. */
+.mobile-screen .manta-scroll-y .flex {
   min-width: 0;
 }
 

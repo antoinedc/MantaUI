@@ -19,6 +19,7 @@ import {
   readPromptHistory,
   appendPromptHistory,
   mergePromptHistory,
+  resolveActiveModel,
 } from "./chatShared";
 import type { OpencodeModel } from "../shared/types";
 
@@ -149,6 +150,45 @@ describe("findLast", () => {
   it("returns undefined when nothing matches or the array is empty", () => {
     expect(findLast([1, 2, 3], (v) => v > 10)).toBeUndefined();
     expect(findLast([], () => true)).toBeUndefined();
+  });
+});
+
+describe("resolveActiveModel (BET-415)", () => {
+  // Minimal models: two providers, one with variants.
+  const models: OpencodeModel[] = [
+    { id: "claude-sonnet-4", providerID: "anthropic", name: "Claude Sonnet 4" },
+    { id: "claude-opus-4", providerID: "anthropic", name: "Claude Opus 4", variants: [{ id: "high" }] },
+    { id: "deepseek-chat", providerID: "deepseek", name: "DeepSeek Chat" },
+  ];
+
+  it("returns null when no models are loaded", () => {
+    expect(resolveActiveModel(null, null, null)).toBeNull();
+    expect(resolveActiveModel([], null, null)).toBeNull();
+  });
+
+  it("prefers modelOverride over defaultModel", () => {
+    const override = { providerID: "deepseek", modelID: "deepseek-chat" };
+    const def = { providerID: "anthropic", modelID: "claude-sonnet-4" };
+    expect(resolveActiveModel(models, override, def)?.id).toBe("deepseek-chat");
+  });
+
+  it("falls back to defaultModel when no override is set", () => {
+    const def = { providerID: "anthropic", modelID: "claude-opus-4" };
+    expect(resolveActiveModel(models, null, def)?.id).toBe("claude-opus-4");
+  });
+
+  it("returns null when neither override nor default is set", () => {
+    expect(resolveActiveModel(models, null, null)).toBeNull();
+  });
+
+  it("returns null when the target model is not in the list", () => {
+    const override = { providerID: "anthropic", modelID: "claude-haiku-99" };
+    expect(resolveActiveModel(models, override, null)).toBeNull();
+  });
+
+  it("ignores the variant field when matching (variant is per-prompt, not model identity)", () => {
+    const override = { providerID: "anthropic", modelID: "claude-opus-4", variant: "high" };
+    expect(resolveActiveModel(models, override, null)?.id).toBe("claude-opus-4");
   });
 });
 

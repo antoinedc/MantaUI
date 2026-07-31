@@ -177,7 +177,7 @@ export function SessionListScreen({
           <Plus size={20} aria-hidden="true" />
         </button>
       </div>
-      <div className="flex-1 overflow-auto py-2">
+      <div className="manta-scroll-y flex-1 overflow-auto py-2">
         {projects.length === 0 ? (
           <div className="h-full flex items-center justify-center text-text-faint text-body px-8 text-center">
             {serverUrl || boxId

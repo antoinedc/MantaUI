@@ -26,6 +26,8 @@ import {
   selectCacheTtlMs,
   selectLastAssistantCompletion,
   computeStaleCache,
+  computeContextBreakdown,
+  resolveContextLimit,
   STALE_CACHE_MIN_TOKENS,
   countRunningSubagents,
   shouldAutoRename,
@@ -46,6 +48,7 @@ import {
   modelSupportsAttachments,
   readSavedModel,
   writeSavedModel,
+  resolveActiveModel,
   type AgentMention,
   type Attachment,
   type ModelSelection,
@@ -63,6 +66,7 @@ import { useVoice } from "./hooks/useVoice";
 import { useTypeahead } from "./hooks/useTypeahead";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
+import { SessionHeader } from "./SessionHeader";
 import { getMantaPreload } from "./preloadAccess";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
@@ -622,25 +626,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       );
       try {
         if (cmdName === "clear") {
-          if (!tmuxSession || windowIndex == null) {
-            setSendError("Can't /clear — no owning tmux window.");
-            return;
-          }
-          const cleared = await window.api.opencodeClearSession({
-            sessionName: tmuxSession,
-            windowIndex,
-            // Empty string signals the main handler to resolve from the
-            // project's stored defaultCwd. Passing "~" or a stale paneCurrentPath
-            // would short-circuit that fallback.
-            cwd: cwd ?? "",
-            title: `${tmuxSession} / cleared`,
-          });
-          // Carry the current model selection forward to the new session so
-          // the user doesn't have to re-pick it after every /clear.
-          if (cleared?.newSessionId && modelOverride) {
-            writeSavedModel(cleared.newSessionId, modelOverride);
-          }
-          await refresh();
+          await clearSession();
         } else if (cmdName === "fork") {
           await forkSession();
         } else if (cmdName === "compact") {
@@ -866,20 +852,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const ensureModels = useCallback(async () => { /* noop */ }, []);
 
   // Active model used for the NEXT prompt. modelOverride wins; otherwise the
-  // server default. Used to look up capability flags (attachment support).
-  const activeModel = useMemo<OpencodeModel | null>(() => {
-    if (!models || models.length === 0) return null;
-    const target = modelOverride ??
-      (defaultModel
-        ? { providerID: defaultModel.providerID, modelID: defaultModel.modelID }
-        : null);
-    if (!target) return null;
-    return (
-      models.find(
-        (m) => m.providerID === target.providerID && m.id === target.modelID,
-      ) ?? null
-    );
-  }, [models, modelOverride, defaultModel]);
+  // server default. Used to look up capability flags (attachment support) and
+  // the context-window limit. Resolution lives in chatShared so ModelPicker
+  // and ChatPanel share one path (BET-415 duplication gate).
+  const activeModel = useMemo<OpencodeModel | null>(
+    () => resolveActiveModel(models, modelOverride, defaultModel),
+    [models, modelOverride, defaultModel],
+  );
   const currentModelSupportsAttachments = modelSupportsAttachments(activeModel);
   const currentModelName = activeModel?.name ?? "this model";
 
@@ -966,6 +945,50 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       setSendError(String((e as Error)?.message ?? e));
     }
   }, [sessionId]);
+
+  // Clear session — extracted from the /clear slash-command path so the
+  // SessionHeader menu (and the context popover's "Clear session" button)
+  // can call it directly without routing through the composer. Same logic:
+  // opencodeClearSession swaps in a new session id; the model override is
+  // carried forward so the user doesn't re-pick after every clear.
+  const clearSession = useCallback(async () => {
+    if (!tmuxSession || windowIndex == null) {
+      setSendError("Can't clear — no owning tmux window.");
+      return;
+    }
+    setSendError(null);
+    try {
+      const cleared = await window.api.opencodeClearSession({
+        sessionName: tmuxSession,
+        windowIndex,
+        cwd: cwd ?? "",
+        title: `${tmuxSession} / cleared`,
+      });
+      if (cleared?.newSessionId && modelOverride) {
+        writeSavedModel(cleared.newSessionId, modelOverride);
+      }
+      await refresh();
+    } catch (e) {
+      setSendError(String((e as Error)?.message ?? e));
+    }
+  }, [tmuxSession, windowIndex, cwd, modelOverride, refresh]);
+
+  // Delete session — kills the tmux window + opencode session. Reaches the
+  // same IPC the mobile ⋯ sheet uses.
+  const deleteSession = useCallback(async () => {
+    if (!tmuxSession || windowIndex == null) return;
+    setSendError(null);
+    try {
+      await window.api.opencodeDeleteSession({
+        sessionId,
+        sessionName: tmuxSession,
+        windowIndex,
+      });
+      await refresh();
+    } catch (e) {
+      setSendError(String((e as Error)?.message ?? e));
+    }
+  }, [sessionId, tmuxSession, windowIndex, refresh]);
 
   // Session deletion lives in the sidebar (desktop) and the mobile ⋯ sheet —
   // it was removed from the composer status bar to declutter. The IPC
@@ -1509,6 +1532,18 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     [lastAssistantCompletion, ttlMs, cachedTokens, running, staleTick],
   );
 
+  // Context breakdown for the SessionHeader pill + popover (BET-415). The
+  // denominator is the active model's real context window so the pill
+  // reflects what the provider will actually accept on the next request.
+  const ctxLimit = useMemo(
+    () => resolveContextLimit(activeModel),
+    [activeModel],
+  );
+  const ctxBreakdown = useMemo(
+    () => computeContextBreakdown(latestTokens, ctxLimit),
+    [latestTokens, ctxLimit],
+  );
+
   // Most recent TodoWrite call from anywhere in the session — pinned under
   // either the running indicator (while a turn is live) or the final turn's
   // duration footer (when idle). Walks back through ALL messages, not just
@@ -1731,6 +1766,26 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           </span>
         </div>
       )}
+
+      {/* Session header (BET-415): owns SESSION STATE — git branch, context
+          usage pill + popover, and the session menu (fork / compact / clear /
+          delete). The composer below owns only composing. */}
+      <SessionHeader
+        branch={branch}
+        ctxBreakdown={ctxBreakdown}
+        ctxLimit={ctxLimit}
+        staleCache={staleCache}
+        modelName={
+          activeModel
+            ? activeModel.name
+            : null
+        }
+        hasSession={!!tmuxSession && windowIndex != null}
+        onFork={() => void forkSession()}
+        onCompact={() => void compactSession()}
+        onClear={() => void clearSession()}
+        onDelete={() => void deleteSession()}
+      />
 
       <Transcript
         messages={messages}
@@ -2084,7 +2139,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         abort={abort}
         running={running}
         refreshing={refreshing}
-        branch={branch}
         modelLabel={modelLabel}
         chatAutoAllow={chatAutoAllow}
         setChatAutoAllow={setChatAutoAllow}
@@ -2096,13 +2150,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         startVoice={(mode) => { voiceRecorder.start(mode); return Promise.resolve(); }}
         stopVoice={voiceRecorder.stop}
         cancelVoice={voiceRecorder.cancel}
-        tokens={latestTokens}
-        staleCache={staleCache}
         models={models}
         modelOverride={modelOverride}
         defaultModel={defaultModel}
         deactivatedMainModels={deactivatedMainModels}
-        activeModel={activeModel}
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
         scheduleCount={schedules.length}

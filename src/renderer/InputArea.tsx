@@ -2,33 +2,32 @@
 //
 // Extracted from ChatPanel.tsx (M0.5). The bottom composer and its immediate
 // helpers:
-//   - SessionToolbar: ⏰/🔑/🪝 footer toggles.
+//   - SessionToolbar: ⏰/🔑/🪝/🤖 footer toggles.
 //   - AttachmentStrip: uploaded-file chips above the textarea.
 //   - TypeaheadPopup: @-file / @-agent / /command completion list (visual +
 //     mouse; keyboard nav is driven by InputArea).
 //   - MicButton: press-and-hold voice affordance (inline + mobile PTT FAB).
-//   - InputArea: the textarea row, footer (model picker + context bar +
-//     toolbar), and trust toggle. Purely presentational — all state and
-//     handlers are passed in as props by ChatPanel.
+//   - InputArea: the textarea row, footer (model picker + resource toolbar),
+//     and trust toggle. Purely presentational — all state and handlers are
+//     passed in as props by ChatPanel.
+//
+// BET-415 redesign: the composer owns COMPOSING only. Branch chip, context
+// pill, and session ops (fork/compact/clear/delete) moved to the SessionHeader
+// above the transcript. The composer shell is now a real bordered input with
+// a focus state instead of hairline dividers around a naked textarea.
 
 import { useEffect, useRef, useState } from "react";
-import { GitBranch, Mic, Shield } from "lucide-react";
+import { Mic, Shield } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import type { VoiceMode, VoicePhase } from "./voice";
 import {
-  ASSUMED_CONTEXT_TOKENS,
   arrowDownNavigatesHistory,
   arrowUpNavigatesHistory,
-  computeContextBreakdown,
-  resolveContextLimit,
   type CaretRow,
-  type StaleCacheResult,
 } from "./chatUtils";
 import {
   type ModelSelection,
-  type TokenUsage,
 } from "./chatShared";
-import { ContextBar } from "./ContextBar";
 import { ModelPicker } from "./ModelPicker";
 import { MicButton, SessionToolbar } from "./ComposerParts";
 // Re-exported so existing `import { AttachmentStrip, TypeaheadPopup } from
@@ -99,10 +98,7 @@ export function InputArea({
   submit,
   abort,
   running,
-  // True while the canonical transcript is being refetched in the background.
-  // Drives the ambient orange gradient on the top divider (below).
   refreshing,
-  branch,
   modelLabel,
   chatAutoAllow,
   setChatAutoAllow,
@@ -114,13 +110,10 @@ export function InputArea({
   startVoice,
   stopVoice,
   cancelVoice,
-  tokens,
-  staleCache,
   models,
   modelOverride,
   defaultModel,
   deactivatedMainModels,
-  activeModel,
   onOpenModels,
   onSelectModel,
   scheduleCount,
@@ -146,47 +139,26 @@ export function InputArea({
   abort: () => void;
   running: boolean;
   // True while the canonical transcript is being refetched in the background.
-  // Drives the ambient orange gradient on the top divider (below).
+  // Drives a subtle ambient tint on the composer border so the user knows a
+  // refetch is in flight without a separate loading bar.
   refreshing: boolean;
-  branch: string | null;
   modelLabel: string | null;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
-  // Voice (Groq STT). When voiceEnabled=false the MicButton is hidden so
-  // users without a configured API key never see the affordance. start/stop/
-  // cancel come from useVoiceRecorder; phase drives the icon state; mode is
-  // owned by the hook (W2: previously the button kept its own copy and the
-  // two drifted, so long-press never reached the hook as "command").
   voiceEnabled: boolean;
   voicePhase: VoicePhase;
   voiceMode: VoiceMode;
-  // Derived flags so the input row's pulse class doesn't need to recompute
-  // these on every keystroke. "recording" covers both pre-permission
-  // (requesting) and active capture; "processing" is the post-stop
-  // transcribe round-trip. Both render the same pulsing affordance — the
-  // user only cares "is the mic busy".
   voiceRecording: boolean;
   voiceProcessing: boolean;
   startVoice: (mode: VoiceMode, opts?: { promote?: boolean }) => Promise<void>;
   stopVoice: () => void;
   cancelVoice: () => void;
-  tokens: TokenUsage | null;
-  // Stale-prompt-cache result: when isStale is true the footer shows
-  // "/clear to save Nk tokens" next to the context bar. Computed at the
-  // panel scope so the tick interval doesn't run inside InputArea.
-  staleCache: StaleCacheResult;
+  // tokens / staleCache / branch / activeModel moved to SessionHeader
+  // (BET-415). The composer owns only composing controls now.
   models: OpencodeModel[] | null;
   modelOverride: ModelSelection | null;
   defaultModel: { providerID: string; modelID: string } | null;
-  // BET-215: "providerID/modelID" strings — hidden from the ModelPicker
-  // dropdown. Mirrors the AppConfig.deactivatedMainModels opt-out semantics.
   deactivatedMainModels: string[];
-  // Active model resolved by the parent (modelOverride ?? defaultModel,
-  // looked up against `models`). Used to size the context bar against the
-  // real provider window (e.g. 1M for Opus 4.7) instead of the 200k
-  // fallback — without this the bar saturates at "100%" while the
-  // provider happily keeps serving requests, which is misleading.
-  activeModel: OpencodeModel | null;
   onOpenModels: () => void;
   onSelectModel: (m: ModelSelection | null) => void;
   scheduleCount: number;
@@ -205,30 +177,10 @@ export function InputArea({
   onQueuePop: () => void;
   onPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
 }) {
-  // Persistent context usage — shown next to the model name in the footer
-  // whenever the session has had at least one assistant turn (tokens > 0).
-  // The running indicator above shows the LIVE version while generating;
-  // this one is the resting baseline.
-  //
-  // Denominator is the ACTIVE model's real context window when known
-  // (Opus 4.7 = 1M, Sonnet 4 = 200k, etc.) so the bar reflects what the
-  // provider will actually accept on the next request. Falls back to
-  // ASSUMED_CONTEXT_TOKENS (200k) when no model is selected yet.
-  // Context window numerator = input + cache.read + cache.write. All three
-  // input buckets are disjoint and ALL consume the request's context window;
-  // the previous formula omitted cache.write and under-reported the bar on
-  // cache-warming turns. computeContextBreakdown also produces the per-
-  // segment widths the SEGMENTED ContextBar needs (uncached vs warm vs
-  // cached) so the user can see the warm-up bucket without hovering.
-  const ctxLimit = resolveContextLimit(activeModel);
-  const ctxBreakdown = computeContextBreakdown(tokens, ctxLimit);
-  const ctxTokens = ctxBreakdown.totalInput;
-  const ctxPct = ctxBreakdown.pct;
+  const voiceActive = voiceRecording || voiceProcessing;
   // Detect mobile shell (touch device using the no-window.api branch with
   // MobileApp + .mobile-body wrapper). MicButton is only rendered there;
   // on desktop the keyboard shortcut (Ctrl+M / Enter / Esc) drives voice.
-  // Read once on mount via a ref callback so we don't pay a per-render
-  // closest() cost.
   const [isMobileShell, setIsMobileShell] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -236,12 +188,6 @@ export function InputArea({
       setIsMobileShell(!!rowRef.current.closest(".mobile-body"));
     }
   }, []);
-  // Pulsing border on the input row while the recorder is active OR the
-  // transcribe round-trip is in flight. Same affordance for both phases
-  // (the user only cares "the mic is busy"). Implemented as a color +
-  // shadow swap on the existing top/bottom dividers — border width stays
-  // 1px in both states so there's no row jump when recording toggles.
-  const voiceActive = voiceRecording || voiceProcessing;
   return (
     <div className="manta-composer shrink-0" ref={rowRef}>
       {/* Mobile push-to-talk FAB (WhatsApp-style, bottom-right above the
@@ -259,55 +205,26 @@ export function InputArea({
           floating
         />
       )}
-      {/* Error banner moved to ChatPanel scope (dismissable + closer to the */}
-      {/* attachment strip). Nothing rendered here for sendError anymore. */}
-      {/* Top divider — white-ish, matches Claude TUI. Turns into a pulsing */}
-      {/* red line while voice is active so the user has clear peripheral */}
-      {/* feedback that the mic is hot (the `>` glyph also recolors red). */}
-      {/* Border width stays at 1px in both states to avoid a 1px row jump */}
-      {/* when recording starts/stops. While a background transcript refetch */}
-      {/* is in flight (BET-251), the resting hairline is replaced by an */}
-      {/* ambient orange gradient — the line itself stays 1px tall (the */}
-      {/* gradient is painted as a background-image, not a thicker border). */}
+      {/* Real input shell (BET-415): a bordered card with focus-within state
+          replaces the old hairline-dividers-around-a-naked-textarea. The
+          voice-active pulse is now a ring on this border; the background
+          refetch shows as an ambient accent tint. Horizontal padding is
+          --sp-4 (16px) per the BET-423 spacing ruling. */}
       <div
         className={
-          voiceActive
-            ? "border-t border-danger animate-pulse shadow-[0_0_6px_rgb(var(--danger-rgb)/0.6)]"
+          "manta-composer-input-row mx-4 mb-2 rounded-xl border bg-card flex items-start gap-2 px-4 py-3 " +
+          (voiceActive
+            ? "border-danger animate-pulse shadow-[0_0_6px_rgb(var(--danger-rgb)/0.6)]"
             : refreshing
-              ? "manta-loading-divider"
-              : "border-t border-text/25"
+              ? "border-accent"
+              : "border-border-strong")
         }
-        aria-busy={refreshing || undefined}
-      />
-      {/* Input row — no box, generous vertical padding. The mic affordance */}
-      {/* on desktop is keyboard-only (Ctrl+M to toggle, Enter to stop+send, */}
-      {/* Esc to cancel); the visible feedback is the pulsing border above + */}
-      {/* below this row. On mobile the mic lives in the floating PTT FAB */}
-      {/* above the composer (rendered at the top of this wrapper). */}
-      <div className="manta-composer-input-row px-4 pt-3 flex items-start gap-2">
-        <span
-          className="select-none pt-px shrink-0"
-          style={{ color: voiceActive ? "var(--danger)" : "var(--accent)" }}
-          title={
-            voiceActive
-              ? voiceProcessing
-                ? "Transcribing… (esc cancels)"
-                : "Recording — enter to send, ctrl+m to stop, esc to cancel"
-              : undefined
-          }
-        >
-          {">"}
-        </span>
+      >
         <textarea
           ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
-            // Typeahead nav. Arrows move, Tab/Enter insert the highlighted
-            // row, Esc dismisses. EXCEPTION: when the input text already
-            // exactly matches the highlighted row's primary (e.g. user typed
-            // `/clear` fully), Enter dismisses the popup and SUBMITS so the
-            // command executes in one keystroke instead of two.
             if (typeaheadOpen) {
               if (e.key === "ArrowDown") {
                 e.preventDefault();
@@ -345,13 +262,6 @@ export function InputArea({
               submit();
               return;
             }
-            // Prompt history when typeahead is closed. Only navigate history
-            // when the caret is on the first VISUAL row (Up) or last VISUAL row
-            // (Down) — soft-wrapped long lines occupy multiple rows, and a caret
-            // on row 2 must NOT jump to history. Measurement failure (null)
-            // degrades to "navigate history" so the arrows never wedge.
-            // While running, Up on an empty first-row input pops the last queued
-            // message back into the input so it can be edited/removed.
             if (e.key === "ArrowUp" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
               const el = e.currentTarget;
               const row = caretRowInfo(el);
@@ -383,36 +293,26 @@ export function InputArea({
           placeholder={running ? "Queue a message…  (⏎ to queue · Esc to stop)" : "Try something…  (@ files · / commands · tab insert · ⏎ send)"}
           rows={1}
           spellCheck={false}
-          className="flex-1 resize-none bg-transparent text-text text-code focus:outline-none placeholder:text-text-faint font-mono"
+          className="manta-composer-textarea flex-1 resize-none bg-transparent text-text text-code focus:outline-none placeholder:text-text-faint font-mono min-w-0"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
+        {/* Inline mic on desktop — keyboard-driven, glyph-only feedback.
+            The mobile PTT FAB is rendered above the composer wrapper. */}
+        {voiceEnabled && !isMobileShell && (
+          <MicButton
+            phase={voicePhase}
+            mode={voiceMode}
+            onStart={startVoice}
+            onStop={stopVoice}
+            onCancel={cancelVoice}
+          />
+        )}
       </div>
-      {/* Bottom divider — mirrors the top so the pulsing voice ring */}
-      {/* frames the input row on both sides. */}
-      <div
-        className={
-          voiceActive
-            ? "border-t border-danger animate-pulse shadow-[0_0_6px_rgb(var(--danger-rgb)/0.6)]"
-            : "border-t border-text/25"
-        }
-      />
-      {/* Meta footer — model picker + ctx bar on the left, session ops + hints right. */}
-      {/* NOTE: don't put `truncate` on this row's spans — it triggers */}
-      {/* overflow:hidden which clips the model picker's absolute dropdown. */}
-      <div className="manta-composer-meta px-4 py-2 flex items-center justify-between gap-3">
-        <span className="flex items-center gap-3 min-w-0">
-          {branch && (
-            // `manta-composer-branch` is a styling hook only — it has no
-            // desktop rule. mobile.css uses it to give the branch chip its
-            // own line in the stacked mobile footer (see mobile.css).
-            <span
-              className="manta-composer-branch text-text-faint font-mono shrink-0 truncate max-w-[160px] inline-flex items-center gap-1"
-              title={`Current branch: ${branch}`}
-            >
-              <GitBranch size={14} aria-hidden="true" className="shrink-0" />
-              <span className="truncate">{branch}</span>
-            </span>
-          )}
+      {/* Meta footer — model ▸ effort split on the left, resource toolbar +
+          transient status on the right. Branch + context pill moved to the
+          SessionHeader; the footer now owns only composing controls. */}
+      <div className="manta-composer-meta px-4 py-1 flex items-center justify-between gap-3 flex-wrap">
+        <span className="flex items-center gap-3 min-w-0 flex-wrap">
           <ModelPicker
             modelLabel={modelLabel}
             models={models}
@@ -422,34 +322,8 @@ export function InputArea({
             onOpen={onOpenModels}
             onSelect={onSelectModel}
           />
-          {ctxTokens > 0 && (
-            <ContextBar
-              breakdown={ctxBreakdown}
-              limit={ctxLimit}
-              staleCache={staleCache}
-              modelName={
-                activeModel
-                  ? activeModel.name
-                  : `(fallback ${ASSUMED_CONTEXT_TOKENS.toLocaleString()}-token window)`
-              }
-              tooltip={
-                // Action hint scales with how close we are to the wall.
-                // 100% on the real model limit means the next request will
-                // very likely truncate or hit `model_context_window_exceeded`
-                // — make the remediation explicit instead of letting the
-                // user discover it from a truncated reply. Bucket-level
-                // breakdown is provided by ContextBar itself; this tooltip
-                // is only the *hint* line.
-                ctxPct >= 100
-                  ? "Compact recommended — run /compact to free space"
-                  : ctxPct >= 90
-                    ? "Approaching limit — consider /compact soon"
-                    : undefined
-              }
-            />
-          )}
         </span>
-        <span className="shrink-0 flex items-center gap-3">
+        <span className="shrink-0 flex items-center gap-3 flex-wrap">
           <SessionToolbar
             scheduleCount={scheduleCount}
             jobsCount={jobsCount}
@@ -458,8 +332,6 @@ export function InputArea({
             onWebhooks={onWebhooks}
             onJobs={onJobs}
           />
-          {/* Transient status only — recording / interrupt feedback. The static */}
-          {/* keyboard-hint (shift+⏎ newline · ⏎ send) was removed to declutter. */}
           {(voiceActive || running) && (
             <span className="text-meta text-text-faint">
               {voiceActive
@@ -471,27 +343,28 @@ export function InputArea({
           )}
         </span>
       </div>
-      {/* Trust toggle — its own line, more visible when ON. Below the footer */}
-      {/* so it doesn't crowd the model/hints row. */}
+      {/* Trust toggle — labelled control with a Shield icon (BET-415).
+          Replaces the ▶▶/▷▷ glyphs. Same chatAutoAllow behaviour, same
+          config key. Danger colour when bypassing. */}
       <div className="manta-composer-trust px-4 pb-3 flex items-center text-meta">
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={
-            "px-1.5 py-px rounded inline-flex items-center gap-1 " +
+            "px-1.5 py-px rounded inline-flex items-center gap-1.5 " +
             (chatAutoAllow
               ? "text-danger hover:text-danger"
               : "text-text-faint hover:text-text-muted")
           }
           title={
             chatAutoAllow
-              ? "Trust mode ON — permissions auto-allowed (click to disable)"
-              : "Trust mode OFF — permissions require approval (click to enable)"
+              ? "Bypassing permissions — click to re-enable approval"
+              : "Permissions on — click to bypass"
           }
         >
           <Shield size={14} aria-hidden="true" />
           {chatAutoAllow
-            ? "bypass permissions on (click to disable)"
-            : "bypass permissions off (click to enable)"}
+            ? "Bypassing permissions"
+            : "Permissions on — click to bypass"}
         </button>
       </div>
     </div>

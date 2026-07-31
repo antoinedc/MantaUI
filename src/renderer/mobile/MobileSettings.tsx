@@ -252,7 +252,7 @@ export function MobileSettings({ onClose }: Props) {
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-5">
+      <div className="manta-scroll-y flex-1 overflow-y-auto px-4 py-3 space-y-5">
         {/* Server URL — the most important field for a fresh install. */}
         <section className="space-y-2">
           <label className="block text-micro font-semibold uppercase text-text-muted">

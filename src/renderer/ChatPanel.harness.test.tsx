@@ -97,7 +97,7 @@ describe("ChatPanel render harness", () => {
     expect(h.text()).toBe(before);
   });
 
-  it("stamps the manta-composer-branch hook on the footer branch chip", async () => {
+  it("stamps the manta-session-branch hook on the header branch chip", async () => {
     // The default mock returns null for the branch, so the chip is not
     // rendered; override it so the chip exists.
     ({ bus } = installMockApi({
@@ -106,7 +106,7 @@ describe("ChatPanel render harness", () => {
     resetStore();
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
-    const chip = h.container.querySelector(".manta-composer-branch");
+    const chip = h.container.querySelector(".manta-session-branch");
     expect(chip).not.toBeNull();
     expect(chip?.textContent).toContain("feat/mobile-footer");
   });
