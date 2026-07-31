@@ -2278,6 +2278,45 @@ export function parseDeviceCode(instructions: string): string | null {
 }
 
 /**
+ * BET-421 §D: when parseDeviceCode returns null (the provider reformatted
+ * the sentence and the chip would silently vanish), point the user at the
+ * verbatim instructions block instead of rendering an empty code slot.
+ * Returns the hint string the waiting card renders under the URL; null when
+ * a code WAS parsed (caller shows the chip instead).
+ */
+export function deviceCodeFallback(instructions: string): string | null {
+  if (parseDeviceCode(instructions) !== null) return null;
+  if (typeof instructions === "string" && instructions.trim().length > 0) {
+    return "The code is in the message below — copy it from there.";
+  }
+  return null;
+}
+
+/**
+ * BET-421 §D: format the remaining time on a device-code poll as
+ * "M:SS remaining". Clamped at 0; NaN-safe. Pure so the countdown display
+ * is unit-testable.
+ */
+export function formatRemaining(
+  startedAt: number,
+  now: number,
+  limitMs: number,
+): string {
+  if (
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(now) ||
+    !Number.isFinite(limitMs)
+  ) {
+    return "0:00 remaining";
+  }
+  const ms = Math.max(0, limitMs - (now - startedAt));
+  const totalSec = Math.ceil(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")} remaining`;
+}
+
+/**
  * Single source of user-facing status text for every phase of the connect
  * flow. Centralised so no string is duplicated across branches and so a
  * future i18n pass replaces one place, not five.

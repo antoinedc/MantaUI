@@ -68,6 +68,8 @@ import {
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
   parseDeviceCode,
+  deviceCodeFallback,
+  formatRemaining,
   connectPhaseLabel,
   isPollExpired,
   describeSubscriptionStatus,
@@ -3097,6 +3099,39 @@ describe("parseDeviceCode", () => {
     expect(parseDeviceCode(undefined as unknown as string)).toBeNull();
     expect(parseDeviceCode(null as unknown as string)).toBeNull();
     expect(parseDeviceCode(42 as unknown as string)).toBeNull();
+  });
+});
+
+// ===== deviceCodeFallback + formatRemaining (BET-421 §D) =====
+
+describe("deviceCodeFallback", () => {
+  it("returns null when a code parsed (caller shows the chip)", () => {
+    expect(deviceCodeFallback("Enter code: TOQR-BUA7Z")).toBeNull();
+  });
+  it("points at the instructions when no code parses", () => {
+    expect(deviceCodeFallback("Sign in to your account to continue")).toBe(
+      "The code is in the message below — copy it from there.",
+    );
+  });
+  it("returns null for empty instructions", () => {
+    expect(deviceCodeFallback("")).toBeNull();
+    expect(deviceCodeFallback("   ")).toBeNull();
+  });
+});
+
+describe("formatRemaining", () => {
+  it("formats the remaining minutes:seconds on a device-code poll", () => {
+    // 5 min limit, 90s elapsed → 3:30 remaining.
+    expect(formatRemaining(0, 90_000, 300_000)).toBe("3:30 remaining");
+  });
+  it("clamps at 0 when the deadline has passed", () => {
+    expect(formatRemaining(0, 400_000, 300_000)).toBe("0:00 remaining");
+  });
+  it("is NaN-safe", () => {
+    expect(formatRemaining(NaN, 0, 0)).toBe("0:00 remaining");
+  });
+  it("handles the full-limit case at start", () => {
+    expect(formatRemaining(0, 0, 300_000)).toBe("5:00 remaining");
   });
 });
 

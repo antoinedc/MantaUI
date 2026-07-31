@@ -48,6 +48,8 @@ import { X } from "lucide-react";
 import type { OpencodeProviderAuthRequest } from "../shared/types";
 import {
   connectPhaseLabel,
+  deviceCodeFallback,
+  formatRemaining,
   isPollExpired,
   parseDeviceCode,
   type ConnectPhase,
@@ -97,6 +99,23 @@ export function ConnectProvider({
   onCancel: () => void;
 }): JSX.Element {
   const [phase, setPhase] = useState<ConnectPhase>({ kind: "starting" });
+  // BET-421 §D: device-code wait elapsed + remaining countdown. Ticked once
+  // a second while `phase.kind === "waiting"` so the user sees how long is
+  // left on the code instead of a bare "Waiting for sign-in".
+  const [waitingElapsed, setWaitingElapsed] = useState(0);
+  const waitingStartedRef = useRef<number>(0);
+  useEffect(() => {
+    if (phase.kind !== "waiting") {
+      setWaitingElapsed(0);
+      return;
+    }
+    waitingStartedRef.current = Date.now();
+    setWaitingElapsed(0);
+    const t = setInterval(() => {
+      setWaitingElapsed(Math.floor((Date.now() - waitingStartedRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [phase.kind, phase.kind === "waiting" ? phase.methodIndex : null]);
   const mounted = useMounted();
 
   // Wraps setPhase to guard against late-firing async paths (status polls,
@@ -396,7 +415,12 @@ export function ConnectProvider({
       )}
 
       {phase.kind === "waiting" && (
-        <WaitingBlock url={phase.url} instructions={phase.instructions} />
+        <WaitingBlock
+          url={phase.url}
+          instructions={phase.instructions}
+          elapsedSeconds={waitingElapsed}
+          onCancel={onCancel}
+        />
       )}
 
       {phase.kind === "needsCode" && (
@@ -562,41 +586,90 @@ export function ConnectProvider({
   );
 }
 
-// Device-code block: instructions verbatim + a clickable URL + a copyable
-// code (when one is present in the instructions). Matches the OAuth shape
-// the server reports: "oauth-auto" only ships the URL + instructions, the
-// device code is a token embedded inside the instructions string that
-// parseDeviceCode extracts.
+// Device-code block (BET-421 §D). Two labelled steps the user works through:
+//   1. Open the URL (copy + open).
+//   2. Enter the code shown on that page.
+// The device code is regex-scraped out of the `instructions` string by
+// parseDeviceCode. When nothing parses (the provider reformatted the
+// sentence), deviceCodeFallback points the user at the verbatim instructions
+// instead of rendering an empty code slot — the chip silently vanishing was
+// the exact fragility the issue calls out.
+//
+// The upstream `instructions` text is demoted to a collapsed
+// "Message from ChatGPT" disclosure — it's upstream text we render verbatim,
+// not our framing; we own the card's headline. While waiting, an elapsed +
+// remaining countdown + a real Cancel replace the old bare "Waiting for
+// sign-in" that could sit for five minutes with no feedback.
 function WaitingBlock({
   url,
   instructions,
+  elapsedSeconds,
+  onCancel,
 }: {
   url: string;
   instructions: string;
+  elapsedSeconds: number;
+  onCancel: () => void;
 }) {
   const code = parseDeviceCode(instructions);
+  const fallback = deviceCodeFallback(instructions);
+  const remaining = formatRemaining(0, elapsedSeconds * 1000, DEVICE_POLL_LIMIT_MS);
   return (
-    <div className="space-y-1">
-      <div className="text-text">{instructions || "Open the URL below on any device."}</div>
-      {url && (
-        <div className="flex items-center gap-2 min-w-0">
-          <a
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-text-muted underline decoration-dotted truncate min-w-0"
-            title={url}
-          >
-            {url.replace(/^https?:\/\//, "")}
-          </a>
-          <CopyButton text={url} />
-        </div>
-      )}
-      {code && (
-        <div className="flex items-center gap-2">
-          <code className="font-mono text-text bg-bg px-2 py-px rounded">{code}</code>
-          <CopyButton text={code} />
-        </div>
+    <div className="space-y-2">
+      <div className="text-text">
+        <div className="text-label font-medium text-text-faint mb-1">Step 1 — open this link</div>
+        {url ? (
+          <div className="flex items-center gap-2 min-w-0">
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-text-muted underline decoration-dotted truncate min-w-0"
+              title={url}
+            >
+              {url.replace(/^https?:\/\//, "")}
+            </a>
+            <CopyButton text={url} />
+          </div>
+        ) : (
+          <span className="text-text-muted">Open the sign-in page on any device.</span>
+        )}
+      </div>
+      <div className="text-text">
+        <div className="text-label font-medium text-text-faint mb-1">Step 2 — enter the code</div>
+        {code ? (
+          <div className="flex items-center gap-2">
+            <code className="font-mono text-text bg-bg px-2 py-px rounded">{code}</code>
+            <CopyButton text={code} />
+          </div>
+        ) : fallback ? (
+          <p className="text-text-muted">{fallback}</p>
+        ) : (
+          <p className="text-text-muted">The code will appear on the page above.</p>
+        )}
+      </div>
+      <div className="flex items-center gap-3 text-text-faint">
+        <span
+          aria-hidden
+          className="inline-block w-2.5 h-2.5 rounded-full border-2 border-accent border-t-transparent animate-spin"
+        />
+        <span>Waiting for sign-in · {remaining}</span>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="ml-auto px-2 py-1 rounded text-meta"
+          style={{ border: "1px solid var(--danger)", color: "var(--danger)" }}
+        >
+          Cancel
+        </button>
+      </div>
+      {instructions && (
+        <details className="text-meta">
+          <summary className="text-text-faint cursor-pointer hover:text-text-muted">
+            Message from ChatGPT
+          </summary>
+          <pre className="whitespace-pre-wrap text-text-muted mt-1">{instructions}</pre>
+        </details>
       )}
     </div>
   );
@@ -775,17 +848,24 @@ function ClaudeLoginBlock({
             error={inputError}
             onSubmit={onSubmitCode}
           />
-          {/* Live terminal pane — renders the raw escape sequences from
-              `claude auth login`. Sized small enough to live inside the
-              connect card without dominating the onboarding step. */}
-          <div className="rounded border border-border overflow-hidden h-40 bg-[var(--inset)]">
-            <Terminal
-              sessionKey={ptySessionKey}
-              cwd={cwd}
-              active={true}
-              launcher={{ id: "claude-auth-login", flags: {} }}
-            />
-          </div>
+          {/* BET-421 §D: demote the live terminal to a collapsed disclosure.
+              It always being visible at h-40 reads as something going wrong;
+              the two labelled steps (URL, then code) above are the card's
+              real surface. The raw escape sequences from `claude auth login`
+              still render through xterm for users who want to watch. */}
+          <details className="text-meta">
+            <summary className="text-text-faint cursor-pointer hover:text-text-muted">
+              Show what's happening on the box
+            </summary>
+            <div className="rounded border border-border overflow-hidden h-40 bg-[var(--inset)] mt-1">
+              <Terminal
+                sessionKey={ptySessionKey}
+                cwd={cwd}
+                active={true}
+                launcher={{ id: "claude-auth-login", flags: {} }}
+              />
+            </div>
+          </details>
         </>
       )}
     </div>

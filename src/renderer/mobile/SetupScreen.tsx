@@ -8,6 +8,7 @@ import {
   clearDebugLog,
 } from "./debugLog";
 import { isValidBoxToken } from "../../shared/transport.mjs";
+import { MantaMark } from "../onboardingUi";
 import {
   canConnectSetup,
   buildSetupClaimInput,
@@ -113,21 +114,9 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
             }}
             aria-hidden
           >
-            <svg width="30" height="30" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M3 17c3-6 6-9 9-9s6 3 9 9"
-                stroke="#fff"
-                strokeWidth="2"
-                strokeLinecap="round"
-              />
-              <path
-                d="M7 17c2-3.5 3.4-5 5-5s3 1.5 5 5"
-                stroke="#fff"
-                strokeWidth="2"
-                strokeLinecap="round"
-                opacity=".6"
-              />
-            </svg>
+            {/* BET-421 §F: one brand mark for desktop and mobile — the shared
+                MantaMark SVG (same arcs), white on the pair-screen circle. */}
+            <MantaMark className="w-[30px] h-[30px] text-white" />
           </div>
           <div className="flex flex-col gap-2">
             <div className="text-text text-display font-semibold">Pair your phone</div>
@@ -143,7 +132,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
             <b className="text-text font-semibold">Settings &rsaquo; Connection</b>.
           </Step>
           <Step n={2}>
-            Tap <b className="text-text font-semibold">Generate Pairing Code</b> to show a QR code.
+            Tap <b className="text-text font-semibold">Generate pairing code</b> to show a QR code.
           </Step>
           <Step n={3}>
             Point your iPhone <b className="text-text font-semibold">Camera</b> at the QR code. This
