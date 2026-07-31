@@ -53,7 +53,28 @@ export function Settings({ onClose }: { onClose: () => void }) {
     worktreeCleanOnClose,
     theme,
     refresh,
+    updatePrompt,
   } = useStore();
+
+  // Client + server versions for the About section (BET-416 §E). "Update
+  // available" is no longer a full-width bar — it is a quiet --accent dot on
+  // the Settings sidebar entry, and the details (downloaded version + install
+  // action) live HERE, in About. This is the only install path for a
+  // downloaded desktop auto-update that has no co-occurring version-skew.
+  const [clientVersion, setClientVersion] = useState<string | null>(null);
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      window.api.getClientVersion?.().catch(() => null),
+      window.api.getServerVersion?.().catch(() => null),
+    ]).then(([client, server]) => {
+      if (cancelled) return;
+      if (client && typeof client.version === "string") setClientVersion(client.version);
+      if (server && typeof server.version === "string") setServerVersion(server.version);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   // AI fields (AI tab)
   // Note: the model list, default model, and toggles for Main/Sub all live
@@ -975,11 +996,37 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <div className="border-t border-border pt-6">
                 <h3 className="text-title font-semibold mb-4">About</h3>
                 <div className="text-body text-text-faint">
-                  Manta UI v0.0.1
+                  Manta UI v{clientVersion ?? "…"}
                 </div>
-                <div className="text-meta text-text-faint mt-2">
+                <div className="text-meta text-text-faint mt-1">
                   Desktop client for remote Claude Code sessions.
                 </div>
+                {serverVersion && (
+                  <div className="text-meta text-text-faint mt-1">
+                    Box server v{serverVersion}
+                  </div>
+                )}
+                {/* Downloaded auto-update details (BET-416 §E). "Update
+                    available" is a quiet --accent dot on the Settings sidebar
+                    entry; the install action lives HERE so a downloaded update
+                    always has a path even with no co-occurring version-skew
+                    bar. Mirrors the old "Restart to update" bar's action. */}
+                {updatePrompt && (
+                  <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
+                    <span className="flex-1 text-meta text-text">
+                      Update ready:{" "}
+                      <span className="font-medium">
+                        {updatePrompt.releaseName || updatePrompt.version}
+                      </span>
+                    </span>
+                    <button
+                      onClick={() => { void window.api.autoUpdateInstall(); }}
+                      className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium"
+                    >
+                      Restart to update
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           )}
