@@ -838,6 +838,59 @@ export function renderCaddyVhost(
   ].join("\n");
 }
 
+// Return `existing` with EXACTLY ONE manta vhost block in it.
+//
+// - Every `# >>> manta >>>` … `# <<< manta <<<` region is removed first
+//   (there may be several: a bug in the old awk-based replace appended a
+//   stray opening marker on every re-run), along with any stray unpaired
+//   marker lines.
+// - `block` (the full marker-wrapped output of renderCaddyVhost(..., {mode:"inline"}))
+//   is then appended once, separated from the preceding content by one blank line.
+// - If `existing` is empty/whitespace-only, the result is just the block.
+//
+// Idempotent: upsertCaddyBlock(upsertCaddyBlock(x, b), b) === upsertCaddyBlock(x, b).
+export function upsertCaddyBlock(existing, block) {
+  if (typeof existing !== "string") {
+    throw new TypeError("upsertCaddyBlock: existing must be a string");
+  }
+  if (typeof block !== "string") {
+    throw new TypeError("upsertCaddyBlock: block must be a string");
+  }
+  const OPEN = "# >>> manta >>>";
+  const CLOSE = "# <<< manta <<<";
+
+  // 1. Strip complete regions first (opening marker → next closing marker,
+  //    inclusive). Repeat until no region remains.
+  let stripped = existing;
+  for (;;) {
+    const openIdx = stripped.split("\n").findIndex((l) => l === OPEN);
+    if (openIdx === -1) break;
+    const lines = stripped.split("\n");
+    const closeIdx = lines.findIndex((l, i) => i > openIdx && l === CLOSE);
+    if (closeIdx === -1) break;
+    lines.splice(openIdx, closeIdx - openIdx + 1);
+    stripped = lines.join("\n");
+  }
+
+  // 2. Remove any remaining line that is exactly an opening or closing marker.
+  let remainder = stripped
+    .split("\n")
+    .filter((l) => l !== OPEN && l !== CLOSE)
+    .join("\n");
+
+  // 3. Trim trailing whitespace/newlines.
+  remainder = remainder.trimEnd();
+
+  // 4. Empty remainder → return the block, ending with exactly one \n.
+  if (remainder === "") {
+    return block.endsWith("\n") ? block : block + "\n";
+  }
+
+  // 5. Otherwise prefix with one blank line and end with exactly one \n.
+  const normalized = remainder + "\n\n" + block;
+  return normalized.endsWith("\n") ? normalized : normalized + "\n";
+}
+
 // ---------------------------------------------------------------------------
 // /etc/os-release parser + Debian/Ubuntu classifier — pure, used by
 // install.sh's privileged-section gate (BET-205 reviewer guidance §4).
@@ -1467,6 +1520,37 @@ async function cliMain(argv) {
     }
     return 0;
   }
+  if (cmd === "upsert-caddy-block") {
+    // node install-lib.mjs upsert-caddy-block --box-id <32hex> --port <N>
+    // Reads the current Caddyfile content from stdin (empty stdin = "no file
+    // yet"), computes upsertCaddyBlock(stdin, renderCaddyVhost(boxId, port,
+    // {mode:"inline"})), and writes the full new file content to stdout.
+    // install.sh pipes the existing /etc/caddy/Caddyfile in (a missing file
+    // yields empty stdin) and installs the result — so create / append /
+    // replace are one code path, all the block editing lives in the pure,
+    // unit-tested upsertCaddyBlock.
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    const existing = Buffer.concat(chunks).toString("utf-8");
+    const boxId = flags["box-id"];
+    const port = flags.port ? Number(flags.port) : undefined;
+    if (!boxId) {
+      process.stderr.write("upsert-caddy-block: --box-id <32hex> required\n");
+      return 2;
+    }
+    if (!port) {
+      process.stderr.write("upsert-caddy-block: --port <N> required\n");
+      return 2;
+    }
+    try {
+      const block = renderCaddyVhost(boxId, port, { mode: "inline" });
+      process.stdout.write(upsertCaddyBlock(existing, block));
+    } catch (e) {
+      process.stderr.write(`upsert-caddy-block: ${e?.message ?? e}\n`);
+      return 1;
+    }
+    return 0;
+  }
   if (cmd === "detect-distro") {
     // node install-lib.mjs detect-distro [--os-release <path>]
     // Parses /etc/os-release and emits a one-line JSON status object
@@ -1584,7 +1668,7 @@ async function cliMain(argv) {
   }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|format-provider-detection|merge-gateway|wait-for-dns|render-caddy-vhost|detect-distro|render-systemd-unit|parse-tailscale-status|write-ingress> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--tailnet-ip IP] [--has-claude-creds 0|1] [--cli-claude 0|1] [--cli-codex 0|1] [--cli-kimi 0|1] [--placeholder K=V]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|format-provider-detection|merge-gateway|wait-for-dns|render-caddy-vhost|upsert-caddy-block|detect-distro|render-systemd-unit|parse-tailscale-status|write-ingress> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--tailnet-ip IP] [--has-claude-creds 0|1] [--cli-claude 0|1] [--cli-codex 0|1] [--cli-kimi 0|1] [--placeholder K=V]\n",
   );
   return 2;
 }
