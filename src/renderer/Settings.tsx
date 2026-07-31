@@ -412,6 +412,19 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
   // Arrow-key navigation on the tab rail (BET-419 §C).
   const railRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      // ⌘F / Ctrl+F focuses the settings search (BET-419 §B.1).
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
   const onRailKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
     e.preventDefault();
@@ -641,7 +654,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <div className="flex items-center gap-3 p-4 border-b border-border">
           <div className="flex-1 relative">
             <Search size={14} aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-text-faint" />
-            <input type="text" placeholder="Find a setting…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search settings" className="w-full max-w-sm bg-bg-soft border border-border pl-8 pr-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
+            <input ref={searchRef} type="text" placeholder="Find a setting…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search settings" className="w-full max-w-sm bg-bg-soft border border-border pl-8 pr-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
           </div>
           <button onClick={onClose} className="text-text-muted hover:text-text text-body px-3 py-2 rounded hover:bg-bg-elev transition-colors inline-flex items-center" aria-label="Close settings"><X size={16} aria-hidden="true" /></button>
           <div className="titlebar-inset-right" />
