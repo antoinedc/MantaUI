@@ -1,16 +1,27 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { useStore } from "../store";
 import { ProvidersCard } from "../ProvidersCard";
 import { SubscriptionsCard } from "../SubscriptionsCard";
 import { resolveLauncherFlags } from "../chatShared";
 import { TtlToggle } from "../TtlToggle";
+import { ToastStack } from "../Toast";
 import {
   useLaunchers,
   updateLauncherFlag,
   useRegistryUrls,
 } from "../settingsShared";
+import { useSettingsToasts, useApplySetting } from "../settingsApply";
 import type { OpencodeModel } from "../../shared/types";
+import {
+  SETTINGS,
+  SETTING_SECTIONS,
+  settingsForSection,
+  sectionIsModified,
+  fieldId,
+  type SettingEntry,
+  type SettingSectionId,
+} from "../../shared/settingsSchema";
 import {
   isPushSupported,
   pushPermission,
@@ -22,108 +33,146 @@ import {
 
 type Props = { onClose: () => void };
 
+const PLATFORM = "mobile" as const;
+
 // Mobile-friendly settings — single scrollable column, no modal overlay
-// (overlays + iOS keyboard interact badly: focusing an input shrinks the
-// visual viewport and the modal's vertical-center anchor pushes the form
-// half off-screen). The whole screen IS the modal; a "Done" button in the
-// header pops back to wherever the user came from.
+// (overlays + iOS keyboard interact badly). The whole screen IS the surface;
+// a "‹" back button pops to wherever the user came from.
 //
-// Surface area is the subset of desktop Settings that makes sense on a
-// device with no SSH layer:
-//   - Server URL (localStorage["manta_server"]) — how the mobile/web client
-//     finds the box; this is the single most important setting.
-//   - Trust mode (chatAutoAllow) — bypasses permission prompts.
-//   - Default model — global default for new sessions and /clear.
-//   - Cache TTL — display-only knob for the "/clear to save Nk tokens" pill.
-//   - Skill registries — extra opencode skill registry URLs.
-//
-// Deliberately omitted on mobile:
-//   - SSH host/user/identity (mobile server has no SSH hop)
-//   - Transport selector (mobile is always direct)
-//   - Tmux config setup (UI is manta-managed only when the user opts in;
-//     deferred for now — not a UX gap in practice)
-//   - Setup wizard (rpc.mjs returns stub n/a responses; no UI value)
-//   - Upload cleanup hours (server-side default works)
+// BET-419: this surface now renders from the shared settingsSchema (same
+// source as desktop Settings.tsx), uses instant-apply + Undo (no Save
+// button), and routes every failure through a local toast — no alert().
+
 export function MobileSettings({ onClose }: Props) {
-  const {
-    chatAutoAllow,
-    autoRenameSessions,
-    defaultModel,
-    skillRegistryUrls,
-    cacheTtl,
-    groqApiKey,
-    voiceTranscriptionModel,
-    voiceCommandModel,
-    launcherFlags,
-    refresh,
-  } = useStore();
+  const store = useStore();
+  const { toasts, push, dismiss } = useSettingsToasts();
+  const applySetting = useApplySetting(push);
 
-  // The browser-served URL the client points at. localStorage["manta_server"]
-  // is the override knob from httpApi.ts; empty string means "use page
-  // origin", which works when the client is served from the same host as
-  // the API (the named Cloudflare tunnel deployment). Show the current
-  // resolved value as placeholder so users know what's in effect.
-  const [serverUrl, setServerUrl] = useState(
-    () => localStorage.getItem("manta_server") ?? "",
+  // Current config values for schema-driven fields (read directly from the
+  // store — NO local field state + resync effect, which was the stomping
+  // bug fixed in BET-419).
+  const values: Record<string, unknown> = useMemo(
+    () => ({
+      cacheTtl: store.cacheTtl,
+      groqApiKey: store.groqApiKey,
+      voiceTranscriptionModel: store.voiceTranscriptionModel,
+      voiceCommandModel: store.voiceCommandModel,
+      chatAutoAllow: store.chatAutoAllow,
+      autoRenameSessions: store.autoRenameSessions,
+    }),
+    [store.cacheTtl, store.groqApiKey, store.voiceTranscriptionModel, store.voiceCommandModel, store.chatAutoAllow, store.autoRenameSessions],
   );
-  const [trust, setTrust] = useState(chatAutoAllow);
-  const [autoRename, setAutoRename] = useState(autoRenameSessions);
-  const [selectedModel, setSelectedModel] = useState<{
-    providerID: string;
-    modelID: string;
-  } | null>(defaultModel ?? null);
-  const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
-  const {
-    registryUrls,
-    setRegistryUrls,
-    newRegistryUrl,
-    setNewRegistryUrl,
-    addRegistryUrl,
-    removeRegistryUrl,
-  } = useRegistryUrls(skillRegistryUrls ?? []);
-  const [models, setModels] = useState<OpencodeModel[] | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [savedToast, setSavedToast] = useState(false);
-  // Voice / Groq. Empty key hides the mic in the composer.
-  const [groqKey, setGroqKey] = useState(groqApiKey);
-  const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
-  const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
-  // AI CLI TUI launch options (BET-138 refinement) — mirrors desktop Settings.
-  const [availableLaunchers] = useLaunchers();
-  const [launcherFlagValues, setLauncherFlagValues] =
-    useState<Record<string, Record<string, boolean>>>(launcherFlags ?? {});
 
-  // Push notifications — not server config (it's a per-device subscription),
-  // so it lives outside the Save flow. `pushOn` reflects an actual live
-  // subscription; `pushBusy` guards the async enable/disable.
+  const commitKey = async (entry: SettingEntry, nextValue: unknown) => {
+    if (entry.configKey == null) return;
+    const prev = values[entry.configKey];
+    await applySetting(entry, nextValue, prev);
+  };
+
+  // Server URL — mobile-local (localStorage["manta_server"]), not a server
+  // config key. Committed on blur (instant apply). Seeded once on mount; the
+  // draft is never resynced from anywhere while focused (stomping fix).
+  const [serverUrlDraft, setServerUrlDraft] = useState(
+    () => (typeof localStorage !== "undefined" ? localStorage.getItem("manta_server") ?? "" : ""),
+  );
+  const serverUrlFocused = useRef(false);
+  const [serverUrlSavedAt, setServerUrlSavedAt] = useState<number | null>(null);
+  const commitServerUrl = () => {
+    const trimmed = serverUrlDraft.trim();
+    try {
+      if (trimmed) localStorage.setItem("manta_server", trimmed);
+      else localStorage.removeItem("manta_server");
+      setServerUrlSavedAt(Date.now());
+      push({ id: `server-url-${Date.now()}`, message: trimmed ? "Server URL set" : "Server URL cleared" });
+    } catch {
+      push({ id: `err-server-url-${Date.now()}`, message: "Couldn't save the server URL." });
+    }
+  };
+
+  // Default model — instant apply on change (replaces the old batched Save).
+  const [selectedModel, setSelectedModel] = useState(store.defaultModel ?? null);
+  const [models, setModels] = useState<OpencodeModel[] | null>(null);
+  const commitModel = (val: string) => {
+    if (!val) {
+      setSelectedModel(null);
+      void useStore.setState({ defaultModel: null });
+      window.api.configUpdate({ defaultModel: undefined }).catch(() => {});
+      return;
+    }
+    const [providerID, modelID] = val.split("::");
+    const model = { providerID, modelID };
+    const prev = store.defaultModel ?? null;
+    setSelectedModel(model);
+    void useStore.setState({ defaultModel: model });
+    window.api.configUpdate({ defaultModel: model })
+      .then((r) => { const saved = (r as Record<string, unknown>).defaultModel; useStore.setState({ defaultModel: (saved && typeof saved === "object" ? saved : model) as { providerID: string; modelID: string } | null }); })
+      .catch(() => { useStore.setState({ defaultModel: prev }); setSelectedModel(prev); push({ id: `err-model-${Date.now()}`, message: "Couldn't save the default model." }); });
+  };
+
+  // Registry URLs (custom control — instant apply on add/remove).
+  const {
+    registryUrls, setRegistryUrls, newRegistryUrl, setNewRegistryUrl,
+  } = useRegistryUrls(store.skillRegistryUrls ?? []);
+  const persistRegistryUrls = async (next: string[]) => {
+    const prev = store.skillRegistryUrls ?? [];
+    useStore.setState({ skillRegistryUrls: next });
+    try {
+      const r = await window.api.configUpdate({ skillRegistryUrls: next });
+      const saved = (r as Record<string, unknown>).skillRegistryUrls;
+      useStore.setState({ skillRegistryUrls: Array.isArray(saved) ? (saved as string[]) : next });
+      push({
+        id: `registry-${Date.now()}`,
+        message: next.length > prev.length ? "Registry URL added" : "Registry URL removed",
+        action: { label: "Undo", onClick: () => { void useStore.setState({ skillRegistryUrls: prev }); window.api.configUpdate({ skillRegistryUrls: prev }).catch(() => {}); } },
+      });
+    } catch {
+      useStore.setState({ skillRegistryUrls: prev });
+      push({ id: `err-registry-${Date.now()}`, message: "Couldn't update skill registries." });
+    }
+  };
+  const onAddRegistry = () => {
+    const url = newRegistryUrl.trim();
+    if (!url || registryUrls.includes(url)) return;
+    const next = [...registryUrls, url];
+    setNewRegistryUrl("");
+    setRegistryUrls(next);
+    void persistRegistryUrls(next);
+  };
+  const onRemoveRegistry = (url: string) => {
+    const next = registryUrls.filter((u) => u !== url);
+    setRegistryUrls(next);
+    void persistRegistryUrls(next);
+  };
+
+  // Launcher flags (custom control — instant apply per flag).
+  const [availableLaunchers] = useLaunchers();
+  const [launcherFlagValues, setLauncherFlagValues] = useState(store.launcherFlags ?? {});
+  const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
+    const prev = launcherFlagValues;
+    const nextFlags = updateLauncherFlag(availableLaunchers, launcherId, flagKey, checked, prev);
+    setLauncherFlagValues(nextFlags);
+    useStore.setState({ launcherFlags: nextFlags });
+    void window.api.configUpdate({ launcherFlags: nextFlags })
+      .then((r) => { const saved = (r as Record<string, unknown>).launcherFlags; useStore.setState({ launcherFlags: (saved && typeof saved === "object" ? saved : nextFlags) as Record<string, Record<string, boolean>> }); })
+      .catch(() => { useStore.setState({ launcherFlags: prev }); setLauncherFlagValues(prev); push({ id: `err-launcher-${Date.now()}`, message: "Couldn't save launcher flag." }); });
+  };
+
+  // Push notifications — per-device subscription, not server config.
   const [pushOn, setPushOn] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [pushErr, setPushErr] = useState<string | null>(null);
-  // Server version (BET-180) — fetched once on mount via the
-  // `server:version` RPC channel. Null until the call resolves; a failure
-  // stays null (display falls back to "?", non-fatal).
   const [serverVersion, setServerVersion] = useState<string | null>(null);
-  useEffect(() => {
-    hasActiveSubscription().then(setPushOn).catch(() => setPushOn(false));
-  }, []);
+  useEffect(() => { hasActiveSubscription().then(setPushOn).catch(() => setPushOn(false)); }, []);
   const togglePush = async () => {
     setPushErr(null);
     setPushBusy(true);
     try {
-      if (pushOn) {
-        await disablePush();
-        setPushOn(false);
-      } else {
+      if (pushOn) { await disablePush(); setPushOn(false); }
+      else {
         const state = await enablePush();
         if (state === "granted") setPushOn(true);
-        else if (state === "denied")
-          setPushErr(
-            "Notifications are blocked. Enable them for this site in iOS Settings.",
-          );
-        else if (state === "unsupported")
-          setPushErr(
-            "Push needs the app installed to your home screen (iOS 16.4+).",
-          );
+        else if (state === "denied") setPushErr("Notifications are blocked. Enable them for this site in iOS Settings.");
+        else if (state === "unsupported") setPushErr("Push needs the app installed to your home screen (iOS 16.4+).");
         else setPushErr("Permission not granted.");
       }
     } catch (e) {
@@ -132,23 +181,14 @@ export function MobileSettings({ onClose }: Props) {
       setPushBusy(false);
     }
   };
-
-  // Self-heal a stale/ghost subscription: iOS can silently invalidate the
-  // device-side subscription (post-update / PWA offload) while Apple keeps
-  // 201-ing the dead endpoint, so it can't be auto-detected and a plain enable
-  // re-uploads the same dead endpoint. Force a fresh subscribe in one tap.
   const resubscribe = async () => {
     setPushErr(null);
     setPushBusy(true);
     try {
       const state = await resubscribePush();
       if (state === "granted") setPushOn(true);
-      else if (state === "denied")
-        setPushErr(
-          "Notifications are blocked. Enable them for this site in iOS Settings.",
-        );
-      else if (state === "unsupported")
-        setPushErr("Push needs the app installed to your home screen (iOS 16.4+).");
+      else if (state === "denied") setPushErr("Notifications are blocked. Enable them for this site in iOS Settings.");
+      else if (state === "unsupported") setPushErr("Push needs the app installed to your home screen (iOS 16.4+).");
       else setPushErr("Permission not granted.");
     } catch (e) {
       setPushErr(e instanceof Error ? e.message : String(e));
@@ -157,415 +197,246 @@ export function MobileSettings({ onClose }: Props) {
     }
   };
 
-  // Sync local state if store updates while screen is open (rare —
-  // shouldn't happen during a single-screen edit, but matches the
-  // desktop Settings pattern).
-  useEffect(() => {
-    setTrust(chatAutoAllow);
-    setAutoRename(autoRenameSessions);
-    setSelectedModel(defaultModel ?? null);
-    setTtl(cacheTtl);
-    setRegistryUrls(skillRegistryUrls ?? []);
-    setGroqKey(groqApiKey);
-    setVoiceTrModel(voiceTranscriptionModel);
-    setVoiceCmdModel(voiceCommandModel);
-    setLauncherFlagValues(launcherFlags ?? {});
-  }, [chatAutoAllow, autoRenameSessions, defaultModel, cacheTtl, skillRegistryUrls, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags]);
+  useEffect(() => { window.api.opencodeModels().then((list) => setModels(list)).catch(() => {}); }, []);
+  useEffect(() => { window.api.getServerVersion().then(({ version }) => setServerVersion(version)).catch(() => {}); }, []);
 
-  // Model list is best-effort — opencode unreachable just means the
-  // picker shows only "opencode default". Same as desktop Settings.
-  useEffect(() => {
-    window.api
-      .opencodeModels()
-      .then((list) => setModels(list))
-      .catch(() => {});
-  }, []);
-
-  // Server version (BET-180) — fetch once on mount so the URL section can
-  // render `Server vX.Y.Z` below its hint. In-process via the
-  // `server:version` RPC channel; failure stays null → "?" placeholder.
-  useEffect(() => {
-    window.api
-      .getServerVersion()
-      .then(({ version }) => setServerVersion(version))
-      .catch(() => {});
-  }, []);
-
-  const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
-    setLauncherFlagValues((prev) =>
-      updateLauncherFlag(availableLaunchers, launcherId, flagKey, checked, prev),
-    );
-  };
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      // Server URL is a localStorage knob, NOT a server-persisted config
-      // field — it tells the BROWSER which server to talk to, which by
-      // definition can't be stored on that server. Apply it before the
-      // configUpdate so a server-URL change takes effect immediately for
-      // the rpc call below (httpApi.ts reads localStorage on every rpc).
-      const trimmed = serverUrl.trim();
-      if (trimmed) localStorage.setItem("manta_server", trimmed);
-      else localStorage.removeItem("manta_server");
-
-      await window.api.configUpdate({
-        chatAutoAllow: trust,
-        autoRenameSessions: autoRename,
-        defaultModel: selectedModel ?? undefined,
-        skillRegistryUrls: registryUrls,
-        cacheTtl: ttl,
-        groqApiKey: groqKey.trim(),
-        voiceTranscriptionModel: voiceTrModel.trim(),
-        voiceCommandModel: voiceCmdModel.trim(),
-        launcherFlags: launcherFlagValues,
-      });
-      await refresh();
-      setSavedToast(true);
-      // Auto-dismiss the saved toast after a beat; the user can still
-      // navigate away during it.
-      setTimeout(() => setSavedToast(false), 1200);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
+  // ----- schema-driven field renderers (mobile-styled) -----
+  const renderField = (entry: SettingEntry): ReactNode => {
+    const id = fieldId(entry);
+    const cur = entry.configKey ? values[entry.configKey] : undefined;
+    if (entry.control === "toggle") {
+      return (
+        <label htmlFor={id} className="flex items-center justify-between gap-3">
+          <span className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</span>
+          <input id={id} type="checkbox" checked={Boolean(cur)} onChange={(e) => void commitKey(entry, e.target.checked)} className="w-5 h-5 accent-accent" />
+        </label>
+      );
     }
+    if (entry.control === "segmented") {
+      if (entry.id === "cacheTtl") {
+        return (
+          <>
+            <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+            <TtlToggle ttl={String(cur ?? "1h") as "5m" | "1h"} setTtl={(v) => void commitKey(entry, v)} compact />
+            {entry.help && <div className="text-meta text-text-faint">{entry.help}</div>}
+          </>
+        );
+      }
+      return null;
+    }
+    // text / password
+    const isCred = entry.commitOnBlur;
+    if (isCred) {
+      return <MobilePassword entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v.trim())} />;
+    }
+    // voiceTranscriptionModel / voiceCommandModel — text, commit on blur.
+    return <MobileText entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v)} />;
   };
+
+  // Server URL is a mobile-only schema entry with configKey null (localStorage).
+  const serverUrlEntry = SETTINGS.find((e) => e.id === "serverUrl") as SettingEntry;
+
+  // Group schema entries by their section for the single-scroll layout.
+  const sections = SETTING_SECTIONS.filter((s) => settingsForSection(SETTINGS, s.id, PLATFORM).length > 0 || s.id === "connection");
 
   return (
     <div className="mobile-screen">
       <div className="mobile-header">
-        <button
-          className="mobile-tap text-accent text-2xl leading-none"
-          onClick={onClose}
-          aria-label="Back"
-        >
-          ‹
-        </button>
+        <button className="mobile-tap text-accent text-2xl leading-none" onClick={onClose} aria-label="Back">‹</button>
         <div className="flex-1 text-text font-bold text-title">Settings</div>
-        <button
-          className="mobile-tap text-accent text-body font-semibold px-2"
-          onClick={save}
-          disabled={saving}
-        >
-          {saving ? "…" : "Save"}
-        </button>
+        <div className="w-8" />
       </div>
 
       <div className="manta-scroll-y flex-1 overflow-y-auto px-4 py-3 space-y-5">
         {/* Server URL — the most important field for a fresh install. */}
         <section className="space-y-2">
-          <label className="block text-micro font-semibold uppercase text-text-muted">
-            Server URL
-          </label>
+          <label htmlFor={fieldId(serverUrlEntry)} className="block text-micro font-semibold uppercase text-text-muted">Server URL</label>
           <input
-            placeholder={window.location.origin}
-            value={serverUrl}
-            onChange={(e) => setServerUrl(e.target.value)}
+            id={fieldId(serverUrlEntry)}
+            placeholder={typeof window !== "undefined" ? window.location.origin : ""}
+            value={serverUrlDraft}
+            onChange={(e) => { setServerUrlDraft(e.target.value); setServerUrlSavedAt(null); }}
+            onFocus={() => { serverUrlFocused.current = true; }}
+            onBlur={() => { serverUrlFocused.current = false; commitServerUrl(); }}
             spellCheck={false}
             autoComplete="off"
             autoCapitalize="off"
             inputMode="url"
             className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
           />
-          <div className="text-meta text-text-faint">
-            Leave blank to use the page's own origin (default). Override only
-            if your Manta server is on a different host (e.g.{" "}
-            <code className="text-text-muted">https://manta.example.com</code>).
-            Changes take effect after Save.
-          </div>
-          {/* Server version (BET-180) — display only. Lets a user confirm
-              the renderer is talking to the box version they think (no
-              skew enforcement yet). */}
-          <div className="text-meta text-text-faint">
-            Server v{serverVersion ?? "?"}
-          </div>
+          <div className="text-meta text-text-faint">Leave blank to use the page's own origin (default). Override only if your Manta server is on a different host. Changes take effect immediately.</div>
+          <div className="text-meta text-text-faint">Server v{serverVersion ?? "?"}</div>
+          {serverUrlSavedAt && <div role="status" className="text-meta text-ok">Saved</div>}
         </section>
 
-        {/* Trust mode — high-impact toggle, keep it near the top. */}
-        <section className="space-y-2">
-          <label className="flex items-center justify-between gap-3">
-            <span className="block text-micro font-semibold uppercase text-text-muted">
-              Auto-allow tool permissions
-            </span>
-            <input
-              type="checkbox"
-              checked={trust}
-              onChange={(e) => setTrust(e.target.checked)}
-              className="w-5 h-5 accent-accent"
-            />
-          </label>
-          <div className="text-meta text-text-faint">
-            Auto-reply "always" to every permission request — equivalent to
-            opencode's <code className="text-text-muted">--dangerously-skip-permissions</code>.
-            Question tool requests still require an explicit answer.
-          </div>
-        </section>
-
-        {/* Auto-rename sessions. */}
-        <section className="space-y-2 pt-1 border-t border-border">
-          <label className="flex items-center justify-between gap-3">
-            <span className="block text-micro font-semibold uppercase text-text-muted">
-              Auto-rename sessions
-            </span>
-            <input
-              type="checkbox"
-              checked={autoRename}
-              onChange={(e) => setAutoRename(e.target.checked)}
-              className="w-5 h-5 accent-accent"
-            />
-          </label>
-          <div className="text-meta text-text-faint">
-            Every few turns, ask the model for a 1-2 word title and rename the
-            chat window to match the current work. Overwrites the window name,
-            including names you set by hand.
-          </div>
-        </section>
-
-        {/* Default model. */}
-        <section className="space-y-2 pt-1 border-t border-border">
-          <label className="block text-micro font-semibold uppercase text-text-muted">
-            Default model
-          </label>
-          <select
-            value={
-              selectedModel
-                ? `${selectedModel.providerID}::${selectedModel.modelID}`
-                : ""
-            }
-            onChange={(e) => {
-              const val = e.target.value;
-              if (!val) setSelectedModel(null);
-              else {
-                const [providerID, modelID] = val.split("::");
-                setSelectedModel({ providerID, modelID });
-              }
-            }}
-            className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
-          >
-            <option value="">opencode default</option>
-            {models &&
-              models.map((m) => (
-                <option
-                  key={`${m.providerID}::${m.id}`}
-                  value={`${m.providerID}::${m.id}`}
-                >
-                  {m.name} ({m.providerID})
-                </option>
+        {/* Schema-driven simple fields, grouped by section. */}
+        {sections.map((section) => {
+          const entries = settingsForSection(SETTINGS, section.id, PLATFORM);
+          if (entries.length === 0) return null;
+          return (
+            <section key={section.id} className="space-y-3 pt-1 border-t border-border">
+              <div className="flex items-center gap-2">
+                <span className="text-micro font-semibold uppercase text-text-muted">{section.label}</span>
+                {sectionIsModified(SETTINGS, section.id, PLATFORM, values) && (
+                  <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-accent" title="Modified" />
+                )}
+              </div>
+              {entries.map((entry) => (
+                <div key={entry.id} className="space-y-2">
+                  {renderField(entry)}
+                  {entry.help && entry.control !== "toggle" && <div className="text-meta text-text-faint">{entry.help}</div>}
+                </div>
               ))}
-          </select>
-          <div className="text-meta text-text-faint">
-            Used for every new and cleared session. Can be overridden
-            per-session in the chat composer.
+              {/* Per-section custom content for mobile. */}
+              {renderMobileCustom(section.id)}
+            </section>
+          );
+        })}
+
+        {toasts.length > 0 && <ToastStack toasts={toasts} onDismiss={dismiss} />}
+      </div>
+    </div>
+  );
+
+  // Per-section custom content for mobile (default model, providers,
+  // subscriptions, launcher flags, push, skill registries).
+  function renderMobileCustom(sectionId: SettingSectionId): ReactNode {
+    if (sectionId === "ai") {
+      return (
+        <>
+          {/* Default model */}
+          <div className="space-y-1">
+            <label className="block text-micro font-semibold uppercase text-text-muted">Default model</label>
+            <select
+              value={selectedModel ? `${selectedModel.providerID}::${selectedModel.modelID}` : ""}
+              onChange={(e) => commitModel(e.target.value)}
+              className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
+            >
+              <option value="">opencode default</option>
+              {models && models.map((m) => (
+                <option key={`${m.providerID}::${m.id}`} value={`${m.providerID}::${m.id}`}>{m.name} ({m.providerID})</option>
+              ))}
+            </select>
+            <div className="text-meta text-text-faint">Used for every new and cleared session. Can be overridden per-session in the chat composer.</div>
           </div>
-        </section>
-
-        <SubscriptionsCard />
-        <ProvidersCard />
-
-        {/* AI CLI launch options (BET-138 refinement) — mirrors desktop
-            Settings' AI tab section. Only CLIs detected on this box are
-            shown; an empty list renders nothing. */}
-        {availableLaunchers.some((l) => l.flags.length > 0) && (
-          <section className="space-y-3 pt-1 border-t border-border">
-            <label className="block text-micro font-semibold uppercase text-text-muted">
-              AI CLI launch options
-            </label>
-            <div className="text-meta text-text-faint">
-              Flags used when launching an AI CLI (e.g. Claude Code) directly in a
-              session's terminal. Only CLIs detected on this box are shown.
-            </div>
-            {availableLaunchers
-              .filter((l) => l.flags.length > 0)
-              .map((l) => (
+          <SubscriptionsCard />
+          <ProvidersCard />
+          {availableLaunchers.some((l) => l.flags.length > 0) && (
+            <div className="space-y-2">
+              <span className="text-micro font-semibold uppercase text-text-muted">AI CLI launch options</span>
+              <div className="text-meta text-text-faint">Flags used when launching an AI CLI directly in a session's terminal.</div>
+              {availableLaunchers.filter((l) => l.flags.length > 0).map((l) => (
                 <div key={l.id} className="space-y-2">
                   <div className="text-body font-medium text-text">{l.label}</div>
                   {l.flags.map((f) => (
-                    <label
-                      key={f.key}
-                      className="flex items-center justify-between gap-3"
-                    >
+                    <label key={f.key} className="flex items-center justify-between gap-3">
                       <span className="text-body text-text">{f.label}</span>
-                      <input
-                        type="checkbox"
-                        checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]}
-                        onChange={(e) => setLauncherFlag(l.id, f.key, e.target.checked)}
-                        className="w-5 h-5 accent-accent"
-                      />
+                      <input type="checkbox" checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]} onChange={(e) => setLauncherFlag(l.id, f.key, e.target.checked)} className="w-5 h-5 accent-accent" />
                     </label>
                   ))}
                 </div>
               ))}
-          </section>
-        )}
-
-        {/* Cache TTL — two buttons, not a select, to match desktop affordance. */}
-        <section className="space-y-2 pt-1 border-t border-border">
-          <label className="block text-micro font-semibold uppercase text-text-muted">
-            Prompt cache TTL
-          </label>
-          <TtlToggle ttl={ttl} setTtl={setTtl} compact />
-          <div className="text-meta text-text-faint">
-            Must match opencode's <code className="text-text-muted">cache_control.ttl</code> —
-            manta only uses this to predict when a chat has gone stale (drives
-            the "/clear to save Nk tokens" pill).
-          </div>
-        </section>
-
-        {/* Voice / Groq STT. Empty key disables the mic button. */}
-        <section className="space-y-2 pt-1 border-t border-border">
-          <label className="block text-micro font-semibold uppercase text-text-muted">
-            Voice (Groq)
-          </label>
-          <div className="text-meta text-text-faint">
-            Adds a push-to-talk mic to the composer. Tap = dictate. Long-press
-            (≥500ms) = command mode (say "clear", "compact", "use opus",
-            "answer two", …). Get a key at{" "}
-            <a
-              href="https://console.groq.com/keys"
-              target="_blank"
-              rel="noreferrer"
-              className="text-accent"
-            >
-              console.groq.com/keys
-            </a>
-            .
-          </div>
-          <input
-            type="password"
-            placeholder="gsk_… (leave blank to disable)"
-            value={groqKey}
-            onChange={(e) => setGroqKey(e.target.value)}
-            autoComplete="off"
-            spellCheck={false}
-            autoCapitalize="off"
-            className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
-          />
-          <div className="space-y-1">
-            <label className="block text-micro font-semibold uppercase text-text-faint">
-              Transcription model
-            </label>
-            <input
-              placeholder="whisper-large-v3-turbo"
-              value={voiceTrModel}
-              onChange={(e) => setVoiceTrModel(e.target.value)}
-              spellCheck={false}
-              autoCapitalize="off"
-              className="w-full bg-bg-soft border border-border px-2 py-2 text-meta rounded focus:outline-none focus:border-accent font-mono"
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="block text-micro font-semibold uppercase text-text-faint">
-              Command classifier model
-            </label>
-            <input
-              placeholder="llama-3.1-8b-instant"
-              value={voiceCmdModel}
-              onChange={(e) => setVoiceCmdModel(e.target.value)}
-              spellCheck={false}
-              autoCapitalize="off"
-              className="w-full bg-bg-soft border border-border px-2 py-2 text-meta rounded focus:outline-none focus:border-accent font-mono"
-            />
-          </div>
-        </section>
-
-        {/* Push notifications — per-device subscription, not server config, so
-            it toggles immediately (outside the Save flow). */}
-        {isPushSupported() && (
-          <section className="space-y-2 pt-1 border-t border-border">
-            <label className="block text-micro font-semibold uppercase text-text-muted">
-              Notifications
-            </label>
-            <div className="text-meta text-text-faint">
-              Push alerts when Claude needs a permission/question, finishes a
-              turn (only when you're not watching it), or hits an error.
-              {pushPermission() === "default" &&
-                " iOS only delivers these to the app installed on your home screen."}
             </div>
-            <button
-              onClick={togglePush}
-              disabled={pushBusy}
-              className={`w-full px-3 py-2 text-body rounded border ${
-                pushOn
-                  ? "bg-accent-soft text-white border-accent"
-                  : "bg-bg-soft text-text-muted border-border"
-              } ${pushBusy ? "opacity-60" : ""}`}
-            >
-              {pushBusy
-                ? "Working…"
-                : pushOn
-                  ? "Notifications on — tap to disable"
-                  : "Enable notifications"}
-            </button>
-            {pushOn && (
-              <button
-                onClick={resubscribe}
-                disabled={pushBusy}
-                className={`w-full px-3 py-2 text-meta rounded border border-border bg-bg-soft text-text-muted ${
-                  pushBusy ? "opacity-60" : ""
-                }`}
-              >
-                Not getting notifications? Re-subscribe
-              </button>
-            )}
-            {pushErr && <div className="text-meta text-danger">{pushErr}</div>}
-          </section>
-        )}
+          )}
+          {/* Skill registries */}
+          <div className="space-y-2">
+            <span className="text-micro font-semibold uppercase text-text-muted">Skill registries</span>
+            <div className="text-meta text-text-faint">Extra opencode skill registry URLs. The default manta registry is always included.</div>
+            <div className="space-y-1">
+              {registryUrls.map((url) => (
+                <div key={url} className="flex items-center gap-2 bg-bg-soft border border-border rounded px-2 py-2">
+                  <code className="flex-1 min-w-0 text-meta text-text-muted truncate">{url}</code>
+                  <button onClick={() => onRemoveRegistry(url)} className="mobile-tap text-text-faint hover:text-text px-1 -my-2 inline-flex items-center" aria-label={`Remove ${url}`}><X size={14} aria-hidden="true" /></button>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <input placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} spellCheck={false} autoComplete="off" autoCapitalize="off" inputMode="url" className="flex-1 min-w-0 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
+              <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-3 py-2 text-body bg-accent-solid text-on-accent rounded disabled:opacity-40">Add</button>
+            </div>
+          </div>
+        </>
+      );
+    }
+    if (sectionId === "voice") {
+      // The Groq key input is rendered by the schema (PasswordField) — but
+      // the schema's password renderer below needs the mobile-styled markup.
+      return null;
+    }
+    if (sectionId === "general") {
+      // Push notifications live in general on mobile (per-device, not config).
+      if (!isPushSupported()) return null;
+      return (
+        <div className="space-y-2">
+          <span className="text-micro font-semibold uppercase text-text-muted">Notifications</span>
+          <div className="text-meta text-text-faint">Push alerts when Claude needs a permission/question, finishes a turn, or hits an error.{pushPermission() === "default" && " iOS only delivers these to the app installed on your home screen."}</div>
+          <button onClick={togglePush} disabled={pushBusy} className={`w-full px-3 py-2 text-body rounded border ${pushOn ? "bg-accent-soft text-white border-accent" : "bg-bg-soft text-text-muted border-border"} ${pushBusy ? "opacity-60" : ""}`}>
+            {pushBusy ? "Working…" : pushOn ? "Notifications on — tap to disable" : "Enable notifications"}
+          </button>
+          {pushOn && (
+            <button onClick={resubscribe} disabled={pushBusy} className={`w-full px-3 py-2 text-meta rounded border border-border bg-bg-soft text-text-muted ${pushBusy ? "opacity-60" : ""}`}>Not getting notifications? Re-subscribe</button>
+          )}
+          {pushErr && <div role="alert" className="text-meta text-danger">{pushErr}</div>}
+        </div>
+      );
+    }
+    return null;
+  }
+}
 
-        {/* Skill registries — add/remove with row buttons. */}
-        <section className="space-y-2 pt-1 border-t border-border">
-          <label className="block text-micro font-semibold uppercase text-text-muted">
-            Skill registries
-          </label>
-          <div className="text-meta text-text-faint">
-            Extra opencode skill registry URLs. The default manta registry is
-            always included.
-          </div>
-          <div className="space-y-1">
-            {registryUrls.map((url) => (
-              <div
-                key={url}
-                className="flex items-center gap-2 bg-bg-soft border border-border rounded px-2 py-2"
-              >
-                <code className="flex-1 min-w-0 text-meta text-text-muted truncate">
-                  {url}
-                </code>
-                <button
-                  onClick={() => removeRegistryUrl(url)}
-                  className="mobile-tap text-text-faint hover:text-text px-1 -my-2 inline-flex items-center"
-                  aria-label={`Remove ${url}`}
-                >
-                  <X size={14} aria-hidden="true" />
-                </button>
-              </div>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <input
-              placeholder="https://example.com/skills"
-              value={newRegistryUrl}
-              onChange={(e) => setNewRegistryUrl(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addRegistryUrl()}
-              spellCheck={false}
-              autoComplete="off"
-              autoCapitalize="off"
-              inputMode="url"
-              className="flex-1 min-w-0 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
-            />
-            <button
-              onClick={addRegistryUrl}
-              disabled={!newRegistryUrl.trim()}
-              className="px-3 py-2 text-body bg-accent-solid text-on-accent rounded disabled:opacity-40"
-            >
-              Add
-            </button>
-          </div>
-        </section>
+// Mobile-styled password (credential) field: commit on blur, inline "Saved".
+function MobilePassword({ entry, value, onCommit }: {
+  entry: SettingEntry; value: string; onCommit: (v: string) => void;
+}) {
+  const id = fieldId(entry);
+  const [draft, setDraft] = useState(value);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
+  return (
+    <div className="space-y-1">
+      <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+      <input
+        id={id}
+        type="password"
+        placeholder={entry.placeholder}
+        value={draft}
+        onChange={(e) => { setDraft(e.target.value); setSavedAt(null); }}
+        onFocus={() => { focused.current = true; }}
+        onBlur={() => { focused.current = false; if (draft !== value) { onCommit(draft); setSavedAt(Date.now()); } }}
+        autoComplete="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
+      />
+      {savedAt && <div role="status" className="text-meta text-ok">Saved</div>}
+    </div>
+  );
+}
 
-        {savedToast && (
-          <div className="text-center text-meta text-ok">Saved</div>
-        )}
-      </div>
+// Mobile-styled text field: local draft committed on blur → toast + Undo.
+function MobileText({ entry, value, onCommit }: {
+  entry: SettingEntry; value: string; onCommit: (v: string) => void;
+}) {
+  const id = fieldId(entry);
+  const [draft, setDraft] = useState(value);
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
+  return (
+    <div className="space-y-1">
+      <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+      <input
+        id={id}
+        type="text"
+        placeholder={entry.placeholder}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onFocus={() => { focused.current = true; }}
+        onBlur={() => { focused.current = false; if (draft !== value) onCommit(draft); }}
+        spellCheck={false}
+        autoCapitalize="off"
+        className="w-full bg-bg-soft border border-border px-3 py-2 text-meta rounded focus:outline-none focus:border-accent font-mono"
+      />
     </div>
   );
 }

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type KeyboardEvent } from "react";
+import { X, Search } from "lucide-react";
 import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
@@ -9,6 +9,7 @@ import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
 import { applyTheme, type ThemePref } from "./theme";
 import { TtlToggle } from "./TtlToggle";
+import { useSettingsToasts, useApplySetting, ToastStack } from "./settingsApply";
 import {
   useLaunchers,
   updateLauncherFlag,
@@ -18,49 +19,233 @@ import type {
   AuthPairResult,
   PluginRegistryRow,
 } from "../shared/types";
+import {
+  SETTINGS,
+  SETTING_SECTIONS,
+  settingsForSection,
+  searchSettings,
+  sectionIsModified,
+  resetAllPayload,
+  fieldId,
+  type SettingEntry,
+  type SettingSectionId,
+} from "../shared/settingsSchema";
 
-const TABS = [
-  { id: "connection", label: "Connection" },
-  { id: "ai", label: "AI" },
-  { id: "voice", label: "Voice" },
-  { id: "files", label: "Files" },
-  { id: "plugins", label: "Plugins" },
-  { id: "general", label: "General" },
-] as const;
-type TabId = (typeof TABS)[number]["id"];
+const PLATFORM = "desktop" as const;
 
-// Render a millisecond timeout as "5s" or "30m" — matches the manifest's
-// `timeout:` field shape so the UI stays in sync with what the user types.
+// Render a millisecond timeout as "5s" or "30m".
 function formatTimeout(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
   return `${Math.round(ms / 60_000)}m`;
 }
 
-export function Settings({ onClose }: { onClose: () => void }) {
-  const {
-    allowAgentPush,
-    autoRenameSessions,
-    downloadsDir,
-    skillRegistryUrls,
-    cacheTtl,
-    groqApiKey,
-    voiceTranscriptionModel,
-    voiceCommandModel,
-    launcherFlags,
-    shareAnalytics,
-    worktreePerSession,
-    worktreeCleanOnClose,
-    theme,
-    refresh,
-    updatePrompt,
-  } = useStore();
+// ===== Dialog semantics (BET-419 §C): focus trap + Esc + focus restore =====
+function useDialog(onClose: () => void) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const opener = document.activeElement as HTMLElement | null;
+    const firstFocusable = root.querySelector<HTMLElement>("h2[tabindex], button, input, select, textarea, a[href]");
+    (firstFocusable ?? root).focus();
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+      if (e.key !== "Tab") return;
+      const focusables = root.querySelectorAll<HTMLElement>(
+        'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])',
+      );
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      if (opener && typeof opener.focus === "function") opener.focus();
+    };
+  }, [onClose]);
+  return ref;
+}
 
-  // Client + server versions for the About section (BET-416 §E). "Update
-  // available" is no longer a full-width bar — it is a quiet --accent dot on
-  // the Settings sidebar entry, and the details (downloaded version + install
-  // action) live HERE, in About. This is the only install path for a
-  // downloaded desktop auto-update that has no co-occurring version-skew.
+// ===== Schema-driven field components =====
+// Each reads its current value from the store and commits via the shared
+// apply helper. NO local field state is seeded from the store and resynced
+// — that resync was the stomping bug (BET-419 §"The bug"). Text-like fields
+// keep a local DRAFT for the duration of focus and commit on blur, so an
+// in-progress edit survives any store update that lands while typing.
+
+function ToggleField({ entry, value, onApply }: {
+  entry: SettingEntry; value: boolean; onApply: (v: boolean) => void;
+}) {
+  const id = fieldId(entry);
+  return (
+    <div className="space-y-1">
+      <label htmlFor={id} className="flex items-start gap-3 text-body cursor-pointer">
+        <input id={id} type="checkbox" checked={value} onChange={(e) => onApply(e.target.checked)} className="mt-px" />
+        <span>
+          {entry.label}
+          {entry.help && <span className="block text-meta text-text-faint mt-1">{entry.help}</span>}
+        </span>
+      </label>
+    </div>
+  );
+}
+
+function SegmentedField({ entry, value, onApply }: {
+  entry: SettingEntry; value: string; onApply: (v: string) => void;
+}) {
+  const id = fieldId(entry);
+  // cacheTtl uses the shared TtlToggle on desktop (matches the old UI's
+  // "1 hour (default)" label). Other segmented controls (theme) render the
+  // generic inline-flex.
+  if (entry.id === "cacheTtl") {
+    return (
+      <div className="space-y-1">
+        <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+        <TtlToggle ttl={value as "5m" | "1h"} setTtl={onApply} />
+        {entry.help && <div className="text-meta text-text-faint mt-2">{entry.help}</div>}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+      <div role="group" aria-label={entry.label} className="inline-flex rounded-lg border border-border overflow-hidden">
+        {entry.options?.map((opt) => {
+          const selected = value === opt.value;
+          return (
+            <button
+              key={opt.value}
+              id={selected ? id : undefined}
+              type="button"
+              aria-pressed={selected}
+              onClick={() => onApply(opt.value)}
+              className={`px-4 py-2 text-body capitalize transition-colors border-r border-border last:border-r-0 ${
+                selected ? "bg-accent-solid" : "text-text-muted hover:text-text hover:bg-bg-elev"
+              }`}
+              style={selected ? { color: "var(--on-accent)" } : undefined}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+      {entry.help && <span className="block text-meta text-text-faint mt-2">{entry.help}</span>}
+    </div>
+  );
+}
+
+// Text/path (non-credential): local draft committed on blur → toast + Undo.
+function TextField({ entry, value, onCommit }: {
+  entry: SettingEntry; value: string; onCommit: (v: string) => void;
+}) {
+  const id = fieldId(entry);
+  const [draft, setDraft] = useState(value);
+  // Keep the draft in sync with the store ONLY when the field is NOT focused
+  // (so an external change — e.g. Undo from another toast — is picked up,
+  // but an in-progress edit is never stomped).
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
+  return (
+    <div className="space-y-1">
+      <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+      <input
+        id={id}
+        type="text"
+        placeholder={entry.placeholder}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onFocus={() => { focused.current = true; }}
+        onBlur={() => {
+          focused.current = false;
+          if (draft !== value) onCommit(draft);
+        }}
+        spellCheck={false}
+        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
+      />
+      {entry.help && <div className="text-meta text-text-faint">{entry.help}</div>}
+    </div>
+  );
+}
+
+// Password (credential): local draft committed on blur → inline "Saved"
+// confirmation (role=status), no toast. The ONE blur-commit exception called
+// out in the spec.
+function PasswordField({ entry, value, onCommit }: {
+  entry: SettingEntry; value: string; onCommit: (v: string) => void;
+}) {
+  const id = fieldId(entry);
+  const [draft, setDraft] = useState(value);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
+  return (
+    <div className="space-y-1">
+      <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+      <input
+        id={id}
+        type="password"
+        placeholder={entry.placeholder}
+        value={draft}
+        onChange={(e) => { setDraft(e.target.value); setSavedAt(null); }}
+        onFocus={() => { focused.current = true; }}
+        onBlur={() => {
+          focused.current = false;
+          if (draft !== value) { onCommit(draft); setSavedAt(Date.now()); }
+        }}
+        autoComplete="off"
+        spellCheck={false}
+        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
+      />
+      {entry.help && <div className="text-meta text-text-faint">{entry.help}</div>}
+      {savedAt && <div role="status" className="text-meta text-ok">Saved</div>}
+    </div>
+  );
+}
+
+export function Settings({ onClose }: { onClose: () => void }) {
+  const store = useStore();
+  const { toasts, push, dismiss } = useSettingsToasts();
+  const applySetting = useApplySetting(push);
+  const dialogRef = useDialog(onClose);
+
+  // Active tab + search — declared early so the plugins effect below can read
+  // activeTab without a TDZ violation.
+  const [activeTab, setActiveTab] = useState<SettingSectionId>("connection");
+  const [query, setQuery] = useState("");
+  const inSearch = query.trim().length > 0;
+  const searchHits = useMemo(() => searchSettings(SETTINGS, query, PLATFORM), [query]);
+
+  // Current config values for schema-driven fields, read directly from the
+  // store (NO local field state → no stomping bug).
+  const values: Record<string, unknown> = useMemo(
+    () => ({
+      cacheTtl: store.cacheTtl,
+      groqApiKey: store.groqApiKey,
+      voiceTranscriptionModel: store.voiceTranscriptionModel,
+      voiceCommandModel: store.voiceCommandModel,
+      allowAgentPush: store.allowAgentPush,
+      downloadsDir: store.downloadsDir,
+      worktreePerSession: store.worktreePerSession,
+      worktreeCleanOnClose: store.worktreeCleanOnClose,
+      theme: store.theme,
+      autoRenameSessions: store.autoRenameSessions,
+      shareAnalytics: store.shareAnalytics,
+    }),
+    [store.cacheTtl, store.groqApiKey, store.voiceTranscriptionModel, store.voiceCommandModel, store.allowAgentPush, store.downloadsDir, store.worktreePerSession, store.worktreeCleanOnClose, store.theme, store.autoRenameSessions, store.shareAnalytics],
+  );
+
+  const commitKey = async (entry: SettingEntry, nextValue: unknown) => {
+    if (entry.configKey == null) return;
+    const prev = values[entry.configKey];
+    await applySetting(entry, nextValue, prev);
+  };
+
+  // Client + server versions for About.
   const [clientVersion, setClientVersion] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   useEffect(() => {
@@ -76,987 +261,462 @@ export function Settings({ onClose }: { onClose: () => void }) {
     return () => { cancelled = true; };
   }, []);
 
-  // AI fields (AI tab)
-  // Note: the model list, default model, and toggles for Main/Sub all live
-  // inside `ModelsCard` now (BET-215) — Settings no longer owns that state.
+  // Registry URLs (custom control — instant apply on add/remove).
   const {
-    registryUrls,
-    setRegistryUrls,
-    newRegistryUrl,
-    setNewRegistryUrl,
-    addRegistryUrl,
-    removeRegistryUrl,
-  } = useRegistryUrls(skillRegistryUrls ?? []);
-  const [ttl, setTtl] = useState<"5m" | "1h">(cacheTtl);
-  // AI CLI TUI launch options (BET-138 refinement) — flags for launchers
-  // detected on this box (e.g. Claude Code's --dangerously-skip-permissions).
+    registryUrls, setRegistryUrls, newRegistryUrl, setNewRegistryUrl,
+  } = useRegistryUrls(store.skillRegistryUrls ?? []);
+  const persistRegistryUrls = async (next: string[]) => {
+    const prev = store.skillRegistryUrls ?? [];
+    useStore.setState({ skillRegistryUrls: next });
+    try {
+      const r = await window.api.configUpdate({ skillRegistryUrls: next });
+      const saved = (r as Record<string, unknown>).skillRegistryUrls;
+      useStore.setState({ skillRegistryUrls: Array.isArray(saved) ? (saved as string[]) : next });
+      push({
+        id: `registry-${Date.now()}`,
+        message: next.length > prev.length ? "Registry URL added" : "Registry URL removed",
+        action: { label: "Undo", onClick: () => { void useStore.setState({ skillRegistryUrls: prev }); window.api.configUpdate({ skillRegistryUrls: prev }).catch(() => {}); } },
+      });
+    } catch {
+      useStore.setState({ skillRegistryUrls: prev });
+      push({ id: `err-registry-${Date.now()}`, message: "Couldn't update skill registries." });
+    }
+  };
+  const onAddRegistry = () => {
+    const url = newRegistryUrl.trim();
+    if (!url || registryUrls.includes(url)) return;
+    const next = [...registryUrls, url];
+    setNewRegistryUrl("");
+    setRegistryUrls(next);
+    void persistRegistryUrls(next);
+  };
+  const onRemoveRegistry = (url: string) => {
+    const next = registryUrls.filter((u) => u !== url);
+    setRegistryUrls(next);
+    void persistRegistryUrls(next);
+  };
+
+  // Launcher flags (custom control — instant apply per flag).
   const [availableLaunchers] = useLaunchers();
-  const [launcherFlagValues, setLauncherFlagValues] =
-    useState<Record<string, Record<string, boolean>>>(launcherFlags ?? {});
+  const [launcherFlagValues, setLauncherFlagValues] = useState(store.launcherFlags ?? {});
+  const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
+    const prev = launcherFlagValues;
+    const nextFlags = updateLauncherFlag(availableLaunchers, launcherId, flagKey, checked, prev);
+    setLauncherFlagValues(nextFlags);
+    useStore.setState({ launcherFlags: nextFlags });
+    void window.api.configUpdate({ launcherFlags: nextFlags })
+      .then((r) => { const saved = (r as Record<string, unknown>).launcherFlags; useStore.setState({ launcherFlags: (saved && typeof saved === "object" ? saved : nextFlags) as Record<string, Record<string, boolean>> }); })
+      .catch(() => { useStore.setState({ launcherFlags: prev }); setLauncherFlagValues(prev); push({ id: `err-launcher-${Date.now()}`, message: "Couldn't save launcher flag." }); });
+  };
 
-  // Files fields (Files tab)
-  const [agentPush, setAgentPush] = useState(allowAgentPush);
-  const [dlDir, setDlDir] = useState(downloadsDir);
-  // BET-246: worktree-per-session + clean-on-close toggles. Global-only;
-  // the per-session override lives in the new-session dialog in Sidebar.
-  const [worktreeOn, setWorktreeOn] = useState(worktreePerSession);
-  const [worktreeClean, setWorktreeClean] = useState(worktreeCleanOnClose);
-
-  // General fields (General tab)
-  const [autoRename, setAutoRename] = useState(autoRenameSessions);
-  const [analytics, setAnalytics] = useState(shareAnalytics);
-  // BET-409: theme preference. Seeded from the store, applied LIVE on click
-  // (instant visual feedback via applyTheme), persisted on Save. On unmount
-  // without a save, the cleanup reverts the preview to the persisted value.
-  const [themePref, setThemePref] = useState<ThemePref>(theme);
-  const persistedThemeRef = useRef<ThemePref>(theme);
-  persistedThemeRef.current = theme;
-
-  // Plugins fields (Plugins tab — replaces the v1 Capability executor
-  // block on the Files tab). The toggle is OFF by default; toggling takes
-  // effect on the next app launch (the executor gates itself at start
-  // time — see src/main/capExecutor.ts).
-  //
-  // BET-207: `pluginsEnabled` is a Mac-machine-local toggle. It is NOT
-  // mirrored through the store (the store mirrors the box config via
-  // configGet, and the toggle must persist to the Mac-local file the
-  // executor reads). Seed the toggle from the Mac-local value via the
-  // preload getter, and persist via the preload setter — never via
-  // configUpdate (which writes the box config).
+  // Plugins (desktop-only Mac-local toggle + registry list).
   const [pluginsOn, setPluginsOn] = useState(false);
   const [plugins, setPlugins] = useState<PluginRegistryRow[] | null>(null);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
-
-  // Voice fields (Voice tab)
-  const [groqKey, setGroqKey] = useState(groqApiKey);
-  const [voiceTrModel, setVoiceTrModel] = useState(voiceTranscriptionModel);
-  const [voiceCmdModel, setVoiceCmdModel] = useState(voiceCommandModel);
-  // Mobile pairing — one-time code minted on demand. The QR encodes the
-  // CANONICAL box-form `manta://pair?box=<boxId>&code=<6-digit>` payload
-  // (BET-177 §2.4 — the old `?id=&token=` form was a parsePairPayload
-  // rejector; the mobile deep-link handler now matches the same canonical
-  // form produced by buildPairPayload). `pairing` is null until the user
-  // clicks "Generate code". `pairingExpiry` is a Date parsed from the
-  // server's expiresAt ISO string, used to compute the remaining seconds
-  // for the countdown UI.
-  const [pairing, setPairing] = useState<AuthPairResult | null>(null);
-  const [pairingExpiry, setPairingExpiry] = useState<Date | null>(null);
-  const [pairingMinting, setPairingMinting] = useState(false);
-
-  // Remove-box (BET-357 §2): the in-flight flag plus the latest outcome so
-  // the Settings panel can render a structured note when remote revocation
-  // didn't reach the box (the unreachable-box fallback is honored regardless
-  // — the local config IS cleared, the note is just informational).
-  const [removingBox, setRemovingBox] = useState(false);
-  const [removeResult, setRemoveResult] = useState<{
-    ok: boolean;
-    message: string;
-  } | null>(null);
-
-  // Active tab
-  const [activeTab, setActiveTab] = useState<TabId>("connection");
-
-  // Sync local state when store values change
-  useEffect(() => {
-    setRegistryUrls(skillRegistryUrls ?? []);
-    setTtl(cacheTtl);
-    setAgentPush(allowAgentPush);
-    setDlDir(downloadsDir);
-    setAutoRename(autoRenameSessions);
-    setGroqKey(groqApiKey);
-    setVoiceTrModel(voiceTranscriptionModel);
-    setVoiceCmdModel(voiceCommandModel);
-    setLauncherFlagValues(launcherFlags ?? {});
-    setAnalytics(shareAnalytics);
-    setThemePref(theme);
-    setWorktreeOn(worktreePerSession);
-    setWorktreeClean(worktreeCleanOnClose);
-  }, [skillRegistryUrls, cacheTtl, allowAgentPush, autoRenameSessions, downloadsDir, groqApiKey, voiceTranscriptionModel, voiceCommandModel, launcherFlags, shareAnalytics, worktreePerSession, worktreeCleanOnClose, theme]);
-
-  // BET-409: revert any unsaved theme preview when Settings closes without a
-  // save. On Save, refresh() updates the store (and thus the ref) to the new
-  // value BEFORE unmount, so the revert is a no-op; on Cancel the ref still
-  // holds the old value and the preview rolls back.
-  useEffect(() => {
-    return () => {
-      applyTheme(persistedThemeRef.current);
-    };
-  }, []);
-
-  // Seed the Mac-local `pluginsEnabled` toggle from the desktop's config
-  // (BET-207). The store mirrors the BOX config (via httpApi.configGet),
-  // so seeding from the store would show the wrong value after a reload.
-  // Read once on mount — the toggle only changes via Save in this same
-  // panel, so a live listener isn't needed.
   useEffect(() => {
     const preload = getMantaPreload();
-    if (!preload?.pluginsGetEnabled) return; // mobile/web has no preload
+    if (!preload?.pluginsGetEnabled) return;
     preload.pluginsGetEnabled().then(setPluginsOn).catch(() => {});
   }, []);
-
-  // Fetch the installed-plugins list when the Plugins tab is open, and
-  // re-fetch every 10s while it stays open (the ScheduledTasksCard poll
-  // pattern — no bus event because the Mac executor publishes via PUT,
-  // not a fire-and-forget envelope).
+  const togglePlugins = async (on: boolean) => {
+    const prev = pluginsOn;
+    setPluginsOn(on);
+    const preload = getMantaPreload();
+    if (!preload?.pluginsSetEnabled) return;
+    try {
+      await preload.pluginsSetEnabled(on);
+      push({ id: `plugins-${Date.now()}`, message: `Plugins ${on ? "enabled" : "disabled"} — restart MantaUI to apply.`, action: { label: "Undo", onClick: () => { setPluginsOn(prev); void preload.pluginsSetEnabled(prev); } } });
+    } catch {
+      setPluginsOn(prev);
+      push({ id: `err-plugins-${Date.now()}`, message: "Couldn't toggle plugins." });
+    }
+  };
   useEffect(() => {
     if (activeTab !== "plugins") return;
     let cancelled = false;
     const fetchOnce = () => {
-      window.api
-        .pluginsRegistry()
-        .then((rows) => {
-          if (cancelled) return;
-          setPlugins(rows);
-          setPluginsError(null);
-        })
-        .catch((e) => {
-          if (cancelled) return;
-          setPluginsError(e instanceof Error ? e.message : String(e));
-        });
+      window.api.pluginsRegistry()
+        .then((rows) => { if (!cancelled) { setPlugins(rows); setPluginsError(null); } })
+        .catch((e) => { if (!cancelled) setPluginsError(e instanceof Error ? e.message : String(e)); });
     };
     fetchOnce();
     const timer = setInterval(fetchOnce, 10_000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    return () => { cancelled = true; clearInterval(timer); };
   }, [activeTab]);
 
-  const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
-    setLauncherFlagValues((prev) =>
-      updateLauncherFlag(availableLaunchers, launcherId, flagKey, checked, prev),
-    );
-  };
-
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  const save = async () => {
-    if (saving) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await window.api.configUpdate({
-        allowAgentPush: agentPush,
-        autoRenameSessions: autoRename,
-        downloadsDir: dlDir.trim(),
-        // defaultModel is owned by ModelsCard now (BET-215) — it persists on
-        // its own radio change, so Settings' Save does not touch it.
-        skillRegistryUrls: registryUrls,
-        cacheTtl: ttl,
-        groqApiKey: groqKey.trim(),
-        voiceTranscriptionModel: voiceTrModel.trim(),
-        voiceCommandModel: voiceCmdModel.trim(),
-        shareAnalytics: analytics,
-        launcherFlags: launcherFlagValues,
-        // BET-409: persisted theme preference (the live preview was already
-        // applied on click; this just pins it to config.json).
-        theme: themePref,
-        // BET-246: per-session worktree defaults — global settings only;
-        // the per-window override lives in Sidebar's new-session dialog.
-        worktreePerSession: worktreeOn,
-        worktreeCleanOnClose: worktreeClean,
-      });
-      // BET-207: persist `pluginsEnabled` to the Mac-local config via the
-      // preload bridge — NOT via window.api.configUpdate (which writes the
-      // box config the executor never reads). No-op on mobile/web where
-      // the plugins tab is not rendered.
-      const preload = getMantaPreload();
-      if (preload?.pluginsSetEnabled) {
-        await preload.pluginsSetEnabled(pluginsOn);
-      }
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : String(e));
-      setSaving(false);
-      return;
-    }
-    try {
-      await refresh();
-    } catch {
-      /* non-fatal — the save already persisted */
-    }
-    setSaving(false);
-    onClose();
-  };
-
-  // Mint a one-time pairing code for mobile device pairing. The code is valid
-  // for ~5 minutes (server-enforced); the UI shows a countdown. A new code
-  // supersedes any prior code (the server invalidates the old one).
+  // Mobile pairing (Connection tab).
+  const [pairing, setPairing] = useState<AuthPairResult | null>(null);
+  const [pairingExpiry, setPairingExpiry] = useState<Date | null>(null);
+  const [pairingMinting, setPairingMinting] = useState(false);
   const mintPairingCode = async () => {
     setPairingMinting(true);
     try {
       const result = await window.api.authPair();
       setPairing(result);
-      if (result.ok) {
-        const expiresAt = new Date(result.expiresAt);
-        setPairingExpiry(expiresAt);
-      }
-    } catch (e) {
-      // Should not happen — authPair returns { ok:false, error } for failures.
-      // But guard against IPC layer crashes.
-      alert(e instanceof Error ? e.message : String(e));
+      if (result.ok) setPairingExpiry(new Date(result.expiresAt));
+    } catch {
+      push({ id: `err-pair-${Date.now()}`, message: "Couldn't generate a pairing code. Try again." });
     } finally {
       setPairingMinting(false);
     }
   };
 
-  // Remove this box (BET-357 §2): DELETE <serverUrl>/auth/revoke with the
-  // current box_token, then clear the local config entry regardless of the
-  // remote outcome (the unreachable-box path still succeeds locally per the
-  // spec). On a remote failure we surface a structured note so the user
-  // knows the box's own token is still alive until the next device re-pairs.
+  // Remove box — in-app confirm replaces window.confirm (BET-419 §D).
+  const [removingBox, setRemovingBox] = useState(false);
+  const [removeResult, setRemoveResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const removeBox = async () => {
+    setConfirmRemove(false);
     if (removingBox) return;
-    // Native confirm — same simplicity the existing "Run setup again" uses
-    // for an irreversible action. The user is about to drop their pairing
-    // and any saved projects; we don't want a one-click accident.
-    const confirmed = window.confirm(
-      "Remove this box from the desktop?\n\n" +
-        "The desktop will forget its pairing and saved projects. " +
-        "If the box is reachable, its current token is also revoked. " +
-        "If the box is offline, the local credentials are cleared and the " +
-        "box's token will be rotated the next time it starts.\n\n" +
-        "Continue?",
-    );
-    if (!confirmed) return;
     setRemovingBox(true);
     setRemoveResult(null);
-    // authUnpair is a desktop-only IPC channel (mobile/web have no preload
-    // and therefore can't trigger a remote revoke) — null-check the bridge
-    // so the Settings panel still renders cleanly on those platforms.
     const preload = getMantaPreload();
     if (!preload?.authUnpair) {
       setRemovingBox(false);
-      setRemoveResult({
-        ok: false,
-        message: "Removing a box is only supported in the desktop app.",
-      });
+      setRemoveResult({ ok: false, message: "Removing a box is only supported in the desktop app." });
       return;
     }
     try {
       const outcome = await preload.authUnpair();
-      // Always reflect the cleared state in the store so subsequent Save
-      // calls don't try to re-persist the (now-empty) box identity.
-      await refresh().catch(() => {
-        /* refresh is best-effort; config.json is already cleared */
-      });
-      if (outcome.ok) {
-        // Clean exit: nothing to surface besides the dialog closing.
-        setRemoveResult({ ok: true, message: "" });
-        onClose();
-        return;
-      }
-      // Remote revocation didn't reach the box. The local credentials are
-      // gone — surface the UnpairOutcome.message so the user knows what
-      // happened (and can re-pair from scratch on next launch if they want
-      // to start over cleanly).
-      setRemoveResult({
-        ok: false,
-        message:
-          outcome.message ||
-          "The box's token could not be revoked remotely. Local credentials were cleared.",
-      });
+      await useStore.getState().refresh().catch(() => {});
+      if (outcome.ok) { setRemoveResult({ ok: true, message: "" }); onClose(); return; }
+      setRemoveResult({ ok: false, message: outcome.message || "The box's token could not be revoked remotely. Local credentials were cleared." });
     } catch (e) {
-      // IPC crash — the local clear also didn't happen. Bail out without
-      // closing so the user can retry.
-      setRemoveResult({
-        ok: false,
-        message: e instanceof Error ? e.message : String(e),
-      });
+      setRemoveResult({ ok: false, message: e instanceof Error ? e.message : String(e) });
     } finally {
       setRemovingBox(false);
     }
   };
 
+  // Reset all settings (BET-419 §B.3 — danger zone, General).
+  const [confirmReset, setConfirmReset] = useState(false);
+  const resetAll = async () => {
+    setConfirmReset(false);
+    const payload = resetAllPayload(SETTINGS);
+    const prev = { ...values };
+    useStore.setState(payload);
+    if (typeof payload.theme === "string") applyTheme(payload.theme as ThemePref);
+    try {
+      await window.api.configUpdate(payload);
+      push({
+        id: `reset-${Date.now()}`,
+        message: "All settings reset to defaults.",
+        action: { label: "Undo", onClick: () => { void useStore.setState(prev); if (prev.theme) applyTheme(prev.theme as ThemePref); window.api.configUpdate(prev).catch(() => {}); } },
+      });
+    } catch {
+      useStore.setState(prev);
+      if (prev.theme) applyTheme(prev.theme as ThemePref);
+      push({ id: `err-reset-${Date.now()}`, message: "Couldn't reset settings." });
+    }
+  };
+
+  // Arrow-key navigation on the tab rail (BET-419 §C).
+  const railRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const onRailKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    e.preventDefault();
+    const idx = SETTING_SECTIONS.findIndex((s) => s.id === activeTab);
+    const dir = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : -1;
+    const next = SETTING_SECTIONS[(idx + dir + SETTING_SECTIONS.length) % SETTING_SECTIONS.length];
+    setActiveTab(next.id);
+    railRefs.current[next.id]?.focus();
+  };
+
+  const schemaEntries = settingsForSection(SETTINGS, activeTab, PLATFORM);
+
+  const renderField = (entry: SettingEntry): ReactNode => {
+    const cur = entry.configKey ? values[entry.configKey] : undefined;
+    switch (entry.control) {
+      case "toggle":
+        return <ToggleField entry={entry} value={Boolean(cur)} onApply={(v) => void commitKey(entry, v)} />;
+      case "segmented":
+        return <SegmentedField entry={entry} value={String(cur ?? "")} onApply={(v) => void commitKey(entry, v)} />;
+      case "password":
+        return <PasswordField entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v.trim())} />;
+      case "text":
+      case "path":
+        return <TextField entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v)} />;
+      default:
+        return null;
+    }
+  };
+
+  // Per-section custom content (cards/lists the schema doesn't describe).
+  const renderCustom = (section: SettingSectionId): ReactNode => {
+    if (section === "connection") {
+      return (
+        <>
+          <div>
+            <h3 className="text-title font-semibold mb-4">Pair phone</h3>
+            <div className="text-body text-text-faint mb-4">
+              Scan this QR with the MANTA mobile app to connect it to your box. The code is one-time and valid for ~5 minutes. Generate a new code if the old one expires.
+            </div>
+            {!pairing ? (
+              <button onClick={mintPairingCode} disabled={pairingMinting} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">
+                {pairingMinting ? "Generating…" : "Generate pairing code"}
+              </button>
+            ) : pairing.ok ? (
+              <div className="space-y-4">
+                <div className="flex items-start gap-4">
+                  <div className="bg-white p-2 rounded border border-border shrink-0">
+                    <PairingQR boxId={pairing.boxId} pairingCode={pairing.pairingCode} />
+                  </div>
+                  <div className="flex-1 space-y-2">
+                    <div className="text-body"><span className="text-text-muted">Code:</span> <span className="font-mono text-text">{pairing.pairingCode}</span></div>
+                    <div className="text-body"><span className="text-text-muted">Box ID:</span> <span className="font-mono text-text break-all" title={pairing.boxId}>{pairing.boxId}</span></div>
+                    {pairingExpiry && <PairingCountdown expiry={pairingExpiry} />}
+                  </div>
+                </div>
+                <button onClick={mintPairingCode} disabled={pairingMinting} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">
+                  {pairingMinting ? "Generating…" : "Refresh code"}
+                </button>
+              </div>
+            ) : (
+              <div className="text-body text-danger">{pairing.error}</div>
+            )}
+          </div>
+          <div className="border-t border-border pt-6">
+            <div className="flex items-center justify-between">
+              <div className="text-body text-text-faint">Re-run the guided setup (pairing, providers, first project).</div>
+              <button onClick={() => { void useStore.getState().relaunchOnboarding(); onClose(); }} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text shrink-0">Run setup again</button>
+            </div>
+          </div>
+          <div className="border-t border-border pt-6">
+            <div className="flex items-center justify-between">
+              <div className="text-body text-text-faint">Forget this box on the desktop. If the box is reachable, its current token is revoked too.</div>
+              <button onClick={() => setConfirmRemove(true)} disabled={removingBox} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-danger hover:border-danger disabled:opacity-40 disabled:cursor-not-allowed shrink-0">
+                {removingBox ? "Removing…" : "Remove box"}
+              </button>
+            </div>
+            {removeResult && !removeResult.ok && <div role="alert" className="text-body text-warn mt-3">{removeResult.message}</div>}
+          </div>
+        </>
+      );
+    }
+    if (section === "ai") {
+      return (
+        <>
+          <ModelsCard />
+          <SubscriptionsCard />
+          <div className="border-t border-border pt-6"><ProvidersCard /></div>
+          {availableLaunchers.some((l) => l.flags.length > 0) && (
+            <div className="border-t border-border pt-6">
+              <h3 className="text-title font-semibold mb-1">AI CLI launch options</h3>
+              <div className="text-body text-text-faint mb-4">Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this box are shown.</div>
+              <div className="space-y-4">
+                {availableLaunchers.filter((l) => l.flags.length > 0).map((l) => (
+                  <div key={l.id} className="space-y-2">
+                    <div className="text-body font-medium text-text">{l.label}</div>
+                    {l.flags.map((f) => (
+                      <label key={f.key} className="flex items-start gap-3 text-body cursor-pointer">
+                        <input type="checkbox" checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]} onChange={(e) => setLauncherFlag(l.id, f.key, e.target.checked)} className="mt-px" />
+                        <span>{f.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="border-t border-border pt-6">
+            <h3 className="text-title font-semibold mb-4">Skill registries</h3>
+            <div className="text-body text-text-faint mb-3">Extra skill registry URLs fetched by opencode on startup. The default manta registry is always included.</div>
+            <div className="space-y-2">
+              {registryUrls.map((url) => (
+                <div key={url} className="flex items-center gap-2">
+                  <code className="flex-1 text-body bg-bg-soft border border-border rounded px-3 py-2 text-text-muted truncate">{url}</code>
+                  <button onClick={() => onRemoveRegistry(url)} className="text-body text-text-faint hover:text-text px-2 inline-flex items-center" aria-label="Remove registry URL"><X size={14} aria-hidden="true" /></button>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2 mt-3">
+              <input placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} className="flex-1 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
+              <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-4 py-2 text-body bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">Add</button>
+            </div>
+          </div>
+        </>
+      );
+    }
+    if (section === "plugins") {
+      return (
+        <>
+          <div className="border-t border-border pt-6">
+            <h3 className="text-title font-semibold mb-4">Installed plugins</h3>
+            {pluginsError ? (
+              <div role="alert" className="text-body text-danger break-words">Failed to load: {pluginsError}</div>
+            ) : plugins === null ? (
+              <div className="text-body text-text-faint">Loading…</div>
+            ) : plugins.length === 0 ? (
+              <div className="text-body text-text-faint">No plugins installed yet. The AI can author them with <code className="text-text-muted">plugin.write</code> when this toggle is on.</div>
+            ) : (
+              <div className="space-y-2">
+                {plugins.map((p) => (
+                  <div key={p.name} className="border border-border rounded p-3 bg-bg-soft space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-body font-medium text-text">{p.name}</span>
+                      {p.valid ? <span className="text-meta px-2 py-px rounded bg-ok-bg text-ok">valid</span> : <span className="text-meta px-2 py-px rounded bg-danger-bg text-danger break-all">parse error: {p.error}</span>}
+                      <span className="ml-auto text-meta text-text-faint">{p.stepCount} step{p.stepCount === 1 ? "" : "s"}{p.timeoutMs != null ? ` · ${formatTimeout(p.timeoutMs)}` : ""}</span>
+                    </div>
+                    {p.description && <div className="text-meta text-text-muted">{p.description}</div>}
+                    {p.inputs.length > 0 && <div className="text-meta text-text-faint">Inputs: {p.inputs.map((i) => `${i.id}${i.default !== undefined ? `=${JSON.stringify(i.default)}` : ""}`).join(", ")}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="border-t border-border pt-6">
+            <button onClick={() => { const preload = getMantaPreload(); if (preload?.revealInFolder) void preload.revealInFolder("~/.manta/plugins"); }} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text">Open plugins folder</button>
+          </div>
+        </>
+      );
+    }
+    if (section === "general") {
+      return (
+        <>
+          <div className="border-t border-border pt-6">
+            <h3 className="text-title font-semibold mb-4">About</h3>
+            <div className="text-body text-text-faint">Manta UI v{clientVersion ?? "…"}</div>
+            <div className="text-meta text-text-faint mt-1">Desktop client for remote Claude Code sessions.</div>
+            {serverVersion && <div className="text-meta text-text-faint mt-1">Box server v{serverVersion}</div>}
+            {store.updatePrompt && (
+              <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
+                <span className="flex-1 text-meta text-text">Update ready: <span className="font-medium">{store.updatePrompt.releaseName || store.updatePrompt.version}</span></span>
+                <button onClick={() => { void window.api.autoUpdateInstall(); }} className="shrink-0 rounded bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium">Restart to update</button>
+              </div>
+            )}
+          </div>
+          <div className="border-t border-border pt-6">
+            <h3 className="text-title font-semibold mb-4">Reset all settings</h3>
+            <div className="text-body text-text-faint mb-3">Restore every setting below to its default. This does not remove your box pairing or projects.</div>
+            <button onClick={() => setConfirmReset(true)} className="text-body px-4 py-2 rounded border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
+          </div>
+        </>
+      );
+    }
+    return null;
+  };
+
+  // The plugins toggle is a schema entry but also drives the registry list,
+  // so render it specially here (it's Mac-local, not a config key). We pull
+  // it out of schemaEntries and render it above the registry list.
+  const pluginsToggleEntry = schemaEntries.find((e) => e.id === "pluginsEnabled");
+
   return (
-    <div className="fixed inset-0 bg-bg z-50 flex">
-      {/* Left sidebar navigation */}
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-title" className="fixed inset-0 bg-bg z-50 flex">
+      {/* Left sidebar navigation (tablist) */}
       <div className="w-48 bg-bg-soft border-r border-border flex flex-col shrink-0">
-        {/* 40px draggable spacer at the top of the sidebar nav, kept in sync
-            with the h-10 header in App.tsx (BET-332). The matching top-right
-            spacer inside the main content header reserves room for the OS
-            caption buttons (Windows) / traffic lights (macOS). */}
         <div className="titlebar-drag h-10 shrink-0" />
         <div className="p-4 border-b border-border">
-          <h2 className="text-title font-semibold">Settings</h2>
+          <h2 id="settings-title" tabIndex={-1} className="text-title font-semibold">Settings</h2>
         </div>
-        <nav className="flex-1 py-2">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`w-full text-left px-4 py-2 text-body transition-colors ${
-                activeTab === tab.id
-                  ? "bg-accent/10 text-accent border-r-2 border-accent"
-                  : "text-text-muted hover:text-text hover:bg-bg-elev"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+        <nav className="flex-1 py-2" role="tablist" aria-label="Settings sections">
+          {SETTING_SECTIONS.map((tab) => {
+            const modified = sectionIsModified(SETTINGS, tab.id, PLATFORM, values);
+            return (
+              <button
+                key={tab.id}
+                ref={(el) => { railRefs.current[tab.id] = el; }}
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                aria-controls={`panel-${tab.id}`}
+                id={`tab-${tab.id}`}
+                onClick={() => setActiveTab(tab.id)}
+                onKeyDown={onRailKeyDown}
+                className={`w-full text-left px-4 py-2 text-body transition-colors ${
+                  activeTab === tab.id ? "bg-accent/10 text-accent border-r-2 border-accent" : "text-text-muted hover:text-text hover:bg-bg-elev"
+                }`}
+              >
+                <span className="inline-flex items-center gap-2">
+                  {tab.label}
+                  {modified && <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-accent" title="Modified" />}
+                </span>
+              </button>
+            );
+          })}
         </nav>
-        <div className="p-3 border-t border-border">
-          <button
-            onClick={onClose}
-            className="w-full text-left text-meta text-text-muted hover:text-text px-2 py-1 rounded hover:bg-bg-elev transition-colors"
-          >
-            Close
-          </button>
-        </div>
       </div>
 
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Header with close button */}
-        <div className="flex items-center justify-end p-4 border-b border-border">
-          <button
-            onClick={onClose}
-            className="text-text-muted hover:text-text text-body px-3 py-2 rounded hover:bg-bg-elev transition-colors inline-flex items-center"
-            aria-label="Close settings"
-          >
-            <X size={16} aria-hidden="true" />
-          </button>
-          {/* Trailing spacer — Windows paints min/max/close over the top-right
-              of the window; this keeps the ✕ from sitting under them.
-              Zero-width everywhere else. */}
+        <div className="flex items-center gap-3 p-4 border-b border-border">
+          <div className="flex-1 relative">
+            <Search size={14} aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-text-faint" />
+            <input type="text" placeholder="Find a setting…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search settings" className="w-full max-w-sm bg-bg-soft border border-border pl-8 pr-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
+          </div>
+          <button onClick={onClose} className="text-text-muted hover:text-text text-body px-3 py-2 rounded hover:bg-bg-elev transition-colors inline-flex items-center" aria-label="Close settings"><X size={16} aria-hidden="true" /></button>
           <div className="titlebar-inset-right" />
         </div>
 
-        {/* Scrollable content */}
         <div className="flex-1 overflow-y-auto p-6">
-          {/* Connection Tab */}
-          {activeTab === "connection" && (
-            <div className="max-w-2xl space-y-6">
-              {/* Mobile pairing (BET-80): generate a QR code the mobile app can scan
-                  to auto-connect. The QR encodes the canonical box-form
-                  `manta://pair?box=<boxId>&code=<code>` (BET-177 §2.4 — the old
-                  `?id=&token=` form was a parsePairPayload rejector). The code
-                  is one-time, valid for ~5 minutes. A new code supersedes any
-                  prior code. */}
-              <div>
-                <h3 className="text-title font-semibold mb-4">Pair phone</h3>
-                <div className="text-body text-text-faint mb-4">
-                  Scan this QR with the MANTA mobile app to connect it to your box. The
-                  code is one-time and valid for ~5 minutes. Generate a new code if the
-                  old one expires.
-                </div>
-                {!pairing ? (
-                  <button
-                    onClick={mintPairingCode}
-                    disabled={pairingMinting}
-                    className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {pairingMinting ? "Generating…" : "Generate pairing code"}
-                  </button>
-                ) : pairing.ok ? (
-                  <div className="space-y-4">
-                    <div className="flex items-start gap-4">
-                      {/* QR code container — rendered as an <img> from the QR data URL. */}
-                      <div className="bg-white p-2 rounded border border-border shrink-0">
-                        <PairingQR
-                          boxId={pairing.boxId}
-                          pairingCode={pairing.pairingCode}
-                        />
-                      </div>
-                      <div className="flex-1 space-y-2">
-                        <div className="text-body">
-                          <span className="text-text-muted">Code:</span>{" "}
-                          <span className="font-mono text-text">{pairing.pairingCode}</span>
-                        </div>
-                        <div className="text-body">
-                          <span className="text-text-muted">Box ID:</span>{" "}
-                          <span className="font-mono text-text break-all" title={pairing.boxId}>
-                            {pairing.boxId}
-                          </span>
-                        </div>
-                        {pairingExpiry && (
-                          <PairingCountdown expiry={pairingExpiry} />
-                        )}
-                      </div>
-                    </div>
-                    <button
-                      onClick={mintPairingCode}
-                      disabled={pairingMinting}
-                      className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {pairingMinting ? "Generating…" : "Refresh code"}
-                    </button>
+          {inSearch ? (
+            <div className="max-w-2xl space-y-4">
+              <div className="text-body text-text-faint">{searchHits.length} match{searchHits.length === 1 ? "" : "es"} for “{query.trim()}”</div>
+              {searchHits.length === 0 ? (
+                <div className="text-body text-text-faint">No settings match. Try another term.</div>
+              ) : (
+                searchHits.map((entry) => (
+                  <div key={entry.id} className="border-t border-border pt-4">
+                    <div className="text-micro uppercase text-text-faint mb-1">{SETTING_SECTIONS.find((s) => s.id === entry.section)?.label}</div>
+                    {renderField(entry)}
                   </div>
-                ) : (
-                  <div className="text-body text-danger">
-                    {pairing.error}
-                  </div>
-                )}
-              </div>
-
-              <div className="border-t border-border pt-6">
-                <div className="flex items-center justify-between">
-                  <div className="text-body text-text-faint">
-                    Re-run the guided setup (pairing, providers, first project).
-                  </div>
-                  <button
-                    onClick={() => {
-                      void useStore.getState().relaunchOnboarding();
-                      onClose();
-                    }}
-                    className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text shrink-0"
-                  >
-                    Run setup again
-                  </button>
-                </div>
-              </div>
-
-              {/* Remove box (BET-357 §2): clears the local pairing triple and
-                  asks the box (when reachable) to revoke the current box_token.
-                  Always clears locally — the unreachable-box path is honored
-                  per the spec, with the UnpairOutcome surfaced as a note when
-                  remote revocation didn't reach the box. */}
-              <div className="border-t border-border pt-6">
-                <div className="flex items-center justify-between">
-                  <div className="text-body text-text-faint">
-                    Forget this box on the desktop. If the box is reachable,
-                    its current token is revoked too.
-                  </div>
-                  <button
-                    onClick={removeBox}
-                    disabled={removingBox}
-                    className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-danger hover:border-danger disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-                  >
-                    {removingBox ? "Removing…" : "Remove box"}
-                  </button>
-                </div>
-                {removeResult && !removeResult.ok && (
-                  <div className="text-body text-warn mt-3">
-                    {removeResult.message}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* AI Tab */}
-          {activeTab === "ai" && (
-            <div className="max-w-2xl space-y-6">
-              {/* Consolidated model table (BET-215). Replaces the previous
-                  "Default model" <select>, the read-only "Model reference"
-                  catalog, and `SubagentsCard`. The table owns its own
-                  load + save (per-model toggles persist on change, the
-                  Default radio persists on change); Settings' bottom Save
-                  does not touch model state. */}
-              <ModelsCard />
-
-              <div className="border-t border-border pt-6">
-                <h3 className="text-title font-semibold mb-4">Prompt cache TTL</h3>
-                <TtlToggle ttl={ttl} setTtl={setTtl} />
-                <div className="text-meta text-text-faint mt-2">
-                  How long Anthropic keeps a session's prompt cache warm between
-                  requests. Used to predict when a session has gone stale and show
-                  "/clear to save Nk tokens" in the chat footer. manta doesn't set
-                  this value itself — opencode does, when it builds the Anthropic
-                  request. Match this setting to opencode's{" "}
-                  <code className="text-text-muted">cache_control.ttl</code> so the
-                  staleness pill fires at the right time. 1h is the better default
-                  for manta's typical "step away to read code" pattern.
-                </div>
-              </div>
-
-              {/* Subscriptions (BET-314) — sits ABOVE ProvidersCard so the
-                  user sees the one-tap OAuth path before the
-                  bring-your-own-key path. New card, not a widening of
-                  ProvidersCard (see src/server/providers.mjs's baseURL
-                  filter). */}
-              <SubscriptionsCard />
-
-              <div className="border-t border-border pt-6">
-                <ProvidersCard />
-              </div>
-
-              {/* AI CLI launch options (BET-138 refinement) — flags used when
-                  launching an AI CLI (e.g. Claude Code) directly in a
-                  session's terminal via the session-mode dropdown. Only CLIs
-                  detected on this box (binary on PATH + provider connected)
-                  are shown; an empty list renders nothing beyond the muted
-                  hint. */}
-              {availableLaunchers.some((l) => l.flags.length > 0) && (
-                <div className="border-t border-border pt-6">
-                  <h3 className="text-title font-semibold mb-1">AI CLI launch options</h3>
-                  <div className="text-body text-text-faint mb-4">
-                    Flags used when launching an AI CLI (e.g. Claude Code) directly in a
-                    session's terminal. Only CLIs detected on this box are shown.
-                  </div>
-                  <div className="space-y-4">
-                    {availableLaunchers
-                      .filter((l) => l.flags.length > 0)
-                      .map((l) => (
-                        <div key={l.id} className="space-y-2">
-                          <div className="text-body font-medium text-text">{l.label}</div>
-                          {l.flags.map((f) => (
-                            <label
-                              key={f.key}
-                              className="flex items-start gap-3 text-body cursor-pointer"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]}
-                                onChange={(e) => setLauncherFlag(l.id, f.key, e.target.checked)}
-                                className="mt-px"
-                              />
-                              <span>{f.label}</span>
-                            </label>
-                          ))}
-                        </div>
-                      ))}
-                  </div>
-                </div>
+                ))
               )}
-
-              <div className="border-t border-border pt-6">
-                <h3 className="text-title font-semibold mb-4">Skill registries</h3>
-                <div className="text-body text-text-faint mb-3">
-                  Extra skill registry URLs fetched by opencode on startup. The default manta registry is
-                  always included. Add your own to surface additional skills in the AI's toolset.
-                </div>
-                <div className="space-y-2">
-                  {registryUrls.map((url) => (
-                    <div key={url} className="flex items-center gap-2">
-                      <code className="flex-1 text-body bg-bg-soft border border-border rounded px-3 py-2 text-text-muted truncate">
-                        {url}
-                      </code>
-                      <button
-                        onClick={() => removeRegistryUrl(url)}
-                        className="text-body text-text-faint hover:text-text px-2 inline-flex items-center"
-                        title="Remove"
-                        aria-label="Remove registry URL"
-                      >
-                        <X size={14} aria-hidden="true" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <div className="flex gap-2 mt-3">
-                  <input
-                    placeholder="https://example.com/skills"
-                    value={newRegistryUrl}
-                    onChange={(e) => setNewRegistryUrl(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && addRegistryUrl()}
-                    className="flex-1 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
-                  />
-                  <button
-                    onClick={addRegistryUrl}
-                    disabled={!newRegistryUrl.trim()}
-                    className="px-4 py-2 text-body bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Add
-                  </button>
-                </div>
-              </div>
             </div>
-          )}
-
-          {/* Voice Tab */}
-          {activeTab === "voice" && (
-            <div className="max-w-2xl space-y-6">
-              <div>
-                <h3 className="text-title font-semibold mb-4">Voice (Groq)</h3>
-                <div className="text-body text-text-faint mb-4">
-                  Enables push-to-talk dictation in the chat composer. Press{" "}
-                  <kbd className="text-text-muted">ctrl+m</kbd> to start recording — a
-                  pulsing red ring appears around the input. Press{" "}
-                  <kbd className="text-text-muted">⏎</kbd> to stop and send, or{" "}
-                  <kbd className="text-text-muted">ctrl+m</kbd> again to stop and edit
-                  before sending. <kbd className="text-text-muted">esc</kbd> cancels.
-                  Get a key at{" "}
-                  <a
-                    href="https://console.groq.com/keys"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      getMantaPreload()?.openExternal("https://console.groq.com/keys");
-                    }}
-                    className="text-accent hover:underline"
-                  >
-                    console.groq.com/keys
-                  </a>
-                  . Free tier covers normal use.
-                </div>
-                <div className="space-y-3">
-                  <div className="space-y-1">
-                    <label className="block text-micro font-semibold uppercase text-text-muted">
-                      Groq API key
-                    </label>
-                    <input
-                      type="password"
-                      placeholder="gsk_… (leave blank to disable)"
-                      value={groqKey}
-                      onChange={(e) => setGroqKey(e.target.value)}
-                      autoComplete="off"
-                      spellCheck={false}
-                      className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="block text-micro font-semibold uppercase text-text-faint">
-                        Transcription model
-                      </label>
-                      <input
-                        placeholder="whisper-large-v3-turbo"
-                        value={voiceTrModel}
-                        onChange={(e) => setVoiceTrModel(e.target.value)}
-                        spellCheck={false}
-                        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="block text-micro font-semibold uppercase text-text-faint">
-                        Command classifier model
-                      </label>
-                      <input
-                        placeholder="llama-3.1-8b-instant"
-                        value={voiceCmdModel}
-                        onChange={(e) => setVoiceCmdModel(e.target.value)}
-                        spellCheck={false}
-                        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Files Tab */}
-          {activeTab === "files" && (
-            <div className="max-w-2xl space-y-6">
-              <div className="border-t border-border pt-6">
-                <h3 className="text-title font-semibold mb-4">Agent file delivery</h3>
-                <div className="space-y-3">
-                  <label className="flex items-start gap-3 text-body cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={agentPush}
-                      onChange={(e) => setAgentPush(e.target.checked)}
-                      className="mt-px"
-                    />
+          ) : (
+            <div role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`} className="max-w-2xl space-y-6">
+              {activeTab === "plugins" && pluginsToggleEntry ? (
+                <div className="space-y-1">
+                  <label htmlFor={fieldId(pluginsToggleEntry)} className="flex items-start gap-3 text-body cursor-pointer">
+                    <input id={fieldId(pluginsToggleEntry)} type="checkbox" checked={pluginsOn} onChange={(e) => void togglePlugins(e.target.checked)} className="mt-px" />
                     <span>
-                      Auto-save files the AI sends
-                      <span className="block text-meta text-text-faint mt-1">
-                        When the AI drops a file in{" "}
-                        <code className="text-text-muted">~/.manta-outbox</code> on the remote, save it to your
-                        downloads folder without asking. Off = a toast asks before each file is saved.
-                      </span>
-                    </span>
-                  </label>
-                  <div className="space-y-1">
-                    <label className="block text-micro font-semibold uppercase text-text-muted">
-                      Downloads directory
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="~/Downloads (default)"
-                      value={dlDir}
-                      onChange={(e) => setDlDir(e.target.value)}
-                      className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
-                    />
-                    <div className="text-meta text-text-faint">
-                      Destination for AI-sent files. Absolute path; leave empty for your OS Downloads folder.
-                    </div>
-                  </div>
-                </div>
-              </div>
-              {/* BET-246: per-session git-worktree creation + clean-on-close.
-                  Two independent toggles, same markup as allowAgentPush.
-                  Global-only — the per-window override lives in Sidebar. */}
-              <div className="border-t border-border pt-6">
-                <h3 className="text-title font-semibold mb-4">Session worktrees</h3>
-                <div className="space-y-3">
-                  <label className="flex items-start gap-3 text-body cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={worktreeOn}
-                      onChange={(e) => setWorktreeOn(e.target.checked)}
-                      className="mt-px"
-                    />
-                    <span>
-                      Create git worktree for new sessions
-                      <span className="block text-meta text-text-faint mt-1">
-                        When creating a new chat session in a project that's a git
-                        repo, automatically branch a sibling worktree and start the
-                        session on its own branch. Has no effect on non-git projects.
-                      </span>
-                    </span>
-                  </label>
-                  <label className="flex items-start gap-3 text-body cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={worktreeClean}
-                      onChange={(e) => setWorktreeClean(e.target.checked)}
-                      className="mt-px"
-                    />
-                    <span>
-                      Remove worktree when a session is closed
-                      <span className="block text-meta text-text-faint mt-1">
-                        Deletes the session's git worktree on close. Prompts
-                        before discarding uncommitted changes.
-                      </span>
+                      {pluginsToggleEntry.label}
+                      {pluginsToggleEntry.help && <span className="block text-meta text-text-faint mt-1">{pluginsToggleEntry.help}</span>}
                     </span>
                   </label>
                 </div>
-              </div>
+              ) : (
+                schemaEntries.map((entry) => <div key={entry.id}>{renderField(entry)}</div>)
+              )}
+              {renderCustom(activeTab)}
             </div>
           )}
-
-          {/* Plugins Tab (BET-189 / BET-190) */}
-          {activeTab === "plugins" && (
-            <div className="max-w-2xl space-y-6">
-              <div>
-                <h3 className="text-title font-semibold mb-4">Run plugins on this machine</h3>
-                <label className="flex items-start gap-3 text-body cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={pluginsOn}
-                    onChange={(e) => setPluginsOn(e.target.checked)}
-                    className="mt-px"
-                  />
-                  <span>
-                    Lets the AI trigger the plugins below — each is a YAML file on
-                    this machine; the AI can also create and edit them when this is on.
-                    Takes effect after restarting MantaUI.
-                  </span>
-                </label>
-              </div>
-
-              <div className="border-t border-border pt-6">
-                <h3 className="text-title font-semibold mb-4">Installed plugins</h3>
-                {pluginsError ? (
-                  <div className="text-body text-danger break-words">
-                    Failed to load: {pluginsError}
-                  </div>
-                ) : plugins === null ? (
-                  <div className="text-body text-text-faint">Loading…</div>
-                ) : plugins.length === 0 ? (
-                  <div className="text-body text-text-faint">
-                    No plugins installed yet. The AI can author them with{" "}
-                    <code className="text-text-muted">plugin.write</code> when
-                    this toggle is on.
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {plugins.map((p) => (
-                      <div
-                        key={p.name}
-                        className="border border-border rounded p-3 bg-bg-soft space-y-1"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="text-body font-medium text-text">
-                            {p.name}
-                          </span>
-                          {p.valid ? (
-                            <span className="text-meta px-2 py-px rounded bg-ok-bg text-ok">
-                              valid
-                            </span>
-                          ) : (
-                            <span className="text-meta px-2 py-px rounded bg-danger-bg text-danger break-all">
-                              parse error: {p.error}
-                            </span>
-                          )}
-                          <span className="ml-auto text-meta text-text-faint">
-                            {p.stepCount} step{p.stepCount === 1 ? "" : "s"}
-                            {p.timeoutMs != null
-                              ? ` · ${formatTimeout(p.timeoutMs)}`
-                              : ""}
-                          </span>
-                        </div>
-                        {p.description && (
-                          <div className="text-meta text-text-muted">
-                            {p.description}
-                          </div>
-                        )}
-                        {p.inputs.length > 0 && (
-                          <div className="text-meta text-text-faint">
-                            Inputs:{" "}
-                            {p.inputs
-                              .map(
-                                (i) =>
-                                  `${i.id}${
-                                    i.default !== undefined
-                                      ? `=${JSON.stringify(i.default)}`
-                                      : ""
-                                  }`,
-                              )
-                              .join(", ")}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="border-t border-border pt-6">
-                <button
-                  onClick={() => {
-                    const preload = getMantaPreload();
-                    if (preload?.revealInFolder) {
-                      // Pass the `~`-prefixed plugins path; main's
-                      // revealInFolder handler expands it against homedir()
-                      // before shell.showItemInFolder (BET-211 — Electron
-                      // does not expand `~` itself).
-                      void preload.revealInFolder("~/.manta/plugins");
-                    }
-                  }}
-                  className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text"
-                >
-                  Open plugins folder
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* General Tab */}
-          {activeTab === "general" && (
-            <div className="max-w-2xl space-y-6">
-              <div>
-                <h3 className="text-title font-semibold mb-4">Theme</h3>
-                {/* Three segmented options. Applied live on click (applyTheme)
-                    so the user sees the change immediately; persisted on Save.
-                    "System" follows the OS and re-themes live when it flips. */}
-                <div
-                  role="group"
-                  aria-label="Theme"
-                  className="inline-flex rounded-lg border border-border overflow-hidden"
-                >
-                  {(["system", "light", "dark"] as ThemePref[]).map((opt) => (
-                    <button
-                      key={opt}
-                      type="button"
-                      onClick={() => {
-                        setThemePref(opt);
-                        applyTheme(opt);
-                      }}
-                      className={`px-4 py-2 text-body capitalize transition-colors border-r border-border last:border-r-0 ${
-                        themePref === opt
-                          ? "bg-accent-solid"
-                          : "text-text-muted hover:text-text hover:bg-bg-elev"
-                      }`}
-                      style={
-                        themePref === opt
-                          ? { color: "var(--on-accent)" }
-                          : undefined
-                      }
-                    >
-                      {opt}
-                    </button>
-                  ))}
-                </div>
-                <span className="block text-meta text-text-faint mt-2">
-                  System follows your OS appearance and re-themes live.
-                </span>
-              </div>
-
-              <div className="border-t border-border pt-6">
-                <h3 className="text-title font-semibold mb-4">Auto-rename sessions</h3>
-                <label className="flex items-start gap-3 text-body cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={autoRename}
-                    onChange={(e) => setAutoRename(e.target.checked)}
-                    className="mt-px"
-                  />
-                  <span>
-                    Name sessions from the conversation
-                    <span className="block text-meta text-text-faint mt-1">
-                      Every few turns, ask the model for a 1-2 word title and rename
-                      the chat window to match the current work. Overwrites the
-                      window name, including names you set by hand.
-                    </span>
-                  </span>
-                </label>
-              </div>
-
-              <div className="border-t border-border pt-6">
-                <h3 className="text-title font-semibold mb-4">Share analytics</h3>
-                <label className="flex items-start gap-3 text-body cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={analytics}
-                    onChange={(e) => setAnalytics(e.target.checked)}
-                    className="mt-px"
-                  />
-                  <span>
-                    Share anonymized analytics
-                    <span className="block text-meta text-text-faint mt-1">
-                      Sends app and error logs to help improve Manta UI. On by
-                      default. Turn off to stop this instance — desktop and
-                      server — from sending anything.
-                    </span>
-                  </span>
-                </label>
-              </div>
-
-              <div className="border-t border-border pt-6">
-                <h3 className="text-title font-semibold mb-4">About</h3>
-                <div className="text-body text-text-faint">
-                  Manta UI v{clientVersion ?? "…"}
-                </div>
-                <div className="text-meta text-text-faint mt-1">
-                  Desktop client for remote Claude Code sessions.
-                </div>
-                {serverVersion && (
-                  <div className="text-meta text-text-faint mt-1">
-                    Box server v{serverVersion}
-                  </div>
-                )}
-                {/* Downloaded auto-update details (BET-416 §E). "Update
-                    available" is a quiet --accent dot on the Settings sidebar
-                    entry; the install action lives HERE so a downloaded update
-                    always has a path even with no co-occurring version-skew
-                    bar. Mirrors the old "Restart to update" bar's action. */}
-                {updatePrompt && (
-                  <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
-                    <span className="flex-1 text-meta text-text">
-                      Update ready:{" "}
-                      <span className="font-medium">
-                        {updatePrompt.releaseName || updatePrompt.version}
-                      </span>
-                    </span>
-                    <button
-                      onClick={() => { void window.api.autoUpdateInstall(); }}
-                      className="shrink-0 rounded bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium"
-                    >
-                      Restart to update
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Footer with Save/Cancel */}
-        <div className="border-t border-border p-4">
-          {saveError && (
-            <div className="text-body text-danger mb-3">
-              Couldn't save: {saveError}
-            </div>
-          )}
-          <div className="flex justify-end gap-2">
-            <button
-              onClick={onClose}
-              disabled={saving}
-              className="px-4 py-2 text-body text-text-muted hover:text-text disabled:opacity-40"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={save}
-              disabled={saving}
-              className="px-4 py-2 text-body bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
         </div>
       </div>
+
+      {/* Local toast stack — inside the dialog so toasts surface above the overlay. */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center px-4 pb-4">
+        <div className="pointer-events-auto w-full max-w-[420px]">
+          <ToastStack toasts={toasts} onDismiss={dismiss} />
+        </div>
+      </div>
+
+      {/* In-app confirm: Remove box (replaces window.confirm — BET-419 §D). */}
+      {confirmRemove && (
+        <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-remove-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 space-y-4">
+            <h3 id="confirm-remove-title" className="text-title font-semibold">Remove this box?</h3>
+            <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setConfirmRemove(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
+              <button onClick={removeBox} className="px-4 py-2 text-body bg-danger text-white rounded hover:opacity-90">Remove</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* In-app confirm: Reset all settings (BET-419 §B.3). */}
+      {confirmReset && (
+        <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-reset-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 space-y-4">
+            <h3 id="confirm-reset-title" className="text-title font-semibold">Reset all settings?</h3>
+            <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setConfirmReset(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
+              <button onClick={resetAll} className="px-4 py-2 text-body bg-accent-solid text-on-accent rounded hover:opacity-90">Reset</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
