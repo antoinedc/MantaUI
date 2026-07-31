@@ -9,7 +9,7 @@ import {
 import { ChevronRight, ChevronDown, X, Pin, Search } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI } from "./store";
 import { nowMs } from "./clock";
-import type { Project, TmuxWindow, WorktreeInfo } from "../shared/types";
+import type { Project, TmuxWindow } from "../shared/types";
 import {
   classifyCacheAge,
   computeJobNesting,
@@ -49,10 +49,14 @@ export type SidebarHandle = {
 
 type Props = {
   onOpenSettings: () => void;
+  // BET-417: the rail + / + per-project + open the NewSessionScreen instead
+  // of an inline form. null = new-project mode; a string = new-session mode.
+  onNewProject: () => void;
+  onNewSessionInProject: (projectName: string) => void;
 };
 
 export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
-  { onOpenSettings },
+  { onOpenSettings, onNewProject, onNewSessionInProject },
   ref,
 ) {
   const {
@@ -67,7 +71,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     pinnedWindows,
     recentWindows,
     togglePin,
-    worktreePerSession,
     worktreeCleanOnClose,
   } = useStore();
   // Downloaded desktop auto-update (BET-416 §E): signalled as a dot on the
@@ -84,18 +87,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   };
 
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
-  const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [newProjectName, setNewProjectName] = useState("");
-  const [newProjectCwd, setNewProjectCwd] = useState("~");
-  const [cwdSuggestion, setCwdSuggestion] = useState<string | null>(null);
-  const cwdDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [detectedWorktrees, setDetectedWorktrees] = useState<WorktreeInfo[] | null>(null);
-  const [creating, setCreating] = useState(false);
-
-  const [newSessionFor, setNewSessionFor] = useState<string | null>(null);
-  const [newSessionName, setNewSessionName] = useState("");
-  const [newSessionWorktree, setNewSessionWorktree] = useState(false);
-  const [newSessionIsGitRepo, setNewSessionIsGitRepo] = useState(false);
 
   const [confirmDeleteFor, setConfirmDeleteFor] = useState<ConfirmDeleteFor>(null);
 
@@ -120,13 +111,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   }, [collapsed]);
 
   useImperativeHandle(ref, () => ({
-    openNewProject: () => setNewProjectOpen(true),
+    openNewProject: () => onNewProject(),
     openNewSessionInActive: () => {
       if (activeProjectName) {
-        setNewSessionFor(activeProjectName);
-        setNewSessionName("");
-        setNewSessionWorktree(worktreePerSession);
-        void probeGitForProject(activeProjectName);
+        onNewSessionInProject(activeProjectName);
         setCollapsed((prev) => {
           const next = new Set(prev);
           next.delete(activeProjectName);
@@ -141,237 +129,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     },
   }));
 
-  const resolveProjectCwd = (projectName: string): string => {
-    const proj = projects.find((p) => p.tmuxSession === projectName);
-    const stored = (proj?.defaultCwd ?? "").trim();
-    if (stored && stored !== "~") return stored;
-    const activeIdx = activeWindowByProject[projectName];
-    const w = proj?.windows.find((x) => x.index === activeIdx)
-      ?? proj?.windows.find((x) => x.active)
-      ?? proj?.windows[0];
-    const fallback = (w?.paneCurrentPath ?? "").trim();
-    if (!fallback) {
-      console.warn(
-        `[Sidebar] resolveProjectCwd: no usable cwd for project "${projectName}" (defaultCwd=${JSON.stringify(stored)}, paneCurrentPath missing)`,
-      );
-    }
-    return fallback;
-  };
-
-  const probeGitForProject = async (projectName: string) => {
-    const cwd = resolveProjectCwd(projectName);
-    if (!cwd || cwd === "~") {
-      setNewSessionIsGitRepo(false);
-      setNewSessionWorktree(false);
-      return;
-    }
-    try {
-      const wts = await window.api.gitListWorktrees(cwd);
-      const isRepo = Array.isArray(wts) && wts.length > 0;
-      setNewSessionIsGitRepo(isRepo);
-      if (!isRepo) setNewSessionWorktree(false);
-    } catch {
-      setNewSessionIsGitRepo(false);
-    }
-  };
-
   const toggleCollapse = (id: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
-
-  const worktreeName = (w: WorktreeInfo): string =>
-    w.path.split("/").filter(Boolean).pop() || w.branch || "wt";
-
-  const resetNewProjectForm = () => {
-    setNewProjectName("");
-    setNewProjectCwd("~");
-    setNewProjectOpen(false);
-    setDetectedWorktrees(null);
-    setCreating(false);
-    setCwdSuggestion(null);
-    if (cwdDebounce.current) clearTimeout(cwdDebounce.current);
-  };
-
-  const refreshCwdSuggestion = (value: string) => {
-    if (cwdDebounce.current) clearTimeout(cwdDebounce.current);
-    if (!value) {
-      setCwdSuggestion(null);
-      return;
-    }
-    cwdDebounce.current = setTimeout(async () => {
-      try {
-        const matches = (await window.api.fsListDirs(value)).filter((m) =>
-          m.startsWith(value),
-        );
-        if (matches.length === 0) {
-          setCwdSuggestion(null);
-          return;
-        }
-        if (matches.length === 1) {
-          setCwdSuggestion(matches[0] + "/");
-          return;
-        }
-        const lcp = matches.reduce((acc, m) => {
-          let i = 0;
-          while (i < acc.length && i < m.length && acc[i] === m[i]) i++;
-          return acc.slice(0, i);
-        });
-        setCwdSuggestion(lcp.length > value.length ? lcp : null);
-      } catch {
-        setCwdSuggestion(null);
-      }
-    }, 80);
-  };
-
-  const onCwdChange = (value: string) => {
-    setNewProjectCwd(value);
-    refreshCwdSuggestion(value);
-  };
-
-  const acceptCwdSuggestion = (): boolean => {
-    if (!cwdSuggestion || !cwdSuggestion.startsWith(newProjectCwd)) return false;
-    if (cwdSuggestion === newProjectCwd) return false;
-    setNewProjectCwd(cwdSuggestion);
-    setCwdSuggestion(null);
-    refreshCwdSuggestion(cwdSuggestion);
-    return true;
-  };
-
-  const createProject = async (mode: "auto" | "all" | "single" = "auto") => {
-    if (creating) return;
-    const name = newProjectName.trim();
-    if (!name) return;
-    const cwd = newProjectCwd.trim() || "";
-
-    if (mode === "auto") {
-      setCreating(true);
-      try {
-        const wts = await window.api.gitListWorktrees(cwd);
-        if (wts.length > 1) {
-          setDetectedWorktrees(wts);
-          setCreating(false);
-          return;
-        }
-      } catch {
-        /* probe failure (no git, network, etc.) → fall through to single */
-      }
-      try {
-        await window.api.tmuxNewSession({
-          name,
-          cwd,
-          windowName: "default",
-          chatMode: true,
-        });
-        resetNewProjectForm();
-        await refresh();
-        setActive(name);
-      } catch (e) {
-        showError(e);
-        setCreating(false);
-      }
-      return;
-    }
-
-    setCreating(true);
-    try {
-      if (mode === "all" && detectedWorktrees && detectedWorktrees.length > 1) {
-        const [first, ...rest] = detectedWorktrees;
-        await window.api.tmuxNewSession({
-          name,
-          cwd: first.path,
-          windowName: worktreeName(first),
-          chatMode: true,
-        });
-        for (const w of rest) {
-          try {
-            await window.api.tmuxNewWindow({
-              sessionName: name,
-              windowName: worktreeName(w),
-              cwd: w.path,
-              chatMode: true,
-            });
-          } catch (e) {
-            showError(e);
-          }
-        }
-      } else {
-        await window.api.tmuxNewSession({
-          name,
-          cwd,
-          windowName: "default",
-          chatMode: true,
-        });
-      }
-      resetNewProjectForm();
-      await refresh();
-      setActive(name);
-    } catch (e) {
-      showError(e);
-      setCreating(false);
-    }
-  };
-
-  const startNewSession = (projectName: string) => {
-    setNewSessionFor(projectName);
-    setNewSessionName("");
-    setNewSessionWorktree(worktreePerSession);
-    void probeGitForProject(projectName);
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      next.delete(projectName);
-      return next;
-    });
-  };
-
-  const createSession = async () => {
-    if (!newSessionFor) return;
-    const sessionFor = newSessionFor;
-    const windowName = newSessionName.trim() || "session";
-    const wantWorktree = newSessionWorktree && newSessionIsGitRepo;
-    let worktreePath: string | undefined;
-    if (wantWorktree) {
-      const projectCwd = resolveProjectCwd(sessionFor);
-      if (!projectCwd || projectCwd === "~") {
-        showError(new Error("project has no cwd; cannot create worktree"));
-        return;
-      }
-      try {
-        const wt = await window.api.gitAddWorktree({ cwd: projectCwd, name: windowName });
-        worktreePath = wt.path;
-      } catch (e) {
-        showError(e);
-        return;
-      }
-    }
-    try {
-      const projects = await window.api.tmuxNewWindow({
-        sessionName: sessionFor,
-        windowName,
-        ...(worktreePath ? { cwd: worktreePath, worktreePath } : {}),
-        chatMode: true,
-      });
-      setNewSessionFor(null);
-      await refresh();
-      const proj = projects.find((p) => p.tmuxSession === sessionFor);
-      const w = proj?.windows.find((x) => x.name === windowName);
-      if (w) {
-        setActive(sessionFor, w.index);
-        try {
-          await window.api.tmuxSelectWindow({
-            sessionName: sessionFor,
-            windowIndex: w.index,
-          });
-        } catch (e) {
-          showError(e);
-        }
-      }
-    } catch (e) {
-      showError(e);
-    }
-  };
 
   const activateWindow = async (proj: Project, idx: number) => {
     setActive(proj.tmuxSession, idx);
@@ -716,7 +479,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             <Search size={15} aria-hidden="true" />
           </button>
           <button
-            onClick={() => setNewProjectOpen(true)}
+            onClick={onNewProject}
             className="text-text-muted hover:text-text text-lg leading-none"
             title={`New project (${MOD_KEY}N)`}
           >
@@ -725,129 +488,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         </div>
       </div>
 
-      {newProjectOpen && (
-        <div className="px-3 pb-3 space-y-2">
-          <input
-            autoFocus
-            placeholder="Project name"
-            value={newProjectName}
-            onChange={(e) => setNewProjectName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !detectedWorktrees) createProject("auto");
-              else if (e.key === "Escape") resetNewProjectForm();
-            }}
-            disabled={!!detectedWorktrees || creating}
-            className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded focus:outline-none focus:border-accent disabled:opacity-60"
-          />
-          <div
-            className={`relative w-full bg-bg-soft border border-border rounded focus-within:border-accent ${
-              !!detectedWorktrees || creating ? "opacity-60" : ""
-            }`}
-          >
-            {cwdSuggestion && cwdSuggestion.startsWith(newProjectCwd) && (
-              <div
-                aria-hidden
-                className="absolute inset-0 px-2 py-1 text-meta flex items-center pointer-events-none whitespace-pre overflow-hidden font-mono"
-              >
-                <span className="invisible">{newProjectCwd}</span>
-                <span className="text-text-faint">
-                  {cwdSuggestion.slice(newProjectCwd.length)}
-                </span>
-              </div>
-            )}
-            <input
-              placeholder="Default cwd (e.g. ~/code/foo)"
-              value={newProjectCwd}
-              onChange={(e) => onCwdChange(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Tab" && cwdSuggestion) {
-                  e.preventDefault();
-                  acceptCwdSuggestion();
-                  return;
-                }
-                if (e.key === "ArrowRight" && cwdSuggestion) {
-                  const el = e.currentTarget;
-                  if (
-                    el.selectionStart === el.value.length &&
-                    el.selectionEnd === el.value.length
-                  ) {
-                    e.preventDefault();
-                    acceptCwdSuggestion();
-                    return;
-                  }
-                }
-                if (e.key === "Enter" && !detectedWorktrees) createProject("auto");
-                else if (e.key === "Escape") {
-                  if (cwdSuggestion) setCwdSuggestion(null);
-                  else resetNewProjectForm();
-                }
-              }}
-              disabled={!!detectedWorktrees || creating}
-              spellCheck={false}
-              autoComplete="off"
-              className="relative w-full bg-transparent border-0 px-2 py-1 text-meta rounded focus:outline-none font-mono"
-            />
-          </div>
-          {detectedWorktrees ? (
-            <div className="space-y-2">
-              <div className="text-meta text-text-muted">
-                Detected {detectedWorktrees.length} git worktrees. Open a session for each?
-              </div>
-              <ul className="text-label text-text-faint space-y-px max-h-32 overflow-y-auto">
-                {detectedWorktrees.map((w) => (
-                  <li key={w.path} className="truncate">
-                    <span className="text-text-muted">{worktreeName(w)}</span>
-                    <span className="text-text-faint"> — {w.path}</span>
-                  </li>
-                ))}
-              </ul>
-              <div className="flex gap-2 flex-wrap">
-                <button
-                  onClick={() => createProject("all")}
-                  disabled={creating}
-                  className="text-meta px-2 py-1 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
-                >
-                  Yes, one per worktree
-                </button>
-                <button
-                  onClick={() => createProject("single")}
-                  disabled={creating}
-                  className="text-meta px-2 py-1 border border-border text-text-muted hover:text-text rounded disabled:opacity-50"
-                >
-                  Just main
-                </button>
-                <button
-                  onClick={resetNewProjectForm}
-                  disabled={creating}
-                  className="text-meta px-2 py-1 text-text-muted hover:text-text"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <div className="flex gap-2">
-                <button
-                  onClick={() => createProject("auto")}
-                  disabled={creating}
-                  className="text-meta px-2 py-1 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
-                >
-                  {creating ? "Checking…" : "Create"}
-                </button>
-                <button
-                  onClick={resetNewProjectForm}
-                  disabled={creating}
-                  className="text-meta px-2 py-1 text-text-muted hover:text-text"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       <div
         className="flex-1 overflow-y-auto px-2 pb-2 outline-none"
         role="tree"
@@ -855,7 +495,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         tabIndex={-1}
         onKeyDown={onRailKeyDown}
       >
-        {projects.length === 0 && !newProjectOpen && (
+        {projects.length === 0 && (
           <div className="px-2 py-3 text-meta text-text-faint">
             No projects yet. Click + or press {MOD_KEY}N.
           </div>
@@ -937,7 +577,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 isProjectActive={isProjectActive}
                 focused={focusedKey === `group:${p.tmuxSession}`}
                 onToggle={() => toggleCollapse(p.tmuxSession)}
-                onNewSession={() => startNewSession(p.tmuxSession)}
+                onNewSession={() => onNewSessionInProject(p.tmuxSession)}
                 onClose={() => setConfirmDeleteFor({ kind: "project", project: p.tmuxSession })}
                 renameTarget={renameTarget}
                 renameValue={renameValue}
@@ -1038,54 +678,9 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                     );
                   })}
 
-                  {newSessionFor === p.tmuxSession && (
-                    <div className="pl-2 pr-1 py-1 space-y-1">
-                      <input
-                        autoFocus
-                        placeholder="Session name (optional)"
-                        value={newSessionName}
-                        onChange={(e) => setNewSessionName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") createSession();
-                          else if (e.key === "Escape") setNewSessionFor(null);
-                        }}
-                        className="w-full bg-bg-soft border border-border px-2 py-px text-meta rounded focus:outline-none focus:border-accent"
-                      />
-                      <label
-                        className={`flex items-center gap-2 text-meta ${
-                          newSessionIsGitRepo ? "cursor-pointer" : "cursor-not-allowed opacity-50"
-                        }`}
-                        title={newSessionIsGitRepo ? undefined : "not a git repository"}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={newSessionWorktree}
-                          disabled={!newSessionIsGitRepo}
-                          onChange={(e) => setNewSessionWorktree(e.target.checked)}
-                          className="accent-accent"
-                        />
-                        <span>Create git worktree</span>
-                      </label>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={createSession}
-                          className="text-meta px-2 py-px bg-accent-solid text-on-accent rounded hover:opacity-90"
-                        >
-                          Create
-                        </button>
-                        <button
-                          onClick={() => setNewSessionFor(null)}
-                          className="text-meta px-2 py-px text-text-muted hover:text-text"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {p.windows.length === 0 && newSessionFor !== p.tmuxSession && (
+                  {p.windows.length === 0 && (
                     <button
-                      onClick={() => startNewSession(p.tmuxSession)}
+                      onClick={() => onNewSessionInProject(p.tmuxSession)}
                       className="block w-full text-left px-2 py-px text-meta text-text-faint hover:text-text"
                     >
                       + new session

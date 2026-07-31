@@ -4,6 +4,7 @@ import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
 import { Settings } from "./Settings";
 import { Onboarding } from "./Onboarding";
+import { NewSessionScreen } from "./NewSessionScreen";
 import { useStore, flatSessions, resolveSessionOwner } from "./store";
 import { resolveTransportMode } from "../shared/transport.mjs";
 import { getMantaPreload } from "./preloadAccess";
@@ -16,7 +17,6 @@ import {
 } from "./chatShared";
 import { chooseUpdateSkewVariant, registerMountedTerminal, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
-import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
@@ -74,6 +74,21 @@ export function App() {
   const showOnboarding = enterOnboarding || onboardingLatched;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const sidebarRef = useRef<SidebarHandle>(null);
+
+  // BET-417: the new-session screen replaces the old inline forms. null =
+  // not shown. { mode: "new-project" } = new-project (creates a tmux
+  // session). { mode: "new-session", projectName } = new window in an
+  // existing project. The zero-project state (projects.length === 0) shows
+  // it full-panel instead of a dead placeholder.
+  const [newSessionScreen, setNewSessionScreen] = useState<
+    | null
+    | { mode: "new-project" }
+    | { mode: "new-session"; projectName: string }
+  >(null);
+
+  const openNewProject = () => setNewSessionScreen({ mode: "new-project" });
+  const openNewSessionInProject = (name: string) =>
+    setNewSessionScreen({ mode: "new-session", projectName: name });
 
   // Same pattern for chat-mode windows: mount a ChatPanel for each opencode
   // session we've ever opened, keep it mounted so scroll position + in-flight
@@ -742,7 +757,12 @@ export function App() {
 
   return (
     <div className="h-full w-full flex bg-bg text-text">
-      <Sidebar ref={sidebarRef} onOpenSettings={() => setSettingsOpen(true)} />
+      <Sidebar
+        ref={sidebarRef}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onNewProject={openNewProject}
+        onNewSessionInProject={openNewSessionInProject}
+      />
       <main className="flex-1 flex flex-col min-w-0">
         {/* At most ONE full-width bar (BET-416 §E). `activeBanner` is the
             single highest-severity condition across reconnecting / incompatible
@@ -919,15 +939,15 @@ export function App() {
         </div>
         <div className="flex-1 relative">
           {projects.length === 0 ? (
-            // Zero-project state (BET-416 §F). An unpaired config always
-            // routes to onboarding, so this branch is only reached when the
-            // box IS paired but has no projects yet — the dead "Open Settings
-            // to connect to your box." fallback was deleted (unreachable).
-            // The new-session composer (BET-417) will become this zero state;
-            // until it lands, the ⌘N hint holds the slot.
-            <div className="h-full flex items-center justify-center text-text-faint text-body">
-              {`Create a project (${MOD_KEY}N) to start.`}
-            </div>
+            // Zero-project state (BET-416 §F / BET-417 §A): the new-session
+            // composer IS the app's zero state. An unpaired config routes to
+            // onboarding, so this branch is only reached when the box IS
+            // paired but has no projects yet.
+            <NewSessionScreen
+              projectName={null}
+              onDone={() => setNewSessionScreen(null)}
+              onCancel={() => setNewSessionScreen(null)}
+            />
           ) : (
             <>
               {/* Terminal / AI-TUI layer (BET-138, BET-347): one per
@@ -986,6 +1006,22 @@ export function App() {
                   </div>
                 );
               })}
+              {/* New-session screen overlay (BET-417): shown over the panel
+                  when the user hits + or Cmd+N/T. Covers the panel area
+                  (sidebar stays visible so the user can click away). */}
+              {newSessionScreen && (
+                <div className="absolute inset-0 z-30 bg-bg">
+                  <NewSessionScreen
+                    projectName={
+                      newSessionScreen.mode === "new-project"
+                        ? null
+                        : newSessionScreen.projectName
+                    }
+                    onDone={() => setNewSessionScreen(null)}
+                    onCancel={() => setNewSessionScreen(null)}
+                  />
+                </div>
+              )}
             </>
           )}
         </div>
