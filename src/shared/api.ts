@@ -262,6 +262,15 @@ export interface Api {
     sessionName: string;
     windowIndex: number;
   }): Promise<Project[]>;
+  // BET-421: bare session lifecycle for the ephemeral onboarding verifier.
+  // create makes a fresh opencode session in `directory` (no tmux window,
+  // no project); deleteRaw drops it by id alone. Together they let the
+  // verifier probe the box and leave nothing behind.
+  opencodeCreateEphemeralSession(input: {
+    directory: string;
+    title?: string;
+  }): Promise<{ ok: boolean; sessionId?: string; error?: string }>;
+  opencodeDeleteSessionRaw(sessionId: string): Promise<{ ok: boolean }>;
 
   // Scheduled prompts (manta-server owned; desktop reaches it over -L 18787).
   scheduleList(sessionId?: string): Promise<ScheduledJob[]>;
@@ -381,6 +390,9 @@ export interface Api {
   // ptyKill(sessionKey). Both calls together release the full session so
   // a fresh start can register under the SAME name.
   claudeLoginCancel(sessionKey: string): Promise<{ ok: boolean }>;
+  // BET-421 §E: is the `claude` CLI installed on the box? The connect card
+  // runs the lazy installer before sign-in when it isn't.
+  opencodeClaudeCliStatus(): Promise<{ installed: boolean; path: string }>;
 
   // Server version (BET-180): returns the manta-server's package.json version,
   // served in-process via the `server:version` RPC channel (no HTTP round

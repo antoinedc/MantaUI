@@ -15,11 +15,12 @@
 // Settings → Subscriptions card consumes, so an in-app Anthropic sign-in
 // works identically here and there.
 //
-// Helpers (canContinueProviders, customDraftError) used to live in
-// `providersStepLogic.ts`; they're now inlined because that file became
-// dead weight after the model picker was removed from onboarding (the
-// surviving helpers had only this single consumer). Inlining keeps the
-// "providersStep" surface area to one file.
+// Helpers (canContinueProviders) used to live in `providersStepLogic.ts`;
+// they're now inlined because that file became dead weight after the model
+// picker was removed from onboarding (the surviving helpers had only this
+// single consumer). Inlining keeps the "providersStep" surface area to one
+// file. The custom-provider form + its validator (BET-421 §D) live in
+// CustomProviderForm.tsx / chatUtils.ts and are shared with Settings.
 //
 // `canContinueProviders(statuses)` is still the Continue gate — a
 // subscription connected seconds ago counts immediately because the same
@@ -36,8 +37,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Check } from "lucide-react";
 import type { SubscriptionStatus } from "../shared/types";
 import { ConnectProvider } from "./ConnectProvider";
+import { CustomProviderForm } from "./CustomProviderForm";
 import { StepFooter } from "./onboardingUi";
-import { AddEndpointForm, type EndpointDraft } from "./AddEndpointForm";
 
 const DANGER = "var(--danger)";
 const SUCCESS = "var(--ok)";
@@ -50,10 +51,6 @@ const SUCCESS = "var(--ok)";
 export function canContinueProviders(statuses: SubscriptionStatus[]): boolean {
   return statuses.some((s) => s.connected);
 }
-
-// BET-420: the custom-endpoint add form + its validator are shared with
-// Settings (Accounts) via AddEndpointForm / validateEndpointDraft, so a
-// scheme-less URL is rejected identically in onboarding and Settings.
 
 export function ProvidersStep({
   onBack,
@@ -115,39 +112,6 @@ export function ProvidersStep({
     },
     [refresh],
   );
-
-  const submitCustom = async (
-    draft: EndpointDraft,
-    onDone: () => Promise<void>,
-  ): Promise<string | null> => {
-    // The shared AddEndpointForm already validated the draft (scheme check),
-    // so we only persist + restart here.
-    try {
-      const res = await window.api.opencodeSetProviders({
-        upsert: [
-          {
-            id: draft.id.trim(),
-            name: draft.name.trim() || draft.id.trim(),
-            baseURL: draft.baseURL.trim(),
-            apiKey: draft.apiKey,
-            enabledModels: [],
-          },
-        ],
-      });
-      if (!res.ok) return res.error ?? "Couldn't save the provider.";
-      try {
-        await window.api.opencodeRestart();
-      } catch (e) {
-        return `Provider saved, but restarting opencode failed: ${
-          e instanceof Error ? e.message : String(e)
-        }`;
-      }
-      await onDone();
-      return null;
-    } catch (e) {
-      return e instanceof Error ? e.message : String(e);
-    }
-  };
 
   // Render nothing while the auto-skip path is in flight (the shell will
   // have already advanced). Returning null here is what keeps the user
@@ -243,12 +207,11 @@ export function ProvidersStep({
         </button>
         {showCustom && (
           <div className="mt-3">
-            <AddEndpointForm
-              onAdd={(draft) => submitCustom(draft, async () => {
+            <CustomProviderForm
+              onSaved={async () => {
                 setShowCustom(false);
                 await refresh();
-              })}
-              busy={false}
+              }}
             />
           </div>
         )}
@@ -263,4 +226,3 @@ export function ProvidersStep({
     </div>
   );
 }
-

@@ -1207,6 +1207,36 @@ function resolveClaudeBin() {
   return "claude";
 }
 
+/**
+ * BET-421 §E: is the `claude` CLI installed on this box? Used by the
+ * connect card to decide whether to run the lazy installer before sign-in.
+ * Pure over an injected `existsFn` so the decision is unit-testable.
+ * Returns `{ installed, path }` — `path` is the resolved binary path, or
+ * `"claude"` (the bare-name fallback) when nothing is on disk.
+ */
+export function claudeCliStatus({ existsFn = existsSync } = {}) {
+  const bin = resolveClaudeBinExists(existsFn);
+  return { installed: bin.installed, path: bin.path };
+}
+
+// Separated from resolveClaudeBin so claudeCliStatus can report the resolved
+// path AND whether it actually exists (resolveClaudeBin returns "claude" as
+// a last-resort bare name, which is NOT "installed").
+function resolveClaudeBinExists(existsFn) {
+  const candidates = [
+    path.join(homedir(), ".local", "bin", "claude"),
+    "/usr/local/bin/claude",
+  ];
+  for (const c of candidates) {
+    try {
+      if (existsFn(c)) return { installed: true, path: c };
+    } catch {
+      // ignore and try the next candidate
+    }
+  }
+  return { installed: false, path: "claude" };
+}
+
 /** Best-effort read + parse of ~/.claude/.credentials.json. Null on any
  *  read or parse failure (file missing, permissions, malformed JSON). */
 function readCredsSnapshot() {

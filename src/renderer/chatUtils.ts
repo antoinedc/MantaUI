@@ -2245,6 +2245,23 @@ export type ConnectPhase =
       preExisting?: boolean;
     }
   | {
+      // BET-421 §E: the `claude` CLI is not on the box. The card spawns the
+      // official installer over the pty bus (launcher `claude-cli-install`)
+      // and polls `opencodeClaudeCliStatus()` until the binary appears. On
+      // success it re-fires `{action:"start"}` to enter `needsClaudeLogin`
+      // using the SAME server-side sessionKey (startClaudeLogin only stamps
+      // metadata + backs up credentials; it does not spawn, so the key is
+      // still valid). On failure the user gets Try again / Use a different
+      // model / Install manually.
+      kind: "installingClaudeCli";
+      ptySessionKey: string;
+      // The sessionKey the server already minted for the eventual
+      // `needsClaudeLogin` — reused after install so we don't double-mint.
+      loginSessionKey: string;
+      startedAt: number;
+      cwd: string;
+    }
+  | {
       // BET-354: `restarted` is true when the server already called
       // `restartOpencode()` for this transition (the Claude "completed"
       // path). When true, the `applying` effect skips the renderer's
@@ -2258,7 +2275,7 @@ export type ConnectPhase =
       restarted?: boolean;
     }
   | { kind: "done" }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string; reason?: "claude-cli-install" };
 
 /**
  * Pull the device code out of an opencode OAuth instructions string, e.g.
@@ -2275,6 +2292,85 @@ export function parseDeviceCode(instructions: string): string | null {
   if (typeof instructions !== "string" || instructions.length === 0) return null;
   const m = instructions.match(/\bcode[:\s]+([A-Z0-9]+-[A-Z0-9]+)/i);
   return m ? m[1] : null;
+}
+
+/**
+ * BET-421 §D: when parseDeviceCode returns null (the provider reformatted
+ * the sentence and the chip would silently vanish), point the user at the
+ * verbatim instructions block instead of rendering an empty code slot.
+ * Returns the hint string the waiting card renders under the URL; null when
+ * a code WAS parsed (caller shows the chip instead).
+ */
+export function deviceCodeFallback(instructions: string): string | null {
+  if (parseDeviceCode(instructions) !== null) return null;
+  if (typeof instructions === "string" && instructions.trim().length > 0) {
+    return "The code is in the message below — copy it from there.";
+  }
+  return null;
+}
+
+/**
+ * BET-421 §D: format the remaining time on a device-code poll as
+ * "M:SS remaining". Clamped at 0; NaN-safe. Pure so the countdown display
+ * is unit-testable.
+ */
+export function formatRemaining(
+  startedAt: number,
+  now: number,
+  limitMs: number,
+): string {
+  if (
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(now) ||
+    !Number.isFinite(limitMs)
+  ) {
+    return "0:00 remaining";
+  }
+  const ms = Math.max(0, limitMs - (now - startedAt));
+  const totalSec = Math.ceil(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")} remaining`;
+}
+
+/**
+ * BET-421 §D: derive an opencode provider `id` from a human-readable name.
+ * Lowercase, ASCII alphanumeric + hyphens only, collapsed whitespace →
+ * single hyphen, trimmed leading/trailing hyphens. Non-ASCII chars are
+ * dropped (opencode ids are ASCII-safe keys persisted in opencode.jsonc).
+ * Returns "" for an empty/whitespace-only name so the caller can gate the
+ * save button. Pure so the derivation is unit-testable.
+ */
+export function slugifyProviderId(name: string): string {
+  if (typeof name !== "string") return "";
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug;
+}
+
+/**
+ * BET-421 §D: shared validator for the custom-provider add form used by BOTH
+ * the onboarding step (ProvidersStep) and Settings → Accounts (ProvidersCard).
+ * The id is DERIVED from the name (slugifyProviderId), so the form never asks
+ * for it — this validator gates on name + baseURL, not id. Returns the reason
+ * the draft is invalid, or null when it's submittable. Pure so both call sites
+ * share one source of truth and the validator is unit-testable.
+ */
+export function customProviderDraftError(draft: {
+  name: string;
+  baseURL: string;
+}): string | null {
+  if (!draft.name.trim()) return "Name is required.";
+  if (!slugifyProviderId(draft.name)) {
+    return "Name must contain a letter or digit.";
+  }
+  if (!draft.baseURL.trim()) return "Base URL is required.";
+  if (!/^https?:\/\//i.test(draft.baseURL.trim())) {
+    return "Base URL must start with http:// or https://.";
+  }
+  return null;
 }
 
 /**
@@ -2296,6 +2392,8 @@ export function connectPhaseLabel(state: ConnectPhase): string {
       return state.preExisting
         ? "Already signed in"
         : "Awaiting Claude sign-in";
+    case "installingClaudeCli":
+      return "Installing the Claude CLI";
     case "applying":
       return "Applying…";
     case "done":

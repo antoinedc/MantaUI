@@ -631,6 +631,14 @@ export const IPC = {
   // @manta-session-id user-option. The renderer notices the new id and
   // unmounts/remounts ChatPanel.
   opencodeClearSession: "opencode:clear-session",
+  // BET-421: bare opencode session create/delete with NO tmux window. Used
+  // by the onboarding verifier to spin up an ephemeral session, send one
+  // probe prompt, confirm a real assistant reply, and delete the session
+  // — leaving no project and no session behind on the box. Mirrors the
+  // throwaway-session pattern opencode:generate-title already uses
+  // server-side, exposed here so the renderer can drive the staged UI.
+  opencodeCreateEphemeralSession: "opencode:create-ephemeral-session",
+  opencodeDeleteSessionRaw: "opencode:delete-session-raw",
   // Auto-rename: generate a short 1-2 word title for a session by spawning a
   // throwaway opencode session, prompting it to summarize the conversation,
   // then deleting it. Returns the RAW model reply (renderer sanitizes). Used
@@ -656,6 +664,10 @@ export const IPC = {
   // shared with every other terminal, so cancellation here + pty:kill
   // there = full teardown).
   claudeLoginCancel: "claude:login-cancel",
+  // BET-421 §E: probe whether the `claude` CLI is installed on the box, so
+  // the connect card can run the lazy installer before sign-in when it
+  // isn't. Returns { installed, path }.
+  opencodeClaudeCliStatus: "opencode:claude-cli-status",
 
   // ---- voice (Groq STT + lightweight classifier) ----
   // Renderer captures audio via MediaRecorder, ships the ArrayBuffer to

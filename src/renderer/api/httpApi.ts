@@ -884,6 +884,11 @@ export const httpApi: Api = {
   opencodeCompactSession: (sessionId) =>
     rpc(IPC.opencodeCompactSession, sessionId),
   opencodeDeleteSession: (input) => rpc(IPC.opencodeDeleteSession, input),
+  // BET-421: ephemeral session lifecycle for the onboarding verifier.
+  opencodeCreateEphemeralSession: (input) =>
+    rpc(IPC.opencodeCreateEphemeralSession, input),
+  opencodeDeleteSessionRaw: (sessionId) =>
+    rpc(IPC.opencodeDeleteSessionRaw, sessionId),
 
   // -- scheduled prompts (manta-server owned; in-process on mobile) --
   scheduleList: (sessionId) => rpc(IPC.scheduleList, sessionId),
@@ -988,6 +993,8 @@ export const httpApi: Api = {
   // (server-side) so a fresh start can register under the SAME name.
   claudeLoginCancel: (sessionKey: string) =>
     rpc<{ ok: boolean }>(IPC.claudeLoginCancel, sessionKey),
+  // BET-421 §E: claude CLI presence probe for the lazy install.
+  opencodeClaudeCliStatus: () => rpc(IPC.opencodeClaudeCliStatus),
 
   // -- server version (BET-180, BET-428) --
   // Returns the manta-server's package.json version. In-process via the

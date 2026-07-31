@@ -68,6 +68,10 @@ import {
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
   parseDeviceCode,
+  deviceCodeFallback,
+  formatRemaining,
+  slugifyProviderId,
+  customProviderDraftError,
   connectPhaseLabel,
   isPollExpired,
   describeSubscriptionStatus,
@@ -3100,6 +3104,83 @@ describe("parseDeviceCode", () => {
   });
 });
 
+// ===== deviceCodeFallback + formatRemaining (BET-421 §D) =====
+
+describe("deviceCodeFallback", () => {
+  it("returns null when a code parsed (caller shows the chip)", () => {
+    expect(deviceCodeFallback("Enter code: TOQR-BUA7Z")).toBeNull();
+  });
+  it("points at the instructions when no code parses", () => {
+    expect(deviceCodeFallback("Sign in to your account to continue")).toBe(
+      "The code is in the message below — copy it from there.",
+    );
+  });
+  it("returns null for empty instructions", () => {
+    expect(deviceCodeFallback("")).toBeNull();
+    expect(deviceCodeFallback("   ")).toBeNull();
+  });
+});
+
+describe("formatRemaining", () => {
+  it("formats the remaining minutes:seconds on a device-code poll", () => {
+    // 5 min limit, 90s elapsed → 3:30 remaining.
+    expect(formatRemaining(0, 90_000, 300_000)).toBe("3:30 remaining");
+  });
+  it("clamps at 0 when the deadline has passed", () => {
+    expect(formatRemaining(0, 400_000, 300_000)).toBe("0:00 remaining");
+  });
+  it("is NaN-safe", () => {
+    expect(formatRemaining(NaN, 0, 0)).toBe("0:00 remaining");
+  });
+  it("handles the full-limit case at start", () => {
+    expect(formatRemaining(0, 0, 300_000)).toBe("5:00 remaining");
+  });
+});
+
+describe("slugifyProviderId", () => {
+  it("lowercases and hyphenates a name", () => {
+    expect(slugifyProviderId("Groq")).toBe("groq");
+    expect(slugifyProviderId("My Cool API")).toBe("my-cool-api");
+    expect(slugifyProviderId("VoskaAI v2")).toBe("voskaai-v2");
+  });
+  it("drops non-ASCII and collapses runs of non-alphanumerics", () => {
+    expect(slugifyProviderId("Élan API!")).toBe("lan-api");
+    expect(slugifyProviderId("a---b")).toBe("a-b");
+  });
+  it("returns empty string for blank input", () => {
+    expect(slugifyProviderId("")).toBe("");
+    expect(slugifyProviderId("   ")).toBe("");
+    expect(slugifyProviderId("---")).toBe("");
+  });
+});
+
+describe("customProviderDraftError", () => {
+  const ok = (name: string, baseURL: string) =>
+    customProviderDraftError({ name, baseURL });
+  it("returns null for a valid name + http(s) baseURL", () => {
+    expect(ok("VoskaAI", "https://api.voska.org/v1")).toBeNull();
+    expect(ok("groq", "http://localhost:8080/v1")).toBeNull();
+  });
+  it("requires a name", () => {
+    expect(ok("", "https://x/v1")).toBe("Name is required.");
+    expect(ok("   ", "https://x/v1")).toBe("Name is required.");
+  });
+  it("rejects a name that slugifies to empty (no ASCII alphanumerics)", () => {
+    expect(ok("É---!", "https://x/v1")).toBe(
+      "Name must contain a letter or digit.",
+    );
+  });
+  it("requires a baseURL with an http(s) scheme", () => {
+    expect(ok("groq", "")).toBe("Base URL is required.");
+    expect(ok("groq", "api.groq.com/v1")).toBe(
+      "Base URL must start with http:// or https://.",
+    );
+    expect(ok("groq", "ftp://x/v1")).toBe(
+      "Base URL must start with http:// or https://.",
+    );
+  });
+});
+
 // ===== connectPhaseLabel (BET-312) =====
 //
 // Single source of user-facing status text. The exhaustive switch in
@@ -3112,6 +3193,7 @@ describe("connectPhaseLabel", () => {
     expect(
       connectPhaseLabel({ kind: "waiting", url: "u", instructions: "i", methodIndex: 0 }),
     ).toBe("Waiting for sign-in");
+    expect(connectPhaseLabel({ kind: "installingClaudeCli", ptySessionKey: "k", loginSessionKey: "l", startedAt: 0, cwd: "~" })).toBe("Installing the Claude CLI");
     expect(
       connectPhaseLabel({
         kind: "needsCode",

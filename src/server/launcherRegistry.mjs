@@ -67,6 +67,24 @@ export const LAUNCHERS = [
     hidden: true,
     buildArgs: () => ["auth", "login"],
   },
+  // BET-421 §E: lazy Claude CLI install. The app owns the binary now —
+  // install.sh no longer installs it. When the user picks Claude and the
+  // binary isn't on the box, the connect card spawns this launcher (via the
+  // same pty bus as claude-auth-login) to run the official installer, then
+  // flows straight into sign-in. Hidden from the dropdown; one-shot.
+  // `bash -c "curl … | bash"` mirrors the install.sh shape that worked
+  // before the deletion (stdin from /dev/null is the curl|bash pipe itself).
+  {
+    id: "claude-cli-install",
+    label: "Claude CLI install",
+    bin: "bash",
+    flags: [],
+    hidden: true,
+    buildArgs: () => [
+      "-c",
+      "curl -fsSL https://claude.ai/install.sh | bash",
+    ],
+  },
 ];
 
 export function findLauncher(id) {

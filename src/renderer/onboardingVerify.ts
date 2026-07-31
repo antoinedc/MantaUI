@@ -1,24 +1,27 @@
-// onboardingVerify.ts — pure orchestrator for the final onboarding actions
-// (BET-356 §4 "Verify by working, not by exit code").
+// onboardingVerify.ts — pure orchestrator for the onboarding verification
+// (BET-421 §B "Verify by working, not by exit code").
 //
-// Two responsibilities, kept together because they always run in this order:
+// Replaces the old finalizeOnboarding, which created a real ~/projects/welcome
+// project, opened a chat window, sent "hi", and left all of it behind. Every
+// install therefore billed a model turn, littered the box, and put a junk
+// session in the sidebar before the user had done anything.
 //
-//   1. ensureWelcomeProject — auto-create a "welcome" project on the box the
-//      user just paired with, so they land somewhere real (the sidebar shows
-//      a project, the chat panel mounts against an existing session). No
-//      dedicated onboarding step — BET-356 demotes the project step out of
-//      onboarding. Skips if any project already exists on the box.
+// The new flow spins up an EPHEMERAL opencode session (no tmux project, no
+// sidebar entry), sends one probe prompt, waits for a real assistant reply,
+// and deletes the session the moment the reply lands. Nothing is left on
+// the box. Three named stages drive the ProcessPanel:
 //
-//   2. verifyBoxAnswers — send a one-line prompt to the box's opencode and
-//      wait for a real assistant response. An install that exits zero but
-//      cannot answer is a failure the user must know about immediately, not
-//      discover later. The check is intentionally a real round-trip: any
-//      cheaper proxy (TCP probe, /provider ping) would pass on a misconfigured
-//      provider that cannot serve a turn.
+//   1. Reached opencode on your box       — createEphemeralSession succeeds.
+//   2. <Provider> credentials accepted    — the probe prompt is accepted.
+//   3. Getting a reply from <model>       — a completed assistant reply.
 //
-// Both helpers are framework-free + pure (deps injected); the renderer wires
-// `window.api` and `useStore.getState()` into them at the call site. Tests
-// stub the deps so the orchestrator can be exercised without a real box.
+// The failure state always names which stage failed; the caller renders
+// Try again / Back to the model step / Copy diagnostics. There is no
+// "continue anyway" — a working model is mandatory.
+//
+// Pure + framework-free (deps injected); the renderer wires `window.api`
+// into it at the call site. Tests stub the deps so the orchestrator can be
+// exercised without a real box.
 
 // ---------- Types injected from the renderer ----------
 
@@ -26,17 +29,11 @@
 // here as a type so the test fixture doesn't need to construct the whole
 // preload surface — see onboardingVerify.test.ts.
 export type VerifyApi = {
-  tmuxNewSession: (input: {
-    name: string;
-    cwd: string;
-    windowName?: string;
-    chatMode?: boolean;
-    createDir?: boolean;
-  }) => Promise<TmuxNewSessionResult>;
-  opencodeProviderAuth: (input: {
-    action: string;
-    [k: string]: unknown;
-  }) => Promise<unknown>;
+  opencodeCreateEphemeralSession: (input: {
+    directory: string;
+    title?: string;
+  }) => Promise<{ ok: boolean; sessionId?: string; error?: string }>;
+  opencodeDeleteSessionRaw: (sessionId: string) => Promise<{ ok: boolean }>;
   opencodePrompt: (
     sessionId: string,
     text: string,
@@ -45,169 +42,195 @@ export type VerifyApi = {
     mentions?: unknown,
   ) => Promise<{ ok: boolean; error?: string }>;
   opencodeMessages: (sessionId: string) => Promise<unknown>;
+  opencodeProviderAuth: (input: {
+    action: string;
+    [k: string]: unknown;
+  }) => Promise<unknown>;
 };
 
-// TmuxNewSessionResult — the relevant fields only. The renderer reads the
-// full object from `useStore.getState().projects`, but for our purposes we
-// only need to know "did creation succeed and what session name was used".
-export type TmuxNewSessionResult =
-  | { ok: true; sessionName: string }
-  | { ok: false; error: string };
+// A verify stage index (0-based) the caller feeds to ProcessPanel.activeIndex.
+export type VerifyStageIndex = 0 | 1 | 2;
 
-// Minimal store surface — provides `projects` (the live projects list) and
-// `refresh`/`setActive` actions to re-sync after auto-creating a project.
-export type VerifyStore = {
-  projects: Array<{
-    tmuxSession: string;
-    windows: Array<{ opencodeSessionId: string | null }>;
-  }>;
-  refresh: () => Promise<void>;
-  setActive: (projectName: string, windowIndex?: number) => void;
+export type VerifyProgress = {
+  // 0-based index of the stage that is currently running (or that failed).
+  stage: VerifyStageIndex;
+  status: "running" | "done" | "error";
 };
 
-// ---------- ensureWelcomeProject ----------
-
-export const WELCOME_PROJECT_NAME = "welcome";
-export const WELCOME_PROJECT_CWD = "~/projects/welcome";
-
-// Create a "welcome" project + chat-mode window if none exists yet. Returns
-// the opencode session id of the new project's first chat-mode window, or
-// `null` if no auto-create was needed (a project already exists) AND none
-// of the existing projects carry a chat-mode session id (caller will not
-// have anything to verify against — see verifyBoxAnswers for the empty-
-// projects early return).
-//
-// Pure orchestrator: the only I/O is `api.tmuxNewSession` and
-// `store.refresh`/`store.setActive`. Both deps are injected.
-export async function ensureWelcomeProject(deps: {
-  api: VerifyApi;
-  store: VerifyStore;
-}): Promise<string | null> {
-  // Skip when a project already exists. The sidebar shows real things; the
-  // user can rename / move them later. This is the common resume path: the
-  // user already had a project from a previous run.
-  if (deps.store.projects.length > 0) {
-    const existing = firstChatSessionId(deps.store.projects);
-    if (existing) return existing;
-    // Projects exist but none has a chat-mode window — fall through and
-    // create one anyway, so the verify path has somewhere to send the
-    // probe prompt. (The user will see their existing project with one
-    // new chat-mode window added.)
-  }
-
-  const result = await deps.api.tmuxNewSession({
-    name: WELCOME_PROJECT_NAME,
-    cwd: WELCOME_PROJECT_CWD,
-    windowName: "default",
-    chatMode: true,
-    createDir: true,
-  });
-  if (!result.ok) {
-    throw new Error(`Couldn't create a starter project: ${result.error}`);
-  }
-  // Refresh the store so the new project + window is visible, then select
-  // the new session so the user lands on it. setActive's windowIndex is
-  // omitted on purpose — the project's first window is the chat-mode one
-  // we just minted, and the store's setActive defaults to index 0.
-  await deps.store.refresh();
-  deps.store.setActive(result.sessionName);
-
-  // After refresh, the store carries the new project. Find its chat session.
-  const refreshed = firstChatSessionId(deps.store.projects);
-  if (!refreshed) {
-    throw new Error("Welcome project created but no chat session was opened.");
-  }
-  return refreshed;
-}
-
-// Pick the first chat-mode opencode session id across all projects + windows.
-// Used by both `ensureWelcomeProject` and the verify helper so they agree on
-// "what counts as the chat session we're verifying against".
-export function firstChatSessionId(
-  projects: VerifyStore["projects"],
-): string | null {
-  for (const p of projects) {
-    for (const w of p.windows) {
-      if (typeof w.opencodeSessionId === "string" && w.opencodeSessionId.length > 0) {
-        return w.opencodeSessionId;
-      }
-    }
-  }
-  return null;
-}
-
-// ---------- verifyBoxAnswers ----------
-
-export const VERIFY_DEFAULT_TIMEOUT_MS = 15_000;
-export const VERIFY_POLL_INTERVAL_MS = 1_000;
-export const VERIFY_PROBE_TEXT = "hi";
-
-// Outcome of a single verification attempt. The caller surfaces `message` to
-// the user (Plain-language cause + one action, per BET-356 §5 failure UX).
 export type VerifyOutcome =
   | { ok: true }
-  | { ok: false; message: string };
+  | { ok: false; failedStage: VerifyStageIndex; message: string };
 
-// Send the probe prompt + wait for a real assistant response. Polls
-// `opencodeMessages` at 1Hz; an assistant message with `time.completed`
-// set is the success signal (the turn has fully ended server-side, so an
-// empty/timed-out reply won't false-positive).
+export const VERIFY_DEFAULT_TIMEOUT_MS = 30_000;
+export const VERIFY_POLL_INTERVAL_MS = 1_000;
+export const VERIFY_PROBE_TEXT = "hi";
+// The ephemeral session is created in the box's home dir — no project, no
+// worktree, nothing to clean up beyond the session itself.
+export const VERIFY_DIRECTORY = "~";
+
+// Build the three stage labels the ProcessPanel renders. Provider and model
+// labels come from the caller (the onboarding shell reads them from the
+// connected-provider status + the configured default model). Pure so the
+// test can assert the exact strings.
+export function verifyStageLabels(
+  providerLabel: string,
+  modelLabel?: string,
+): [string, string, string] {
+  return [
+    "Reached opencode on your box",
+    `${providerLabel} credentials accepted`,
+    `Getting a reply from ${modelLabel ?? "the model"}`,
+  ];
+}
+
+// Send the probe prompt + wait for a real assistant reply inside an
+// EPHEMERAL session that is deleted the moment the function returns (success
+// OR failure). Reports stage progress via `onProgress` so the caller can
+// advance its ProcessPanel live.
 //
 // `now` is injected so the deadline math is pure-testable; production wires
 // `Date.now`.
-export async function verifyBoxAnswers(deps: {
+export async function verifyOnboarding(deps: {
   api: VerifyApi;
-  sessionId: string;
-  now?: () => number;
+  providerLabel: string;
+  modelLabel?: string;
+  directory?: string;
+  probeText?: string;
   timeoutMs?: number;
   pollIntervalMs?: number;
+  now?: () => number;
+  onProgress?: (p: VerifyProgress) => void;
 }): Promise<VerifyOutcome> {
   const now = deps.now ?? Date.now;
   const timeoutMs = deps.timeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS;
   const pollIntervalMs = deps.pollIntervalMs ?? VERIFY_POLL_INTERVAL_MS;
+  const directory = deps.directory ?? VERIFY_DIRECTORY;
+  const probeText = deps.probeText ?? VERIFY_PROBE_TEXT;
+  const onProgress = deps.onProgress ?? (() => {});
 
-  // Snapshot the transcript BEFORE we send so we can detect "a NEW assistant
-  // message appeared after the prompt" rather than "any assistant message
-  // is present" (the latter would falsely pass on a project that already
-  // had a turn before onboarding was re-entered).
-  const baseline = await safeFetchMessages(deps.api, deps.sessionId);
-  const baselineAssistantIds = new Set(extractAssistantIds(baseline));
-
-  const send = await deps.api.opencodePrompt(deps.sessionId, VERIFY_PROBE_TEXT);
-  if (!send || send.ok === false) {
+  // Stage 1 — reach opencode by creating an ephemeral session.
+  onProgress({ stage: 0, status: "running" });
+  const created = await deps.api.opencodeCreateEphemeralSession({
+    directory,
+    title: "manta-verify",
+  });
+  if (!created.ok || typeof created.sessionId !== "string" || !created.sessionId) {
+    onProgress({ stage: 0, status: "error" });
     return {
       ok: false,
+      failedStage: 0,
       message:
-        send && typeof send.error === "string"
-          ? `Couldn't send the test prompt: ${send.error}`
-          : "Couldn't send the test prompt to the box.",
+        created && typeof created.error === "string" && created.error.length > 0
+          ? `Couldn't reach opencode on your box: ${created.error}`
+          : "Couldn't reach opencode on your box. Check that the box service is running and try again.",
     };
   }
+  const sessionId = created.sessionId;
 
-  const deadline = now() + timeoutMs;
-  while (true) {
-    if (now() >= deadline) {
+  try {
+    // Stage 2 — send the probe prompt (credentials accepted by the provider).
+    onProgress({ stage: 1, status: "running" });
+    const send = await deps.api.opencodePrompt(sessionId, probeText);
+    if (!send || send.ok === false) {
+      onProgress({ stage: 1, status: "error" });
       return {
         ok: false,
+        failedStage: 1,
         message:
-          "The box accepted the install but didn't answer the test prompt. Open the chat and try sending a message to diagnose.",
+          send && typeof send.error === "string" && send.error.length > 0
+            ? `${deps.providerLabel} rejected the request: ${send.error}`
+            : `${deps.providerLabel} isn't ready. Reconnect the provider and try again.`,
       };
     }
-    await sleep(pollIntervalMs, deps.api);
-    const msgs = await safeFetchMessages(deps.api, deps.sessionId);
-    if (!msgs) {
-      // Transient fetch failure — keep polling until the deadline.
-      continue;
-    }
-    for (const id of extractAssistantIds(msgs)) {
-      if (baselineAssistantIds.has(id)) continue;
-      // New assistant message found. Verify it has actually completed
-      // (time.completed is server-stamped only when the turn fully ended).
-      if (hasCompletedAssistantMessage(msgs, id)) {
-        return { ok: true };
+
+    // Stage 3 — wait for a completed assistant reply.
+    onProgress({ stage: 2, status: "running" });
+    const baseline = await safeFetchMessages(deps.api, sessionId);
+    const baselineAssistantIds = new Set(extractAssistantIds(baseline));
+
+    const deadline = now() + timeoutMs;
+    while (true) {
+      if (now() >= deadline) {
+        onProgress({ stage: 2, status: "error" });
+        return {
+          ok: false,
+          failedStage: 2,
+          message:
+            "The box accepted the install but the model didn't reply. Open the chat and try sending a message to diagnose — a bad credential or a misconfigured provider shows up here.",
+        };
+      }
+      await sleep(pollIntervalMs);
+      const msgs = await safeFetchMessages(deps.api, sessionId);
+      if (!msgs) continue; // transient fetch failure — keep polling.
+      for (const id of extractAssistantIds(msgs)) {
+        if (baselineAssistantIds.has(id)) continue;
+        if (hasCompletedAssistantMessage(msgs, id)) {
+          onProgress({ stage: 2, status: "done" });
+          return { ok: true };
+        }
       }
     }
+  } finally {
+    // Delete the ephemeral session no matter the outcome — success or
+    // failure. A session that fails to delete is non-fatal (the caller
+    // still surfaces the real verify result); best-effort, never throws.
+    try {
+      await deps.api.opencodeDeleteSessionRaw(sessionId);
+    } catch {
+      /* ignore — nothing left behind that the user would see */
+    }
   }
+}
+
+// ---------- pre-connect provider check ----------
+
+// Quick `is there at least one provider connected` probe — used by the
+// Connect step to decide whether to skip step 2 entirely. Same source
+// (`opencodeProviderAuth({action:"status"})`) that ProvidersStep consumes
+// for its Continue gate, so the two paths agree by construction.
+export async function hasConnectedProvider(api: VerifyApi): Promise<boolean> {
+  try {
+    const res = await api.opencodeProviderAuth({ action: "status" });
+    if (!res || typeof res !== "object") return false;
+    const providers = (res as { providers?: unknown }).providers;
+    if (!Array.isArray(providers)) return false;
+    return providers.some(
+      (p) =>
+        typeof p === "object" &&
+        p !== null &&
+        (p as { connected?: unknown }).connected === true,
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Resolve a (providerLabel, modelLabel) pair for the stage labels from the
+// status probe. The first connected provider's label + the configured
+// default model. Pure so the test can assert; returns nulls when nothing
+// is connected (the caller shouldn't call verify without a provider, but
+// the resolver is defensive).
+export function pickVerifyLabels(
+  statusResult: unknown,
+  defaultModel?: { providerID: string; modelID: string } | null,
+): { providerLabel: string; modelLabel: string } | null {
+  if (!statusResult || typeof statusResult !== "object") return null;
+  const providers = (statusResult as { providers?: unknown }).providers;
+  if (!Array.isArray(providers)) return null;
+  const connected = providers.find(
+    (p) =>
+      typeof p === "object" &&
+      p !== null &&
+      (p as { connected?: unknown }).connected === true,
+  );
+  if (!connected) return null;
+  const providerLabel =
+    (connected as { label?: unknown }).label ?? "the provider";
+  const modelLabel = defaultModel?.modelID ?? "the model";
+  return {
+    providerLabel: String(providerLabel),
+    modelLabel: String(modelLabel),
+  };
 }
 
 // ---------- helpers ----------
@@ -223,9 +246,7 @@ async function safeFetchMessages(
   }
 }
 
-function sleep(ms: number, _api: VerifyApi): Promise<void> {
-  // Pure setTimeout; the api param is in the signature so future tests can
-  // swap in a fake clock without rewriting call sites.
+function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -270,69 +291,4 @@ function hasCompletedAssistantMessage(
     return typeof completed === "number" && Number.isFinite(completed) && completed > 0;
   }
   return false;
-}
-
-// ---------- orchestrator: finalizeOnboarding ----------
-
-// Compose the two helpers above into the single "we're done" transition
-// from the onboarding shell. Called when:
-//   - step 1 (Connect) onPaired fires AND the box already has a provider
-//     connected (skip step 2, jump straight to finalization), or
-//   - step 2 (Provider) onContinue fires after a fresh provider connect.
-//
-// Throws on failure — the caller renders the message in the same inline
-// error slot a manual claim failure uses (BET-356 §5).
-export async function finalizeOnboarding(deps: {
-  api: VerifyApi;
-  store: VerifyStore;
-  now?: () => number;
-  timeoutMs?: number;
-  pollIntervalMs?: number;
-}): Promise<void> {
-  const sessionId = await ensureWelcomeProject({
-    api: deps.api,
-    store: deps.store,
-  });
-  if (!sessionId) {
-    // No project and no chat session to verify against. This shouldn't
-    // happen on a fresh box (ensureWelcomeProject creates one), but if a
-    // user closed onboarding mid-create we treat it as a verification
-    // failure rather than a silent pass.
-    throw new Error(
-      "Couldn't open a chat session to verify the box. Try again from the welcome project in the sidebar.",
-    );
-  }
-  const outcome = await verifyBoxAnswers({
-    api: deps.api,
-    sessionId,
-    now: deps.now,
-    timeoutMs: deps.timeoutMs,
-    pollIntervalMs: deps.pollIntervalMs,
-  });
-  if (!outcome.ok) {
-    throw new Error(outcome.message);
-  }
-}
-
-// ---------- pre-connect provider check ----------
-
-// Quick `is there at least one provider connected` probe — used by the
-// Connect step to decide whether to skip step 2 entirely. Same source
-// (`opencodeProviderAuth({action:"status"})`) that ProvidersStep consumes
-// for its Continue gate, so the two paths agree by construction.
-export async function hasConnectedProvider(api: VerifyApi): Promise<boolean> {
-  try {
-    const res = await api.opencodeProviderAuth({ action: "status" });
-    if (!res || typeof res !== "object") return false;
-    const providers = (res as { providers?: unknown }).providers;
-    if (!Array.isArray(providers)) return false;
-    return providers.some(
-      (p) =>
-        typeof p === "object" &&
-        p !== null &&
-        (p as { connected?: unknown }).connected === true,
-    );
-  } catch {
-    return false;
-  }
 }
