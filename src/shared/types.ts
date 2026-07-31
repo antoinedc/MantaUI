@@ -970,6 +970,10 @@ export type DelegateJob = {
   result: string | null; // last assistant text (done only)
   error: string | null; // failure / stop / timeout reason
   filesChanged: number | null; // committed + uncommitted (done only)
+  // BET-418 §B: true once the terminal cleanup removed the tmux window +
+  // worktree; false when a dirty worktree kept both (record is retained so
+  // the window stays recognisable as a job). Undefined for pre-§B records.
+  cleanedUp?: boolean;
 };
 
 // ----- Agent → laptop file push (outbox) -----

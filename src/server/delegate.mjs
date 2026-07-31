@@ -459,6 +459,52 @@ async function countFilesChanged(job, deps) {
   return committed + uncommitted;
 }
 
+// ---------------------------------------------------------------------------
+// Terminal cleanup (BET-418 §B)
+//
+// On terminal status a job's tmux window AND git worktree are removed — the
+// artefact is the branch, and a branch lives in git without a worktree. A
+// DIRTY worktree is the one exception: uncommitted work is NOT disposable, so
+// the worktree removal is attempted with force:false and, on refusal, BOTH
+// the window and the worktree are kept (and the job record is kept too, so
+// the window stays recognisable as a job instead of silently reappearing as
+// an ordinary top-level session). NEVER pass force:true.
+//
+// Order: try the worktree removal FIRST. Only when it succeeds (or there is
+// no worktree) do we kill the window — killing the window first would leave a
+// dirty worktree behind with no window to recognise it as a job (the leak).
+//
+// Returns { cleanedUp: true } when the window + worktree were removed, or
+// { cleanedUp: false, reason: "dirty" } when the dirty worktree kept both.
+// Pure-ish: all I/O is injected; exported for unit tests.
+// ---------------------------------------------------------------------------
+export async function cleanupTerminalJob(job, deps = {}) {
+  const { killWindow, gitRemoveWorktree } = deps;
+  if (job?.worktree && gitRemoveWorktree) {
+    try {
+      const res = await gitRemoveWorktree({ path: job.worktree, force: false });
+      if (res && res.removed === false && res.reason === "dirty") {
+        // Keep both the worktree AND the window; the record stays so the
+        // window remains recognisable as a job.
+        return { cleanedUp: false, reason: "dirty" };
+      }
+    } catch (e) {
+      console.warn(`[delegate] cleanup gitRemoveWorktree failed for ${job?.id}:`, e?.message ?? e);
+      // A failed remove leaves the worktree on disk; keep the window too so
+      // the worktree stays reachable/recognisable.
+      return { cleanedUp: false, reason: "remove-failed" };
+    }
+  }
+  if (killWindow && job?.tmuxSession != null && job?.windowIndex != null) {
+    try {
+      await killWindow({ sessionName: job.tmuxSession, windowIndex: job.windowIndex });
+    } catch (e) {
+      console.warn(`[delegate] cleanup killWindow failed for ${job?.id}:`, e?.message ?? e);
+    }
+  }
+  return { cleanedUp: true };
+}
+
 export async function finishJob(job, status, error, deps = {}, sawBusy) {
   const {
     load = loadJobs,
@@ -523,6 +569,28 @@ export async function finishJob(job, status, error, deps = {}, sawBusy) {
       });
     } catch (e) {
       console.warn(`[delegate] completion delivery failed for ${job.id}:`, e?.message ?? e);
+    }
+  }
+
+  // BET-418 §B: remove the tmux window + worktree now that the job is
+  // terminal. A dirty worktree keeps both (cleanupTerminalJob returns
+  // cleanedUp:false); persist that flag so the retention sweep does NOT prune
+  // the record (the window must stay recognisable as a job, not leak as an
+  // ordinary session). A clean cleanup sets cleanedUp:true so retention may
+  // prune the record normally once it ages out.
+  let cleanedUp = false;
+  try {
+    const res = await cleanupTerminalJob(updated, deps);
+    cleanedUp = !!res.cleanedUp;
+  } catch (e) {
+    console.warn(`[delegate] cleanup failed for ${job.id}:`, e?.message ?? e);
+  }
+  {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === job.id);
+    if (idx !== -1) {
+      jobs[idx] = { ...jobs[idx], cleanedUp };
+      await save(jobs);
     }
   }
   return { ok: true };
@@ -597,13 +665,32 @@ export async function sweepDelegateJobs(deps = {}) {
     publish,
     deliver,
     now = () => Date.now(),
+    sessionExists,
+    abortSession,
   } = deps;
   try {
     const jobs = await load();
     if (jobs.length === 0) return;
     const nowMs = now();
-    const transitioned = [];
 
+    // BET-418 §B: parent session gone → stop the job immediately (there is
+    // nobody left to report to), then the same terminal cleanup runs inside
+    // stopJob. Best-effort: a sessionExists failure degrades to "assume
+    // alive" so a transient opencode blip never orphans a healthy job.
+    const orphaned = [];
+    if (sessionExists) {
+      for (const job of jobs) {
+        if (job.status !== "running" || !job.parentSessionID) continue;
+        try {
+          const alive = await sessionExists(job.parentSessionID);
+          if (!alive) orphaned.push(job);
+        } catch {
+          /* best-effort: assume alive */
+        }
+      }
+    }
+
+    const transitioned = [];
     for (const job of jobs) {
       if (
         job.status === "running" &&
@@ -614,16 +701,24 @@ export async function sweepDelegateJobs(deps = {}) {
       }
     }
 
-    if (transitioned.length === 0) {
+    if (transitioned.length === 0 && orphaned.length === 0) {
       const retained = applyRetention(jobs, nowMs);
       if (retained.length !== jobs.length) await save(retained);
       return;
     }
 
+    // Orphaned jobs → stopped (parent gone). stopJob aborts + marks stopped +
+    // runs the same terminal cleanup. Runs BEFORE the timeout pass so a job
+    // that is both orphaned and timed-out is recorded as "stopped" (parent
+    // gone is the more precise reason); finishJob is idempotent on the
+    // already-terminal record.
+    for (const job of orphaned) {
+      await stopJob(job.id, { load, save, publish, deliver, abortSession, now, killWindow: deps.killWindow, gitRemoveWorktree: deps.gitRemoveWorktree });
+    }
+    // Timed-out jobs → failed. Pass the FULL deps so finishJob's terminal
+    // cleanup (killWindow + gitRemoveWorktree) actually runs.
     for (const job of transitioned) {
-      // finishJob persists + publishes + delivers. Pass a fresh sawBusy map —
-      // the sweeper has no event-stream state.
-      await finishJob(job, "failed", "timed out after 30 minutes", { load, save, publish, deliver, now }, new Map());
+      await finishJob(job, "failed", "timed out after 30 minutes", deps, new Map());
     }
     const retained = applyRetention(await load(), nowMs);
     await save(retained);
@@ -634,12 +729,18 @@ export async function sweepDelegateJobs(deps = {}) {
 
 function applyRetention(jobs, nowMs) {
   const cutoff = nowMs - TERMINAL_RETENTION_MS;
+  // BET-418 §B: a terminal job whose worktree was kept (dirty) must NOT be
+  // pruned — its tmux window is still live and the record is what keeps it
+  // recognisable as a job (pruning it would let the stale window reappear as
+  // an ordinary top-level session). cleanedUp===false is set only by the new
+  // cleanup path; undefined (old records) prunes as before.
   let out = jobs.filter(
     (j) =>
       !(
         (j.status === "done" || j.status === "failed" || j.status === "stopped") &&
         j.finishedAt != null &&
-        j.finishedAt < cutoff
+        j.finishedAt < cutoff &&
+        j.cleanedUp !== false
       ),
   );
   const terminal = out.filter(
@@ -648,7 +749,10 @@ function applyRetention(jobs, nowMs) {
   if (terminal.length > MAX_TERMINAL_JOBS) {
     const sorted = [...terminal].sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0));
     const dropped = new Set(
-      sorted.slice(0, terminal.length - MAX_TERMINAL_JOBS).map((j) => j.id),
+      sorted
+        .filter((j) => j.cleanedUp !== false)
+        .slice(0, Math.max(0, terminal.length - MAX_TERMINAL_JOBS))
+        .map((j) => j.id),
     );
     out = out.filter((j) => !dropped.has(j.id));
   }
@@ -732,6 +836,24 @@ export async function stopJob(id, deps = {}) {
       });
     } catch (e) {
       console.warn(`[delegate] stop completion delivery failed for ${id}:`, e?.message ?? e);
+    }
+  }
+  // BET-418 §B: a stopped job is terminal → remove the window + worktree (a
+  // dirty worktree keeps both). Persist cleanedUp so retention treats it
+  // correctly.
+  let cleanedUp = false;
+  try {
+    const res = await cleanupTerminalJob(updated, deps);
+    cleanedUp = !!res.cleanedUp;
+  } catch (e) {
+    console.warn(`[delegate] stop cleanup failed for ${id}:`, e?.message ?? e);
+  }
+  {
+    const jobs2 = await load();
+    const idx2 = jobs2.findIndex((j) => j.id === id);
+    if (idx2 !== -1) {
+      jobs2[idx2] = { ...jobs2[idx2], cleanedUp };
+      await save(jobs2);
     }
   }
   void listMessages;

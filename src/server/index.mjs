@@ -239,6 +239,16 @@ const delegateEngine = createDelegateEngine({
   gitRun: (args) => tmux.run("git", args),
   listMessages: (sid) => oc.listMessages(sid),
   abortSession: (sid) => oc.abortSession(sid),
+  // BET-418 §B: detect a running job whose parent opencode session is gone so
+  // the sweeper can stop + clean it up (nobody left to report to).
+  sessionExists: async (sid) => {
+    try {
+      const sessions = await oc.listSessions();
+      return Array.isArray(sessions) && sessions.some((s) => s?.id === sid);
+    } catch {
+      return true; // best-effort: assume alive on a transient blip
+    }
+  },
   oc,
 });
 // eslint-disable-next-line no-unused-vars

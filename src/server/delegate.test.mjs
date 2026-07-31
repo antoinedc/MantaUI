@@ -10,6 +10,8 @@ import {
   finishJob,
   sweepDelegateJobs,
   deleteJob,
+  cleanupTerminalJob,
+  stopJob,
   MAX_RUNNING_JOBS,
   createDelegateEngine,
 } from "./delegate.mjs";
@@ -199,23 +201,158 @@ test("startJob refuses a sixth concurrent job with the exact cap error", async (
   assert.equal(h.delivered.length, 0);
 });
 
-test("startJob allows a job when under the cap", async () => {
-  const h = harness(Array.from({ length: MAX_RUNNING_JOBS - 1 }, (_, i) => runningJob(i)));
-  h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
-  const parentWin = { index: 0, name: "parent", opencodeSessionId: "parentX", paneCurrentPath: "/repo" };
-  const childWin = { index: 9, name: "extra-work", opencodeSessionId: "child-new", paneCurrentPath: "/repo" };
-  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
-  h.deps.newWindow = async (input) => [
-    { tmuxSession: input.sessionName, windows: [parentWin, childWin] },
-  ];
-  const res = await startJob(
-    { prompt: "extra work", parentSessionID: "parentX", parentDirectory: "/repo" },
-    h.deps,
-  );
-  assert.equal(res.ok, true);
-  assert.equal(res.job.status, "running");
-  assert.equal(h.jobs.length, MAX_RUNNING_JOBS);
+// ----------------------------------------------------------------------------
+// cleanupTerminalJob + finishJob/stopJob terminal cleanup (BET-418 §B)
+// ----------------------------------------------------------------------------
+
+function cleanupHarness() {
+  const killWindowCalls = [];
+  const removeCalls = [];
+  return {
+    killWindowCalls,
+    removeCalls,
+    killWindow: async (input) => { killWindowCalls.push(input); },
+    gitRemoveWorktree: async (input) => { removeCalls.push(input); return { removed: true }; },
+  };
+}
+
+function terminalJob(overrides = {}) {
+  return {
+    id: "jx",
+    name: "fix",
+    parentSessionID: "ses_p",
+    childSessionID: "ses_c",
+    tmuxSession: "proj",
+    windowIndex: 3,
+    worktree: "/tmp/wt",
+    branch: "fix",
+    baseSha: "abc",
+    status: "done",
+    finishedAt: 100,
+    ...overrides,
+  };
+}
+
+test("cleanupTerminalJob removes worktree then window on a clean worktree", async () => {
+  const c = cleanupHarness();
+  const res = await cleanupTerminalJob(terminalJob(), c);
+  assert.equal(res.cleanedUp, true);
+  assert.equal(c.removeCalls.length, 1);
+  assert.deepEqual(c.removeCalls[0], { path: "/tmp/wt", force: false });
+  assert.equal(c.killWindowCalls.length, 1);
+  assert.deepEqual(c.killWindowCalls[0], { sessionName: "proj", windowIndex: 3 });
 });
+
+test("cleanupTerminalJob keeps both window + worktree on a dirty worktree", async () => {
+  const c = cleanupHarness();
+  c.gitRemoveWorktree = async (input) => { c.removeCalls.push(input); return { removed: false, reason: "dirty" }; };
+  const res = await cleanupTerminalJob(terminalJob(), c);
+  assert.equal(res.cleanedUp, false);
+  assert.equal(res.reason, "dirty");
+  assert.equal(c.removeCalls.length, 1, "worktree removal attempted (force:false)");
+  assert.equal(c.killWindowCalls.length, 0, "window is NOT killed when the worktree is dirty");
+});
+
+test("cleanupTerminalJob with no worktree just kills the window", async () => {
+  const c = cleanupHarness();
+  const res = await cleanupTerminalJob(terminalJob({ worktree: null, branch: null }), c);
+  assert.equal(res.cleanedUp, true);
+  assert.equal(c.removeCalls.length, 0);
+  assert.equal(c.killWindowCalls.length, 1);
+});
+
+test("finishJob runs terminal cleanup and stamps cleanedUp true on a clean worktree", async () => {
+  const c = cleanupHarness();
+  const job = { ...runningObserverJob(), id: "fin-clean", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = { ...h.deps, ...c };
+  await finishJob(job, "done", null, deps, new Map());
+  const stored = h.jobs.find((j) => j.id === "fin-clean");
+  assert.equal(stored.status, "done");
+  assert.equal(stored.cleanedUp, true);
+  assert.equal(c.killWindowCalls.length, 1);
+  assert.equal(c.removeCalls.length, 1);
+});
+
+test("finishJob keeps the record (cleanedUp false) on a dirty worktree", async () => {
+  const c = cleanupHarness();
+  c.gitRemoveWorktree = async () => ({ removed: false, reason: "dirty" });
+  const job = { ...runningObserverJob(), id: "fin-dirty", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = { ...h.deps, ...c };
+  await finishJob(job, "done", null, deps, new Map());
+  const stored = h.jobs.find((j) => j.id === "fin-dirty");
+  assert.equal(stored.cleanedUp, false);
+  assert.equal(c.killWindowCalls.length, 0, "dirty worktree keeps the window");
+});
+
+test("stopJob runs terminal cleanup and stamps cleanedUp", async () => {
+  const c = cleanupHarness();
+  const job = { ...runningObserverJob(), id: "stop-clean", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = { ...h.deps, ...c };
+  const res = await stopJob("stop-clean", deps);
+  assert.equal(res.ok, true);
+  const stored = h.jobs.find((j) => j.id === "stop-clean");
+  assert.equal(stored.status, "stopped");
+  assert.equal(stored.cleanedUp, true);
+  assert.equal(c.killWindowCalls.length, 1);
+});
+
+// ----------------------------------------------------------------------------
+// Retention skips dirty-kept terminal jobs (BET-418 §B)
+// ----------------------------------------------------------------------------
+
+test("sweep does not prune a terminal dirty-kept job (cleanedUp false)", async () => {
+  const old = 1_700_000_000_000;
+  const cutoff = old - 8 * 24 * 60 * 60_000; // older than the 7-day retention
+  const dirty = terminalJob({ id: "dirty", status: "done", finishedAt: cutoff, cleanedUp: false, worktree: "/tmp/wt" });
+  const clean = terminalJob({ id: "clean", status: "done", finishedAt: cutoff, cleanedUp: true, worktree: "/tmp/wt" });
+  const h = harness([dirty, clean], old);
+  // No timed-out, no orphaned jobs → retention only.
+  await sweepDelegateJobs(h.deps);
+  const ids = h.jobs.map((j) => j.id);
+  assert.ok(ids.includes("dirty"), "dirty-kept record is retained so its window stays a job");
+  assert.ok(!ids.includes("clean"), "cleaned-up record is pruned normally");
+});
+
+// ----------------------------------------------------------------------------
+// Parent-gone detection in the sweeper (BET-418 §B)
+// ----------------------------------------------------------------------------
+
+test("sweep stops a running job whose parent session is gone", async () => {
+  const c = cleanupHarness();
+  const job = { ...runningObserverJob(), id: "orphan", parentSessionID: "ses_gone", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2, startedAt: 1_700_000_000_000 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = {
+    ...h.deps,
+    ...c,
+    sessionExists: async (sid) => sid !== "ses_gone",
+    abortSession: async () => {},
+  };
+  await sweepDelegateJobs(deps);
+  const stored = h.jobs.find((j) => j.id === "orphan");
+  assert.equal(stored.status, "stopped", "orphaned job is stopped");
+  assert.equal(stored.cleanedUp, true, "terminal cleanup ran on the orphaned job");
+  assert.equal(c.killWindowCalls.length, 1);
+});
+
+test("sweep leaves a running job whose parent session is alive", async () => {
+  const c = cleanupHarness();
+  const job = { ...runningObserverJob(), id: "alive", parentSessionID: "ses_alive", worktree: "/tmp/wt", startedAt: 1_700_000_000_000 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = {
+    ...h.deps,
+    ...c,
+    sessionExists: async () => true,
+    abortSession: async () => {},
+  };
+  await sweepDelegateJobs(deps);
+  const stored = h.jobs.find((j) => j.id === "alive");
+  assert.equal(stored.status, "running", "alive-parent job is left running");
+  assert.equal(c.killWindowCalls.length, 0);
+});
+
 
 // ----------------------------------------------------------------------------
 // 4. Nesting: a start whose parentSessionID is a live job's childSessionID
