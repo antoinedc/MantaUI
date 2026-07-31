@@ -1429,6 +1429,32 @@ test("install.sh guards every MANTA_CLAUDE_AUTH_PLUGIN use against set -u (BET-3
   );
 });
 
+test("install.sh guards every OPENCODE_CLAUDE_AUTH_PLUGIN use against set -u (BET-446 regression)", () => {
+  // BET-319 guarded MANTA_CLAUDE_AUTH_PLUGIN (the override) but missed the
+  // parallel LOG-ONLY var OPENCODE_CLAUDE_AUTH_PLUGIN, which install.sh
+  // references at the two "Seeding Claude auth plugin (...)" messages inside
+  // the then/else branches for the `-n "${MANTA_CLAUDE_AUTH_PLUGIN:-}"`
+  // checks. That var is normally set by the `print-config` eval earlier in
+  // main(), but the installer runs under `set -u`, and a bare expansion of an
+  // unset var is a hard abort mid-install — the same class of failure
+  // BET-319 fixed for the override. This static guard pins the fix: every
+  // non-comment reference must use the `${VAR:-}` default-expansion form.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const lines = src.split("\n");
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*#/.test(line)) continue; // skip comment lines
+    const bare = /\$OPENCODE_CLAUDE_AUTH_PLUGIN(?!\{)/.test(line);
+    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `install.sh references OPENCODE_CLAUDE_AUTH_PLUGIN without the \${VAR:-} set -u guard:\n${offenders.join("\n")}`,
+  );
+});
+
 test("install.sh brace-delimits every $VAR adjacent to the … ellipsis (BET-319 bash 3.2 regression)", () => {
   // macOS ships bash 3.2, which under a UTF-8 locale absorbs the multibyte
   // `…` (U+2026) bytes into the variable-name lookup when `$VAR` is directly
@@ -5429,4 +5455,96 @@ test("missing Caddyfile under pipefail yields empty stdin and a created block, n
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ----------------------------------------------------------------------------
+// BET-446 — `$OPENCODE_CLAUDE_AUTH_PLUGIN` must be `set -u` safe in the seeding
+// block.
+// ----------------------------------------------------------------------------
+//
+// install.sh runs under `set -euo pipefail`. BET-319 guarded the
+// MANTA_CLAUDE_AUTH_PLUGIN override but missed the parallel LOG-ONLY var
+// OPENCODE_CLAUDE_AUTH_PLUGIN, referenced in the two "Seeding Claude auth
+// plugin (...)" messages that are reached exactly when NO override is set —
+// i.e. the default install path. A bare `$OPENCODE_CLAUDE_AUTH_PLUGIN` there
+// would abort the whole install the instant the var is unset.
+//
+// These tests run the REAL extracted seeding block out of the REAL install.sh
+// under the real `set -eu` semantics against a fake box, rather than
+// replicating the branch logic in a test copy, so a regression in the shipped
+// source is what goes red.
+
+// Extract the "B. opencode config seeding" block from install.sh (inline in
+// main(), so slice it out of the source between its comment marker and the
+// `ok "opencode.jsonc seeded."` line). Returns the literal shell source — the
+// `${...}` / `$VAR` tokens inside are intended for the SHELL, so must never be
+// JS-interpolated by the caller.
+function extractSeedClaudeAuthBlock() {
+  const lines = readFileSync(INSTALL_SH, "utf-8").split("\n");
+  const start = lines.findIndex((l) => l.includes("# --- B. opencode config seeding"));
+  const end = lines.findIndex((l) => /ok "opencode\.jsonc seeded\."/.test(l));
+  assert.ok(start !== -1, "must find the '# --- B. opencode config seeding' comment in install.sh");
+  assert.ok(end > start, "must find the \\`ok \"opencode.jsonc seeded.\"\\` line after the block start");
+  return lines.slice(start, end + 1).join("\n");
+}
+
+// Run the real seeding block under `set -euo pipefail` with a fake $HOME and
+// the real merge lib. `pluginVar`:
+//   - undefined → the var is absent from the env (the BET-446 failure mode)
+//   - a string  → the var is set (regression: must still seed normally)
+// Returns { code, out, config } where `config` is the merged opencode.jsonc
+// content under the fake home (for the set case) or null (for the unset case,
+// where the else branch still writes a fresh file).
+function runSeedClaudeAuthBlock(pluginVar) {
+  const block = extractSeedClaudeAuthBlock();
+  const fakeHome = mkdtempSync(join(tmpdir(), "manta-seed-home-"));
+  const script = join(tmpdir(), `manta-seed-${process.pid}.sh`);
+  const body =
+    "#!/usr/bin/env bash\n" +
+    "set -euo pipefail\n" + // exactly the real installer's flag set
+    "export MANTA_INSTALL_TEST_MODE=1\n" +
+    "set +e\n" + // source install.sh (test-mode guard returns cleanly under set +e)
+    "source '" + INSTALL_SH + "'\n" +
+    "set -euo pipefail\n" + // re-assert the real flags after sourcing
+    "NODE=node\n" +
+    "LIB='" + join(__dirname, "install-lib.mjs") + "'\n" +
+    block + "\n" +
+    'echo "SEED_COMPLETE"\n'; // only reached if the block did not abort under set -u
+  writeFileSync(script, body, { mode: 0o755 });
+  const env = { ...process.env, HOME: fakeHome };
+  if (pluginVar === undefined) {
+    delete env.OPENCODE_CLAUDE_AUTH_PLUGIN;
+  } else {
+    env.OPENCODE_CLAUDE_AUTH_PLUGIN = pluginVar;
+  }
+  try {
+    const res = spawnSync("bash", [script], { env, encoding: "utf8" });
+    const out = (res.stdout ?? "") + (res.stderr ?? "");
+    let config = null;
+    const cfgPath = join(fakeHome, ".config", "opencode", "opencode.jsonc");
+    try {
+      config = readFileSync(cfgPath, "utf8");
+    } catch {
+      /* no config written (shouldn't happen — the else branch writes one) */
+    }
+    return { code: res.status, out, config };
+  } finally {
+    rmSync(script, { force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+}
+
+test("BET-446: seeding block does NOT abort under set -u when OPENCODE_CLAUDE_AUTH_PLUGIN is unset", () => {
+  const { code, out } = runSeedClaudeAuthBlock(undefined);
+  assert.equal(code, 0, `seeding block must complete when the var is unset:\n${out}`);
+  assert.match(out, /SEED_COMPLETE/, `seeding block must reach completion:\n${out}`);
+  assert.doesNotMatch(out, /unbound variable/, `no bare-expansion abort under set -u:\n${out}`);
+});
+
+test("BET-446: seeding still merges the plugin when OPENCODE_CLAUDE_AUTH_PLUGIN is set", () => {
+  const { code, out, config } = runSeedClaudeAuthBlock("opencode-claude-auth@latest");
+  assert.equal(code, 0, `seeding block must complete when the var is set:\n${out}`);
+  assert.match(out, /opencode\.jsonc seeded\./, `must print the success line:\n${out}`);
+  assert.ok(config !== null, "the merged opencode.jsonc must be written");
+  assert.match(config, /opencode-claude-auth@latest/, "the plugin must still be seeded into the config");
 });
