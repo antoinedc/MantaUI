@@ -24,6 +24,7 @@ import {
   buildIngressJson,
   waitForDns,
   renderCaddyVhost,
+  upsertCaddyBlock,
   readOsReleaseIds,
   classifyDistro,
   renderSystemdUnit,
@@ -2409,6 +2410,95 @@ test("renderCaddyVhost snippet is byte-identical for the same inputs (idempotenc
 });
 
 // ----------------------------------------------------------------------------
+// upsertCaddyBlock — pure, keeps EXACTLY ONE manta vhost block in a Caddyfile
+// (BET-441). Replaces the old awk-based marker replace in install.sh, which
+// appended a stray opening marker line on every re-run.
+// ----------------------------------------------------------------------------
+
+// A block for the canonical box id, in inline mode (marker-wrapped).
+function blockFor(boxId = HEX32, port = 8787) {
+  return renderCaddyVhost(boxId, port, { mode: "inline" });
+}
+
+test("upsertCaddyBlock: empty input → result is exactly the block", () => {
+  const block = blockFor();
+  assert.equal(upsertCaddyBlock("", block), block);
+  assert.equal(upsertCaddyBlock("   \n\n  ", block), block);
+});
+
+test("upsertCaddyBlock: unrelated content preserved, block appended once, one trailing newline", () => {
+  const block = blockFor();
+  const stock = ":80 {\n    respond \"hello\"\n}\n";
+  const out = upsertCaddyBlock(stock, block);
+  assert.ok(out.includes(stock), "stock content must be preserved verbatim");
+  assert.strictEqual((out.match(/# >>> manta >>>/g) || []).length, 1);
+  assert.strictEqual((out.match(/# <<< manta <<</g) || []).length, 1);
+  assert.ok(out.endsWith("\n"), "must end with exactly one newline");
+  assert.ok(!out.endsWith("\n\n"), "must not have a double trailing newline");
+});
+
+test("upsertCaddyBlock: input already containing one block → exactly one marker pair", () => {
+  const block = blockFor();
+  const existing = ":80 {\n    respond \"hello\"\n}\n\n" + block;
+  const out = upsertCaddyBlock(existing, block);
+  assert.strictEqual((out.match(/# >>> manta >>>/g) || []).length, 1);
+  assert.strictEqual((out.match(/# <<< manta <<</g) || []).length, 1);
+  assert.ok(blockFor().includes(out.split("# >>> manta >>>")[1]), "block body intact");
+});
+
+test("upsertCaddyBlock REGRESSION: FIVE stacked opening markers collapse to one (BET-441)", () => {
+  // Paste of the real-world sample from the issue: five `# >>> manta >>>`
+  // lines followed by one vhost body + one closing marker, preceded by the
+  // stock `:80` block.
+  const existing = [
+    ":80 {",
+    "    respond \"hello\"",
+    "}",
+    "",
+    "# >>> manta >>>",
+    "# >>> manta >>>",
+    "# >>> manta >>>",
+    "# >>> manta >>>",
+    "# >>> manta >>>",
+    `${HEX32}.boxes.mantaui.com {`,
+    "    reverse_proxy 127.0.0.1:8787",
+    "}",
+    "# <<< manta <<<",
+  ].join("\n");
+  const out = upsertCaddyBlock(existing, blockFor());
+  assert.strictEqual((out.match(/# >>> manta >>>/g) || []).length, 1, "exactly one opening marker");
+  assert.strictEqual((out.match(/# <<< manta <<</g) || []).length, 1, "exactly one closing marker");
+  assert.ok(out.includes(":80 {\n    respond \"hello\"\n}"), "stock Caddy config preserved untouched");
+  assert.strictEqual((out.match(new RegExp(`${HEX32}\\.boxes\\.mantaui\\.com`, "g")) || []).length, 1, "vhost body present exactly once");
+});
+
+test("upsertCaddyBlock is idempotent — applying twice equals applying once", () => {
+  const stock = ":80 {\n    response\n}\n";
+  const b = blockFor();
+  const once = upsertCaddyBlock(stock, b);
+  const twice = upsertCaddyBlock(upsertCaddyBlock(stock, b), b);
+  assert.equal(twice, once);
+});
+
+test("upsertCaddyBlock: a block for a different box id replaces the old one", () => {
+  const oldBox = "0123456789abcdef0123456789abcdef";
+  const newBox = "ffffffffffffffffffffffffffffffff";
+  const existing = ":80 {}\n\n" + blockFor(oldBox, 8787);
+  const out = upsertCaddyBlock(existing, blockFor(newBox, 8787));
+  assert.doesNotMatch(out, /0123456789abcdef\.boxes\.mantaui\.com/, "old box hostname must not appear");
+  assert.match(out, /ffffffffffffffffffffffffffffffff\.boxes\.mantaui\.com/, "new box hostname present");
+});
+
+test("upsertCaddyBlock: non-string argument throws TypeError", () => {
+  const b = blockFor();
+  assert.throws(() => upsertCaddyBlock(null, b), TypeError);
+  assert.throws(() => upsertCaddyBlock(undefined, b), TypeError);
+  assert.throws(() => upsertCaddyBlock(42, b), TypeError);
+  assert.throws(() => upsertCaddyBlock(":80 {}", null), TypeError);
+  assert.throws(() => upsertCaddyBlock(":80 {}", { text: b }), TypeError);
+});
+
+// ----------------------------------------------------------------------------
 // install.sh — bash syntax + caddy-skip behavior in dry-run mode (BET-205
 // acceptance: "skip Caddy install when caddy binary exists")
 // ----------------------------------------------------------------------------
@@ -2650,6 +2740,70 @@ test("render-caddy-vhost CLI subcommand rejects a non-hex boxId", () => {
     assert.fail("non-hex boxId must exit non-zero");
   } catch (e) {
     assert.match(e.stderr ?? "", /32 lowercase hex/);
+  }
+});
+
+test("upsert-caddy-block CLI subcommand upserts over empty stdin (BET-441)", () => {
+  const out = execSync(
+    `printf '' | node ${join(__dirname, "install-lib.mjs")} upsert-caddy-block --box-id ${HEX32} --port 8787`,
+    { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+  );
+  assert.equal(out, blockFor());
+});
+
+test("upsert-caddy-block CLI subcommand is byte-idempotent over its own output (BET-441)", () => {
+  const one = execSync(
+    `printf '' | node ${join(__dirname, "install-lib.mjs")} upsert-caddy-block --box-id ${HEX32} --port 8787`,
+    { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+  );
+  const two = execSync(
+    `printf '%s' "${one}" | node ${join(__dirname, "install-lib.mjs")} upsert-caddy-block --box-id ${HEX32} --port 8787`,
+    { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+  );
+  assert.equal(two, one, "running the subcommand twice over its own output must be byte-identical");
+});
+
+test("upsert-caddy-block CLI subcommand collapses stacked markers in the piped Caddyfile (BET-441)", () => {
+  const existing = [
+    ":80 {",
+    "    respond \"hello\"",
+    "}",
+    "",
+    "# >>> manta >>>",
+    "# >>> manta >>>",
+    "# >>> manta >>>",
+    `${HEX32}.boxes.mantaui.com {`,
+    "    reverse_proxy 127.0.0.1:8787",
+    "}",
+    "# <<< manta <<<",
+  ].join("\n");
+  const out = execSync(
+    `node ${join(__dirname, "install-lib.mjs")} upsert-caddy-block --box-id ${HEX32} --port 8787`,
+    { encoding: "utf8", input: existing, stdio: ["pipe", "pipe", "pipe"] },
+  );
+  assert.strictEqual((out.match(/# >>> manta >>>/g) || []).length, 1);
+  assert.strictEqual((out.match(/# <<< manta <<</g) || []).length, 1);
+  assert.ok(out.includes(":80 {\n    respond \"hello\"\n}"));
+});
+
+test("upsert-caddy-block CLI requires --box-id and --port (BET-441)", () => {
+  try {
+    execSync(
+      `printf '' | node ${join(__dirname, "install-lib.mjs")} upsert-caddy-block --port 8787`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.fail("missing --box-id must exit non-zero");
+  } catch (e) {
+    assert.match(e.stderr ?? "", /upsert-caddy-block: --box-id <32hex> required/);
+  }
+  try {
+    execSync(
+      `printf '' | node ${join(__dirname, "install-lib.mjs")} upsert-caddy-block --box-id ${HEX32}`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.fail("missing --port must exit non-zero");
+  } catch (e) {
+    assert.match(e.stderr ?? "", /upsert-caddy-block: --port <N> required/);
   }
 });
 
@@ -5186,4 +5340,30 @@ test("install.sh no longer warns about a port bound by something other than Cadd
 test("install.sh no longer invokes `ss -tlnH` (BET-442)", () => {
   const src = readFileSync(INSTALL_SH, "utf-8");
   assert.doesNotMatch(src, /ss -tlnH/, "the `ss` process-less call that made the port check always-false must be gone");
+});
+
+// ----------------------------------------------------------------------------
+// install.sh — the four Caddyfile write paths are ONE upsert (BET-441)
+// ----------------------------------------------------------------------------
+// The old awk-based marker-replace appended a stray `# >>> manta >>>` line on
+// every re-run, and the create / append / replace paths were four divergent
+// shell branches. They collapse to a single `upsert-caddy-block` call into
+// the pure, unit-tested install-lib.mjs; assertions are textual so a
+// regression that reintroduces shell block-editing is caught here.
+
+test("install.sh contains no awk invocation referencing the manta markers (BET-441)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.doesNotMatch(src, /awk.*manta >>>/, "the awk marker-replace pipeline must be gone");
+});
+
+test("install.sh contains exactly one upsert-caddy-block call site (BET-441)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const sites = (src.split("\n").filter((l) => /upsert-caddy-block/.test(l)) || []).length;
+  assert.strictEqual(sites, 1, "upsert-caddy-block must be invoked exactly once in install.sh");
+});
+
+test("install.sh no longer contains the stray-marker grep test or the SNIPPET inline render (BET-441)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.doesNotMatch(src, /grep -q '\^# >>> manta >>>'/, "the marker-presence grep branch must be gone");
+  assert.doesNotMatch(src, /--mode inline/, "the inline SNIPPET render in install.sh must be gone (upsert-caddy-block owns inline mode now)");
 });
