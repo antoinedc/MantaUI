@@ -1173,7 +1173,7 @@ main() {
   # ===========================================================================
 
   # Public-TLS predicate — ONE gate, ONE source of truth for the Caddy/apt/
-  # DNS/vhost sub-steps (A/D/E/port-check/reload). Merges the macOS case
+  # DNS/vhost sub-steps (A/D/E/reload). Merges the macOS case
   # (BET-274 / BET-276) with the existing tailscale case (BET-267): both
   # skip the public TLS path; gateway-register (B/C) still runs in both
   # because it's user-space and the gateway_token is still needed for
@@ -1193,7 +1193,7 @@ main() {
   # point is "skip Caddy + public DNS"). PRIVILEGED_SECTION_SKIP is left
   # at 0 so sub-steps B + C (gateway register + merge-gateway) still run —
   # they are user-space and the gateway_token is still needed for APNs
-  # push. A/D/E/port-check/reload are gated on SKIP_PUBLIC_TLS further
+  # push. A/D/E/reload are gated on SKIP_PUBLIC_TLS further
   # down.
   PRIVILEGED_SECTION_SKIP=0
   if [ "$DRY_RUN" != "1" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
@@ -1254,7 +1254,7 @@ main() {
 
   if [ "$INGRESS_MODE" = "tailscale" ]; then
     # Tailscale path (BET-267): skip Caddy install + DNS wait + vhost write +
-    # port-check + caddy reload. B/C (gateway register + merge-gateway) still
+    # caddy reload. B/C (gateway register + merge-gateway) still
     # run below — the gateway_token is still needed for APNs push.
     log "Tailscale detected ($TAILNET_IP) — skipping Caddy + public DNS; devices connect over the tailnet."
   elif [ "$IS_MACOS" = "1" ]; then
@@ -1330,7 +1330,7 @@ main() {
   fi
 
   # --- A. Install Caddy if absent ------------------------------------------
-  # A, D, E/port-check/reload only run on the public path (BET-267). The
+  # A, D, E/reload only run on the public path (BET-267). The
   # tailscale path AND the macOS path (BET-276) never bind :80/:443, never
   # write a Caddy vhost, never wait on DNS, never reload Caddy. Gated via
   # SKIP_PUBLIC_TLS which merges both cases into one predicate.
@@ -1600,7 +1600,7 @@ main() {
             warn "systemctl not found — reload caddy manually with: sudo caddy reload --config /etc/caddy/Caddyfile"
           fi
         else
-          warn "Caddy vhost write was skipped — skipping port-check + systemctl reload too."
+          warn "Caddy vhost write was skipped — skipping systemctl reload too."
         fi
       fi
     fi
