@@ -2,14 +2,24 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from "react";
-import { ChevronRight, ChevronDown, X } from "lucide-react";
-import { useStore, type WindowStatusUI } from "./store";
+import { ChevronRight, ChevronDown, X, Pin, Search } from "lucide-react";
+import { useStore, flatSessions, type WindowStatusUI } from "./store";
 import { nowMs } from "./clock";
-import type { Project, WorktreeInfo } from "../shared/types";
-import { classifyCacheAge, formatAge, isJobRow, selectCacheTtlMs } from "./chatUtils";
+import type { Project, TmuxWindow, WorktreeInfo } from "../shared/types";
+import {
+  classifyCacheAge,
+  computeJobNesting,
+  formatAge,
+  fuzzySessionScore,
+  isJobRow,
+  resolvePin,
+  selectCacheTtlMs,
+  windowPinId,
+} from "./chatUtils";
 import { MOD_KEY } from "./platform";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
@@ -26,6 +36,7 @@ function loadCollapsed(): Set<string> {
 export type SidebarHandle = {
   openNewProject: () => void;
   openNewSessionInActive: () => void;
+  openPalette: () => void;
 };
 
 type Props = {
@@ -45,8 +56,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     setActive,
     refresh,
     backgroundSyncing,
-    // BET-246: worktree defaults from Settings (Global default for the
-    // new-session checkbox + the clean-on-close gate).
+    pinnedWindows,
+    togglePin,
     worktreePerSession,
     worktreeCleanOnClose,
   } = useStore();
@@ -56,10 +67,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     alert(msg);
   };
 
-  // BET-248: positive counterpart of showError — used when an action
-  // succeeded but left side-effects the user should know about (e.g.
-  // "Kept worktree at <path>"). Same alert() surface so the behavior is
-  // consistent across this file without introducing a new toast system.
   const showNotice = (msg: string) => {
     alert(msg);
   };
@@ -68,40 +75,38 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectCwd, setNewProjectCwd] = useState("~");
-  // Inline ghost-text completion for the cwd field. Holds the FULL suggested
-  // path; we show only the tail past the typed prefix as muted overlay text.
   const [cwdSuggestion, setCwdSuggestion] = useState<string | null>(null);
   const cwdDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // When the user's cwd resolves to a git repo with >1 worktree, we pause
-  // creation and ask whether to fan out into one session per worktree.
   const [detectedWorktrees, setDetectedWorktrees] = useState<WorktreeInfo[] | null>(null);
   const [creating, setCreating] = useState(false);
 
   const [newSessionFor, setNewSessionFor] = useState<string | null>(null);
   const [newSessionName, setNewSessionName] = useState("");
-  // BET-246: per-session worktree override. Seeded from the global
-  // worktreePerSession setting; the dialog disables the checkbox when the
-  // project's cwd isn't a git repo. Defaults to false (non-git projects
-  // always force it false here too).
   const [newSessionWorktree, setNewSessionWorktree] = useState(false);
   const [newSessionIsGitRepo, setNewSessionIsGitRepo] = useState(false);
 
   const [confirmDeleteFor, setConfirmDeleteFor] = useState<
     | { kind: "session"; project: string; index: number; name: string }
     | { kind: "project"; project: string }
-    // BET-246: killWindow ran the safe git worktree remove and got the
-    // dirty-checkout refusal — ask the user whether to --force (Remove)
-    // or keep the worktree (Keep). Either choice continues to teardown;
-    // Cancel bails entirely.
     | { kind: "worktree-dirty"; project: string; index: number; name: string; worktreePath: string }
     | null
   >(null);
 
-  // Inline rename state
   const [renameTarget, setRenameTarget] = useState<
     { kind: "project"; old: string } | { kind: "window"; project: string; index: number; old: string } | null
   >(null);
   const [renameValue, setRenameValue] = useState("");
+
+  // BET-414: ⌘K session palette.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  const [paletteSel, setPaletteSel] = useState(0);
+
+  // BET-414: keyboard tree-nav focus (roving tabindex). `focusedKey` is the
+  // row that currently holds tabIndex=0; ArrowUp/Down moves it along the
+  // computed nav order. Keys: `pin:<id>` | `group:<session>` | `win:<session>:<idx>`
+  // | `job:<session>:<idx>`.
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
 
   useEffect(() => {
     localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsed]));
@@ -113,8 +118,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       if (activeProjectName) {
         setNewSessionFor(activeProjectName);
         setNewSessionName("");
-        // BET-246: seed checkbox + probe git. Non-git projects force the
-        // checkbox off; the dialog disables + mutes it visually.
         setNewSessionWorktree(worktreePerSession);
         void probeGitForProject(activeProjectName);
         setCollapsed((prev) => {
@@ -124,12 +127,13 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         });
       }
     },
+    openPalette: () => {
+      setPaletteOpen(true);
+      setPaletteQuery("");
+      setPaletteSel(0);
+    },
   }));
 
-  // Project cwd resolution (mirror of server-side resolveProjectCwd, but
-  // enough for the renderer's is-git-repo probe + worktree-create cwd).
-  // Prefer the project's stored defaultCwd; fall back to the active
-  // window's paneCurrentPath; "~" / empty → not a usable git probe.
   const resolveProjectCwd = (projectName: string): string => {
     const proj = projects.find((p) => p.tmuxSession === projectName);
     const stored = (proj?.defaultCwd ?? "").trim();
@@ -139,9 +143,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       ?? proj?.windows.find((x) => x.active)
       ?? proj?.windows[0];
     const fallback = (w?.paneCurrentPath ?? "").trim();
-    // BET-248: silent empty return bit a future caller. When neither
-    // defaultCwd nor any paneCurrentPath resolved, surface a warn so the
-    // regression is visible during dev rather than in a downstream NPE.
     if (!fallback) {
       console.warn(
         `[Sidebar] resolveProjectCwd: no usable cwd for project "${projectName}" (defaultCwd=${JSON.stringify(stored)}, paneCurrentPath missing)`,
@@ -150,9 +151,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     return fallback;
   };
 
-  // Probe whether the project's cwd is inside a git repo. Reuses the
-  // existing gitListWorktrees channel — a non-empty list means at least
-  // the main worktree is registered, which only happens for git repos.
   const probeGitForProject = async (projectName: string) => {
     const cwd = resolveProjectCwd(projectName);
     if (!cwd || cwd === "~") {
@@ -166,9 +164,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       setNewSessionIsGitRepo(isRepo);
       if (!isRepo) setNewSessionWorktree(false);
     } catch {
-      // Probe failure (transient) → leave state alone; the existing checkbox
-      // value stays, and the user sees a non-checked state until they retry
-      // by reopening the form.
       setNewSessionIsGitRepo(false);
     }
   };
@@ -180,8 +175,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       return next;
     });
 
-  // Window name for a worktree: dir basename (matches how users name worktree
-  // folders — e.g. `ethernal`, `ethernal-feature`). Branch is the fallback.
   const worktreeName = (w: WorktreeInfo): string =>
     w.path.split("/").filter(Boolean).pop() || w.branch || "wt";
 
@@ -195,10 +188,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     if (cwdDebounce.current) clearTimeout(cwdDebounce.current);
   };
 
-  // Shell-style tab-complete: when there's exactly one match, suggest its
-  // full path plus `/` so the next probe can descend into it. When multiple
-  // candidates share a prefix longer than what's typed, suggest the longest
-  // common prefix (LCP) — never commit to one of the ambiguous siblings.
   const refreshCwdSuggestion = (value: string) => {
     if (cwdDebounce.current) clearTimeout(cwdDebounce.current);
     if (!value) {
@@ -215,7 +204,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           return;
         }
         if (matches.length === 1) {
-          // Append `/` so further Tab can descend into the matched directory.
           setCwdSuggestion(matches[0] + "/");
           return;
         }
@@ -236,22 +224,15 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     refreshCwdSuggestion(value);
   };
 
-  // Accept current suggestion: replace the input value with the full match.
-  // Returns true if anything was accepted (so the caller can preventDefault).
   const acceptCwdSuggestion = (): boolean => {
     if (!cwdSuggestion || !cwdSuggestion.startsWith(newProjectCwd)) return false;
     if (cwdSuggestion === newProjectCwd) return false;
     setNewProjectCwd(cwdSuggestion);
     setCwdSuggestion(null);
-    // Re-probe under the newly accepted path so successive Tabs keep descending
-    // / disambiguating, the way shell completion does.
     refreshCwdSuggestion(cwdSuggestion);
     return true;
   };
 
-  // mode === "auto": probe for worktrees; if >1, switch to confirm UI and bail.
-  // mode === "all":  create one window per detected worktree.
-  // mode === "single": create one window at the user's typed cwd.
   const createProject = async (mode: "auto" | "all" | "single" = "auto") => {
     if (creating) return;
     const name = newProjectName.trim();
@@ -268,9 +249,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           return;
         }
       } catch {
-        // probe failure (no git, network, etc.) → fall through to single
+        /* probe failure (no git, network, etc.) → fall through to single */
       }
-      // <=1 worktree found, just create normally
       try {
         await window.api.tmuxNewSession({
           name,
@@ -291,9 +271,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     setCreating(true);
     try {
       if (mode === "all" && detectedWorktrees && detectedWorktrees.length > 1) {
-        // First worktree → tmux session's initial window. The rest are added
-        // as additional windows. Each window's cwd is the worktree's own path,
-        // not the user-typed cwd, so each one starts in its own checkout.
         const [first, ...rest] = detectedWorktrees;
         await window.api.tmuxNewSession({
           name,
@@ -310,8 +287,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               chatMode: true,
             });
           } catch (e) {
-            // Surface but keep going — partial fan-out is better than aborting
-            // with the session already created.
             showError(e);
           }
         }
@@ -335,8 +310,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const startNewSession = (projectName: string) => {
     setNewSessionFor(projectName);
     setNewSessionName("");
-    // BET-246: seed checkbox + probe git for the clicked project. Same
-    // dance as openNewSessionInActive above.
     setNewSessionWorktree(worktreePerSession);
     void probeGitForProject(projectName);
     setCollapsed((prev) => {
@@ -350,11 +323,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     if (!newSessionFor) return;
     const sessionFor = newSessionFor;
     const windowName = newSessionName.trim() || "session";
-    // BET-246: when the user opted in AND the project is a git repo,
-    // branch a sibling worktree first, then create the window with that
-    // path as its cwd. Fail-closed: any worktree error surfaces and the
-    // window is NOT created (no silent fall-through to the shared dir).
-    // The unchecked/non-git path is byte-for-byte the legacy flow.
     const wantWorktree = newSessionWorktree && newSessionIsGitRepo;
     let worktreePath: string | undefined;
     if (wantWorktree) {
@@ -380,7 +348,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       });
       setNewSessionFor(null);
       await refresh();
-      // Activate the new window (it'll be at the highest index in this session)
       const proj = projects.find((p) => p.tmuxSession === sessionFor);
       const w = proj?.windows.find((x) => x.name === windowName);
       if (w) {
@@ -399,11 +366,9 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     }
   };
 
-  const onClickWindow = async (proj: Project, idx: number) => {
+  const activateWindow = async (proj: Project, idx: number) => {
     setActive(proj.tmuxSession, idx);
     if (proj.tmuxSession === activeProjectName) {
-      // Already attached to this project's tmux session — tell tmux to switch
-      // its active window so the PTY's display follows.
       try {
         await window.api.tmuxSelectWindow({
           sessionName: proj.tmuxSession,
@@ -416,11 +381,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   };
 
   const killWindow = async (project: string, index: number) => {
-    // BET-246: BEFORE teardown, run the safe worktree remove (if gated).
-    // Only act on windows whose `@manta-worktree-path` is set — that's the
-    // one signal that MantaUI itself created the worktree (a pre-existing
-    // worktree or the main checkout is never stamped, so it's never
-    // cleaned here).
     const proj = projects.find((p) => p.tmuxSession === project);
     const w = proj?.windows.find((x) => x.index === index);
     const wtPath = w?.worktreePath ?? null;
@@ -428,8 +388,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       try {
         const res = await window.api.gitRemoveWorktree({ path: wtPath, force: false });
         if (res && res.removed === false && res.reason === "dirty") {
-          // Pause teardown; surface the confirm dialog. The user picks
-          // Remove (force) or Keep (skip).
           setConfirmDeleteFor({
             kind: "worktree-dirty",
             project,
@@ -440,9 +398,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           return;
         }
       } catch (e) {
-        // Anything other than a classified dirty refusal → show the error
-        // but still continue to teardown. Closing the session must not be
-        // blocked by a cleanup failure.
         showError(e);
       }
     }
@@ -455,10 +410,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     }
   };
 
-  // Second-stage kill after the worktree-dirty confirm. force=true retries
-  // git worktree remove with --force; force=false skips removal entirely
-  // (the worktree + branch remain on disk). Either way the tmux window
-  // itself is then torn down — both branches lead to teardown per spec.
   const killWorktreeDirtyAndClose = async (
     project: string,
     index: number,
@@ -470,14 +421,9 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       try {
         await window.api.gitRemoveWorktree({ path: wtPath, force: true });
       } catch (e) {
-        // Force-remove failed — surface but still close the session.
         showError(e);
       }
     } else {
-      // BET-248: the worktree + branch remain on disk, but the session
-      // window still closes. Without this feedback the user gets no
-      // signal that the worktree was kept — the previous behavior left
-      // them wondering whether the click registered.
       showNotice(`Kept worktree at ${wtPath}`);
     }
     try {
@@ -497,7 +443,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       showError(e);
     }
   };
-
 
   const startRename = (target: NonNullable<typeof renameTarget>, current: string) => {
     setRenameTarget(target);
@@ -532,6 +477,192 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     }
   };
 
+  // ---- BET-414: pinned section + job nesting (pure compute) ----
+
+  // Resolve pinned ids to live (project, window) pairs; drop stale pins.
+  const pinnedRows = useMemo(() => {
+    const seen = new Set<string>();
+    const rows: { project: Project; window: TmuxWindow; pinId: string }[] = [];
+    for (const pinId of pinnedWindows) {
+      if (seen.has(pinId)) continue;
+      seen.add(pinId);
+      const r = resolvePin(projects, pinId);
+      if (r) rows.push({ ...r, pinId });
+    }
+    return rows;
+  }, [pinnedWindows, projects]);
+
+  // Pinned window ids as a set, for excluding from workspace groups.
+  const pinnedIds = useMemo(
+    () => new Set(pinnedRows.map((r) => r.pinId)),
+    [pinnedRows],
+  );
+
+  // Per-project job nesting. Keyed by tmuxSession.
+  const nesting = useMemo(() => {
+    const m = new Map<string, ReturnType<typeof computeJobNesting>>();
+    for (const p of projects) {
+      const activeIdx = activeWindowByProject[p.tmuxSession];
+      m.set(p.tmuxSession, computeJobNesting(p, jobs, activeIdx));
+    }
+    return m;
+  }, [projects, jobs, activeWindowByProject]);
+
+  // Flat nav-order keys for keyboard tree nav (roving tabindex).
+  const navKeys = useMemo(() => {
+    const keys: string[] = [];
+    for (const r of pinnedRows) keys.push(`pin:${r.pinId}`);
+    for (const p of projects) {
+      keys.push(`group:${p.tmuxSession}`);
+      if (collapsed.has(p.tmuxSession)) continue;
+      const n = nesting.get(p.tmuxSession)!;
+      for (const w of p.windows) {
+        if (pinnedIds.has(windowPinId(p.tmuxSession, w.index))) continue;
+        if (n.hidden.has(w.index)) continue;
+        keys.push(`win:${p.tmuxSession}:${w.index}`);
+        const kids = n.children.get(w.index);
+        if (kids) for (const k of kids) keys.push(`job:${p.tmuxSession}:${k}`);
+      }
+    }
+    return keys;
+  }, [pinnedRows, pinnedIds, projects, collapsed, nesting]);
+
+  // Reset focus if it falls off the list.
+  useEffect(() => {
+    if (focusedKey && !navKeys.includes(focusedKey)) setFocusedKey(null);
+  }, [navKeys, focusedKey]);
+
+  const focusIndex = focusedKey ? navKeys.indexOf(focusedKey) : -1;
+
+  const moveFocus = (dir: 1 | -1) => {
+    if (navKeys.length === 0) return;
+    const next =
+      focusIndex < 0
+        ? dir === 1
+          ? 0
+          : navKeys.length - 1
+        : (focusIndex + dir + navKeys.length) % navKeys.length;
+    setFocusedKey(navKeys[next]);
+  };
+
+  const activateFocused = () => {
+    if (!focusedKey) return;
+    const [kind, ...rest] = focusedKey.split(":");
+    if (kind === "group") {
+      toggleCollapse(rest.join(":"));
+      return;
+    }
+    if (kind === "pin") {
+      const r = resolvePin(projects, rest.join(":"));
+      if (r) void activateWindow(r.project, r.window.index);
+      return;
+    }
+    // win:<session>:<idx> | job:<session>:<idx>
+    const session = rest[0];
+    const idx = Number(rest[1]);
+    const proj = projects.find((p) => p.tmuxSession === session);
+    const win = proj?.windows.find((w) => w.index === idx);
+    if (proj && win) void activateWindow(proj, idx);
+  };
+
+  const onRailKeyDown = (e: React.KeyboardEvent) => {
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        moveFocus(1);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        moveFocus(-1);
+        break;
+      case "ArrowRight": {
+        if (!focusedKey) break;
+        if (focusedKey.startsWith("group:")) {
+          const id = focusedKey.slice("group:".length);
+          setCollapsed((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        }
+        break;
+      }
+      case "ArrowLeft": {
+        if (!focusedKey) break;
+        if (focusedKey.startsWith("group:")) {
+          const id = focusedKey.slice("group:".length);
+          setCollapsed((prev) => {
+            const next = new Set(prev);
+            next.add(id);
+            return next;
+          });
+        }
+        break;
+      }
+      case "Enter":
+        e.preventDefault();
+        activateFocused();
+        break;
+    }
+  };
+
+  // ---- ⌘K palette candidates (reuse flatSessions for ordering) ----
+  const paletteCandidates = useMemo(() => flatSessions(projects), [projects]);
+  const paletteResults = useMemo(() => {
+    const q = paletteQuery.trim();
+    const scored = paletteCandidates
+      .map((c) => ({
+        ...c,
+        score: fuzzySessionScore(q, c.window.name, c.project.tmuxSession),
+      }))
+      .filter((c) => c.score > 0)
+      .sort((a, b) => b.score - a.score);
+    return scored;
+  }, [paletteCandidates, paletteQuery]);
+
+  useEffect(() => {
+    if (paletteSel >= paletteResults.length) setPaletteSel(0);
+  }, [paletteResults.length, paletteSel]);
+
+  const onPaletteKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setPaletteOpen(false);
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setPaletteSel((s) =>
+        paletteResults.length === 0 ? 0 : (s + 1) % paletteResults.length,
+      );
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setPaletteSel((s) =>
+        paletteResults.length === 0 ? 0 : (s - 1 + paletteResults.length) % paletteResults.length,
+      );
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const target = paletteResults[paletteSel];
+      if (target) {
+        void activateWindow(target.project, target.window.index);
+        setPaletteOpen(false);
+      }
+    }
+  };
+
+  // Row-indexed status lookup helper.
+  const statusFor = (session: string, idx: number): WindowStatusUI | undefined =>
+    status[session]?.[idx];
+
+  // Title tooltip for a window row: rename hint + job activity (the activity
+  // formerly rendered as a second line now lives here, per BET-414 one-line rule).
+  const rowTitle = (w: TmuxWindow): string => {
+    const parts = ["Double-click to rename"];
+    if (isJobRow(jobs, w.opencodeSessionId)) {
+      const job = w.opencodeSessionId ? jobs[w.opencodeSessionId] : undefined;
+      if (job?.activity) parts.push(job.activity);
+    }
+    return parts.join(" · ");
+  };
+
   return (
     <aside className="w-64 shrink-0 border-r border-border bg-bg-elev flex flex-col">
       <div className="titlebar-drag h-12 shrink-0" />
@@ -553,13 +684,23 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             </span>
           )}
         </div>
-        <button
-          onClick={() => setNewProjectOpen(true)}
-          className="text-text-muted hover:text-text text-lg leading-none"
-          title={`New project (${MOD_KEY}N)`}
-        >
-          +
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setPaletteOpen(true)}
+            className="text-text-muted hover:text-text text-base leading-none"
+            title={`Search sessions (${MOD_KEY}K)`}
+            aria-label="Search sessions"
+          >
+            <Search size={15} aria-hidden="true" />
+          </button>
+          <button
+            onClick={() => setNewProjectOpen(true)}
+            className="text-text-muted hover:text-text text-lg leading-none"
+            title={`New project (${MOD_KEY}N)`}
+          >
+            +
+          </button>
+        </div>
       </div>
 
       {newProjectOpen && (
@@ -576,9 +717,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             disabled={!!detectedWorktrees || creating}
             className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded focus:outline-none focus:border-accent disabled:opacity-60"
           />
-          {/* Wrapper holds the background + border so the input can be
-              transparent — that lets the ghost-text overlay show through
-              underneath. */}
           <div
             className={`relative w-full bg-bg-soft border border-border rounded focus-within:border-accent ${
               !!detectedWorktrees || creating ? "opacity-60" : ""
@@ -688,10 +826,74 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto px-2 pb-2">
+      <div
+        className="flex-1 overflow-y-auto px-2 pb-2 outline-none"
+        role="tree"
+        aria-label="Sessions"
+        tabIndex={-1}
+        onKeyDown={onRailKeyDown}
+      >
         {projects.length === 0 && !newProjectOpen && (
           <div className="px-2 py-3 text-meta text-text-faint">
             No projects yet. Click + or press {MOD_KEY}N.
+          </div>
+        )}
+
+        {/* Pinned section — above the workspace groups. */}
+        {pinnedRows.length > 0 && (
+          <div className="mb-3">
+            <div className="px-1 py-1 text-micro font-semibold uppercase tracking-wider text-text-quiet">
+              Pinned
+            </div>
+            <div className="space-y-0.5">
+              {pinnedRows.map((r) => (
+                <WindowRow
+                  key={`pin:${r.pinId}`}
+                  project={r.project}
+                  window={r.window}
+                  isActive={
+                    activeProjectName === r.project.tmuxSession &&
+                    activeWindowByProject[r.project.tmuxSession] === r.window.index
+                  }
+                  status={statusFor(r.project.tmuxSession, r.window.index)}
+                  pinned
+                  focused={focusedKey === `pin:${r.pinId}`}
+                  onActivate={() => activateWindow(r.project, r.window.index)}
+                  onTogglePin={() => void togglePin(r.pinId)}
+                  onClose={() =>
+                    setConfirmDeleteFor({
+                      kind: "session",
+                      project: r.project.tmuxSession,
+                      index: r.window.index,
+                      name: r.window.name,
+                    })
+                  }
+                  onRename={() =>
+                    startRename(
+                      {
+                        kind: "window",
+                        project: r.project.tmuxSession,
+                        index: r.window.index,
+                        old: r.window.name,
+                      },
+                      r.window.name,
+                    )
+                  }
+                  renameTarget={renameTarget}
+                  renameValue={renameValue}
+                  setRenameValue={setRenameValue}
+                  commitRename={commitRename}
+                  cancelRename={() => setRenameTarget(null)}
+                  title={rowTitle(r.window)}
+                  confirmDeleteFor={confirmDeleteFor}
+                  setConfirmDeleteFor={setConfirmDeleteFor}
+                  onKillWindow={() => killWindow(r.project.tmuxSession, r.window.index)}
+                  onKillWorktreeDirty={(wtPath, force) =>
+                    killWorktreeDirtyAndClose(r.project.tmuxSession, r.window.index, wtPath, force)
+                  }
+                />
+              ))}
+            </div>
           </div>
         )}
 
@@ -699,57 +901,31 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           const isCollapsed = collapsed.has(p.tmuxSession);
           const activeWinIdx = activeWindowByProject[p.tmuxSession];
           const isProjectActive = activeProjectName === p.tmuxSession;
+          const n = nesting.get(p.tmuxSession)!;
+          const topWindows = p.windows.filter(
+            (w) =>
+              !pinnedIds.has(windowPinId(p.tmuxSession, w.index)) &&
+              !n.hidden.has(w.index),
+          );
           return (
             <div key={p.tmuxSession} className="mb-4">
-              <div
-                className="group flex items-center gap-1 px-1 py-1 rounded text-micro font-semibold uppercase text-text-muted hover:text-text cursor-pointer select-none"
-                onClick={() => toggleCollapse(p.tmuxSession)}
-              >
-                <span className="w-3 flex items-center justify-center text-text-quiet">
-                  {isCollapsed ? <ChevronRight size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
-                </span>
-                {renameTarget?.kind === "project" && renameTarget.old === p.tmuxSession ? (
-                  <RenameInput
-                    value={renameValue}
-                    onChange={setRenameValue}
-                    onCommit={commitRename}
-                    onCancel={() => setRenameTarget(null)}
-                    size="project"
-                  />
-                ) : (
-                  <span
-                    className={`flex-1 truncate font-semibold ${isProjectActive ? "text-text" : ""}`}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      startRename({ kind: "project", old: p.tmuxSession }, p.tmuxSession);
-                    }}
-                    title="Double-click to rename"
-                  >
-                    {p.tmuxSession}
-                  </span>
-                )}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    startNewSession(p.tmuxSession);
-                  }}
-                  className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-text leading-none"
-                  title="New session in this project"
-                >
-                  +
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setConfirmDeleteFor({ kind: "project", project: p.tmuxSession });
-                  }}
-                  className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
-                  title="Close project"
-                  aria-label="Close project"
-                >
-                  <X size={14} aria-hidden="true" />
-                </button>
-              </div>
+              <GroupHeader
+                project={p}
+                isCollapsed={isCollapsed}
+                isProjectActive={isProjectActive}
+                focused={focusedKey === `group:${p.tmuxSession}`}
+                onToggle={() => toggleCollapse(p.tmuxSession)}
+                onNewSession={() => startNewSession(p.tmuxSession)}
+                onClose={() => setConfirmDeleteFor({ kind: "project", project: p.tmuxSession })}
+                renameTarget={renameTarget}
+                renameValue={renameValue}
+                setRenameValue={setRenameValue}
+                commitRename={commitRename}
+                cancelRename={() => setRenameTarget(null)}
+                startRename={() =>
+                  startRename({ kind: "project", old: p.tmuxSession }, p.tmuxSession)
+                }
+              />
 
               {confirmDeleteFor?.kind === "project" &&
                 confirmDeleteFor.project === p.tmuxSession && (
@@ -761,106 +937,81 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 )}
 
               {!isCollapsed && (
-                <div className="pl-4 space-y-1 mt-0.5">
-                  {p.windows.map((w) => {
+                <div className="pl-2 space-y-0.5 mt-0.5">
+                  {topWindows.map((w) => {
                     const isActive = isProjectActive && activeWinIdx === w.index;
-                    const isRenaming =
-                      renameTarget?.kind === "window" &&
-                      renameTarget.project === p.tmuxSession &&
-                      renameTarget.index === w.index;
+                    const kids = n.children.get(w.index) ?? [];
                     return (
                       <div key={w.index}>
-                        <div
-                          className={`group flex items-center gap-1 pl-2 pr-2 py-1 min-h-8 rounded text-meta cursor-pointer transition ${
-                            isActive
-                              ? "bg-bg-soft text-text"
-                              : "text-text-muted hover:bg-bg-soft hover:text-text"
-                          }`}
-                          onClick={() => onClickWindow(p, w.index)}
-                        >
-                          {isRenaming ? (
-                            <RenameInput
-                              value={renameValue}
-                              onChange={setRenameValue}
-                              onCommit={commitRename}
-                              onCancel={() => setRenameTarget(null)}
-                              size="window"
+                        <WindowRow
+                          project={p}
+                          window={w}
+                          isActive={isActive}
+                          status={statusFor(p.tmuxSession, w.index)}
+                          pinned={pinnedIds.has(windowPinId(p.tmuxSession, w.index))}
+                          focused={focusedKey === `win:${p.tmuxSession}:${w.index}`}
+                          onActivate={() => activateWindow(p, w.index)}
+                          onTogglePin={() => void togglePin(windowPinId(p.tmuxSession, w.index))}
+                          onClose={() =>
+                            setConfirmDeleteFor({
+                              kind: "session",
+                              project: p.tmuxSession,
+                              index: w.index,
+                              name: w.name,
+                            })
+                          }
+                          onRename={() =>
+                            startRename(
+                              {
+                                kind: "window",
+                                project: p.tmuxSession,
+                                index: w.index,
+                                old: w.name,
+                              },
+                              w.name,
+                            )
+                          }
+                          renameTarget={renameTarget}
+                          renameValue={renameValue}
+                          setRenameValue={setRenameValue}
+                          commitRename={commitRename}
+                          cancelRename={() => setRenameTarget(null)}
+                          title={rowTitle(w)}
+                          confirmDeleteFor={confirmDeleteFor}
+                          setConfirmDeleteFor={setConfirmDeleteFor}
+                          onKillWindow={() => killWindow(p.tmuxSession, w.index)}
+                          onKillWorktreeDirty={(wtPath, force) =>
+                            killWorktreeDirtyAndClose(p.tmuxSession, w.index, wtPath, force)
+                          }
+                        />
+                        {kids.map((childIdx) => {
+                          const childWin = p.windows.find((x) => x.index === childIdx);
+                          if (!childWin) return null;
+                          const childActive = isProjectActive && activeWinIdx === childIdx;
+                          return (
+                            <JobChildRow
+                              key={`job:${p.tmuxSession}:${childIdx}`}
+                              project={p}
+                              window={childWin}
+                              isActive={childActive}
+                              status={statusFor(p.tmuxSession, childIdx)}
+                              focused={focusedKey === `job:${p.tmuxSession}:${childIdx}`}
+                              onActivate={() => activateWindow(p, childIdx)}
+                              onClose={() =>
+                                setConfirmDeleteFor({
+                                  kind: "session",
+                                  project: p.tmuxSession,
+                                  index: childIdx,
+                                  name: childWin.name,
+                                })
+                              }
+                              title={rowTitle(childWin)}
+                              confirmDeleteFor={confirmDeleteFor}
+                              setConfirmDeleteFor={setConfirmDeleteFor}
+                              onKillWindow={() => killWindow(p.tmuxSession, childIdx)}
                             />
-                          ) : (
-                            <span className="flex-1 min-w-0 flex flex-col">
-                              <span
-                                className="truncate"
-                                onDoubleClick={(e) => {
-                                  e.stopPropagation();
-                                  startRename(
-                                    {
-                                      kind: "window",
-                                      project: p.tmuxSession,
-                                      index: w.index,
-                                      old: w.name,
-                                    },
-                                    w.name,
-                                  );
-                                }}
-                                title="Double-click to rename"
-                              >
-                                {w.name}
-                              </span>
-                              {isJobRow(jobs, w.opencodeSessionId) &&
-                                jobs[w.opencodeSessionId as string]?.activity && (
-                                  <span
-                                    className="text-text-faint text-meta truncate leading-tight"
-                                    title={jobs[w.opencodeSessionId as string]!.activity}
-                                  >
-                                    {jobs[w.opencodeSessionId as string]!.activity}
-                                  </span>
-                                )}
-                            </span>
-                          )}
-                          <StatusIndicator
-                            status={status[p.tmuxSession]?.[w.index]}
-                          />
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setConfirmDeleteFor(
-                                confirmDeleteFor?.kind === "session" &&
-                                  confirmDeleteFor.project === p.tmuxSession &&
-                                  confirmDeleteFor.index === w.index
-                                  ? null
-                                  : {
-                                      kind: "session",
-                                      project: p.tmuxSession,
-                                      index: w.index,
-                                      name: w.name,
-                                    },
-                              );
-                            }}
-                            className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger text-meta leading-none inline-flex items-center"
-                            title="Close session"
-                            aria-label="Close session"
-                          >
-                            <X size={14} aria-hidden="true" />
-                          </button>
-                        </div>
-                        {confirmDeleteFor?.kind === "session" &&
-                          confirmDeleteFor.project === p.tmuxSession &&
-                          confirmDeleteFor.index === w.index && (
-                            <ConfirmDelete
-                              label={`session "${w.name}"`}
-                              onKill={() => killWindow(p.tmuxSession, w.index)}
-                              onCancel={() => setConfirmDeleteFor(null)}
-                            />
-                          )}
-                        {confirmDeleteFor?.kind === "worktree-dirty" &&
-                          confirmDeleteFor.project === p.tmuxSession &&
-                          confirmDeleteFor.index === w.index && (
-                            <ConfirmWorktreeDirty
-                              worktreePath={confirmDeleteFor.worktreePath}
-                              onRemove={() => killWorktreeDirtyAndClose(p.tmuxSession, w.index, confirmDeleteFor.worktreePath, true)}
-                              onKeep={() => killWorktreeDirtyAndClose(p.tmuxSession, w.index, confirmDeleteFor.worktreePath, false)}
-                            />
-                          )}
+                          );
+                        })}
                       </div>
                     );
                   })}
@@ -878,11 +1029,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                         }}
                         className="w-full bg-bg-soft border border-border px-2 py-0.5 text-meta rounded focus:outline-none focus:border-accent"
                       />
-                      {/* BET-246: per-session worktree override. Disabled
-                          (visibly muted) when the project cwd isn't inside
-                          a git repo; the spec's "disabled, not hidden"
-                          choice. Reuses the same checkbox markup as the
-                          Settings toggles. */}
                       <label
                         className={`flex items-center gap-2 text-meta ${
                           newSessionIsGitRepo ? "cursor-pointer" : "cursor-not-allowed opacity-50"
@@ -938,141 +1084,514 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           Settings…
         </button>
       </div>
+
+      {paletteOpen && (
+        <CommandPalette
+          query={paletteQuery}
+          setQuery={(v) => {
+            setPaletteQuery(v);
+            setPaletteSel(0);
+          }}
+          results={paletteResults}
+          sel={paletteSel}
+          setSel={setPaletteSel}
+          onKeyDown={onPaletteKeyDown}
+          onClose={() => setPaletteOpen(false)}
+          onActivate={(proj, idx) => {
+            void activateWindow(proj, idx);
+            setPaletteOpen(false);
+          }}
+        />
+      )}
     </aside>
   );
 });
 
-// Subtle per-window indicator. Four states:
-//
-//   running                  → pulsing accent (blue) dot, with `·N` if
-//                              subagents > 0. Sourced from the PTY
-//                              poller for claude-TUI windows and from
-//                              opencode SSE (`setChatRunning`) for
-//                              chat-mode windows — the same dot, just a
-//                              different update path.
-//   attention "question"     → pulsing red dot + `?` glyph. AI is
-//                              blocked on a Question tool request;
-//                              user MUST answer for the turn to proceed.
-//   attention "permission"   → pulsing red dot + `!` glyph. AI is
-//                              blocked on a permission.asked event;
-//                              user MUST approve/deny for a tool call
-//                              to run. Same urgency as a question;
-//                              distinct glyph so the user can tell
-//                              what's blocking before opening the
-//                              window.
-//   attention "idle"         → steady amber dot (no animation, no
-//                              glyph). Claude or chat finished a turn
-//                              while the user was on a different
-//                              window — soft "go check" signal, not
-//                              urgent.
-//   none                     → nothing rendered.
-function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
-  // Read here (not lifted to the call site) to keep the Sidebar.tsx call
-  // site untouched — see BET-119 spec.
-  const cacheTtl = useStore((s) => s.cacheTtl);
-  if (!status) return null;
+// ---- BET-414 row primitives ----
+
+// One 7px status dot carrying every state. No trailing glyphs/counts — the
+// subagent count is folded into the dot's title tooltip only.
+function StatusDot({ status }: { status: WindowStatusUI | undefined }) {
+  if (!status) return <span className="w-[10px] h-[7px] shrink-0" aria-hidden />;
   const kind = status.attentionKind ?? "idle";
-  const isBlockingAttention =
+  const isBlocking =
     status.attention && (kind === "question" || kind === "permission");
-  // BET-119: elapsed-since-last-message label, colored by prompt-cache
-  // freshness. Shown only for chat-mode windows (lastMessageAt is only ever
-  // stamped by setChatRunning/backfillLastMessageTimes, both chat-only) that
-  // are idle and not blocked on a question/permission — the red ?/! glyph
-  // outranks it, matching the precedence below. While running, the pulsing
-  // dot IS the indicator; no age label alongside it.
-  //
-  // Re-render cadence is free: `applyStatusBatch` replaces the whole
-  // `status` object on every 2s poller tick, and setChatRunning/
-  // setChatAttention do the same on every opencode SSE event, so
-  // `Date.now()` below recomputes on every one of those renders without a
-  // dedicated interval. If the status map is ever memoized to skip
-  // unchanged-looking updates, a ticking interval needs to be added here.
-  const ageLabel =
-    status.lastMessageAt != null && !status.running && !isBlockingAttention
-      ? (() => {
-          const ttlMs = selectCacheTtlMs(cacheTtl);
-          // `nowMs()` returns the demo mode's deterministic clock when the
-          // hero video is rendering (seeded by `DemoBootstrap`, advanced
-          // per-frame by `useFrameSync`), or `Date.now()` in the real app.
-          // Same return type as `Date.now()`; see src/renderer/clock.ts.
-          const now = nowMs();
-          const cls = classifyCacheAge(status.lastMessageAt!, now, ttlMs);
-          const color =
-            cls === "fresh"
-              ? "text-ok/70"
-              : cls === "aging"
-                ? "text-warn/80"
-                : "text-danger/80";
-          // Stale ages are low-signal for old idle sessions: hide by default,
-          // reveal on row hover. Reuses the same group-hover pattern as the
-          // row's close button (the row <div> carries the `group` class).
-          const hoverOnly =
-            cls === "stale" ? " opacity-0 group-hover:opacity-100" : "";
-          return (
-            <span className={`text-meta font-mono tabular-nums ${color}${hoverOnly}`}>
-              {formatAge(now - status.lastMessageAt!)}
-            </span>
-          );
-        })()
-      : null;
-  // Blocking attention (question/permission) OUTRANKS running. opencode keeps
-  // the session "busy" while it's blocked on a Question/permission tool, so a
-  // running-first check would mask the red ?/! behind a blue running dot for
-  // the entire time the user is being asked to act — exactly when the
-  // indicator matters most. The red dot wins; the user MUST act to unblock.
-  if (status.attention) {
-    if (isBlockingAttention) {
-      const glyph = kind === "question" ? "?" : "!";
-      const tooltip =
-        kind === "question"
-          ? "Waiting on a question — click to answer"
-          : "Waiting on permission — click to approve or deny";
-      return (
-        <span
-          className="flex items-center gap-0.5 text-meta text-danger leading-none"
-          title={tooltip}
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />
-          <span className="font-bold tabular-nums">{glyph}</span>
-        </span>
-      );
-    }
-    // "idle" attention is a soft "go check" signal. If the window is also
-    // still running (rare race), prefer the running dot below; otherwise
-    // show the steady amber dot.
-    if (!status.running) {
-      return (
-        <span className="flex items-center gap-1 leading-none">
-          {ageLabel}
-          <span
-            className="w-1.5 h-1.5 rounded-full bg-warn"
-            title="Finished — click to view"
-          />
-        </span>
-      );
-    }
-  }
-  if (status.running) {
+  if (isBlocking) {
+    const tooltip =
+      kind === "question"
+        ? "Waiting on a question — click to answer"
+        : "Waiting on permission — click to approve or deny";
     return (
-      <span
-        className="flex items-center gap-1 text-meta text-accent leading-none"
-        title={
-          status.subagents > 0
-            ? `Running · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
-            : "Running"
-        }
-      >
-        <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
-        {status.subagents > 0 && (
-          <span className="font-mono tabular-nums">·{status.subagents}</span>
-        )}
+      <span className="w-[10px] flex items-center justify-center shrink-0" title={tooltip}>
+        <span className="w-[7px] h-[7px] rounded-full bg-danger animate-pulse" />
       </span>
     );
   }
-  if (ageLabel) {
-    return <span className="flex items-center leading-none">{ageLabel}</span>;
+  if (status.attention && !status.running) {
+    return (
+      <span className="w-[10px] flex items-center justify-center shrink-0" title="Finished — click to view">
+        <span className="w-[7px] h-[7px] rounded-full bg-warn" />
+      </span>
+    );
   }
-  return null;
+  if (status.running) {
+    const tooltip =
+      status.subagents > 0
+        ? `Running · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
+        : "Running";
+    return (
+      <span className="w-[10px] flex items-center justify-center shrink-0" title={tooltip}>
+        <span className="w-[7px] h-[7px] rounded-full bg-accent animate-pulse" />
+      </span>
+    );
+  }
+  return <span className="w-[10px] flex items-center justify-center shrink-0" title="Idle"><span className="w-[7px] h-[7px] rounded-full" style={{ backgroundColor: "var(--tx4)" }} /></span>;
+}
+
+// Trailing timer slot. Mono, tabular figures, right-aligned, min-width 20px.
+// Visible under the staleness TTL; past it `visibility:hidden` (NOT display:none)
+// so the slot is preserved and revealing it on hover never shifts the pin.
+function Timer({ status }: { status: WindowStatusUI | undefined }) {
+  const cacheTtl = useStore((s) => s.cacheTtl);
+  const showAge =
+    status?.lastMessageAt != null && !status.running && !status.attention;
+  if (!showAge) {
+    return <span className="w-7 shrink-0" aria-hidden />;
+  }
+  const now = nowMs();
+  const ttl = selectCacheTtlMs(cacheTtl);
+  const cls = classifyCacheAge(status.lastMessageAt!, now, ttl);
+  const visible = cls !== "stale";
+  return (
+    <span
+      className="w-7 shrink-0 text-right font-mono tabular-nums text-meta"
+      style={{ color: "var(--tx4)", visibility: visible ? "visible" : "hidden" }}
+    >
+      {formatAge(now - status.lastMessageAt!)}
+    </span>
+  );
+}
+
+// Permanently 18px pin slot. Empty at rest; on row hover reveals an outline
+// Pin (unpinned) or filled Pin (pinned). Brightens to --accent-tx on hover of
+// the pin itself. Clicking toggles the pin via configUpdate.
+function PinSlot({
+  pinned,
+  onToggle,
+}: {
+  pinned: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      className="w-[18px] h-[18px] flex items-center justify-center shrink-0 text-text-faint opacity-0 group-hover:opacity-100 hover:text-[var(--accent-tx)] transition-colors"
+      title={pinned ? "Unpin" : "Pin"}
+      aria-label={pinned ? "Unpin" : "Pin"}
+      tabIndex={-1}
+    >
+      <Pin size={12} className={pinned ? "fill-current" : ""} aria-hidden="true" />
+    </button>
+  );
+}
+
+// The four-slot session row: [status dot] [name] [pin slot] [timer]. One line,
+// nothing else. The close (X) is a hover-revealed overlay in the trailing
+// timer slot so the at-rest layout is exactly four slots and hover shifts
+// nothing. Rename via double-click on the name.
+function WindowRow({
+  project,
+  window: w,
+  isActive,
+  status,
+  pinned,
+  focused,
+  onActivate,
+  onTogglePin,
+  onClose,
+  onRename,
+  renameTarget,
+  renameValue,
+  setRenameValue,
+  commitRename,
+  cancelRename,
+  title,
+  confirmDeleteFor,
+  setConfirmDeleteFor,
+  onKillWindow,
+  onKillWorktreeDirty,
+}: {
+  project: Project;
+  window: TmuxWindow;
+  isActive: boolean;
+  status: WindowStatusUI | undefined;
+  pinned: boolean;
+  focused: boolean;
+  onActivate: () => void;
+  onTogglePin: () => void;
+  onClose: () => void;
+  onRename: () => void;
+  renameTarget:
+    | { kind: "project"; old: string }
+    | { kind: "window"; project: string; index: number; old: string }
+    | null;
+  renameValue: string;
+  setRenameValue: (v: string) => void;
+  commitRename: () => void;
+  cancelRename: () => void;
+  title: string;
+  confirmDeleteFor:
+    | { kind: "session"; project: string; index: number; name: string }
+    | { kind: "project"; project: string }
+    | { kind: "worktree-dirty"; project: string; index: number; name: string; worktreePath: string }
+    | null;
+  setConfirmDeleteFor: (v: typeof confirmDeleteFor) => void;
+  onKillWindow: () => void;
+  onKillWorktreeDirty: (wtPath: string, force: boolean) => void;
+}) {
+  const isRenaming =
+    renameTarget?.kind === "window" &&
+    renameTarget.project === project.tmuxSession &&
+    renameTarget.index === w.index;
+  const showConfirm =
+    confirmDeleteFor?.kind === "session" &&
+    confirmDeleteFor.project === project.tmuxSession &&
+    confirmDeleteFor.index === w.index;
+  const showWorktreeConfirm =
+    confirmDeleteFor?.kind === "worktree-dirty" &&
+    confirmDeleteFor.project === project.tmuxSession &&
+    confirmDeleteFor.index === w.index;
+  return (
+    <div>
+      <div
+        role="treeitem"
+        aria-selected={isActive}
+        tabIndex={focused ? 0 : -1}
+        className={`group flex items-center gap-1.5 px-2 py-2 min-h-8 rounded text-meta cursor-pointer transition outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 ${
+          isActive
+            ? "bg-bg-soft text-text"
+            : "text-text-muted hover:bg-bg-soft hover:text-text"
+        }`}
+        onClick={onActivate}
+        title={title}
+      >
+        <StatusDot status={status} />
+        {isRenaming ? (
+          <RenameInput
+            value={renameValue}
+            onChange={setRenameValue}
+            onCommit={commitRename}
+            onCancel={cancelRename}
+            size="window"
+          />
+        ) : (
+          <span
+            className="flex-1 min-w-0 truncate"
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              onRename();
+            }}
+          >
+            {w.name}
+          </span>
+        )}
+        <PinSlot pinned={pinned} onToggle={onTogglePin} />
+        {/* Trailing slot: timer at rest, close (X) on hover. Same 28px slot —
+            hover swaps content without shifting the pin or the row width. */}
+        <span className="relative w-7 shrink-0 flex items-center justify-end">
+          <span className="opacity-100 group-hover:opacity-0 transition-opacity">
+            <Timer status={status} />
+          </span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose();
+            }}
+            className="absolute right-0 opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center transition-opacity"
+            title="Close session"
+            aria-label="Close session"
+            tabIndex={-1}
+          >
+            <X size={13} aria-hidden="true" />
+          </button>
+        </span>
+      </div>
+      {showConfirm && (
+        <ConfirmDelete
+          label={`session "${w.name}"`}
+          onKill={onKillWindow}
+          onCancel={() => setConfirmDeleteFor(null)}
+        />
+      )}
+      {showWorktreeConfirm && confirmDeleteFor?.kind === "worktree-dirty" && (
+        <ConfirmWorktreeDirty
+          worktreePath={confirmDeleteFor.worktreePath}
+          onRemove={() => onKillWorktreeDirty(confirmDeleteFor.worktreePath, true)}
+          onKeep={() => onKillWorktreeDirty(confirmDeleteFor.worktreePath, false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// A nested job child row: same four slots, indented 26px, with a 1px border
+// tree connector. Only running jobs (or the currently-viewed terminal job)
+// reach this component — the parent filters the rest.
+function JobChildRow({
+  project,
+  window: w,
+  isActive,
+  status,
+  focused,
+  onActivate,
+  onClose,
+  title,
+  confirmDeleteFor,
+  setConfirmDeleteFor,
+  onKillWindow,
+}: {
+  project: Project;
+  window: TmuxWindow;
+  isActive: boolean;
+  status: WindowStatusUI | undefined;
+  focused: boolean;
+  onActivate: () => void;
+  onClose: () => void;
+  title: string;
+  confirmDeleteFor:
+    | { kind: "session"; project: string; index: number; name: string }
+    | { kind: "project"; project: string }
+    | { kind: "worktree-dirty"; project: string; index: number; name: string; worktreePath: string }
+    | null;
+  setConfirmDeleteFor: (v: typeof confirmDeleteFor) => void;
+  onKillWindow: () => void;
+}) {
+  const showConfirm =
+    confirmDeleteFor?.kind === "session" &&
+    confirmDeleteFor.project === project.tmuxSession &&
+    confirmDeleteFor.index === w.index;
+  return (
+    <div>
+      <div
+        role="treeitem"
+        aria-level={2}
+        aria-selected={isActive}
+        tabIndex={focused ? 0 : -1}
+        className={`group flex items-center gap-1.5 pl-[26px] pr-2 py-2 min-h-8 rounded text-meta cursor-pointer transition outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 border-l border-border ml-3 ${
+          isActive
+            ? "bg-bg-soft text-text"
+            : "text-text-muted hover:bg-bg-soft hover:text-text"
+        }`}
+        onClick={onActivate}
+        title={title}
+      >
+        <StatusDot status={status} />
+        <span className="flex-1 min-w-0 truncate">{w.name}</span>
+        <span className="relative w-7 shrink-0 flex items-center justify-end">
+          <span className="opacity-100 group-hover:opacity-0 transition-opacity">
+            <Timer status={status} />
+          </span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose();
+            }}
+            className="absolute right-0 opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center transition-opacity"
+            title="Close session"
+            aria-label="Close session"
+            tabIndex={-1}
+          >
+            <X size={13} aria-hidden="true" />
+          </button>
+        </span>
+      </div>
+      {showConfirm && (
+        <ConfirmDelete
+          label={`session "${w.name}"`}
+          onKill={onKillWindow}
+          onCancel={() => setConfirmDeleteFor(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Workspace group header: chevron + name + collapse state. No colour dot, no
+// count. Project-level new-session (+) and close (X) are hover actions on the
+// header (NOT session rows, so the four-slot rule doesn't apply).
+function GroupHeader({
+  project: p,
+  isCollapsed,
+  isProjectActive,
+  focused,
+  onToggle,
+  onNewSession,
+  onClose,
+  renameTarget,
+  renameValue,
+  setRenameValue,
+  commitRename,
+  cancelRename,
+  startRename,
+}: {
+  project: Project;
+  isCollapsed: boolean;
+  isProjectActive: boolean;
+  focused: boolean;
+  onToggle: () => void;
+  onNewSession: () => void;
+  onClose: () => void;
+  renameTarget:
+    | { kind: "project"; old: string }
+    | { kind: "window"; project: string; index: number; old: string }
+    | null;
+  renameValue: string;
+  setRenameValue: (v: string) => void;
+  commitRename: () => void;
+  cancelRename: () => void;
+  startRename: () => void;
+}) {
+  const isRenaming = renameTarget?.kind === "project" && renameTarget.old === p.tmuxSession;
+  return (
+    <div
+      role="treeitem"
+      aria-expanded={!isCollapsed}
+      tabIndex={focused ? 0 : -1}
+      className="group flex items-center gap-1 px-1 py-1 rounded text-micro font-semibold uppercase text-text-muted hover:text-text cursor-pointer select-none outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1"
+      onClick={onToggle}
+    >
+      <span className="w-3 flex items-center justify-center text-text-quiet">
+        {isCollapsed ? <ChevronRight size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+      </span>
+      {isRenaming ? (
+        <RenameInput
+          value={renameValue}
+          onChange={setRenameValue}
+          onCommit={commitRename}
+          onCancel={cancelRename}
+          size="project"
+        />
+      ) : (
+        <span
+          className={`flex-1 truncate font-semibold ${isProjectActive ? "text-text" : ""}`}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            startRename();
+          }}
+          title="Double-click to rename"
+        >
+          {p.tmuxSession}
+        </span>
+      )}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onNewSession();
+        }}
+        className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-text leading-none"
+        title="New session in this project"
+        tabIndex={-1}
+      >
+        +
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+        className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
+        title="Close project"
+        aria-label="Close project"
+        tabIndex={-1}
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
+// ⌘K session palette. Fuzzy match on session + workspace name; Enter activates,
+// Esc closes, arrows move. Reuses flatSessions(projects) for ordering — no
+// second flattener. Empty query shows the full list; no match shows a plain
+// "No sessions match" row.
+function CommandPalette({
+  query,
+  setQuery,
+  results,
+  sel,
+  setSel,
+  onKeyDown,
+  onClose,
+  onActivate,
+}: {
+  query: string;
+  setQuery: (v: string) => void;
+  results: Array<{ project: Project; window: TmuxWindow; score: number }>;
+  sel: number;
+  setSel: (n: number) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
+  onClose: () => void;
+  onActivate: (project: Project, windowIndex: number) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="w-[420px] max-w-[90vw] bg-bg-elev border border-border rounded-lg shadow-xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
+          <Search size={14} className="text-text-faint" aria-hidden="true" />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="Search sessions…"
+            spellCheck={false}
+            autoComplete="off"
+            className="flex-1 bg-transparent text-meta outline-none placeholder:text-text-faint"
+          />
+          <button
+            onClick={onClose}
+            className="text-text-faint hover:text-text text-meta"
+            title="Close (Esc)"
+          >
+            Esc
+          </button>
+        </div>
+        <div className="max-h-[50vh] overflow-y-auto py-1">
+          {results.length === 0 ? (
+            <div className="px-3 py-3 text-meta text-text-faint">No sessions match</div>
+          ) : (
+            results.map((r, i) => (
+              <button
+                key={`${r.project.tmuxSession}/${r.window.index}`}
+                onMouseEnter={() => setSel(i)}
+                onClick={() => onActivate(r.project, r.window.index)}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-meta ${
+                  i === sel ? "bg-bg-soft text-text" : "text-text-muted hover:bg-bg-soft"
+                }`}
+              >
+                <StatusDot status={undefined} />
+                <span className="flex-1 min-w-0 truncate">{r.window.name}</span>
+                <span className="text-text-faint truncate">{r.project.tmuxSession}</span>
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function RenameInput({
@@ -1144,12 +1663,6 @@ function ConfirmDelete({
   );
 }
 
-// BET-246: second-stage confirm after the safe git worktree remove hit a
-// dirty checkout. Both buttons lead to teardown — Remove retries with
-// --force (and discards uncommitted work), Keep skips the worktree remove
-// entirely and just closes the tmux window. Same visual shape as
-// ConfirmDelete; reusing the existing confirmDeleteFor state avoids
-// introducing a parallel modal system.
 function ConfirmWorktreeDirty({
   worktreePath,
   onRemove,

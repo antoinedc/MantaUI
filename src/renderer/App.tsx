@@ -634,6 +634,12 @@ export function App() {
         e.preventDefault();
         return;
       }
+      // Cmd+K = session search palette (BET-414)
+      if ((e.key === "k" || e.key === "K") && !e.shiftKey && !e.altKey) {
+        sidebarRef.current?.openPalette();
+        e.preventDefault();
+        return;
+      }
       // Cmd+1..9 = jump to nth (project, window) tuple in sidebar order
       if (/^[1-9]$/.test(e.key) && !e.altKey) {
         const idx = parseInt(e.key, 10) - 1;
