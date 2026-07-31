@@ -1173,7 +1173,7 @@ main() {
   # ===========================================================================
 
   # Public-TLS predicate — ONE gate, ONE source of truth for the Caddy/apt/
-  # DNS/vhost sub-steps (A/D/E/port-check/reload). Merges the macOS case
+  # DNS/vhost sub-steps (A/D/E/reload). Merges the macOS case
   # (BET-274 / BET-276) with the existing tailscale case (BET-267): both
   # skip the public TLS path; gateway-register (B/C) still runs in both
   # because it's user-space and the gateway_token is still needed for
@@ -1193,7 +1193,7 @@ main() {
   # point is "skip Caddy + public DNS"). PRIVILEGED_SECTION_SKIP is left
   # at 0 so sub-steps B + C (gateway register + merge-gateway) still run —
   # they are user-space and the gateway_token is still needed for APNs
-  # push. A/D/E/port-check/reload are gated on SKIP_PUBLIC_TLS further
+  # push. A/D/E/reload are gated on SKIP_PUBLIC_TLS further
   # down.
   PRIVILEGED_SECTION_SKIP=0
   if [ "$DRY_RUN" != "1" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
@@ -1254,7 +1254,7 @@ main() {
 
   if [ "$INGRESS_MODE" = "tailscale" ]; then
     # Tailscale path (BET-267): skip Caddy install + DNS wait + vhost write +
-    # port-check + caddy reload. B/C (gateway register + merge-gateway) still
+    # caddy reload. B/C (gateway register + merge-gateway) still
     # run below — the gateway_token is still needed for APNs push.
     log "Tailscale detected ($TAILNET_IP) — skipping Caddy + public DNS; devices connect over the tailnet."
   elif [ "$IS_MACOS" = "1" ]; then
@@ -1319,16 +1319,18 @@ main() {
           # Pipe the JSON to merge-gateway via stdin (lib subcommand) so the
           # auth.json write is atomic temp-rename + 0600, preserving
           # box_id / box_token / created_at.
-          printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err \
-            || warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
-          ok "gateway registration complete."
+          if printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err; then
+            ok "gateway registration complete."
+          else
+            warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
+          fi
         fi
       fi
     fi
   fi
 
   # --- A. Install Caddy if absent ------------------------------------------
-  # A, D, E/port-check/reload only run on the public path (BET-267). The
+  # A, D, E/reload only run on the public path (BET-267). The
   # tailscale path AND the macOS path (BET-276) never bind :80/:443, never
   # write a Caddy vhost, never wait on DNS, never reload Caddy. Gated via
   # SKIP_PUBLIC_TLS which merges both cases into one predicate.
@@ -1587,32 +1589,18 @@ main() {
         # if any write above failed (CADDY_E_SKIP=1). The pair-code step
         # (8) still runs regardless.
         if [ "$CADDY_E_SKIP" = "0" ]; then
-          # Let's Encrypt HTTP-01 needs :80 + :443 open. If something else
-          # is bound (Apache, nginx, …) warn loudly so the operator knows
-          # why cert issuance will fail.
-          if command -v ss >/dev/null 2>&1; then
-            for port in 80 443; do
-              if ss -tlnH "sport = :$port" 2>/dev/null | grep -q LISTEN \
-                && ! ss -tlnH "sport = :$port" 2>/dev/null | grep -q caddy; then
-                warn "port $port is bound by something other than Caddy — Let's Encrypt HTTP-01 will fail.
-                  Check: ss -tlnp 'sport = :$port'
-                  Fix: stop the conflicting service, or move Caddy to a non-standard port + your own reverse proxy."
-              fi
-            done
-          fi
-
           if command -v systemctl >/dev/null 2>&1; then
             if ! sudo -n systemctl reload caddy 2>/tmp/manta-caddy-reload.err; then
               warn "systemctl reload caddy failed — see /tmp/manta-caddy-reload.err"
-              warn "  (Caddy's daemon may not be running yet; it normally starts after \`apt install caddy\`.)"
-              warn "  re-run \`sudo systemctl reload caddy\` after Caddy is up."
+              warn "  the vhost is on disk but NOT live: no certificate will be issued until the reload succeeds."
+            else
+              ok "caddy reloaded."
             fi
-            ok "caddy reloaded."
           else
             warn "systemctl not found — reload caddy manually with: sudo caddy reload --config /etc/caddy/Caddyfile"
           fi
         else
-          warn "Caddy vhost write was skipped — skipping port-check + systemctl reload too."
+          warn "Caddy vhost write was skipped — skipping systemctl reload too."
         fi
       fi
     fi
