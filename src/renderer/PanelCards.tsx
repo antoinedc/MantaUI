@@ -11,6 +11,7 @@
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useRef, useState } from "react";
+import { Clock, Webhook, Key, Bot, X } from "lucide-react";
 import type {
   DelegateJob,
   ScheduledJob,
@@ -60,15 +61,18 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: "var(--accent)" }}>⏰</span>
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Clock size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">Scheduled</span>
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted text-[14px]"
+          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close (or click outside)"
+          aria-label="Close"
         >
-          ×
+          <X size={16} aria-hidden="true" />
         </button>
       </div>
       {error ? (
@@ -159,15 +163,18 @@ export const WebhooksCard = memo(function WebhooksCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: "var(--accent)" }}>🪝</span>
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Webhook size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">Webhooks</span>
         {hooks.length > 0 && <span className="text-text-faint">· {hooks.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted text-[14px]"
+          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close (or click outside)"
+          aria-label="Close"
         >
-          ×
+          <X size={16} aria-hidden="true" />
         </button>
       </div>
       {error ? (
@@ -297,15 +304,18 @@ export const SecretsCard = memo(function SecretsCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1.5">
-        <span style={{ color: "var(--accent)" }}>🔑</span>
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Key size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">Secrets</span>
         {secrets.length > 0 && <span className="text-text-faint">· {secrets.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-1 rounded text-text-faint hover:text-text-muted"
+          className="ml-auto px-1 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close"
+          aria-label="Close"
         >
-          ×
+          <X size={16} aria-hidden="true" />
         </button>
       </div>
 
@@ -413,10 +423,11 @@ export const SecretsCard = memo(function SecretsCard({
               </div>
               <button
                 onClick={() => onDelete(s.id)}
-                className="shrink-0 px-1.5 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30"
+                className="shrink-0 px-1.5 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30 inline-flex items-center"
                 title="Delete this secret"
+                aria-label="Delete this secret"
               >
-                ✕
+                <X size={14} aria-hidden="true" />
               </button>
             </div>
           ))}
@@ -480,15 +491,18 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: "var(--accent)" }}>⚙</span>
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Bot size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">Background jobs</span>
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted text-[14px]"
+          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close (or click outside)"
+          aria-label="Close"
         >
-          ×
+          <X size={16} aria-hidden="true" />
         </button>
       </div>
       {error ? (

@@ -6,6 +6,7 @@
 // and the press-and-hold mic button. InputArea.tsx composes them.
 
 import { useRef } from "react";
+import { Clock, Key, Webhook, Bot, X, Mic, Loader2 } from "lucide-react";
 import type { VoiceMode, VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import { ALT_KEY } from "./platform";
@@ -32,31 +33,31 @@ export function SessionToolbar({
     <span className="manta-session-toolbar flex items-center gap-1 text-[10px]">
       <button
         onClick={onSchedules}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
+        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="View / cancel scheduled tasks"
       >
-        ⏰ schedules{scheduleCount > 0 ? ` (${scheduleCount})` : ""}
+        <Clock size={14} aria-hidden="true" />schedules{scheduleCount > 0 ? ` (${scheduleCount})` : ""}
       </button>
       <button
         onClick={onSecrets}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
+        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="Manage secrets the agent can use (values never enter the chat)"
       >
-        🔑 secrets
+        <Key size={14} aria-hidden="true" />secrets
       </button>
       <button
         onClick={onWebhooks}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
+        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="View / revoke inbound webhooks (external events that wake this session)"
       >
-        🪝 webhooks
+        <Webhook size={14} aria-hidden="true" />webhooks
       </button>
       <button
         onClick={onJobs}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted"
+        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="View / stop / delete background delegation jobs"
       >
-        ⚙ jobs{jobsCount > 0 ? ` (${jobsCount})` : ""}
+        <Bot size={14} aria-hidden="true" />jobs{jobsCount > 0 ? ` (${jobsCount})` : ""}
       </button>
     </span>
   );
@@ -100,10 +101,11 @@ export function AttachmentStrip({
             <span className="truncate max-w-[200px]">{a.filename}</span>
             <button
               onClick={() => onRemove(a.id)}
-              className="text-text-faint hover:text-danger leading-none px-0.5"
+              className="text-text-faint hover:text-danger leading-none px-0.5 inline-flex items-center"
               title="Remove"
+              aria-label="Remove attachment"
             >
-              ×
+              <X size={14} aria-hidden="true" />
             </button>
           </span>
         );
@@ -313,7 +315,7 @@ export function MicButton({
         }
         style={{ touchAction: "none" }}
       >
-        {busy ? "⋯" : "🎙"}
+        {busy ? <Loader2 size={20} aria-hidden="true" className="animate-spin" /> : <Mic size={20} aria-hidden="true" />}
       </button>
     );
   }
@@ -346,7 +348,7 @@ export function MicButton({
       }
       style={{ touchAction: "none" }}  // suppress mobile pull-to-refresh
     >
-      {busy ? "⋯" : "🎙"}
+      {busy ? <Loader2 size={16} aria-hidden="true" className="animate-spin" /> : <Mic size={16} aria-hidden="true" />}
     </button>
   );
 }

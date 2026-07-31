@@ -12,6 +12,7 @@
 //     handlers are passed in as props by ChatPanel.
 
 import { useEffect, useRef, useState } from "react";
+import { GitBranch, Mic, Shield } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import type { VoiceMode, VoicePhase } from "./voice";
 import {
@@ -405,10 +406,11 @@ export function InputArea({
             // desktop rule. mobile.css uses it to give the branch chip its
             // own line in the stacked mobile footer (see mobile.css).
             <span
-              className="manta-composer-branch text-text-faint shrink-0 truncate max-w-[160px]"
+              className="manta-composer-branch text-text-faint shrink-0 truncate max-w-[160px] inline-flex items-center gap-1"
               title={`Current branch: ${branch}`}
             >
-              ⎇ {branch}
+              <GitBranch size={14} aria-hidden="true" className="shrink-0" />
+              <span className="truncate">{branch}</span>
             </span>
           )}
           <ModelPicker
@@ -463,7 +465,7 @@ export function InputArea({
               {voiceActive
                 ? voiceProcessing
                   ? "transcribing… · esc cancels"
-                  : "🎙 recording · ⏎ send · ctrl+m stop · esc cancel"
+                  : <span className="inline-flex items-center gap-1"><Mic size={14} aria-hidden="true" />recording · ⏎ send · ctrl+m stop · esc cancel</span>
                 : "esc · interrupt"}
             </span>
           )}
@@ -475,7 +477,7 @@ export function InputArea({
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={
-            "px-1.5 py-px rounded " +
+            "px-1.5 py-px rounded inline-flex items-center gap-1 " +
             (chatAutoAllow
               ? "text-danger hover:text-danger"
               : "text-text-faint hover:text-text-muted")
@@ -486,9 +488,10 @@ export function InputArea({
               : "Trust mode OFF — permissions require approval (click to enable)"
           }
         >
+          <Shield size={14} aria-hidden="true" />
           {chatAutoAllow
-            ? "▶▶ bypass permissions on (click to disable)"
-            : "▷▷ bypass permissions off (click to enable)"}
+            ? "bypass permissions on (click to disable)"
+            : "bypass permissions off (click to enable)"}
         </button>
       </div>
     </div>

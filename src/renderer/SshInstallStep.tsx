@@ -30,6 +30,7 @@
 // state + per-event dispatch + JSX, nothing more.
 
 import { useCallback, useEffect, useState, useRef } from "react";
+import { Check, X, ChevronUp, ChevronDown } from "lucide-react";
 import {
   getMantaPreload,
   type InstallerEvent,
@@ -850,8 +851,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         <section className="space-y-2">
           <div className="flex items-center gap-2 text-sm">
             {done ? (
-              <span aria-hidden style={{ color: done.ok ? OK_GREEN : DANGER }}>
-                {done.ok ? "✓" : "✕"}
+              <span aria-hidden style={{ color: done.ok ? OK_GREEN : DANGER }} className="inline-flex items-center">
+                {done.ok ? <Check size={14} aria-hidden="true" /> : <X size={14} aria-hidden="true" />}
               </span>
             ) : (
               <span
@@ -872,9 +873,9 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             </span>
             <button
               onClick={() => setLogOpen((o) => !o)}
-              className="ml-auto text-xs text-text-muted hover:text-text"
+              className="ml-auto text-xs text-text-muted hover:text-text inline-flex items-center gap-1"
             >
-              {logOpen ? "Hide log ▴" : "Show log ▾"}
+              {logOpen ? <>Hide log <ChevronUp size={12} aria-hidden="true" /></> : <>Show log <ChevronDown size={12} aria-hidden="true" /></>}
             </button>
           </div>
           <div

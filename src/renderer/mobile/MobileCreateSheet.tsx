@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { useStore } from "../store";
 import type { WorktreeInfo } from "../../shared/types";
 
@@ -250,10 +251,10 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
           <div className="text-text font-semibold text-sm">{titleText}</div>
           <button
             onClick={onClose}
-            className="mobile-tap text-text-muted text-xl leading-none"
+            className="mobile-tap text-text-muted leading-none inline-flex items-center"
             aria-label="Close"
           >
-            ✕
+            <X size={20} aria-hidden="true" />
           </button>
         </div>
 

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { MoreHorizontal } from "lucide-react";
 import { useStore, resolveSessionOwner } from "../store";
 import { ChatPanel } from "../ChatPanel";
 import { Terminal } from "../Terminal";
@@ -299,11 +300,11 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
             terminal windows get rename + kill; chat windows additionally get
             fork / compact / delete. */}
         <button
-          className="mobile-tap text-text-muted text-xl"
+          className="mobile-tap text-text-muted leading-none"
           onClick={() => setSheetOpen(true)}
           aria-label="Session actions"
         >
-          ⋯
+          <MoreHorizontal size={20} aria-hidden="true" />
         </button>
       </div>
 

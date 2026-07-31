@@ -33,6 +33,7 @@
 //                "verify by working" orchestrator (BET-356 §4).
 
 import { useCallback, useEffect, useState } from "react";
+import { Check } from "lucide-react";
 import type { SubscriptionStatus } from "../shared/types";
 import { ConnectProvider } from "./ConnectProvider";
 import { StepFooter } from "./onboardingUi";
@@ -205,10 +206,10 @@ export function ProvidersStep({
                 </div>
                 {isConnecting ? null : s.connected ? (
                   <span
-                    className="text-[11px] font-medium"
+                    className="text-[11px] font-medium inline-flex items-center"
                     style={{ color: SUCCESS }}
                   >
-                    ✓
+                    <Check size={14} aria-hidden="true" />
                   </span>
                 ) : (
                   <button

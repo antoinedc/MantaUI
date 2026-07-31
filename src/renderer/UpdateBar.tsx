@@ -22,6 +22,7 @@
 // until the client gets on a supported version.
 
 import type { ReactNode } from "react";
+import { X } from "lucide-react";
 
 export type UpdateBarProps = {
   /** Main message text. Keep it under ~80 chars so it fits the titlebar width. */
@@ -66,10 +67,11 @@ export function UpdateBar({
       {dismissible && onDismiss && (
         <button
           onClick={() => onDismiss()}
-          className="shrink-0 text-text-faint hover:text-text leading-none"
+          className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center"
           title="Dismiss"
+          aria-label="Dismiss update"
         >
-          ×
+          <X size={14} aria-hidden="true" />
         </button>
       )}
     </div>

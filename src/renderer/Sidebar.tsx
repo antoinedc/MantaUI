@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { ChevronRight, ChevronDown, X } from "lucide-react";
 import { useStore, type WindowStatusUI } from "./store";
 import { nowMs } from "./clock";
 import type { Project, WorktreeInfo } from "../shared/types";
@@ -704,8 +705,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 className="group flex items-center gap-1 px-1 py-1 rounded text-xs uppercase tracking-wider text-text-muted hover:text-text cursor-pointer select-none"
                 onClick={() => toggleCollapse(p.tmuxSession)}
               >
-                <span className="w-3 text-center text-text-quiet">
-                  {isCollapsed ? "▸" : "▾"}
+                <span className="w-3 flex items-center justify-center text-text-quiet">
+                  {isCollapsed ? <ChevronRight size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
                 </span>
                 {renameTarget?.kind === "project" && renameTarget.old === p.tmuxSession ? (
                   <RenameInput
@@ -742,10 +743,11 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                     e.stopPropagation();
                     setConfirmDeleteFor({ kind: "project", project: p.tmuxSession });
                   }}
-                  className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none"
+                  className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
                   title="Close project"
+                  aria-label="Close project"
                 >
-                  ×
+                  <X size={14} aria-hidden="true" />
                 </button>
               </div>
 
@@ -834,10 +836,11 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                                     },
                               );
                             }}
-                            className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger text-xs leading-none"
+                            className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger text-xs leading-none inline-flex items-center"
                             title="Close session"
+                            aria-label="Close session"
                           >
-                            ×
+                            <X size={14} aria-hidden="true" />
                           </button>
                         </div>
                         {confirmDeleteFor?.kind === "session" &&

@@ -44,6 +44,7 @@
 // server-side SUBSCRIPTION_PROVIDERS table in subscriptionProviders.mjs.
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import type { OpencodeProviderAuthRequest } from "../shared/types";
 import {
   connectPhaseLabel,
@@ -381,10 +382,11 @@ export function ConnectProvider({
         <span className="text-text-faint">{connectPhaseLabel(phase)}</span>
         <button
           onClick={onCancel}
-          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted text-[14px]"
+          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close"
+          aria-label="Close"
         >
-          ×
+          <X size={16} aria-hidden="true" />
         </button>
       </div>
 

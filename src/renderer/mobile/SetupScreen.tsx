@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { normalizeCode } from "../../shared/claim.mjs";
 import {
   type DebugEntry,
@@ -243,9 +244,9 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                   onClick={() => setAdvancedOpen((v) => !v)}
                   aria-expanded={advancedOpen}
                   aria-controls="mobile-setup-server-url"
-                  className="mobile-tap self-start text-xs text-text-muted"
+                  className="mobile-tap self-start text-xs text-text-muted inline-flex items-center gap-1"
                 >
-                  {advancedOpen ? "▾" : "▸"} Advanced
+                  {advancedOpen ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />} Advanced
                 </button>
                 {advancedOpen && (
                   <>
@@ -357,10 +358,10 @@ function DebugLogPanel() {
     <div className="w-full max-w-xs mt-1">
       <button
         type="button"
-        className="mobile-tap text-text-faint text-[11px]"
+        className="mobile-tap text-text-faint text-[11px] inline-flex items-center gap-1"
         onClick={() => setOpen((v) => !v)}
       >
-        {open ? "▾" : "▸"} Debug log ({entries.length})
+        {open ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />} Debug log ({entries.length})
       </button>
       {open && (
         <div className="mt-2 rounded-lg border border-border bg-bg-elev p-2 text-left">

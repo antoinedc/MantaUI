@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { X } from "lucide-react";
 import { useStore } from "../store";
 import { ProvidersCard } from "../ProvidersCard";
 import { SubscriptionsCard } from "../SubscriptionsCard";
@@ -531,10 +532,10 @@ export function MobileSettings({ onClose }: Props) {
                 </code>
                 <button
                   onClick={() => removeRegistryUrl(url)}
-                  className="mobile-tap text-text-faint hover:text-text px-1 -my-2"
+                  className="mobile-tap text-text-faint hover:text-text px-1 -my-2 inline-flex items-center"
                   aria-label={`Remove ${url}`}
                 >
-                  ✕
+                  <X size={14} aria-hidden="true" />
                 </button>
               </div>
             ))}

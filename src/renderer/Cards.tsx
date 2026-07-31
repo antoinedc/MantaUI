@@ -9,6 +9,7 @@
 //   - QuestionCard: the Question tool's multi-choice + free-text form.
 
 import { useState } from "react";
+import { Shield, HelpCircle, X } from "lucide-react";
 import type { PermissionRequest, QuestionRequest } from "../shared/types";
 import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
 
@@ -135,7 +136,9 @@ export function PermissionCard({
       style={{ borderColor: "rgb(var(--warn-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
-        <span style={{ color: "var(--warn)" }}>✻</span>
+        <span style={{ color: "var(--warn)" }} className="inline-flex items-center">
+          <Shield size={16} aria-hidden="true" />
+        </span>
         <span className="text-text">
           {perm.fromJobName ? `${perm.fromJobName} · ` : ""}Permission needed
         </span>
@@ -223,16 +226,19 @@ export function QuestionCard({
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
-        <span style={{ color: "var(--accent)" }}>?</span>
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <HelpCircle size={16} aria-hidden="true" />
+        </span>
         <span className="text-text font-medium">
           {request.fromJobName ? `${request.fromJobName} · ` : ""}Question
         </span>
         <button
           onClick={onReject}
-          className="ml-auto text-text-faint hover:text-text leading-none"
+          className="ml-auto text-text-faint hover:text-text leading-none inline-flex items-center"
           title="Reject / dismiss"
+          aria-label="Reject question"
         >
-          ×
+          <X size={16} aria-hidden="true" />
         </button>
       </div>
 
