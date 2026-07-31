@@ -42,6 +42,7 @@ import {
   detectCommandFromText,
   formatBytes,
   type StaleCacheResult,
+  isApprovalCoveredByAlways,
 } from "./chatUtils";
 import {
   appendPromptHistory,
@@ -176,20 +177,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   // arrive here.
   const [pendingApproval, setPendingApproval] = useState<DelegateApproval | null>(null);
   const chatAutoAllowApproval = useStore((s) => s.chatAutoAllow);
-  useEffect(() => {
-    setPendingApproval(null);
-    if (chatAutoAllowApproval) return; // trust mode → server never requests approval
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const list = await window.api.delegatePendingApprovals(sessionId);
-        if (!cancelled && list.length > 0) setPendingApproval(list[0]);
-      } catch { /* non-fatal */ }
-    };
-    void poll();
-    const t = setInterval(poll, 3000);
-    return () => { cancelled = true; clearInterval(t); };
-  }, [sessionId, chatAutoAllowApproval]);
 
   // BET-418 §D: detect whether THIS session is a background job's child. A
   // job session is read-only (no composer, no cards, no model picker/fork/
@@ -343,6 +330,36 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     submitRef,
     setInput,
   });
+
+  // BET-418 §A5: ref mirror of permissions so the approval poll can read the
+  // latest always[] grants without taking permissions as a dep (which would
+  // reset the poll timer on every permission change).
+  const permissionsRef = useRef(permissions);
+  useEffect(() => {
+    permissionsRef.current = permissions;
+  }, [permissions]);
+  useEffect(() => {
+    setPendingApproval(null);
+    if (chatAutoAllowApproval) return; // trust mode → server never requests approval
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const list = await window.api.delegatePendingApprovals(sessionId);
+        if (cancelled || list.length === 0) return;
+        const approval = list[0];
+        // BET-418 §A5: if the parent's existing always[] grants cover every
+        // requested tool, auto-approve without rendering the card.
+        if (isApprovalCoveredByAlways(approval, permissionsRef.current)) {
+          void window.api.delegateApprove(approval.id, approval.tools).catch(() => { /* best-effort */ });
+          return;
+        }
+        setPendingApproval(approval);
+      } catch { /* non-fatal */ }
+    };
+    void poll();
+    const t = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [sessionId, chatAutoAllowApproval]);
 
   // ===== ChatPanel-own state (not extracted to hooks) =====
   const [error, setError] = useState<string | null>(null);
