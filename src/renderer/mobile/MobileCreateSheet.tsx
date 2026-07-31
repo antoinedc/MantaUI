@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { X, Folder as FolderIcon } from "lucide-react";
 import { useStore } from "../store";
 import type { WorktreeInfo } from "../../shared/types";
+import { MobileFolderPicker } from "./MobileFolderPicker";
 
 // Bottom-sheet that creates either a new project (tmux session) OR a new
 // session inside an existing project (tmux window). Mirrors the desktop
@@ -56,6 +57,10 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
   >(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // BET-417 §B: folder picker as a full-height sheet. Replaces the plain
+  // text cwd field with a browser — touch users get the same folder
+  // completion as desktop without ghost-text (which needs a Tab key).
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
 
   // Cleanup the debounce on unmount so a late callback doesn't setState
   // on an unmounted sheet.
@@ -322,15 +327,25 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
                 <label className="block text-micro font-semibold uppercase text-text-muted">
                   Default working directory
                 </label>
-                <input
-                  placeholder="~/code/foo"
-                  value={cwd}
-                  onChange={(e) => onCwdChange(e.target.value)}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoComplete="off"
-                  className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded font-mono focus:outline-none focus:border-accent"
-                />
+                <div className="flex gap-2">
+                  <input
+                    placeholder="~/code/foo"
+                    value={cwd}
+                    onChange={(e) => onCwdChange(e.target.value)}
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoComplete="off"
+                    className="flex-1 bg-bg-soft border border-border px-3 py-2 text-body rounded font-mono focus:outline-none focus:border-accent"
+                  />
+                  <button
+                    onClick={() => setFolderPickerOpen(true)}
+                    className="px-3 py-2 border border-border rounded text-text-muted hover:text-text inline-flex items-center gap-1"
+                    title="Browse folders"
+                    aria-label="Browse folders"
+                  >
+                    <FolderIcon size={18} aria-hidden="true" />
+                  </button>
+                </div>
                 {cwdMatches.length > 0 && (
                   // Tappable suggestions list — replaces the desktop's ghost-text
                   // accept-with-Tab affordance. Showing the parent prefix and
@@ -381,6 +396,16 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
           </div>
         )}
       </div>
+      {folderPickerOpen && (
+        <MobileFolderPicker
+          initialPath={cwd || "~"}
+          onSelect={(path) => {
+            setCwd(path);
+            setFolderPickerOpen(false);
+          }}
+          onCancel={() => setFolderPickerOpen(false)}
+        />
+      )}
     </div>
   );
 }
