@@ -360,7 +360,11 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
   }, [cwd]);
 
   return (
-    <div className="h-full flex flex-col items-center justify-center px-8">
+    // data-screen is the visual harness's handle on this screen (see
+    // scripts/visual/screens.mjs). One stable attribute per screen root, so
+    // the harness never depends on a class name or DOM position — both of
+    // which a redesign is expected to change.
+    <div data-screen="welcome" className="h-full flex flex-col items-center justify-center px-8">
       <div className="w-full max-w-[680px] flex flex-col gap-4">
         {/* Heading */}
         <div className="text-center space-y-1">

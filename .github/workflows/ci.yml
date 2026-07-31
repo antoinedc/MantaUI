@@ -124,6 +124,37 @@ jobs:
             exit 1
           fi
 
+      # ── Visual gate — every screen in scripts/visual/screens.mjs is checked
+      #    for structure (accessibility-tree snapshot) and pixels (screenshot
+      #    vs committed baseline). See docs/visual-verification.md.
+      #
+      #    Why this is a STEP in the required job, not a new job: one
+      #    self-hosted runner, one queue slot (cost discipline at the top of
+      #    this file). It is deterministic by construction — fixture-backed
+      #    demo transport, no network, animations disabled, selector-gated
+      #    waits, and Playwright's version-pinned Chromium (NOT system Chrome,
+      #    which auto-updates and would silently invalidate every baseline).
+      #    So it blocks, like the other gates here.
+      #
+      #    Cost: builds the renderer (~13s) + ~3s per screen. The browser is
+      #    restored from the same Playwright cache the E2E job uses.
+      #
+      #    Baselines are regenerated deliberately with `npm run visual:update`
+      #    and reviewed as part of the diff — never auto-updated in CI, which
+      #    would make the gate unfalsifiable.
+      - name: Cache Playwright browsers
+        id: pw-cache-visual
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright Chromium
+        run: npx playwright install ${{ steps.pw-cache-visual.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}
+
+      - name: Visual gate (structure + pixel baselines)
+        run: npm run visual
+
       # ── Security gates (moved verbatim from security-gates.yml, now deleted.
       #    Same detectors, same blocking behaviour, no extra runner slot) ────
       #

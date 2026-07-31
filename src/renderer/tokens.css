@@ -1,0 +1,197 @@
+/* tokens.css — THE design-token substrate. Single source of truth.
+ *
+ * Extracted verbatim from index.css (BET-VIS): the values are unchanged, but
+ * they now live in a standalone stylesheet so that BOTH consumers load the
+ * SAME file:
+ *
+ *   1. the app        — index.css @imports it (Vite inlines it at build time)
+ *   2. design mockups — docs/<screen>/mockup.html <link>s it directly
+ *
+ * That is what makes a mockup and the implementation comparable: same
+ * palette, same spacing grid, same shadows, same theme switching. A mockup
+ * that hardcodes its own hexes is not a spec — it is a picture, and it drifts
+ * the moment a token is retuned.
+ *
+ * RULES
+ *   - No selectors here other than :root and [data-theme="..."].
+ *   - No component styles. Those stay in index.css / Tailwind utilities.
+ *   - Changing a value here changes the app AND every mockup at once. That
+ *     is the point; it is also why a retune needs the visual baselines
+ *     regenerated (npm run visual:update).
+ */
+
+:root {
+  /* Width of the OS caption buttons overlaying the top-right of the window.
+     Windows (titleBarOverlay) reports a titlebar area narrower than the
+     window; macOS and Linux define neither variable, so the fallbacks make
+     this evaluate to 0 and the rule costs nothing there. */
+  --titlebar-inset-right: calc(
+    100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)
+  );
+
+  /* Spacing scale (BET-411). The 4px-grid steps matching the trimmed
+     Tailwind spacing scale from BET-407 (0, px, 1..12). Exposed as CSS
+     custom properties so hand-written layout rules (the transcript gap
+     rhythm below, and the surface sub-issues 08/09 that follow) read
+     spacing from one source — a value off the grid becomes impossible to
+     write in either Tailwind utilities or raw CSS. */
+  --sp-0: 0;
+  --sp-px: 1px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* Transcript vertical rhythm (BET-411). Two numbers govern the whole
+     transcript: --block-gap is the gap between ANY two sibling blocks
+     inside one turn (paragraph, tool card, diff, todo list — all equal);
+     --turn-gap is the gap between turns. Driven from the container's
+     `gap`, never from per-child margins, so a new block type inherits the
+     correct spacing and cannot opt out. */
+  --block-gap: var(--sp-3);
+  --turn-gap: var(--sp-6);
+
+  /* Elevation shadows (BET-415). --shadow-sm is the resting lift for
+     contained surfaces (composer input, popovers, menus); --shadow-md is
+     reserved for floating panels that overlap content. Theme-aware so the
+     lift reads on both canvases without re-tuning per surface. */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.18), 0 1px 3px rgb(0 0 0 / 0.12);
+  --shadow-md: 0 4px 12px rgb(0 0 0 / 0.22), 0 2px 4px rgb(0 0 0 / 0.14);
+}
+
+/* Token substrate (BET-407). Colour literals moved out of tailwind.config.js
+   into CSS custom properties so a theme is one attribute on <html>. Values are
+   a 1:1 rename of the previous hardcoded literals — no retune. Sub-issue 03
+   adds a light block; sub-issue 04 splits the intentionally-collapsed tokens
+   (border-subtle/border, tx3/tx4, the three accent tokens).
+
+   Each colour that is used with a Tailwind alpha modifier (e.g. bg-accent/20)
+   is paired with a `-rgb` channel variable so `rgb(var(--tok-rgb) / <alpha>)`
+   can apply opacity. The hex `--tok` variables hold the same values for direct
+   use in hand-written CSS (e.g. the scrollbar below) and are the substrate
+   sub-issue 04 will split. */
+[data-theme="dark"] {
+  /* Contrast pass (BET-410): values retuned to the verified WCAG-AA block.
+     The prior values collapsed tx3/tx4 to #5C6578 (3.23:1 on canvas — below
+     AA for text) and border-strong to #33406B (1.88:1 — below the 3:1
+     control-boundary minimum). tx3 is now #939FB8 (7.12:1) for load-bearing
+     quiet text; tx4 (#6B7690) is the single sub-AA tier, reserved for
+     decorative text only (text-text-quiet). border-strong is now #5E6C9B
+     (3.69:1). See src/shared/contrast.mjs for the gate that pins these. */
+  --canvas: #0B1020;
+  --panel: #0F1526;
+  --card: #151C33;
+  --raised: #1C2440;
+  --inset: #070B16;
+  --border-subtle: #222C49;
+  --border: #33406B;
+  --border-strong: #5E6C9B;
+  --tx1: #F2F5FA;
+  --tx2: #BDC7DB;
+  --tx3: #939FB8;
+  --tx4: #6B7690;
+  --accent: #5A88FF;
+  --accent-tx: #7BA0FF;
+  --accent-solid: #5A88FF;
+  --on-accent: #0B1020;
+  --accent-soft: #1740AE;
+
+  /* Semantic tokens (BET-408). The -bg variants are pre-alpha'd fills; the
+     base ok/warn/danger/info colours carry -rgb channel vars so Tailwind
+     alpha modifiers (border-danger/30) and inline rgb(var(--tok-rgb)/<a>)
+     work. ok/warn/danger/info retuned in BET-410 to clear 4.5:1 on canvas
+     and panel (verified by the contrast gate). */
+  --ok: #3DD9A4;
+  --warn: #F0A934;
+  --danger: #FF6B7A;
+  --info: #49D7F5;
+  --ok-bg: #3DD9A41f;
+  --warn-bg: #F0A9341f;
+  --danger-bg: #FF6B7A1f;
+  --accent-bg: #5A88FF1f;
+  --fill: rgba(255, 255, 255, .04);
+  --fill-hover: rgba(255, 255, 255, .07);
+  --fill-active: rgba(255, 255, 255, .10);
+  --diff-add: #12351f;
+  --diff-del: #3a1720;
+
+  --ok-rgb: 61 217 164;
+  --warn-rgb: 240 169 52;
+  --danger-rgb: 255 107 122;
+  --info-rgb: 73 215 245;
+
+  --canvas-rgb: 11 16 32;
+  --panel-rgb: 15 21 38;
+  --card-rgb: 21 28 51;
+  --border-rgb: 51 64 107;
+  --tx1-rgb: 242 245 250;
+  --accent-rgb: 90 136 255;
+  --accent-soft-rgb: 23 64 174;
+}
+
+/* Light theme (BET-409). The core palette below is the WCAG-verified block
+   from the issue — values are exact, do not retune (sub-issue 04 splits the
+   intentionally-collapsed tokens). --accent is the hue (borders/tints);
+   --accent-solid is the DARKER fill behind --on-accent text so white-on-blue
+   clears 4.5:1 on thin glyphs. Use --accent-solid for filled buttons /
+   checkboxes / radios, never --accent.
+
+   The -rgb channel vars and --accent-soft are NOT in the issue's palette
+   block but the dark theme defines them and tailwind.config.js + existing
+   var() consumers (bg-accent, border-border, text-text, bg-accent-soft,
+   rgb(var(--danger-rgb)/…)) read them in BOTH themes. Omitting them here
+   would make every Tailwind colour class and every -rgb expression resolve
+   to nothing in light mode, so they are derived 1:1 from the listed values. */
+[data-theme="light"] {
+  --canvas: #FAF9F7;
+  --panel: #F2F0EC;
+  --card: #FFFFFF;
+  --raised: #EAE7E1;
+  --inset: #F5F3EF;
+  --border-subtle: #E8E4DD;
+  --border: #DAD5CC;
+  --border-strong: #857C6E;
+  --tx1: #1A1815;
+  --tx2: #48433C;
+  --tx3: #665F55;
+  --tx4: #8A8275;
+  --accent: #2E6BFF;
+  --accent-tx: #1F55D6;
+  --accent-solid: #1F55D6;
+  --on-accent: #FFFFFF;
+  --accent-soft: #1F55D6;
+  --ok: #0A7A53;
+  --warn: #8A5A08;
+  --danger: #BE2F3C;
+  --info: #0B6E85;
+  --ok-bg: #0A7A5314;
+  --warn-bg: #8A5A0814;
+  --danger-bg: #BE2F3C14;
+  --accent-bg: #2E6BFF14;
+  --fill: rgba(26, 24, 21, .035);
+  --fill-hover: rgba(26, 24, 21, .06);
+  --fill-active: rgba(26, 24, 21, .09);
+  --diff-add: #E4F4E9;
+  --diff-del: #FCEAEC;
+
+  --ok-rgb: 10 122 83;
+  --warn-rgb: 138 90 8;
+  --danger-rgb: 190 47 60;
+  --info-rgb: 11 110 133;
+
+  --canvas-rgb: 250 249 247;
+  --panel-rgb: 242 240 236;
+  --card-rgb: 255 255 255;
+  --border-rgb: 218 213 204;
+  --tx1-rgb: 26 24 21;
+  --accent-rgb: 46 107 255;
+  --accent-soft-rgb: 31 85 214;
+
+  --shadow-sm: 0 1px 2px rgb(26 24 21 / 0.06), 0 1px 3px rgb(26 24 21 / 0.05);
+  --shadow-md: 0 4px 12px rgb(26 24 21 / 0.10), 0 2px 4px rgb(26 24 21 / 0.05);
+}

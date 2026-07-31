@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>Mockup — Welcome / new session composer</title>
+
+<!--
+  THE SPEC for the welcome screen. This file is the design contract, not a
+  picture of one. Read docs/visual-verification.md before editing.
+
+  Two rules make it a contract rather than decoration:
+
+  1. It loads the app's REAL token stylesheet below. Every colour, spacing
+     step, radius and shadow here is the same variable the app resolves at
+     runtime. A mockup that hardcodes #2E6BFF is a picture: it keeps looking
+     right after the token is retuned and the app has moved on.
+
+  2. It renders in the same browser, at the same viewport, as the
+     implementation capture — so `npm run visual:compare` produces a fair
+     side-by-side instead of a font-mismatch diff.
+
+  What this file is NOT: it is not a component library, and nothing here is
+  imported by the app. Markup is written to read like the target DOM so the
+  structure snapshot is comparable, but it is throwaway HTML.
+-->
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+
+<style>
+  /* Only layout for the mockup shell. Everything visual comes from tokens. */
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--canvas);
+    color: var(--tx1);
+    font-family: "Inter Variable", Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* --- Window chrome (context only; NOT part of this screen's spec) ----- */
+  .app { height: 100%; display: flex; }
+  .sidebar {
+    width: 240px; flex: none; border-right: 1px solid var(--border-subtle);
+    background: var(--panel); display: flex; flex-direction: column;
+  }
+  .sidebar-head {
+    padding: var(--sp-4); font-size: 11px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--tx3); font-weight: 600;
+  }
+  .sidebar-empty { padding: 0 var(--sp-4); font-size: 13px; color: var(--tx3); }
+  .sidebar-foot {
+    margin-top: auto; padding: var(--sp-3) var(--sp-4);
+    border-top: 1px solid var(--border-subtle); font-size: 13px; color: var(--tx2);
+  }
+  .main { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; }
+
+  /* --- THE SCREEN ------------------------------------------------------- */
+  .welcome { width: 100%; max-width: 680px; padding: 0 var(--sp-8); }
+
+  .heading { text-align: center; margin-bottom: var(--sp-6); }
+  .heading h1 {
+    margin: 0 0 var(--sp-2); font-size: 30px; line-height: 1.2;
+    font-weight: 700; letter-spacing: -0.02em; color: var(--tx1);
+  }
+  .heading p { margin: 0; font-size: 15px; color: var(--tx2); }
+
+  /* Chip row — folder, then branch + worktree as ONE segmented control.
+     Left-aligned with the composer, not centred: it reads as a property bar
+     belonging to the input below it, not as a second heading. */
+  .chips { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+  .chip {
+    display: inline-flex; align-items: center; gap: var(--sp-2);
+    height: 36px; padding: 0 var(--sp-3);
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--card); color: var(--tx1);
+    font-size: 14px; box-shadow: var(--shadow-sm);
+  }
+  .chip svg { color: var(--tx2); flex: none; }
+  .chip .caret { color: var(--tx3); margin-left: var(--sp-px); }
+  .chip-group { display: inline-flex; }
+  .chip-group .chip:first-child {
+    border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: none;
+  }
+  .chip-group .chip:last-child {
+    border-top-left-radius: 0; border-bottom-left-radius: 0;
+  }
+  .chip-check {
+    width: 16px; height: 16px; border: 1px solid var(--border-strong);
+    border-radius: 4px; background: var(--canvas); flex: none;
+  }
+
+  /* Composer — a single tall input card. The submit affordance sits INSIDE
+     the input on the trailing edge; the controls sit on their own row below
+     the input, left-aligned. */
+  .composer {
+    display: flex; align-items: flex-start; gap: var(--sp-2);
+    border: 1px solid var(--border); border-radius: 14px;
+    background: var(--card); box-shadow: var(--shadow-sm);
+    padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);
+    margin-bottom: var(--sp-3);
+  }
+  .composer .placeholder {
+    flex: 1; min-width: 0; font-size: 17px; color: var(--tx3);
+    padding: var(--sp-2) 0 var(--sp-6);
+  }
+  .send {
+    width: 34px; height: 34px; flex: none; border-radius: 9px;
+    border: 1px solid var(--border); background: var(--panel);
+    display: grid; place-items: center; color: var(--tx2);
+  }
+
+  .controls { display: flex; align-items: center; gap: var(--sp-2); }
+  .pill {
+    display: inline-flex; align-items: center; gap: var(--sp-2);
+    height: 34px; padding: 0 var(--sp-3);
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--card); font-size: 14px; color: var(--tx1);
+  }
+  .pill.effort { color: var(--accent-tx); font-weight: 600; }
+  .icon-btn {
+    width: 34px; height: 34px; border-radius: 10px; border: 1px solid transparent;
+    display: grid; place-items: center; color: var(--tx2); background: transparent;
+  }
+
+  .spec-note {
+    max-width: 680px; margin: var(--sp-8) auto 0; padding: 0 var(--sp-8);
+    font-size: 13px; color: var(--tx3); line-height: 1.6;
+  }
+  .spec-note code {
+    font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+    font-size: 12px; background: var(--panel); padding: 1px 4px; border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+
+<div class="app" data-screen="welcome-mockup">
+  <!-- Sidebar is context, so the composer is judged at its real width. -->
+  <aside class="sidebar">
+    <div class="sidebar-head">Workspace</div>
+    <div class="sidebar-empty">No projects yet. Click + or press ⌘N.</div>
+    <div class="sidebar-foot">Settings…</div>
+  </aside>
+
+  <main class="main">
+    <div class="welcome">
+      <div class="heading">
+        <h1>What's up next?</h1>
+        <p>Start a session on any folder your box can see.</p>
+      </div>
+
+      <div class="chips">
+        <button class="chip" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+          <span>leasebot</span>
+          <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+
+        <div class="chip-group">
+          <span class="chip">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+            <span>main</span>
+          </span>
+          <label class="chip">
+            <span class="chip-check"></span>
+            <span>worktree</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="placeholder">Describe a task or ask a question</div>
+        <div class="send">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 10 4 15l5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button class="pill" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3m0 12v3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1M3 12h3m12 0h3M5.6 18.4l2.1-2.1m8.6-8.6 2.1-2.1"/></svg>
+          <span>Auto</span>
+          <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <button class="pill effort" type="button">
+          <span>High</span>
+          <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <button class="icon-btn" type="button" aria-label="Attach a file">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <button class="icon-btn" type="button" aria-label="Dictate">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+        </button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<p class="spec-note">
+  <strong>Spec notes — the parts a screenshot cannot express.</strong>
+  The chip row and the controls row are <strong>left-aligned to the composer</strong>,
+  not centred; only the heading is centred. The submit control lives
+  <strong>inside</strong> the input on the trailing edge, vertically top-aligned, so
+  the input can grow downward without moving it. Branch and worktree form
+  <strong>one segmented control</strong> (shared border, no gap); folder is a separate
+  chip. The effort pill is the only accent-coloured text on the screen — it is
+  the one setting users change per task. Every control is
+  <code>34–36px</code> tall on one <code>4px</code> grid. Empty state of the
+  sidebar is shown for context and is specified elsewhere.
+</p>
+
+</body>
+</html>

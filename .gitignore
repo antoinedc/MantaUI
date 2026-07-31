@@ -40,3 +40,6 @@ mobile/www/
 report/
 playwright-report/
 test-results/
+
+# Visual conformance captures (npm run visual:compare) — regenerated on demand.
+.visual-out/

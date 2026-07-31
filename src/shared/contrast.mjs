@@ -1,11 +1,11 @@
 // Contrast gate (BET-410). Pure WCAG luminance + ratio helpers plus a
 // `checkContrast(theme)` that reads the live CSS custom properties out of
-// `src/renderer/index.css` and fails any (foreground, background) pair that
+// `src/renderer/tokens.css` and fails any (foreground, background) pair that
 // drops below its minimum. The test `contrast.test.ts` asserts zero failures
 // for both themes — that test IS the CI gate (the repo runs one self-hosted
 // runner, so no separate workflow job).
 //
-// Reading the values straight from index.css (rather than redeclaring the
+// Reading the values straight from tokens.css (rather than redeclaring the
 // palette here) is what makes the test a real gate: retuning a token in the
 // CSS without re-verifying contrast turns the test red. A second copy of the
 // palette in JS would silently drift.
@@ -14,11 +14,15 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+// tokens.css is THE token substrate — the same file the app @imports and
+// every design mockup <link>s. Pointing the gate at it (rather than at
+// index.css, which now only holds component rules) keeps "retune a token"
+// and "re-verify contrast" the same action.
 const CSS_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",
   "renderer",
-  "index.css",
+  "tokens.css",
 );
 
 /** Parse a #RRGGBB or #RRGGBBAA hex string into [r, g, b] (0–255). */

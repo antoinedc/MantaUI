@@ -34,14 +34,14 @@ describe("contrastRatio", () => {
 });
 
 describe("parseThemeVars", () => {
-  it("parses the dark block from the live index.css", () => {
+  it("parses the dark block from the live tokens.css", () => {
     const vars = parseThemeVars("dark");
     expect(vars.canvas).toBe("#0B1020");
     expect(vars.tx3).toBe("#939FB8");
     expect(vars.tx4).toBe("#6B7690");
     expect(vars["border-strong"]).toBe("#5E6C9B");
   });
-  it("parses the light block from the live index.css", () => {
+  it("parses the light block from the live tokens.css", () => {
     const vars = parseThemeVars("light");
     expect(vars.canvas).toBe("#FAF9F7");
     expect(vars.tx3).toBe("#665F55");

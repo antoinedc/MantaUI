@@ -7,7 +7,7 @@
 // the conflict + edge cases the PR review specifically asked us to cover.
 
 import { describe, it, expect } from "vitest";
-import { pickDemoLayout } from "./demoLayout";
+import { pickDemoLayout, pickDemoDataset } from "./demoLayout";
 
 describe("pickDemoLayout — demo-mode URL override", () => {
   it("forces <App/> (desktop) with ?demo&desktop, independent of preload presence", () => {
@@ -34,5 +34,20 @@ describe("pickDemoLayout — demo-mode URL override", () => {
   it("returns null when no override is present (the helper is demo-mode-only)", () => {
     expect(pickDemoLayout(new URLSearchParams(""))).toBeNull();
     expect(pickDemoLayout(new URLSearchParams("foo=bar"))).toBeNull();
+  });
+});
+
+describe("pickDemoDataset", () => {
+  it("defaults to the full fixture", () => {
+    expect(pickDemoDataset(new URLSearchParams(""))).toBe("full");
+    expect(pickDemoDataset(new URLSearchParams("demo&desktop"))).toBe("full");
+  });
+
+  it("serves the empty box when ?empty is present", () => {
+    expect(pickDemoDataset(new URLSearchParams("demo&desktop&empty"))).toBe("empty");
+  });
+
+  it("ignores the flag's value — presence is the signal", () => {
+    expect(pickDemoDataset(new URLSearchParams("empty=0"))).toBe("empty");
   });
 });

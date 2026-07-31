@@ -35,6 +35,16 @@
 
 import type { Api } from "../../shared/api.js";
 import { demoState } from "./demoFixture.js";
+import { pickDemoDataset } from "../demoLayout.js";
+
+// Resolved once at module load — the demo transport is only ever imported
+// from bootDemo(), which has already decided we are in demo mode. "empty"
+// serves a box with no projects so the zero-project screens are reachable
+// from a URL (see pickDemoDataset).
+const DEMO_DATASET =
+  typeof window === "undefined"
+    ? "full"
+    : pickDemoDataset(new URLSearchParams(window.location.search));
 
 // ===========================================================================
 // Explicit methods — the ones the renderer actually calls during load +
@@ -45,7 +55,7 @@ const configGet = (): Promise<typeof demoState.config> =>
   Promise.resolve(demoState.config);
 
 const tmuxList = (): Promise<typeof demoState.projects> =>
-  Promise.resolve(demoState.projects);
+  Promise.resolve(DEMO_DATASET === "empty" ? [] : demoState.projects);
 
 // SSE-style push subscription. The renderer (App.tsx) registers one
 // onStatusEvent listener; we call it back once with the full fixture status

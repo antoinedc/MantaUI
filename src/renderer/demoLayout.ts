@@ -23,3 +23,23 @@ export function pickDemoLayout(params: URLSearchParams): DemoLayout | null {
   if (params.has("mobile")) return "mobile";
   return null;
 }
+
+// Which fixture dataset the demo transport serves.
+//
+// "full"  — the populated fixture (projects, sessions, a transcript). The
+//           default, and what the marketing shots capture.
+// "empty" — a box with no projects yet. This is a REAL product state (a
+//           freshly-paired box), and it is the only way to reach the
+//           zero-project screens, which otherwise require deleting fixture
+//           data from a live box.
+//
+// Exposed as a URL flag rather than a code path so every state the visual
+// harness captures is reachable by pasting a URL into a browser — a human
+// reviewer can see exactly what the machine saw. Keep it that way: if a
+// screen can only be reached by poking internals, make it URL-addressable
+// instead of teaching the harness a special case.
+export type DemoDataset = "full" | "empty";
+
+export function pickDemoDataset(params: URLSearchParams): DemoDataset {
+  return params.has("empty") ? "empty" : "full";
+}
