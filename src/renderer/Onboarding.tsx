@@ -54,8 +54,9 @@ import {
   type VerifyStageIndex,
 } from "./onboardingVerify";
 import { installHttpTransport } from "./transportInstall";
-import { ArrowRight, CheckIcon, MantaMark } from "./onboardingUi";
+import { ArrowRight, CheckIcon } from "./onboardingUi";
 import { ProcessPanel } from "./ProcessPanel";
+import mantaMark from "./assets/manta-mark-128.png";
 
 const ACCENT = "var(--accent)"; // the app's accent token (borders/tints)
 const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409: darker in light for AA)
@@ -286,9 +287,21 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         {/* Header: brand mark + progress rail (hidden on the success screen). */}
         <div className="text-center mb-10">
           <div className="inline-flex items-center gap-3 mb-8">
-            {/* BET-421 §F: one brand mark for desktop and mobile — the
-                inline MantaMark SVG (current page text color), not a PNG. */}
-            <MantaMark className="w-9 h-9 text-accent" />
+            {/* The real brand mark (docs/brand/README.md: "The current
+                onboarding 'logo' is a generic inline SVG and must be replaced
+                with the Manta mark"). The PNG is the manta ray in the
+                cyan→blue brand gradient on a transparent ground, so it reads
+                on both the light and dark canvas — which is why the mark is
+                NOT tinted by the theme here. onboardingUi's inline MantaMark
+                stays for the mobile pair screen, where the shape is drawn in
+                white on an accent circle and a gradient PNG would not work. */}
+            <img
+              src={mantaMark}
+              alt=""
+              aria-hidden="true"
+              className="w-9 h-9"
+              draggable={false}
+            />
             <span className="text-title font-semibold tracking-tight">Manta</span>
           </div>
           {!isSuccess && <ProgressRail current={pos} />}

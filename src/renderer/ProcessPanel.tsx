@@ -24,9 +24,10 @@
 //                   stage.
 //   elapsedSeconds  seconds since the operation started (parent ticks it).
 //   logLines        live log lines (auto-scrolls while open).
-//   onCopyDiagnostics  optional — renders a "Copy diagnostics" button. Present
-//                      for every operation that can fail opaquely (installer,
-//                      verify, restart).
+//   onCopyDiagnostics  optional — renders a "Copy diagnostics" button, but ONLY
+//                      while `status === "error"`. Passed by every operation
+//                      that can fail opaquely (installer, verify, restart);
+//                      the panel decides when it is useful to show.
 //   children         optional inline prompts rendered between the bar and the
 //                    log (the SSH installer's fingerprint / passphrase cards).
 //   logHeight        log pane height in px (defaults to the SSH installer's 172).
@@ -95,8 +96,17 @@ export function ProcessPanel({
   // The log toggle only makes sense when there ARE log lines. Operations
   // like the Codex wait and the opencode restart have no log pane — hiding
   // the toggle keeps the status line clean.
+  //
+  // The pane used to ALSO require `!children`, which made "Show log" a dead
+  // button in the only consumer that has a log. `children` is the inline
+  // prompt slot, and JSX passes every child expression positionally — so
+  // SshInstallStep's two conditional prompt cards make `children` the array
+  // [false, false] even when neither prompt is showing. That array is
+  // truthy, so `!children` was permanently false. Children and the log are
+  // designed to coexist (children render above the pane, per the header
+  // comment), so the condition is just gone.
   const hasLog = logLines.length > 0;
-  const showLog = logOpen && !children && hasLog;
+  const showLog = logOpen && hasLog;
 
   return (
     <section className="space-y-2">
@@ -163,7 +173,10 @@ export function ProcessPanel({
           {logLines.join("\n")}
         </div>
       )}
-      {onCopyDiagnostics && (
+      {/* Diagnostics are an error-recovery affordance, so they only appear on
+          failure. Rendering the button (in the danger color, no less) during a
+          healthy run reads as "something is wrong" while nothing is. */}
+      {onCopyDiagnostics && status === "error" && (
         <div className="pt-px">
           <button
             type="button"

@@ -941,29 +941,18 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           className="text-body space-y-2"
           style={{ color: DANGER }}
         >
+          {/* No Copy diagnostics button here: ProcessPanel renders exactly one
+              on error, directly under the failed stage. This section used to
+              render a second copy of it. */}
           <div>
             Install failed (exit code {done.code ?? "—"}
             {done.signal ? `, signal ${done.signal}` : ""}).
           </div>
-          <button
-            onClick={copyDiagnostics}
-            className="px-3 py-2 rounded-md text-meta"
-            style={{ border: `1px solid ${DANGER}`, color: DANGER }}
-          >
-            Copy diagnostics
-          </button>
         </section>
       )}
       {installError && (
         <section className="text-body" style={{ color: DANGER }}>
           {installError}
-          <button
-            onClick={copyDiagnostics}
-            className="ml-3 px-3 py-2 rounded-md text-meta"
-            style={{ border: `1px solid ${DANGER}`, color: DANGER }}
-          >
-            Copy diagnostics
-          </button>
         </section>
       )}
       {claimError && (
