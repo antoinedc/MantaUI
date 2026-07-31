@@ -25,6 +25,7 @@ import type { OpencodeMessage, QuestionRequest } from "../shared/types";
 import { TaskContext, type TaskContextValue } from "./chatShared";
 import { ActiveTodos, MessageRow } from "./MessageRow";
 import { QuestionCard } from "./Cards";
+import { isBackgroundJobCompletionTurn } from "./chatUtils";
 
 export type TranscriptProps = {
   messages: OpencodeMessage[];
@@ -83,6 +84,12 @@ export function Transcript({
               style={{ gap: "var(--turn-gap)", maxWidth: "72ch" }}
             >
               {messages.map((m, idx) => {
+                // BET-418 §C: a background job's completion report is injected
+                // as a fake user turn whose first line is the machine marker
+                // `[background job "<name>" <status>]`. The model still sees it,
+                // but the user must not — skip rendering the row entirely so it
+                // never appears as a right-aligned user bubble.
+                if (isBackgroundJobCompletionTurn(m)) return null;
                 const isLastInTranscript =
                   idx === messages.length - 1 && m.info.role === "assistant";
                 // cmdInfo comes from `userCommandInfo` (memoized at panel

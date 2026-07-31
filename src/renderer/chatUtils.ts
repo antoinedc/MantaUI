@@ -2526,6 +2526,32 @@ export function formatJobSummary(job: {
   return `${job.branch} · ${filesLabel}`;
 }
 
+// ===== Background-job completion turn suppression (BET-418 §C) =====
+//
+// A background job's completion report is delivered to the parent session via
+// oc.sendPrompt, so it lands in the parent transcript as a FAKE USER turn
+// whose first line is the machine-generated marker
+// `[background job "<name>" <status>]` (see buildCompletionText in
+// src/server/delegate.mjs). Under the redesign that would render as a
+// right-aligned user bubble reading as if the user typed it. The model still
+// receives the turn (it is a real user message in opencode's transcript), but
+// the user must not SEE it — the assistant's own next turn reports the result
+// conversationally. This predicate detects the marker so Transcript can skip
+// rendering the row. Pure + tested.
+export function isBackgroundJobCompletionTurn(msg: {
+  info?: { role?: string; id?: string };
+  parts?: Array<{ type?: string; text?: string; synthetic?: boolean; ignored?: boolean; id?: string }>;
+}): boolean {
+  if (msg?.info?.role !== "user") return false;
+  const parts = Array.isArray(msg?.parts) ? msg.parts : [];
+  const text = parts
+    .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
+    .map((p) => p.text ?? "")
+    .join("\n")
+    .trimStart();
+  return text.startsWith("[background job \"");
+}
+
 // ===== Sidebar redesign (BET-414) =====
 //
 // Pure helpers for the redesigned sidebar: window pin ids, ⌘K fuzzy match,

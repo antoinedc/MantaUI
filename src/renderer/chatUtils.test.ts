@@ -78,6 +78,7 @@ import {
   registerMountedTerminal,
   isJobRow,
   formatJobSummary,
+  isBackgroundJobCompletionTurn,
   windowPinId,
   parsePinId,
   resolvePin,
@@ -3574,6 +3575,65 @@ describe("formatJobSummary", () => {
     expect(
       formatJobSummary({ branch: "fix-login", filesChanged: null, worktree: "/tmp/wt" }),
     ).toBe("fix-login · 0 files changed");
+  });
+});
+
+// ===== isBackgroundJobCompletionTurn (BET-418 §C) =====
+
+describe("isBackgroundJobCompletionTurn", () => {
+  const userMsg = (text: string) => ({
+    info: { role: "user", id: "m1" },
+    parts: [{ type: "text", text, id: "p1" }],
+  });
+
+  it("matches a user turn whose first line is the job-completion marker", () => {
+    expect(
+      isBackgroundJobCompletionTurn(
+        userMsg('[background job "fix-login" done]\nBranch: x (3 files changed)\n\nresult'),
+      ),
+    ).toBe(true);
+  });
+
+  it("matches a failed/stopped status marker", () => {
+    expect(
+      isBackgroundJobCompletionTurn(userMsg('[background job "x" failed]\n\nError: boom')),
+    ).toBe(true);
+    expect(
+      isBackgroundJobCompletionTurn(userMsg('[background job "x" stopped]')),
+    ).toBe(true);
+  });
+
+  it("ignores leading whitespace before the marker", () => {
+    expect(
+      isBackgroundJobCompletionTurn(userMsg('  \n[background job "x" done]\nrest')),
+    ).toBe(true);
+  });
+
+  it("does not match a genuine user message that merely mentions background jobs", () => {
+    expect(
+      isBackgroundJobCompletionTurn(userMsg("can you start a background job to run tests?")),
+    ).toBe(false);
+    expect(
+      isBackgroundJobCompletionTurn(userMsg('background job "x" finished')), // no brackets
+    ).toBe(false);
+  });
+
+  it("returns false for an assistant message even if its text is the marker", () => {
+    expect(
+      isBackgroundJobCompletionTurn({
+        info: { role: "assistant", id: "m2" },
+        parts: [{ type: "text", text: '[background job "x" done]', id: "p1" }],
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores synthetic/ignored text parts (only counts real user text)", () => {
+    expect(
+      isBackgroundJobCompletionTurn({
+        info: { role: "user", id: "m1" },
+        parts: [{ type: "text", text: '[background job "x" done]', synthetic: true, id: "p1" }],
+      }),
+    ).toBe(false);
   });
 });
 
