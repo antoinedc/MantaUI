@@ -131,16 +131,17 @@ script import them.
 - **No retries** on the visual project. A retry on a deterministic gate only
   converts a real regression into an intermittent one.
 
-## Known issue: `scripts/shots.mjs` is broken
+## Known issue: the marketing-shot drift gate is advisory (BET-444)
 
-The marketing-screenshot script pins `/usr/bin/google-chrome`. As of
-2026-07-31 that binary refuses every loopback navigation on the runner with
-`ERR_ACCESS_DENIED`, so `npm run shots` cannot run — which means the
-shots drift gate in `ci.yml` cannot pass either. The visual harness sidesteps
-this by using the pinned Chromium.
+`scripts/shots.mjs` now shares this harness's browser (`LAUNCH_OPTIONS`), so it
+runs again — Chrome 148 had started refusing every loopback navigation on the
+runner with `ERR_ACCESS_DENIED`, which took the script down and, because its
+drift gate sits in the REQUIRED `typecheck-test` job, blocked **every open PR**.
 
-The fix is for `shots.mjs` to import `LAUNCH_OPTIONS` from
-`scripts/visual/harness.mjs` like everything else. That changes the renderer
-and therefore every committed `website/shot-*.webp`, so it needs its own change
-with the baselines regenerated deliberately. Tracked separately; not folded in
-here.
+It is not yet a gate again: two consecutive captures of an unchanged UI are not
+byte-identical under the pinned Chromium, so the diff would fail spuriously.
+The step is `continue-on-error: true` until BET-444 restores determinism.
+
+The visual gate in this document is unaffected — it was built on the pinned
+browser from the start, and its captures ARE reproducible (verified by
+back-to-back runs).

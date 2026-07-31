@@ -63,12 +63,12 @@ import { createReadStream, existsSync, mkdirSync, rmSync, statSync } from "node:
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
+import { LAUNCH_OPTIONS } from "./visual/harness.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 const RENDERER_DIR = join(ROOT, "mobile/www");
 const WEBSITE_DIR = join(ROOT, "website");
-const CHROME_PATH = "/usr/bin/google-chrome";
 const FFMPEG_PATH = "/usr/bin/ffmpeg";
 const MAX_SIZE_KB = 250;
 const WEBP_QUALITY = 82;
@@ -492,10 +492,6 @@ async function main() {
   const serveDirIdx = args.indexOf("--serve-dir");
   const serveDir = serveDirIdx >= 0 ? resolve(args[serveDirIdx + 1]) : RENDERER_DIR;
 
-  if (!existsSync(CHROME_PATH)) {
-    fail(`system Chrome not found at ${CHROME_PATH}`);
-    return;
-  }
   if (!existsSync(WEBSITE_DIR)) mkdirSync(WEBSITE_DIR, { recursive: true });
 
   let chromium;
@@ -526,17 +522,13 @@ async function main() {
   const baseURL = `http://127.0.0.1:${port}`;
   log(`serving ${serveDir} on ${baseURL}`);
 
-  const browser = await chromium.launch({
-    executablePath: CHROME_PATH,
-    channel: "chrome",
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--font-render-hinting=none",
-    ],
-  });
+  // Shared with the visual gate — ONE browser recipe (scripts/visual/harness.mjs).
+  // Was pinned to /usr/bin/google-chrome; Chrome 148 began refusing every
+  // loopback navigation with ERR_ACCESS_DENIED, which took this script — and
+  // therefore the drift gate in ci.yml, on the REQUIRED job — down for every
+  // PR. Playwright's bundled Chromium is pinned by package-lock.json, so the
+  // renderer these baselines hash can now only change in a reviewed commit.
+  const browser = await chromium.launch(LAUNCH_OPTIONS);
 
   const producedPaths = {};
   try {
