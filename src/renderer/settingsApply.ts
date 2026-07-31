@@ -24,6 +24,22 @@ function describeValue(entry: SettingEntry, value: unknown): string {
   return String(value);
 }
 
+/**
+ * Coerce a UI-produced value to the entry's stored type. Segmented controls
+ * emit their option `value` (always a string); when the entry's default is a
+ * number (e.g. uploadCleanupHours), coerce to a number so the store and box
+ * config stay numeric (keeps the Modified-dot comparison strict-equal and the
+ * box poller's arithmetic correct). Non-numeric-default entries pass through
+ * unchanged.
+ */
+function coerceSettingValue(entry: SettingEntry, value: unknown): unknown {
+  if (entry.control === "segmented" && typeof entry.default === "number") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : entry.default;
+  }
+  return value;
+}
+
 /** Local toast stack for a Settings surface (newest-first, capped at 3). */
 export function useSettingsToasts() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -41,6 +57,7 @@ export function useApplySetting(pushToast: (t: ToastItem) => void) {
   return async (entry: SettingEntry, value: unknown, prevValue: unknown) => {
     if (entry.configKey == null) return;
     const key = entry.configKey;
+    value = coerceSettingValue(entry, value);
     if (key === "theme") applyTheme(value as ThemePref);
     useStore.setState({ [key]: value });
     try {

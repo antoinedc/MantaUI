@@ -41,6 +41,7 @@ import { attachPtyWs } from "./ptyWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { startOutboxPoller } from "./outbox.mjs";
+import { startUploadCleanupPoller } from "./uploads.mjs";
 import { startServerUpdatePoller } from "./serverUpdate.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
@@ -161,6 +162,18 @@ const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
 // (parity with the desktop outbox poller; see src/server/outbox.mjs).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopOutboxPoller } = startOutboxPoller(bus, { intervalMs: 3000 });
+
+// Upload cleanup (BET-427): hourly sweep of ~/.manta-uploads/ that deletes
+// per-batch <ts> dirs older than `uploadCleanupHours` (box config, default
+// 24, 0 disables) and prunes session dirs left empty. Runs box-server-side
+// (the box is a persistent service; the desktop is often offline) and reads
+// box config via configGet — same channel worktreePerSession rides. See
+// src/server/uploads.mjs.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopUploadCleanupPoller } = startUploadCleanupPoller({
+  configGet: local.configGet,
+  uploadRoot: uploadRoot(),
+});
 
 // Shared prompt-delivery engine (BET-375). ONE instance, shared by every
 // sender that injects a prompt into an opencode session: the scheduled-prompt
@@ -586,9 +599,12 @@ function requireLoopback(req, res, errorMessage) {
 
 // ---------- uploads ----------
 //
-// Layout matches the Electron path (~/.manta-uploads/<session>/<ts>/<file>) so
-// the existing cleanup conventions apply. Client sends one request per file
-// with raw bytes; filename + batch id come in headers. No multipart parser.
+// Layout: ~/.manta-uploads/<session>/<ts>/<file>. A server-side poller
+// (`startUploadCleanupPoller` above, src/server/uploads.mjs) sweeps this dir
+// hourly, deleting batch dirs older than `uploadCleanupHours` (box config,
+// default 24, 0 disables) and pruning empty session dirs. Client sends one
+// request per file with raw bytes; filename + batch id come in headers. No
+// multipart parser.
 
 const UPLOAD_ROOT = uploadRoot();
 // Agent → device download root. The mobile mirror of the desktop outbox pull:

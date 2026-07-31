@@ -48,6 +48,14 @@ export type AppConfig = {
   // Absent → app.getPath("downloads") (~/Downloads). A leading "~" is NOT
   // expanded here; pass an absolute path or leave empty for the default.
   downloadsDir?: string;
+  // BET-427: hours a dragged-in upload's per-batch dir survives on the box
+  // before the hourly server-side sweep deletes it. Box-server config key
+  // (the box is a persistent systemd service; the desktop is often offline,
+  // so the cleanup poller runs on the box and reads box config). Rides the
+  // generic configGet/configUpdate channel like every other AppConfig field.
+  // `0` disables cleanup (keep everything). Default 24. See
+  // src/server/uploads.mjs `startUploadCleanupPoller`.
+  uploadCleanupHours?: number;
   /**
    * Per-launcher CLI flag values for TUI launch modes (BET-138 refinement).
    * Keyed by launcher id (see src/server/launcherRegistry.mjs), then flag key.

@@ -233,10 +233,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
       downloadsDir: store.downloadsDir,
       worktreePerSession: store.worktreePerSession,
       worktreeCleanOnClose: store.worktreeCleanOnClose,
+      uploadCleanupHours: store.uploadCleanupHours,
       theme: store.theme,
       autoRenameSessions: store.autoRenameSessions,
     }),
-    [store.cacheTtl, store.groqApiKey, store.voiceTranscriptionModel, store.voiceCommandModel, store.allowAgentPush, store.downloadsDir, store.worktreePerSession, store.worktreeCleanOnClose, store.theme, store.autoRenameSessions],
+    [store.cacheTtl, store.groqApiKey, store.voiceTranscriptionModel, store.voiceCommandModel, store.allowAgentPush, store.downloadsDir, store.worktreePerSession, store.worktreeCleanOnClose, store.uploadCleanupHours, store.theme, store.autoRenameSessions],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {

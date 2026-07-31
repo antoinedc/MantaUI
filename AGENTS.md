@@ -294,11 +294,17 @@ back → `__mantaPreload.writeTempAndOpen` writes to a Mac tmpfile and
 `window.open` path gets denied by `setWindowOpenHandler` in `main/index.ts`, so
 URLs silently no-op.
 
-**Hourly cleanup** of `~/.manta-uploads/`: `find -mindepth 2 -maxdepth 2 -type d
--mmin +N -exec rm -rf {} +` deletes per-batch `<ts>` directories, then prunes
-empty session dirs. Threshold is `uploadCleanupHours` in config (default 1,
-`0` disables). Sweep runs once at app load + every hour after; worst-case
-staleness ≈ `uploadCleanupHours + 1h`.
+**Hourly cleanup** of `~/.manta-uploads/`: a server-side poller in
+`src/server/uploads.mjs` (`startUploadCleanupPoller`, wired in
+`src/server/index.mjs`) sweeps the upload root hourly, deleting per-batch
+`<ts>` directories whose mtime is older than `uploadCleanupHours` (box-server
+config key, default 24, `0` disables cleanup), then `rmdir`s session dirs
+left empty. The poller runs box-server-side (the box is a persistent systemd
+service; the desktop is often offline) and reads the threshold via
+`configGet()` — the same channel `worktreePerSession` rides. Only batch dirs
+matching the timestamp shape (`/^[0-9]{6,20}$/`) are swept; stray files are
+left alone. The threshold is user-facing in Settings → Files ("Upload cleanup
+interval"). Worst-case staleness ≈ `uploadCleanupHours + 1h`.
 
 **Agent → laptop push (outbox / download).** The reverse of drag-in: the remote
 AI drops a file into `~/.manta-outbox/` (optionally `~/.manta-outbox/<session>/`)
@@ -418,8 +424,9 @@ reintroduce `--protocol http2`.
 Client→server: `{type:"data",data}` or `{type:"resize",cols,rows}`.
 Server→client: raw PTY bytes.
 
-**Upload endpoint** (`POST /api/upload?session=NAME`): unchanged layout
-(`~/.manta-uploads/<session>/<batch>/<file>`).
+**Upload endpoint** (`POST /api/upload?session=NAME`): layout
+`~/.manta-uploads/<session>/<batch>/<file>`; cleaned by the hourly poller
+described above.
 
 **Capacitor wrapper** (`mobile/`): Android APK + iOS scaffold. `npm run apk`
 in `mobile/` builds the debug APK. `mobile/sync-web.sh` runs `build:mobile`

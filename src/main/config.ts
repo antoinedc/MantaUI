@@ -20,13 +20,18 @@ export function loadConfig(): AppConfig {
     const parsed = JSON.parse(raw) as Partial<AppConfig> & {
       sessions?: unknown;
       // Legacy SSH fields silently dropped (BET-105): host, user, identityFile,
-      // transport, uploadCleanupHours. They no longer exist on AppConfig so
-      // spreading them in would be a no-op, but we explicitly delete them here
-      // to keep the persisted file clean on next save.
+      // transport. They no longer exist on AppConfig so spreading them in would
+      // be a no-op, but we explicitly delete them here to keep the persisted
+      // file clean on next save.
       host?: unknown;
       user?: unknown;
       identityFile?: unknown;
       transport?: unknown;
+      // uploadCleanupHours is NOT a legacy SSH field — it's a live box-server
+      // config key (BET-427, read by the upload cleanup poller in
+      // src/server/uploads.mjs). But the DESKTOP config.json never carried it
+      // (it's box config, persisted on the box), so any copy found here is a
+      // stale pre-migration desktop value we scrub to keep the file clean.
       uploadCleanupHours?: unknown;
     };
     // Migration: drop the old `sessions` field if present.
@@ -37,6 +42,8 @@ export function loadConfig(): AppConfig {
     delete parsed.user;
     delete parsed.identityFile;
     delete parsed.transport;
+    // Scrub a stale desktop-persisted copy of uploadCleanupHours (box-server
+    // config key now — see comment above). Not a legacy SSH field.
     delete parsed.uploadCleanupHours;
     // Migration: v1 capability executor (capExecutorEnabled /
     // iosBuildRepoPath / iosSimulatorName) → v2 plugins

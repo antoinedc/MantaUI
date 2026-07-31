@@ -145,6 +145,10 @@ type State = {
   // user-option is set removes the worktree (and best-effort deletes its
   // branch) first. Global only — no per-session override.
   worktreeCleanOnClose: boolean;
+  // BET-427: hours a dragged-in upload's batch dir survives on the box before
+  // the hourly server-side sweep deletes it. 0 disables cleanup. Box-server
+  // config key — applies to uploads from both desktop and mobile. Default 24.
+  uploadCleanupHours: number;
   // Override destination for agent-pushed files. "" = main's default (~/Downloads).
   downloadsDir: string;
   // Global default model for new/cleared sessions. Set in Settings, persisted
@@ -392,6 +396,7 @@ export const useStore = create<State>((set, get) => ({
   allowAgentPush: false,
   worktreePerSession: false,
   worktreeCleanOnClose: false,
+  uploadCleanupHours: 24,
   downloadsDir: "",
   defaultModel: null,
   deactivatedMainModels: [],
@@ -538,6 +543,7 @@ export const useStore = create<State>((set, get) => ({
       allowAgentPush: c.allowAgentPush ?? false,
       worktreePerSession: c.worktreePerSession ?? false,
       worktreeCleanOnClose: c.worktreeCleanOnClose ?? false,
+      uploadCleanupHours: typeof c.uploadCleanupHours === "number" ? c.uploadCleanupHours : 24,
       downloadsDir: c.downloadsDir ?? "",
       defaultModel: c.defaultModel ?? null,
       deactivatedMainModels: c.deactivatedMainModels ?? [],
