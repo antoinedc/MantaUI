@@ -12,12 +12,15 @@ import {
   useRegistryUrls,
 } from "../settingsShared";
 import { useSettingsToasts, useApplySetting } from "../settingsApply";
+import { errorDisclosure } from "../settingsError";
 import type { OpencodeModel } from "../../shared/types";
 import {
   SETTINGS,
   SETTING_SECTIONS,
   settingsForSection,
+  searchSettings,
   sectionIsModified,
+  resetAllPayload,
   fieldId,
   type SettingEntry,
   type SettingSectionId,
@@ -41,7 +44,7 @@ const PLATFORM = "mobile" as const;
 //
 // BET-419: this surface now renders from the shared settingsSchema (same
 // source as desktop Settings.tsx), uses instant-apply + Undo (no Save
-// button), and routes every failure through a local toast — no alert().
+// button), and routes every failure through a local toast — no native dialogs.
 
 export function MobileSettings({ onClose }: Props) {
   const store = useStore();
@@ -69,6 +72,31 @@ export function MobileSettings({ onClose }: Props) {
     await applySetting(entry, nextValue, prev);
   };
 
+  // Search (BET-419 §B.1) — filters schema entries by label + help.
+  const [query, setQuery] = useState("");
+  const inSearch = query.trim().length > 0;
+  const searchHits = useMemo(() => searchSettings(SETTINGS, query, PLATFORM), [query]);
+
+  // Reset all settings (BET-419 §B.3) — danger zone, General section.
+  const [confirmReset, setConfirmReset] = useState(false);
+  const resetAll = async () => {
+    setConfirmReset(false);
+    const payload = resetAllPayload(SETTINGS);
+    const prev = { ...values };
+    useStore.setState(payload);
+    try {
+      await window.api.configUpdate(payload);
+      push({
+        id: `reset-${Date.now()}`,
+        message: "All settings reset to defaults.",
+        action: { label: "Undo", onClick: () => { void useStore.setState(prev); window.api.configUpdate(prev).catch(() => {}); } },
+      });
+    } catch (e) {
+      useStore.setState(prev);
+      push({ id: `err-reset-${Date.now()}`, message: errorDisclosure("Couldn't reset settings.", e) });
+    }
+  };
+
   // Server URL — mobile-local (localStorage["manta_server"]), not a server
   // config key. Committed on blur (instant apply). Seeded once on mount; the
   // draft is never resynced from anywhere while focused (stomping fix).
@@ -84,8 +112,8 @@ export function MobileSettings({ onClose }: Props) {
       else localStorage.removeItem("manta_server");
       setServerUrlSavedAt(Date.now());
       push({ id: `server-url-${Date.now()}`, message: trimmed ? "Server URL set" : "Server URL cleared" });
-    } catch {
-      push({ id: `err-server-url-${Date.now()}`, message: "Couldn't save the server URL." });
+    } catch (e) {
+      push({ id: `err-server-url-${Date.now()}`, message: errorDisclosure("Couldn't save the server URL.", e) });
     }
   };
 
@@ -106,7 +134,7 @@ export function MobileSettings({ onClose }: Props) {
     void useStore.setState({ defaultModel: model });
     window.api.configUpdate({ defaultModel: model })
       .then((r) => { const saved = (r as Record<string, unknown>).defaultModel; useStore.setState({ defaultModel: (saved && typeof saved === "object" ? saved : model) as { providerID: string; modelID: string } | null }); })
-      .catch(() => { useStore.setState({ defaultModel: prev }); setSelectedModel(prev); push({ id: `err-model-${Date.now()}`, message: "Couldn't save the default model." }); });
+      .catch((e: unknown) => { useStore.setState({ defaultModel: prev }); setSelectedModel(prev); push({ id: `err-model-${Date.now()}`, message: errorDisclosure("Couldn't save the default model.", e) }); });
   };
 
   // Registry URLs (custom control — instant apply on add/remove).
@@ -125,9 +153,9 @@ export function MobileSettings({ onClose }: Props) {
         message: next.length > prev.length ? "Registry URL added" : "Registry URL removed",
         action: { label: "Undo", onClick: () => { void useStore.setState({ skillRegistryUrls: prev }); window.api.configUpdate({ skillRegistryUrls: prev }).catch(() => {}); } },
       });
-    } catch {
+    } catch (e) {
       useStore.setState({ skillRegistryUrls: prev });
-      push({ id: `err-registry-${Date.now()}`, message: "Couldn't update skill registries." });
+      push({ id: `err-registry-${Date.now()}`, message: errorDisclosure("Couldn't update skill registries.", e) });
     }
   };
   const onAddRegistry = () => {
@@ -154,17 +182,19 @@ export function MobileSettings({ onClose }: Props) {
     useStore.setState({ launcherFlags: nextFlags });
     void window.api.configUpdate({ launcherFlags: nextFlags })
       .then((r) => { const saved = (r as Record<string, unknown>).launcherFlags; useStore.setState({ launcherFlags: (saved && typeof saved === "object" ? saved : nextFlags) as Record<string, Record<string, boolean>> }); })
-      .catch(() => { useStore.setState({ launcherFlags: prev }); setLauncherFlagValues(prev); push({ id: `err-launcher-${Date.now()}`, message: "Couldn't save launcher flag." }); });
+      .catch((e: unknown) => { useStore.setState({ launcherFlags: prev }); setLauncherFlagValues(prev); push({ id: `err-launcher-${Date.now()}`, message: errorDisclosure("Couldn't save launcher flag.", e) }); });
   };
 
   // Push notifications — per-device subscription, not server config.
   const [pushOn, setPushOn] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [pushErr, setPushErr] = useState<string | null>(null);
+  const [pushErrRaw, setPushErrRaw] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   useEffect(() => { hasActiveSubscription().then(setPushOn).catch(() => setPushOn(false)); }, []);
   const togglePush = async () => {
     setPushErr(null);
+    setPushErrRaw(null);
     setPushBusy(true);
     try {
       if (pushOn) { await disablePush(); setPushOn(false); }
@@ -176,13 +206,15 @@ export function MobileSettings({ onClose }: Props) {
         else setPushErr("Permission not granted.");
       }
     } catch (e) {
-      setPushErr(e instanceof Error ? e.message : String(e));
+      setPushErr("Couldn't toggle notifications.");
+      setPushErrRaw(e instanceof Error ? e.message : String(e));
     } finally {
       setPushBusy(false);
     }
   };
   const resubscribe = async () => {
     setPushErr(null);
+    setPushErrRaw(null);
     setPushBusy(true);
     try {
       const state = await resubscribePush();
@@ -191,7 +223,8 @@ export function MobileSettings({ onClose }: Props) {
       else if (state === "unsupported") setPushErr("Push needs the app installed to your home screen (iOS 16.4+).");
       else setPushErr("Permission not granted.");
     } catch (e) {
-      setPushErr(e instanceof Error ? e.message : String(e));
+      setPushErr("Couldn't re-subscribe to notifications.");
+      setPushErrRaw(e instanceof Error ? e.message : String(e));
     } finally {
       setPushBusy(false);
     }
@@ -248,53 +281,96 @@ export function MobileSettings({ onClose }: Props) {
       </div>
 
       <div className="manta-scroll-y flex-1 overflow-y-auto px-4 py-3 space-y-5">
-        {/* Server URL — the most important field for a fresh install. */}
-        <section className="space-y-2">
-          <label htmlFor={fieldId(serverUrlEntry)} className="block text-micro font-semibold uppercase text-text-muted">Server URL</label>
-          <input
-            id={fieldId(serverUrlEntry)}
-            placeholder={typeof window !== "undefined" ? window.location.origin : ""}
-            value={serverUrlDraft}
-            onChange={(e) => { setServerUrlDraft(e.target.value); setServerUrlSavedAt(null); }}
-            onFocus={() => { serverUrlFocused.current = true; }}
-            onBlur={() => { serverUrlFocused.current = false; commitServerUrl(); }}
-            spellCheck={false}
-            autoComplete="off"
-            autoCapitalize="off"
-            inputMode="url"
-            className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
-          />
-          <div className="text-meta text-text-faint">Leave blank to use the page's own origin (default). Override only if your Manta server is on a different host. Changes take effect immediately.</div>
-          <div className="text-meta text-text-faint">Server v{serverVersion ?? "?"}</div>
-          {serverUrlSavedAt && <div role="status" className="text-meta text-ok">Saved</div>}
-        </section>
+        {/* Search (BET-419 §B.1) — filters schema entries by label + help. */}
+        <input
+          type="text"
+          placeholder="Find a setting…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Search settings"
+          className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
+        />
 
-        {/* Schema-driven simple fields, grouped by section. */}
-        {sections.map((section) => {
-          const entries = settingsForSection(SETTINGS, section.id, PLATFORM);
-          if (entries.length === 0) return null;
-          return (
-            <section key={section.id} className="space-y-3 pt-1 border-t border-border">
-              <div className="flex items-center gap-2">
-                <span className="text-micro font-semibold uppercase text-text-muted">{section.label}</span>
-                {sectionIsModified(SETTINGS, section.id, PLATFORM, values) && (
-                  <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-accent" title="Modified" />
-                )}
-              </div>
-              {entries.map((entry) => (
-                <div key={entry.id} className="space-y-2">
+        {inSearch ? (
+          <div className="space-y-4">
+            <div className="text-meta text-text-faint">{searchHits.length} match{searchHits.length === 1 ? "" : "es"} for “{query.trim()}”</div>
+            {searchHits.length === 0 ? (
+              <div className="text-body text-text-faint">No settings match. Try another term.</div>
+            ) : (
+              searchHits.map((entry) => (
+                <div key={entry.id} className="space-y-2 pt-1 border-t border-border">
+                  <div className="text-micro uppercase text-text-faint">{SETTING_SECTIONS.find((s) => s.id === entry.section)?.label}</div>
                   {renderField(entry)}
                   {entry.help && entry.control !== "toggle" && <div className="text-meta text-text-faint">{entry.help}</div>}
                 </div>
-              ))}
-              {/* Per-section custom content for mobile. */}
-              {renderMobileCustom(section.id)}
+              ))
+            )}
+          </div>
+        ) : (
+          <>
+            {/* Server URL — the most important field for a fresh install. */}
+            <section className="space-y-2">
+              <label htmlFor={fieldId(serverUrlEntry)} className="block text-micro font-semibold uppercase text-text-muted">Server URL</label>
+              <input
+                id={fieldId(serverUrlEntry)}
+                placeholder={typeof window !== "undefined" ? window.location.origin : ""}
+                value={serverUrlDraft}
+                onChange={(e) => { setServerUrlDraft(e.target.value); setServerUrlSavedAt(null); }}
+                onFocus={() => { serverUrlFocused.current = true; }}
+                onBlur={() => { serverUrlFocused.current = false; commitServerUrl(); }}
+                spellCheck={false}
+                autoComplete="off"
+                autoCapitalize="off"
+                inputMode="url"
+                className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
+              />
+              <div className="text-meta text-text-faint">Leave blank to use the page's own origin (default). Override only if your Manta server is on a different host. Changes take effect immediately.</div>
+              <div className="text-meta text-text-faint">Server v{serverVersion ?? "?"}</div>
+              {serverUrlSavedAt && <div role="status" className="text-meta text-ok">Saved</div>}
             </section>
-          );
-        })}
+
+            {/* Schema-driven simple fields, grouped by section. */}
+            {sections.map((section) => {
+              const entries = settingsForSection(SETTINGS, section.id, PLATFORM);
+              if (entries.length === 0) return null;
+              return (
+                <section key={section.id} className="space-y-3 pt-1 border-t border-border">
+                  <div className="flex items-center gap-2">
+                    <span className="text-micro font-semibold uppercase text-text-muted">{section.label}</span>
+                    {sectionIsModified(SETTINGS, section.id, PLATFORM, values) && (
+                      <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-accent" title="Modified" />
+                    )}
+                  </div>
+                  {entries.map((entry) => (
+                    <div key={entry.id} className="space-y-2">
+                      {renderField(entry)}
+                      {entry.help && entry.control !== "toggle" && <div className="text-meta text-text-faint">{entry.help}</div>}
+                    </div>
+                  ))}
+                  {/* Per-section custom content for mobile. */}
+                  {renderMobileCustom(section.id)}
+                </section>
+              );
+            })}
+          </>
+        )}
 
         {toasts.length > 0 && <ToastStack toasts={toasts} onDismiss={dismiss} />}
       </div>
+
+      {/* In-app confirm: Reset all settings (BET-419 §B.3). */}
+      {confirmReset && (
+        <div role="alertdialog" aria-modal="true" aria-labelledby="mobile-confirm-reset-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 space-y-4">
+            <h3 id="mobile-confirm-reset-title" className="text-title font-semibold">Reset all settings?</h3>
+            <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setConfirmReset(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
+              <button onClick={resetAll} className="px-4 py-2 text-body bg-accent-solid text-on-accent rounded hover:opacity-90">Reset</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -306,8 +382,9 @@ export function MobileSettings({ onClose }: Props) {
         <>
           {/* Default model */}
           <div className="space-y-1">
-            <label className="block text-micro font-semibold uppercase text-text-muted">Default model</label>
+            <label htmlFor="setting-defaultModel" className="block text-micro font-semibold uppercase text-text-muted">Default model</label>
             <select
+              id="setting-defaultModel"
               value={selectedModel ? `${selectedModel.providerID}::${selectedModel.modelID}` : ""}
               onChange={(e) => commitModel(e.target.value)}
               className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
@@ -322,8 +399,8 @@ export function MobileSettings({ onClose }: Props) {
           <SubscriptionsCard />
           <ProvidersCard />
           {availableLaunchers.some((l) => l.flags.length > 0) && (
-            <div className="space-y-2">
-              <span className="text-micro font-semibold uppercase text-text-muted">AI CLI launch options</span>
+            <div role="group" aria-labelledby="setting-mobile-launchers" className="space-y-2">
+              <span id="setting-mobile-launchers" className="text-micro font-semibold uppercase text-text-muted">AI CLI launch options</span>
               <div className="text-meta text-text-faint">Flags used when launching an AI CLI directly in a session's terminal.</div>
               {availableLaunchers.filter((l) => l.flags.length > 0).map((l) => (
                 <div key={l.id} className="space-y-2">
@@ -340,7 +417,7 @@ export function MobileSettings({ onClose }: Props) {
           )}
           {/* Skill registries */}
           <div className="space-y-2">
-            <span className="text-micro font-semibold uppercase text-text-muted">Skill registries</span>
+            <label htmlFor="setting-mobile-skillRegistries" className="text-micro font-semibold uppercase text-text-muted">Skill registries</label>
             <div className="text-meta text-text-faint">Extra opencode skill registry URLs. The default manta registry is always included.</div>
             <div className="space-y-1">
               {registryUrls.map((url) => (
@@ -351,7 +428,7 @@ export function MobileSettings({ onClose }: Props) {
               ))}
             </div>
             <div className="flex gap-2">
-              <input placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} spellCheck={false} autoComplete="off" autoCapitalize="off" inputMode="url" className="flex-1 min-w-0 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
+              <input id="setting-mobile-skillRegistries" placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} spellCheck={false} autoComplete="off" autoCapitalize="off" inputMode="url" className="flex-1 min-w-0 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
               <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-3 py-2 text-body bg-accent-solid text-on-accent rounded disabled:opacity-40">Add</button>
             </div>
           </div>
@@ -364,20 +441,29 @@ export function MobileSettings({ onClose }: Props) {
       return null;
     }
     if (sectionId === "general") {
-      // Push notifications live in general on mobile (per-device, not config).
-      if (!isPushSupported()) return null;
       return (
-        <div className="space-y-2">
-          <span className="text-micro font-semibold uppercase text-text-muted">Notifications</span>
-          <div className="text-meta text-text-faint">Push alerts when Claude needs a permission/question, finishes a turn, or hits an error.{pushPermission() === "default" && " iOS only delivers these to the app installed on your home screen."}</div>
-          <button onClick={togglePush} disabled={pushBusy} className={`w-full px-3 py-2 text-body rounded border ${pushOn ? "bg-accent-soft text-white border-accent" : "bg-bg-soft text-text-muted border-border"} ${pushBusy ? "opacity-60" : ""}`}>
-            {pushBusy ? "Working…" : pushOn ? "Notifications on — tap to disable" : "Enable notifications"}
-          </button>
-          {pushOn && (
-            <button onClick={resubscribe} disabled={pushBusy} className={`w-full px-3 py-2 text-meta rounded border border-border bg-bg-soft text-text-muted ${pushBusy ? "opacity-60" : ""}`}>Not getting notifications? Re-subscribe</button>
+        <>
+          {/* Push notifications — per-device subscription, not server config. */}
+          {isPushSupported() && (
+            <div role="group" aria-labelledby="setting-mobile-notifications" className="space-y-2">
+              <span id="setting-mobile-notifications" className="text-micro font-semibold uppercase text-text-muted">Notifications</span>
+              <div className="text-meta text-text-faint">Push alerts when Claude needs a permission/question, finishes a turn, or hits an error.{pushPermission() === "default" && " iOS only delivers these to the app installed on your home screen."}</div>
+              <button onClick={togglePush} disabled={pushBusy} className={`w-full px-3 py-2 text-body rounded border ${pushOn ? "bg-accent-soft text-white border-accent" : "bg-bg-soft text-text-muted border-border"} ${pushBusy ? "opacity-60" : ""}`}>
+                {pushBusy ? "Working…" : pushOn ? "Notifications on — tap to disable" : "Enable notifications"}
+              </button>
+              {pushOn && (
+                <button onClick={resubscribe} disabled={pushBusy} className={`w-full px-3 py-2 text-meta rounded border border-border bg-bg-soft text-text-muted ${pushBusy ? "opacity-60" : ""}`}>Not getting notifications? Re-subscribe</button>
+              )}
+              {pushErr && <div role="alert" className="text-meta text-danger">{errorDisclosure(pushErr, pushErrRaw)}</div>}
+            </div>
           )}
-          {pushErr && <div role="alert" className="text-meta text-danger">{pushErr}</div>}
-        </div>
+          {/* Reset all settings — danger zone (BET-419 §B.3). */}
+          <div className="space-y-2 pt-1 border-t border-border">
+            <span className="text-micro font-semibold uppercase text-text-muted">Reset all settings</span>
+            <div className="text-meta text-text-faint">Restore every setting to its default. This does not remove your box pairing or projects.</div>
+            <button onClick={() => setConfirmReset(true)} className="w-full px-3 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
+          </div>
+        </>
       );
     }
     return null;

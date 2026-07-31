@@ -12,6 +12,7 @@ import { useState } from "react";
 import { useStore } from "./store";
 import { applyTheme, type ThemePref } from "./theme";
 import { ToastStack, type ToastItem } from "./Toast";
+import { errorDisclosure } from "./settingsError";
 import type { SettingEntry } from "../shared/settingsSchema";
 
 function describeValue(entry: SettingEntry, value: unknown): string {
@@ -63,10 +64,10 @@ export function useApplySetting(pushToast: (t: ToastItem) => void) {
           },
         },
       });
-    } catch {
+    } catch (e) {
       useStore.setState({ [key]: prevValue });
       if (key === "theme") applyTheme(prevValue as ThemePref);
-      pushToast({ id: `err-${key}-${Date.now()}`, message: `Couldn't set ${entry.label.toLowerCase()}.` });
+      pushToast({ id: `err-${key}-${Date.now()}`, message: errorDisclosure(`Couldn't set ${entry.label.toLowerCase()}.`, e) });
     }
   };
 }

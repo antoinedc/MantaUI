@@ -10,6 +10,7 @@ import { resolveLauncherFlags } from "./chatShared";
 import { applyTheme, type ThemePref } from "./theme";
 import { TtlToggle } from "./TtlToggle";
 import { useSettingsToasts, useApplySetting, ToastStack } from "./settingsApply";
+import { errorDisclosure } from "./settingsError";
 import {
   useLaunchers,
   updateLauncherFlag,
@@ -277,9 +278,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
         message: next.length > prev.length ? "Registry URL added" : "Registry URL removed",
         action: { label: "Undo", onClick: () => { void useStore.setState({ skillRegistryUrls: prev }); window.api.configUpdate({ skillRegistryUrls: prev }).catch(() => {}); } },
       });
-    } catch {
+    } catch (e) {
       useStore.setState({ skillRegistryUrls: prev });
-      push({ id: `err-registry-${Date.now()}`, message: "Couldn't update skill registries." });
+      push({ id: `err-registry-${Date.now()}`, message: errorDisclosure("Couldn't update skill registries.", e) });
     }
   };
   const onAddRegistry = () => {
@@ -306,7 +307,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
     useStore.setState({ launcherFlags: nextFlags });
     void window.api.configUpdate({ launcherFlags: nextFlags })
       .then((r) => { const saved = (r as Record<string, unknown>).launcherFlags; useStore.setState({ launcherFlags: (saved && typeof saved === "object" ? saved : nextFlags) as Record<string, Record<string, boolean>> }); })
-      .catch(() => { useStore.setState({ launcherFlags: prev }); setLauncherFlagValues(prev); push({ id: `err-launcher-${Date.now()}`, message: "Couldn't save launcher flag." }); });
+      .catch((e: unknown) => { useStore.setState({ launcherFlags: prev }); setLauncherFlagValues(prev); push({ id: `err-launcher-${Date.now()}`, message: errorDisclosure("Couldn't save launcher flag.", e) }); });
   };
 
   // Plugins (desktop-only Mac-local toggle + registry list).
@@ -326,9 +327,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
     try {
       await preload.pluginsSetEnabled(on);
       push({ id: `plugins-${Date.now()}`, message: `Plugins ${on ? "enabled" : "disabled"} — restart MantaUI to apply.`, action: { label: "Undo", onClick: () => { setPluginsOn(prev); void preload.pluginsSetEnabled(prev); } } });
-    } catch {
+    } catch (e) {
       setPluginsOn(prev);
-      push({ id: `err-plugins-${Date.now()}`, message: "Couldn't toggle plugins." });
+      push({ id: `err-plugins-${Date.now()}`, message: errorDisclosure("Couldn't toggle plugins.", e) });
     }
   };
   useEffect(() => {
@@ -354,8 +355,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
       const result = await window.api.authPair();
       setPairing(result);
       if (result.ok) setPairingExpiry(new Date(result.expiresAt));
-    } catch {
-      push({ id: `err-pair-${Date.now()}`, message: "Couldn't generate a pairing code. Try again." });
+    } catch (e) {
+      push({ id: `err-pair-${Date.now()}`, message: errorDisclosure("Couldn't generate a pairing code. Try again.", e) });
     } finally {
       setPairingMinting(false);
     }
@@ -403,10 +404,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
         message: "All settings reset to defaults.",
         action: { label: "Undo", onClick: () => { void useStore.setState(prev); if (prev.theme) applyTheme(prev.theme as ThemePref); window.api.configUpdate(prev).catch(() => {}); } },
       });
-    } catch {
+    } catch (e) {
       useStore.setState(prev);
       if (prev.theme) applyTheme(prev.theme as ThemePref);
-      push({ id: `err-reset-${Date.now()}`, message: "Couldn't reset settings." });
+      push({ id: `err-reset-${Date.now()}`, message: errorDisclosure("Couldn't reset settings.", e) });
     }
   };
 
@@ -556,7 +557,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <div className="border-t border-border pt-6">
             <h3 className="text-title font-semibold mb-4">Installed plugins</h3>
             {pluginsError ? (
-              <div role="alert" className="text-body text-danger break-words">Failed to load: {pluginsError}</div>
+              <div role="alert" className="text-body text-danger">{errorDisclosure("Couldn't load the plugins list.", pluginsError)}</div>
             ) : plugins === null ? (
               <div className="text-body text-text-faint">Loading…</div>
             ) : plugins.length === 0 ? (
