@@ -261,7 +261,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       <div className="w-full max-w-[720px] px-6 py-8">
         {/* Header: logo + progress rail (hidden on the success screen). */}
         <div className="text-center mb-10">
-          <div className="inline-flex items-center gap-2.5 mb-8">
+          <div className="inline-flex items-center gap-3 mb-8">
             <img src={mantaMark} alt="" className="w-9 h-9 object-contain" />
             <span className="text-title font-semibold tracking-tight">Manta</span>
           </div>
@@ -327,13 +327,13 @@ function SuccessPanel({ onOpen }: { onOpen: () => void }) {
         <CheckIcon className="w-7 h-7 text-ok" />
       </div>
       <h2 className="text-display font-semibold mb-2">You're all set!</h2>
-      <p className="text-body text-text-muted leading-relaxed max-w-sm mx-auto mb-7">
+      <p className="text-body text-text-muted leading-relaxed max-w-sm mx-auto mb-8">
         Your box is paired, a provider is connected, and your first project is
         ready. Start chatting with your AI assistant.
       </p>
       <button
         onClick={onOpen}
-        className="inline-flex items-center gap-2 px-6 py-2.5 rounded-md text-body font-medium text-on-accent"
+        className="inline-flex items-center gap-2 px-6 py-3 rounded-md text-body font-medium text-on-accent"
         style={{ background: ACCENT_SOLID }}
       >
         Open Manta

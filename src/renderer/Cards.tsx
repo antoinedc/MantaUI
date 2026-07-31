@@ -54,7 +54,7 @@ export function RetryCard({
             href={info.action.link}
             target="_blank"
             rel="noreferrer noopener"
-            className="inline-block px-2 py-0.5 rounded border border-border-strong text-text hover:bg-bg-soft"
+            className="inline-block px-2 py-px rounded border border-border-strong text-text hover:bg-bg-soft"
           >
             {info.action.label || "Open"}
           </a>
@@ -165,13 +165,13 @@ export function PermissionCard({
         </span>
         <div className="min-w-0 flex-1">
           {/* Plain-language title + one-line description */}
-          <div className="text-text font-medium mb-0.5">
+          <div className="text-text font-medium mb-px">
             {perm.fromJobName ? `${perm.fromJobName} · ` : ""}{title}
           </div>
-          <div className="text-text-muted mb-0.5">{desc}</div>
+          <div className="text-text-muted mb-px">{desc}</div>
           {/* Literal command in its own --inset well */}
           {detail && (
-            <div className="rounded-md bg-inset px-2 py-1 mt-1.5 mb-1 font-mono text-text break-all">
+            <div className="rounded-md bg-inset px-2 py-1 mt-2 mb-1 font-mono text-text break-all">
               {detail}
             </div>
           )}
@@ -183,7 +183,7 @@ export function PermissionCard({
         {alwaysScope ? (
           <button
             onClick={() => onReply("always")}
-            className="px-2.5 py-1 rounded text-bg text-meta font-medium"
+            className="px-3 py-1 rounded text-bg text-meta font-medium"
             style={{ backgroundColor: "var(--warn)" }}
             title={`Always allow ${alwaysScope}`}
           >
@@ -192,13 +192,13 @@ export function PermissionCard({
         ) : null}
         <button
           onClick={() => onReply("once")}
-          className="px-2.5 py-1 rounded border border-border-strong text-text hover:bg-bg-soft text-meta"
+          className="px-3 py-1 rounded border border-border-strong text-text hover:bg-bg-soft text-meta"
         >
           Allow once
         </button>
         <button
           onClick={() => onReply("reject")}
-          className="ml-auto px-2.5 py-1 rounded text-danger hover:bg-danger-bg text-meta"
+          className="ml-auto px-3 py-1 rounded text-danger hover:bg-danger-bg text-meta"
         >
           Reject
         </button>
@@ -325,17 +325,17 @@ export function QuestionCard({
           <div key={qIdx}>
             {/* Numbered section header when multiple questions */}
             {isMulti && (
-              <div className="text-text-faint text-label mb-0.5">
+              <div className="text-text-faint text-label mb-px">
                 {qIdx + 1}. {info.header}
               </div>
             )}
             {!isMulti && (
-              <div className="text-text-muted mb-0.5 font-medium">{info.header}</div>
+              <div className="text-text-muted mb-px font-medium">{info.header}</div>
             )}
-            <div className="text-text mb-1.5 leading-snug">{info.question}</div>
+            <div className="text-text mb-2 leading-snug">{info.question}</div>
 
             {/* Checkbox options — multi-select aware */}
-            <div className="mt-0.5 flex flex-col gap-1">
+            <div className="mt-px flex flex-col gap-1">
               {options.map((opt) => {
                 const isSelected = selected[qIdx].has(opt.origLabel);
                 const multiple = info.multiple ?? false;
@@ -364,7 +364,7 @@ export function QuestionCard({
                     <span className="text-text min-w-0">{opt.displayLabel}</span>
                     {opt.recommended && (
                       <span
-                        className="ml-auto shrink-0 px-1.5 rounded-sm text-label"
+                        className="ml-auto shrink-0 px-2 rounded-sm text-label"
                         style={{
                           backgroundColor: "var(--accent-bg)",
                           color: "var(--accent)",
@@ -404,7 +404,7 @@ export function QuestionCard({
                   handleSubmit();
                 }
               }}
-              className="mt-1.5 w-full rounded border border-border bg-transparent px-2 py-0.5 text-meta text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
+              className="mt-2 w-full rounded border border-border bg-transparent px-2 py-px text-meta text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
             />
           </div>
         ))}
@@ -416,14 +416,14 @@ export function QuestionCard({
       <div className="flex justify-end gap-2">
         <button
           onClick={onReject}
-          className="px-2.5 py-1 rounded border border-border text-text-faint hover:text-text text-meta"
+          className="px-3 py-1 rounded border border-border text-text-faint hover:text-text text-meta"
         >
           Cancel
         </button>
         <button
           onClick={handleSubmit}
           disabled={!canSubmit}
-          className="px-2.5 py-1 rounded text-on-accent text-meta font-medium disabled:opacity-40"
+          className="px-3 py-1 rounded text-on-accent text-meta font-medium disabled:opacity-40"
           style={{ backgroundColor: "var(--accent-solid)" }}
         >
           Submit

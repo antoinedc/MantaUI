@@ -68,7 +68,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close (or click outside)"
           aria-label="Close"
         >
@@ -80,7 +80,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
       ) : jobs.length === 0 ? (
         <div className="text-text-muted">No scheduled tasks in this session.</div>
       ) : (
-        <div className="flex flex-col gap-1.5 max-h-[40vh] overflow-y-auto">
+        <div className="flex flex-col gap-2 max-h-[40vh] overflow-y-auto">
           {jobs.map((j) => {
             const next = describeNextRun(j.cron, j.recurring);
             return (
@@ -106,7 +106,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
                 </div>
                 <button
                   onClick={() => onDelete(j.id)}
-                  className="shrink-0 px-2 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30 text-label"
+                  className="shrink-0 px-2 py-px rounded text-danger hover:bg-danger-bg border border-danger/30 text-label"
                   title="Cancel this scheduled task"
                 >
                   Cancel
@@ -170,7 +170,7 @@ export const WebhooksCard = memo(function WebhooksCard({
         {hooks.length > 0 && <span className="text-text-faint">· {hooks.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close (or click outside)"
           aria-label="Close"
         >
@@ -185,7 +185,7 @@ export const WebhooksCard = memo(function WebhooksCard({
           Multica ping this session when the task finishes”).
         </div>
       ) : (
-        <div className="flex flex-col gap-1.5 max-h-[40vh] overflow-y-auto">
+        <div className="flex flex-col gap-2 max-h-[40vh] overflow-y-auto">
           {hooks.map((h) => {
             const last =
               h.lastDeliveredAt != null
@@ -194,7 +194,7 @@ export const WebhooksCard = memo(function WebhooksCard({
             return (
               <div key={h.id} className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-2">
                     <span className="text-text truncate" title={h.label}>
                       {h.label}
                     </span>
@@ -224,7 +224,7 @@ export const WebhooksCard = memo(function WebhooksCard({
                 </div>
                 <button
                   onClick={() => onDelete(h.id)}
-                  className="shrink-0 px-2 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30 text-label"
+                  className="shrink-0 px-2 py-px rounded text-danger hover:bg-danger-bg border border-danger/30 text-label"
                   title="Revoke this webhook (further POSTs will 404)"
                 >
                   Revoke
@@ -303,7 +303,7 @@ export const SecretsCard = memo(function SecretsCard({
       className="rounded-md border bg-bg-elev px-3 py-2 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
-      <div className="flex items-center gap-2 mb-1.5">
+      <div className="flex items-center gap-2 mb-2">
         <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
           <Key size={16} aria-hidden="true" />
         </span>
@@ -320,8 +320,8 @@ export const SecretsCard = memo(function SecretsCard({
       </div>
 
       {/* Add / update form */}
-      <div className="flex flex-col gap-1.5 mb-2">
-        <div className="flex flex-wrap gap-1.5">
+      <div className="flex flex-col gap-2 mb-2">
+        <div className="flex flex-wrap gap-2">
           <input
             value={key}
             onChange={(e) => setKey(e.target.value)}
@@ -329,14 +329,14 @@ export const SecretsCard = memo(function SecretsCard({
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
-            className={`min-w-0 flex-1 rounded border bg-bg px-1.5 py-1 font-mono text-text outline-none ${
+            className={`min-w-0 flex-1 rounded border bg-bg px-2 py-1 font-mono text-text outline-none ${
               key && !keyValid ? "border-danger/60" : "border-border"
             }`}
           />
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value as SecretScope)}
-            className="rounded border border-border bg-bg px-1.5 py-1 text-text outline-none"
+            className="rounded border border-border bg-bg px-2 py-1 text-text outline-none"
             title="shared = every session · project = every chat in this workspace · session = only this chat"
           >
             <option value="shared">shared</option>
@@ -358,14 +358,14 @@ export const SecretsCard = memo(function SecretsCard({
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          className="w-full rounded border border-border bg-bg px-1.5 py-1 font-mono text-text outline-none"
+          className="w-full rounded border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
         />
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex flex-wrap gap-2">
           <input
             value={hint}
             onChange={(e) => setHint(e.target.value)}
             placeholder="hint for the agent (optional, e.g. 'git push token')"
-            className="min-w-0 flex-1 rounded border border-border bg-bg px-1.5 py-1 text-text outline-none"
+            className="min-w-0 flex-1 rounded border border-border bg-bg px-2 py-1 text-text outline-none"
           />
           <button
             onClick={submit}
@@ -393,11 +393,11 @@ export const SecretsCard = memo(function SecretsCard({
           without ever seeing the value.
         </div>
       ) : (
-        <div className="flex flex-col gap-1.5 border-t border-border pt-1.5 max-h-[40vh] overflow-y-auto">
+        <div className="flex flex-col gap-2 border-t border-border pt-2 max-h-[40vh] overflow-y-auto">
           {secrets.map((s) => (
             <div key={s.id} className="flex items-center gap-2">
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
                   <span className="text-text font-mono truncate">{s.key}</span>
                   <MetaBadge
                     title={
@@ -423,7 +423,7 @@ export const SecretsCard = memo(function SecretsCard({
               </div>
               <button
                 onClick={() => onDelete(s.id)}
-                className="shrink-0 px-1.5 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30 inline-flex items-center"
+                className="shrink-0 px-2 py-px rounded text-danger hover:bg-danger-bg border border-danger/30 inline-flex items-center"
                 title="Delete this secret"
                 aria-label="Delete this secret"
               >
@@ -498,7 +498,7 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close (or click outside)"
           aria-label="Close"
         >
@@ -514,13 +514,13 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
           background”).
         </div>
       ) : (
-        <div className="flex flex-col gap-1.5 max-h-[40vh] overflow-y-auto">
+        <div className="flex flex-col gap-2 max-h-[40vh] overflow-y-auto">
           {jobs.map((j) => {
             const terminal = j.status !== "running";
             return (
               <div key={j.id} className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-2">
                     <button
                       onClick={() => onOpen(j)}
                       className="text-text truncate hover:underline text-left"
@@ -554,7 +554,7 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
                 {j.status === "running" && (
                   <button
                     onClick={() => onStop(j.id)}
-                    className="shrink-0 px-2 py-0.5 rounded text-warn hover:bg-warn-bg border border-warn/30 text-label"
+                    className="shrink-0 px-2 py-px rounded text-warn hover:bg-warn-bg border border-warn/30 text-label"
                     title="Stop this job (aborts the session; window + worktree kept)"
                   >
                     Stop
@@ -573,7 +573,7 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
                         setTimeout(() => setDirtyRow((r) => (r === j.id ? null : r)), 6000);
                       }
                     }}
-                    className="shrink-0 px-2 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30 text-label"
+                    className="shrink-0 px-2 py-px rounded text-danger hover:bg-danger-bg border border-danger/30 text-label"
                     title="Delete this job (removes the window + worktree; refuses a dirty worktree)"
                   >
                     Delete

@@ -201,7 +201,7 @@ function ContextPill({
       type="button"
       onClick={() => setOpen((v) => !v)}
       className={
-        "manta-ctx-pill inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-meta transition-colors " +
+        "manta-ctx-pill inline-flex items-center gap-2 rounded-full px-2 py-px text-meta transition-colors " +
         (stale
           ? "bg-warn-bg hover:bg-warn-bg"
           : "hover:bg-fill")
@@ -294,7 +294,7 @@ function ContextPill({
                   setOpen(false);
                   onClear();
                 }}
-                className="px-2 py-0.5 rounded text-bg text-meta font-medium"
+                className="px-2 py-px rounded text-bg text-meta font-medium"
                 style={{ backgroundColor: "var(--warn)" }}
               >
                 Clear session
@@ -365,7 +365,7 @@ function SessionMenu({
         onClick();
       }}
       className={
-        "w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-bg-soft text-meta " +
+        "w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-bg-soft text-meta " +
         (danger ? "text-danger hover:bg-danger-bg" : "text-text")
       }
     >

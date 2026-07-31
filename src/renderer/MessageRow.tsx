@@ -168,7 +168,7 @@ const UserCommandBar = memo(function UserCommandBar({
   const [expanded, setExpanded] = useState(false);
   const trimmedArgs = args.trim();
   return (
-    <div className="-mx-4 px-4 py-0.5 bg-bg-soft">
+    <div className="-mx-4 px-4 py-px bg-bg-soft">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -282,7 +282,7 @@ export const MessageRow = memo(function MessageRow({
               return (
                 <span
                   key={p.id}
-                  className="rounded-md border border-border-strong px-1.5 py-0.5 bg-bg-elev text-text-muted truncate max-w-[260px]"
+                  className="rounded-md border border-border-strong px-2 py-px bg-bg-elev text-text-muted truncate max-w-[260px]"
                   title={url}
                 >
                   {filename}
@@ -299,7 +299,7 @@ export const MessageRow = memo(function MessageRow({
               expandedText={text}
             />
           ) : (
-            <div className="-mx-4 px-4 py-0.5 bg-bg-soft flex">
+            <div className="-mx-4 px-4 py-px bg-bg-soft flex">
               <span className="text-text-quiet select-none mr-2 shrink-0">›</span>
               <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-text">
                 {text}
@@ -353,13 +353,13 @@ export const MessageRow = memo(function MessageRow({
           {truncation != null && (
             <>
               {turnDurationMs != null && (
-                <span className="text-text-quiet mx-1.5">·</span>
+                <span className="text-text-quiet mx-2">·</span>
               )}
               {/* File-chip-style pill tinted with the warn token — visually */}
               {/* coherent with CompactionCard / RetryCard / QuestionCard, */}
               {/* the existing "something needs your attention" color. */}
               <span
-                className="rounded-md border px-1.5 py-0.5 text-label inline-flex items-center gap-1"
+                className="rounded-md border px-2 py-px text-label inline-flex items-center gap-1"
                 style={{
                   borderColor: "rgb(var(--warn-rgb) / 0.33)",
                   backgroundColor: "var(--warn-bg)",

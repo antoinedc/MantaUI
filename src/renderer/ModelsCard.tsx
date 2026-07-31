@@ -286,7 +286,7 @@ export function ModelsCard() {
       {/* Saved & active default banner — reads from the store, NOT local
           edits, so it stays in sync with what's actually persisted. */}
       <div
-        className={`flex items-center gap-2 bg-bg-soft border border-border rounded px-3 py-1.5 ${
+        className={`flex items-center gap-2 bg-bg-soft border border-border rounded px-3 py-2 ${
           savedDefault ? "" : "text-text-faint italic"
         }`}
       >
@@ -326,19 +326,19 @@ export function ModelsCard() {
               </th>
               <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
                 Default
-                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-0.5">
+                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-px">
                   main
                 </span>
               </th>
               <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
                 Main
-                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-0.5">
+                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-px">
                   agent
                 </span>
               </th>
               <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
                 Sub
-                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-0.5">
+                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-px">
                   agent
                 </span>
               </th>
@@ -371,7 +371,7 @@ export function ModelsCard() {
                       <span className="text-meta text-text-faint">{m.providerID}</span>
                       {ctxSize && <span className="text-meta text-text-faint">{ctxSize}</span>}
                       {info && (
-                        <span className={`px-1.5 py-0.5 rounded text-meta ${TIER_CLASS[info.tier]}`}>
+                        <span className={`px-2 py-px rounded text-meta ${TIER_CLASS[info.tier]}`}>
                           {info.tier}
                         </span>
                       )}
@@ -426,7 +426,7 @@ export function ModelsCard() {
         {!restartConfirmOpen ? (
           <button
             onClick={() => { setRestartConfirmOpen(true); setRestartResult(null); }}
-            className="px-3 py-1.5 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text"
+            className="px-3 py-2 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text"
           >
             ⟳ Restart opencode
           </button>

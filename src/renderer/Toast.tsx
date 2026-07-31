@@ -81,7 +81,7 @@ export function Toast({ toast, onDismiss }: ToastProps) {
         <button
           onClick={toast.action.onClick}
           disabled={toast.action.disabled}
-          className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium disabled:opacity-50"
+          className="shrink-0 rounded bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium disabled:opacity-50"
         >
           {toast.action.label}
         </button>

@@ -49,7 +49,7 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
           pinnedRef.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 8;
         }}
-        className="text-code font-mono bg-bg-soft border border-border rounded px-2 py-1 pr-7 max-h-64 overflow-auto whitespace-pre"
+        className="text-code font-mono bg-bg-soft border border-border rounded px-2 py-1 pr-8 max-h-64 overflow-auto whitespace-pre"
       >
         <code>{output}</code>
       </pre>
@@ -170,7 +170,7 @@ export function TodoWriteBody({ state }: { state: ToolState }) {
   const todos = (input.todos as Array<Record<string, unknown>> | undefined) ?? [];
   if (todos.length === 0) return null;
   return (
-    <div className="text-meta space-y-0.5">
+    <div className="text-meta space-y-px">
       {todos.map((t, i) => {
         const content = String(t.content ?? "");
         const status = String(t.status ?? "pending");
@@ -237,7 +237,7 @@ function CollapsibleCode({ body, maxLines }: { body: string; maxLines: number })
       {overflow && (
         <button
           onClick={() => setExpanded(true)}
-          className="block w-full text-left px-2 py-0.5 text-meta text-text-faint hover:text-text border-t border-border"
+          className="block w-full text-left px-2 py-px text-meta text-text-faint hover:text-text border-t border-border"
         >
           + {hiddenCount} more line{hiddenCount === 1 ? "" : "s"}
         </button>
@@ -265,7 +265,7 @@ function CollapsiblePathList({ paths, maxLines }: { paths: string[]; maxLines: n
       {overflow && (
         <button
           onClick={() => setExpanded(true)}
-          className="block w-full text-left px-2 py-0.5 text-meta text-text-faint hover:text-text border-t border-border"
+          className="block w-full text-left px-2 py-px text-meta text-text-faint hover:text-text border-t border-border"
         >
           + {hiddenCount} more
         </button>

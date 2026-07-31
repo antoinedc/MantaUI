@@ -409,7 +409,7 @@ export function mergePromptHistory(
 // cannot drift apart.
 //
 // Always render it as the `shrink-0` sibling of a `truncate` primary label
-// inside a `flex items-center gap-1.5` row — that is what keeps the badge
+// inside a `flex items-center gap-2` row — that is what keeps the badge
 // visible when the primary label is too long for the row.
 export function MetaBadge({
   children,

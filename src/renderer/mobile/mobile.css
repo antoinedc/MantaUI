@@ -57,7 +57,7 @@ body,
   transform: translateX(-22%);
 }
 
-/* Touch-sized session rows: the desktop sidebar rows were py-0.5 (~6px) and
+/* Touch-sized session rows: the desktop sidebar rows were py-px (~1px) and
    broke automated tapping. Mobile rows are >=48px. */
 .mobile-row {
   min-height: 56px;

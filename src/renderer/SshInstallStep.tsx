@@ -671,8 +671,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             the list is ready. No second host control ever coexists with
             the select either way. */}
         {hostsLoaded && alias === CUSTOM_HOST_VALUE && (
-          <div className="rounded-md border border-border bg-bg-soft p-3.5 space-y-2.5">
-            <div className="grid grid-cols-[1fr_90px] gap-2.5">
+          <div className="rounded-md border border-border bg-bg-soft p-4 space-y-3">
+            <div className="grid grid-cols-[1fr_90px] gap-3">
               <div className="flex flex-col gap-1">
                 <label
                   className="text-label font-medium text-text-muted"
@@ -715,7 +715,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 />
               </div>
             </div>
-            <div className="flex flex-col gap-2.5">
+            <div className="flex flex-col gap-3">
               <div className="flex flex-col gap-1">
                 <label
                   className="text-label font-medium text-text-muted"
@@ -834,7 +834,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 style={{ border: `1px solid ${DANGER}`, color: DANGER }}
               >
                 <div className="font-medium">{f.cause}</div>
-                <div className="text-meta mt-0.5 opacity-80">{f.action}</div>
+                <div className="text-meta mt-px opacity-80">{f.action}</div>
               </li>
             ))}
           </ul>
@@ -895,7 +895,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               attention until the user answers. */}
           {fingerprintPrompt && (
             <div
-              className="rounded-md p-3.5 space-y-2.5"
+              className="rounded-md p-4 space-y-3"
               style={{ border: `1px solid ${ACCENT}` }}
             >
               <div className="text-body font-medium">Trust this host?</div>
@@ -904,7 +904,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 {fingerprintPrompt.algo} key fingerprint is:
               </p>
               <code
-                className="block text-meta font-mono break-all rounded px-2 py-1.5 bg-bg-elev"
+                className="block text-meta font-mono break-all rounded px-2 py-2 bg-bg-elev"
                 style={{ color: ACCENT }}
               >
                 {fingerprintPrompt.sha256}
@@ -914,17 +914,17 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 from your VPS console). The key is saved to
                 ~/.ssh/known_hosts so future connections skip this prompt.
               </p>
-              <div className="flex gap-2 pt-0.5">
+              <div className="flex gap-2 pt-px">
                 <button
                   onClick={() => void trustHostDecision(true)}
-                  className="px-3 py-1.5 rounded-md text-body font-medium"
+                  className="px-3 py-2 rounded-md text-body font-medium"
                   style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
                 >
                   Trust &amp; continue
                 </button>
                 <button
                   onClick={() => void trustHostDecision(false)}
-                  className="px-3 py-1.5 rounded-md text-body font-medium"
+                  className="px-3 py-2 rounded-md text-body font-medium"
                   style={{ border: `1px solid ${DANGER}`, color: DANGER }}
                 >
                   Don't trust
@@ -938,7 +938,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               file for every ssh invocation in the rest of the flow. */}
           {passphrasePrompt && (
             <div
-              className="rounded-md p-3.5 space-y-2.5"
+              className="rounded-md p-4 space-y-3"
               style={{ border: `1px solid ${ACCENT}` }}
             >
               <div className="text-body font-medium">{passphrasePrompt.prompt}</div>
@@ -963,11 +963,11 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                   className="w-full rounded-md px-3 py-2 text-body bg-bg-elev"
                   style={{ border: `1px solid ${ACCENT}` }}
                 />
-                <div className="flex gap-2 pt-0.5">
+                <div className="flex gap-2 pt-px">
                   <button
                     type="submit"
                     disabled={passphraseInput.length === 0}
-                    className="px-3 py-1.5 rounded-md text-body font-medium disabled:opacity-40"
+                    className="px-3 py-2 rounded-md text-body font-medium disabled:opacity-40"
                     style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
                   >
                     Unlock &amp; continue
@@ -975,7 +975,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                   <button
                     type="button"
                     onClick={() => void submitPassphrase(false)}
-                    className="px-3 py-1.5 rounded-md text-body font-medium"
+                    className="px-3 py-2 rounded-md text-body font-medium"
                     style={{ border: `1px solid ${DANGER}`, color: DANGER }}
                   >
                     Cancel
@@ -1013,7 +1013,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           </div>
           <button
             onClick={copyDiagnostics}
-            className="px-3 py-1.5 rounded-md text-meta"
+            className="px-3 py-2 rounded-md text-meta"
             style={{ border: `1px solid ${DANGER}`, color: DANGER }}
           >
             Copy diagnostics
@@ -1025,7 +1025,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           {installError}
           <button
             onClick={copyDiagnostics}
-            className="ml-3 px-3 py-1.5 rounded-md text-meta"
+            className="ml-3 px-3 py-2 rounded-md text-meta"
             style={{ border: `1px solid ${DANGER}`, color: DANGER }}
           >
             Copy diagnostics

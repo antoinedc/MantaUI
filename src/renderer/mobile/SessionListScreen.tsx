@@ -142,7 +142,7 @@ export function SessionListScreen({
           <span className="text-text font-bold text-title">Sessions</span>
           {backgroundSyncing && (
             <span
-              className="flex items-center gap-1.5 text-label text-text-faint"
+              className="flex items-center gap-2 text-label text-text-faint"
               title="Syncing session state…"
             >
               <span

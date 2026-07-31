@@ -98,14 +98,14 @@ export function SubscriptionsCard() {
       {error && <div className="text-meta text-danger break-words">{error}</div>}
 
       {(statuses ?? []).map((s) => (
-        <div key={s.id} className="border border-border rounded p-2 space-y-1.5">
+        <div key={s.id} className="border border-border rounded p-2 space-y-2">
           <div className="flex items-center gap-2">
             <div className="flex-1 min-w-0">
               <div className="text-body text-text truncate">
                 <span className="font-medium">{s.label}</span>
                 <span className="text-text-faint"> · {s.plan}</span>
               </div>
-              <div className="text-meta text-text-faint flex items-center gap-1.5">
+              <div className="text-meta text-text-faint flex items-center gap-2">
                 <span
                   aria-hidden
                   className={`inline-block w-1.5 h-1.5 rounded-full ${
@@ -117,7 +117,7 @@ export function SubscriptionsCard() {
             </div>
             {connectingId === s.id ? null : s.connected ? (
               disconnectConfirmId === s.id ? (
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
                   <button
                     onClick={() => void disconnect(s.id)}
                     disabled={busy !== null}

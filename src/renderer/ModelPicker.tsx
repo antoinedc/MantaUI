@@ -157,7 +157,7 @@ export function ModelPicker({
           )}
           {groups?.map(([providerID, ms]) => (
             <div key={providerID} className="py-1">
-              <div className="px-2 py-0.5 text-micro font-semibold uppercase text-text-faint">
+              <div className="px-2 py-px text-micro font-semibold uppercase text-text-faint">
                 {providerID}
               </div>
               {ms.map((m) => (
@@ -170,7 +170,7 @@ export function ModelPicker({
                     setModelOpen(false);
                   }}
                   className={
-                    "w-full text-left px-2 py-0.5 hover:bg-bg-soft flex justify-between gap-2 " +
+                    "w-full text-left px-2 py-px hover:bg-bg-soft flex justify-between gap-2 " +
                     (isActive(m) ? "text-text" : "text-text-muted")
                   }
                 >
@@ -224,7 +224,7 @@ export function ModelPicker({
                 setVariantOpen(false);
               }}
               className={
-                "w-full text-left px-2 py-0.5 hover:bg-bg-soft " +
+                "w-full text-left px-2 py-px hover:bg-bg-soft " +
                 (isActive(activeModel!, v.id) ? "text-text" : "text-text-muted")
               }
             >

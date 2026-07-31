@@ -411,7 +411,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-end p-4 border-b border-border">
           <button
             onClick={onClose}
-            className="text-text-muted hover:text-text text-body px-3 py-1.5 rounded hover:bg-bg-elev transition-colors inline-flex items-center"
+            className="text-text-muted hover:text-text text-body px-3 py-2 rounded hover:bg-bg-elev transition-colors inline-flex items-center"
             aria-label="Close settings"
           >
             <X size={16} aria-hidden="true" />
@@ -599,7 +599,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                                 type="checkbox"
                                 checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]}
                                 onChange={(e) => setLauncherFlag(l.id, f.key, e.target.checked)}
-                                className="mt-0.5"
+                                className="mt-px"
                               />
                               <span>{f.label}</span>
                             </label>
@@ -735,7 +735,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       type="checkbox"
                       checked={agentPush}
                       onChange={(e) => setAgentPush(e.target.checked)}
-                      className="mt-0.5"
+                      className="mt-px"
                     />
                     <span>
                       Auto-save files the AI sends
@@ -774,7 +774,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       type="checkbox"
                       checked={worktreeOn}
                       onChange={(e) => setWorktreeOn(e.target.checked)}
-                      className="mt-0.5"
+                      className="mt-px"
                     />
                     <span>
                       Create git worktree for new sessions
@@ -790,7 +790,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       type="checkbox"
                       checked={worktreeClean}
                       onChange={(e) => setWorktreeClean(e.target.checked)}
-                      className="mt-0.5"
+                      className="mt-px"
                     />
                     <span>
                       Remove worktree when a session is closed
@@ -815,7 +815,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     type="checkbox"
                     checked={pluginsOn}
                     onChange={(e) => setPluginsOn(e.target.checked)}
-                    className="mt-0.5"
+                    className="mt-px"
                   />
                   <span>
                     Lets the AI trigger the plugins below — each is a YAML file on
@@ -851,11 +851,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             {p.name}
                           </span>
                           {p.valid ? (
-                            <span className="text-meta px-1.5 py-0.5 rounded bg-ok-bg text-ok">
+                            <span className="text-meta px-2 py-px rounded bg-ok-bg text-ok">
                               valid
                             </span>
                           ) : (
-                            <span className="text-meta px-1.5 py-0.5 rounded bg-danger-bg text-danger break-all">
+                            <span className="text-meta px-2 py-px rounded bg-danger-bg text-danger break-all">
                               parse error: {p.error}
                             </span>
                           )}
@@ -933,7 +933,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                         setThemePref(opt);
                         applyTheme(opt);
                       }}
-                      className={`px-4 py-1.5 text-body capitalize transition-colors border-r border-border last:border-r-0 ${
+                      className={`px-4 py-2 text-body capitalize transition-colors border-r border-border last:border-r-0 ${
                         themePref === opt
                           ? "bg-accent-solid"
                           : "text-text-muted hover:text-text hover:bg-bg-elev"
@@ -960,7 +960,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     type="checkbox"
                     checked={autoRename}
                     onChange={(e) => setAutoRename(e.target.checked)}
-                    className="mt-0.5"
+                    className="mt-px"
                   />
                   <span>
                     Name sessions from the conversation
@@ -980,7 +980,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     type="checkbox"
                     checked={analytics}
                     onChange={(e) => setAnalytics(e.target.checked)}
-                    className="mt-0.5"
+                    className="mt-px"
                   />
                   <span>
                     Share anonymized analytics
@@ -1021,7 +1021,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     </span>
                     <button
                       onClick={() => { void window.api.autoUpdateInstall(); }}
-                      className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium"
+                      className="shrink-0 rounded bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium"
                     >
                       Restart to update
                     </button>

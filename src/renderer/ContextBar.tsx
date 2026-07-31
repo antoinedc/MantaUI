@@ -82,7 +82,7 @@ export function ContextBar({
   ].filter(Boolean);
   return (
     <span
-      className="flex items-center gap-1.5 shrink-0"
+      className="flex items-center gap-2 shrink-0"
       title={breakdownLines.join("\n")}
     >
       <span
@@ -128,7 +128,7 @@ export function ContextBar({
         // user message will pay full rate + surcharge to re-warm exactly
         // these tokens; /clear avoids the bill entirely.
         <span
-          className="tabular-nums text-label font-mono font-medium px-1.5 rounded-sm shrink-0"
+          className="tabular-nums text-label font-mono font-medium px-2 rounded-sm shrink-0"
           style={{
             color: CACHE_WRITE_COLOR,
             backgroundColor: `${CACHE_WRITE_COLOR}1f`,

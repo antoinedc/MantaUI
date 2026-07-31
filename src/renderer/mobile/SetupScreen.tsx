@@ -101,7 +101,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
 
   return (
     <div className="mobile">
-      <div className="h-full flex flex-col items-center justify-center gap-7 px-8 text-center">
+      <div className="h-full flex flex-col items-center justify-center gap-8 px-8 text-center">
         <div className="flex flex-col items-center gap-4">
           <div
             className="grid place-items-center rounded-2xl"
@@ -194,7 +194,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
               </div>
             </div>
 
-            <form onSubmit={onSubmitForm} className="flex flex-col gap-3.5">
+            <form onSubmit={onSubmitForm} className="flex flex-col gap-4">
               <Field label="Box ID">
                 <input
                   type="text"
@@ -237,7 +237,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
               {/* Advanced — optional server URL override (BET-268, tailnet
                   path). Collapsed by default; only renders the field when the
                   user opts in. */}
-              <div className="flex flex-col gap-1.5">
+              <div className="flex flex-col gap-2">
                 <button
                   type="button"
                   disabled={submitting}
@@ -300,7 +300,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
               <button
                 type="submit"
                 disabled={!canConnectSetup({ boxId, code, submitting, serverUrl: serverUrlTrimmed })}
-                className="mobile-tap w-full px-5 py-3.5 rounded-xl bg-accent-soft text-white font-semibold disabled:opacity-40"
+                className="mobile-tap w-full px-5 py-4 rounded-xl bg-accent-soft text-white font-semibold disabled:opacity-40"
               >
                 {submitting ? "Connecting…" : "Connect"}
               </button>
@@ -428,7 +428,7 @@ function Step({ n, children }: { n: number; children: React.ReactNode }) {
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-2">
       <label className="text-meta font-medium text-text-muted self-start">{label}</label>
       {children}
     </div>

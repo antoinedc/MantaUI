@@ -695,7 +695,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           </h2>
           {backgroundSyncing && (
             <span
-              className="flex items-center gap-1.5 text-label text-text-faint"
+              className="flex items-center gap-2 text-label text-text-faint"
               title="Syncing session state…"
             >
               <span
@@ -793,7 +793,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               <div className="text-meta text-text-muted">
                 Detected {detectedWorktrees.length} git worktrees. Open a session for each?
               </div>
-              <ul className="text-label text-text-faint space-y-0.5 max-h-32 overflow-y-auto">
+              <ul className="text-label text-text-faint space-y-px max-h-32 overflow-y-auto">
                 {detectedWorktrees.map((w) => (
                   <li key={w.path} className="truncate">
                     <span className="text-text-muted">{worktreeName(w)}</span>
@@ -867,7 +867,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             <div className="px-1 py-1 text-micro font-semibold uppercase tracking-wider text-text-quiet">
               Pinned
             </div>
-            <div className="space-y-0.5">
+            <div className="space-y-px">
               {pinnedRows.map((r) => (
                 <WindowRow
                   key={`pin:${r.pinId}`}
@@ -959,7 +959,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 )}
 
               {!isCollapsed && (
-                <div className="pl-2 space-y-0.5 mt-0.5">
+                <div className="pl-2 space-y-px mt-px">
                   {topWindows.map((w) => {
                     const isActive = isProjectActive && activeWinIdx === w.index;
                     const kids = n.children.get(w.index) ?? [];
@@ -1049,7 +1049,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                           if (e.key === "Enter") createSession();
                           else if (e.key === "Escape") setNewSessionFor(null);
                         }}
-                        className="w-full bg-bg-soft border border-border px-2 py-0.5 text-meta rounded focus:outline-none focus:border-accent"
+                        className="w-full bg-bg-soft border border-border px-2 py-px text-meta rounded focus:outline-none focus:border-accent"
                       />
                       <label
                         className={`flex items-center gap-2 text-meta ${
@@ -1069,13 +1069,13 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                       <div className="flex gap-2">
                         <button
                           onClick={createSession}
-                          className="text-meta px-2 py-0.5 bg-accent-solid text-on-accent rounded hover:opacity-90"
+                          className="text-meta px-2 py-px bg-accent-solid text-on-accent rounded hover:opacity-90"
                         >
                           Create
                         </button>
                         <button
                           onClick={() => setNewSessionFor(null)}
-                          className="text-meta px-2 py-0.5 text-text-muted hover:text-text"
+                          className="text-meta px-2 py-px text-text-muted hover:text-text"
                         >
                           Cancel
                         </button>
@@ -1086,7 +1086,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   {p.windows.length === 0 && newSessionFor !== p.tmuxSession && (
                     <button
                       onClick={() => startNewSession(p.tmuxSession)}
-                      className="block w-full text-left px-2 py-0.5 text-meta text-text-faint hover:text-text"
+                      className="block w-full text-left px-2 py-px text-meta text-text-faint hover:text-text"
                     >
                       + new session
                     </button>
@@ -1306,7 +1306,7 @@ function WindowRow({
         role="treeitem"
         aria-selected={isActive}
         tabIndex={focused ? 0 : -1}
-        className={`group flex items-center gap-1.5 px-2 py-2 min-h-8 rounded text-meta cursor-pointer transition outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 ${
+        className={`group flex items-center gap-2 px-2 py-2 min-h-8 rounded text-meta cursor-pointer transition outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 ${
           isActive
             ? "bg-bg-soft text-text"
             : "text-text-muted hover:bg-bg-soft hover:text-text"
@@ -1402,7 +1402,7 @@ function JobChildRow({
         aria-level={2}
         aria-selected={isActive}
         tabIndex={focused ? 0 : -1}
-        className={`group flex items-center gap-1.5 pl-[26px] pr-2 py-2 min-h-8 rounded text-meta cursor-pointer transition outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 border-l border-border ml-3 ${
+        className={`group flex items-center gap-2 pl-[26px] pr-2 py-2 min-h-8 rounded text-meta cursor-pointer transition outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 border-l border-border ml-3 ${
           isActive
             ? "bg-bg-soft text-text"
             : "text-text-muted hover:bg-bg-soft hover:text-text"
@@ -1590,7 +1590,7 @@ function CommandPalette({
                 key={`${r.project.tmuxSession}/${r.window.index}`}
                 onMouseEnter={() => setSel(i)}
                 onClick={() => onActivate(r.project, r.window.index)}
-                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-meta ${
+                className={`w-full flex items-center gap-2 px-3 py-2 text-left text-meta ${
                   i === sel ? "bg-bg-soft text-text" : "text-text-muted hover:bg-bg-soft"
                 }`}
               >
@@ -1648,7 +1648,7 @@ function ConfirmDelete({
   onCancel: () => void;
 }) {
   return (
-    <div className="ml-2 mt-1 mb-1 px-2 py-1.5 rounded bg-bg-soft border border-border space-y-1.5">
+    <div className="ml-2 mt-1 mb-1 px-2 py-2 rounded bg-bg-soft border border-border space-y-2">
       <div className="text-meta text-text-muted">Close {label}?</div>
       <div className="flex flex-wrap gap-1">
         <button
@@ -1656,7 +1656,7 @@ function ConfirmDelete({
             e.stopPropagation();
             onKill();
           }}
-          className="text-meta px-2 py-0.5 rounded bg-danger-bg text-danger hover:bg-danger-bg"
+          className="text-meta px-2 py-px rounded bg-danger-bg text-danger hover:bg-danger-bg"
           title="kill the tmux session/window on the remote"
         >
           Kill on server
@@ -1666,7 +1666,7 @@ function ConfirmDelete({
             e.stopPropagation();
             onCancel();
           }}
-          className="text-meta px-2 py-0.5 text-text-faint hover:text-text"
+          className="text-meta px-2 py-px text-text-faint hover:text-text"
         >
           Cancel
         </button>
@@ -1685,7 +1685,7 @@ function ConfirmWorktreeDirty({
   onKeep: () => void;
 }) {
   return (
-    <div className="ml-2 mt-1 mb-1 px-2 py-1.5 rounded bg-bg-soft border border-border space-y-1.5">
+    <div className="ml-2 mt-1 mb-1 px-2 py-2 rounded bg-bg-soft border border-border space-y-2">
       <div className="text-meta text-text-muted">
         <code className="break-all">{worktreePath}</code> has uncommitted
         changes. Removing the worktree will permanently delete that work.
@@ -1697,7 +1697,7 @@ function ConfirmWorktreeDirty({
             e.stopPropagation();
             onRemove();
           }}
-          className="text-meta px-2 py-0.5 rounded bg-danger-bg text-danger hover:bg-danger-bg"
+          className="text-meta px-2 py-px rounded bg-danger-bg text-danger hover:bg-danger-bg"
           title="git worktree remove --force (discards uncommitted changes)"
         >
           Remove
@@ -1707,7 +1707,7 @@ function ConfirmWorktreeDirty({
             e.stopPropagation();
             onKeep();
           }}
-          className="text-meta px-2 py-0.5 text-text-faint hover:text-text"
+          className="text-meta px-2 py-px text-text-faint hover:text-text"
           title="leave the worktree + branch on disk; just close the session"
         >
           Keep worktree

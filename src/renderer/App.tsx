@@ -897,7 +897,7 @@ export function App() {
           {activeChatSessionId && (
             <div className="ml-auto" style={{ WebkitAppRegion: "no-drag" } as CSSProperties}>
               <select
-                className="text-meta bg-bg-elev border border-border rounded px-1 py-0.5 text-text cursor-pointer hover:border-border-strong focus:outline-none focus:border-accent"
+                className="text-meta bg-bg-elev border border-border rounded px-1 py-px text-text cursor-pointer hover:border-border-strong focus:outline-none focus:border-accent"
                 style={{ colorScheme: "dark" }}
                 value={mode}
                 onChange={(e) => setMode(e.target.value as SessionMode)}

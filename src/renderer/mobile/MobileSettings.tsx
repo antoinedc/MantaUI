@@ -451,7 +451,7 @@ export function MobileSettings({ onClose }: Props) {
               onChange={(e) => setVoiceTrModel(e.target.value)}
               spellCheck={false}
               autoCapitalize="off"
-              className="w-full bg-bg-soft border border-border px-2 py-1.5 text-meta rounded focus:outline-none focus:border-accent font-mono"
+              className="w-full bg-bg-soft border border-border px-2 py-2 text-meta rounded focus:outline-none focus:border-accent font-mono"
             />
           </div>
           <div className="space-y-1">
@@ -464,7 +464,7 @@ export function MobileSettings({ onClose }: Props) {
               onChange={(e) => setVoiceCmdModel(e.target.value)}
               spellCheck={false}
               autoCapitalize="off"
-              className="w-full bg-bg-soft border border-border px-2 py-1.5 text-meta rounded focus:outline-none focus:border-accent font-mono"
+              className="w-full bg-bg-soft border border-border px-2 py-2 text-meta rounded focus:outline-none focus:border-accent font-mono"
             />
           </div>
         </section>
@@ -501,7 +501,7 @@ export function MobileSettings({ onClose }: Props) {
               <button
                 onClick={resubscribe}
                 disabled={pushBusy}
-                className={`w-full px-3 py-1.5 text-meta rounded border border-border bg-bg-soft text-text-muted ${
+                className={`w-full px-3 py-2 text-meta rounded border border-border bg-bg-soft text-text-muted ${
                   pushBusy ? "opacity-60" : ""
                 }`}
               >
@@ -525,7 +525,7 @@ export function MobileSettings({ onClose }: Props) {
             {registryUrls.map((url) => (
               <div
                 key={url}
-                className="flex items-center gap-2 bg-bg-soft border border-border rounded px-2 py-1.5"
+                className="flex items-center gap-2 bg-bg-soft border border-border rounded px-2 py-2"
               >
                 <code className="flex-1 min-w-0 text-meta text-text-muted truncate">
                   {url}

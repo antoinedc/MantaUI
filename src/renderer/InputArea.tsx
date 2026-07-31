@@ -370,7 +370,7 @@ export function InputArea({
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={
-            "px-1.5 py-px rounded inline-flex items-center gap-1.5 " +
+            "px-2 py-px rounded inline-flex items-center gap-2 " +
             (chatAutoAllow
               ? "text-danger hover:text-danger"
               : "text-text-faint hover:text-text-muted")

@@ -113,7 +113,7 @@ export function ConnectingScreen({ host, failed, onRetry, onCancel }: Props) {
         </div>
 
         {host && (
-          <div className="inline-flex items-center gap-2 rounded-full bg-bg-soft border border-border px-3.5 py-1.5 text-meta text-text-muted">
+          <div className="inline-flex items-center gap-2 rounded-full bg-bg-soft border border-border px-4 py-2 text-meta text-text-muted">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
               <rect x="4" y="4" width="16" height="7" rx="1.5" stroke="var(--tx2)" strokeWidth="1.6" />
               <rect x="4" y="14" width="16" height="6" rx="1.5" stroke="var(--tx2)" strokeWidth="1.6" />
