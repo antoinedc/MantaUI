@@ -1225,11 +1225,6 @@ export type PermissionRequest = {
   always?: string[];
   metadata?: Record<string, unknown>;
   tool?: { messageID: string; callID: string };
-  // Present when this request originated from a background delegation job the
-  // viewed session owns. The renderer prefixes the card header with
-  // `<fromJobName> · ` so the user knows which job is asking. Absent for the
-  // session's own requests. Stamped server-side only (BET-380).
-  fromJobName?: string;
 };
 
 // Question tool — Claude asks the user structured multiple-choice questions
@@ -1253,9 +1248,6 @@ export type QuestionRequest = {
   // the ONLY id opencode's /question/{requestID}/reply|reject accepts. Absent
   // for transcript-only recovered questions (which are thus unanswerable).
   requestId?: string;
-  // Present when this question came from a background delegation job the
-  // viewed session owns — see PermissionRequest.fromJobName (BET-380).
-  fromJobName?: string;
 };
 
 // ----- Voice / speech-to-text (Groq) -----

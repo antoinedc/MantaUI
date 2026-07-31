@@ -933,12 +933,6 @@ export type QuestionLike = {
   // Kept ALONGSIDE the callID-keyed `id` so a replied/rejected event that
   // echoes only the `que_` id can still clear a callID-keyed card.
   requestId?: string;
-  // Present when this question came from a background delegation job the
-  // viewed session owns — see PermissionRequest.fromJobName (BET-380). Set
-  // by hydrateQuestion from the server-stamped field; the live event path
-  // has no name (only the related-id set), so the prefix appears once the
-  // GET refresh replaces the live record.
-  fromJobName?: string;
 };
 
 export function applyQuestionEvent(
@@ -946,7 +940,6 @@ export function applyQuestionEvent(
   eventType: string,
   properties: Record<string, unknown> | undefined,
   viewedSessionId: string,
-  relatedSessionIds: Set<string> = new Set(),
 ): QuestionLike[] {
   const p = properties ?? {};
   const sessionID = typeof p.sessionID === "string" ? p.sessionID : "";
@@ -983,12 +976,10 @@ export function applyQuestionEvent(
   }
   if (eventType === "question.asked") {
     if (!id) return prev; // need a stable key to store/dedupe
-    // Surface questions for the viewed session OR a background job it owns.
-    // The related-id set is maintained in useSseBus from the GET refresh
-    // results (every record carrying fromJobName carries its own sessionID).
-    // Pure: the set is passed in, never read from module state (BET-380).
-    if (sessionID !== viewedSessionId && !relatedSessionIds.has(sessionID))
-      return prev;
+    // Only the viewed session's own questions are accepted (BET-418 §A):
+    // background-job children no longer route asks into the parent's panel —
+    // a job is created with a pre-flight permission ruleset and never asks.
+    if (sessionID !== viewedSessionId) return prev;
     if (!Array.isArray(p.questions)) return prev;
     const next: QuestionLike = {
       id,
@@ -1024,7 +1015,6 @@ export function hydrateQuestion(server: {
   sessionID: string;
   questions: unknown[];
   tool?: { messageID: string; callID: string };
-  fromJobName?: string;
 }): QuestionLike {
   // Dedup key prefers tool.callID (matches applyQuestionEvent so a live
   // event arriving after GET hydrate updates the same row instead of
@@ -1039,7 +1029,6 @@ export function hydrateQuestion(server: {
     questions: server.questions,
     tool: server.tool,
     requestId: server.id, // the `que_…` — what opencode's reply API requires
-    fromJobName: server.fromJobName,
   };
 }
 

@@ -401,25 +401,18 @@ export function buildHandlers({
     // Scope the list to the session's directory — opencode returns [] for a
     // non-default-directory session on the unscoped endpoint, so an unpassed
     // sessionId made the PermissionCard never appear on mobile (turn hangs).
-    // The job records are passed so the server can widen the filter to
-    // non-terminal background-job child sessions and stamp `fromJobName`
-    // (BET-380): a job's asks surface in the PARENT's panel.
-    "opencode:permissions": async (sessionId) => {
-      const jobs = delegate ? await delegate.cachedListJobs() : [];
-      return oc.listPermissions(sessionId, jobs);
-    },
+    // Background-job children no longer surface here (BET-418 §A): a job is
+    // created with a pre-flight permission ruleset and never asks once running.
+    "opencode:permissions": async (sessionId) => oc.listPermissions(sessionId),
 
     // preload: ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply, sessionId })
     // → args[0] = { requestId, reply, sessionId }; opencode.mjs replyPermission expects same shape
     "opencode:permission-reply": (input) => oc.replyPermission(input),
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestions, sessionId?)  → args[0] = sessionId
-    // Job records passed so a background job's questions surface in the
-    // parent's panel with `fromJobName` (BET-380) — see opencode:permissions.
-    "opencode:questions": async (sessionId) => {
-      const jobs = delegate ? await delegate.cachedListJobs() : [];
-      return oc.listQuestions(sessionId, jobs);
-    },
+    // Background-job children no longer surface here (BET-418 §A) — see
+    // opencode:permissions above.
+    "opencode:questions": async (sessionId) => oc.listQuestions(sessionId),
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers, sessionId })
     // → opencode.mjs replyQuestion expects { requestId, answers, sessionId }

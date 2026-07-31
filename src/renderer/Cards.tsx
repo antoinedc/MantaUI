@@ -166,7 +166,7 @@ export function PermissionCard({
         <div className="min-w-0 flex-1">
           {/* Plain-language title + one-line description */}
           <div className="text-text font-medium mb-px">
-            {perm.fromJobName ? `${perm.fromJobName} · ` : ""}{title}
+            {title}
           </div>
           <div className="text-text-muted mb-px">{desc}</div>
           {/* Literal command in its own --inset well */}
@@ -302,7 +302,7 @@ export function QuestionCard({
         </span>
         <div className="min-w-0 flex-1">
           <div className="text-text font-medium">
-            {request.fromJobName ? `${request.fromJobName} · ` : ""}Question
+            Question
           </div>
           {isMulti && (
             <div className="text-text-faint">

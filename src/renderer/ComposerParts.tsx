@@ -6,7 +6,7 @@
 // and the press-and-hold mic button. InputArea.tsx composes them.
 
 import { useRef } from "react";
-import { Clock, Key, Webhook, Bot, X, Mic, Loader2 } from "lucide-react";
+import { Clock, Key, Webhook, X, Mic, Loader2 } from "lucide-react";
 import type { VoiceMode, VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import { ALT_KEY } from "./platform";
@@ -16,18 +16,14 @@ import { ALT_KEY } from "./platform";
 // here so its live count is always visible next to the composer.
 export function SessionToolbar({
   scheduleCount,
-  jobsCount,
   onSchedules,
   onSecrets,
   onWebhooks,
-  onJobs,
 }: {
   scheduleCount: number;
-  jobsCount: number;
   onSchedules: () => void;
   onSecrets: () => void;
   onWebhooks: () => void;
-  onJobs: () => void;
 }) {
   return (
     <span className="manta-session-toolbar flex items-center gap-1 text-meta">
@@ -51,13 +47,6 @@ export function SessionToolbar({
         title="View / revoke inbound webhooks (external events that wake this session)"
       >
         <Webhook size={14} aria-hidden="true" />webhooks
-      </button>
-      <button
-        onClick={onJobs}
-        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
-        title="View / stop / delete background delegation jobs"
-      >
-        <Bot size={14} aria-hidden="true" />jobs{jobsCount > 0 ? ` (${jobsCount})` : ""}
       </button>
     </span>
   );

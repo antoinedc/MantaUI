@@ -24,7 +24,7 @@
 // shims.
 
 import { useCallback, useEffect, useState } from "react";
-import type { DelegateJob, ScheduledJob, SecretMeta, WebhookMeta } from "../../shared/types";
+import type { ScheduledJob, SecretMeta, WebhookMeta } from "../../shared/types";
 
 export type SessionResources = {
   // Scheduled prompts (⏰).
@@ -53,19 +53,6 @@ export type SessionResources = {
   webhookError: string | null;
   setWebhookError: React.Dispatch<React.SetStateAction<string | null>>;
   refreshWebhooks: () => Promise<void>;
-
-  // Background delegation jobs (⚙). list returns full job records for this
-  // session; stop/delete via the delegate:* channels. The toolbar count is
-  // the number of RUNNING jobs (kept fresh by the 30s-while-closed poll,
-  // matching the schedules shape). No create channel — jobs are started by
-  // the AI's `delegate` opencode tool.
-  showJobs: boolean;
-  setShowJobs: React.Dispatch<React.SetStateAction<boolean>>;
-  jobs: DelegateJob[];
-  setJobs: React.Dispatch<React.SetStateAction<DelegateJob[]>>;
-  jobsError: string | null;
-  setJobsError: React.Dispatch<React.SetStateAction<string | null>>;
-  refreshJobs: () => Promise<void>;
 };
 
 export function useSessionResources(sessionId: string): SessionResources {
@@ -131,29 +118,6 @@ export function useSessionResources(sessionId: string): SessionResources {
       });
   }, [sessionId]);
 
-  // ----- Background delegation jobs (the ⚙ BackgroundJobsCard) -----
-  // Jobs are server-owned (manta-server starts them via the AI's `delegate`
-  // opencode tool; completion is detected from the opencode event stream).
-  // Here we only list + stop + delete via the delegate:* channels. list
-  // returns full records for this session (filtered by parentSessionID).
-  // Refetch-driven like schedules; the toolbar count is the number of
-  // RUNNING jobs, so the poll runs even while the card is shut (30s) to keep
-  // that count fresh — same shape as schedules.
-  const [showJobs, setShowJobs] = useState(false);
-  const [jobs, setJobs] = useState<DelegateJob[]>([]);
-  const [jobsError, setJobsError] = useState<string | null>(null);
-  const refreshJobs = useCallback(() => {
-    return window.api
-      .delegateList(sessionId)
-      .then((list: DelegateJob[]) => {
-        setJobs(Array.isArray(list) ? list : []);
-        setJobsError(null);
-      })
-      .catch((e: unknown) => {
-        setJobsError(e instanceof Error ? e.message : "delegate server unreachable");
-      });
-  }, [sessionId]);
-
   // Close the schedules card + clear its state on session change.
   useEffect(() => {
     setShowSchedules(false);
@@ -210,28 +174,6 @@ export function useSessionResources(sessionId: string): SessionResources {
     return () => clearInterval(poll);
   }, [showWebhooks, refreshWebhooks]);
 
-  // Close the jobs card + clear its state on session change (same shape as
-  // the other three resources).
-  useEffect(() => {
-    setShowJobs(false);
-    setJobs([]);
-    setJobsError(null);
-  }, [sessionId]);
-
-  // Keep the toolbar jobs count fresh whether or not the card is open: fetch
-  // once on mount/session-change, then poll. The card being open speeds the
-  // poll up (10s) for snappy stop/delete feedback; while closed a slower 30s
-  // background poll keeps the running-count current so a freshly-started job
-  // shows up without the user having to open the card first. Mirrors the
-  // schedules shape exactly. Refetch-driven (no bus event) so desktop and
-  // mobile behave identically.
-  useEffect(() => {
-    void refreshJobs();
-    const intervalMs = showJobs ? 10_000 : 30_000;
-    const poll = setInterval(() => void refreshJobs(), intervalMs);
-    return () => clearInterval(poll);
-  }, [showJobs, refreshJobs]);
-
   // Mobile entry point for the schedules card: the ⋯ sheet (outside ChatPanel)
   // dispatches a window CustomEvent rather than reaching into this component's
   // state. Mirrors the manta-scroll-to-question bridge.
@@ -264,16 +206,6 @@ export function useSessionResources(sessionId: string): SessionResources {
     return () => window.removeEventListener("manta-open-webhooks", onOpenWebhooks);
   }, [sessionId]);
 
-  // Mobile entry point for the jobs card (mirror of manta-open-schedules).
-  useEffect(() => {
-    const onOpenJobs = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowJobs(true);
-    };
-    window.addEventListener("manta-open-jobs", onOpenJobs);
-    return () => window.removeEventListener("manta-open-jobs", onOpenJobs);
-  }, [sessionId]);
-
   return {
     showSchedules,
     setShowSchedules,
@@ -296,12 +228,5 @@ export function useSessionResources(sessionId: string): SessionResources {
     webhookError,
     setWebhookError,
     refreshWebhooks,
-    showJobs,
-    setShowJobs,
-    jobs,
-    setJobs,
-    jobsError,
-    setJobsError,
-    refreshJobs,
   };
 }

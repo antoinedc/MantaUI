@@ -74,37 +74,14 @@ function genId() {
 }
 
 // ---------------------------------------------------------------------------
-// Jobs cache (BET-403 nit 2)
+// Jobs cache (BET-403 nit 2) — REMOVED (BET-418 §A)
 // ---------------------------------------------------------------------------
-// `opencode:permissions` / `opencode:questions` only need the job list to
-// compute ownership (relatedSessionIds / jobNameForSession), which depends on
-// status/parentSessionID/childSessionID/name — fields that only change on a
-// job lifecycle transition. Reading the delegate-jobs.json file on every RPC
-// was wasted work for a single-user box; this wraps the load in a short-TTL
-// in-memory cache that is also invalidated by every engine mutation
-// (startJob/stopJob/deleteJob/observeEvent/sweep). The activity poller's
-// 10s saves mutate `activity` only (ownership-irrelevant), so it intentionally
-// does NOT invalidate — the cache stays warm through activity ticks.
-//
-// `delegate:list` (the UI jobs card) bypasses the cache and reads fresh, so a
-// `delegate.updated`-driven refetch still shows live status instantly.
-export function createJobsCache({ load = loadJobs, ttlMs = 2000, now = () => Date.now() } = {}) {
-  let cached = null;
-  let expiresAt = 0;
-  return {
-    async get() {
-      const t = now();
-      if (cached !== null && t < expiresAt) return cached;
-      cached = await load();
-      expiresAt = t + ttlMs;
-      return cached;
-    },
-    invalidate() {
-      cached = null;
-      expiresAt = 0;
-    },
-  };
-}
+// The TTL cache existed only to cheaply serve opencode:permissions /
+// opencode:questions the job list for BET-380 ownership computation. With
+// BET-380's parent-panel routing deleted, nothing reads the job list from
+// inside the permission/question RPC handlers, so the cache is dead. The UI
+// jobs card (now also deleted, BET-418 §E) used the uncached listJobs; the
+// read-only job view + delegate:list still use listJobs directly.
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for unit tests)
@@ -167,37 +144,6 @@ export function buildCompletionText(job) {
 export function deriveName(prompt) {
   const words = String(prompt ?? "").trim().split(/\s+/).slice(0, 4).join(" ");
   return slugify(words || "background");
-}
-
-/**
- * The childSessionIDs of every NON-TERMINAL job whose parentSessionID matches.
- * Used by opencode.mjs listPermissions/listQuestions to widen their session
- * filter so a background job's permission/question requests surface in the
- * PARENT's panel (BET-380). Terminal jobs are excluded: once a job is done/
- * failed/stopped its session is no longer interactive and its stale asks must
- * not be pulled into the parent's panel. Pure.
- */
-export function relatedSessionIds(parentSessionID, jobs) {
-  if (!parentSessionID || !Array.isArray(jobs)) return [];
-  return jobs
-    .filter((j) => j.parentSessionID === parentSessionID && j.status === "running")
-    .map((j) => j.childSessionID)
-    .filter((sid) => typeof sid === "string" && sid.length > 0);
-}
-
-/**
- * The job name for a given childSessionID, or null when the session is not a
- * known running job. Used by opencode.mjs to stamp `fromJobName` on each
- * permission/question record so the renderer can prefix the card header with
- * `<job name> · ` (BET-380). Only running jobs are considered — a terminal
- * job's session is no longer owned. Pure.
- */
-export function jobNameForSession(childSessionID, jobs) {
-  if (!childSessionID || !Array.isArray(jobs)) return null;
-  const job = jobs.find(
-    (j) => j.childSessionID === childSessionID && j.status === "running",
-  );
-  return job ? (job.name ?? null) : null;
 }
 
 // Find the tmux session that owns a given opencode sessionID. Mirrors the
@@ -851,36 +797,13 @@ export async function deleteJob(id, deps = {}) {
 
 export function createDelegateEngine(deps) {
   const sawBusy = new Map();
-  const jobsCache = createJobsCache({
-    load: deps.load ?? (() => loadJobs(deps.storePath ?? STORE_PATH)),
-  });
-  // Invalidate the cache after any mutation so the next ownership read sees
-  // fresh status. Wrapping the bound methods (rather than poking the pure
-  // fns) keeps the pure functions testable and untouched (BET-403 nit 2).
-  const invalidate = () => jobsCache.invalidate();
-  const withInvalidate = (fn) => async (...args) => {
-    const r = await fn(...args);
-    invalidate();
-    return r;
-  };
   const bound = {
-    startJob: withInvalidate((input) => startJob(input, deps)),
-    stopJob: withInvalidate((id) => stopJob(id, deps)),
-    deleteJob: withInvalidate((id) => deleteJob(id, deps)),
-    observeEvent: withInvalidate((evt) => observeEvent(evt, deps, sawBusy)),
-    sweep: withInvalidate(() => sweepDelegateJobs(deps)),
+    startJob: (input) => startJob(input, deps),
+    stopJob: (id) => stopJob(id, deps),
+    deleteJob: (id) => deleteJob(id, deps),
+    observeEvent: (evt) => observeEvent(evt, deps, sawBusy),
+    sweep: () => sweepDelegateJobs(deps),
     listJobs: (filter) => listJobs(filter, deps),
-    // Cached read for the permissions/questions RPC handlers (BET-403 nit 2).
-    // Mirrors listJobs' filter semantics (no filter → all jobs; sessionID →
-    // narrow to that parent's children) but serves from the TTL cache. The
-    // UI jobs card uses the uncached `listJobs` so it stays live.
-    cachedListJobs: async (filter = {}) => {
-      const jobs = await jobsCache.get();
-      if (filter?.sessionID === undefined) return jobs.map((j) => ({ ...j }));
-      return jobs
-        .filter((j) => j.parentSessionID === filter.sessionID)
-        .map((j) => ({ ...j }));
-    },
     getJob: (id) => getJob(id, deps),
     startSweeper: (opts) => startSweeper(deps, opts),
     startActivityPoller: (opts) => startActivityPoller(deps, opts),
