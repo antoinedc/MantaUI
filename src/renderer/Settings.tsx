@@ -632,8 +632,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
     }
     if (section === "accounts") {
       // Subscriptions + custom endpoints merged into one list (BET-420).
-      // Both are "a way to reach a model"; the shared AddEndpointForm lives
-      // inside ProvidersCard and rejects a scheme-less URL identically here
+      // Both are "a way to reach a model"; the shared CustomProviderForm
+      // lives inside ProvidersCard and probes + validates identically here
       // and in onboarding.
       return (
         <>

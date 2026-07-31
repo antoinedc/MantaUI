@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { X } from "lucide-react";
 import type { ProviderEndpoint, DiscoverResult } from "../shared/types";
-import { AddEndpointForm, type EndpointDraft } from "./AddEndpointForm";
+import { CustomProviderForm } from "./CustomProviderForm";
 
 type Props = {
   /**
@@ -10,6 +10,10 @@ type Props = {
    * banner — the Settings panel shows ONE shared restart banner instead. When
    * omitted (mobile), the card keeps its inline "Apply Now / Apply Later"
    * banner so mobile still has a restart affordance.
+   *
+   * BET-421 §D: the add-endpoint form (CustomProviderForm) handles its OWN
+   * save + restart internally (probe → save → restart), so it does NOT route
+   * through this callback — only the per-endpoint toggle/remove mutations do.
    */
   onRestartNeeded?: () => void;
 };
@@ -19,7 +23,6 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
   const [discovered, setDiscovered] = useState<Record<string, { id: string }[]>>({});
   const [discoverError, setDiscoverError] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null); // endpoint id being mutated
-  const [adding, setAdding] = useState(false);
   const [restartNeeded, setRestartNeeded] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
 
@@ -82,30 +85,6 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
       setBusy(null);
     }
   }, [busy, load, onRestartNeeded]);
-
-  const addEndpoint = useCallback(async (draft: EndpointDraft): Promise<string | null> => {
-    if (busy || adding) return null;
-    setAdding(true);
-    setGlobalError(null);
-    try {
-      const res = await window.api.opencodeSetProviders({
-        upsert: [{
-          id: draft.id.trim(), name: draft.name.trim() || draft.id.trim(),
-          baseURL: draft.baseURL.trim(), apiKey: draft.apiKey, enabledModels: [],
-        }],
-      });
-      if (!res.ok) { setGlobalError(res.error ?? "Add failed"); return res.error ?? "Add failed"; }
-      flagRestart();
-      load();
-      return null;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setGlobalError(msg);
-      return msg;
-    } finally {
-      setAdding(false);
-    }
-  }, [busy, adding, load, onRestartNeeded]);
 
   const removeEndpoint = useCallback(async (ep: ProviderEndpoint) => {
     if (busy) return;
@@ -192,7 +171,14 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
         </div>
       ))}
 
-      <AddEndpointForm onAdd={addEndpoint} busy={adding || busy !== null} />
+      {/* BET-421 §D: shared CustomProviderForm — probes the endpoint before
+          saving, derives the provider id from the name, and handles its own
+          save + restart. Replaces the old bespoke add-endpoint block and the
+          BET-420 AddEndpointForm (which had no probe and asked for the id). */}
+      <CustomProviderForm
+        compact
+        onSaved={load}
+      />
 
       {/* Mobile-only restart banner (desktop routes through the panel banner
           via onRestartNeeded, so this never renders on desktop). */}

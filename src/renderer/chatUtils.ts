@@ -2351,6 +2351,29 @@ export function slugifyProviderId(name: string): string {
 }
 
 /**
+ * BET-421 §D: shared validator for the custom-provider add form used by BOTH
+ * the onboarding step (ProvidersStep) and Settings → Accounts (ProvidersCard).
+ * The id is DERIVED from the name (slugifyProviderId), so the form never asks
+ * for it — this validator gates on name + baseURL, not id. Returns the reason
+ * the draft is invalid, or null when it's submittable. Pure so both call sites
+ * share one source of truth and the validator is unit-testable.
+ */
+export function customProviderDraftError(draft: {
+  name: string;
+  baseURL: string;
+}): string | null {
+  if (!draft.name.trim()) return "Name is required.";
+  if (!slugifyProviderId(draft.name)) {
+    return "Name must contain a letter or digit.";
+  }
+  if (!draft.baseURL.trim()) return "Base URL is required.";
+  if (!/^https?:\/\//i.test(draft.baseURL.trim())) {
+    return "Base URL must start with http:// or https://.";
+  }
+  return null;
+}
+
+/**
  * Single source of user-facing status text for every phase of the connect
  * flow. Centralised so no string is duplicated across branches and so a
  * future i18n pass replaces one place, not five.

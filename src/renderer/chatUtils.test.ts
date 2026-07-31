@@ -71,6 +71,7 @@ import {
   deviceCodeFallback,
   formatRemaining,
   slugifyProviderId,
+  customProviderDraftError,
   connectPhaseLabel,
   isPollExpired,
   describeSubscriptionStatus,
@@ -3150,6 +3151,33 @@ describe("slugifyProviderId", () => {
     expect(slugifyProviderId("")).toBe("");
     expect(slugifyProviderId("   ")).toBe("");
     expect(slugifyProviderId("---")).toBe("");
+  });
+});
+
+describe("customProviderDraftError", () => {
+  const ok = (name: string, baseURL: string) =>
+    customProviderDraftError({ name, baseURL });
+  it("returns null for a valid name + http(s) baseURL", () => {
+    expect(ok("VoskaAI", "https://api.voska.org/v1")).toBeNull();
+    expect(ok("groq", "http://localhost:8080/v1")).toBeNull();
+  });
+  it("requires a name", () => {
+    expect(ok("", "https://x/v1")).toBe("Name is required.");
+    expect(ok("   ", "https://x/v1")).toBe("Name is required.");
+  });
+  it("rejects a name that slugifies to empty (no ASCII alphanumerics)", () => {
+    expect(ok("É---!", "https://x/v1")).toBe(
+      "Name must contain a letter or digit.",
+    );
+  });
+  it("requires a baseURL with an http(s) scheme", () => {
+    expect(ok("groq", "")).toBe("Base URL is required.");
+    expect(ok("groq", "api.groq.com/v1")).toBe(
+      "Base URL must start with http:// or https://.",
+    );
+    expect(ok("groq", "ftp://x/v1")).toBe(
+      "Base URL must start with http:// or https://.",
+    );
   });
 });
 
