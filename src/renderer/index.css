@@ -205,6 +205,18 @@ html, body, #root {
   --shadow-md: 0 4px 12px rgb(26 24 21 / 0.10), 0 2px 4px rgb(26 24 21 / 0.05);
 }
 
+/* Composer input shell (BET-415): bordered card with a resting shadow and
+   a focus-within accent ring. The shadow + ring live here (not as inline
+   styles) so focus-within can override the resting shadow without an
+   inline-style specificity fight. */
+.manta-composer-input-row {
+  box-shadow: var(--shadow-sm);
+}
+.manta-composer-input-row:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-sm), 0 0 0 3px var(--accent-bg);
+}
+
 /* Trailing spacer inside any header row that reaches the top-right of the
    window. Zero-width off Windows. */
 .titlebar-inset-right {

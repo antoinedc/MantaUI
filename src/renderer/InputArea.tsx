@@ -208,17 +208,17 @@ export function InputArea({
       {/* Real input shell (BET-415): a bordered card with focus-within state
           replaces the old hairline-dividers-around-a-naked-textarea. The
           voice-active pulse is now a ring on this border; the background
-          refetch shows as an ambient accent tint. */}
+          refetch shows as an ambient accent tint. Horizontal padding is
+          --sp-4 (16px) per the BET-423 spacing ruling. */}
       <div
         className={
-          "manta-composer-input-row mx-4 mb-2 rounded-xl border bg-card flex items-start gap-2 px-3.5 py-3 " +
+          "manta-composer-input-row mx-4 mb-2 rounded-xl border bg-card flex items-start gap-2 px-4 py-3 " +
           (voiceActive
             ? "border-danger animate-pulse shadow-[0_0_6px_rgb(var(--danger-rgb)/0.6)]"
             : refreshing
               ? "border-accent"
               : "border-border-strong")
         }
-        style={{ boxShadow: "var(--shadow-sm)" }}
       >
         <textarea
           ref={inputRef}
