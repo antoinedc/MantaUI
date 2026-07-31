@@ -95,12 +95,6 @@ export function ModelsCard() {
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
 
-  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
-  const [restarting, setRestarting] = useState(false);
-  const [restartResult, setRestartResult] = useState<
-    { ok: boolean; message: string } | null
-  >(null);
-
   // Load models + config + reconcile subagents on mount. Mirrors the
   // SubagentsCard.refresh() flow (BET-123): every known model is auto-
   // registered as a named subagent; the user opts OUT via the Sub toggle.
@@ -137,24 +131,11 @@ export function ModelsCard() {
   }, [refresh]);
 
   // (Reused as-is from the prior SubagentsCard — subagent reconcile is the
-  // only opencode.jsonc writing the table triggers.)
-  const doRestart = useCallback(async () => {
-    if (restarting) return;
-    setRestarting(true);
-    setRestartResult(null);
-    try {
-      await window.api.opencodeRestart();
-      setRestartResult({ ok: true, message: "Restarted — subagent changes are now live." });
-    } catch (e) {
-      setRestartResult({
-        ok: false,
-        message: `Restart failed: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    } finally {
-      setRestarting(false);
-      setRestartConfirmOpen(false);
-    }
-  }, [restarting]);
+  // only opencode.jsonc writing the table triggers.) A sub toggle change
+  // needs an opencode restart to take effect; rather than show a per-card
+  // restart prompt (BET-420 collapsed the three prompts into one panel-level
+  // banner), we raise the shared `opencodeRestartNeeded` flag and let the
+  // Settings panel offer the single restart button.
 
   // ---- Toggles ----
   //
@@ -225,6 +206,9 @@ export function ModelsCard() {
           deactivated: resolvedList,
         });
         setDeactivatedSub(new Set(resolvedList));
+        // Sub toggles write opencode.jsonc agent blocks — a restart is
+        // required for opencode to re-read them. Raise the panel banner.
+        useStore.getState().setOpencodeRestartNeeded(true);
       } catch (e) {
         setGlobalError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -419,53 +403,6 @@ export function ModelsCard() {
             })}
           </tbody>
         </table>
-      </div>
-
-      {/* Restart — Subagent changes still require a restart, so keep the
-          existing SubagentsCard restart button + destructive-confirm copy
-          verbatim (BET-123). */}
-      <div className="border border-border rounded p-3 space-y-2 bg-bg-elev">
-        {!restartConfirmOpen ? (
-          <button
-            onClick={() => { setRestartConfirmOpen(true); setRestartResult(null); }}
-            className="px-3 py-2 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text"
-          >
-            ⟳ Restart opencode
-          </button>
-        ) : (
-          <div className="space-y-2">
-            <div className="text-meta text-warn">
-              Restarting opencode applies subagent changes but STOPS all
-              running opencode sessions — any in-progress turns will be
-              interrupted. Continue?
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => void doRestart()}
-                disabled={restarting}
-                className="px-3 py-1 text-meta bg-danger-bg border border-danger rounded text-danger hover:text-danger disabled:opacity-40"
-              >
-                {restarting ? "Restarting…" : "Restart"}
-              </button>
-              <button
-                onClick={() => setRestartConfirmOpen(false)}
-                disabled={restarting}
-                className="px-2 py-1 text-meta text-text-faint hover:text-text disabled:opacity-40"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-        {restartResult && (
-          <div className={`text-meta ${restartResult.ok ? "text-ok" : "text-danger"}`}>
-            {restartResult.message}
-          </div>
-        )}
-        <div className="text-meta text-text-faint">
-          Restart applies config to opencode's own service (systemctl --user
-          restart opencode-serve) — separate from manta-server itself.
-        </div>
       </div>
     </div>
   );

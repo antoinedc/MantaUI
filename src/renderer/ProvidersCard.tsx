@@ -1,16 +1,25 @@
 import { useEffect, useState, useCallback } from "react";
 import { X } from "lucide-react";
 import type { ProviderEndpoint, DiscoverResult } from "../shared/types";
+import { AddEndpointForm, type EndpointDraft } from "./AddEndpointForm";
 
-type Draft = { id: string; name: string; baseURL: string; apiKey: string };
-const EMPTY_DRAFT: Draft = { id: "", name: "", baseURL: "", apiKey: "" };
+type Props = {
+  /**
+   * BET-420: raised when an endpoint mutation needs an opencode restart. When
+   * provided (desktop Settings), the card does NOT render its own restart
+   * banner — the Settings panel shows ONE shared restart banner instead. When
+   * omitted (mobile), the card keeps its inline "Apply Now / Apply Later"
+   * banner so mobile still has a restart affordance.
+   */
+  onRestartNeeded?: () => void;
+};
 
-export function ProvidersCard() {
+export function ProvidersCard({ onRestartNeeded }: Props = {}) {
   const [endpoints, setEndpoints] = useState<ProviderEndpoint[] | null>(null);
   const [discovered, setDiscovered] = useState<Record<string, { id: string }[]>>({});
   const [discoverError, setDiscoverError] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null); // endpoint id being mutated
-  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+  const [adding, setAdding] = useState(false);
   const [restartNeeded, setRestartNeeded] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
 
@@ -48,6 +57,11 @@ export function ProvidersCard() {
     }
   }, [busy]);
 
+  const flagRestart = () => {
+    if (onRestartNeeded) onRestartNeeded();
+    else setRestartNeeded(true);
+  };
+
   const toggleModel = useCallback(async (ep: ProviderEndpoint, modelId: string) => {
     if (busy) return;
     const enabled = ep.enabledModels.includes(modelId)
@@ -60,38 +74,38 @@ export function ProvidersCard() {
         upsert: [{ id: ep.id, name: ep.name, baseURL: ep.baseURL, enabledModels: enabled }],
       });
       if (!res.ok) { setGlobalError(res.error ?? "Save failed"); return; }
-      setRestartNeeded(true);
+      flagRestart();
       load();
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
-  }, [busy, load]);
+  }, [busy, load, onRestartNeeded]);
 
-  const addEndpoint = useCallback(async () => {
-    if (busy) return;
-    const d = draft;
-    if (!d.id.trim() || !d.baseURL.trim()) return;
-    setBusy(d.id);
+  const addEndpoint = useCallback(async (draft: EndpointDraft): Promise<string | null> => {
+    if (busy || adding) return null;
+    setAdding(true);
     setGlobalError(null);
     try {
       const res = await window.api.opencodeSetProviders({
         upsert: [{
-          id: d.id.trim(), name: d.name.trim() || d.id.trim(),
-          baseURL: d.baseURL.trim(), apiKey: d.apiKey, enabledModels: [],
+          id: draft.id.trim(), name: draft.name.trim() || draft.id.trim(),
+          baseURL: draft.baseURL.trim(), apiKey: draft.apiKey, enabledModels: [],
         }],
       });
-      if (!res.ok) { setGlobalError(res.error ?? "Add failed"); return; }
-      setDraft(EMPTY_DRAFT);
-      setRestartNeeded(true);
+      if (!res.ok) { setGlobalError(res.error ?? "Add failed"); return res.error ?? "Add failed"; }
+      flagRestart();
       load();
+      return null;
     } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setGlobalError(msg);
+      return msg;
     } finally {
-      setBusy(null);
+      setAdding(false);
     }
-  }, [busy, draft, load]);
+  }, [busy, adding, load, onRestartNeeded]);
 
   const removeEndpoint = useCallback(async (ep: ProviderEndpoint) => {
     if (busy) return;
@@ -102,14 +116,14 @@ export function ProvidersCard() {
       if (!res.ok) { setGlobalError(res.error ?? "Remove failed"); return; }
       setDiscovered((d) => { const { [ep.id]: _drop, ...rest } = d; return rest; });
       setDiscoverError((er) => { const { [ep.id]: _drop, ...rest } = er; return rest; });
-      setRestartNeeded(true);
+      flagRestart();
       load();
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
-  }, [busy, load]);
+  }, [busy, load, onRestartNeeded]);
 
   const [restarting, setRestarting] = useState(false);
   const applyRestart = useCallback(async () => {
@@ -129,10 +143,7 @@ export function ProvidersCard() {
   }, [restarting]);
 
   return (
-    <div className="space-y-2 pt-2 border-t border-border">
-      <label className="block text-micro font-semibold uppercase text-text-muted">
-        Providers
-      </label>
+    <div className="space-y-2">
       <div className="text-meta text-text-faint">
         OpenAI-compatible endpoints opencode can serve. Refresh to discover models,
         then enable the ones you want in the model picker.
@@ -181,30 +192,11 @@ export function ProvidersCard() {
         </div>
       ))}
 
-      <div className="border border-dashed border-border rounded p-2 space-y-1">
-        <div className="text-micro font-semibold uppercase text-text-faint">Add endpoint</div>
-        <input className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded"
-          placeholder="id (e.g. voska)" value={draft.id}
-          onChange={(e) => setDraft((d) => ({ ...d, id: e.target.value }))} />
-        <input className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded"
-          placeholder="name (e.g. VoskaAI)" value={draft.name}
-          onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} />
-        <input className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded"
-          placeholder="baseURL (https://api.voska.org/v1)" value={draft.baseURL}
-          onChange={(e) => setDraft((d) => ({ ...d, baseURL: e.target.value }))} />
-        <input type="password" className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded"
-          placeholder="API key" value={draft.apiKey}
-          onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))} />
-        <button
-          onClick={addEndpoint}
-          disabled={!draft.id.trim() || !draft.baseURL.trim() || busy !== null}
-          className="px-3 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
-        >
-          Add
-        </button>
-      </div>
+      <AddEndpointForm onAdd={addEndpoint} busy={adding || busy !== null} />
 
-      {restartNeeded && (
+      {/* Mobile-only restart banner (desktop routes through the panel banner
+          via onRestartNeeded, so this never renders on desktop). */}
+      {!onRestartNeeded && restartNeeded && (
         <div className="flex items-center gap-2 text-meta bg-bg-soft border border-border rounded p-2">
           <span className="flex-1 text-text-muted">
             Restart opencode now to apply? (interrupts active sessions)

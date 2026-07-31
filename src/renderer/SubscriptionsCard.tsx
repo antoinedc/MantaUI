@@ -159,7 +159,6 @@ export function SubscriptionsCard() {
             <ConnectProvider
               id={s.id}
               label={s.label}
-              confirmRestart={true}
               onDone={onConnectDone}
               onCancel={() => setConnectingId(null)}
             />
