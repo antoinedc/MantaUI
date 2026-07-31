@@ -993,6 +993,8 @@ export const httpApi: Api = {
   // (server-side) so a fresh start can register under the SAME name.
   claudeLoginCancel: (sessionKey: string) =>
     rpc<{ ok: boolean }>(IPC.claudeLoginCancel, sessionKey),
+  // BET-421 §E: claude CLI presence probe for the lazy install.
+  opencodeClaudeCliStatus: () => rpc(IPC.opencodeClaudeCliStatus),
 
   // -- server version (BET-180) --
   // Returns the manta-server's package.json version. In-process via the

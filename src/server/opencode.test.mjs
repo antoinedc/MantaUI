@@ -31,6 +31,7 @@ import {
   getProviders,
   getDefaultModel,
   listModels,
+  claudeCliStatus,
 } from "./opencode.mjs";
 
 test("apiUrl targets local opencode port 4096", () => {
@@ -1534,3 +1535,27 @@ test("subscribeEvents default (no eagerDirectories) opens NO scoped stream at st
   }
 });
 
+
+// ===== claudeCliStatus (BET-421 §E) =====
+
+test("claudeCliStatus reports installed when a candidate binary exists", () => {
+  const status = claudeCliStatus({
+    existsFn: (p) => p === "/usr/local/bin/claude",
+  });
+  assert.equal(status.installed, true);
+  assert.equal(status.path, "/usr/local/bin/claude");
+});
+
+test("claudeCliStatus reports not-installed when no candidate exists", () => {
+  const status = claudeCliStatus({ existsFn: () => false });
+  assert.equal(status.installed, false);
+  // Falls back to the bare name, which is NOT "installed".
+  assert.equal(status.path, "claude");
+});
+
+test("claudeCliStatus prefers ~/.local/bin/claude over /usr/local/bin/claude", () => {
+  const status = claudeCliStatus({ existsFn: () => true });
+  // resolveClaudeBinExists walks candidates in order; the home-dir path wins.
+  assert.match(status.path, /\.local\/bin\/claude$/);
+  assert.equal(status.installed, true);
+});

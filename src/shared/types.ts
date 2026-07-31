@@ -664,6 +664,10 @@ export const IPC = {
   // shared with every other terminal, so cancellation here + pty:kill
   // there = full teardown).
   claudeLoginCancel: "claude:login-cancel",
+  // BET-421 §E: probe whether the `claude` CLI is installed on the box, so
+  // the connect card can run the lazy installer before sign-in when it
+  // isn't. Returns { installed, path }.
+  opencodeClaudeCliStatus: "opencode:claude-cli-status",
 
   // ---- voice (Groq STT + lightweight classifier) ----
   // Renderer captures audio via MediaRecorder, ships the ArrayBuffer to
