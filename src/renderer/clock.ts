@@ -25,3 +25,20 @@ export function nowMs(): number {
   const videoNow = useStore.getState().videoRenderNow;
   return videoNow ?? Date.now();
 }
+
+/**
+ * Pin the renderer's clock to a fixed instant. Called by `bootDemo()` in
+ * main.tsx with the demo fixture's own anchor (`DEMO_T0`).
+ *
+ * Demo mode exists to be CAPTURED — by the marketing shots and by the visual
+ * baselines — and every fixture timestamp is expressed relative to `DEMO_T0`.
+ * Against a live `Date.now()` each elapsed label therefore renders the
+ * distance from the fixture's anchor to today ("990d") and grows by one every
+ * day, so both pipelines' committed images expire at the next day boundary and
+ * the blocking drift gate then fails on unrelated PRs. Pinning makes every
+ * capture a function of the fixture alone — and makes the demo read correctly
+ * ("14m") instead of as a pile of year-old sessions.
+ */
+export function pinDemoClock(t0: number): void {
+  useStore.setState({ videoRenderNow: t0 });
+}
