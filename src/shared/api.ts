@@ -262,6 +262,15 @@ export interface Api {
     sessionName: string;
     windowIndex: number;
   }): Promise<Project[]>;
+  // BET-421: bare session lifecycle for the ephemeral onboarding verifier.
+  // create makes a fresh opencode session in `directory` (no tmux window,
+  // no project); deleteRaw drops it by id alone. Together they let the
+  // verifier probe the box and leave nothing behind.
+  opencodeCreateEphemeralSession(input: {
+    directory: string;
+    title?: string;
+  }): Promise<{ ok: boolean; sessionId?: string; error?: string }>;
+  opencodeDeleteSessionRaw(sessionId: string): Promise<{ ok: boolean }>;
 
   // Scheduled prompts (manta-server owned; desktop reaches it over -L 18787).
   scheduleList(sessionId?: string): Promise<ScheduledJob[]>;
