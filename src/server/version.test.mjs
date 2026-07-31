@@ -18,6 +18,7 @@ import { createServer } from "node:http";
 import http from "node:http";
 import {
   readServerVersion,
+  readOpencodeVersion,
   writeVersionResponse,
   FALLBACK_VERSION,
   MIN_CLIENT,
@@ -83,10 +84,63 @@ test("readServerVersion returns FALLBACK_VERSION when version field is missing o
 });
 
 // ---------------------------------------------------------------------------
+// readOpencodeVersion (BET-428)
+// ---------------------------------------------------------------------------
+// opencode's HTTP API exposes no version endpoint, so the server shells out
+// to `opencode --version` once at startup. `exec` is injectable (mirrors the
+// fs-injection contract readServerVersion uses) so no real subprocess runs
+// during the test. The stub returns a Buffer/string the same way execFileSync
+// would; we assert parsing + every failure path falls back to FALLBACK_VERSION.
+
+test("readOpencodeVersion parses a clean version string from execFileSync stdout", () => {
+  const exec = () => "1.18.10\n";
+  assert.equal(readOpencodeVersion(exec), "1.18.10");
+});
+
+test("readOpencodeVersion takes the last token when stdout has a prefix", () => {
+  // Robust to a future `opencode version 1.18.10`-style output without
+  // coupling to a fixed format.
+  const exec = () => "opencode version 1.18.10\n";
+  assert.equal(readOpencodeVersion(exec), "1.18.10");
+});
+
+test("readOpencodeVersion trims trailing whitespace / newlines", () => {
+  const exec = () => "  1.2.3  \n\n";
+  assert.equal(readOpencodeVersion(exec), "1.2.3");
+});
+
+test("readOpencodeVersion returns FALLBACK_VERSION when the command throws (ENOENT — opencode not installed)", () => {
+  const exec = () => {
+    const err = new Error("spawn opencode ENOENT");
+    err.code = "ENOENT";
+    throw err;
+  };
+  assert.equal(readOpencodeVersion(exec), FALLBACK_VERSION);
+});
+
+test("readOpencodeVersion returns FALLBACK_VERSION when stdout is empty", () => {
+  const exec = () => "";
+  assert.equal(readOpencodeVersion(exec), FALLBACK_VERSION);
+});
+
+test("readOpencodeVersion returns FALLBACK_VERSION when stdout is only whitespace", () => {
+  const exec = () => "   \n\t\n";
+  assert.equal(readOpencodeVersion(exec), FALLBACK_VERSION);
+});
+
+test("readOpencodeVersion returns FALLBACK_VERSION on non-zero exit (child returns empty)", () => {
+  // execFileSync throws on non-zero exit; the catch maps it to FALLBACK.
+  const exec = () => {
+    throw new Error("Command failed: opencode --version");
+  };
+  assert.equal(readOpencodeVersion(exec), FALLBACK_VERSION);
+});
+
+// ---------------------------------------------------------------------------
 // writeVersionResponse (pure)
 // ---------------------------------------------------------------------------
 
-test("writeVersionResponse writes 200 + JSON { version, minClient }", () => {
+test("writeVersionResponse writes 200 + JSON { version, minClient, opencodeVersion }", () => {
   let captured = null;
   const fakeRes = {
     writeHead(status, headers) {
@@ -97,7 +151,7 @@ test("writeVersionResponse writes 200 + JSON { version, minClient }", () => {
       captured = { status: this._status, headers: this._headers, body };
     },
   };
-  writeVersionResponse(fakeRes, { version: "9.9.9" });
+  writeVersionResponse(fakeRes, { version: "9.9.9", opencodeVersion: "1.18.10" });
   assert.equal(captured.status, 200);
   assert.equal(captured.headers["content-type"], "application/json");
   const body = JSON.parse(captured.body);
@@ -108,6 +162,24 @@ test("writeVersionResponse writes 200 + JSON { version, minClient }", () => {
   assert.equal(body.minClient, MIN_CLIENT);
   assert.equal(typeof body.minClient, "string");
   assert.ok(body.minClient.length > 0);
+  // BET-428: opencodeVersion MUST be present so Settings → About renders it
+  // in the same getServerVersion round-trip — no new IPC channel.
+  assert.equal(body.opencodeVersion, "1.18.10");
+});
+
+test("writeVersionResponse defaults opencodeVersion to FALLBACK_VERSION when omitted", () => {
+  // Backward-compat: the BET-180 callers (and the existing route test below)
+  // pass only { version }. The response must still carry opencodeVersion so
+  // the renderer's destructure never hits `undefined`; it falls back to
+  // "0.0.0" which the About block hides.
+  let captured = null;
+  const fakeRes = {
+    writeHead() {},
+    end(body) { captured = body; },
+  };
+  writeVersionResponse(fakeRes, { version: "1.2.3" });
+  const body = JSON.parse(captured);
+  assert.equal(body.opencodeVersion, FALLBACK_VERSION);
 });
 
 // ---------------------------------------------------------------------------
@@ -143,7 +215,7 @@ function httpRequest(port, path, headers = {}) {
   });
 }
 
-async function startVersionServer(version) {
+async function startVersionServer(version, opencodeVersion = FALLBACK_VERSION) {
   // Real ensureAuth writes to ~/.manta/auth.json — avoid touching disk in
   // tests, so build an auth engine from a hand-rolled boxAuth with the
   // well-known HEX32 token. createAuthEngine doesn't care where the auth
@@ -187,7 +259,7 @@ async function startVersionServer(version) {
 
       // ---- /api/version route (mirrors src/server/index.mjs) ----
       if (req.method === "GET" && path === "/api/version") {
-        writeVersionResponse(res, { version });
+        writeVersionResponse(res, { version, opencodeVersion });
         return;
       }
 
@@ -223,8 +295,8 @@ test("/api/version returns 401 when Bearer is wrong", async () => {
   }
 });
 
-test("/api/version returns 200 + { version, minClient } when Bearer present", async () => {
-  const { server, port } = await startVersionServer("1.2.3-test");
+test("/api/version returns 200 + { version, minClient, opencodeVersion } when Bearer present", async () => {
+  const { server, port } = await startVersionServer("1.2.3-test", "1.18.10");
   try {
     const res = await httpRequest(port, "/api/version", {
       authorization: `Bearer ${HEY_HEX32}`,
@@ -237,6 +309,9 @@ test("/api/version returns 200 + { version, minClient } when Bearer present", as
     // surface MUST surface minClient to the renderer's `getServerVersion()`
     // consumer in stage 3.
     assert.equal(body.minClient, MIN_CLIENT);
+    // BET-428: opencodeVersion MUST be present so Settings → About renders it
+    // in the same round-trip — no new IPC channel.
+    assert.equal(body.opencodeVersion, "1.18.10");
   } finally {
     server.close();
   }

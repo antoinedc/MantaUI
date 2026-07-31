@@ -91,7 +91,7 @@ import {
 } from "./pairPage.mjs";
 import * as push from "./push.mjs";
 import { registerWithGateway, publicBaseUrl } from "./gatewayRegister.mjs";
-import { readServerVersion, writeVersionResponse } from "./version.mjs";
+import { readServerVersion, readOpencodeVersion, writeVersionResponse } from "./version.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -292,6 +292,13 @@ if (!authEnforced) {
 // (in-process, no HTTP round-trip); curl + future non-renderer clients use the
 // REST route.
 const SERVER_VERSION = await readServerVersion(PROJECT_ROOT);
+// BET-428: opencode's HTTP API exposes no version endpoint, so shell out to
+// `opencode --version` ONCE at startup (sync, cached here — never per-request).
+// Falls back to FALLBACK_VERSION if opencode isn't installed / errors, so the
+// boot sequence is never blocked. Surfaced in the same `server:version` RPC
+// response + `/api/version` body as `version` + `minClient` — no new IPC
+// channel; Settings → About reads it in the single getServerVersion trip.
+const OPENCODE_VERSION = readOpencodeVersion();
 rpcHandlers = buildHandlers({
   tmux,
   oc,
@@ -301,6 +308,7 @@ rpcHandlers = buildHandlers({
   authPair: () => authEngine.pair(),
   push,
   serverVersion: SERVER_VERSION,
+  opencodeVersion: OPENCODE_VERSION,
   delegate: delegateEngine,
   // BET-366 reviewer return: production wiring for the
   // `server:update-apply` IPC channel. The handler in rpc.mjs calls this
@@ -884,7 +892,7 @@ const handleRequest = async (req, res) => {
   // gating / banner / force-update logic lives behind this once skew is
   // visible.
   if (req.method === "GET" && path === "/api/version") {
-    writeVersionResponse(res, { version: SERVER_VERSION });
+    writeVersionResponse(res, { version: SERVER_VERSION, opencodeVersion: OPENCODE_VERSION });
     return;
   }
 

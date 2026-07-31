@@ -248,6 +248,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
   // Client + server versions for About.
   const [clientVersion, setClientVersion] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const [opencodeVersion, setOpencodeVersion] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     void Promise.all([
@@ -257,6 +258,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
       if (cancelled) return;
       if (client && typeof client.version === "string") setClientVersion(client.version);
       if (server && typeof server.version === "string") setServerVersion(server.version);
+      // BET-428: opencode version ships in the same getServerVersion response
+      // (opencode's HTTP API has no version endpoint, so the server shells out
+      // to `opencode --version` once at startup). Only render when it's a real
+      // value — FALLBACK_VERSION ("0.0.0") means opencode isn't installed, so
+      // we hide the line rather than show a misleading "v0.0.0".
+      if (server && typeof server.opencodeVersion === "string" && server.opencodeVersion && server.opencodeVersion !== "0.0.0") setOpencodeVersion(server.opencodeVersion);
     });
     return () => { cancelled = true; };
   }, []);
@@ -512,6 +519,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <h3 className="text-title font-semibold mb-4">About</h3>
             <div className="text-body text-text-faint">Manta v{clientVersion ?? "…"}</div>
             {serverVersion && <div className="text-meta text-text-faint mt-1">Box server v{serverVersion}</div>}
+            {opencodeVersion && <div className="text-meta text-text-faint mt-1">Box opencode v{opencodeVersion}</div>}
             <div className="text-meta text-text-faint mt-1">Desktop client for remote Claude Code sessions.</div>
             {store.updatePrompt && (
               <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">

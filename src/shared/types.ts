@@ -775,13 +775,15 @@ export const IPC = {
   // noticed — the app simply stopped updating without ever saying so.
   autoUpdateError: "autoUpdate:error",
 
-  // ---- server version (BET-180) ----
+  // ---- server version (BET-180, BET-428) ----
   // Returns the manta-server's package.json version (read once at server startup,
   // served by GET /api/version for non-renderer clients AND by this in-process
   // RPC channel for the renderer — single source of truth on the box, never
   // drifts between surfaces). Display-only foundation for client/server skew
   // detection; gating / banner / force-update logic lands in a later phase.
-  getServerVersion: "server:version",                 // () → { version: string }
+  // BET-428 added `opencodeVersion` (the box's `opencode --version`, read once
+  // at startup) so Settings → About can render it without a new IPC channel.
+  getServerVersion: "server:version",                 // () → { version: string, minClient: string, opencodeVersion: string }
 
   // ---- server self-update apply (BET-225 stage 3) ----
   // Trigger the server's `scripts/self-update.sh` (git fetch + reset --hard
