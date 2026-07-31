@@ -755,22 +755,27 @@ main() {
   OPENCODE_CONFIG="$OPENCODE_CONFIG_DIR/opencode.jsonc"
   mkdir -p "$OPENCODE_CONFIG_DIR"
   OPENCODE_CONFIG_BACKUP="$OPENCODE_CONFIG.pre-manta"
-  # ${MANTA_CLAUDE_AUTH_PLUGIN:-} — the installer runs under `set -u`, so the
-  # bare expansion of an unset var is a hard error (the macOS CI job caught
-  # this: every public install crashes because end users never set the
-  # override). The `:-` default keeps the test safe when the var is unset.
+  # The installer runs under `set -u`, so a bare expansion of an unset var is a
+  # hard error. Both plugin vars are therefore guarded with `${VAR:-}`:
+  #   - MANTA_CLAUDE_AUTH_PLUGIN — the dev/CI override; unset for every end
+  #     user. The macOS CI job caught this once (BET-319): every public
+  #     install crashed because end users never set the override.
+  #   - OPENCODE_CLAUDE_AUTH_PLUGIN — the LOG-ONLY default name, emitted by the
+  #     `print-config` eval above (line ~659). It is pure cosmetic output for
+  #     the seeding message here; it must never be able to abort the install,
+  #     so the (should-be-unreachable-in-practice) empty default is fine.
   if [ -f "$OPENCODE_CONFIG" ]; then
     if [ -n "${MANTA_CLAUDE_AUTH_PLUGIN:-}" ]; then
       log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — merging into existing ${OPENCODE_CONFIG}…"
     else
-      log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — merging into existing ${OPENCODE_CONFIG}…"
+      log "Seeding Claude auth plugin (${OPENCODE_CLAUDE_AUTH_PLUGIN:-}) — merging into existing ${OPENCODE_CONFIG}…"
     fi
     existing="$(cat "$OPENCODE_CONFIG" 2>/dev/null || true)"
   else
     if [ -n "${MANTA_CLAUDE_AUTH_PLUGIN:-}" ]; then
       log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — no existing ${OPENCODE_CONFIG}, creating…"
     else
-      log "Seeding Claude auth plugin ($OPENCODE_CLAUDE_AUTH_PLUGIN) — no existing ${OPENCODE_CONFIG}, creating…"
+      log "Seeding Claude auth plugin (${OPENCODE_CLAUDE_AUTH_PLUGIN:-}) — no existing ${OPENCODE_CONFIG}, creating…"
     fi
     existing=""
   fi
