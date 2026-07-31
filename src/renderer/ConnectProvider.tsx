@@ -54,6 +54,7 @@ import {
 } from "./chatUtils";
 import { CopyButton } from "./CopyButton";
 import { Terminal } from "./Terminal";
+import { useStore } from "./store";
 
 // Poll cadences (BET-312, BET-354): 3s for both the device-code wait and
 // the post-restart readiness poll. BET-354 adds a 1s tick for the
@@ -89,13 +90,11 @@ export function ConnectProvider({
   label,
   onDone,
   onCancel,
-  confirmRestart = false,
 }: {
   id: string;
   label: string;
   onDone: (connected: boolean) => void;
   onCancel: () => void;
-  confirmRestart?: boolean;
 }): JSX.Element {
   const [phase, setPhase] = useState<ConnectPhase>({ kind: "starting" });
   const mounted = useMounted();
@@ -306,7 +305,6 @@ export function ConnectProvider({
   // progress that completed before the second restart.
   useEffect(() => {
     if (phase.kind !== "applying") return;
-    if (confirmRestart && !phase.restartConfirmed) return;
     let cancelled = false;
     const startedAt = Date.now();
     const serverAlreadyRestarted = phase.restarted === true;
@@ -314,6 +312,9 @@ export function ConnectProvider({
       if (!serverAlreadyRestarted) {
         try {
           await window.api.opencodeRestart();
+          // BET-420: this restart satisfies any pending panel-level restart
+          // banner — clear it so the banner doesn't outlive the restart.
+          useStore.getState().setOpencodeRestartNeeded(false);
         } catch {
           /* poll below will catch a no-op restart on a reachable box */
         }
@@ -352,7 +353,7 @@ export function ConnectProvider({
     // `applying` variant; the ternary narrows `phase` for the access and
     // the `null` branch keeps the deps array a uniform value list (the
     // false branches never read the field).
-  }, [phase.kind, phase.kind === "applying" ? phase.restartConfirmed : null, phase.kind === "applying" ? phase.restarted : null, confirmRestart, id, safeSetPhase]);
+  }, [phase.kind, phase.kind === "applying" ? phase.restartConfirmed : null, phase.kind === "applying" ? phase.restarted : null, id, safeSetPhase]);
 
   // done is terminal — fire onDone exactly once when the phase KIND
   // becomes "done". Deps `[phase.kind, onDone]` so updates to fields
@@ -538,30 +539,9 @@ export function ConnectProvider({
         />
       )}
 
-      {phase.kind === "applying" && confirmRestart && !phase.restartConfirmed && (
-        <div className="flex items-center gap-2 bg-bg-soft border border-border rounded p-2">
-          <span className="flex-1 text-text-muted">
-            Restart opencode now to apply? (interrupts active sessions)
-          </span>
-          <button
-            onClick={() => safeSetPhase({ kind: "applying", restartConfirmed: true })}
-            className="px-2 py-1 bg-accent/20 border border-accent rounded text-text"
-          >
-            Apply Now
-          </button>
-          <button
-            onClick={onCancel}
-            className="px-2 py-1 border border-border rounded text-text-muted"
-          >
-            Apply Later
-          </button>
-        </div>
+      {phase.kind === "applying" && (
+        <div className="text-text-muted">Restarting opencode…</div>
       )}
-
-      {phase.kind === "applying" &&
-        (!confirmRestart || phase.restartConfirmed) && (
-          <div className="text-text-muted">Restarting opencode…</div>
-        )}
 
       {phase.kind === "done" && (
         <div className="text-ok">Connected.</div>

@@ -259,6 +259,16 @@ type State = {
   // (no `Date.now()` leakage in labels). Real apps leave it null and
   // `nowMs()` in src/renderer/clock.ts falls back to `Date.now()`.
   videoRenderNow: number | null;
+  // BET-420: raised by Settings cards whose changes need an opencode restart
+  // to take effect (subagent toggles, endpoint add/remove/toggle). The
+  // Settings panel renders ONE restart banner from this flag — replacing the
+  // three per-card restart prompts that used to live in ModelsCard,
+  // ProvidersCard and ConnectProvider. Cleared by the banner's restart button
+  // (and by any other path that restarts opencode, e.g. ConnectProvider's
+  // connect-completion restart). Desktop-only concept; mobile keeps its own
+  // inline restart prompt inside ProvidersCard.
+  opencodeRestartNeeded: boolean;
+  setOpencodeRestartNeeded: (v: boolean) => void;
   // ----- derived selectors -----
   activeSession: () => ActiveSession | null;
   // A minimal AppConfig-shaped snapshot of the onboarding-relevant fields,
@@ -408,6 +418,7 @@ export const useStore = create<State>((set, get) => ({
   connectionState: { state: "idle" },
   backgroundSyncing: false,
   videoRenderNow: null,
+  opencodeRestartNeeded: false,
 
   configSnapshot: () => {
     const s = get();
@@ -592,6 +603,7 @@ export const useStore = create<State>((set, get) => ({
   setUpdateError: (p) => set({ updateError: p }),
   setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
   setConnectionState: (s) => set({ connectionState: s }),
+  setOpencodeRestartNeeded: (v) => set({ opencodeRestartNeeded: v }),
 
   applyStatusBatch: (batch) =>
     set((prev) => {

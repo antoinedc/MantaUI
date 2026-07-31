@@ -37,8 +37,8 @@ import { Check } from "lucide-react";
 import type { SubscriptionStatus } from "../shared/types";
 import { ConnectProvider } from "./ConnectProvider";
 import { StepFooter } from "./onboardingUi";
+import { AddEndpointForm, type EndpointDraft } from "./AddEndpointForm";
 
-const ACCENT_SOLID = "var(--accent-solid)";
 const DANGER = "var(--danger)";
 const SUCCESS = "var(--ok)";
 
@@ -51,17 +51,9 @@ export function canContinueProviders(statuses: SubscriptionStatus[]): boolean {
   return statuses.some((s) => s.connected);
 }
 
-// Validation for the custom-endpoint add form. id + baseURL are required;
-// key is optional (some self-hosted endpoints are keyless). Returns the
-// reason it's invalid, or null when the draft is submittable.
-type ProviderDraft = { id: string; name: string; baseURL: string; apiKey: string };
-
-export function customDraftError(draft: ProviderDraft): string | null {
-  if (!draft.id.trim()) return "Provider id is required.";
-  if (!draft.baseURL.trim()) return "Base URL is required.";
-  if (!/^https?:\/\//i.test(draft.baseURL.trim())) return "Base URL must start with http:// or https://.";
-  return null;
-}
+// BET-420: the custom-endpoint add form + its validator are shared with
+// Settings (Accounts) via AddEndpointForm / validateEndpointDraft, so a
+// scheme-less URL is rejected identically in onboarding and Settings.
 
 export function ProvidersStep({
   onBack,
@@ -125,9 +117,11 @@ export function ProvidersStep({
   );
 
   const submitCustom = async (
-    draft: ProviderDraft,
+    draft: EndpointDraft,
     onDone: () => Promise<void>,
   ): Promise<string | null> => {
+    // The shared AddEndpointForm already validated the draft (scheme check),
+    // so we only persist + restart here.
     try {
       const res = await window.api.opencodeSetProviders({
         upsert: [
@@ -249,12 +243,12 @@ export function ProvidersStep({
         </button>
         {showCustom && (
           <div className="mt-3">
-            <CustomForm
-              onDone={async () => {
+            <AddEndpointForm
+              onAdd={(draft) => submitCustom(draft, async () => {
                 setShowCustom(false);
                 await refresh();
-              }}
-              submit={submitCustom}
+              })}
+              busy={false}
             />
           </div>
         )}
@@ -270,113 +264,3 @@ export function ProvidersStep({
   );
 }
 
-function CustomForm({
-  onDone,
-  submit,
-}: {
-  onDone: () => Promise<void>;
-  submit: (draft: ProviderDraft, onDone: () => Promise<void>) => Promise<string | null>;
-}) {
-  const [draft, setDraft] = useState<ProviderDraft>({
-    id: "",
-    name: "",
-    baseURL: "",
-    apiKey: "",
-  });
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const set = (patch: Partial<ProviderDraft>) => {
-    setDraft((d) => ({ ...d, ...patch }));
-    setError(null);
-  };
-
-  const onSubmit = async () => {
-    const draftErr = customDraftError(draft);
-    if (draftErr) {
-      setError(draftErr);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    const err = await submit(draft, onDone);
-    if (err) setError(err);
-    setBusy(false);
-  };
-
-  return (
-    <div className="rounded-md border border-border bg-bg-soft p-3 space-y-3">
-      <div className="text-micro font-semibold uppercase text-text-faint">
-        Add a custom provider
-      </div>
-      <CustomInput
-        label="Provider id"
-        placeholder="e.g. groq"
-        value={draft.id}
-        disabled={busy}
-        onChange={(v) => set({ id: v })}
-      />
-      <CustomInput
-        label="Name (optional)"
-        placeholder="e.g. Groq"
-        value={draft.name}
-        disabled={busy}
-        onChange={(v) => set({ name: v })}
-      />
-      <CustomInput
-        label="Base URL"
-        placeholder="https://api.groq.com/openai/v1"
-        value={draft.baseURL}
-        disabled={busy}
-        onChange={(v) => set({ baseURL: v })}
-      />
-      <CustomInput
-        label="API key (optional)"
-        placeholder="key"
-        value={draft.apiKey}
-        type="password"
-        disabled={busy}
-        onChange={(v) => set({ apiKey: v })}
-      />
-      {error && (
-        <div role="alert" className="text-meta" style={{ color: DANGER }}>
-          {error}
-        </div>
-      )}
-      <button
-        type="button"
-        onClick={() => void onSubmit()}
-        disabled={busy || !draft.id.trim() || !draft.baseURL.trim()}
-        className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
-        style={{ background: ACCENT_SOLID }}
-      >
-        {busy ? "Adding…" : "Add provider"}
-      </button>
-    </div>
-  );
-}
-
-function CustomInput(props: {
-  label: string;
-  placeholder: string;
-  value: string;
-  type?: "text" | "password";
-  disabled: boolean;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-label text-text-muted">{props.label}</span>
-      <input
-        type={props.type ?? "text"}
-        autoComplete="off"
-        spellCheck={false}
-        placeholder={props.placeholder}
-        value={props.value}
-        disabled={props.disabled}
-        onChange={(e) => props.onChange(e.target.value)}
-        className="w-full rounded bg-bg border border-border px-3 py-2 text-body text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
-      />
-    </label>
-  );
-}
