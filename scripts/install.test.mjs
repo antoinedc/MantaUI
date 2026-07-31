@@ -4383,78 +4383,32 @@ command() {
   assert.equal(out.match(/\/opt\/homebrew\/bin/g).length, 1);
 });
 
-test("install.sh claude install step: dry-run shows the install branch when claude is absent (BET-353)", () => {
-  // Stage-2 acceptance: a fresh box has no claude binary; the installer's
-  // dry-run mode must show that it WOULD install it (not silently skip it).
-  // Pin the dry-run shape so a future regression that drops the step is
-  // caught here instead of on a real box.
-  const out = runBootstrap({
-    preBody: `
-# Force claude to be absent (the test runner itself may have claude
-# installed — see the same stub used in print_provider_detection_summary's
-# CLI-probe test).
-command() {
-  case "$1" in
-    -v) case "$2" in claude) return 1 ;; *) builtin command "$@" ;; esac ;;
-    *) builtin command "$@" ;;
-  esac
-}
-export -f command
-
-# claude is NOT on PATH for this test; dry-run must emit the install branch.
-DRY_RUN=1
-dry_log() { [ "$DRY_RUN" = "1" ] && printf '\\033[36m▸\\033[0m [dry-run] %s\\n' "$*"; }
-# Inline the Claude install branch from install.sh (the helper lives inside
-# main() so we can't call it directly).
-if [ "$DRY_RUN" = "1" ]; then
-  if command -v claude >/dev/null 2>&1; then
-    dry_log "claude CLI already installed ($(command -v claude)) — would skip install step"
-  else
-    dry_log "would install claude CLI (official installer https://claude.ai/install.sh); idempotent on PATH probe"
-  fi
-elif command -v claude >/dev/null 2>&1; then
-  echo "BRANCH=already-installed"
-else
-  echo "BRANCH=install"
-fi
-echo "DONE"
-`,
-    func: ":",
-  });
-  assert.match(out, /\[dry-run\] would install claude CLI/);
-  assert.doesNotMatch(out, /already installed/);
-  assert.match(out, /DONE/);
+test("install.sh no longer installs the claude CLI — the app owns it now (BET-421 §E)", () => {
+  // BET-421 §E: the A2 claude-CLI install block was deleted from install.sh.
+  // The app installs the binary lazily on first Claude sign-in instead. This
+  // test pins the deletion so a future regression that re-adds the block is
+  // caught here. Acceptance (issue Verify): `grep -n 'claude' install.sh`
+  // shows no install block.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  // The official-installer invocation must be gone.
+  assert.doesNotMatch(src, /curl -fsSL https:\/\/claude\.ai\/install\.sh -o/);
+  assert.doesNotMatch(src, /would install claude CLI/);
+  // The A2 heading now documents the removal, not the install.
+  assert.match(src, /A2\. claude CLI install — REMOVED/);
 });
 
-test("install.sh claude install step: dry-run reports skip when claude is on PATH (BET-353)", () => {
-  // Mirror of the previous test: when `command -v claude` succeeds, the
-  // dry-run output must say "already installed … would skip" — never the
-  // install branch. This is the BET-353 idempotency acceptance: re-running
-  // the installer must not re-download or re-install.
-  const out = runBootstrap({
-    preBody: `
-DRY_RUN=1
-dry_log() { [ "$DRY_RUN" = "1" ] && printf '\\033[36m▸\\033[0m [dry-run] %s\\n' "$*"; }
-command() {
-  case "$1" in
-    -v) case "$2" in claude) echo "/home/tester/.local/bin/claude"; return 0 ;; *) builtin command "$@" ;; esac ;;
-    *) builtin command "$@" ;;
-  esac
-}
-if [ "$DRY_RUN" = "1" ]; then
-  if command -v claude >/dev/null 2>&1; then
-    dry_log "claude CLI already installed ($(command -v claude)) — would skip install step"
-  else
-    dry_log "would install claude CLI (official installer https://claude.ai/install.sh); idempotent on PATH probe"
-  fi
-fi
-echo "DONE"
-`,
-    func: ":",
-  });
-  assert.match(out, /claude CLI already installed/);
-  assert.match(out, /would skip install step/);
-  assert.doesNotMatch(out, /\[dry-run\] would install claude CLI \(official/);
+test("install.sh launchd_agent_path still prepends ~/.local/bin after the claude install removal (BET-421 §E)", () => {
+  // BET-421 §E: do NOT touch launchd_agent_path. It appends $HOME/.local/bin
+  // unconditionally — that's what makes a later lazy install (by the app)
+  // visible to both supervisors. Deleting it "because claude is gone" would
+  // break the whole design. Acceptance (issue Verify): launchd_agent_path
+  // still contains .local/bin.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.match(src, /\$HOME\/\.local\/bin/);
+  // The function body must still prepend it.
+  const fn = src.match(/launchd_agent_path\(\) \{[\s\S]*?\n\}/);
+  assert.ok(fn, "launchd_agent_path function not found");
+  assert.match(fn[0], /HOME\/\.local\/bin/);
 });
 
 test("install.sh: scripts/systemd/*.service carries @@AGENT_PATH@@ placeholder (BET-353 wiring)", () => {
