@@ -48,6 +48,7 @@ import {
   modelSupportsAttachments,
   readSavedModel,
   writeSavedModel,
+  resolveActiveModel,
   type AgentMention,
   type Attachment,
   type ModelSelection,
@@ -851,20 +852,13 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   const ensureModels = useCallback(async () => { /* noop */ }, []);
 
   // Active model used for the NEXT prompt. modelOverride wins; otherwise the
-  // server default. Used to look up capability flags (attachment support).
-  const activeModel = useMemo<OpencodeModel | null>(() => {
-    if (!models || models.length === 0) return null;
-    const target = modelOverride ??
-      (defaultModel
-        ? { providerID: defaultModel.providerID, modelID: defaultModel.modelID }
-        : null);
-    if (!target) return null;
-    return (
-      models.find(
-        (m) => m.providerID === target.providerID && m.id === target.modelID,
-      ) ?? null
-    );
-  }, [models, modelOverride, defaultModel]);
+  // server default. Used to look up capability flags (attachment support) and
+  // the context-window limit. Resolution lives in chatShared so ModelPicker
+  // and ChatPanel share one path (BET-415 duplication gate).
+  const activeModel = useMemo<OpencodeModel | null>(
+    () => resolveActiveModel(models, modelOverride, defaultModel),
+    [models, modelOverride, defaultModel],
+  );
   const currentModelSupportsAttachments = modelSupportsAttachments(activeModel);
   const currentModelName = activeModel?.name ?? "this model";
 

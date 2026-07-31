@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Sparkles } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
-import { type ModelSelection } from "./chatShared";
+import { type ModelSelection, resolveActiveModel } from "./chatShared";
 import { formatModelContextSize } from "./chatUtils";
 
 export function ModelPicker({
@@ -81,19 +81,11 @@ export function ModelPicker({
   };
 
   // Resolve the active model object (for the friendly name + variant list).
-  const activeModel = useMemo<OpencodeModel | null>(() => {
-    if (!models || models.length === 0) return null;
-    const target = modelOverride ??
-      (defaultModel
-        ? { providerID: defaultModel.providerID, modelID: defaultModel.modelID }
-        : null);
-    if (!target) return null;
-    return (
-      models.find(
-        (m) => m.providerID === target.providerID && m.id === target.modelID,
-      ) ?? null
-    );
-  }, [models, modelOverride, defaultModel]);
+  // Shared resolution path with ChatPanel (BET-415 duplication gate).
+  const activeModel = useMemo<OpencodeModel | null>(
+    () => resolveActiveModel(models, modelOverride, defaultModel),
+    [models, modelOverride, defaultModel],
+  );
 
   const variants = activeModel?.variants ?? [];
   const activeVariantId = modelOverride?.variant ?? undefined;

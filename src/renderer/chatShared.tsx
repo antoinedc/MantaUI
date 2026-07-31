@@ -261,6 +261,30 @@ export function writeSavedModel(sessionId: string, m: ModelSelection | null): vo
   } catch { /* quota / disabled storage */ }
 }
 
+// Resolve the active OpencodeModel for the NEXT prompt from the available
+// model list + the per-session override + the server default. modelOverride
+// wins; otherwise the server default's provider/model is looked up. Returns
+// null when no models are loaded or no target can be resolved. Pure —
+// extracted so ChatPanel (capability lookups) and ModelPicker (display +
+// variant list) share one resolution path instead of duplicating the lookup.
+export function resolveActiveModel(
+  models: OpencodeModel[] | null | undefined,
+  modelOverride: ModelSelection | null,
+  defaultModel: { providerID: string; modelID: string } | null,
+): OpencodeModel | null {
+  if (!models || models.length === 0) return null;
+  const target = modelOverride ??
+    (defaultModel
+      ? { providerID: defaultModel.providerID, modelID: defaultModel.modelID }
+      : null);
+  if (!target) return null;
+  return (
+    models.find(
+      (m) => m.providerID === target.providerID && m.id === target.modelID,
+    ) ?? null
+  );
+}
+
 // Per-session mode toggle (BET-138): a chat session shows either the
 // ChatPanel ("chat"), a bare shell-in-cwd ("terminal"), or an AI CLI TUI
 // launcher ("tui:<launcherId>", e.g. "tui:claude"). Persisted per-session in
