@@ -2820,6 +2820,33 @@ and before a reassign it would wake the stalled agent being routed away from.
 Metadata writes are inert. Anything automated that touches an agent-assigned
 issue must account for this — a "harmless status comment" is an agent run.
 
+**A closed-unmerged PR is NOT evidence the work is missing — and the bot must
+never say it is.** GitHub closes a PR for two reasons that look identical in the
+webhook: someone abandoned it, or it was STACKED on a parent branch that merged
+(merging deletes the branch, which auto-closes every PR still targeting it).
+Stacking is routine here — an implementer splits a follow-up out of a parent and
+bases the follow-up on the parent so the PR diff is the delta only.
+
+`scripts/multica-pr-closed.mjs` (run by `multica-close-on-merge.yml`, pure core
++ `scripts/multica-pr-closed.test.mjs`) tells them apart from evidence: it asks
+GitHub whether the base branch still exists and whether a PR for it merged.
+Merged PR → issue `done`. Stacked → a comment saying so, no status change.
+Abandoned → a comment saying so, no status change. **A failed probe classifies
+as stacked, not abandoned** — an unknown must never be reported as "the work is
+gone".
+
+Two invariants are locked by test, and both exist because breaking them costs an
+agent run: no comment ever contains the word "reopen", and every comment states
+that no status changed. The old wording ("Marking BET-N as still open — please
+reopen") landed on BET-429 seconds after its parent BET-421 merged; the PM read
+it as an instruction and dispatched an implementer to rebase and re-PR — but the
+parent had been sent back in review for exactly those gaps and had absorbed the
+child's whole scope, so the feature was already on `main`. **CI cannot decide
+that part**: duplicated CONTENT leaves the child's commits genuinely absent from
+`main`, so no cheap git test distinguishes "superseded" from "outstanding". The
+bot therefore states the facts and requires a human/PM check against `main`
+before anything is reopened.
+
 **`manta-ops` is NOT part of this.** It's an agent driven by a Multica autopilot
 that has been paused since 2026-07-21, so every recovery path its instructions
 describe (`manta-pm.md` cases D and E) currently routes to nobody. The CI
