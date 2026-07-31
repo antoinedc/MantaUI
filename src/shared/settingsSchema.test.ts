@@ -85,6 +85,24 @@ describe("settingsForSection", () => {
   });
 });
 
+describe("uploadCleanupHours (BET-427)", () => {
+  const entry = ALL.find((e) => e.id === "uploadCleanupHours");
+  it("exists in the Files section with the right config key", () => {
+    expect(entry).toBeDefined();
+    expect(entry!.section).toBe("files");
+    expect(entry!.configKey).toBe("uploadCleanupHours");
+    expect(entry!.control).toBe("segmented");
+    expect(entry!.default).toBe(24);
+  });
+  it("is visible on both desktop and mobile", () => {
+    expect(settingsForPlatform(ALL, "desktop").some((e) => e.id === "uploadCleanupHours")).toBe(true);
+    expect(settingsForPlatform(ALL, "mobile").some((e) => e.id === "uploadCleanupHours")).toBe(true);
+  });
+  it("carries a 0-disables option", () => {
+    expect(entry!.options?.some((o) => o.value === "0")).toBe(true);
+  });
+});
+
 describe("searchSettings", () => {
   it("returns [] for empty query", () => {
     expect(searchSettings(ALL, "", "desktop")).toEqual([]);

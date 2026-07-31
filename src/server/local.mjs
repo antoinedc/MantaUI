@@ -44,6 +44,10 @@ const DEFAULT_CONFIG = {
   // generic configGet/configUpdate channel like every other AppConfig field).
   worktreePerSession: false,
   worktreeCleanOnClose: false,
+  // BET-427: hours an upload batch dir survives before the hourly sweep in
+  // uploads.mjs deletes it. 0 disables cleanup. Default 24h (more forgiving
+  // than the old 1h so a file survives a long session).
+  uploadCleanupHours: 24,
 };
 
 let _config = null;

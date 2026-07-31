@@ -62,8 +62,9 @@ export function MobileSettings({ onClose }: Props) {
       voiceCommandModel: store.voiceCommandModel,
       chatAutoAllow: store.chatAutoAllow,
       autoRenameSessions: store.autoRenameSessions,
+      uploadCleanupHours: store.uploadCleanupHours,
     }),
-    [store.cacheTtl, store.groqApiKey, store.voiceTranscriptionModel, store.voiceCommandModel, store.chatAutoAllow, store.autoRenameSessions],
+    [store.cacheTtl, store.groqApiKey, store.voiceTranscriptionModel, store.voiceCommandModel, store.chatAutoAllow, store.autoRenameSessions, store.uploadCleanupHours],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {
@@ -255,7 +256,33 @@ export function MobileSettings({ onClose }: Props) {
           </>
         );
       }
-      return null;
+      // Generic segmented (e.g. uploadCleanupHours): a row of tap-to-select
+      // buttons. Layout polish deferred to BET-420; this just makes the entry
+      // reachable on mobile.
+      const curStr = String(cur ?? "");
+      return (
+        <div>
+          <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+          <div id={id} role="radiogroup" className="mt-1 flex flex-wrap gap-2">
+            {entry.options?.map((opt) => {
+              const selected = opt.value === curStr;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => void commitKey(entry, opt.value)}
+                  className={`px-3 py-1.5 rounded-lg text-sm border ${selected ? "border-accent bg-accent text-bg" : "border-border text-text-muted"}`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+          {entry.help && <div className="text-meta text-text-faint">{entry.help}</div>}
+        </div>
+      );
     }
     // text / password
     const isCred = entry.commitOnBlur;

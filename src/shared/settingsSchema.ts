@@ -222,6 +222,21 @@ export const SETTINGS: SettingEntry[] = [
     default: "",
     placeholder: "~/Downloads (default)",
   },
+  {
+    id: "uploadCleanupHours",
+    section: "files",
+    label: "Upload cleanup interval",
+    help: "How long files you drag into a session stay on the box before the hourly sweep deletes them. 0 disables cleanup (keep everything). Box-server setting — applies to uploads from both desktop and mobile.",
+    control: "segmented",
+    configKey: "uploadCleanupHours",
+    platform: "both",
+    default: 24,
+    options: [
+      { value: "24", label: "24 hours" },
+      { value: "168", label: "7 days" },
+      { value: "0", label: "Never (keep)" },
+    ],
+  },
 
   // ----- extensions (plugins, skill registries, AI-CLI flags) -----
   {
