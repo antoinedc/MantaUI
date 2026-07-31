@@ -49,6 +49,8 @@ export function ProcessPanel({
   elapsedSeconds,
   logLines,
   onCopyDiagnostics,
+  onCancel,
+  remainingLabel,
   children,
   logHeight = 172,
   copyLabel = "Copy diagnostics",
@@ -59,6 +61,13 @@ export function ProcessPanel({
   elapsedSeconds: number;
   logLines: string[];
   onCopyDiagnostics?: () => void | Promise<void>;
+  /** Optional Cancel — renders a Cancel button at the right of the status
+   *  line (BET-421 §A/§D: the Codex device-code wait and the Claude CLI
+   *  install both need a real cancel, not a bare spinner). */
+  onCancel?: () => void;
+  /** Optional countdown label that replaces the "N of M · elapsed" counter
+   *  (BET-421 §D: Codex shows "3:30 remaining" instead of "1 of 1 · 0:45"). */
+  remainingLabel?: string;
   children?: ReactNode;
   logHeight?: number;
   copyLabel?: string;
@@ -75,22 +84,19 @@ export function ProcessPanel({
   }, [logLines, logOpen]);
 
   const total = stages.length;
-  // Clamp the displayed index for the "N of M" line. While running, it's the
-  // current stage (1-based); when done we show the last stage as completed.
   const displayIndex = Math.min(Math.max(activeIndex + 1, 1), total);
   const stageLabel =
     status === "done"
       ? stages[total - 1] ?? "Done"
       : (stages[activeIndex] ?? stages[0] ?? "");
-  // Bar width: fraction of stages completed. Done → full. Error → frozen at
-  // the failed stage's progress (displayIndex/total).
   const barFraction =
     status === "done" ? 1 : total > 0 ? displayIndex / total : 0;
 
-  // The log only renders when there's something to show AND no inline prompt
-  // is currently monopolizing the panel (mirrors the SSH installer, which
-  // hides the log while a fingerprint / passphrase card is up).
-  const showLog = logOpen && !children;
+  // The log toggle only makes sense when there ARE log lines. Operations
+  // like the Codex wait and the opencode restart have no log pane — hiding
+  // the toggle keeps the status line clean.
+  const hasLog = logLines.length > 0;
+  const showLog = logOpen && !children && hasLog;
 
   return (
     <section className="space-y-2">
@@ -112,19 +118,31 @@ export function ProcessPanel({
         )}
         <span>{stageLabel}</span>
         <span className="text-text-muted">
-          {displayIndex} of {total} · {formatElapsed(elapsedSeconds)}
+          {remainingLabel ?? `${displayIndex} of ${total} · ${formatElapsed(elapsedSeconds)}`}
         </span>
-        <button
-          onClick={() => setLogOpen((o) => !o)}
-          className="ml-auto text-meta text-text-muted hover:text-text inline-flex items-center gap-1"
-          aria-expanded={logOpen}
-        >
-          {logOpen ? (
-            <>Hide log <ChevronUp size={12} aria-hidden="true" /></>
-          ) : (
-            <>Show log <ChevronDown size={12} aria-hidden="true" /></>
-          )}
-        </button>
+        {hasLog && (
+          <button
+            onClick={() => setLogOpen((o) => !o)}
+            className="ml-auto text-meta text-text-muted hover:text-text inline-flex items-center gap-1"
+            aria-expanded={logOpen}
+          >
+            {logOpen ? (
+              <>Hide log <ChevronUp size={12} aria-hidden="true" /></>
+            ) : (
+              <>Show log <ChevronDown size={12} aria-hidden="true" /></>
+            )}
+          </button>
+        )}
+        {onCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            className={`${hasLog ? "" : "ml-auto"} text-meta text-text-muted hover:text-text`}
+            style={{ border: `1px solid ${DANGER}`, color: DANGER, borderRadius: 4, padding: "2px 8px" }}
+          >
+            Cancel
+          </button>
+        )}
       </div>
       <div className="h-0.5 rounded-full overflow-hidden bg-bg-elev" aria-hidden>
         <div

@@ -2245,6 +2245,23 @@ export type ConnectPhase =
       preExisting?: boolean;
     }
   | {
+      // BET-421 §E: the `claude` CLI is not on the box. The card spawns the
+      // official installer over the pty bus (launcher `claude-cli-install`)
+      // and polls `opencodeClaudeCliStatus()` until the binary appears. On
+      // success it re-fires `{action:"start"}` to enter `needsClaudeLogin`
+      // using the SAME server-side sessionKey (startClaudeLogin only stamps
+      // metadata + backs up credentials; it does not spawn, so the key is
+      // still valid). On failure the user gets Try again / Use a different
+      // model / Install manually.
+      kind: "installingClaudeCli";
+      ptySessionKey: string;
+      // The sessionKey the server already minted for the eventual
+      // `needsClaudeLogin` — reused after install so we don't double-mint.
+      loginSessionKey: string;
+      startedAt: number;
+      cwd: string;
+    }
+  | {
       // BET-354: `restarted` is true when the server already called
       // `restartOpencode()` for this transition (the Claude "completed"
       // path). When true, the `applying` effect skips the renderer's
@@ -2258,7 +2275,7 @@ export type ConnectPhase =
       restarted?: boolean;
     }
   | { kind: "done" }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string; reason?: "claude-cli-install" };
 
 /**
  * Pull the device code out of an opencode OAuth instructions string, e.g.
@@ -2317,6 +2334,23 @@ export function formatRemaining(
 }
 
 /**
+ * BET-421 §D: derive an opencode provider `id` from a human-readable name.
+ * Lowercase, ASCII alphanumeric + hyphens only, collapsed whitespace →
+ * single hyphen, trimmed leading/trailing hyphens. Non-ASCII chars are
+ * dropped (opencode ids are ASCII-safe keys persisted in opencode.jsonc).
+ * Returns "" for an empty/whitespace-only name so the caller can gate the
+ * save button. Pure so the derivation is unit-testable.
+ */
+export function slugifyProviderId(name: string): string {
+  if (typeof name !== "string") return "";
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug;
+}
+
+/**
  * Single source of user-facing status text for every phase of the connect
  * flow. Centralised so no string is duplicated across branches and so a
  * future i18n pass replaces one place, not five.
@@ -2335,6 +2369,8 @@ export function connectPhaseLabel(state: ConnectPhase): string {
       return state.preExisting
         ? "Already signed in"
         : "Awaiting Claude sign-in";
+    case "installingClaudeCli":
+      return "Installing the Claude CLI";
     case "applying":
       return "Applying…";
     case "done":

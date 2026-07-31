@@ -70,6 +70,7 @@ import {
   parseDeviceCode,
   deviceCodeFallback,
   formatRemaining,
+  slugifyProviderId,
   connectPhaseLabel,
   isPollExpired,
   describeSubscriptionStatus,
@@ -3135,6 +3136,23 @@ describe("formatRemaining", () => {
   });
 });
 
+describe("slugifyProviderId", () => {
+  it("lowercases and hyphenates a name", () => {
+    expect(slugifyProviderId("Groq")).toBe("groq");
+    expect(slugifyProviderId("My Cool API")).toBe("my-cool-api");
+    expect(slugifyProviderId("VoskaAI v2")).toBe("voskaai-v2");
+  });
+  it("drops non-ASCII and collapses runs of non-alphanumerics", () => {
+    expect(slugifyProviderId("Élan API!")).toBe("lan-api");
+    expect(slugifyProviderId("a---b")).toBe("a-b");
+  });
+  it("returns empty string for blank input", () => {
+    expect(slugifyProviderId("")).toBe("");
+    expect(slugifyProviderId("   ")).toBe("");
+    expect(slugifyProviderId("---")).toBe("");
+  });
+});
+
 // ===== connectPhaseLabel (BET-312) =====
 //
 // Single source of user-facing status text. The exhaustive switch in
@@ -3147,6 +3165,7 @@ describe("connectPhaseLabel", () => {
     expect(
       connectPhaseLabel({ kind: "waiting", url: "u", instructions: "i", methodIndex: 0 }),
     ).toBe("Waiting for sign-in");
+    expect(connectPhaseLabel({ kind: "installingClaudeCli", ptySessionKey: "k", loginSessionKey: "l", startedAt: 0, cwd: "~" })).toBe("Installing the Claude CLI");
     expect(
       connectPhaseLabel({
         kind: "needsCode",

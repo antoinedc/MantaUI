@@ -26,12 +26,13 @@
 //                     until the credentials file appears (or
 //                     "pre-existing" — the user already had a working
 //                     login), then transitions to `applying`.
-//   applying          restart + 30s poll. confirmRestart=true gates step 1
-//                     behind a confirm bar; false starts the restart
-//                     immediately. The Claude path bypasses the confirm
-//                     bar (BET-354: confirmRestart is settings-only;
-//                     onboarding does not show it because there are no
-//                     active sessions to drop).
+//   applying          restart + 30s poll. The restart fires immediately;
+//                     the panel-level restart banner (BET-420) is cleared
+//                     via useStore on success. The Claude path sets
+//                     phase.restarted=true (the server already restarted
+//                     as part of pollClaudeLogin) so this effect skips
+//                     its own restart — a third back-to-back restart
+//                     would flap systemd.
 //
 // Pure helpers (connectPhaseLabel, parseDeviceCode, isPollExpired) live in
 // chatUtils.ts so every "what does this phase mean?" / "has the poll
@@ -57,6 +58,7 @@ import {
 import { CopyButton } from "./CopyButton";
 import { Terminal } from "./Terminal";
 import { useStore } from "./store";
+import { ProcessPanel } from "./ProcessPanel";
 
 // Poll cadences (BET-312, BET-354): 3s for both the device-code wait and
 // the post-restart readiness poll. BET-354 adds a 1s tick for the
@@ -70,6 +72,10 @@ const RESTART_POLL_INTERVAL_MS = 3_000;
 const RESTART_POLL_LIMIT_MS = 30_000;
 const CLAUDE_POLL_INTERVAL_MS = 1_000;
 const CLAUDE_POLL_LIMIT_MS = 5 * 60 * 1_000;
+// BET-421 §E: lazy Claude CLI install poll. The installer writes the binary
+// to ~/.local/bin/claude; we poll opencodeClaudeCliStatus() until it appears.
+const CLAUDE_INSTALL_POLL_INTERVAL_MS = 2_000;
+const CLAUDE_INSTALL_POLL_LIMIT_MS = 5 * 60 * 1_000;
 
 // Track the in-flight action so an unmounted / unmounting component cannot
 // call setPhase on an unmounted tree (React's "set state on unmounted
@@ -99,11 +105,15 @@ export function ConnectProvider({
   onCancel: () => void;
 }): JSX.Element {
   const [phase, setPhase] = useState<ConnectPhase>({ kind: "starting" });
-  // BET-421 §D: device-code wait elapsed + remaining countdown. Ticked once
-  // a second while `phase.kind === "waiting"` so the user sees how long is
-  // left on the code instead of a bare "Waiting for sign-in".
+  // BET-421 §A/§D: elapsed timers for the phases that render a ProcessPanel.
+  // Each ticks once a second while its phase is active; reset to 0 on exit.
   const [waitingElapsed, setWaitingElapsed] = useState(0);
+  const [applyingElapsed, setApplyingElapsed] = useState(0);
+  const [installElapsed, setInstallElapsed] = useState(0);
   const waitingStartedRef = useRef<number>(0);
+  const applyingStartedRef = useRef<number>(0);
+  const installStartedRef = useRef<number>(0);
+
   useEffect(() => {
     if (phase.kind !== "waiting") {
       setWaitingElapsed(0);
@@ -116,6 +126,33 @@ export function ConnectProvider({
     }, 1000);
     return () => clearInterval(t);
   }, [phase.kind, phase.kind === "waiting" ? phase.methodIndex : null]);
+
+  useEffect(() => {
+    if (phase.kind !== "applying") {
+      setApplyingElapsed(0);
+      return;
+    }
+    applyingStartedRef.current = Date.now();
+    setApplyingElapsed(0);
+    const t = setInterval(() => {
+      setApplyingElapsed(Math.floor((Date.now() - applyingStartedRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [phase.kind, phase.kind === "applying" ? phase.restartConfirmed : null, phase.kind === "applying" ? phase.restarted : null]);
+
+  useEffect(() => {
+    if (phase.kind !== "installingClaudeCli") {
+      setInstallElapsed(0);
+      return;
+    }
+    installStartedRef.current = Date.now();
+    setInstallElapsed(0);
+    const t = setInterval(() => {
+      setInstallElapsed(Math.floor((Date.now() - installStartedRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [phase.kind, phase.kind === "installingClaudeCli" ? phase.ptySessionKey : null]);
+
   const mounted = useMounted();
 
   // Wraps setPhase to guard against late-firing async paths (status polls,
@@ -156,11 +193,44 @@ export function ConnectProvider({
       // Terminal's own useEffect) so the IPty sizes to the rendered
       // cols/rows rather than a fixed 80x24.
       if (res.shape === "claude-login") {
+        // BET-421 §E: before entering sign-in, probe whether the `claude`
+        // CLI is actually on the box. install.sh no longer installs it; the
+        // app owns it now. If the binary is missing, transition to
+        // `installingClaudeCli` instead of `needsClaudeLogin` — spawning
+        // `claude auth login` against a missing binary would ENOENT. The
+        // server-side sessionKey is preserved for reuse after install
+        // (startClaudeLogin only stamps metadata; it doesn't spawn).
+        const sessionKey = typeof res.sessionKey === "string" ? res.sessionKey : "";
+        const startedAt = typeof res.startedAt === "number" ? res.startedAt : Date.now();
+        const cwd = typeof res.cwd === "string" ? res.cwd : "~";
+        try {
+          const status = await window.api.opencodeClaudeCliStatus();
+          if (cancelled) return;
+          if (status && !status.installed) {
+            // Generate a client-side pty session key for the installer.
+            // The Terminal's pty:spawn registers it; we kill it on success.
+            const installKey = `claude-install-${Date.now()}`;
+            safeSetPhase({
+              kind: "installingClaudeCli",
+              ptySessionKey: installKey,
+              loginSessionKey: sessionKey,
+              startedAt,
+              cwd,
+            });
+            return;
+          }
+        } catch {
+          // Probe failed (box unreachable, etc.) — fall through to the
+          // normal sign-in path. If the binary really is missing, the
+          // claude auth login spawn will ENOENT and the claude-status
+          // poll will timeout, surfacing a normal failure. Better to try
+          // than to block the whole flow on a probe failure.
+        }
         safeSetPhase({
           kind: "needsClaudeLogin",
-          ptySessionKey: typeof res.sessionKey === "string" ? res.sessionKey : "",
-          startedAt: typeof res.startedAt === "number" ? res.startedAt : Date.now(),
-          cwd: typeof res.cwd === "string" ? res.cwd : "~",
+          ptySessionKey: sessionKey,
+          startedAt,
+          cwd,
           url: "",
           inputError: undefined,
           preExisting: false,
@@ -277,6 +347,85 @@ export function ConnectProvider({
     return () => window.clearInterval(handle);
   }, [phase, safeSetPhase, mounted]);
 
+  // BET-421 §E: lazy Claude CLI install poll. While `installingClaudeCli`,
+  // poll opencodeClaudeCliStatus() every 2s. When the binary appears on
+  // disk, kill the installer pty and re-fire `{action:"start"}` to enter
+  // `needsClaudeLogin` with the SAME server-side sessionKey. Hard cap 5 min
+  // — same rationale as the device-code cap. A pty-exit with no binary is
+  // an installer failure → surface the failure card with three actions.
+  useEffect(() => {
+    if (phase.kind !== "installingClaudeCli") return;
+    const installKey = phase.ptySessionKey;
+    const loginKey = phase.loginSessionKey;
+    const startedAt = phase.startedAt;
+    const cwd = phase.cwd;
+    const startedWall = Date.now();
+    let exited = false;
+
+    // Listen for the installer pty exiting — if it exits and the binary
+    // still isn't installed, that's a failure (curl failed, bash errored,
+    // etc.). The Terminal owns the IPty; we just watch the event bus.
+    const dispose = window.api.onPtyEvent((ev) => {
+      if (ev.sessionKey !== installKey) return;
+      if (ev.kind === "exit") exited = true;
+    });
+
+    const handle = window.setInterval(async () => {
+      if (!mounted.current) return;
+      if (isPollExpired(startedWall, Date.now(), CLAUDE_INSTALL_POLL_LIMIT_MS)) {
+        window.clearInterval(handle);
+        dispose();
+        try { await window.api.ptyKill(installKey); } catch { /* best-effort */ }
+        safeSetPhase({
+          kind: "failed",
+          reason: "claude-cli-install",
+          message:
+            "The Claude CLI didn't install in time. The box itself is fine — try again, use a different model, or install it manually.",
+        });
+        return;
+      }
+      try {
+        const status = await window.api.opencodeClaudeCliStatus();
+        if (!mounted.current) return;
+        if (status && status.installed) {
+          window.clearInterval(handle);
+          dispose();
+          try { await window.api.ptyKill(installKey); } catch { /* best-effort */ }
+          // Binary is on disk → re-enter the normal sign-in flow using
+          // the server-side sessionKey we already minted.
+          safeSetPhase({
+            kind: "needsClaudeLogin",
+            ptySessionKey: loginKey,
+            startedAt,
+            cwd,
+            url: "",
+            inputError: undefined,
+            preExisting: false,
+          });
+          return;
+        }
+        // pty exited but binary still not found → installer failed.
+        if (exited) {
+          window.clearInterval(handle);
+          dispose();
+          safeSetPhase({
+            kind: "failed",
+            reason: "claude-cli-install",
+            message:
+              "The Claude CLI installer exited without installing the binary. The box itself is fine — try again, use a different model, or install it manually from https://claude.ai.",
+          });
+          return;
+        }
+      } catch {
+        /* keep polling; box may be transiently unreachable */
+      }
+    }, CLAUDE_INSTALL_POLL_INTERVAL_MS);
+    return () => {
+      window.clearInterval(handle);
+      dispose();
+    };
+  }, [phase, safeSetPhase, mounted]);
+
   // Device-code poll (waiting). Polls `{action:"status"}` every 3s; the
   // provider-id appearing in `connected[]` is the success signal (opencode
   // has acknowledged the OAuth callback). Hard cap of 5 minutes — device
@@ -308,9 +457,8 @@ export function ConnectProvider({
     return () => window.clearInterval(handle);
   }, [phase.kind, id, safeSetPhase]);
 
-  // Restart + readiness poll (applying). confirmRestart=true gates step 1
-  // behind a confirm bar that the user must explicitly approve; once
-  // approved (or when the prop is false), the restart fires and the 30s
+  // Restart + readiness poll (applying). The restart fires immediately
+  // and the 30s poll drives the transition to `done` / `failed`. The 30s
   // poll drives the transition to `done` / `failed`. The 30s cap is what
   // catches a mistyped API key: the write succeeds, but the re-read is the
   // only proof the credential is real.
@@ -415,12 +563,20 @@ export function ConnectProvider({
       )}
 
       {phase.kind === "waiting" && (
-        <WaitingBlock
-          url={phase.url}
-          instructions={phase.instructions}
+        <ProcessPanel
+          stages={["Waiting for sign-in"]}
+          activeIndex={0}
+          status="running"
           elapsedSeconds={waitingElapsed}
+          logLines={[]}
+          remainingLabel={formatRemaining(0, waitingElapsed * 1000, DEVICE_POLL_LIMIT_MS)}
           onCancel={onCancel}
-        />
+        >
+          <WaitingBlockBody
+            url={phase.url}
+            instructions={phase.instructions}
+          />
+        </ProcessPanel>
       )}
 
       {phase.kind === "needsCode" && (
@@ -563,8 +719,46 @@ export function ConnectProvider({
         />
       )}
 
+      {phase.kind === "installingClaudeCli" && (
+        <ProcessPanel
+          stages={["Installing the Claude CLI"]}
+          activeIndex={0}
+          status="running"
+          elapsedSeconds={installElapsed}
+          logLines={[]}
+          remainingLabel={formatRemaining(0, installElapsed * 1000, CLAUDE_INSTALL_POLL_LIMIT_MS)}
+          onCancel={onCancel}
+        >
+          <div className="space-y-2">
+            <p className="text-text-muted">
+              The <b className="text-text">claude</b> CLI isn't on this box yet.
+              Installing it now via the official installer — no action needed.
+            </p>
+            <details className="text-meta">
+              <summary className="text-text-faint cursor-pointer hover:text-text-muted">
+                Show what's happening on the box
+              </summary>
+              <div className="rounded border border-border overflow-hidden h-40 bg-[var(--inset)] mt-1">
+                <Terminal
+                  sessionKey={phase.ptySessionKey}
+                  cwd={phase.cwd}
+                  active={true}
+                  launcher={{ id: "claude-cli-install", flags: {} }}
+                />
+              </div>
+            </details>
+          </div>
+        </ProcessPanel>
+      )}
+
       {phase.kind === "applying" && (
-        <div className="text-text-muted">Restarting opencode…</div>
+        <ProcessPanel
+          stages={["Restarting opencode"]}
+          activeIndex={0}
+          status="running"
+          elapsedSeconds={applyingElapsed}
+          logLines={[]}
+        />
       )}
 
       {phase.kind === "done" && (
@@ -574,46 +768,68 @@ export function ConnectProvider({
       {phase.kind === "failed" && (
         <div className="space-y-2">
           <div className="text-danger break-words">{phase.message}</div>
-          <button
-            onClick={retry}
-            className="px-2 py-1 border border-border rounded text-text-muted hover:text-text"
-          >
-            Retry
-          </button>
+          {phase.reason === "claude-cli-install" ? (
+            // BET-421 §E.4: three actions — Try again, Use a different
+            // model (Codex/Kimi/custom need no binary — this is the
+            // important one), Install manually. State plainly that the
+            // box itself is fine (already in the message above).
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={retry}
+                className="px-2 py-1 rounded text-meta"
+                style={{ background: "var(--accent-solid)", color: "var(--on-accent)" }}
+              >
+                Try again
+              </button>
+              <button
+                onClick={onCancel}
+                className="px-2 py-1 rounded text-meta"
+                style={{ border: "1px solid var(--accent)", color: "var(--accent)" }}
+              >
+                Use a different model
+              </button>
+              <a
+                href="https://claude.ai"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-2 py-1 rounded text-meta inline-flex items-center"
+                style={{ border: "1px solid var(--border)", color: "var(--text-muted)" }}
+              >
+                Install manually
+              </a>
+            </div>
+          ) : (
+            <button
+              onClick={retry}
+              className="px-2 py-1 border border-border rounded text-text-muted hover:text-text"
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-// Device-code block (BET-421 §D). Two labelled steps the user works through:
+// Device-code block body (BET-421 §D). Renders as ProcessPanel children —
+// the spinner + countdown + Cancel live in the ProcessPanel status line.
+// Two labelled steps the user works through:
 //   1. Open the URL (copy + open).
 //   2. Enter the code shown on that page.
 // The device code is regex-scraped out of the `instructions` string by
-// parseDeviceCode. When nothing parses (the provider reformatted the
-// sentence), deviceCodeFallback points the user at the verbatim instructions
-// instead of rendering an empty code slot — the chip silently vanishing was
-// the exact fragility the issue calls out.
-//
-// The upstream `instructions` text is demoted to a collapsed
-// "Message from ChatGPT" disclosure — it's upstream text we render verbatim,
-// not our framing; we own the card's headline. While waiting, an elapsed +
-// remaining countdown + a real Cancel replace the old bare "Waiting for
-// sign-in" that could sit for five minutes with no feedback.
-function WaitingBlock({
+// parseDeviceCode. When nothing parses, deviceCodeFallback points the user
+// at the verbatim instructions instead of rendering an empty code slot.
+// The upstream `instructions` text is demoted to a collapsed disclosure.
+function WaitingBlockBody({
   url,
   instructions,
-  elapsedSeconds,
-  onCancel,
 }: {
   url: string;
   instructions: string;
-  elapsedSeconds: number;
-  onCancel: () => void;
 }) {
   const code = parseDeviceCode(instructions);
   const fallback = deviceCodeFallback(instructions);
-  const remaining = formatRemaining(0, elapsedSeconds * 1000, DEVICE_POLL_LIMIT_MS);
   return (
     <div className="space-y-2">
       <div className="text-text">
@@ -647,21 +863,6 @@ function WaitingBlock({
         ) : (
           <p className="text-text-muted">The code will appear on the page above.</p>
         )}
-      </div>
-      <div className="flex items-center gap-3 text-text-faint">
-        <span
-          aria-hidden
-          className="inline-block w-2.5 h-2.5 rounded-full border-2 border-accent border-t-transparent animate-spin"
-        />
-        <span>Waiting for sign-in · {remaining}</span>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="ml-auto px-2 py-1 rounded text-meta"
-          style={{ border: "1px solid var(--danger)", color: "var(--danger)" }}
-        >
-          Cancel
-        </button>
       </div>
       {instructions && (
         <details className="text-meta">
