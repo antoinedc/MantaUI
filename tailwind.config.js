@@ -73,8 +73,15 @@ export default {
     // Replaced (not extended) so only the 11 steps generate padding/margin/
     // gap/space/inset utilities. Dimension scales below are decoupled.
     spacing: spacingScale,
-    width: fullSpacingScale,
-    height: fullSpacingScale,
+    // MUST be dimensionScale, not fullSpacingScale. fullSpacingScale is only
+    // the numeric steps — it has no `full`/`screen`/`min`/`max`. Setting
+    // width/height to it silently DELETED `w-full` (73 usages) and `h-full`
+    // (17 usages) from the build, so every full-height flex chain in the app
+    // collapsed to content height: the sidebar stopped filling the window and
+    // the transcript container stopped scrolling. Nothing failed — the classes
+    // just compiled to nothing. (BET-422 regression, fixed in BET-447.)
+    width: dimensionScale,
+    height: dimensionScale,
     minHeight: dimensionScale,
     maxHeight: dimensionScale,
     extend: {
