@@ -3,6 +3,7 @@ import {
   type AgentFileReady,
   type AuthPairResult,
   type DelegateJob,
+  type DelegateApproval,
   type DesktopNotifyPayload,
   type OpencodeEvent,
   type OpencodeProviderAuthRequest,
@@ -907,6 +908,15 @@ export const httpApi: Api = {
     ),
   delegateStop: (id) => rpc(IPC.delegateStop, id),
   delegateDelete: (id) => rpc(IPC.delegateDelete, id),
+  // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls
+  // pending-approvals for the viewed parent session and shows ONE card.
+  delegatePendingApprovals: (sessionId) =>
+    rpc<DelegateApproval[] | { approvals: DelegateApproval[] }>(IPC.delegatePendingApprovals, sessionId).then(
+      (r) => (Array.isArray(r) ? r : Array.isArray(r?.approvals) ? r.approvals : []),
+    ),
+  delegateApprove: (id, tools) =>
+    rpc<{ ok: boolean }>(IPC.delegateApprove, { id, tools }),
+  delegateDecline: (id) => rpc<{ ok: boolean }>(IPC.delegateDecline, id),
   // BET-414: the box publishes `delegate.updated` on the /events WS whenever a
   // job's status/activity changes. The sidebar subscribes so new jobs nest
   // under their parent within ~1s (vs. the 30s poll). The payload is the raw

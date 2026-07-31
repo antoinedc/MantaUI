@@ -4,6 +4,8 @@ import type {
   AuthClaimInput,
   AuthPairResult,
   DelegateJob,
+  DelegateApproval,
+  DelegateApprovalTool,
   DesktopNotifyPayload,
   OpencodeAgent,
   OpencodeCommand,
@@ -289,6 +291,12 @@ export interface Api {
   delegateList(sessionId?: string): Promise<DelegateJob[]>;
   delegateStop(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   delegateDelete(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
+  // BET-418 §A pre-flight approval: the renderer polls pending approvals for
+  // the viewed parent session and shows ONE approval card before the job is
+  // created. approve carries optional edited tools; decline cancels.
+  delegatePendingApprovals(sessionId?: string): Promise<DelegateApproval[]>;
+  delegateApprove(id: string, tools?: DelegateApprovalTool[]): Promise<{ ok: boolean }>;
+  delegateDecline(id: string): Promise<{ ok: boolean }>;
   // BET-414: the box publishes a `delegate.updated` bus event whenever a job's
   // status/activity changes (created, running, finished, stopped, deleted). The
   // sidebar subscribes so a new job nests under its parent within ~1s instead

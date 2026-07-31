@@ -55,6 +55,9 @@ const MAX_TERMINAL_JOBS = 50;
 const ACTIVITY_INTERVAL_MS = 10_000;
 // Sweeper cadence (matches capabilities.mjs SWEEP_INTERVAL_MS).
 const SWEEP_INTERVAL_MS = 60_000;
+// BET-418 §A: a `delegate` call requesting approval blocks this long for the
+// user's decision before being treated as declined.
+const APPROVAL_TIMEOUT_MS = 2 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Store (atomic, same pattern as capabilities.mjs / schedule.mjs)
@@ -144,6 +147,48 @@ export function buildCompletionText(job) {
 export function deriveName(prompt) {
   const words = String(prompt ?? "").trim().split(/\s+/).slice(0, 4).join(" ");
   return slugify(words || "background");
+}
+
+// ---------------------------------------------------------------------------
+// Pre-flight permission ruleset (BET-418 §A)
+//
+// A background job is created with a permission ruleset so it NEVER asks the
+// user anything once running (asking would hang the job until the 30-min
+// timeout, since BET-380's parent-panel routing is gone). The model declares
+// the access it needs via the `delegate` tool's `tools` argument
+// (`[{permission, pattern}]`, action defaults to "allow"). This builder
+// normalizes the entries and appends the MANDATORY catch-all
+// `{permission:"*", pattern:"**", action:"deny"}` — if an unmatched tool
+// resolved to `ask`, the job would hang exactly as before. Pure + exported
+// for unit tests.
+//
+// Returns null when the input is empty (no tools requested) — callers decide
+// whether to skip the ruleset entirely (trust mode / no tools) or to still
+// apply the catch-all deny alone.
+// ---------------------------------------------------------------------------
+export function buildPermissionRuleset(tools) {
+  const input = Array.isArray(tools) ? tools : [];
+  const rules = [];
+  for (const t of input) {
+    if (!t || typeof t !== "object") continue;
+    const permission = typeof t.permission === "string" ? t.permission : null;
+    const pattern = typeof t.pattern === "string" ? t.pattern : null;
+    if (!permission || !pattern) continue;
+    const action = t.action === "deny" ? "deny" : "allow";
+    rules.push({ permission, pattern, action });
+  }
+  // De-dup identical rules (model may repeat).
+  const seen = new Set();
+  const deduped = rules.filter((r) => {
+    const key = `${r.permission}\u0000${r.pattern}\u0000${r.action}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  // The catch-all deny MUST be last — it is what stops an unmatched tool from
+  // resolving to `ask` and hanging the job.
+  deduped.push({ permission: "*", pattern: "**", action: "deny" });
+  return deduped;
 }
 
 // Find the tmux session that owns a given opencode sessionID. Mirrors the
@@ -289,6 +334,7 @@ export async function startJob(input, deps = {}) {
       chatMode: true,
       worktreePath: worktree,
       oc: deps.oc,
+      permission: input?.permission,
     });
     const owner2 = resolveOwner(projects, parentSessionID);
     const proj = (projects || []).find((p) => p.tmuxSession === tmuxSession);
@@ -912,6 +958,82 @@ export async function deleteJob(id, deps = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Pre-flight approval (BET-418 §A)
+//
+// When trust mode is OFF and the model declared `tools`, the `delegate` call
+// blocks for a single approval before creating anything. The engine owns a
+// pending-approvals map (approvalId → {approval, resolve, timer}); the REST
+// handler creates an approval, publishes `delegate.approval.requested`, and
+// awaits the decision. The renderer's approval card resolves it via
+// approve/decline; a 2-minute timeout resolves it as declined. Pure-ish: the
+// map + timers are owned by the engine instance; exported for unit tests.
+// ---------------------------------------------------------------------------
+
+export function createApprovalState({ now = () => Date.now() } = {}) {
+  const pending = new Map();
+  return {
+    pending,
+    create({ parentSessionID, name, prompt, tools }) {
+      const id = genId();
+      const approval = {
+        id,
+        parentSessionID,
+        name,
+        prompt,
+        tools: Array.isArray(tools) ? tools : [],
+        createdAt: now(),
+      };
+      pending.set(id, { approval, resolve: null, timer: null });
+      return approval;
+    },
+    list(parentSessionID) {
+      const out = [];
+      for (const { approval } of pending.values()) {
+        if (parentSessionID && approval.parentSessionID !== parentSessionID) continue;
+        out.push({ ...approval });
+      }
+      return out;
+    },
+    get(id) {
+      const entry = pending.get(id);
+      return entry ? { ...entry.approval } : null;
+    },
+    /**
+     * Block until the approval is resolved or the timeout elapses.
+     * @returns {{ decision: "approve"|"decline"|"timeout", tools?: Array }}
+     */
+    awaitDecision(id, timeoutMs = APPROVAL_TIMEOUT_MS) {
+      const entry = pending.get(id);
+      if (!entry) return Promise.resolve({ decision: "declined" });
+      return new Promise((resolve) => {
+        entry.resolve = (decision, tools) => {
+          if (entry.timer) clearTimeout(entry.timer);
+          entry.timer = null;
+          pending.delete(id);
+          resolve({ decision, tools });
+        };
+        entry.timer = setTimeout(() => {
+          pending.delete(id);
+          resolve({ decision: "timeout" });
+        }, timeoutMs);
+      });
+    },
+    resolve(id, decision, tools) {
+      const entry = pending.get(id);
+      if (!entry || !entry.resolve) return false;
+      entry.resolve(decision, tools);
+      return true;
+    },
+    clear() {
+      for (const { timer } of pending.values()) {
+        if (timer) clearTimeout(timer);
+      }
+      pending.clear();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Engine factory — wires the runtime deps once (in src/server/index.mjs) and
 // returns bound methods the REST/RPC handlers + the pump call. Mirrors the
 // createPromptDelivery / createWebhookEngine pattern.
@@ -919,8 +1041,38 @@ export async function deleteJob(id, deps = {}) {
 
 export function createDelegateEngine(deps) {
   const sawBusy = new Map();
+  const approvals = deps.approvals ?? createApprovalState({ now: deps.now });
+  // startJobWithApproval: the REST handler's entry point (BET-418 §A). Builds
+  // the ruleset, requests approval when trust mode is OFF + tools were
+  // declared, and only then starts the job. Returns the startJob result OR
+  // {ok:false, error:"declined"}.
+  const startJobWithApproval = async (input) => {
+    const tools = Array.isArray(input?.tools) ? input.tools : [];
+    const trustMode = !!input?.trustMode;
+    // Skip the card entirely when trust mode is on (nothing to approve) or
+    // when the model declared no tools (nothing to scope). The ruleset is
+    // still applied so the catch-all deny keeps an unscoped job from asking.
+    let resolvedTools = tools;
+    if (!trustMode && tools.length > 0) {
+      const approval = approvals.create({
+        parentSessionID: input.parentSessionID,
+        name: deriveName(input.prompt),
+        prompt: input.prompt,
+        tools,
+      });
+      deps.publish?.({ kind: "delegate.approval.requested", payload: approval });
+      const { decision, tools: edited } = await approvals.awaitDecision(approval.id);
+      if (decision !== "approve") {
+        return { ok: false, error: decision === "timeout" ? "approval timed out" : "declined" };
+      }
+      resolvedTools = Array.isArray(edited) && edited.length > 0 ? edited : tools;
+    }
+    const permission = buildPermissionRuleset(resolvedTools);
+    return startJob({ ...input, permission }, deps);
+  };
   const bound = {
     startJob: (input) => startJob(input, deps),
+    startJobWithApproval,
     stopJob: (id) => stopJob(id, deps),
     deleteJob: (id) => deleteJob(id, deps),
     observeEvent: (evt) => observeEvent(evt, deps, sawBusy),
@@ -929,6 +1081,10 @@ export function createDelegateEngine(deps) {
     getJob: (id) => getJob(id, deps),
     startSweeper: (opts) => startSweeper(deps, opts),
     startActivityPoller: (opts) => startActivityPoller(deps, opts),
+    approvals,
+    approve: (id, tools) => approvals.resolve(id, "approve", tools),
+    decline: (id) => approvals.resolve(id, "declined"),
+    listPendingApprovals: (parentSessionID) => approvals.list(parentSessionID),
   };
   return bound;
 }

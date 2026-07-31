@@ -12,6 +12,8 @@ import {
   deleteJob,
   cleanupTerminalJob,
   stopJob,
+  buildPermissionRuleset,
+  createApprovalState,
   MAX_RUNNING_JOBS,
   createDelegateEngine,
 } from "./delegate.mjs";
@@ -666,3 +668,177 @@ test("finishJob is idempotent for an already-terminal job", async () => {
   assert.equal(h.delivered.length, 0);
 });
 
+
+// ----------------------------------------------------------------------------
+// buildPermissionRuleset (BET-418 §A)
+// ----------------------------------------------------------------------------
+
+test("buildPermissionRuleset appends the mandatory catch-all deny last", () => {
+  const rs = buildPermissionRuleset([
+    { permission: "bash", pattern: "pytest *" },
+    { permission: "write", pattern: "**/*.ts" },
+  ]);
+  assert.deepEqual(rs, [
+    { permission: "bash", pattern: "pytest *", action: "allow" },
+    { permission: "write", pattern: "**/*.ts", action: "allow" },
+    { permission: "*", pattern: "**", action: "deny" },
+  ]);
+  assert.equal(rs[rs.length - 1].action, "deny", "catch-all deny MUST be last");
+});
+
+test("buildPermissionRuleset with no tools still applies the catch-all deny (job asks nothing, denies everything)", () => {
+  const rs = buildPermissionRuleset([]);
+  assert.deepEqual(rs, [{ permission: "*", pattern: "**", action: "deny" }]);
+});
+
+test("buildPermissionRuleset de-dups identical rules and defaults action to allow", () => {
+  const rs = buildPermissionRuleset([
+    { permission: "bash", pattern: "pytest *" },
+    { permission: "bash", pattern: "pytest *" },
+    { permission: "bash", pattern: "rm *", action: "deny" },
+  ]);
+  assert.equal(rs.length, 3, "two allows (de-duped) + one explicit deny + catch-all");
+  assert.equal(rs[0].action, "allow");
+  assert.equal(rs[1].action, "deny");
+});
+
+// BET-418 §A acceptance: a job whose ruleset omits `bash` must FAIL its first
+// command, not stall. The ruleset has no bash-allow rule, so opencode resolves
+// the bash tool against the catch-all deny and rejects it immediately — there
+// is no `ask` path to hang on. This test pins the ruleset shape that produces
+// that behavior (the live opencode denial is an integration concern).
+test("a ruleset omitting bash has no bash-allow rule (command fails, no hang)", () => {
+  const rs = buildPermissionRuleset([
+    { permission: "write", pattern: "**/*.ts" },
+  ]);
+  const bashAllow = rs.find((r) => r.permission === "bash" && r.action === "allow");
+  assert.equal(bashAllow, undefined, "no bash-allow rule — bash hits the catch-all deny");
+  assert.equal(rs[rs.length - 1].action, "deny");
+});
+
+// ----------------------------------------------------------------------------
+// createApprovalState (BET-418 §A)
+// ----------------------------------------------------------------------------
+
+test("approval awaitDecision resolves on approve with edited tools", async () => {
+  const state = createApprovalState({ now: () => 1000 });
+  const a = state.create({ parentSessionID: "ses_p", name: "fix", prompt: "do it", tools: [{ permission: "bash", pattern: "pytest *" }] });
+  const p = state.awaitDecision(a.id, 10_000);
+  assert.ok(state.resolve(a.id, "approve", [{ permission: "bash", pattern: "pytest * -x" }]));
+  const res = await p;
+  assert.equal(res.decision, "approve");
+  assert.deepEqual(res.tools, [{ permission: "bash", pattern: "pytest * -x" }]);
+  assert.equal(state.list().length, 0, "approval cleared after resolve");
+});
+
+test("approval awaitDecision resolves as declined on decline", async () => {
+  const state = createApprovalState({ now: () => 1000 });
+  const a = state.create({ parentSessionID: "ses_p", name: "fix", prompt: "do it", tools: [] });
+  const p = state.awaitDecision(a.id, 10_000);
+  state.resolve(a.id, "declined");
+  const res = await p;
+  assert.equal(res.decision, "declined");
+});
+
+test("approval awaitDecision resolves as timeout when nobody answers", async () => {
+  const state = createApprovalState({ now: () => 1000 });
+  const a = state.create({ parentSessionID: "ses_p", name: "fix", prompt: "do it", tools: [] });
+  const res = await state.awaitDecision(a.id, 50);
+  assert.equal(res.decision, "timeout");
+  assert.equal(state.list().length, 0, "approval cleared after timeout");
+});
+
+test("approval list filters by parent session", () => {
+  const state = createApprovalState({ now: () => 1000 });
+  state.create({ parentSessionID: "ses_a", name: "a", prompt: "a", tools: [] });
+  state.create({ parentSessionID: "ses_b", name: "b", prompt: "b", tools: [] });
+  assert.equal(state.list("ses_a").length, 1);
+  assert.equal(state.list("ses_a")[0].name, "a");
+  assert.equal(state.list().length, 2);
+});
+
+// ----------------------------------------------------------------------------
+// createDelegateEngine.startJobWithApproval (BET-418 §A)
+// ----------------------------------------------------------------------------
+
+function approvalEngineHarness(initialJobs = []) {
+  let jobs = initialJobs.map((j) => ({ ...j }));
+  const published = [];
+  const newWindowCalls = [];
+  const parentWin = { index: 1, name: "parent", opencodeSessionId: "ses_p", paneCurrentPath: "/proj" };
+  const childWin = { index: 2, name: "run-the-tests", opencodeSessionId: "ses_child", paneCurrentPath: "/proj" };
+  const deps = {
+    load: async () => jobs.map((j) => ({ ...j })),
+    save: async (next) => { jobs = next.map((j) => ({ ...j })); },
+    publish: (evt) => published.push(evt),
+    deliver: async () => ({ delivered: true, queued: false }),
+    listMessages: async () => [],
+    gitRun: async () => ({ stdout: "" }),
+    gitAddWorktree: async () => { throw new Error("not a git repository"); },
+    gitRemoveWorktree: async () => ({ removed: true }),
+    killWindow: async () => {},
+    listProjects: async () => [{ tmuxSession: "proj", windows: [parentWin] }],
+    newWindow: async (input) => {
+      newWindowCalls.push(input);
+      return [{ tmuxSession: input.sessionName, windows: [parentWin, { ...childWin, name: input.windowName }] }];
+    },
+    oc: { createSession: async (input) => ({ id: "ses_child", directory: input?.directory }) },
+    now: () => 1_700_000_000_000,
+  };
+  const engine = createDelegateEngine(deps);
+  return { engine, published, get jobs() { return jobs; }, newWindowCalls };
+}
+
+test("startJobWithApproval auto-approves (no card) when trust mode is on", async () => {
+  const h = approvalEngineHarness([]);
+  const res = await h.engine.startJobWithApproval({
+    prompt: "run the tests",
+    parentSessionID: "ses_p",
+    parentDirectory: "/proj",
+    tools: [{ permission: "bash", pattern: "pytest *" }],
+    trustMode: true,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(h.published.find((e) => e.kind === "delegate.approval.requested"), undefined, "no approval requested in trust mode");
+});
+
+test("startJobWithApproval requests approval + declines when the user says Not now", async () => {
+  const h = approvalEngineHarness([]);
+  const p = h.engine.startJobWithApproval({
+    prompt: "run the tests",
+    parentSessionID: "ses_p",
+    parentDirectory: "/proj",
+    tools: [{ permission: "bash", pattern: "pytest *" }],
+    trustMode: false,
+  });
+  // The approval request was published.
+  const req = h.published.find((e) => e.kind === "delegate.approval.requested");
+  assert.ok(req, "approval requested");
+  // User declines.
+  assert.ok(h.engine.decline(req.payload.id));
+  const res = await p;
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "declined");
+});
+
+test("startJobWithApproval starts the job on approve and forwards the ruleset", async () => {
+  const h = approvalEngineHarness([]);
+  const p = h.engine.startJobWithApproval({
+    prompt: "run the tests",
+    parentSessionID: "ses_p",
+    parentDirectory: "/proj",
+    tools: [{ permission: "bash", pattern: "pytest *" }],
+    trustMode: false,
+  });
+  const req = h.published.find((e) => e.kind === "delegate.approval.requested");
+  // User approves with edited tools.
+  assert.ok(h.engine.approve(req.payload.id, [{ permission: "bash", pattern: "pytest * -x" }]));
+  const res = await p;
+  assert.equal(res.ok, true);
+  // newWindow received the permission ruleset ending in the catch-all deny.
+  const perm = h.newWindowCalls[0]?.permission;
+  assert.ok(Array.isArray(perm));
+  assert.deepEqual(perm[perm.length - 1], { permission: "*", pattern: "**", action: "deny" });
+  assert.equal(perm[0].permission, "bash");
+  assert.equal(perm[0].pattern, "pytest * -x");
+});

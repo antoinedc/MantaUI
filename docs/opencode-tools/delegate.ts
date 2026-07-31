@@ -111,16 +111,50 @@ export const delegate = tool({
           "through to the box. When omitted the job uses the box's default model. " +
           "Not validated client-side.",
       ),
+    tools: z
+      .array(
+        z.object({
+          permission: z
+            .string()
+            .describe(
+              'The opencode permission category the job needs, e.g. "bash", ' +
+                '"write", "edit", "webfetch". Matches the `permission` field on a ' +
+                "PermissionRequest.",
+            ),
+          pattern: z
+            .string()
+            .describe(
+              'A glob pattern scoping the grant, e.g. "pytest *", "**/*.ts", ' +
+                '"/tmp/*". Matches the `patterns` field on a PermissionRequest.',
+            ),
+        }),
+      )
+      .optional()
+      .describe(
+        "The access the job needs, declared up front. When trust mode is OFF, " +
+          "the user sees ONE approval card before the job starts (Start / Edit " +
+          "access / Not now) listing exactly what it will be allowed to do; the " +
+          "job then NEVER asks again. A catch-all deny is appended automatically " +
+          "so any tool you did NOT declare is refused (not prompted). Declare " +
+          "the minimum set: a job lacking a tool it needs FAILS its first " +
+          "command instead of hanging. Omit when the job needs no tool access.",
+      ),
   },
   async execute(args, context) {
     const res = await call("POST", "/api/delegate", {
       prompt: args.prompt,
       model: args.model,
+      tools: args.tools,
       sessionID: context.sessionID,
       directory: context.directory,
     });
     const name = res?.job?.name ?? res?.name ?? "background";
     const id = res?.job?.id ?? res?.id ?? "";
+    if (res && res.ok === false) {
+      // The job was declined (user picked "Not now") or the approval timed out.
+      // Surface the reason so the model does not retry blindly.
+      return `Background job "${name}" was not started: ${res?.error ?? "declined"}.`;
+    }
     return (
       `Started background job "${name}" (id ${id}). It runs in its own session and\n` +
       "worktree; the main conversation is not blocked. You do NOT have its results yet\n" +

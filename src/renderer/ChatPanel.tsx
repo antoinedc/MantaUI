@@ -16,6 +16,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Clock, X } from "lucide-react";
 import type {
+  DelegateApproval,
+  DelegateApprovalTool,
   OpencodeModel,
   QuestionRequest,
 } from "../shared/types";
@@ -57,7 +59,7 @@ import {
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
-import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
+import { DelegateApprovalCard, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
 import { useTranscriptState } from "./hooks/useTranscriptState";
@@ -163,8 +165,31 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     refreshWebhooks,
   } = resources;
   const setChatSubagents = useStore((s) => s.setChatSubagents);
-  // Prompt-history navigation (Up/Down cycles past prompts, terminal-style) is
-  // owned by useInputHistory — see the hook call after `updateInput` below.
+
+  // BET-418 §A: pre-flight background-job approvals. When trust mode is OFF
+  // and the model's `delegate` call declared `tools`, the server holds the
+  // call and publishes a pending approval; this panel polls for it and shows
+  // ONE card (Start / Edit access / Not now). The 3s poll is fast enough that
+  // the card appears within the 2-min approval window. Cleared on session
+  // change. Trust mode (chatAutoAllow) skips the card server-side, so none
+  // arrive here.
+  const [pendingApproval, setPendingApproval] = useState<DelegateApproval | null>(null);
+  const chatAutoAllowApproval = useStore((s) => s.chatAutoAllow);
+  useEffect(() => {
+    setPendingApproval(null);
+    if (chatAutoAllowApproval) return; // trust mode → server never requests approval
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const list = await window.api.delegatePendingApprovals(sessionId);
+        if (!cancelled && list.length > 0) setPendingApproval(list[0]);
+      } catch { /* non-fatal */ }
+    };
+    void poll();
+    const t = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [sessionId, chatAutoAllowApproval]);
+
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Per-child debounce timers for refetching child transcripts when their
   // expanded card is receiving SSE traffic. Keyed by childSessionId. 300ms
@@ -1921,6 +1946,26 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {compactionState && (
         <div className="shrink-0 px-4 pt-2">
           <CompactionCard state={compactionState} />
+        </div>
+      )}
+
+      {/* BET-418 §A: pre-flight background-job approval. Shown in the parent's */}
+      {/* panel when a `delegate` call declared tools and trust mode is OFF. */}
+      {pendingApproval && (
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <DelegateApprovalCard
+            approval={pendingApproval}
+            onApprove={(tools: DelegateApprovalTool[]) => {
+              const id = pendingApproval.id;
+              setPendingApproval(null);
+              void window.api.delegateApprove(id, tools).catch(() => { /* best-effort */ });
+            }}
+            onDecline={() => {
+              const id = pendingApproval.id;
+              setPendingApproval(null);
+              void window.api.delegateDecline(id).catch(() => { /* best-effort */ });
+            }}
+          />
         </div>
       )}
 

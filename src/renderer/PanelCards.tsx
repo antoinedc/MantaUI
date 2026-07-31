@@ -11,8 +11,10 @@
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useRef, useState } from "react";
-import { Clock, Webhook, Key, X } from "lucide-react";
+import { Clock, Webhook, Key, Bot, X } from "lucide-react";
 import type {
+  DelegateApproval,
+  DelegateApprovalTool,
   ScheduledJob,
   SecretMeta,
   SecretScope,
@@ -432,6 +434,136 @@ export const SecretsCard = memo(function SecretsCard({
           ))}
         </div>
       )}
+    </div>
+  );
+});
+
+// DelegateApprovalCard — ONE pre-flight approval shown in the parent's panel
+// before a background job is created (BET-418 §A). The model's `delegate`
+// call declared the access it needs (`tools`); the user picks Start (create
+// the job with that ruleset), Edit access (trim/augment the ruleset first),
+// or Not now (decline — the delegate call returns declined). A catch-all deny
+// is appended server-side so any tool NOT listed is refused, not prompted.
+// Mirrors the other cards' markup so it renders on desktop + mobile.
+export const DelegateApprovalCard = memo(function DelegateApprovalCard({
+  approval,
+  onApprove,
+  onDecline,
+}: {
+  approval: DelegateApproval;
+  onApprove: (tools: DelegateApprovalTool[]) => void;
+  onDecline: () => void;
+}) {
+  // Edit-access mode: a local, editable copy of the tools list. Start sends
+  // the (possibly edited) list; the server rebuilds the ruleset + catch-all.
+  const [editing, setEditing] = useState(false);
+  const [tools, setTools] = useState<DelegateApprovalTool[]>(
+    Array.isArray(approval.tools) ? approval.tools.map((t) => ({ ...t })) : [],
+  );
+  useEffect(() => {
+    setTools(Array.isArray(approval.tools) ? approval.tools.map((t) => ({ ...t })) : []);
+    setEditing(false);
+  }, [approval.id]);
+  return (
+    <div
+      className="rounded-md border bg-bg-elev px-3 py-2 text-meta"
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Bot size={16} aria-hidden="true" />
+        </span>
+        <span className="text-text">Background job approval</span>
+        <span className="text-text-faint truncate">· {approval.name}</span>
+        <button
+          onClick={onDecline}
+          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          title="Not now (decline)"
+          aria-label="Not now"
+        >
+          <X size={16} aria-hidden="true" />
+        </button>
+      </div>
+      <div className="text-text-muted mb-1 line-clamp-2">{approval.prompt}</div>
+      <div className="text-text-faint mb-1">Will be allowed to:</div>
+      {tools.length === 0 ? (
+        <div className="text-text-faint text-label">No tools declared.</div>
+      ) : (
+        <div className="flex flex-col gap-1 mb-1">
+          {tools.map((t, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              {editing ? (
+                <>
+                  <input
+                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-1.5 py-0.5 font-mono text-text"
+                    value={t.permission}
+                    onChange={(e) =>
+                      setTools((prev) =>
+                        prev.map((p, j) => (j === i ? { ...p, permission: e.target.value } : p)),
+                      )
+                    }
+                    placeholder="permission"
+                  />
+                  <input
+                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-1.5 py-0.5 font-mono text-text"
+                    value={t.pattern}
+                    onChange={(e) =>
+                      setTools((prev) =>
+                        prev.map((p, j) => (j === i ? { ...p, pattern: e.target.value } : p)),
+                      )
+                    }
+                    placeholder="pattern"
+                  />
+                  <button
+                    onClick={() => setTools((prev) => prev.filter((_, j) => j !== i))}
+                    className="shrink-0 px-1 rounded text-danger hover:bg-danger-bg border border-danger/30"
+                    title="Remove"
+                  >
+                    <X size={12} aria-hidden="true" />
+                  </button>
+                </>
+              ) : (
+                <MetaBadge title={`${t.permission}: ${t.pattern}`}>
+                  {t.permission}: {t.pattern}
+                </MetaBadge>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {editing && (
+        <button
+          onClick={() => setTools((prev) => [...prev, { permission: "bash", pattern: "" }])}
+          className="text-label text-text-faint hover:text-text-muted mb-1"
+        >
+          + Add rule
+        </button>
+      )}
+      <div className="text-text-faint text-label mb-2">
+        Anything not listed is denied (the job will not ask again).
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => onApprove(tools)}
+          className="px-2.5 py-1 rounded text-bg font-medium"
+          style={{ backgroundColor: "var(--accent)" }}
+          title="Start the job with this access"
+        >
+          Start job
+        </button>
+        <button
+          onClick={() => setEditing((v) => !v)}
+          className="px-2 py-1 rounded border border-border-strong text-text hover:bg-bg-soft"
+        >
+          {editing ? "Done editing" : "Edit access"}
+        </button>
+        <button
+          onClick={onDecline}
+          className="px-2 py-1 rounded text-text-faint hover:text-text-muted"
+        >
+          Not now
+        </button>
+      </div>
     </div>
   );
 });

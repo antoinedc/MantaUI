@@ -734,6 +734,19 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.delegateDelete, id) → args[0] = id
     "delegate:delete": (id) => (delegate ? delegate.deleteJob(id) : { ok: false, error: "no engine" }),
 
+    // ---- background job pre-flight approvals (BET-418 §A) ----
+    // The renderer polls pending-approvals for the viewed parent session and
+    // shows ONE approval card (Start / Edit access / Not now) before the job
+    // is created. approve carries optional edited tools; decline cancels.
+    "delegate:pending-approvals": (sessionId) =>
+      delegate ? delegate.listPendingApprovals(sessionId || undefined) : [],
+    "delegate:approve": (input) =>
+      delegate
+        ? { ok: delegate.approve(input?.id, input?.tools) }
+        : { ok: false },
+    "delegate:decline": (id) =>
+      delegate ? { ok: delegate.decline(id) } : { ok: false },
+
     // ---- secrets (manta-server owned; in-process on mobile) ----
     // Mirror of desktop IPC.secretsList / secretsSet / secretsDelete. The store
     // lives in src/server/secrets.mjs; the UI never sees secret VALUES — list

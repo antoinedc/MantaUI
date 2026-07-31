@@ -448,13 +448,22 @@ export function _onSessionDirectoryAdded(fn) {
 // paths. The server runs ON the opencode host, so `expandTilde` from
 // src/shared/paths.mjs expands against this process's own $HOME before
 // opencode sees the path.
-export async function createSession({ directory, title = "" }) {
+export async function createSession({ directory, title = "", permission }) {
   const absDir = expandTilde(directory);
   const url = `/session?directory=${encodeURIComponent(absDir)}`;
+  const body = { title };
+  // BET-418 §A: a background job is created with a permission ruleset so it
+  // never asks once running. opencode's POST /session accepts a `permission`
+  // array (verified working against opencode v1.15.12) — forward it verbatim
+  // when provided. The ruleset MUST end with a catch-all deny (enforced by
+  // buildPermissionRuleset in delegate.mjs).
+  if (Array.isArray(permission) && permission.length > 0) {
+    body.permission = permission;
+  }
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);

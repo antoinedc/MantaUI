@@ -744,6 +744,9 @@ export const IPC = {
   delegateList: "delegate:list", // (sessionId?) → DelegateJob[]
   delegateStop: "delegate:stop", // (id) → { ok: boolean, error?: string, reason?: string }
   delegateDelete: "delegate:delete", // (id) → { ok: boolean, error?: string, reason?: string }
+  delegatePendingApprovals: "delegate:pending-approvals", // (sessionId?) → DelegateApproval[]
+  delegateApprove: "delegate:approve", // ({id, tools?}) → { ok: boolean }
+  delegateDecline: "delegate:decline", // (id) → { ok: boolean }
 
   // ---- APNs native-push registration (BET-181) ----
   // iOS Capacitor app registers its APNs device token so the server can
@@ -970,10 +973,28 @@ export type DelegateJob = {
   result: string | null; // last assistant text (done only)
   error: string | null; // failure / stop / timeout reason
   filesChanged: number | null; // committed + uncommitted (done only)
-  // BET-418 §B: true once the terminal cleanup removed the tmux window +
+  // BET-418 §A: true once the terminal cleanup removed the tmux window +
   // worktree; false when a dirty worktree kept both (record is retained so
   // the window stays recognisable as a job). Undefined for pre-§B records.
   cleanedUp?: boolean;
+};
+
+// A pre-flight approval requested by a `delegate` call when trust mode is OFF
+// and the model declared `tools` (BET-418 §A). The renderer shows ONE card
+// (Start / Edit access / Not now); approve/decline resolve the held delegate
+// call. `tools` is the access the model declared ({permission, pattern}).
+export type DelegateApprovalTool = {
+  permission: string; // opencode category, e.g. "bash", "write"
+  pattern: string; // glob, e.g. "pytest *", "**/*.ts"
+  action?: "allow" | "deny";
+};
+export type DelegateApproval = {
+  id: string; // 8-char hex
+  parentSessionID: string;
+  name: string;
+  prompt: string;
+  tools: DelegateApprovalTool[];
+  createdAt: number;
 };
 
 // ----- Agent → laptop file push (outbox) -----
