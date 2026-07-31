@@ -1707,7 +1707,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   return (
     <div
-      className="h-full w-full flex flex-col bg-bg font-mono font-medium text-[13px] leading-[1.5] relative"
+      className="h-full w-full flex flex-col bg-bg font-sans text-prose relative"
       onDragEnter={onPanelDragEnter}
       onDragOver={onPanelDragOver}
       onDragLeave={onPanelDragLeave}

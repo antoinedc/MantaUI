@@ -73,7 +73,15 @@ export function Transcript({
               Welcome. Type a message below to start.
             </div>
           ) : (
-            <div className="flex flex-col" style={{ gap: "var(--turn-gap)" }}>
+            // BET-413: cap the transcript column at 72ch and centre it. This is
+            // the single highest-leverage readability change — the measure was
+            // previously the full window width (~150ch on a 2000px monitor).
+            // max-width + mx-auto on the message-flow column; the outer
+            // min-h-full wrapper keeps full width so the column centres.
+            <div
+              className="flex flex-col w-full mx-auto"
+              style={{ gap: "var(--turn-gap)", maxWidth: "72ch" }}
+            >
               {messages.map((m, idx) => {
                 const isLastInTranscript =
                   idx === messages.length - 1 && m.info.role === "assistant";

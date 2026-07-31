@@ -97,41 +97,93 @@ const MD_COMPONENTS: MarkdownComponents = {
       </a>
     );
   },
-  // BET-411: block-level elements no longer set their own vertical margins.
-  // The turn wrapper's `gap: var(--block-gap)` owns the spacing between
-  // every sibling block (paragraph, list, blockquote, table, heading, code
-  // block), so a new block type inherits the correct gap and cannot opt out.
-  // Heading top-spacing (22/18/14px above) is sub-issue 07's job; until then
-  // headings ride the uniform block-gap.
-  h1: ({ children }) => <div className="text-base font-semibold text-text">{children}</div>,
-  h2: ({ children }) => <div className="text-sm font-semibold text-text">{children}</div>,
-  h3: ({ children }) => <div className="text-sm font-medium text-text">{children}</div>,
-  h4: ({ children }) => <div className="text-sm font-medium text-text">{children}</div>,
+  // BET-413: real headings restored. MD_COMPONENTS previously downgraded every
+  // heading to a <div> at near-body size. The sizes/weights below are the
+  // "Balanced" values from the issue; most of the skimmability comes from the
+  // space ABOVE, not the size — do not increase the sizes to "make it clearer".
+  // These are the ONLY margins MarkdownBody sets (sub-issue 05 removed the
+  // rest); they are intentional exceptions because heading spacing is
+  // asymmetric and the container `gap` cannot express that. Values are exact
+  // px (not on the 4px spacing grid) so they are written as inline styles.
+  h1: ({ children }) => (
+    <h1
+      className="text-title font-semibold text-text"
+      style={{ marginTop: "22px", marginBottom: "6px", letterSpacing: "-0.01em" }}
+    >
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2
+      className="text-prose font-semibold text-text"
+      style={{ marginTop: "18px", marginBottom: "5px" }}
+    >
+      {children}
+    </h2>
+  ),
+  h3: ({ children }) => (
+    <h3
+      className="text-body font-semibold text-text-muted"
+      style={{ marginTop: "14px", marginBottom: "3px" }}
+    >
+      {children}
+    </h3>
+  ),
+  h4: ({ children }) => (
+    <h4
+      className="text-body font-semibold text-text-muted"
+      style={{ marginTop: "14px", marginBottom: "3px" }}
+    >
+      {children}
+    </h4>
+  ),
   // Tight list rendering: GFM "loose" lists (blank lines between items)
   // wrap each li's content in a <p>. [&_p]:m-0 collapses those inner
   // paragraphs so the visual spacing is driven only by space-y-* on the
   // ul/ol parent. The list's own spacing to its siblings is the turn gap.
+  // Lists inherit the prose size from the transcript column (BET-413).
   ul: ({ children }) => <ul className="ml-2 list-disc list-inside space-y-0.5 [&_p]:m-0">{children}</ul>,
   ol: ({ children }) => <ol className="ml-2 list-decimal list-inside space-y-0.5 [&_p]:m-0">{children}</ol>,
   li: ({ children }) => <li className="text-text">{children}</li>,
   p: ({ children }) => <div>{children}</div>,
   blockquote: ({ children }) => (
-    <blockquote className="border-l-2 border-border pl-3 text-text-muted italic">
+    <blockquote
+      className="pl-3 italic"
+      style={{ borderLeft: "2px solid var(--border)", color: "var(--tx2)" }}
+    >
       {children}
     </blockquote>
   ),
+  // Tables: meta size, --border-subtle rules (BET-413).
   table: ({ children }) => (
     <div className="overflow-x-auto max-w-full">
-      <table className="text-[12px] border-collapse">{children}</table>
+      <table className="text-meta border-collapse">{children}</table>
     </div>
   ),
   th: ({ children }) => (
-    <th className="border border-border px-2 py-0.5 text-left text-text font-medium bg-bg-soft">
+    <th
+      className="px-2 py-0.5 text-left text-text font-medium bg-bg-soft"
+      style={{ border: "1px solid var(--border-subtle)" }}
+    >
       {children}
     </th>
   ),
   td: ({ children }) => (
-    <td className="border border-border px-2 py-0.5 text-text">{children}</td>
+    <td
+      className="px-2 py-0.5 text-text"
+      style={{ border: "1px solid var(--border-subtle)" }}
+    >
+      {children}
+    </td>
+  ),
+  // Images: max-width 100%, rounded, --border-subtle (BET-413).
+  img: ({ src, alt }) => (
+    <img
+      src={typeof src === "string" ? src : undefined}
+      alt={alt ?? ""}
+      className="max-w-full rounded"
+      style={{ border: "1px solid var(--border-subtle)" }}
+    />
   ),
   hr: () => <hr className="border-border" />,
 };
@@ -152,7 +204,7 @@ export const MarkdownBody = memo(function MarkdownBody({ text }: { text: string 
   if (text.length > MARKDOWN_MAX_CHARS) {
     // Oversized: bypass markdown + Prism to keep the main thread responsive.
     return (
-      <pre className="whitespace-pre-wrap break-words text-[13px] text-text">
+      <pre className="whitespace-pre-wrap break-words text-code font-mono text-text">
         {text}
       </pre>
     );
@@ -282,17 +334,17 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
   return (
     <div className="rounded border border-border bg-bg-soft overflow-hidden relative">
       {lang && (
-        <div className="px-2 py-0.5 text-[10px] text-text-faint border-b border-border bg-bg-elev pr-7">
+        <div className="px-2 py-0.5 text-micro uppercase text-text-faint border-b border-border bg-bg-elev pr-7">
           {lang}
         </div>
       )}
       <CopyButton
         text={cleaned}
-        className="absolute top-1 right-1 z-10 text-[10px] text-text-faint hover:text-text px-1 rounded"
+        className="absolute top-1 right-1 z-10 text-micro uppercase text-text-faint hover:text-text px-1 rounded"
       />
       {tooLarge ? (
         <pre
-          className="px-2 py-1.5 pr-7 text-[12px] overflow-x-auto max-w-full whitespace-pre"
+          className="px-2 py-1.5 pr-7 text-meta font-mono overflow-x-auto max-w-full whitespace-pre"
           style={{ background: "transparent" }}
         >
           <code>{cleaned}</code>
@@ -305,7 +357,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
         >
           {({ tokens, getLineProps, getTokenProps }) => (
             <pre
-              className="px-2 py-1.5 pr-7 text-[12px] overflow-x-auto max-w-full whitespace-pre"
+              className="px-2 py-1.5 pr-7 text-meta font-mono overflow-x-auto max-w-full whitespace-pre"
               // The Prism theme's default bg would override bg-bg-soft — disable
               // it in both themes so the card surface shows through.
               style={{ background: "transparent" }}
