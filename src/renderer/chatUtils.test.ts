@@ -89,6 +89,8 @@ import {
   fuzzySessionScore,
   computeJobNesting,
   isNestedJobChild,
+  globCovers,
+  isApprovalCoveredByAlways,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -3721,7 +3723,7 @@ describe("isBackgroundJobCompletionTurn", () => {
 
 // ===== BET-414 sidebar helpers =====
 
-import type { Project } from "../shared/types";
+import type { Project, PermissionRequest } from "../shared/types";
 
 function mkProject(
   tmuxSession: string,
@@ -3883,5 +3885,134 @@ describe("isNestedJobChild", () => {
     const project = mkProject("p", [{ index: 0, name: "plain", opencodeSessionId: "plain" }]);
     expect(isNestedJobChild(jobs, "plain", project, undefined)).toBe(false);
     expect(isNestedJobChild(jobs, null, project, undefined)).toBe(false);
+  });
+});
+
+// ===== globCovers / isApprovalCoveredByAlways (BET-418 §A5) =====
+
+describe("globCovers", () => {
+  it("covers equal patterns", () => {
+    expect(globCovers("alembic upgrade head", "alembic upgrade head")).toBe(true);
+    expect(globCovers("pytest *", "pytest *")).toBe(true);
+  });
+
+  it("covers when always is a bare star (matches everything)", () => {
+    expect(globCovers("*", "anything")).toBe(true);
+    expect(globCovers("*", "pytest tests/")).toBe(true);
+  });
+
+  it("covers when always ends with star and pattern starts with the prefix", () => {
+    expect(globCovers("alembic upgrade *", "alembic upgrade head")).toBe(true);
+    expect(globCovers("pytest *", "pytest tests/")).toBe(true);
+    expect(globCovers("git *", "git commit -m")).toBe(true);
+  });
+
+  it("covers a narrower glob (pattern also ends with star, longer prefix)", () => {
+    expect(globCovers("alembic upgrade *", "alembic upgrade head *")).toBe(true);
+    expect(globCovers("git *", "git push *")).toBe(true);
+  });
+
+  it("does not cover when prefix differs", () => {
+    expect(globCovers("alembic upgrade *", "pytest tests/")).toBe(false);
+    expect(globCovers("git *", "hg commit")).toBe(false);
+  });
+
+  it("does not cover when always has no star and patterns differ", () => {
+    expect(globCovers("alembic upgrade head", "alembic upgrade downgrade")).toBe(false);
+  });
+
+  it("is conservative with complex globs (does not parse ** patterns)", () => {
+    expect(globCovers("**/*.ts", "src/foo.ts")).toBe(false);
+    expect(globCovers("**/*.ts", "**/*.ts")).toBe(true);
+  });
+});
+
+describe("isApprovalCoveredByAlways", () => {
+  const mkPerm = (
+    permission: string,
+    always: string[],
+  ): PermissionRequest => ({
+    id: `id-${permission}`,
+    sessionID: "ses",
+    permission,
+    always,
+  });
+
+  it("returns false when approval has no tools", () => {
+    expect(isApprovalCoveredByAlways({ tools: [] }, [mkPerm("bash", ["*"])])).toBe(false);
+  });
+
+  it("returns false when there are no permissions", () => {
+    const approval = { tools: [{ permission: "bash", pattern: "pytest *" }] };
+    expect(isApprovalCoveredByAlways(approval, [])).toBe(false);
+  });
+
+  it("returns false when no permission matches the tool category", () => {
+    const approval = { tools: [{ permission: "bash", pattern: "pytest *" }] };
+    const perms = [mkPerm("write", ["/tmp/*"])];
+    expect(isApprovalCoveredByAlways(approval, perms)).toBe(false);
+  });
+
+  it("returns true when a single tool is covered by a matching always grant", () => {
+    const approval = { tools: [{ permission: "bash", pattern: "alembic upgrade head" }] };
+    const perms = [mkPerm("bash", ["alembic upgrade *"])];
+    expect(isApprovalCoveredByAlways(approval, perms)).toBe(true);
+  });
+
+  it("returns true when always is a bare star for the matching category", () => {
+    const approval = { tools: [{ permission: "bash", pattern: "anything" }] };
+    const perms = [mkPerm("bash", ["*"])];
+    expect(isApprovalCoveredByAlways(approval, perms)).toBe(true);
+  });
+
+  it("returns true when all tools are covered (multi-tool)", () => {
+    const approval = {
+      tools: [
+        { permission: "bash", pattern: "pytest tests/" },
+        { permission: "write", pattern: "/tmp/out.txt" },
+      ],
+    };
+    const perms = [
+      mkPerm("bash", ["pytest *"]),
+      mkPerm("write", ["/tmp/*"]),
+    ];
+    expect(isApprovalCoveredByAlways(approval, perms)).toBe(true);
+  });
+
+  it("returns false when one of multiple tools is not covered", () => {
+    const approval = {
+      tools: [
+        { permission: "bash", pattern: "pytest tests/" },
+        { permission: "write", pattern: "/etc/passwd" },
+      ],
+    };
+    const perms = [
+      mkPerm("bash", ["pytest *"]),
+      mkPerm("write", ["/tmp/*"]),
+    ];
+    expect(isApprovalCoveredByAlways(approval, perms)).toBe(false);
+  });
+
+  it("aggregates always[] across multiple PermissionRequests of the same category", () => {
+    const approval = { tools: [{ permission: "bash", pattern: "git push" }] };
+    const perms = [
+      mkPerm("bash", ["pytest *"]),
+      mkPerm("bash", ["git *"]),
+    ];
+    expect(isApprovalCoveredByAlways(approval, perms)).toBe(true);
+  });
+
+  it("ignores PermissionRequests with empty always[]", () => {
+    const approval = { tools: [{ permission: "bash", pattern: "pytest *" }] };
+    const perms = [mkPerm("bash", [])];
+    expect(isApprovalCoveredByAlways(approval, perms)).toBe(false);
+  });
+
+  it("ignores PermissionRequests with undefined always", () => {
+    const approval = { tools: [{ permission: "bash", pattern: "pytest *" }] };
+    const perms: PermissionRequest[] = [
+      { id: "p1", sessionID: "ses", permission: "bash" },
+    ];
+    expect(isApprovalCoveredByAlways(approval, perms)).toBe(false);
   });
 });

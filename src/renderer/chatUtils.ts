@@ -4,7 +4,7 @@
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
+import type { DelegateApprovalTool, PermissionRequest, Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
@@ -2820,4 +2820,47 @@ export function isNestedJobChild(
   return activeWindowIndex !== undefined && project.windows.some(
     (w) => w.opencodeSessionId === opencodeSessionId && w.index === activeWindowIndex,
   );
+}
+
+// BET-418 §A5: conservative glob-cover check. An `always` pattern covers a
+// requested pattern when they are equal, or the always pattern is a prefix-
+// star superset (ends with `*` and the requested stem starts with the always
+// prefix). Intentionally conservative — when in doubt, return false so the
+// card is shown rather than silently auto-approving.
+export function globCovers(always: string, pattern: string): boolean {
+  if (always === pattern) return true;
+  if (always === "*") return true;
+  if (always.endsWith("*")) {
+    const prefix = always.slice(0, -1);
+    const reqStem = pattern.endsWith("*") ? pattern.slice(0, -1) : pattern;
+    if (reqStem.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
+// BET-418 §A5: check whether the parent session's existing `always[]` grants
+// (from pending/retained PermissionRequest records) already cover every tool
+// the delegate approval requests. When fully covered, the renderer auto-
+// approves via delegateApprove without rendering the card. Returns false when
+// any tool lacks a covering always grant — the card is shown in that case.
+export function isApprovalCoveredByAlways(
+  approval: { tools: DelegateApprovalTool[] },
+  permissions: PermissionRequest[],
+): boolean {
+  if (approval.tools.length === 0) return false;
+  const alwaysByPerm = new Map<string, Set<string>>();
+  for (const p of permissions) {
+    if (!p.always || p.always.length === 0) continue;
+    const set = alwaysByPerm.get(p.permission) ?? new Set<string>();
+    for (const a of p.always) set.add(a);
+    alwaysByPerm.set(p.permission, set);
+  }
+  return approval.tools.every((tool) => {
+    const set = alwaysByPerm.get(tool.permission);
+    if (!set) return false;
+    for (const always of set) {
+      if (globCovers(always, tool.pattern)) return true;
+    }
+    return false;
+  });
 }
