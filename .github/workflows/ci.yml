@@ -150,12 +150,17 @@ jobs:
         run: |
           npm run shots
           npm run shots
-          echo "::group::Post-capture website/ diff against the committed set"
-          git status --porcelain website/ || true
-          git diff --name-status website/ || true
-          git diff --stat website/ || true
+          # Scope is the SHOT ARTIFACTS this gate owns (website/shot-*.webp +
+          # hero-poster.webp). NOT the whole website/ dir — the npm test step
+          # regenerates website/sitemap.xml from git history, so including it
+          # here makes the gate measure the sitemap's lastmod against a stale
+          # committed copy and fail on an unrelated file (BET-444).
+          echo "::group::Post-capture shot diff against the committed set"
+          git status --porcelain -- website/shot-*.webp website/hero-poster.webp || true
+          git diff --name-status -- website/shot-*.webp website/hero-poster.webp || true
+          git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
           echo "::endgroup::"
-          if ! git diff --exit-code --quiet website/; then
+          if ! git diff --exit-code --quiet -- website/shot-*.webp website/hero-poster.webp; then
             echo "::error file=website/shot-*.webp::drift detected — two consecutive runs differ from the committed set. Either the renderer changed or the capture is not byte-deterministic."
             echo "::error::If the renderer intentionally changed, run 'npm run shots' locally and commit the regenerated files. If not, the capture pipeline is non-deterministic — investigate before merging."
             exit 1
