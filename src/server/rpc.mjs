@@ -19,7 +19,7 @@ import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
 import * as subscriptionProviders from "./subscriptionProviders.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
-import { pollClaudeLogin } from "./opencode.mjs";
+import { pollClaudeLogin, claudeCliStatus } from "./opencode.mjs";
 import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
@@ -734,7 +734,11 @@ export function buildHandlers({
       const key = String(sessionKey ?? "");
       cancelClaudeLogin(key);
       return { ok: true };
-    },    // ---- scheduled prompts (manta-server owned; in-process on mobile) ----
+    },
+    // BET-421 §E: is the `claude` CLI installed on this box? The connect
+    // card asks before sign-in so it can run the lazy installer when it
+    // isn't. Pure probe over resolveClaudeBin — never spawns anything.
+    "opencode:claude-cli-status": () => claudeCliStatus(),    // ---- scheduled prompts (manta-server owned; in-process on mobile) ----
     // Mirror of desktop IPC.scheduleList / scheduleDelete. The store + firing
     // loop live in src/server/schedule.mjs; these just read/mutate it. Delete
     // publishes schedule.updated so the ScheduledTasksCard refetches live.
