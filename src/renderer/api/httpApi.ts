@@ -989,7 +989,7 @@ export const httpApi: Api = {
   claudeLoginCancel: (sessionKey: string) =>
     rpc<{ ok: boolean }>(IPC.claudeLoginCancel, sessionKey),
 
-  // -- server version (BET-180) --
+  // -- server version (BET-180, BET-428) --
   // Returns the manta-server's package.json version. In-process via the
   // `server:version` RPC channel (no HTTP round-trip; same value GET
   // /api/version returns for non-renderer clients). MobileSettings renders
@@ -1000,8 +1000,13 @@ export const httpApi: Api = {
   // (BET-225 stage 3) can compute `isClientTooOld` from a single round-trip
   // — no second endpoint, no parallel poll. The interface keeps `version`
   // only for backward compat with the BET-180 callers; new consumers
-  // should destructure both fields off the response.
-  getServerVersion: () => rpc<{ version: string; minClient: string }>(IPC.getServerVersion),
+  // should destructure all three fields off the response.
+  //
+  // BET-428: response also carries `opencodeVersion` — the box's
+  // `opencode --version` (read once at server startup; opencode's HTTP API
+  // has no version endpoint). Settings → About renders it in this same
+  // round-trip — no new IPC channel.
+  getServerVersion: () => rpc<{ version: string; minClient: string; opencodeVersion: string }>(IPC.getServerVersion),
 
   // -- client version (BET-225 stage 3) --
   // Returns the running client's own version. On desktop the preload bridge

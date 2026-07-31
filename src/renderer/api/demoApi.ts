@@ -140,8 +140,8 @@ const launchersList = (): Promise<unknown[]> => Promise.resolve([]);
 const getClientVersion = (): Promise<{ version: string }> =>
   Promise.resolve({ version: "0.0.13" });
 
-const getServerVersion = (): Promise<{ version: string; minClient: string }> =>
-  Promise.resolve({ version: "0.0.13", minClient: "0.0.0" });
+const getServerVersion = (): Promise<{ version: string; minClient: string; opencodeVersion: string }> =>
+  Promise.resolve({ version: "0.0.13", minClient: "0.0.0", opencodeVersion: "0.0.0" });
 
 // Subscription provider auth (BET-308 / BET-309). Demo returns the three
 // disconnected rows so the connect-card UI still renders the registry

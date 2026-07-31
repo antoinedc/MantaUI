@@ -396,7 +396,14 @@ export interface Api {
   // poll. The interface keeps `version` as the primary field for the
   // BET-180 callers (MobileSettings); new consumers should destructure
   // both.
-  getServerVersion(): Promise<{ version: string; minClient: string }>;
+  //
+  // BET-428: response also carries `opencodeVersion` — the box's
+  // `opencode --version` output, read once at server startup (opencode's
+  // HTTP API exposes no version endpoint, so a shell-out is the only
+  // source). Settings → About renders it alongside the desktop + server
+  // versions in this single round-trip — no new IPC channel. Falls back to
+  // "0.0.0" when opencode isn't installed.
+  getServerVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string }>;
 
   // Client version (BET-225 stage 3): returns the desktop app's own version
   // via Electron's `app.getVersion()`. Combined with the server's

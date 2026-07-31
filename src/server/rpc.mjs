@@ -174,6 +174,11 @@ export async function dispatch(handlers, channel, args) {
 //                         value `GET /api/version` returns). The `server:version`
 //                         channel returns it in-process so the renderer avoids an
 //                         HTTP round-trip on every Settings mount.
+//   opencodeVersion     — string, the box's `opencode --version` output read once
+//                         at startup (BET-428). Surfaced in the same `server:version`
+//                         response so Settings → About can render it without a new
+//                         IPC channel; falls back to FALLBACK_VERSION when opencode
+//                         isn't installed.
 //   runServerSelfUpdate — the box's self-update spawner (BET-366 reviewer return).
 //                         Injected so the regression guard in rpc.test.mjs can
 //                         stub the spawn and assert the `server:update-apply`
@@ -193,6 +198,7 @@ export function buildHandlers({
   authPair,
   push,
   serverVersion,
+  opencodeVersion,
   runServerSelfUpdate,
   delegate,
 }) {
@@ -805,16 +811,19 @@ export function buildHandlers({
       }
     },
 
-    // ---- server version (BET-180, BET-225 stage 2) ----
+    // ---- server version (BET-180, BET-225 stage 2, BET-428) ----
     // Returns the cached package.json version (read once at startup, same
     // value the GET /api/version REST route returns). The renderer hits this
     // channel via window.api.getServerVersion() so it doesn't have to do an
     // HTTP round-trip just to render "Server vX.Y.Z" under the URL field in
     // MobileSettings. Also includes `minClient` so the version-skew guard
     // (BET-225 stage 3, renderer side) can compute `isClientTooOld` from a
-    // single response — no second poll, no parallel endpoint. The
-    // JSON-RPC envelope wraps the body as { result: { version, minClient } }.
-    "server:version": () => ({ version: serverVersion, minClient: MIN_CLIENT }),
+    // single response — no second poll, no parallel endpoint. BET-428 added
+    // `opencodeVersion` (the box's `opencode --version`, read once at startup)
+    // so Settings → About renders it in the same trip — no new IPC channel.
+    // The JSON-RPC envelope wraps the body as
+    // { result: { version, minClient, opencodeVersion } }.
+    "server:version": () => ({ version: serverVersion, minClient: MIN_CLIENT, opencodeVersion }),
 
     // ---- plugins (BET-189 / BET-190) ----
     // Read the current plugin registry the Mac executor has published.
