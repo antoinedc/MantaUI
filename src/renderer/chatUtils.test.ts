@@ -3189,6 +3189,33 @@ describe("connectPhaseLabel", () => {
       }),
     ).toBe("Already signed in");
   });
+
+  // BET-429: the lazy-install phase has its own label so the status chip
+  // tells the user the box is installing the Claude CLI (not waiting on
+  // sign-in). Pins the copy so a future change is an explicit decision.
+  it("labels installingClaudeCli 'Installing Claude CLI…'", () => {
+    expect(
+      connectPhaseLabel({
+        kind: "installingClaudeCli",
+        installSessionKey: "claude-cli-install-abc",
+        loginSessionKey: "claude-login-1",
+        startedAt: 0,
+        cwd: "~",
+      }),
+    ).toBe("Installing Claude CLI…");
+  });
+
+  // BET-429: an install failure still labels "Failed" — the three-action
+  // card is the distinguishing surface, not the status chip.
+  it("labels failed 'Failed' even when installFailure is set", () => {
+    expect(
+      connectPhaseLabel({
+        kind: "failed",
+        message: "The install didn't finish.",
+        installFailure: { loginSessionKey: "claude-login-1", cwd: "~" },
+      }),
+    ).toBe("Failed");
+  });
 });
 
 // ===== isPollExpired (BET-312) =====

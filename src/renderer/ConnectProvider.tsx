@@ -69,6 +69,30 @@ const RESTART_POLL_INTERVAL_MS = 3_000;
 const RESTART_POLL_LIMIT_MS = 30_000;
 const CLAUDE_POLL_INTERVAL_MS = 1_000;
 const CLAUDE_POLL_LIMIT_MS = 5 * 60 * 1_000;
+// BET-429: lazy Claude CLI install poll. The installer is a one-shot
+// `curl … | bash` over the pty bus; the renderer can't observe its exit
+// code across the WS boundary reliably (the pty stays open for scrollback),
+// so it polls `opencodeClaudeCliStatus()` for the binary to appear. 2s is
+// a comfortable cadence — the install takes seconds to minutes, and a
+// sub-second poll would hammer the box's filesystem stat for no benefit.
+// 5-minute cap matches the device-code / Claude-login caps (same
+// rationale: an unbounded poll would leave the user staring at a stale
+// installer forever; the failure card's "Try again" re-runs it on demand).
+const CLI_INSTALL_POLL_INTERVAL_MS = 2_000;
+const CLI_INSTALL_POLL_LIMIT_MS = 5 * 60 * 1_000;
+
+// BET-429: client-generated session key for the installer pty. Distinct
+// from the server-minted claude-login sessionKey (which never spawns in
+// the install phase — startClaudeLogin only stamps metadata) so the two
+// ptys never collide on the bus. Mirrors the att-id shape used elsewhere
+// in the renderer (Date.now + Math.random) — `crypto.randomUUID` is not
+// guaranteed in the renderer's secure-context on every box, and this key
+// only needs to be unique within the session, not cryptographically so.
+function makeInstallSessionKey(): string {
+  return `claude-cli-install-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
 
 // Track the in-flight action so an unmounted / unmounting component cannot
 // call setPhase on an unmounted tree (React's "set state on unmounted
@@ -129,83 +153,187 @@ export function ConnectProvider({
     [mounted],
   );
 
-  // Fire `{action:"start"}` on mount. The server's resolveAuthMethod picks
-  // the right opencode method index (NEVER a literal) and returns one of
-  // four shapes that drive the next state directly. Errors fall back to
-  // the API-key path so a transient box-unreachable still gives the user a
-  // way forward.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const req: OpencodeProviderAuthRequest = { action: "start", id };
-      let res;
+  // BET-429: factor the `{action:"start"}` dispatch into a callable so the
+  // post-install re-fire (when the lazy CLI installer reports installed)
+  // re-enters the SAME branch logic the mount-time call uses — no second
+  // copy of the shape switch. A generation ref guards against a stale
+  // in-flight start overwriting a newer one (e.g. the post-install re-fire
+  // landing while a retry-driven start is still pending); safeSetPhase's
+  // mounted guard covers the unmount case.
+  const startGenRef = useRef(0);
+  const runStart = useCallback(async () => {
+    const gen = ++startGenRef.current;
+    const req: OpencodeProviderAuthRequest = { action: "start", id };
+    let res;
+    try {
+      res = await window.api.opencodeProviderAuth(req);
+    } catch {
+      if (startGenRef.current === gen)
+        safeSetPhase({ kind: "failed", message: "Couldn't reach the box. Try again." });
+      return;
+    }
+    if (startGenRef.current !== gen) return;
+    if (res.action !== "start") {
+      safeSetPhase({ kind: "failed", message: "Unexpected response from the box." });
+      return;
+    }
+    // BET-354: claude-login shape carries a sessionKey for the live
+    // terminal pane + the server-side startedAt timestamp the renderer
+    // passes back to the claude-status poll. The server has already
+    // stamped the metadata; the actual pty:spawn is below (in the
+    // Terminal's own useEffect) so the IPty sizes to the rendered
+    // cols/rows rather than a fixed 80x24.
+    if (res.shape === "claude-login") {
+      const sessionKey = typeof res.sessionKey === "string" ? res.sessionKey : "";
+      const startedAt = typeof res.startedAt === "number" ? res.startedAt : Date.now();
+      const cwd = typeof res.cwd === "string" ? res.cwd : "~";
+      // BET-429: probe the CLI BEFORE sign-in. Installed → straight to
+      // the existing needsClaudeLogin flow. Not installed → install
+      // phase; the login sessionKey is held so the post-install re-fire
+      // can cancel it before minting a fresh one. A probe failure is
+      // treated as "not installed" — the install phase will re-probe
+      // on its poll and recover, so a transiently-unreachable box does
+      // not block the flow.
+      let cli: { installed: boolean; path: string } | null = null;
       try {
-        res = await window.api.opencodeProviderAuth(req);
+        cli = await window.api.opencodeClaudeCliStatus();
       } catch {
-        if (!cancelled) safeSetPhase({ kind: "failed", message: "Couldn't reach the box. Try again." });
-        return;
+        cli = null;
       }
-      if (cancelled) return;
-      if (res.action !== "start") {
-        safeSetPhase({ kind: "failed", message: "Unexpected response from the box." });
-        return;
-      }
-      // BET-354: claude-login shape carries a sessionKey for the live
-      // terminal pane + the server-side startedAt timestamp the renderer
-      // passes back to the claude-status poll. The server has already
-      // stamped the metadata; the actual pty:spawn is below (in the
-      // Terminal's own useEffect) so the IPty sizes to the rendered
-      // cols/rows rather than a fixed 80x24.
-      if (res.shape === "claude-login") {
+      if (startGenRef.current !== gen) return;
+      if (cli?.installed) {
         safeSetPhase({
           kind: "needsClaudeLogin",
-          ptySessionKey: typeof res.sessionKey === "string" ? res.sessionKey : "",
-          startedAt: typeof res.startedAt === "number" ? res.startedAt : Date.now(),
-          cwd: typeof res.cwd === "string" ? res.cwd : "~",
+          ptySessionKey: sessionKey,
+          startedAt,
+          cwd,
           url: "",
           inputError: undefined,
           preExisting: false,
         });
-        return;
-      }
-      if (res.shape === "oauth-auto") {
+      } else {
         safeSetPhase({
-          kind: "waiting",
-          url: typeof res.url === "string" ? res.url : "",
-          instructions: typeof res.instructions === "string" ? res.instructions : "",
-          methodIndex: typeof res.methodIndex === "number" ? res.methodIndex : 0,
+          kind: "installingClaudeCli",
+          installSessionKey: makeInstallSessionKey(),
+          loginSessionKey: sessionKey,
+          startedAt: Date.now(),
+          cwd,
         });
-        return;
       }
-      if (res.shape === "oauth-code") {
-        safeSetPhase({
-          kind: "needsCode",
-          url: typeof res.url === "string" ? res.url : "",
-          instructions: typeof res.instructions === "string" ? res.instructions : "",
-          methodIndex: typeof res.methodIndex === "number" ? res.methodIndex : 0,
-        });
-        return;
+      return;
+    }
+    if (res.shape === "oauth-auto") {
+      safeSetPhase({
+        kind: "waiting",
+        url: typeof res.url === "string" ? res.url : "",
+        instructions: typeof res.instructions === "string" ? res.instructions : "",
+        methodIndex: typeof res.methodIndex === "number" ? res.methodIndex : 0,
+      });
+      return;
+    }
+    if (res.shape === "oauth-code") {
+      safeSetPhase({
+        kind: "needsCode",
+        url: typeof res.url === "string" ? res.url : "",
+        instructions: typeof res.instructions === "string" ? res.instructions : "",
+        methodIndex: typeof res.methodIndex === "number" ? res.methodIndex : 0,
+      });
+      return;
+    }
+    // api-key path. Fetch the console URL from the status action so the
+    // "Get a key" link can appear when the registry provides one; the
+    // start response itself doesn't carry it (server-side scope: the
+    // resolver returns the connect shape, not the meta).
+    let consoleUrl: string | null = null;
+    try {
+      const s = await window.api.opencodeProviderAuth({ action: "status" });
+      if (startGenRef.current !== gen) return;
+      if (s.action === "status") {
+        const row = s.providers.find((p) => p.id === id);
+        consoleUrl = row?.console ?? null;
       }
-      // api-key path. Fetch the console URL from the status action so the
-      // "Get a key" link can appear when the registry provides one; the
-      // start response itself doesn't carry it (server-side scope: the
-      // resolver returns the connect shape, not the meta).
-      let consoleUrl: string | null = null;
-      try {
-        const s = await window.api.opencodeProviderAuth({ action: "status" });
-        if (s.action === "status") {
-          const row = s.providers.find((p) => p.id === id);
-          consoleUrl = row?.console ?? null;
-        }
-      } catch {
-        // Console link is optional; degrade silently to "no link".
-      }
-      safeSetPhase({ kind: "needsKey", consoleUrl });
-    })();
-    return () => {
-      cancelled = true;
-    };
+    } catch {
+      // Console link is optional; degrade silently to "no link".
+    }
+    if (startGenRef.current !== gen) return;
+    safeSetPhase({ kind: "needsKey", consoleUrl });
   }, [id, safeSetPhase]);
+
+  // Fire `{action:"start"}` on mount. The server's resolveAuthMethod picks
+  // the right opencode method index (NEVER a literal) and returns one of
+  // four shapes that drive the next state directly. Errors fall back to
+  // the API-key path so a transient box-unreachable still gives the user a
+  // way forward. BET-429: the body lives in `runStart` so the post-install
+  // re-fire reuses the exact same branch logic.
+  useEffect(() => {
+    void runStart();
+  }, [runStart]);
+
+  // BET-429: lazy Claude CLI install poll. Fires every 2s while
+  // `installingClaudeCli`. The installer pty is owned by the Terminal
+  // below (claude-cli-install launcher); this poll watches for the binary
+  // to appear via opencodeClaudeCliStatus(). On installed → kill the
+  // installer pty (the Terminal's own cleanup deliberately does NOT kill
+  // ptys — it keeps them alive across remounts), cancel the original
+  // login sessionKey, and re-fire runStart() so the server mints a fresh
+  // claude-login sessionKey + takes a fresh credential backup right
+  // before the real OAuth. On 5-min timeout → failure card with three
+  // actions (Try again / Use a different model / Install manually),
+  // carrying loginSessionKey + cwd so "Try again" can re-enter the
+  // install phase without re-firing start.
+  useEffect(() => {
+    if (phase.kind !== "installingClaudeCli") return;
+    const installKey = phase.installSessionKey;
+    const loginKey = phase.loginSessionKey;
+    const cwd = phase.cwd;
+    const startedWall = phase.startedAt;
+    const handle = window.setInterval(async () => {
+      if (!mounted.current) return;
+      if (isPollExpired(startedWall, Date.now(), CLI_INSTALL_POLL_LIMIT_MS)) {
+        window.clearInterval(handle);
+        // Best-effort: stop the installer pty so a "Try again" doesn't
+        // leave a second curl|bash running alongside the new one.
+        window.api.ptyKill(installKey).catch(() => {
+          /* best-effort — the pty may already be gone */
+        });
+        safeSetPhase({
+          kind: "failed",
+          message:
+            "The Claude CLI didn't install in time. The box is fine — only the Claude binary didn't appear.",
+          installFailure: { loginSessionKey: loginKey, cwd },
+        });
+        return;
+      }
+      let cli: { installed: boolean; path: string } | null = null;
+      try {
+        cli = await window.api.opencodeClaudeCliStatus();
+      } catch {
+        /* keep polling; box may be transiently unreachable */
+        return;
+      }
+      if (!mounted.current) return;
+      if (cli?.installed) {
+        window.clearInterval(handle);
+        // Kill the installer pty — Terminal's cleanup keeps ptys alive
+        // across remounts by design, so without this the finished
+        // installer would linger on the bus.
+        window.api.ptyKill(installKey).catch(() => {
+          /* best-effort */
+        });
+        // Cancel the original login session so the re-fire doesn't
+        // orphan its entry in the server's _claudeLoginSessions map.
+        // The re-fire mints a fresh sessionKey + takes a fresh backup.
+        try {
+          await window.api.claudeLoginCancel(loginKey);
+        } catch {
+          /* best-effort — the re-fire mints a fresh key regardless */
+        }
+        if (!mounted.current) return;
+        void runStart();
+      }
+    }, CLI_INSTALL_POLL_INTERVAL_MS);
+    return () => window.clearInterval(handle);
+  }, [phase, safeSetPhase, mounted, runStart]);
 
   // BET-354: claude-status poll. Fires every 1s while `needsClaudeLogin`.
   // The server checks the credentials file mtime + probes opencode's
@@ -393,6 +521,23 @@ export function ConnectProvider({
   const retry = useCallback(() => {
     safeSetPhase({ kind: "starting" });
   }, [safeSetPhase]);
+
+  // BET-429: re-run the lazy installer after an install failure. Reuses
+  // the original loginSessionKey + cwd (carried in installFailure) so the
+  // retry does NOT re-fire `{action:"start"}` — the server-side metadata
+  // is still valid (startClaudeLogin only stamps metadata + backs up
+  // credentials, it does not spawn). A fresh installSessionKey ensures
+  // the new installer pty doesn't collide with the killed one's bus entry.
+  const retryInstall = useCallback(() => {
+    if (phase.kind !== "failed" || !phase.installFailure) return;
+    safeSetPhase({
+      kind: "installingClaudeCli",
+      installSessionKey: makeInstallSessionKey(),
+      loginSessionKey: phase.installFailure.loginSessionKey,
+      startedAt: Date.now(),
+      cwd: phase.installFailure.cwd,
+    });
+  }, [phase, safeSetPhase]);
 
   return (
     <div className="rounded-md border bg-bg-elev px-3 py-2 text-meta space-y-2">
@@ -591,15 +736,76 @@ export function ConnectProvider({
         <div className="text-ok">Connected.</div>
       )}
 
+      {/* BET-429: lazy Claude CLI install. The box has no `claude` binary;
+          the connect card spawned the official installer (`curl … | bash`)
+          over the pty bus and is polling opencodeClaudeCliStatus() for the
+          binary to appear. The live terminal is demoted to a collapsed
+          disclosure — same pattern as the Claude login terminal — so the
+          card's headline is the status line, not a wall of curl output.
+          Once the binary appears, the poll kills the installer pty and
+          re-fires start to enter sign-in. */}
+      {phase.kind === "installingClaudeCli" && (
+        <div className="space-y-2">
+          <div className="text-text-muted">
+            Installing the Claude CLI on the box. Sign-in will start
+            automatically once it's ready.
+          </div>
+          <details className="text-meta">
+            <summary className="text-text-faint cursor-pointer hover:text-text-muted">
+              Show what's happening on the box
+            </summary>
+            <div className="rounded border border-border overflow-hidden h-40 bg-[var(--inset)] mt-1">
+              <Terminal
+                sessionKey={phase.installSessionKey}
+                cwd={phase.cwd}
+                active={true}
+                launcher={{ id: "claude-cli-install", flags: {} }}
+              />
+            </div>
+          </details>
+        </div>
+      )}
+
       {phase.kind === "failed" && (
         <div className="space-y-2">
           <div className="text-danger break-words">{phase.message}</div>
-          <button
-            onClick={retry}
-            className="px-2 py-1 border border-border rounded text-text-muted hover:text-text"
-          >
-            Retry
-          </button>
+          {phase.installFailure ? (
+            // BET-429: install failure gets three actions, not the single
+            // Retry. "Use a different model" closes the card — Codex, Kimi,
+            // and custom providers need no binary, so the user can pivot
+            // without revisiting the box. "Install manually" links to the
+            // official installer page for a user-driven install outside
+            // the app.
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={retryInstall}
+                className="px-2 py-1 border border-border rounded text-text-muted hover:text-text"
+              >
+                Try again
+              </button>
+              <button
+                onClick={onCancel}
+                className="px-2 py-1 border border-border rounded text-text-muted hover:text-text"
+              >
+                Use a different model
+              </button>
+              <a
+                href="https://claude.ai"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-2 py-1 border border-border rounded text-text-muted hover:text-text inline-flex items-center"
+              >
+                Install manually
+              </a>
+            </div>
+          ) : (
+            <button
+              onClick={retry}
+              className="px-2 py-1 border border-border rounded text-text-muted hover:text-text"
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
     </div>

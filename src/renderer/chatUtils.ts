@@ -2245,6 +2245,24 @@ export type ConnectPhase =
       preExisting?: boolean;
     }
   | {
+      // BET-429: lazy Claude CLI install. The box has no `claude` binary,
+      // so the connect card spawned the official installer over the pty
+      // bus (installSessionKey, client-generated) and is polling
+      // opencodeClaudeCliStatus() every 2s. loginSessionKey is the
+      // claude-login sessionKey minted by the initial `{action:"start"}`
+      // response — held so the post-install re-fire can cancel it before
+      // minting a fresh one (the server's startClaudeLogin always
+      // generates a new key; the orphaned entry would otherwise leak in
+      // the server's _claudeLoginSessions map). startedAt is the wall
+      // clock the 5-min cap ticks against; cwd is the installer's cwd
+      // (the home dir the start response carried).
+      kind: "installingClaudeCli";
+      installSessionKey: string;
+      loginSessionKey: string;
+      startedAt: number;
+      cwd: string;
+    }
+  | {
       // BET-354: `restarted` is true when the server already called
       // `restartOpencode()` for this transition (the Claude "completed"
       // path). When true, the `applying` effect skips the renderer's
@@ -2258,7 +2276,23 @@ export type ConnectPhase =
       restarted?: boolean;
     }
   | { kind: "done" }
-  | { kind: "failed"; message: string };
+  | {
+      kind: "failed";
+      message: string;
+      // BET-429: when present, the failure was the lazy Claude CLI
+      // install — NOT the box (the box itself is fine; only the Claude
+      // binary didn't appear). The card renders three actions instead
+      // of the single Retry: Try again (re-run the installer with a
+      // fresh installSessionKey, reusing loginSessionKey), Use a
+      // different model (close the card — Codex/Kimi/custom need no
+      // binary), and Install manually (link to claude.ai). loginSessionKey
+      // + cwd are carried so "Try again" can re-enter installingClaudeCli
+      // without re-firing start.
+      installFailure?: {
+        loginSessionKey: string;
+        cwd: string;
+      };
+    };
 
 /**
  * Pull the device code out of an opencode OAuth instructions string, e.g.
@@ -2335,6 +2369,8 @@ export function connectPhaseLabel(state: ConnectPhase): string {
       return state.preExisting
         ? "Already signed in"
         : "Awaiting Claude sign-in";
+    case "installingClaudeCli":
+      return "Installing Claude CLI…";
     case "applying":
       return "Applying…";
     case "done":
