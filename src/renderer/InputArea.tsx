@@ -121,11 +121,9 @@ export function InputArea({
   onOpenModels,
   onSelectModel,
   scheduleCount,
-  jobsCount,
   onSchedules,
   onSecrets,
   onWebhooks,
-  onJobs,
   typeaheadOpen,
   typeaheadExactMatch,
   onTypeaheadConfirm,
@@ -171,11 +169,9 @@ export function InputArea({
   onOpenModels: () => void;
   onSelectModel: (m: ModelSelection | null) => void;
   scheduleCount: number;
-  jobsCount: number;
   onSchedules: () => void;
   onSecrets: () => void;
   onWebhooks: () => void;
-  onJobs: () => void;
   typeaheadOpen: boolean;
   typeaheadExactMatch: boolean;
   onTypeaheadConfirm: () => void;
@@ -346,11 +342,9 @@ export function InputArea({
         <span className="shrink-0 flex items-center gap-3 flex-wrap">
           <SessionToolbar
             scheduleCount={scheduleCount}
-            jobsCount={jobsCount}
             onSchedules={onSchedules}
             onSecrets={onSecrets}
             onWebhooks={onWebhooks}
-            onJobs={onJobs}
           />
           {(voiceActive || running) && (
             <span className="text-meta text-text-faint">

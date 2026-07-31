@@ -13,6 +13,3 @@ src/renderer/api/httpApi.ts
 # 10s delegateList() job poll is shared by both transports (identical call).
 src/renderer/App.tsx
 src/renderer/mobile/MobileApp.tsx
-# BET-404: BET-381 decision 7 — BackgroundJobsCard mirrors ScheduledTasksCard
-# (copy the existing card pattern exactly).
-src/renderer/PanelCards.tsx

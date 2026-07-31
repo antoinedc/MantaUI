@@ -239,6 +239,16 @@ const delegateEngine = createDelegateEngine({
   gitRun: (args) => tmux.run("git", args),
   listMessages: (sid) => oc.listMessages(sid),
   abortSession: (sid) => oc.abortSession(sid),
+  // BET-418 §B: detect a running job whose parent opencode session is gone so
+  // the sweeper can stop + clean it up (nobody left to report to).
+  sessionExists: async (sid) => {
+    try {
+      const sessions = await oc.listSessions();
+      return Array.isArray(sessions) && sessions.some((s) => s?.id === sid);
+    } catch {
+      return true; // best-effort: assume alive on a transient blip
+    }
+  },
   oc,
 });
 // eslint-disable-next-line no-unused-vars
@@ -1142,11 +1152,14 @@ const handleRequest = async (req, res) => {
   }
 
   // ---------- Background jobs (BET-378, server-side only) ----------
-  // POST   /api/delegate           body {prompt, model?, sessionID, directory}
-  //                               → 200 {ok, job} (400 refused: cap/nesting/bad input)
+  // POST   /api/delegate           body {prompt, model?, sessionID, directory, tools?}
+  //                               → 200 {ok, job} (400 refused: cap/nesting/bad input; 202 pending approval)
   // GET    /api/delegate?sessionID= → {jobs:[...]} (jobs for that parent session)
   // POST   /api/delegate/:id/stop  → 200 {ok} (409 not running / 404 not found)
   // DELETE /api/delegate/:id       → 200 {ok} (409 dirty worktree → {error:"dirty"})
+  // GET    /api/delegate/approvals?sessionID= → pending pre-flight approvals (BET-418 §A)
+  // POST   /api/delegate/approve/:id  body {tools?} → 200 {ok} (approve + start the job)
+  // POST   /api/delegate/decline/:id             → 200 {ok} (decline; the delegate call returns declined)
   //
   // Behind the existing Bearer auth gate (every route below the gate is
   // gated wholesale). Jobs are created by the AI tool (Stage 3) — there is
@@ -1154,11 +1167,45 @@ const handleRequest = async (req, res) => {
   // deletes via the delegate:* channels in rpc.mjs.
   if (
     path === "/api/delegate" ||
+    path === "/api/delegate/approvals" ||
+    /^\/api\/delegate\/approve\/([0-9a-f]{8})$/.test(path) ||
+    /^\/api\/delegate\/decline\/([0-9a-f]{8})$/.test(path) ||
     /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop))?$/.test(path)
   ) {
     const detailRe = /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop))?$/;
     const detailMatch = path.match(detailRe);
+    const approveMatch = path.match(/^\/api\/delegate\/approve\/([0-9a-f]{8})$/);
+    const declineMatch = path.match(/^\/api\/delegate\/decline\/([0-9a-f]{8})$/);
     try {
+      if (approveMatch) {
+        if (req.method !== "POST") {
+          respondJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const body = await readJsonBody(req);
+        const ok = delegateEngine.approve(approveMatch[1], body?.tools);
+        respondJson(res, 200, { ok });
+        return;
+      }
+      if (declineMatch) {
+        if (req.method !== "POST") {
+          respondJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const ok = delegateEngine.decline(declineMatch[1]);
+        respondJson(res, 200, { ok });
+        return;
+      }
+      if (path === "/api/delegate/approvals") {
+        if (req.method !== "GET") {
+          respondJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const sessionID = url.searchParams.get("sessionID") || undefined;
+        const approvals = delegateEngine.listPendingApprovals(sessionID);
+        respondJson(res, 200, { approvals });
+        return;
+      }
       if (detailMatch) {
         const [, id, action] = detailMatch;
         if (action === "stop") {
@@ -1191,11 +1238,16 @@ const handleRequest = async (req, res) => {
       // Collection routes (/api/delegate): create + list.
       if (req.method === "POST") {
         const body = await readJsonBody(req);
-        const result = await delegateEngine.startJob({
+        // BET-418 §A: trust mode (chatAutoAllow) skips the approval card.
+        const cfg = await local.configGet();
+        const trustMode = !!cfg?.chatAutoAllow;
+        const result = await delegateEngine.startJobWithApproval({
           prompt: body?.prompt,
           model: body?.model,
           parentSessionID: body?.sessionID,
           parentDirectory: body?.directory,
+          tools: body?.tools,
+          trustMode,
         });
         if (!result.ok) {
           respondJson(res, 400, { error: result.error });

@@ -16,6 +16,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Clock, X } from "lucide-react";
 import type {
+  DelegateApproval,
+  DelegateApprovalTool,
+  DelegateJob,
   OpencodeModel,
   QuestionRequest,
 } from "../shared/types";
@@ -57,7 +60,7 @@ import {
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
-import { BackgroundJobsCard, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
+import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
 import { useTranscriptState } from "./hooks/useTranscriptState";
@@ -161,17 +164,57 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     webhookError,
     setWebhookError,
     refreshWebhooks,
-    showJobs,
-    setShowJobs,
-    jobs,
-    setJobs,
-    jobsError,
-    setJobsError,
-    refreshJobs,
   } = resources;
   const setChatSubagents = useStore((s) => s.setChatSubagents);
-  // Prompt-history navigation (Up/Down cycles past prompts, terminal-style) is
-  // owned by useInputHistory — see the hook call after `updateInput` below.
+
+  // BET-418 §A: pre-flight background-job approvals. When trust mode is OFF
+  // and the model's `delegate` call declared `tools`, the server holds the
+  // call and publishes a pending approval; this panel polls for it and shows
+  // ONE card (Start / Edit access / Not now). The 3s poll is fast enough that
+  // the card appears within the 2-min approval window. Cleared on session
+  // change. Trust mode (chatAutoAllow) skips the card server-side, so none
+  // arrive here.
+  const [pendingApproval, setPendingApproval] = useState<DelegateApproval | null>(null);
+  const chatAutoAllowApproval = useStore((s) => s.chatAutoAllow);
+  useEffect(() => {
+    setPendingApproval(null);
+    if (chatAutoAllowApproval) return; // trust mode → server never requests approval
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const list = await window.api.delegatePendingApprovals(sessionId);
+        if (!cancelled && list.length > 0) setPendingApproval(list[0]);
+      } catch { /* non-fatal */ }
+    };
+    void poll();
+    const t = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [sessionId, chatAutoAllowApproval]);
+
+  // BET-418 §D: detect whether THIS session is a background job's child. A
+  // job session is read-only (no composer, no cards, no model picker/fork/
+  // compact/clear); the composer is replaced by ReadOnlyJobBar. Poll the
+  // box-wide job list (no-arg delegateList) and match on childSessionID.
+  const [jobOwnership, setJobOwnership] = useState<DelegateJob | null>(null);
+  useEffect(() => {
+    setJobOwnership(null);
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const list = await window.api.delegateList();
+        const arr = Array.isArray(list) ? list : [];
+        const match = arr.find((j) => j.childSessionID === sessionId) ?? null;
+        if (!cancelled) setJobOwnership(match);
+      } catch { /* non-fatal */ }
+    };
+    void poll();
+    const t = setInterval(poll, 10_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [sessionId]);
+
+  const projects = useStore((s) => s.projects);
+  const setActive = useStore((s) => s.setActive);
+
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Per-child debounce timers for refetching child transcripts when their
   // expanded card is receiving SSE traffic. Keyed by childSessionId. 300ms
@@ -1870,6 +1913,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             : null
         }
         hasSession={!!tmuxSession && windowIndex != null}
+        readOnly={!!jobOwnership}
         onFork={() => void forkSession()}
         onCompact={() => void compactSession()}
         onClear={() => void clearSession()}
@@ -1884,7 +1928,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         showThinking={showThinking}
         running={running}
         activeTodos={activeTodos}
-        questions={questions}
+        // BET-418 §D: a job session is read-only — never show its (anyway
+        // impossible) question cards. Defensive: a job's pre-flight ruleset
+        // means it never generates asks.
+        questions={jobOwnership ? [] : questions}
         turnInfo={turnInfo}
         finishByMessageId={finishByMessageId}
         userCommandInfo={userCommandInfo}
@@ -1894,7 +1941,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
       {/* Pending permission cards. Shown above the running indicator/input */}
       {/* so they're hard to miss — tool execution pauses until reply. */}
-      {permissions.length > 0 && (
+      {/* Hidden for a job session (BET-418 §D: a job's pre-flight ruleset */}
+      {/* means it never generates asks, but gate defensively anyway). */}
+      {!jobOwnership && permissions.length > 0 && (
         <div className="shrink-0 px-4 pt-2 space-y-2">
           {permissions.map((p) => (
             <PermissionCard
@@ -1931,11 +1980,32 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         </div>
       )}
 
+      {/* BET-418 §A: pre-flight background-job approval. Shown in the parent's */}
+      {/* panel when a `delegate` call declared tools and trust mode is OFF. */}
+      {/* Hidden for a job session (read-only view). */}
+      {!jobOwnership && pendingApproval && (
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <DelegateApprovalCard
+            approval={pendingApproval}
+            onApprove={(tools: DelegateApprovalTool[]) => {
+              const id = pendingApproval.id;
+              setPendingApproval(null);
+              void window.api.delegateApprove(id, tools).catch(() => { /* best-effort */ });
+            }}
+            onDecline={() => {
+              const id = pendingApproval.id;
+              setPendingApproval(null);
+              void window.api.delegateDecline(id).catch(() => { /* best-effort */ });
+            }}
+          />
+        </div>
+      )}
+
       {/* Scheduled-tasks management card. Toggled by the ⏰ toolbar button */}
       {/* (desktop) or the ⋯ sheet (mobile). Refetch-driven while open. */}
       {/* pb-2 gives the card breathing room above the composer border so it */}
-      {/* doesn't sit flush against the chat divider. */}
-      {showSchedules && (
+      {/* doesn't sit flush against the chat divider. Hidden for a job session. */}
+      {!jobOwnership && showSchedules && (
         <div className="shrink-0 px-4 pt-2 pb-2">
           <ScheduledTasksCard
             jobs={schedules}
@@ -1959,8 +2029,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
       {/* Secrets management card. Toggled by the 🔑 toolbar button (desktop) or */}
       {/* the ⋯ sheet (mobile). The value never appears here — list is metadata */}
-      {/* only; agents read secrets via the secret_* opencode tools. */}
-      {showSecrets && (
+      {/* only. Hidden for a job session (read-only view). */}
+      {!jobOwnership && showSecrets && (
         <div className="shrink-0 px-4 pt-2 pb-2">
           <SecretsCard
             secrets={secrets}
@@ -2001,7 +2071,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {/* Inbound-webhook management card. Toggled by the 🪝 toolbar button */}
       {/* (desktop) or the ⋯ sheet (mobile). List is metadata only (no signing */}
       {/* secret); creation is the AI's job via the `webhook` opencode tool. */}
-      {showWebhooks && (
+      {/* Hidden for a job session (read-only view). */}
+      {!jobOwnership && showWebhooks && (
         <div className="shrink-0 px-4 pt-2 pb-2">
           <WebhooksCard
             hooks={webhooks}
@@ -2016,56 +2087,6 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
                   setWebhookError(e instanceof Error ? e.message : "delete failed");
                   void refreshWebhooks();
                 });
-            }}
-          />
-        </div>
-      )}
-
-      {/* Background-jobs management card. Toggled by the ⚙ toolbar button */}
-      {/* (desktop) or the ⋯ sheet (mobile). Jobs are started by the AI's */}
-      {/* `delegate` opencode tool; the card only lists / stops / deletes. */}
-      {showJobs && (
-        <div className="shrink-0 px-4 pt-2 pb-2">
-          <BackgroundJobsCard
-            jobs={jobs}
-            error={jobsError}
-            onClose={() => setShowJobs(false)}
-            onStop={(id) => {
-              window.api
-                .delegateStop(id)
-                .then(() => refreshJobs())
-                .catch((e: unknown) => {
-                  setJobsError(e instanceof Error ? e.message : "stop failed");
-                  void refreshJobs();
-                });
-            }}
-            onDelete={(id) => {
-              return window.api
-                .delegateDelete(id)
-                .then((res) => {
-                  // Dirty worktree refusal: engine returns {ok:false,
-                  // reason:"dirty"} and keeps the record. The card reads the
-                  // returned result to show the inline refusal message; here
-                  // we just refresh (the record stays).
-                  if (res && res.ok === false && res.reason === "dirty") {
-                    setJobsError(null);
-                  } else {
-                    setJobs((prev) => prev.filter((j) => j.id !== id));
-                  }
-                  void refreshJobs();
-                  return res;
-                })
-                .catch((e: unknown) => {
-                  setJobsError(e instanceof Error ? e.message : "delete failed");
-                  void refreshJobs();
-                  return { ok: false };
-                });
-            }}
-            onOpen={(job) => {
-              if (job.tmuxSession != null && job.windowIndex != null) {
-                useStore.getState().setActive(job.tmuxSession, job.windowIndex);
-              }
-              setShowJobs(false);
             }}
           />
         </div>
@@ -2139,6 +2160,36 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           one instance app-wide. */}
       {isActive && <ToastStack toasts={toasts} onDismiss={dismissToast} />}
 
+      {jobOwnership ? (
+        <ReadOnlyJobBar
+          job={jobOwnership}
+          parentName={(() => {
+            const pid = jobOwnership.parentSessionID;
+            for (const p of projects) {
+              const w = (p.windows || []).find((x) => x.opencodeSessionId === pid);
+              if (w) return w.name ?? p.tmuxSession;
+            }
+            return null;
+          })()}
+          onGoToParent={() => {
+            const pid = jobOwnership.parentSessionID;
+            for (const p of projects) {
+              const w = (p.windows || []).find((x) => x.opencodeSessionId === pid);
+              if (w) {
+                setActive(p.tmuxSession, w.index);
+                return;
+              }
+            }
+          }}
+          onStop={() => {
+            if (jobOwnership.status !== "running") return;
+            void window.api
+              .delegateStop(jobOwnership.id)
+              .then(() => setJobOwnership((j) => (j ? { ...j, status: "stopped" } : j)))
+              .catch(() => { /* best-effort */ });
+          }}
+        />
+      ) : (
       <Composer
         attachments={attachments}
         onRemoveAttachment={removeAttachment}
@@ -2173,11 +2224,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
         scheduleCount={schedules.length}
-        jobsCount={jobs.filter((j) => j.status === "running").length}
         onSchedules={() => setShowSchedules((v) => !v)}
         onSecrets={() => setShowSecrets((v) => !v)}
         onWebhooks={() => setShowWebhooks((v) => !v)}
-        onJobs={() => setShowJobs((v) => !v)}
         typeaheadOpen={typeahead != null && typeaheadRows.length > 0}
         typeaheadExactMatch={(() => {
           if (!typeahead || typeaheadRows.length === 0) return false;
@@ -2213,6 +2262,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         }}
         onPaste={onPaste}
       />
+      )}
     </div>
   );
 }

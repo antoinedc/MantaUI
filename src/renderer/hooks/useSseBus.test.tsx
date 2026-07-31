@@ -623,12 +623,13 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
   });
 });
 
-// BET-403 nit 1 — gate the question.asked refetch to job-origin asks only.
-// The parent session's own question.asked carries a complete live payload, so
-// the GET round-trip was wasted work. A job-origin ask (sessionID is a known
-// related child) still refetches so the server-stamped fromJobName replaces
-// the live record.
-describe("useSseBus question.asked refetch gating (BET-403)", () => {
+// BET-418 §A — background-job children no longer route questions into the
+// parent's panel (a job is created with a pre-flight permission ruleset and
+// never asks once running). question.asked therefore never triggers a
+// refetch: the viewed session's own ask carries a complete live payload, and
+// a foreign session's ask is dropped by applyQuestionEvent before any
+// refetch could be considered.
+describe("useSseBus question.asked refetch gating (BET-418)", () => {
   let api: MockApi;
   let bus: MockEventBus;
   let h: Harness | null = null;
@@ -663,29 +664,13 @@ describe("useSseBus question.asked refetch gating (BET-403)", () => {
     expect(after).toBe(before);
   });
 
-  it("DOES refetch questions for a background-job child's question.asked", async () => {
-    // Seed the related-id set: a server record carrying fromJobName for a
-    // child session. server.connected triggers refreshQuestions, which both
-    // populates the set and records one opencodeQuestions call.
-    ({ api, bus } = installMockApi({
-      opencodeQuestions: async () => [
-        {
-          id: "que_child",
-          sessionID: "ses_child",
-          fromJobName: "fix-the-bug",
-          questions: [["pick one"]],
-        },
-      ],
-    }));
+  it("drops + does NOT refetch for a foreign (background-job child) session's question.asked", async () => {
+    ({ api, bus } = installMockApi());
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, { type: "server.connected", properties: {} });
-    const seeded = (api.calls.opencodeQuestions ?? []).length;
-    expect(seeded).toBeGreaterThanOrEqual(1);
+    const before = (api.calls.opencodeQuestions ?? []).length;
 
-    // A job-origin ask (child session is in the related set) must refetch so
-    // the fromJobName-stamped record replaces the live one.
     await emitAndFlush(bus, h, {
       type: "question.asked",
       properties: {
@@ -697,6 +682,6 @@ describe("useSseBus question.asked refetch gating (BET-403)", () => {
     });
 
     const after = (api.calls.opencodeQuestions ?? []).length;
-    expect(after).toBeGreaterThan(seeded);
+    expect(after).toBe(before);
   });
 });

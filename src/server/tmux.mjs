@@ -302,12 +302,12 @@ export function isMissingSessionError(err, sessionName) {
 // `cwd` is required to be an absolute directory — callers (newSession /
 // newWindow / newWindowGetIndex) flow through `resolveCwdOrThrow` first, which
 // expands `~` and rejects a missing dir. The BET-307 tmux-side chokepoint.
-async function maybeCreateChatSession(oc, chatMode, cwd, title) {
+async function maybeCreateChatSession(oc, chatMode, cwd, title, permission) {
   if (!chatMode) return null;
   if (!oc || typeof oc.createSession !== "function") {
     throw new Error("chat mode requires an opencode client (oc.createSession)");
   }
-  const sess = await oc.createSession({ directory: cwd, title });
+  const sess = await oc.createSession({ directory: cwd, title, permission });
   return sess.id;
 }
 
@@ -375,7 +375,8 @@ export async function newWindowGetIndex(sessionName, windowName, cwd, chatMode =
 // @param {boolean} [input.createDir]   mkdir -p the cwd first (onboarding)
 // @param {boolean} [input.chatMode]    create an opencode chat-mode window
 // @param {object} [input.oc]           opencode client (required when chatMode)
-export async function newSession({ name, cwd, windowName, createDir, chatMode, oc }) {
+// @param {Array} [input.permission]    opencode permission ruleset (chatMode jobs)
+export async function newSession({ name, cwd, windowName, createDir, chatMode, oc, permission }) {
   // Onboarding's first-project step opts into auto-creation via createDir: a
   // missing ~/projects/<name> should be created, not silently swallowed. tmux
   // new-session -c falls back to $HOME for a non-existent dir, so the mkdir -p
@@ -392,7 +393,7 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, o
   // opencodeSessionId === null and renders Terminal instead of ChatPanel —
   // this was the BET-113 regression.
   const sid = await maybeCreateChatSession(
-    oc, chatMode, dir, `${name} / ${windowName ?? "default"}`,
+    oc, chatMode, dir, `${name} / ${windowName ?? "default"}`, permission,
   );
   const idx = await newSessionGetIndex(name, dir, windowName, !!chatMode);
   await applySessionSurvivability(name);
@@ -408,12 +409,12 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, o
   await addOwnedSession(name, { path: ownedSessionsCachePath });
   return listProjects();
 }
-export async function newWindow({ sessionName, windowName, cwd, chatMode, worktreePath, oc }) {
+export async function newWindow({ sessionName, windowName, cwd, chatMode, worktreePath, oc, permission }) {
   // THE tmux-side chokepoint. Resolves before we opencode-create or tmux-call,
   // so a bad cwd throws before we orphan an opencode session.
   const dir = resolveCwdOrThrow(cwd);
   const sid = await maybeCreateChatSession(
-    oc, chatMode, dir, `${sessionName} / ${windowName}`,
+    oc, chatMode, dir, `${sessionName} / ${windowName}`, permission,
   );
   let idx;
   try {

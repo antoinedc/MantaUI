@@ -11,8 +11,10 @@
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useRef, useState } from "react";
-import { Clock, Webhook, Key, Bot, X } from "lucide-react";
+import { Clock, Webhook, Key, Bot, ArrowLeft, Square, X } from "lucide-react";
 import type {
+  DelegateApproval,
+  DelegateApprovalTool,
   DelegateJob,
   ScheduledJob,
   SecretMeta,
@@ -437,56 +439,34 @@ export const SecretsCard = memo(function SecretsCard({
   );
 });
 
-// BackgroundJobsCard — pinned card above the composer listing this session's
-// background delegation jobs (started by the AI's `delegate` opencode tool).
-// Each row shows name, status, activity (running jobs only), and for finished
-// jobs the branch + files-changed count. Buttons: stop (running), delete
-// (terminal), open (all — selects the job's window in the sidebar). Mirrors
-// ScheduledTasksCard exactly: same wrapper markup, same deferred
-// click-outside listener, same memoisation. See docs/manta-tools-delegate.md
-// + src/server/delegate.mjs.
-export const BackgroundJobsCard = memo(function BackgroundJobsCard({
-  jobs,
-  error,
-  onStop,
-  onDelete,
-  onOpen,
-  onClose,
+// DelegateApprovalCard — ONE pre-flight approval shown in the parent's panel
+// before a background job is created (BET-418 §A). The model's `delegate`
+// call declared the access it needs (`tools`); the user picks Start (create
+// the job with that ruleset), Edit access (trim/augment the ruleset first),
+// or Not now (decline — the delegate call returns declined). A catch-all deny
+// is appended server-side so any tool NOT listed is refused, not prompted.
+// Mirrors the other cards' markup so it renders on desktop + mobile.
+export const DelegateApprovalCard = memo(function DelegateApprovalCard({
+  approval,
+  onApprove,
+  onDecline,
 }: {
-  jobs: DelegateJob[];
-  error: string | null;
-  onStop: (id: string) => void;
-  // onDelete returns the engine's result so the card can show the inline
-  // dirty-worktree refusal message ONLY when delete was actually refused
-  // ({ok:false, reason:"dirty"}), not on every click.
-  onDelete: (id: string) => Promise<{ ok: boolean; reason?: string } | void> | void;
-  onOpen: (job: DelegateJob) => void;
-  onClose: () => void;
+  approval: DelegateApproval;
+  onApprove: (tools: DelegateApprovalTool[]) => void;
+  onDecline: () => void;
 }) {
-  // Click-outside-to-dismiss — same guard as ScheduledTasksCard so a mis-tap
-  // on the close button doesn't land on a row's stop/delete.
-  const cardRef = useRef<HTMLDivElement | null>(null);
-  // Per-row dirty-refusal message: when delete is refused because the
-  // worktree has uncommitted changes, the engine returns {ok:false,
-  // reason:"dirty"} and keeps the record. We surface an inline message on
-  // that row rather than a toast. No force option (by design).
-  const [dirtyRow, setDirtyRow] = useState<string | null>(null);
+  // Edit-access mode: a local, editable copy of the tools list. Start sends
+  // the (possibly edited) list; the server rebuilds the ruleset + catch-all.
+  const [editing, setEditing] = useState(false);
+  const [tools, setTools] = useState<DelegateApprovalTool[]>(
+    Array.isArray(approval.tools) ? approval.tools.map((t) => ({ ...t })) : [],
+  );
   useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (cardRef.current && !cardRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    const t = setTimeout(() => document.addEventListener("mousedown", onDown), 0);
-    return () => {
-      clearTimeout(t);
-      document.removeEventListener("mousedown", onDown);
-    };
-  }, [onClose]);
-  const runningCount = jobs.filter((j) => j.status === "running").length;
+    setTools(Array.isArray(approval.tools) ? approval.tools.map((t) => ({ ...t })) : []);
+    setEditing(false);
+  }, [approval.id]);
   return (
     <div
-      ref={cardRef}
       className="rounded-md border bg-bg-elev px-3 py-2 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
@@ -494,99 +474,159 @@ export const BackgroundJobsCard = memo(function BackgroundJobsCard({
         <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
           <Bot size={16} aria-hidden="true" />
         </span>
-        <span className="text-text">Background jobs</span>
-        {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
+        <span className="text-text">Background job approval</span>
+        <span className="text-text-faint truncate">· {approval.name}</span>
         <button
-          onClick={onClose}
-          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
-          title="Close (or click outside)"
-          aria-label="Close"
+          onClick={onDecline}
+          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          title="Not now (decline)"
+          aria-label="Not now"
         >
           <X size={16} aria-hidden="true" />
         </button>
       </div>
-      {error ? (
-        <div className="text-danger break-words">{error}</div>
-      ) : jobs.length === 0 ? (
-        <div className="text-text-muted">
-          No background jobs in this session. Ask the agent to delegate
-          long-running work (e.g. “run the test suite and fix failures in the
-          background”).
+      <div className="text-text-muted mb-1 line-clamp-2">{approval.prompt}</div>
+      <div className="text-text-faint mb-1">Will be allowed to:</div>
+      {tools.length === 0 ? (
+        <div className="text-text-faint text-label">No tools declared.</div>
+      ) : (
+        <div className="flex flex-col gap-1 mb-1">
+          {tools.map((t, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              {editing ? (
+                <>
+                  <input
+                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-1.5 py-0.5 font-mono text-text"
+                    value={t.permission}
+                    onChange={(e) =>
+                      setTools((prev) =>
+                        prev.map((p, j) => (j === i ? { ...p, permission: e.target.value } : p)),
+                      )
+                    }
+                    placeholder="permission"
+                  />
+                  <input
+                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-1.5 py-0.5 font-mono text-text"
+                    value={t.pattern}
+                    onChange={(e) =>
+                      setTools((prev) =>
+                        prev.map((p, j) => (j === i ? { ...p, pattern: e.target.value } : p)),
+                      )
+                    }
+                    placeholder="pattern"
+                  />
+                  <button
+                    onClick={() => setTools((prev) => prev.filter((_, j) => j !== i))}
+                    className="shrink-0 px-1 rounded text-danger hover:bg-danger-bg border border-danger/30"
+                    title="Remove"
+                  >
+                    <X size={12} aria-hidden="true" />
+                  </button>
+                </>
+              ) : (
+                <MetaBadge title={`${t.permission}: ${t.pattern}`}>
+                  {t.permission}: {t.pattern}
+                </MetaBadge>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {editing && (
+        <button
+          onClick={() => setTools((prev) => [...prev, { permission: "bash", pattern: "" }])}
+          className="text-label text-text-faint hover:text-text-muted mb-1"
+        >
+          + Add rule
+        </button>
+      )}
+      <div className="text-text-faint text-label mb-2">
+        Anything not listed is denied (the job will not ask again).
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => onApprove(tools)}
+          className="px-2.5 py-1 rounded text-bg font-medium"
+          style={{ backgroundColor: "var(--accent)" }}
+          title="Start the job with this access"
+        >
+          Start job
+        </button>
+        <button
+          onClick={() => setEditing((v) => !v)}
+          className="px-2 py-1 rounded border border-border-strong text-text hover:bg-bg-soft"
+        >
+          {editing ? "Done editing" : "Edit access"}
+        </button>
+        <button
+          onClick={onDecline}
+          className="px-2 py-1 rounded text-text-faint hover:text-text-muted"
+        >
+          Not now
+        </button>
+      </div>
+    </div>
+  );
+});
+
+// ReadOnlyJobBar — replaces the composer for a background-job session (BET-418
+// §D). A job is read-only: no composer, no permission/question cards, no model
+// picker, no fork/compact/clear. The only live action is Stop (running jobs).
+// "Go to parent" navigates to the parent session's window. Once terminal, the
+// bar shows the outcome (branch + files changed) and Stop is hidden; the view
+// closes when the user navigates away (the window is removed on terminal, so
+// the sidebar no longer lists it).
+export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
+  job,
+  parentName,
+  onGoToParent,
+  onStop,
+}: {
+  job: DelegateJob;
+  parentName: string | null;
+  onGoToParent: () => void;
+  onStop: () => void;
+}) {
+  const terminal = job.status !== "running";
+  return (
+    <div className="shrink-0 px-4 py-2 border-t border-border bg-bg-elev text-meta">
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Bot size={14} aria-hidden="true" />
+        </span>
+        <span className="text-text">Read-only — this is a background job.</span>
+        {parentName && (
+          <span className="text-text-faint">It reports to {parentName}.</span>
+        )}
+      </div>
+      {terminal ? (
+        <div className="text-text-faint">
+          {formatJobSummary(job)}
+          {job.status === "failed" || job.status === "stopped"
+            ? ` · ${job.error ?? job.status}`
+            : ""}
         </div>
       ) : (
-        <div className="flex flex-col gap-2 max-h-[40vh] overflow-y-auto">
-          {jobs.map((j) => {
-            const terminal = j.status !== "running";
-            return (
-              <div key={j.id} className="flex items-center gap-2">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => onOpen(j)}
-                      className="text-text truncate hover:underline text-left"
-                      title={`Open “${j.name}” in the sidebar`}
-                    >
-                      {j.name}
-                    </button>
-                    <MetaBadge
-                      tone={
-                        j.status === "failed" || j.status === "stopped"
-                          ? "danger"
-                          : "neutral"
-                      }
-                      title={`Status: ${j.status}`}
-                    >
-                      {j.status}
-                    </MetaBadge>
-                  </div>
-                  <div className="text-text-faint text-label truncate">
-                    {j.status === "running"
-                      ? j.activity || "running…"
-                      : formatJobSummary(j)}
-                  </div>
-                  {dirtyRow === j.id && (
-                    <div className="text-warn text-label">
-                      worktree has uncommitted changes — open it and commit or
-                      discard first
-                    </div>
-                  )}
-                </div>
-                {j.status === "running" && (
-                  <button
-                    onClick={() => onStop(j.id)}
-                    className="shrink-0 px-2 py-px rounded text-warn hover:bg-warn-bg border border-warn/30 text-label"
-                    title="Stop this job (aborts the session; window + worktree kept)"
-                  >
-                    Stop
-                  </button>
-                )}
-                {terminal && (
-                  <button
-                    onClick={async () => {
-                      const res = await onDelete(j.id);
-                      // Show the inline refusal ONLY when the engine kept the
-                      // record because the worktree was dirty. A successful
-                      // delete removes the row on the next refresh, so this
-                      // never flashes on success.
-                      if (res && res.ok === false && res.reason === "dirty") {
-                        setDirtyRow(j.id);
-                        setTimeout(() => setDirtyRow((r) => (r === j.id ? null : r)), 6000);
-                      }
-                    }}
-                    className="shrink-0 px-2 py-px rounded text-danger hover:bg-danger-bg border border-danger/30 text-label"
-                    title="Delete this job (removes the window + worktree; refuses a dirty worktree)"
-                  >
-                    Delete
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
+        <div className="text-text-faint">{job.activity || "running…"}</div>
       )}
-      {runningCount === 0 && jobs.length > 0 && (
-        <div className="text-text-faint text-label mt-1">No running jobs.</div>
-      )}
+      <div className="flex items-center gap-2 mt-1.5">
+        <button
+          onClick={onGoToParent}
+          className="px-2 py-1 rounded border border-border-strong text-text hover:bg-bg-soft inline-flex items-center gap-1"
+          title="Go to the parent session"
+        >
+          <ArrowLeft size={12} aria-hidden="true" /> Go to parent
+        </button>
+        {!terminal && (
+          <button
+            onClick={onStop}
+            className="px-2 py-1 rounded text-warn hover:bg-warn-bg border border-warn/30 inline-flex items-center gap-1"
+            title="Stop this job"
+          >
+            <Square size={12} aria-hidden="true" /> Stop
+          </button>
+        )}
+      </div>
     </div>
   );
 });

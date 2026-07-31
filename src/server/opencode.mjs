@@ -26,7 +26,9 @@ import {
   defaultCredentialsValidator,
   restoreFromBackup,
 } from "./claudeAuth.mjs";
-import { relatedSessionIds, jobNameForSession } from "./delegate.mjs";
+// BET-418 §A removed the BET-380 background-job permission/question routing;
+// delegate.mjs ownership helpers (relatedSessionIds/jobNameForSession) are no
+// longer imported here.
 
 const REMOTE_PORT = 4096;
 
@@ -446,13 +448,22 @@ export function _onSessionDirectoryAdded(fn) {
 // paths. The server runs ON the opencode host, so `expandTilde` from
 // src/shared/paths.mjs expands against this process's own $HOME before
 // opencode sees the path.
-export async function createSession({ directory, title = "" }) {
+export async function createSession({ directory, title = "", permission }) {
   const absDir = expandTilde(directory);
   const url = `/session?directory=${encodeURIComponent(absDir)}`;
+  const body = { title };
+  // BET-418 §A: a background job is created with a permission ruleset so it
+  // never asks once running. opencode's POST /session accepts a `permission`
+  // array (verified working against opencode v1.15.12) — forward it verbatim
+  // when provided. The ruleset MUST end with a catch-all deny (enforced by
+  // buildPermissionRuleset in delegate.mjs).
+  if (Array.isArray(permission) && permission.length > 0) {
+    body.permission = permission;
+  }
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
@@ -731,38 +742,12 @@ function extractAssistantText(msgs) {
 // Permission flow (Write/Edit/Bash approval)
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Background-job request surfacing (BET-380)
-//
-// A background delegation job runs in its OWN opencode session (a git worktree,
-// or the parent cwd when not a repo). Its permission/question requests must
-// surface in the PARENT's panel so the user can answer them — otherwise the
-// job hangs until the 30-minute sweeper kills it. Ownership is determined
-// server-side from the job records (src/server/delegate.mjs): the renderer
-// never recomputes it.
-//
-// `listPermissions`/`listQuestions` accept the parent's sessionID plus the
-// current job records, widen their filter to the parent OR any non-terminal
-// job child session, and stamp `fromJobName` on each record that came from a
-// job. `fromJobName` is the ONLY new field — the renderer keys everything off
-// its presence.
-//
-// opencode's /permission and /question are `?directory=`-scoped, and a job's
-// child session lives in a DIFFERENT directory than the parent, so the parent's
-// scoped query does not return the child's asks. Each related child's directory
-// is fetched and merged in (best-effort) before the single filter pass. The
-// allowed-id set is built ONCE per call, before filtering — never per record.
-// ---------------------------------------------------------------------------
-
-function buildAllowedSessionSet(sessionId, jobs) {
-  if (!sessionId) return null;
-  return new Set([sessionId, ...relatedSessionIds(sessionId, jobs)]);
-}
-
-function stampFromJobName(record, jobs) {
-  const name = jobNameForSession(record?.sessionID, jobs);
-  return name ? { ...record, fromJobName: name } : record;
-}
+// Background delegation jobs no longer route their permission/question asks
+// into the parent's panel (BET-418 §A): a job is created with a pre-flight
+// permission ruleset so it never asks anything once running. The BET-380
+// widening (relatedSessionIds / jobNameForSession / fromJobName stamping /
+// merged multi-directory fetch) is deleted. listPermissions/listQuestions are
+// back to plain scoped reads of the requested session's directory.
 
 /** List all pending tool-use permissions.
  *  Scoped to the session's directory when sessionId is provided. opencode's
@@ -770,47 +755,25 @@ function stampFromJobName(record, jobs) {
  *  sessions bound to a non-default directory — so without `?directory=` the
  *  PermissionCard never appears on mobile and the turn hangs forever (the
  *  live `per_…` is sitting in the server's pending map, we just can't see
- *  it). Mirrors listQuestions above + desktop listPermissions.
- *
- *  When `jobs` is passed, the filter is widened to the requested session OR
- *  any non-terminal background-job child session, and each record from a job
- *  is stamped with `fromJobName` (BET-380). The child's directory is fetched
- *  separately and merged, because a job runs in its own directory.
+ *  it). Mirrors listQuestions below + desktop listPermissions.
  *  @param {string} [sessionId]
- *  @param {Array<{childSessionID?:string, parentSessionID?:string, status?:string, name?:string}>} [jobs]
- *  @returns {Promise<Array<{ id: string, sessionID: string, permission: string, fromJobName?: string, ... }>>}
+ *  @returns {Promise<Array<{ id: string, sessionID: string, permission: string, ... }>>}
  */
-export async function listPermissions(sessionId, jobs = []) {
-  const allowed = buildAllowedSessionSet(sessionId, jobs);
+export async function listPermissions(sessionId) {
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
   const res = await ocFetch(apiUrl(`/permission${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listPermissions ${res.status}: ${await res.text()}`);
   }
   const all = await res.json();
-  let list = Array.isArray(all) ? all : [];
-  // Pull in each related child job's directory — a job runs in its own
-  // directory, so the parent's scoped query never includes its asks.
-  if (allowed) {
-    for (const childId of relatedSessionIds(sessionId, jobs)) {
-      try {
-        const childDirQ = await getSessionDirectoryQuery(childId);
-        const childRes = await ocFetch(apiUrl(`/permission${childDirQ}`));
-        if (childRes.ok) {
-          const childAll = await childRes.json();
-          if (Array.isArray(childAll)) list = list.concat(childAll);
-        }
-      } catch {
-        /* best-effort: a failed child fetch does not discard the rest */
-      }
-    }
-    // Filter to the allowed-id set (parent + non-terminal children) so
-    // cross-session leaks from the directory-wide responses are dropped.
-    return list
-      .filter((p) => allowed.has(p.sessionID))
-      .map((p) => stampFromJobName(p, jobs));
-  }
-  return list;
+  const list = Array.isArray(all) ? all : [];
+  // opencode's /permission is `?directory=`-scoped, not session-scoped: a
+  // directory can hold pending items from multiple sessions (orphan/subagent
+  // sessions included). Filter the directory-wide response down to the
+  // requested sessionId so callers never see cross-session leaks (BET-110).
+  // Background-job children no longer surface here (BET-418 §A).
+  if (!sessionId) return list;
+  return list.filter((p) => p.sessionID === sessionId);
 }
 
 /** Approve or deny a permission request.
@@ -843,42 +806,22 @@ export async function replyPermission({ requestId, reply, sessionId }) {
  *  from the correct workspace are returned. Without scoping, opencode returns
  *  questions for the default workspace only — causing the QuestionCard to
  *  never appear for non-default sessions and the agent to hang forever.
- *
- *  When `jobs` is passed, the filter is widened to the requested session OR
- *  any non-terminal background-job child session, and each record from a job
- *  is stamped with `fromJobName` (BET-380). The child's directory is fetched
- *  separately and merged, because a job runs in its own directory.
  *  @param {string} [sessionId]
- *  @param {Array<{childSessionID?:string, parentSessionID?:string, status?:string, name?:string}>} [jobs]
- *  @returns {Promise<Array<{ id: string, sessionID: string, questions: Array<...>, fromJobName?: string, ... }>>}
+ *  @returns {Promise<Array<{ id: string, sessionID: string, questions: Array<...>, ... }>>}
  */
-export async function listQuestions(sessionId, jobs = []) {
-  const allowed = buildAllowedSessionSet(sessionId, jobs);
+export async function listQuestions(sessionId) {
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
   const res = await ocFetch(apiUrl(`/question${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode listQuestions ${res.status}: ${await res.text()}`);
   }
   const all = await res.json();
-  let list = Array.isArray(all) ? all : [];
-  if (allowed) {
-    for (const childId of relatedSessionIds(sessionId, jobs)) {
-      try {
-        const childDirQ = await getSessionDirectoryQuery(childId);
-        const childRes = await ocFetch(apiUrl(`/question${childDirQ}`));
-        if (childRes.ok) {
-          const childAll = await childRes.json();
-          if (Array.isArray(childAll)) list = list.concat(childAll);
-        }
-      } catch {
-        /* best-effort: a failed child fetch does not discard the rest */
-      }
-    }
-    return list
-      .filter((q) => allowed.has(q.sessionID))
-      .map((q) => stampFromJobName(q, jobs));
-  }
-  return list;
+  const list = Array.isArray(all) ? all : [];
+  // opencode's /question is `?directory=`-scoped, not session-scoped — see
+  // listPermissions above. Filter to the requested sessionId (BET-110).
+  // Background-job children no longer surface here (BET-418 §A).
+  if (!sessionId) return list;
+  return list.filter((q) => q.sessionID === sessionId);
 }
 
 /**

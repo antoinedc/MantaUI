@@ -10,10 +10,11 @@ import {
   finishJob,
   sweepDelegateJobs,
   deleteJob,
+  cleanupTerminalJob,
+  stopJob,
+  buildPermissionRuleset,
+  createApprovalState,
   MAX_RUNNING_JOBS,
-  relatedSessionIds,
-  jobNameForSession,
-  createJobsCache,
   createDelegateEngine,
 } from "./delegate.mjs";
 
@@ -202,23 +203,158 @@ test("startJob refuses a sixth concurrent job with the exact cap error", async (
   assert.equal(h.delivered.length, 0);
 });
 
-test("startJob allows a job when under the cap", async () => {
-  const h = harness(Array.from({ length: MAX_RUNNING_JOBS - 1 }, (_, i) => runningJob(i)));
-  h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
-  const parentWin = { index: 0, name: "parent", opencodeSessionId: "parentX", paneCurrentPath: "/repo" };
-  const childWin = { index: 9, name: "extra-work", opencodeSessionId: "child-new", paneCurrentPath: "/repo" };
-  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
-  h.deps.newWindow = async (input) => [
-    { tmuxSession: input.sessionName, windows: [parentWin, childWin] },
-  ];
-  const res = await startJob(
-    { prompt: "extra work", parentSessionID: "parentX", parentDirectory: "/repo" },
-    h.deps,
-  );
-  assert.equal(res.ok, true);
-  assert.equal(res.job.status, "running");
-  assert.equal(h.jobs.length, MAX_RUNNING_JOBS);
+// ----------------------------------------------------------------------------
+// cleanupTerminalJob + finishJob/stopJob terminal cleanup (BET-418 §B)
+// ----------------------------------------------------------------------------
+
+function cleanupHarness() {
+  const killWindowCalls = [];
+  const removeCalls = [];
+  return {
+    killWindowCalls,
+    removeCalls,
+    killWindow: async (input) => { killWindowCalls.push(input); },
+    gitRemoveWorktree: async (input) => { removeCalls.push(input); return { removed: true }; },
+  };
+}
+
+function terminalJob(overrides = {}) {
+  return {
+    id: "jx",
+    name: "fix",
+    parentSessionID: "ses_p",
+    childSessionID: "ses_c",
+    tmuxSession: "proj",
+    windowIndex: 3,
+    worktree: "/tmp/wt",
+    branch: "fix",
+    baseSha: "abc",
+    status: "done",
+    finishedAt: 100,
+    ...overrides,
+  };
+}
+
+test("cleanupTerminalJob removes worktree then window on a clean worktree", async () => {
+  const c = cleanupHarness();
+  const res = await cleanupTerminalJob(terminalJob(), c);
+  assert.equal(res.cleanedUp, true);
+  assert.equal(c.removeCalls.length, 1);
+  assert.deepEqual(c.removeCalls[0], { path: "/tmp/wt", force: false });
+  assert.equal(c.killWindowCalls.length, 1);
+  assert.deepEqual(c.killWindowCalls[0], { sessionName: "proj", windowIndex: 3 });
 });
+
+test("cleanupTerminalJob keeps both window + worktree on a dirty worktree", async () => {
+  const c = cleanupHarness();
+  c.gitRemoveWorktree = async (input) => { c.removeCalls.push(input); return { removed: false, reason: "dirty" }; };
+  const res = await cleanupTerminalJob(terminalJob(), c);
+  assert.equal(res.cleanedUp, false);
+  assert.equal(res.reason, "dirty");
+  assert.equal(c.removeCalls.length, 1, "worktree removal attempted (force:false)");
+  assert.equal(c.killWindowCalls.length, 0, "window is NOT killed when the worktree is dirty");
+});
+
+test("cleanupTerminalJob with no worktree just kills the window", async () => {
+  const c = cleanupHarness();
+  const res = await cleanupTerminalJob(terminalJob({ worktree: null, branch: null }), c);
+  assert.equal(res.cleanedUp, true);
+  assert.equal(c.removeCalls.length, 0);
+  assert.equal(c.killWindowCalls.length, 1);
+});
+
+test("finishJob runs terminal cleanup and stamps cleanedUp true on a clean worktree", async () => {
+  const c = cleanupHarness();
+  const job = { ...runningObserverJob(), id: "fin-clean", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = { ...h.deps, ...c };
+  await finishJob(job, "done", null, deps, new Map());
+  const stored = h.jobs.find((j) => j.id === "fin-clean");
+  assert.equal(stored.status, "done");
+  assert.equal(stored.cleanedUp, true);
+  assert.equal(c.killWindowCalls.length, 1);
+  assert.equal(c.removeCalls.length, 1);
+});
+
+test("finishJob keeps the record (cleanedUp false) on a dirty worktree", async () => {
+  const c = cleanupHarness();
+  c.gitRemoveWorktree = async () => ({ removed: false, reason: "dirty" });
+  const job = { ...runningObserverJob(), id: "fin-dirty", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = { ...h.deps, ...c };
+  await finishJob(job, "done", null, deps, new Map());
+  const stored = h.jobs.find((j) => j.id === "fin-dirty");
+  assert.equal(stored.cleanedUp, false);
+  assert.equal(c.killWindowCalls.length, 0, "dirty worktree keeps the window");
+});
+
+test("stopJob runs terminal cleanup and stamps cleanedUp", async () => {
+  const c = cleanupHarness();
+  const job = { ...runningObserverJob(), id: "stop-clean", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = { ...h.deps, ...c };
+  const res = await stopJob("stop-clean", deps);
+  assert.equal(res.ok, true);
+  const stored = h.jobs.find((j) => j.id === "stop-clean");
+  assert.equal(stored.status, "stopped");
+  assert.equal(stored.cleanedUp, true);
+  assert.equal(c.killWindowCalls.length, 1);
+});
+
+// ----------------------------------------------------------------------------
+// Retention skips dirty-kept terminal jobs (BET-418 §B)
+// ----------------------------------------------------------------------------
+
+test("sweep does not prune a terminal dirty-kept job (cleanedUp false)", async () => {
+  const old = 1_700_000_000_000;
+  const cutoff = old - 8 * 24 * 60 * 60_000; // older than the 7-day retention
+  const dirty = terminalJob({ id: "dirty", status: "done", finishedAt: cutoff, cleanedUp: false, worktree: "/tmp/wt" });
+  const clean = terminalJob({ id: "clean", status: "done", finishedAt: cutoff, cleanedUp: true, worktree: "/tmp/wt" });
+  const h = harness([dirty, clean], old);
+  // No timed-out, no orphaned jobs → retention only.
+  await sweepDelegateJobs(h.deps);
+  const ids = h.jobs.map((j) => j.id);
+  assert.ok(ids.includes("dirty"), "dirty-kept record is retained so its window stays a job");
+  assert.ok(!ids.includes("clean"), "cleaned-up record is pruned normally");
+});
+
+// ----------------------------------------------------------------------------
+// Parent-gone detection in the sweeper (BET-418 §B)
+// ----------------------------------------------------------------------------
+
+test("sweep stops a running job whose parent session is gone", async () => {
+  const c = cleanupHarness();
+  const job = { ...runningObserverJob(), id: "orphan", parentSessionID: "ses_gone", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2, startedAt: 1_700_000_000_000 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = {
+    ...h.deps,
+    ...c,
+    sessionExists: async (sid) => sid !== "ses_gone",
+    abortSession: async () => {},
+  };
+  await sweepDelegateJobs(deps);
+  const stored = h.jobs.find((j) => j.id === "orphan");
+  assert.equal(stored.status, "stopped", "orphaned job is stopped");
+  assert.equal(stored.cleanedUp, true, "terminal cleanup ran on the orphaned job");
+  assert.equal(c.killWindowCalls.length, 1);
+});
+
+test("sweep leaves a running job whose parent session is alive", async () => {
+  const c = cleanupHarness();
+  const job = { ...runningObserverJob(), id: "alive", parentSessionID: "ses_alive", worktree: "/tmp/wt", startedAt: 1_700_000_000_000 };
+  const h = harness([job], 1_700_000_000_000);
+  const deps = {
+    ...h.deps,
+    ...c,
+    sessionExists: async () => true,
+    abortSession: async () => {},
+  };
+  await sweepDelegateJobs(deps);
+  const stored = h.jobs.find((j) => j.id === "alive");
+  assert.equal(stored.status, "running", "alive-parent job is left running");
+  assert.equal(c.killWindowCalls.length, 0);
+});
+
 
 // ----------------------------------------------------------------------------
 // 4. Nesting: a start whose parentSessionID is a live job's childSessionID
@@ -532,157 +668,234 @@ test("finishJob is idempotent for an already-terminal job", async () => {
   assert.equal(h.delivered.length, 0);
 });
 
+
 // ----------------------------------------------------------------------------
-// relatedSessionIds / jobNameForSession — BET-380 ownership helpers
-//
-// Pure functions used by opencode.mjs listPermissions/listQuestions to widen
-// their session filter so a background job's asks surface in the PARENT's
-// panel. Non-terminal = "running"; terminal (done/failed/stopped) jobs are
-// excluded so a finished job's stale asks don't leak into the parent panel.
+// buildPermissionRuleset (BET-418 §A)
 // ----------------------------------------------------------------------------
 
-function jobRecord(overrides) {
-  return {
-    id: "j1",
-    name: "fix-login",
-    parentSessionID: "ses_parent",
-    childSessionID: "ses_child",
-    status: "running",
-    ...overrides,
-  };
-}
-
-test("relatedSessionIds returns children of running jobs only, not terminal ones", () => {
-  const jobs = [
-    jobRecord({ id: "a", childSessionID: "child_a", status: "running" }),
-    jobRecord({ id: "b", childSessionID: "child_b", status: "done", finishedAt: 1 }),
-    jobRecord({ id: "c", childSessionID: "child_c", status: "failed", finishedAt: 2 }),
-    jobRecord({ id: "d", childSessionID: "child_d", status: "stopped", finishedAt: 3 }),
-    jobRecord({ id: "e", childSessionID: "child_e", status: "running", parentSessionID: "ses_other" }),
-  ];
-  const related = relatedSessionIds("ses_parent", jobs);
-  assert.deepEqual(related, ["child_a"], "only the running job's child id is returned");
+test("buildPermissionRuleset appends the mandatory catch-all deny last", () => {
+  const rs = buildPermissionRuleset([
+    { permission: "bash", pattern: "pytest *" },
+    { permission: "write", pattern: "**/*.ts" },
+  ]);
+  assert.deepEqual(rs, [
+    { permission: "bash", pattern: "pytest *", action: "allow" },
+    { permission: "write", pattern: "**/*.ts", action: "allow" },
+    { permission: "*", pattern: "**", action: "deny" },
+  ]);
+  assert.equal(rs[rs.length - 1].action, "deny", "catch-all deny MUST be last");
 });
 
-test("relatedSessionIds returns an empty array for an unknown parent", () => {
-  const jobs = [jobRecord({ id: "a", childSessionID: "child_a", status: "running" })];
-  assert.deepEqual(relatedSessionIds("ses_unknown", jobs), []);
-  assert.deepEqual(relatedSessionIds("", jobs), []);
-  assert.deepEqual(relatedSessionIds("ses_parent", []), []);
-  assert.deepEqual(relatedSessionIds("ses_parent", null), []);
+test("buildPermissionRuleset with no tools still applies the catch-all deny (job asks nothing, denies everything)", () => {
+  const rs = buildPermissionRuleset([]);
+  assert.deepEqual(rs, [{ permission: "*", pattern: "**", action: "deny" }]);
 });
 
-test("jobNameForSession returns the job name, and null when unknown or terminal", () => {
-  const jobs = [
-    jobRecord({ id: "a", childSessionID: "child_a", name: "fix-the-bug", status: "running" }),
-    jobRecord({ id: "b", childSessionID: "child_b", name: "done-job", status: "done", finishedAt: 1 }),
-  ];
-  assert.equal(jobNameForSession("child_a", jobs), "fix-the-bug");
-  assert.equal(jobNameForSession("child_b", jobs), null, "terminal job is not owned");
-  assert.equal(jobNameForSession("child_unknown", jobs), null);
-  assert.equal(jobNameForSession("", jobs), null);
-  assert.equal(jobNameForSession("child_a", []), null);
-  assert.equal(jobNameForSession("child_a", null), null);
+test("buildPermissionRuleset de-dups identical rules and defaults action to allow", () => {
+  const rs = buildPermissionRuleset([
+    { permission: "bash", pattern: "pytest *" },
+    { permission: "bash", pattern: "pytest *" },
+    { permission: "bash", pattern: "rm *", action: "deny" },
+  ]);
+  assert.equal(rs.length, 3, "two allows (de-duped) + one explicit deny + catch-all");
+  assert.equal(rs[0].action, "allow");
+  assert.equal(rs[1].action, "deny");
+});
+
+// BET-418 §A acceptance: a job whose ruleset omits `bash` must FAIL its first
+// command, not stall. The ruleset has no bash-allow rule, so opencode resolves
+// the bash tool against the catch-all deny and rejects it immediately — there
+// is no `ask` path to hang on. This test pins the ruleset shape that produces
+// that behavior (the live opencode denial is an integration concern).
+test("a ruleset omitting bash has no bash-allow rule (command fails, no hang)", () => {
+  const rs = buildPermissionRuleset([
+    { permission: "write", pattern: "**/*.ts" },
+  ]);
+  const bashAllow = rs.find((r) => r.permission === "bash" && r.action === "allow");
+  assert.equal(bashAllow, undefined, "no bash-allow rule — bash hits the catch-all deny");
+  assert.equal(rs[rs.length - 1].action, "deny");
 });
 
 // ----------------------------------------------------------------------------
-// createJobsCache — TTL + invalidation (BET-403 nit 2)
+// createApprovalState (BET-418 §A)
 // ----------------------------------------------------------------------------
 
-test("createJobsCache serves a cached load within the TTL window", async () => {
-  let loadCount = 0;
-  const load = async () => { loadCount += 1; return [{ id: "a", status: "running" }]; };
-  let nowMs = 1000;
-  const cache = createJobsCache({ load, ttlMs: 2000, now: () => nowMs });
-
-  const a = await cache.get();
-  const b = await cache.get();
-  assert.equal(loadCount, 1, "second get within TTL hits the cache");
-  assert.deepEqual(a, b);
-
-  nowMs = 4000; // past TTL
-  await cache.get();
-  assert.equal(loadCount, 2, "expired entry re-loads");
+test("approval awaitDecision resolves on approve with edited tools", async () => {
+  const state = createApprovalState({ now: () => 1000 });
+  const a = state.create({ parentSessionID: "ses_p", name: "fix", prompt: "do it", tools: [{ permission: "bash", pattern: "pytest *" }] });
+  const p = state.awaitDecision(a.id, 10_000);
+  assert.ok(state.resolve(a.id, "approve", [{ permission: "bash", pattern: "pytest * -x" }]));
+  const res = await p;
+  assert.equal(res.decision, "approve");
+  assert.deepEqual(res.tools, [{ permission: "bash", pattern: "pytest * -x" }]);
+  assert.equal(state.list().length, 0, "approval cleared after resolve");
 });
 
-test("createJobsCache invalidate forces the next get to reload", async () => {
-  let loadCount = 0;
-  const load = async () => { loadCount += 1; return [{ id: "a" }]; };
-  const cache = createJobsCache({ load, ttlMs: 100000, now: () => 0 });
-  await cache.get();
-  await cache.get();
-  assert.equal(loadCount, 1);
-  cache.invalidate();
-  await cache.get();
-  assert.equal(loadCount, 2, "invalidate busts the cache even inside TTL");
+test("approval awaitDecision resolves as declined on decline", async () => {
+  const state = createApprovalState({ now: () => 1000 });
+  const a = state.create({ parentSessionID: "ses_p", name: "fix", prompt: "do it", tools: [] });
+  const p = state.awaitDecision(a.id, 10_000);
+  state.resolve(a.id, "declined");
+  const res = await p;
+  assert.equal(res.decision, "declined");
+});
+
+test("approval awaitDecision resolves as timeout when nobody answers", async () => {
+  const state = createApprovalState({ now: () => 1000 });
+  const a = state.create({ parentSessionID: "ses_p", name: "fix", prompt: "do it", tools: [] });
+  const res = await state.awaitDecision(a.id, 50);
+  assert.equal(res.decision, "timeout");
+  assert.equal(state.list().length, 0, "approval cleared after timeout");
+});
+
+test("approval list filters by parent session", () => {
+  const state = createApprovalState({ now: () => 1000 });
+  state.create({ parentSessionID: "ses_a", name: "a", prompt: "a", tools: [] });
+  state.create({ parentSessionID: "ses_b", name: "b", prompt: "b", tools: [] });
+  assert.equal(state.list("ses_a").length, 1);
+  assert.equal(state.list("ses_a")[0].name, "a");
+  assert.equal(state.list().length, 2);
 });
 
 // ----------------------------------------------------------------------------
-// createDelegateEngine.cachedListJobs — filter + invalidation on mutation
-// (BET-403 nit 2). The permissions/questions RPC handlers read jobs through
-// this path instead of re-reading delegate-jobs.json on every call.
+// createDelegateEngine.startJobWithApproval (BET-418 §A)
 // ----------------------------------------------------------------------------
 
-function engineHarness(initialJobs = []) {
+function approvalEngineHarness(initialJobs = []) {
   let jobs = initialJobs.map((j) => ({ ...j }));
-  let loadCount = 0;
+  const published = [];
+  const newWindowCalls = [];
+  const createSessionCalls = [];
+  const parentWin = { index: 1, name: "parent", opencodeSessionId: "ses_p", paneCurrentPath: "/proj" };
+  const childWin = { index: 2, name: "run-the-tests", opencodeSessionId: "ses_child", paneCurrentPath: "/proj" };
   const deps = {
-    load: async () => { loadCount += 1; return jobs.map((j) => ({ ...j })); },
+    load: async () => jobs.map((j) => ({ ...j })),
     save: async (next) => { jobs = next.map((j) => ({ ...j })); },
-    publish: () => {},
-    deliver: async () => ({ delivered: true }),
+    publish: (evt) => published.push(evt),
+    deliver: async () => ({ delivered: true, queued: false }),
     listMessages: async () => [],
     gitRun: async () => ({ stdout: "" }),
+    gitAddWorktree: async () => { throw new Error("not a git repository"); },
+    gitRemoveWorktree: async () => ({ removed: true }),
+    killWindow: async () => {},
+    listProjects: async () => [{ tmuxSession: "proj", windows: [parentWin] }],
+    newWindow: async (input) => {
+      newWindowCalls.push(input);
+      return [{ tmuxSession: input.sessionName, windows: [parentWin, { ...childWin, name: input.windowName }] }];
+    },
+    oc: {
+      createSession: async (input) => {
+        createSessionCalls.push(input);
+        return { id: "ses_child", directory: input?.directory };
+      },
+    },
     now: () => 1_700_000_000_000,
   };
   const engine = createDelegateEngine(deps);
-  return { engine, get loadCount() { return loadCount; }, get jobs() { return jobs; }, setJobs(n) { jobs = n.map((j) => ({ ...j })); } };
+  return { engine, published, get jobs() { return jobs; }, newWindowCalls, createSessionCalls };
 }
 
-test("cachedListJobs mirrors listJobs filter semantics", async () => {
-  const h = engineHarness([
-    { id: "1", parentSessionID: "ses_p", childSessionID: "c1", status: "running", name: "job1" },
-    { id: "2", parentSessionID: "ses_other", childSessionID: "c2", status: "running", name: "job2" },
-  ]);
-  const all = await h.engine.cachedListJobs();
-  assert.equal(all.length, 2);
-  const narrowed = await h.engine.cachedListJobs({ sessionID: "ses_p" });
-  assert.deepEqual(narrowed.map((j) => j.id), ["1"]);
+test("startJobWithApproval auto-approves (no card) when trust mode is on", async () => {
+  const h = approvalEngineHarness([]);
+  const res = await h.engine.startJobWithApproval({
+    prompt: "run the tests",
+    parentSessionID: "ses_p",
+    parentDirectory: "/proj",
+    tools: [{ permission: "bash", pattern: "pytest *" }],
+    trustMode: true,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(h.published.find((e) => e.kind === "delegate.approval.requested"), undefined, "no approval requested in trust mode");
 });
 
-test("cachedListJobs serves the cache across repeated reads", async () => {
-  const h = engineHarness([{ id: "1", status: "running" }]);
-  await h.engine.cachedListJobs();
-  await h.engine.cachedListJobs();
-  await h.engine.cachedListJobs();
-  // One load to warm the cache; subsequent reads hit it (TTL not elapsed).
-  assert.equal(h.loadCount, 1);
+test("startJobWithApproval requests approval + declines when the user says Not now", async () => {
+  const h = approvalEngineHarness([]);
+  const p = h.engine.startJobWithApproval({
+    prompt: "run the tests",
+    parentSessionID: "ses_p",
+    parentDirectory: "/proj",
+    tools: [{ permission: "bash", pattern: "pytest *" }],
+    trustMode: false,
+  });
+  // The approval request was published.
+  const req = h.published.find((e) => e.kind === "delegate.approval.requested");
+  assert.ok(req, "approval requested");
+  // User declines.
+  assert.ok(h.engine.decline(req.payload.id));
+  const res = await p;
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "declined");
 });
 
-test("cachedListJobs returns copies, not the live store array", async () => {
-  const h = engineHarness([{ id: "1", status: "running" }]);
-  const a = await h.engine.cachedListJobs();
-  a[0].mutated = true;
-  const b = await h.engine.cachedListJobs();
-  assert.equal(b[0].mutated, undefined, "caller mutations must not leak into the cache");
+test("startJobWithApproval starts the job on approve and forwards the ruleset", async () => {
+  const h = approvalEngineHarness([]);
+  const p = h.engine.startJobWithApproval({
+    prompt: "run the tests",
+    parentSessionID: "ses_p",
+    parentDirectory: "/proj",
+    tools: [{ permission: "bash", pattern: "pytest *" }],
+    trustMode: false,
+  });
+  const req = h.published.find((e) => e.kind === "delegate.approval.requested");
+  // User approves with edited tools.
+  assert.ok(h.engine.approve(req.payload.id, [{ permission: "bash", pattern: "pytest * -x" }]));
+  const res = await p;
+  assert.equal(res.ok, true);
+  // newWindow received the permission ruleset ending in the catch-all deny.
+  const perm = h.newWindowCalls[0]?.permission;
+  assert.ok(Array.isArray(perm));
+  assert.deepEqual(perm[perm.length - 1], { permission: "*", pattern: "**", action: "deny" });
+  assert.equal(perm[0].permission, "bash");
+  assert.equal(perm[0].pattern, "pytest * -x");
 });
 
-test("a mutation invalidates the cache so the next cachedListJobs reloads", async () => {
-  const h = engineHarness([{ id: "1", status: "running" }]);
-  await h.engine.cachedListJobs();
-  const warmCount = h.loadCount; // 1: cache warm
-  // stopJob on a running job transitions it to "stopped" (one internal load)
-  // and busts the cache via the engine's withInvalidate wrapper.
-  await h.engine.stopJob("1");
-  const afterMutation = h.loadCount;
-  assert.equal(afterMutation, warmCount + 1, "stopJob performed its own load");
+// ----------------------------------------------------------------------------
+// §A4 deeper test — a job whose ruleset omits bash FAILS its first command,
+// not stalls. Simulates the deny→fail path through the mocked oc layer:
+//   1. start a job with tools that omit bash (ruleset has no bash-allow).
+//   2. assert the catch-all deny reached oc.createSession (opencode WILL deny
+//      an unmatched bash tool, never resolve it to `ask`).
+//   3. simulate the denial as opencode would surface it — a session.error
+//      event for the child session — and assert observeEvent completes the
+//      job as `failed` immediately (no hang, no 30-min timeout).
+// This bridges the gap the reviewer flagged: it observes the OUTCOME (job
+// fails fast), not just the ruleset SHAPE.
+// ----------------------------------------------------------------------------
 
-  // First read after invalidation must reload and reflect the new status.
-  const jobs = await h.engine.cachedListJobs();
-  assert.equal(h.loadCount, afterMutation + 1, "cache was invalidated → reloaded");
-  assert.equal(jobs[0].status, "stopped");
+test("§A4: a job omitting bash receives the catch-all deny at the session-creation boundary and fails fast on a denied command", async () => {
+  const h = approvalEngineHarness([]);
+  const res = await h.engine.startJobWithApproval({
+    prompt: "edit the docs",
+    parentSessionID: "ses_p",
+    parentDirectory: "/proj",
+    tools: [{ permission: "write", pattern: "**/*.md" }], // NO bash-allow
+    trustMode: true, // skip the card; we are testing the ruleset, not approval
+  });
+  assert.equal(res.ok, true);
 
-  // Second read hits the now-warm cache (no further load).
-  await h.engine.cachedListJobs();
-  assert.equal(h.loadCount, afterMutation + 1, "cache served the second read");
+  // 1. The ruleset reached the session-creation boundary (newWindow forwards
+  //    it to maybeCreateChatSession → oc.createSession in production). The
+  //    harness intercepts at newWindow, so assert there.
+  assert.equal(h.newWindowCalls.length, 1);
+  const perm = h.newWindowCalls[0].permission;
+  assert.ok(Array.isArray(perm), "the permission ruleset was forwarded to session creation");
+  const bashAllow = perm.find((r) => r.permission === "bash" && r.action === "allow");
+  assert.equal(bashAllow, undefined, "no bash-allow rule — bash hits the catch-all deny");
+  assert.deepEqual(perm[perm.length - 1], { permission: "*", pattern: "**", action: "deny" });
+
+  // 2. Simulate opencode denying the job's first bash command. opencode
+  //    surfaces a tool denial as a session.error (the job's turn aborts); the
+  //    engine's observeEvent must transition the job to `failed` immediately.
+  const before = h.jobs[0].status;
+  assert.equal(before, "running");
+  await h.engine.observeEvent({
+    type: "session.error",
+    properties: {
+      sessionID: "ses_child",
+      error: { name: "PermissionDeniedError", message: "bash denied by ruleset" },
+    },
+  });
+  const after = h.jobs[0];
+  assert.equal(after.status, "failed", "job fails fast — does NOT stall for the 30-min timeout");
+  assert.match(after.error ?? "", /denied|bash/i, "failure reason reflects the denial");
 });

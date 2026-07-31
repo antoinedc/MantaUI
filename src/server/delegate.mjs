@@ -55,6 +55,9 @@ const MAX_TERMINAL_JOBS = 50;
 const ACTIVITY_INTERVAL_MS = 10_000;
 // Sweeper cadence (matches capabilities.mjs SWEEP_INTERVAL_MS).
 const SWEEP_INTERVAL_MS = 60_000;
+// BET-418 §A: a `delegate` call requesting approval blocks this long for the
+// user's decision before being treated as declined.
+const APPROVAL_TIMEOUT_MS = 2 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Store (atomic, same pattern as capabilities.mjs / schedule.mjs)
@@ -74,37 +77,14 @@ function genId() {
 }
 
 // ---------------------------------------------------------------------------
-// Jobs cache (BET-403 nit 2)
+// Jobs cache (BET-403 nit 2) — REMOVED (BET-418 §A)
 // ---------------------------------------------------------------------------
-// `opencode:permissions` / `opencode:questions` only need the job list to
-// compute ownership (relatedSessionIds / jobNameForSession), which depends on
-// status/parentSessionID/childSessionID/name — fields that only change on a
-// job lifecycle transition. Reading the delegate-jobs.json file on every RPC
-// was wasted work for a single-user box; this wraps the load in a short-TTL
-// in-memory cache that is also invalidated by every engine mutation
-// (startJob/stopJob/deleteJob/observeEvent/sweep). The activity poller's
-// 10s saves mutate `activity` only (ownership-irrelevant), so it intentionally
-// does NOT invalidate — the cache stays warm through activity ticks.
-//
-// `delegate:list` (the UI jobs card) bypasses the cache and reads fresh, so a
-// `delegate.updated`-driven refetch still shows live status instantly.
-export function createJobsCache({ load = loadJobs, ttlMs = 2000, now = () => Date.now() } = {}) {
-  let cached = null;
-  let expiresAt = 0;
-  return {
-    async get() {
-      const t = now();
-      if (cached !== null && t < expiresAt) return cached;
-      cached = await load();
-      expiresAt = t + ttlMs;
-      return cached;
-    },
-    invalidate() {
-      cached = null;
-      expiresAt = 0;
-    },
-  };
-}
+// The TTL cache existed only to cheaply serve opencode:permissions /
+// opencode:questions the job list for BET-380 ownership computation. With
+// BET-380's parent-panel routing deleted, nothing reads the job list from
+// inside the permission/question RPC handlers, so the cache is dead. The UI
+// jobs card (now also deleted, BET-418 §E) used the uncached listJobs; the
+// read-only job view + delegate:list still use listJobs directly.
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for unit tests)
@@ -169,35 +149,46 @@ export function deriveName(prompt) {
   return slugify(words || "background");
 }
 
-/**
- * The childSessionIDs of every NON-TERMINAL job whose parentSessionID matches.
- * Used by opencode.mjs listPermissions/listQuestions to widen their session
- * filter so a background job's permission/question requests surface in the
- * PARENT's panel (BET-380). Terminal jobs are excluded: once a job is done/
- * failed/stopped its session is no longer interactive and its stale asks must
- * not be pulled into the parent's panel. Pure.
- */
-export function relatedSessionIds(parentSessionID, jobs) {
-  if (!parentSessionID || !Array.isArray(jobs)) return [];
-  return jobs
-    .filter((j) => j.parentSessionID === parentSessionID && j.status === "running")
-    .map((j) => j.childSessionID)
-    .filter((sid) => typeof sid === "string" && sid.length > 0);
-}
-
-/**
- * The job name for a given childSessionID, or null when the session is not a
- * known running job. Used by opencode.mjs to stamp `fromJobName` on each
- * permission/question record so the renderer can prefix the card header with
- * `<job name> · ` (BET-380). Only running jobs are considered — a terminal
- * job's session is no longer owned. Pure.
- */
-export function jobNameForSession(childSessionID, jobs) {
-  if (!childSessionID || !Array.isArray(jobs)) return null;
-  const job = jobs.find(
-    (j) => j.childSessionID === childSessionID && j.status === "running",
-  );
-  return job ? (job.name ?? null) : null;
+// ---------------------------------------------------------------------------
+// Pre-flight permission ruleset (BET-418 §A)
+//
+// A background job is created with a permission ruleset so it NEVER asks the
+// user anything once running (asking would hang the job until the 30-min
+// timeout, since BET-380's parent-panel routing is gone). The model declares
+// the access it needs via the `delegate` tool's `tools` argument
+// (`[{permission, pattern}]`, action defaults to "allow"). This builder
+// normalizes the entries and appends the MANDATORY catch-all
+// `{permission:"*", pattern:"**", action:"deny"}` — if an unmatched tool
+// resolved to `ask`, the job would hang exactly as before. Pure + exported
+// for unit tests.
+//
+// Returns null when the input is empty (no tools requested) — callers decide
+// whether to skip the ruleset entirely (trust mode / no tools) or to still
+// apply the catch-all deny alone.
+// ---------------------------------------------------------------------------
+export function buildPermissionRuleset(tools) {
+  const input = Array.isArray(tools) ? tools : [];
+  const rules = [];
+  for (const t of input) {
+    if (!t || typeof t !== "object") continue;
+    const permission = typeof t.permission === "string" ? t.permission : null;
+    const pattern = typeof t.pattern === "string" ? t.pattern : null;
+    if (!permission || !pattern) continue;
+    const action = t.action === "deny" ? "deny" : "allow";
+    rules.push({ permission, pattern, action });
+  }
+  // De-dup identical rules (model may repeat).
+  const seen = new Set();
+  const deduped = rules.filter((r) => {
+    const key = `${r.permission}\u0000${r.pattern}\u0000${r.action}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  // The catch-all deny MUST be last — it is what stops an unmatched tool from
+  // resolving to `ask` and hanging the job.
+  deduped.push({ permission: "*", pattern: "**", action: "deny" });
+  return deduped;
 }
 
 // Find the tmux session that owns a given opencode sessionID. Mirrors the
@@ -343,6 +334,7 @@ export async function startJob(input, deps = {}) {
       chatMode: true,
       worktreePath: worktree,
       oc: deps.oc,
+      permission: input?.permission,
     });
     const owner2 = resolveOwner(projects, parentSessionID);
     const proj = (projects || []).find((p) => p.tmuxSession === tmuxSession);
@@ -513,6 +505,52 @@ async function countFilesChanged(job, deps) {
   return committed + uncommitted;
 }
 
+// ---------------------------------------------------------------------------
+// Terminal cleanup (BET-418 §B)
+//
+// On terminal status a job's tmux window AND git worktree are removed — the
+// artefact is the branch, and a branch lives in git without a worktree. A
+// DIRTY worktree is the one exception: uncommitted work is NOT disposable, so
+// the worktree removal is attempted with force:false and, on refusal, BOTH
+// the window and the worktree are kept (and the job record is kept too, so
+// the window stays recognisable as a job instead of silently reappearing as
+// an ordinary top-level session). NEVER pass force:true.
+//
+// Order: try the worktree removal FIRST. Only when it succeeds (or there is
+// no worktree) do we kill the window — killing the window first would leave a
+// dirty worktree behind with no window to recognise it as a job (the leak).
+//
+// Returns { cleanedUp: true } when the window + worktree were removed, or
+// { cleanedUp: false, reason: "dirty" } when the dirty worktree kept both.
+// Pure-ish: all I/O is injected; exported for unit tests.
+// ---------------------------------------------------------------------------
+export async function cleanupTerminalJob(job, deps = {}) {
+  const { killWindow, gitRemoveWorktree } = deps;
+  if (job?.worktree && gitRemoveWorktree) {
+    try {
+      const res = await gitRemoveWorktree({ path: job.worktree, force: false });
+      if (res && res.removed === false && res.reason === "dirty") {
+        // Keep both the worktree AND the window; the record stays so the
+        // window remains recognisable as a job.
+        return { cleanedUp: false, reason: "dirty" };
+      }
+    } catch (e) {
+      console.warn(`[delegate] cleanup gitRemoveWorktree failed for ${job?.id}:`, e?.message ?? e);
+      // A failed remove leaves the worktree on disk; keep the window too so
+      // the worktree stays reachable/recognisable.
+      return { cleanedUp: false, reason: "remove-failed" };
+    }
+  }
+  if (killWindow && job?.tmuxSession != null && job?.windowIndex != null) {
+    try {
+      await killWindow({ sessionName: job.tmuxSession, windowIndex: job.windowIndex });
+    } catch (e) {
+      console.warn(`[delegate] cleanup killWindow failed for ${job?.id}:`, e?.message ?? e);
+    }
+  }
+  return { cleanedUp: true };
+}
+
 export async function finishJob(job, status, error, deps = {}, sawBusy) {
   const {
     load = loadJobs,
@@ -577,6 +615,28 @@ export async function finishJob(job, status, error, deps = {}, sawBusy) {
       });
     } catch (e) {
       console.warn(`[delegate] completion delivery failed for ${job.id}:`, e?.message ?? e);
+    }
+  }
+
+  // BET-418 §B: remove the tmux window + worktree now that the job is
+  // terminal. A dirty worktree keeps both (cleanupTerminalJob returns
+  // cleanedUp:false); persist that flag so the retention sweep does NOT prune
+  // the record (the window must stay recognisable as a job, not leak as an
+  // ordinary session). A clean cleanup sets cleanedUp:true so retention may
+  // prune the record normally once it ages out.
+  let cleanedUp = false;
+  try {
+    const res = await cleanupTerminalJob(updated, deps);
+    cleanedUp = !!res.cleanedUp;
+  } catch (e) {
+    console.warn(`[delegate] cleanup failed for ${job.id}:`, e?.message ?? e);
+  }
+  {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === job.id);
+    if (idx !== -1) {
+      jobs[idx] = { ...jobs[idx], cleanedUp };
+      await save(jobs);
     }
   }
   return { ok: true };
@@ -651,13 +711,32 @@ export async function sweepDelegateJobs(deps = {}) {
     publish,
     deliver,
     now = () => Date.now(),
+    sessionExists,
+    abortSession,
   } = deps;
   try {
     const jobs = await load();
     if (jobs.length === 0) return;
     const nowMs = now();
-    const transitioned = [];
 
+    // BET-418 §B: parent session gone → stop the job immediately (there is
+    // nobody left to report to), then the same terminal cleanup runs inside
+    // stopJob. Best-effort: a sessionExists failure degrades to "assume
+    // alive" so a transient opencode blip never orphans a healthy job.
+    const orphaned = [];
+    if (sessionExists) {
+      for (const job of jobs) {
+        if (job.status !== "running" || !job.parentSessionID) continue;
+        try {
+          const alive = await sessionExists(job.parentSessionID);
+          if (!alive) orphaned.push(job);
+        } catch {
+          /* best-effort: assume alive */
+        }
+      }
+    }
+
+    const transitioned = [];
     for (const job of jobs) {
       if (
         job.status === "running" &&
@@ -668,16 +747,24 @@ export async function sweepDelegateJobs(deps = {}) {
       }
     }
 
-    if (transitioned.length === 0) {
+    if (transitioned.length === 0 && orphaned.length === 0) {
       const retained = applyRetention(jobs, nowMs);
       if (retained.length !== jobs.length) await save(retained);
       return;
     }
 
+    // Orphaned jobs → stopped (parent gone). stopJob aborts + marks stopped +
+    // runs the same terminal cleanup. Runs BEFORE the timeout pass so a job
+    // that is both orphaned and timed-out is recorded as "stopped" (parent
+    // gone is the more precise reason); finishJob is idempotent on the
+    // already-terminal record.
+    for (const job of orphaned) {
+      await stopJob(job.id, { load, save, publish, deliver, abortSession, now, killWindow: deps.killWindow, gitRemoveWorktree: deps.gitRemoveWorktree });
+    }
+    // Timed-out jobs → failed. Pass the FULL deps so finishJob's terminal
+    // cleanup (killWindow + gitRemoveWorktree) actually runs.
     for (const job of transitioned) {
-      // finishJob persists + publishes + delivers. Pass a fresh sawBusy map —
-      // the sweeper has no event-stream state.
-      await finishJob(job, "failed", "timed out after 30 minutes", { load, save, publish, deliver, now }, new Map());
+      await finishJob(job, "failed", "timed out after 30 minutes", deps, new Map());
     }
     const retained = applyRetention(await load(), nowMs);
     await save(retained);
@@ -688,12 +775,18 @@ export async function sweepDelegateJobs(deps = {}) {
 
 function applyRetention(jobs, nowMs) {
   const cutoff = nowMs - TERMINAL_RETENTION_MS;
+  // BET-418 §B: a terminal job whose worktree was kept (dirty) must NOT be
+  // pruned — its tmux window is still live and the record is what keeps it
+  // recognisable as a job (pruning it would let the stale window reappear as
+  // an ordinary top-level session). cleanedUp===false is set only by the new
+  // cleanup path; undefined (old records) prunes as before.
   let out = jobs.filter(
     (j) =>
       !(
         (j.status === "done" || j.status === "failed" || j.status === "stopped") &&
         j.finishedAt != null &&
-        j.finishedAt < cutoff
+        j.finishedAt < cutoff &&
+        j.cleanedUp !== false
       ),
   );
   const terminal = out.filter(
@@ -702,7 +795,10 @@ function applyRetention(jobs, nowMs) {
   if (terminal.length > MAX_TERMINAL_JOBS) {
     const sorted = [...terminal].sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0));
     const dropped = new Set(
-      sorted.slice(0, terminal.length - MAX_TERMINAL_JOBS).map((j) => j.id),
+      sorted
+        .filter((j) => j.cleanedUp !== false)
+        .slice(0, Math.max(0, terminal.length - MAX_TERMINAL_JOBS))
+        .map((j) => j.id),
     );
     out = out.filter((j) => !dropped.has(j.id));
   }
@@ -788,6 +884,24 @@ export async function stopJob(id, deps = {}) {
       console.warn(`[delegate] stop completion delivery failed for ${id}:`, e?.message ?? e);
     }
   }
+  // BET-418 §B: a stopped job is terminal → remove the window + worktree (a
+  // dirty worktree keeps both). Persist cleanedUp so retention treats it
+  // correctly.
+  let cleanedUp = false;
+  try {
+    const res = await cleanupTerminalJob(updated, deps);
+    cleanedUp = !!res.cleanedUp;
+  } catch (e) {
+    console.warn(`[delegate] stop cleanup failed for ${id}:`, e?.message ?? e);
+  }
+  {
+    const jobs2 = await load();
+    const idx2 = jobs2.findIndex((j) => j.id === id);
+    if (idx2 !== -1) {
+      jobs2[idx2] = { ...jobs2[idx2], cleanedUp };
+      await save(jobs2);
+    }
+  }
   void listMessages;
   return { ok: true };
 }
@@ -844,6 +958,82 @@ export async function deleteJob(id, deps = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Pre-flight approval (BET-418 §A)
+//
+// When trust mode is OFF and the model declared `tools`, the `delegate` call
+// blocks for a single approval before creating anything. The engine owns a
+// pending-approvals map (approvalId → {approval, resolve, timer}); the REST
+// handler creates an approval, publishes `delegate.approval.requested`, and
+// awaits the decision. The renderer's approval card resolves it via
+// approve/decline; a 2-minute timeout resolves it as declined. Pure-ish: the
+// map + timers are owned by the engine instance; exported for unit tests.
+// ---------------------------------------------------------------------------
+
+export function createApprovalState({ now = () => Date.now() } = {}) {
+  const pending = new Map();
+  return {
+    pending,
+    create({ parentSessionID, name, prompt, tools }) {
+      const id = genId();
+      const approval = {
+        id,
+        parentSessionID,
+        name,
+        prompt,
+        tools: Array.isArray(tools) ? tools : [],
+        createdAt: now(),
+      };
+      pending.set(id, { approval, resolve: null, timer: null });
+      return approval;
+    },
+    list(parentSessionID) {
+      const out = [];
+      for (const { approval } of pending.values()) {
+        if (parentSessionID && approval.parentSessionID !== parentSessionID) continue;
+        out.push({ ...approval });
+      }
+      return out;
+    },
+    get(id) {
+      const entry = pending.get(id);
+      return entry ? { ...entry.approval } : null;
+    },
+    /**
+     * Block until the approval is resolved or the timeout elapses.
+     * @returns {{ decision: "approve"|"decline"|"timeout", tools?: Array }}
+     */
+    awaitDecision(id, timeoutMs = APPROVAL_TIMEOUT_MS) {
+      const entry = pending.get(id);
+      if (!entry) return Promise.resolve({ decision: "declined" });
+      return new Promise((resolve) => {
+        entry.resolve = (decision, tools) => {
+          if (entry.timer) clearTimeout(entry.timer);
+          entry.timer = null;
+          pending.delete(id);
+          resolve({ decision, tools });
+        };
+        entry.timer = setTimeout(() => {
+          pending.delete(id);
+          resolve({ decision: "timeout" });
+        }, timeoutMs);
+      });
+    },
+    resolve(id, decision, tools) {
+      const entry = pending.get(id);
+      if (!entry || !entry.resolve) return false;
+      entry.resolve(decision, tools);
+      return true;
+    },
+    clear() {
+      for (const { timer } of pending.values()) {
+        if (timer) clearTimeout(timer);
+      }
+      pending.clear();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Engine factory — wires the runtime deps once (in src/server/index.mjs) and
 // returns bound methods the REST/RPC handlers + the pump call. Mirrors the
 // createPromptDelivery / createWebhookEngine pattern.
@@ -851,39 +1041,50 @@ export async function deleteJob(id, deps = {}) {
 
 export function createDelegateEngine(deps) {
   const sawBusy = new Map();
-  const jobsCache = createJobsCache({
-    load: deps.load ?? (() => loadJobs(deps.storePath ?? STORE_PATH)),
-  });
-  // Invalidate the cache after any mutation so the next ownership read sees
-  // fresh status. Wrapping the bound methods (rather than poking the pure
-  // fns) keeps the pure functions testable and untouched (BET-403 nit 2).
-  const invalidate = () => jobsCache.invalidate();
-  const withInvalidate = (fn) => async (...args) => {
-    const r = await fn(...args);
-    invalidate();
-    return r;
+  const approvals = deps.approvals ?? createApprovalState({ now: deps.now });
+  // startJobWithApproval: the REST handler's entry point (BET-418 §A). Builds
+  // the ruleset, requests approval when trust mode is OFF + tools were
+  // declared, and only then starts the job. Returns the startJob result OR
+  // {ok:false, error:"declined"}.
+  const startJobWithApproval = async (input) => {
+    const tools = Array.isArray(input?.tools) ? input.tools : [];
+    const trustMode = !!input?.trustMode;
+    // Skip the card entirely when trust mode is on (nothing to approve) or
+    // when the model declared no tools (nothing to scope). The ruleset is
+    // still applied so the catch-all deny keeps an unscoped job from asking.
+    let resolvedTools = tools;
+    if (!trustMode && tools.length > 0) {
+      const approval = approvals.create({
+        parentSessionID: input.parentSessionID,
+        name: deriveName(input.prompt),
+        prompt: input.prompt,
+        tools,
+      });
+      deps.publish?.({ kind: "delegate.approval.requested", payload: approval });
+      const { decision, tools: edited } = await approvals.awaitDecision(approval.id);
+      if (decision !== "approve") {
+        return { ok: false, error: decision === "timeout" ? "approval timed out" : "declined" };
+      }
+      resolvedTools = Array.isArray(edited) && edited.length > 0 ? edited : tools;
+    }
+    const permission = buildPermissionRuleset(resolvedTools);
+    return startJob({ ...input, permission }, deps);
   };
   const bound = {
-    startJob: withInvalidate((input) => startJob(input, deps)),
-    stopJob: withInvalidate((id) => stopJob(id, deps)),
-    deleteJob: withInvalidate((id) => deleteJob(id, deps)),
-    observeEvent: withInvalidate((evt) => observeEvent(evt, deps, sawBusy)),
-    sweep: withInvalidate(() => sweepDelegateJobs(deps)),
+    startJob: (input) => startJob(input, deps),
+    startJobWithApproval,
+    stopJob: (id) => stopJob(id, deps),
+    deleteJob: (id) => deleteJob(id, deps),
+    observeEvent: (evt) => observeEvent(evt, deps, sawBusy),
+    sweep: () => sweepDelegateJobs(deps),
     listJobs: (filter) => listJobs(filter, deps),
-    // Cached read for the permissions/questions RPC handlers (BET-403 nit 2).
-    // Mirrors listJobs' filter semantics (no filter → all jobs; sessionID →
-    // narrow to that parent's children) but serves from the TTL cache. The
-    // UI jobs card uses the uncached `listJobs` so it stays live.
-    cachedListJobs: async (filter = {}) => {
-      const jobs = await jobsCache.get();
-      if (filter?.sessionID === undefined) return jobs.map((j) => ({ ...j }));
-      return jobs
-        .filter((j) => j.parentSessionID === filter.sessionID)
-        .map((j) => ({ ...j }));
-    },
     getJob: (id) => getJob(id, deps),
     startSweeper: (opts) => startSweeper(deps, opts),
     startActivityPoller: (opts) => startActivityPoller(deps, opts),
+    approvals,
+    approve: (id, tools) => approvals.resolve(id, "approve", tools),
+    decline: (id) => approvals.resolve(id, "declined"),
+    listPendingApprovals: (parentSessionID) => approvals.list(parentSessionID),
   };
   return bound;
 }

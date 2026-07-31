@@ -78,6 +78,7 @@ import {
   registerMountedTerminal,
   isJobRow,
   formatJobSummary,
+  isBackgroundJobCompletionTurn,
   windowPinId,
   parsePinId,
   resolvePin,
@@ -1449,62 +1450,6 @@ describe("applyQuestionEvent", () => {
     expect(
       applyQuestionEvent([], "question.asked", { id: "que_x", sessionID: SID }, SID),
     ).toEqual([]); // no questions array
-  });
-
-  // ----- BET-380: background-job child questions surface in the parent's panel -----
-  //
-  // applyQuestionEvent takes a related-id set (the background-job child
-  // sessions the viewed session owns) so a job's live question.asked event is
-  // accepted into the parent's panel. The set is passed in (pure), never read
-  // from module state. Reply/reject still clears regardless of session.
-
-  it("BET-380: keeps a question whose sessionID is in the related-id set", () => {
-    const childAsked = {
-      id: "que_child",
-      sessionID: "ses_child",
-      questions: [{ question: "which?", header: "h", options: [] }],
-      tool: { messageID: "msg_c", callID: "toolu_c" },
-    };
-    const related = new Set<string>(["ses_child"]);
-    const next = applyQuestionEvent([], "question.asked", childAsked, SID, related);
-    expect(next).toHaveLength(1);
-    expect(next[0].sessionID).toBe("ses_child");
-    expect(next[0].id).toBe("toolu_c");
-  });
-
-  it("BET-380: still drops a question from an unrelated session not in the set", () => {
-    const otherAsked = {
-      id: "que_other",
-      sessionID: "ses_other",
-      questions: [{ question: "q?", header: "h", options: [] }],
-      tool: { messageID: "msg_o", callID: "toolu_o" },
-    };
-    const related = new Set<string>(["ses_child"]);
-    expect(applyQuestionEvent([], "question.asked", otherAsked, SID, related)).toEqual([]);
-    // And with no set at all, an unrelated session is still dropped.
-    expect(applyQuestionEvent([], "question.asked", otherAsked, SID)).toEqual([]);
-  });
-
-  it("BET-380: a reply/reject event still removes the question regardless of session", () => {
-    const childAsked = {
-      id: "que_child",
-      sessionID: "ses_child",
-      questions: [{ question: "which?", header: "h", options: [] }],
-      tool: { messageID: "msg_c", callID: "toolu_c" },
-    };
-    const related = new Set<string>(["ses_child"]);
-    const prev = applyQuestionEvent([], "question.asked", childAsked, SID, related);
-    expect(prev).toHaveLength(1);
-    // replied echoes the que_ id; the card must clear even though the event's
-    // sessionID differs from the viewed session.
-    expect(
-      applyQuestionEvent(prev, "question.replied", { id: "que_child", sessionID: "ses_child" }, SID, related),
-    ).toEqual([]);
-    // rejected likewise.
-    const prev2 = applyQuestionEvent([], "question.asked", childAsked, SID, related);
-    expect(
-      applyQuestionEvent(prev2, "question.rejected", { id: "que_child", sessionID: "ses_child" }, SID, related),
-    ).toEqual([]);
   });
 });
 
@@ -3630,6 +3575,65 @@ describe("formatJobSummary", () => {
     expect(
       formatJobSummary({ branch: "fix-login", filesChanged: null, worktree: "/tmp/wt" }),
     ).toBe("fix-login · 0 files changed");
+  });
+});
+
+// ===== isBackgroundJobCompletionTurn (BET-418 §C) =====
+
+describe("isBackgroundJobCompletionTurn", () => {
+  const userMsg = (text: string) => ({
+    info: { role: "user", id: "m1" },
+    parts: [{ type: "text", text, id: "p1" }],
+  });
+
+  it("matches a user turn whose first line is the job-completion marker", () => {
+    expect(
+      isBackgroundJobCompletionTurn(
+        userMsg('[background job "fix-login" done]\nBranch: x (3 files changed)\n\nresult'),
+      ),
+    ).toBe(true);
+  });
+
+  it("matches a failed/stopped status marker", () => {
+    expect(
+      isBackgroundJobCompletionTurn(userMsg('[background job "x" failed]\n\nError: boom')),
+    ).toBe(true);
+    expect(
+      isBackgroundJobCompletionTurn(userMsg('[background job "x" stopped]')),
+    ).toBe(true);
+  });
+
+  it("ignores leading whitespace before the marker", () => {
+    expect(
+      isBackgroundJobCompletionTurn(userMsg('  \n[background job "x" done]\nrest')),
+    ).toBe(true);
+  });
+
+  it("does not match a genuine user message that merely mentions background jobs", () => {
+    expect(
+      isBackgroundJobCompletionTurn(userMsg("can you start a background job to run tests?")),
+    ).toBe(false);
+    expect(
+      isBackgroundJobCompletionTurn(userMsg('background job "x" finished')), // no brackets
+    ).toBe(false);
+  });
+
+  it("returns false for an assistant message even if its text is the marker", () => {
+    expect(
+      isBackgroundJobCompletionTurn({
+        info: { role: "assistant", id: "m2" },
+        parts: [{ type: "text", text: '[background job "x" done]', id: "p1" }],
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores synthetic/ignored text parts (only counts real user text)", () => {
+    expect(
+      isBackgroundJobCompletionTurn({
+        info: { role: "user", id: "m1" },
+        parts: [{ type: "text", text: '[background job "x" done]', synthetic: true, id: "p1" }],
+      }),
+    ).toBe(false);
   });
 });
 
