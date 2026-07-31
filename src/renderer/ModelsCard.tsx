@@ -403,6 +403,7 @@ export function ModelsCard() {
                       checked={isMain}
                       disabled={isBusy}
                       onChange={() => void toggleMain(key, isMain)}
+                      aria-label={`Main availability for ${m.name}`}
                     />
                   </td>
                   <td className="px-3 py-2 align-middle text-center">
@@ -410,6 +411,7 @@ export function ModelsCard() {
                       checked={isSub}
                       disabled={isBusy}
                       onChange={() => void toggleSub(key, isSub)}
+                      aria-label={`Sub availability for ${m.name}`}
                     />
                   </td>
                 </tr>
