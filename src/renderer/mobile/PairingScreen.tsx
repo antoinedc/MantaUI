@@ -57,7 +57,7 @@ export function PairingScreen({ onPaired }: Props) {
     <div className="mobile">
       <div className="h-full flex flex-col items-center justify-center gap-6 px-8 text-center">
         <div className="flex flex-col gap-2">
-          <div className="text-text text-lg font-medium">Connect to your server</div>
+          <div className="text-text text-title font-medium">Connect to your server</div>
           <div className="text-text-muted text-body">
             Enter the pairing code shown by <code>manta pair</code> on your box.
           </div>
@@ -79,7 +79,7 @@ export function PairingScreen({ onPaired }: Props) {
             disabled={submitting}
             value={state.code}
             onChange={(e) => dispatch({ type: "edit", raw: e.target.value })}
-            className="w-full text-center tracking-[0.4em] text-2xl rounded-lg bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
+            className="w-full text-center tracking-[0.4em] text-2xl font-mono rounded-lg bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
           />
 
           {state.error && (

@@ -130,7 +130,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
             </svg>
           </div>
           <div className="flex flex-col gap-2">
-            <div className="text-text text-xl font-semibold">Pair your phone</div>
+            <div className="text-text text-display font-semibold">Pair your phone</div>
             <div className="text-text-muted text-body">
               Connect this device to your MantaUI desktop app.
             </div>
@@ -187,7 +187,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
               }}
             />
             <div className="flex flex-col gap-1 text-left mb-4">
-              <div className="text-text text-lg font-semibold">Manual setup</div>
+              <div className="text-text text-title font-semibold">Manual setup</div>
               <div className="text-text-muted text-meta leading-relaxed">
                 Enter the details shown under Settings &rsaquo; Connection in the desktop app.
                 Your phone will connect directly to your box.
@@ -230,7 +230,7 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                     setCode(normalizeCode(e.target.value));
                     setError(null);
                   }}
-                  className="w-full text-center tracking-[0.4em] text-2xl rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
+                  className="w-full text-center tracking-[0.4em] text-2xl font-mono rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
                 />
               </Field>
 

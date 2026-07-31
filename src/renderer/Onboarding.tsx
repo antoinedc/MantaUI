@@ -263,7 +263,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         <div className="text-center mb-10">
           <div className="inline-flex items-center gap-2.5 mb-8">
             <img src={mantaMark} alt="" className="w-9 h-9 object-contain" />
-            <span className="text-xl font-semibold tracking-tight">Manta</span>
+            <span className="text-title font-semibold tracking-tight">Manta</span>
           </div>
           {!isSuccess && <ProgressRail current={pos} />}
         </div>
@@ -326,7 +326,7 @@ function SuccessPanel({ onOpen }: { onOpen: () => void }) {
       >
         <CheckIcon className="w-7 h-7 text-ok" />
       </div>
-      <h2 className="text-2xl font-semibold mb-2">You're all set!</h2>
+      <h2 className="text-display font-semibold mb-2">You're all set!</h2>
       <p className="text-body text-text-muted leading-relaxed max-w-sm mx-auto mb-7">
         Your box is paired, a provider is connected, and your first project is
         ready. Start chatting with your AI assistant.

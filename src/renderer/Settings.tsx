@@ -357,7 +357,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             caption buttons (Windows) / traffic lights (macOS). */}
         <div className="titlebar-drag h-10 shrink-0" />
         <div className="p-4 border-b border-border">
-          <h2 className="text-lg font-semibold">Settings</h2>
+          <h2 className="text-title font-semibold">Settings</h2>
         </div>
         <nav className="flex-1 py-2">
           {TABS.map((tab) => (

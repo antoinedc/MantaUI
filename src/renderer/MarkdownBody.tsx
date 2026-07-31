@@ -344,7 +344,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
       />
       {tooLarge ? (
         <pre
-          className="px-2 py-1.5 pr-7 text-meta font-mono overflow-x-auto max-w-full whitespace-pre"
+          className="px-2 py-1.5 pr-7 text-code font-mono overflow-x-auto max-w-full whitespace-pre"
           style={{ background: "transparent" }}
         >
           <code>{cleaned}</code>
@@ -357,7 +357,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
         >
           {({ tokens, getLineProps, getTokenProps }) => (
             <pre
-              className="px-2 py-1.5 pr-7 text-meta font-mono overflow-x-auto max-w-full whitespace-pre"
+              className="px-2 py-1.5 pr-7 text-code font-mono overflow-x-auto max-w-full whitespace-pre"
               // The Prism theme's default bg would override bg-bg-soft — disable
               // it in both themes so the card surface shows through.
               style={{ background: "transparent" }}

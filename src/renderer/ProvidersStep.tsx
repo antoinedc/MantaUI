@@ -162,7 +162,7 @@ export function ProvidersStep({
 
   return (
     <div>
-      <h2 className="text-2xl font-semibold tracking-tight text-text mb-1.5">
+      <h2 className="text-display font-semibold tracking-tight text-text mb-1.5">
         Connect your subscriptions
       </h2>
       <p className="text-body text-text-muted leading-relaxed mb-6 max-w-md">

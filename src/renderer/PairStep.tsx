@@ -76,7 +76,7 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
 
   return (
     <div>
-      <h2 className="text-2xl font-semibold tracking-tight text-text mb-1.5">
+      <h2 className="text-display font-semibold tracking-tight text-text mb-1.5">
         Connect your box
       </h2>
       <p className="text-body text-text-muted leading-relaxed mb-8 max-w-md">

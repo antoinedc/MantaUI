@@ -60,7 +60,7 @@ export function ConnectingScreen({ host, failed, onRetry, onCancel }: Props) {
             </svg>
           </div>
           <div className="flex flex-col gap-2">
-            <div className="text-text text-lg font-semibold">Couldn't reach your box</div>
+            <div className="text-text text-title font-semibold">Couldn't reach your box</div>
             <div className="text-text-muted text-label leading-relaxed max-w-[280px]">
               Your box didn't answer. Check it's running and try again.
             </div>
@@ -103,7 +103,7 @@ export function ConnectingScreen({ host, failed, onRetry, onCancel }: Props) {
         </div>
 
         <div className="flex flex-col gap-2">
-          <div className="text-text text-lg font-semibold">
+          <div className="text-text text-title font-semibold">
             Connecting to your box
             <AnimatedDots />
           </div>
