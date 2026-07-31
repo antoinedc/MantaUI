@@ -1319,9 +1319,11 @@ main() {
           # Pipe the JSON to merge-gateway via stdin (lib subcommand) so the
           # auth.json write is atomic temp-rename + 0600, preserving
           # box_id / box_token / created_at.
-          printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err \
-            || warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
-          ok "gateway registration complete."
+          if printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err; then
+            ok "gateway registration complete."
+          else
+            warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
+          fi
         fi
       fi
     fi
@@ -1587,27 +1589,13 @@ main() {
         # if any write above failed (CADDY_E_SKIP=1). The pair-code step
         # (8) still runs regardless.
         if [ "$CADDY_E_SKIP" = "0" ]; then
-          # Let's Encrypt HTTP-01 needs :80 + :443 open. If something else
-          # is bound (Apache, nginx, …) warn loudly so the operator knows
-          # why cert issuance will fail.
-          if command -v ss >/dev/null 2>&1; then
-            for port in 80 443; do
-              if ss -tlnH "sport = :$port" 2>/dev/null | grep -q LISTEN \
-                && ! ss -tlnH "sport = :$port" 2>/dev/null | grep -q caddy; then
-                warn "port $port is bound by something other than Caddy — Let's Encrypt HTTP-01 will fail.
-                  Check: ss -tlnp 'sport = :$port'
-                  Fix: stop the conflicting service, or move Caddy to a non-standard port + your own reverse proxy."
-              fi
-            done
-          fi
-
           if command -v systemctl >/dev/null 2>&1; then
             if ! sudo -n systemctl reload caddy 2>/tmp/manta-caddy-reload.err; then
               warn "systemctl reload caddy failed — see /tmp/manta-caddy-reload.err"
-              warn "  (Caddy's daemon may not be running yet; it normally starts after \`apt install caddy\`.)"
-              warn "  re-run \`sudo systemctl reload caddy\` after Caddy is up."
+              warn "  the vhost is on disk but NOT live: no certificate will be issued until the reload succeeds."
+            else
+              ok "caddy reloaded."
             fi
-            ok "caddy reloaded."
           else
             warn "systemctl not found — reload caddy manually with: sudo caddy reload --config /etc/caddy/Caddyfile"
           fi
