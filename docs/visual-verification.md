@@ -25,6 +25,14 @@ this.
 baseline. It answers "did this change?", never "is this right?". Baselines are
 this app's approved past, **not** the design.
 
+> **Layers 1 and 2 are self-referential.** Both compare the app to its own
+> committed record, so both are green when the record itself is wrong. If a
+> baseline is first recorded from a broken render, the gates lock the breakage
+> in and defend it against every later fix. Only layer 3 compares against
+> something external — which is why running it is mandatory at record time even
+> though its *result* is advisory. See "What the first run taught us" below;
+> this is not hypothetical.
+
 **Layer 3 (conformance)** captures the implementation and its mockup under
 identical conditions and asks a reviewer — human or vision model — to report
 the differences. It is advisory on purpose: judgement gates are
@@ -58,6 +66,16 @@ A mockup is a contract, not a picture. Two rules make it one:
   resolves at runtime. A mockup that hardcodes `#2E6BFF` keeps looking correct
   after the token is retuned and the app has moved on.
 - **It carries `data-screen` on its root**, so the harness can wait on it.
+- **It never specifies a value the acceptance rules forbid.** A UI issue is
+  rejected for an off-grid spacing value or a raw hex, so a mockup that
+  hardcodes `border-radius: 14px` puts the implementer between two rules and
+  they will guess. If a design genuinely needs a value the scale lacks, the
+  scale changes first — the mockup is not the place to introduce one.
+- **Its placeholder content matches the state the registry captures.** The
+  side-by-side is only readable if both sides show the same words. A mockup
+  showing `leasebot / main` against a capture of a non-git `~` that reads
+  `no branch` forces the reviewer to mentally subtract the content difference
+  before they can judge layout, and real differences hide in that subtraction.
 
 Write the markup to read like the target DOM — the closer it is, the more
 useful the side-by-side. But nothing in `docs/screens/` is imported by the app;
@@ -91,6 +109,15 @@ user gestures — a click a person could make — not for reaching into internal
 3. `npm run visual` is green, with the baselines committed.
 4. `npm run visual:compare` has been run and its findings addressed or
    explicitly deferred in the PR description.
+5. **Any baseline this PR creates or re-records is in the PR body as an
+   image.** Not a filename, not "regenerated" — the picture. A baseline is
+   committed *evidence*, and a reviewer who cannot see it is approving a hash.
+   This is the only step that can catch a baseline recorded from a broken
+   render, and it is cheap: paste the PNG.
+
+Steps 4 and 5 apply **whenever a baseline moves**, not only when the issue is a
+design issue. A refactor that shifts a pixel is exactly the case where nobody
+thinks to look.
 
 ## Commands
 
@@ -173,3 +200,80 @@ committed set, prints the post-capture shot diff (name-status + stat) so any
 drift names the offending file, and **blocks** on any difference (no more
 `continue-on-error: true`). A determinism regression fails loudly as itself
 instead of as a mystery diff on someone's unrelated PR.
+
+## What the first run taught us (BET-443 → BET-447)
+
+BET-443 (the welcome screen) was the deliberate first run of this process: one
+screen, to shake the process out before applying it to the rest. Everything
+below is a change already made, or an issue already filed, in response to it.
+
+### 1. The system verified a broken render for a full day, green throughout
+
+While BET-443 was being implemented and reviewed, `w-full` and `h-full` were
+compiling to nothing (BET-447 — a Tailwind scale key had been dropped, which
+produces no rule and no error). Every full-height flex chain in the app had
+collapsed to content height: the sidebar filled 449px of a 900px window and the
+transcript container was not a scroll container at all.
+
+Nothing caught it. The gate was green the whole time, because the baseline had
+been **recorded during the broken window** — layer 2 was faithfully defending a
+collapsed layout, and layer 1's accessibility tree is identical either way (the
+elements are all present; they are just the wrong size). The marketing shots
+were re-recorded in the same window, which is how `shot-hero` and
+`shot-approvals` came to be byte-identical files: "scroll to the approval cards"
+is a no-op when nothing scrolls.
+
+So BET-443's implementer built and its reviewer approved a screen neither could
+see correctly, and both were diligent.
+
+**What changed:** definition-of-done items 4 and 5 above — layer 3 is mandatory
+to *run* whenever a baseline moves, and the baseline image goes in the PR body.
+The one thing that would have caught this is a person looking at the picture
+once. Also `src/renderer/tailwindScale.test.ts`, which makes this specific
+failure mode (a utility class that compiles to nothing) fail as a fast unit
+test naming the affected files, rather than as pixels nobody re-examines.
+
+**The general lesson, worth stating plainly:** a drift gate is only as good as
+the first record. Recording a baseline is the moment of judgement in this
+system; everything after it is bookkeeping.
+
+### 2. The structure snapshot is the load-bearing layer — and has three blind spots
+
+The implementer's report was unambiguous: the layer-1 diff is what they worked
+from. The stray `│` separator, the standalone `Start` button, the resolved model
+name where the design wanted a short `Auto`, the missing attach button — all
+visible as a text diff, actionable without looking at pixels.
+
+It cannot see:
+
+- **alignment** — left-aligned vs centred is invisible in an accessibility tree;
+- **emphasis** — which element is meant to be the loudest;
+- **absent vs merely restyled** — an element missing entirely reads the same as
+  one that was never in the design.
+
+All three come only from the mockup's spec-notes paragraph, which is why that
+paragraph is required. Do not treat a clean layer-1 diff as "matches the
+design"; it means "the right controls exist, named correctly, in order".
+
+### 3. `visual:compare` gives you two pictures and no locator
+
+It writes `app.png` and `mockup.png` and a checklist. Deciding *which* control
+moved versus resized means eyeballing two images side by side, and the content
+mismatch (see the mockup rule added above) has to be subtracted by hand first.
+Filed as BET-448: a composite output with per-region annotation, so the
+reviewer is told where to look instead of hunting.
+
+### 4. A mockup that breaks the acceptance rules costs the implementer real time
+
+The welcome mockup specified raw radii (`14px`, `10px`, `9px`) while the issue
+rejected off-grid values on sight. The implementer mapped them to the nearest
+on-grid utility and flagged the conflict, which was the right call — but they
+had to make a judgement the spec should have made. Hence the new mockup rule:
+a mockup never specifies a value the acceptance rules forbid.
+
+### 5. The welcome screen needs a second pass
+
+BET-443's judgements about alignment, width and vertical rhythm were all made
+against the collapsed render. The screen is structurally right and its baseline
+is now recorded from a correct one, but the design questions it answered were
+answered blind. BET-449 is the honest second pass on the corrected substrate.
