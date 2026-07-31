@@ -33,28 +33,28 @@ export function SessionToolbar({
     <span className="manta-session-toolbar flex items-center gap-1 text-meta">
       <button
         onClick={onSchedules}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
+        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="View / cancel scheduled tasks"
       >
         <Clock size={14} aria-hidden="true" />schedules{scheduleCount > 0 ? ` (${scheduleCount})` : ""}
       </button>
       <button
         onClick={onSecrets}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
+        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="Manage secrets the agent can use (values never enter the chat)"
       >
         <Key size={14} aria-hidden="true" />secrets
       </button>
       <button
         onClick={onWebhooks}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
+        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="View / revoke inbound webhooks (external events that wake this session)"
       >
         <Webhook size={14} aria-hidden="true" />webhooks
       </button>
       <button
         onClick={onJobs}
-        className="px-1.5 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
+        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="View / stop / delete background delegation jobs"
       >
         <Bot size={14} aria-hidden="true" />jobs{jobsCount > 0 ? ` (${jobsCount})` : ""}
@@ -91,7 +91,7 @@ export function AttachmentStrip({
         return (
           <span
             key={a.id}
-            className={`rounded-md border px-1.5 py-0.5 flex items-center gap-1 bg-bg-elev ${color}`}
+            className={`rounded-md border px-2 py-px flex items-center gap-1 bg-bg-elev ${color}`}
             title={a.status === "error" ? a.errorMsg : a.remotePath}
           >
             {a.status === "uploading" && (
@@ -102,7 +102,7 @@ export function AttachmentStrip({
             <span className="truncate max-w-[200px]">{a.filename}</span>
             <button
               onClick={() => onRemove(a.id)}
-              className="text-text-faint hover:text-danger leading-none px-0.5 inline-flex items-center"
+              className="text-text-faint hover:text-danger leading-none px-px inline-flex items-center"
               title="Remove"
               aria-label="Remove attachment"
             >

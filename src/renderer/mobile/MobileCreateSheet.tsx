@@ -265,7 +265,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
               Detected {detectedWorktrees.length} git worktrees. Open a session
               for each?
             </div>
-            <ul className="text-label text-text-faint space-y-0.5 max-h-32 overflow-y-auto">
+            <ul className="text-label text-text-faint space-y-px max-h-32 overflow-y-auto">
               {detectedWorktrees.map((w) => (
                 <li key={w.path} className="truncate">
                   <span className="text-text-muted">{worktreeName(w)}</span>
@@ -278,14 +278,14 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
               <button
                 onClick={() => createProject("all")}
                 disabled={creating}
-                className="px-3 py-2.5 bg-accent-solid text-on-accent rounded font-semibold disabled:opacity-50"
+                className="px-3 py-3 bg-accent-solid text-on-accent rounded font-semibold disabled:opacity-50"
               >
                 Yes, one per worktree
               </button>
               <button
                 onClick={() => createProject("single")}
                 disabled={creating}
-                className="px-3 py-2.5 border border-border text-text-muted rounded disabled:opacity-50"
+                className="px-3 py-3 border border-border text-text-muted rounded disabled:opacity-50"
               >
                 Just main
               </button>
@@ -362,7 +362,7 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
                     : createSession
                 }
                 disabled={creating || !name.trim()}
-                className="px-3 py-2.5 bg-accent-solid text-on-accent rounded font-semibold disabled:opacity-50"
+                className="px-3 py-3 bg-accent-solid text-on-accent rounded font-semibold disabled:opacity-50"
               >
                 {creating
                   ? "Creating…"

@@ -1,7 +1,82 @@
+// BET-422: trimmed spacing scale to 11 steps. Width/height/minHeight/maxHeight
+// are decoupled from theme.spacing and keep the full default Tailwind scale so
+// dimension utilities (w-64, h-52, max-h-32, …) survive the spacing trim.
+// Off-grid pure-spacing usages (p*, m*, gap*, space-*, inset*) were rounded to
+// the nearest step in the renderer source.
+const spacingScale = {
+  0: "0",
+  px: "1px",
+  1: "0.25rem",
+  2: "0.5rem",
+  3: "0.75rem",
+  4: "1rem",
+  5: "1.25rem",
+  6: "1.5rem",
+  8: "2rem",
+  10: "2.5rem",
+  12: "3rem",
+};
+
+// Full default Tailwind spacing scale — used for dimension scales that must NOT
+// be trimmed (width/height/minHeight/maxHeight). Keeping the full set preserves
+// every dimension utility used in the codebase (w-64, h-52, max-h-40, …).
+const fullSpacingScale = {
+  0: "0",
+  px: "1px",
+  0.5: "0.125rem",
+  1: "0.25rem",
+  1.5: "0.375rem",
+  2: "0.5rem",
+  2.5: "0.625rem",
+  3: "0.75rem",
+  3.5: "0.875rem",
+  4: "1rem",
+  5: "1.25rem",
+  6: "1.5rem",
+  7: "1.75rem",
+  8: "2rem",
+  9: "2.25rem",
+  10: "2.5rem",
+  11: "2.75rem",
+  12: "3rem",
+  14: "3.5rem",
+  16: "4rem",
+  20: "5rem",
+  24: "6rem",
+  28: "7rem",
+  32: "8rem",
+  36: "9rem",
+  40: "10rem",
+  44: "11rem",
+  48: "12rem",
+  52: "13rem",
+  56: "14rem",
+  60: "15rem",
+  64: "16rem",
+  72: "18rem",
+  80: "20rem",
+  96: "24rem",
+};
+
+const dimensionScale = {
+  ...fullSpacingScale,
+  full: "100%",
+  screen: "100vh",
+  min: "min-content",
+  max: "max-content",
+};
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./src/renderer/**/*.{html,ts,tsx}"],
   theme: {
+    // Replaced (not extended) so only the 11 steps generate padding/margin/
+    // gap/space/inset utilities. Dimension scales below are decoupled.
+    spacing: spacingScale,
+    width: fullSpacingScale,
+    height: fullSpacingScale,
+    minHeight: dimensionScale,
+    maxHeight: dimensionScale,
     extend: {
       colors: {
         bg: {

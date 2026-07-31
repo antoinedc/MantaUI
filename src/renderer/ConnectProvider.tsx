@@ -376,13 +376,13 @@ export function ConnectProvider({
   }, [safeSetPhase]);
 
   return (
-    <div className="rounded-md border bg-bg-elev px-3 py-2 text-meta space-y-1.5">
+    <div className="rounded-md border bg-bg-elev px-3 py-2 text-meta space-y-2">
       <div className="flex items-center gap-2">
         <span className="text-text">Connect {label}</span>
         <span className="text-text-faint">{connectPhaseLabel(phase)}</span>
         <button
           onClick={onCancel}
-          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close"
           aria-label="Close"
         >
@@ -444,7 +444,7 @@ export function ConnectProvider({
       )}
 
       {phase.kind === "needsKey" && (
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           {phase.consoleUrl && (
             <a
               href={phase.consoleUrl}
@@ -568,7 +568,7 @@ export function ConnectProvider({
       )}
 
       {phase.kind === "failed" && (
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <div className="text-danger break-words">{phase.message}</div>
           <button
             onClick={retry}
@@ -599,7 +599,7 @@ function WaitingBlock({
     <div className="space-y-1">
       <div className="text-text">{instructions || "Open the URL below on any device."}</div>
       {url && (
-        <div className="flex items-center gap-1.5 min-w-0">
+        <div className="flex items-center gap-2 min-w-0">
           <a
             href={url}
             target="_blank"
@@ -613,8 +613,8 @@ function WaitingBlock({
         </div>
       )}
       {code && (
-        <div className="flex items-center gap-1.5">
-          <code className="font-mono text-text bg-bg px-1.5 py-0.5 rounded">{code}</code>
+        <div className="flex items-center gap-2">
+          <code className="font-mono text-text bg-bg px-2 py-px rounded">{code}</code>
           <CopyButton text={code} />
         </div>
       )}
@@ -662,7 +662,7 @@ const CredentialInput = memo(function CredentialInput({
   return (
     <div className="space-y-1">
       <label className="block text-text-faint text-label">{label}</label>
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex flex-wrap gap-2">
         <input
           type={type}
           value={value}
@@ -677,7 +677,7 @@ const CredentialInput = memo(function CredentialInput({
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          className="min-w-0 flex-1 rounded border border-border bg-bg px-1.5 py-1 font-mono text-text outline-none"
+          className="min-w-0 flex-1 rounded border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
         />
         <button
           onClick={() => void submit()}
@@ -762,7 +762,7 @@ function ClaudeLoginBlock({
   }, [ptySessionKey]);
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       {preExisting ? (
         <div className="text-text-muted">
           {inputError ?? "Claude is already signed in on this box."}
@@ -774,7 +774,7 @@ function ClaudeLoginBlock({
             shows you here.
           </div>
           {url && (
-            <div className="flex items-center gap-1.5 min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
               <a
                 href={url}
                 target="_blank"

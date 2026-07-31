@@ -76,7 +76,7 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
 
   return (
     <div>
-      <h2 className="text-display font-semibold tracking-tight text-text mb-1.5">
+      <h2 className="text-display font-semibold tracking-tight text-text mb-2">
         Connect your box
       </h2>
       <p className="text-body text-text-muted leading-relaxed mb-8 max-w-md">
@@ -181,14 +181,14 @@ function ManualPairForm({
 
   return (
     <form onSubmit={onFormSubmit} className="flex flex-col gap-4 mt-3">
-      <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1.5fr_0.9fr] gap-2.5 items-end">
+      <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1.5fr_0.9fr] gap-3 items-end">
         {/* Host — replaces the old Advanced → Server URL disclosure. The
             value is still named `serverUrl` and still flows through
             normalizeServerUrl / canConnectSetup, so the tailnet path
             (BET-268) and the deep-link server= override (BET-336) work
             unchanged. The validation error renders inline under this input
             only (the grid cell wraps input + error). */}
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           <label
             htmlFor="pair-host"
             className="text-label font-medium text-text-muted"
@@ -226,7 +226,7 @@ function ManualPairForm({
         </div>
 
         {/* Box ID */}
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           <label
             htmlFor="pair-box-id"
             className="text-label font-medium text-text-muted"
@@ -255,7 +255,7 @@ function ManualPairForm({
         {/* Pairing code — 6 digits, monospace, centered. Drops the
             previous text-2xl + tracking-[0.4em] (oversized); becomes a
             normal-size input that still reads as "this is a code". */}
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           <label
             htmlFor="pair-code"
             className="text-label font-medium text-text-muted"
@@ -295,7 +295,7 @@ function ManualPairForm({
       <div className="flex items-center justify-between gap-3 pt-1">
         <p className="text-meta text-text-faint">
           Run{" "}
-          <code className="rounded bg-bg px-1.5 py-0.5 text-label font-mono text-text-muted">
+          <code className="rounded bg-bg px-2 py-px text-label font-mono text-text-muted">
             manta pair
           </code>{" "}
           on the box to get a code.

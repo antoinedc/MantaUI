@@ -142,8 +142,8 @@ const MD_COMPONENTS: MarkdownComponents = {
   // paragraphs so the visual spacing is driven only by space-y-* on the
   // ul/ol parent. The list's own spacing to its siblings is the turn gap.
   // Lists inherit the prose size from the transcript column (BET-413).
-  ul: ({ children }) => <ul className="ml-2 list-disc list-inside space-y-0.5 [&_p]:m-0">{children}</ul>,
-  ol: ({ children }) => <ol className="ml-2 list-decimal list-inside space-y-0.5 [&_p]:m-0">{children}</ol>,
+  ul: ({ children }) => <ul className="ml-2 list-disc list-inside space-y-px [&_p]:m-0">{children}</ul>,
+  ol: ({ children }) => <ol className="ml-2 list-decimal list-inside space-y-px [&_p]:m-0">{children}</ol>,
   li: ({ children }) => <li className="text-text">{children}</li>,
   p: ({ children }) => <div>{children}</div>,
   blockquote: ({ children }) => (
@@ -162,7 +162,7 @@ const MD_COMPONENTS: MarkdownComponents = {
   ),
   th: ({ children }) => (
     <th
-      className="px-2 py-0.5 text-left text-text font-medium bg-bg-soft"
+      className="px-2 py-px text-left text-text font-medium bg-bg-soft"
       style={{ border: "1px solid var(--border-subtle)" }}
     >
       {children}
@@ -170,7 +170,7 @@ const MD_COMPONENTS: MarkdownComponents = {
   ),
   td: ({ children }) => (
     <td
-      className="px-2 py-0.5 text-text"
+      className="px-2 py-px text-text"
       style={{ border: "1px solid var(--border-subtle)" }}
     >
       {children}
@@ -334,7 +334,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
   return (
     <div className="rounded border border-border bg-bg-soft overflow-hidden relative">
       {lang && (
-        <div className="px-2 py-0.5 text-micro uppercase text-text-faint border-b border-border bg-bg-elev pr-7">
+        <div className="px-2 py-px text-micro uppercase text-text-faint border-b border-border bg-bg-elev pr-8">
           {lang}
         </div>
       )}
@@ -344,7 +344,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
       />
       {tooLarge ? (
         <pre
-          className="px-2 py-1.5 pr-7 text-code font-mono overflow-x-auto max-w-full whitespace-pre"
+          className="px-2 py-2 pr-8 text-code font-mono overflow-x-auto max-w-full whitespace-pre"
           style={{ background: "transparent" }}
         >
           <code>{cleaned}</code>
@@ -357,7 +357,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
         >
           {({ tokens, getLineProps, getTokenProps }) => (
             <pre
-              className="px-2 py-1.5 pr-7 text-code font-mono overflow-x-auto max-w-full whitespace-pre"
+              className="px-2 py-2 pr-8 text-code font-mono overflow-x-auto max-w-full whitespace-pre"
               // The Prism theme's default bg would override bg-bg-soft — disable
               // it in both themes so the card surface shows through.
               style={{ background: "transparent" }}

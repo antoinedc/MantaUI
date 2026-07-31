@@ -44,14 +44,14 @@ export function ReconnectingBanner({ state, onRetryNow }: ReconnectingBannerProp
     <div
       role="status"
       aria-live="polite"
-      className="shrink-0 bg-accent/10 border-b border-accent/30 px-3 py-1.5 text-meta text-text flex items-center gap-2"
+      className="shrink-0 bg-accent/10 border-b border-accent/30 px-3 py-2 text-meta text-text flex items-center gap-2"
     >
       <span className="flex-1 truncate">
         {renderCopy(state)}
       </span>
       <button
         onClick={onRetryNow}
-        className="shrink-0 rounded bg-accent/20 px-2 py-0.5 text-accent hover:bg-accent/30 font-medium"
+        className="shrink-0 rounded bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium"
         title="Reset backoff and reconnect immediately"
       >
         Retry now
