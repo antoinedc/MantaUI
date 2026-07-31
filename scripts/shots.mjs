@@ -527,8 +527,15 @@ async function main() {
   // loopback navigation with ERR_ACCESS_DENIED, which took this script — and
   // therefore the drift gate in ci.yml, on the REQUIRED job — down for every
   // PR. Playwright's bundled Chromium is pinned by package-lock.json, so the
-  // renderer these baselines hash can now only change in a reviewed commit.
+  // renderer these baselines hash can only change in a reviewed commit.
   const browser = await chromium.launch(LAUNCH_OPTIONS);
+  let browserVersion = "?";
+  try {
+    browserVersion = await browser.version();
+  } catch {
+    // Best-effort: never let version detection break the capture run.
+  }
+  log(`chromium ${browserVersion} via ${chromium.executablePath()}`);
 
   const producedPaths = {};
   try {

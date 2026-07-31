@@ -114,24 +114,55 @@ jobs:
       #    when the PR was merged, so re-running here would just measure
       #    main against itself. PR is the only event where a stale set can
       #    slip in.
-      # TEMPORARILY ADVISORY (BET-444). Two problems, neither caused by the
-      # PRs this gate blocks:
-      #   1. Chrome 148 refuses every loopback navigation on the runner
-      #      (ERR_ACCESS_DENIED), so the capture could not run AT ALL — this
-      #      step failed on the REQUIRED job and blocked every open PR.
-      #   2. Moved to Playwright's pinned Chromium (which runs), but two
-      #      consecutive captures of the same UI are not byte-identical, so
-      #      the diff cannot be a gate until that is fixed.
-      # Left running + visible so the drift signal is not lost, but it no
-      # longer blocks. BET-444 restores it to blocking.
+      #
+      #    This is BLOCKING again (BET-444). It was temporarily advisory
+      #    because Chrome 148 refused every loopback navigation (the captures
+      #    could not run at all) and then, after moving to Playwright's pinned
+      #    Chromium, two consecutive captures of the same UI were not
+      #    byte-identical. Both are fixed: shots.mjs now uses the shared
+      #    LAUNCH_OPTIONS (bundled Chromium pinned by package-lock.json), and
+      #    the two-run below asserts determinism. The first `npm run shots`
+      #    rebuilds + captures; the second proves run-to-run byte-identity; the
+      #    final git diff guards both against the committed set. A determinism
+      #    regression fails HERE (as itself), not as a mystery diff on some
+      #    unrelated PR.
+      #
+      #    The pinned Chromium must be present BEFORE the drift gate captures.
+      #    After the 2026-07-31 Chrome-148 failure the gate ran cold against
+      #    whatever browser was already in the runner cache — the visual gate's
+      #    browser install step sat AFTER this step — so a stale cache could
+      #    launch a browser that paints differently from the committed set.
+      #    The lockfile-pinned browser is installed here, first, so both this
+      #    gate and the visual gate below drive the exact renderer the
+      #    baselines were encoded under.
+      - name: Cache Playwright browsers
+        id: pw-cache-drift
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright Chromium
+        run: npx playwright install ${{ steps.pw-cache-drift.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}
+
       - name: Drift gate — regenerate website/shot-*.webp and diff against the committed set
         if: github.event_name == 'pull_request'
-        continue-on-error: true
         run: |
           npm run shots
-          if ! git diff --exit-code --quiet website/shot-*.webp; then
-            echo "::error file=website/shot-*.webp::drift detected — committed shots do not match what the live renderer paints today."
-            echo "::error::Run 'npm run shots' locally and commit the regenerated files."
+          npm run shots
+          # Scope is the SHOT ARTIFACTS this gate owns (website/shot-*.webp +
+          # hero-poster.webp). NOT the whole website/ dir — the npm test step
+          # regenerates website/sitemap.xml from git history, so including it
+          # here makes the gate measure the sitemap's lastmod against a stale
+          # committed copy and fail on an unrelated file (BET-444).
+          echo "::group::Post-capture shot diff against the committed set"
+          git status --porcelain -- website/shot-*.webp website/hero-poster.webp || true
+          git diff --name-status -- website/shot-*.webp website/hero-poster.webp || true
+          git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
+          echo "::endgroup::"
+          if ! git diff --exit-code --quiet -- website/shot-*.webp website/hero-poster.webp; then
+            echo "::error file=website/shot-*.webp::drift detected — two consecutive runs differ from the committed set. Either the renderer changed or the capture is not byte-deterministic."
+            echo "::error::If the renderer intentionally changed, run 'npm run shots' locally and commit the regenerated files. If not, the capture pipeline is non-deterministic — investigate before merging."
             exit 1
           fi
 
@@ -153,16 +184,9 @@ jobs:
       #    Baselines are regenerated deliberately with `npm run visual:update`
       #    and reviewed as part of the diff — never auto-updated in CI, which
       #    would make the gate unfalsifiable.
-      - name: Cache Playwright browsers
-        id: pw-cache-visual
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
-
-      - name: Install Playwright Chromium
-        run: npx playwright install ${{ steps.pw-cache-visual.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}
-
+      #
+      #    The pinned Chromium was installed above (before the drift gate), so
+      #    the visual gate reuses it from the shared cache.
       - name: Visual gate (structure + pixel baselines)
         run: npm run visual
 
