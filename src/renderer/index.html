@@ -7,7 +7,13 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <title>Manta UI</title>
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self' ws: http: https:;" />
+    <!-- font-src allows data: because Vite INLINES any bundled asset under
+         `build.assetsInlineLimit` (4 KB) as a base64 data URL. Two
+         JetBrains Mono subsets (cyrillic-ext, normal + italic) fall under
+         that threshold, so they ship as `data:font/woff2;base64,…` inside
+         the CSS and were refused under the `default-src 'self'` fallback.
+         Still no remote origin — data: here is our own bundled bytes. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: http: https:;" />
     <!-- iOS PWA: installable via Safari "Add to Home Screen". Inert on
          desktop Electron (apple-* ignored; manifest link harmlessly 404s
          since Electron loads its own out-dir index.html). -->

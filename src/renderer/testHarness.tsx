@@ -93,8 +93,17 @@ let busListeners = new Set<EventListener>();
 // Install a mock `window.api` onto the jsdom window and return the bus +
 // recorder. `overrides` lets a test supply a specific resolved value or a
 // spy for any method.
+//
+// `absent` models the OTHER shape `window.api` really takes: on a fresh,
+// unpaired desktop boot it is the preload OS-bridge SUBSET, where every
+// httpApi-only method is `undefined`. The Proxy below answers every property
+// with a function, so without this a test can never exercise a
+// `if (!window.api.x)` guard — and the one time that mattered, an unguarded
+// call threw from the commit phase and blanked the app on first launch.
+// Listed props read back as `undefined`, exactly as the preload does.
 export function installMockApi(
   overrides: Record<string, unknown> = {},
+  { absent = [] as string[] }: { absent?: string[] } = {},
 ): { api: MockApi; bus: MockEventBus } {
   busListeners = new Set<EventListener>();
   const calls: Record<string, unknown[][]> = {};
@@ -109,11 +118,13 @@ export function installMockApi(
   };
 
   const impl = { ...defaultApiImpl(), ...overrides };
+  const missing = new Set(absent);
 
   const target: MockApi = { calls };
   const proxy = new Proxy(target, {
     get(_t, prop: string) {
       if (prop === "calls") return calls;
+      if (missing.has(prop)) return undefined;
       const provided = impl[prop];
       // Record + delegate to the provided impl if any; otherwise a
       // resolved-undefined no-op so unhandled fire-and-forget calls are safe.

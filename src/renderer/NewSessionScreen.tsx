@@ -95,14 +95,25 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    window.api
-      .opencodeModels()
-      .then((list) => { if (!cancelled) setModels(list); })
-      .catch(() => {});
-    window.api
-      .opencodeDefaultModel()
-      .then((d) => { if (!cancelled) setServerDefault(d); })
-      .catch(() => {});
+    // GUARD (same pattern as App.tsx's launchersList effect): both of these
+    // live ONLY on httpApi. On a fresh/unpaired desktop boot `window.api` is
+    // still the raw preload OS-bridge subset, where they are undefined —
+    // calling them throws synchronously from the commit phase, which `.catch`
+    // cannot see and which unmounts the whole tree. App gates this screen on
+    // `loaded` so it should not mount that early; this keeps a future caller
+    // from re-opening the same hole.
+    if (window.api.opencodeModels) {
+      window.api
+        .opencodeModels()
+        .then((list) => { if (!cancelled) setModels(list); })
+        .catch(() => {});
+    }
+    if (window.api.opencodeDefaultModel) {
+      window.api
+        .opencodeDefaultModel()
+        .then((d) => { if (!cancelled) setServerDefault(d); })
+        .catch(() => {});
+    }
     return () => { cancelled = true; };
   }, []);
 

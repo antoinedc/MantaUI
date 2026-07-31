@@ -938,7 +938,19 @@ export function App() {
           <div className="titlebar-inset-right" />
         </div>
         <div className="flex-1 relative">
-          {projects.length === 0 ? (
+          {projects.length === 0 && !loaded ? (
+            // Config hasn't arrived yet. `loaded` is false on the FIRST paint
+            // (it flips in applyConfig, after main.tsx's async configGet), so
+            // without this gate the zero-project branch below mounts for one
+            // commit on every boot — including a fresh, unpaired install where
+            // `window.api` is still the preload OS-bridge subset. The
+            // composer's mount effect then called httpApi-only methods and
+            // threw "opencodeModels is not a function" from the commit phase,
+            // unmounting the tree BEFORE onboarding could ever render (the
+            // whole app went blank on first launch). Onboarding needs `loaded`
+            // too, so neither branch may render until config is in.
+            <div className="h-full" />
+          ) : projects.length === 0 ? (
             // Zero-project state (BET-416 §F / BET-417 §A): the new-session
             // composer IS the app's zero state. An unpaired config routes to
             // onboarding, so this branch is only reached when the box IS
