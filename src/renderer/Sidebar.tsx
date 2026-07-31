@@ -1180,11 +1180,16 @@ function Timer({ status }: { status: WindowStatusUI | undefined }) {
   const now = nowMs();
   const ttl = selectCacheTtlMs(cacheTtl);
   const cls = classifyCacheAge(status.lastMessageAt!, now, ttl);
-  const visible = cls !== "stale";
+  const stale = cls === "stale";
+  // Stale timers: `invisible` at rest, `group-hover:visible` so the row's
+  // hover reveals it. Tailwind classes (NOT inline style) — inline
+  // `visibility:hidden` would beat the `group-hover:visible` class and the
+  // timer would never reveal (Verify §2). Fresh timers render `visible`.
+  const visibilityClass = stale ? "invisible group-hover:visible" : "visible";
   return (
     <span
-      className="min-w-[20px] shrink-0 text-right font-mono tabular-nums text-meta"
-      style={{ color: "var(--tx4)", visibility: visible ? "visible" : "hidden" }}
+      className={`min-w-[20px] shrink-0 text-right font-mono tabular-nums text-meta ${visibilityClass}`}
+      style={{ color: "var(--tx4)" }}
     >
       {formatAge(now - status.lastMessageAt!)}
     </span>
