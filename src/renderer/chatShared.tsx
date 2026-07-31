@@ -401,7 +401,7 @@ export function MetaBadge({
       ? "text-danger border-danger/30"
       : "text-text-faint border-border";
   return (
-    <span className={"shrink-0 rounded border px-1 text-meta " + toneClass} title={title}>
+    <span className={"shrink-0 rounded border px-1 text-meta font-mono " + toneClass} title={title}>
       {children}
     </span>
   );
