@@ -90,7 +90,7 @@ export function SubscriptionsCard() {
       </label>
       <div className="text-meta text-text-faint space-y-1">
         <div>
-          Sign in with a subscription you already pay for. MantaUI never sees
+          Sign in with a subscription you already pay for. Manta never sees
           your password or your key after it is saved.
         </div>
       </div>
