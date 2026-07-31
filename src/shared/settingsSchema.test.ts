@@ -25,9 +25,14 @@ describe("settingsSchema shape", () => {
     for (const e of ALL) expect(known.has(e.section)).toBe(true);
   });
 
-  it("every non-custom entry has a configKey; custom entries have null", () => {
+  it("every entry declares a configKey field (null for Mac-local / presentational)", () => {
+    // configKey is null for Mac-local toggles (pluginsEnabled, rendered via
+    // the preload bridge) and presentational custom entries (accountsList);
+    // it is a real AppConfig key for everything else. opencodePort is custom-
+    // rendered inside the Box Advanced row but still carries its configKey so
+    // reset-all + the modified-dot work.
     for (const e of ALL) {
-      if (e.control === "custom") expect(e.configKey).toBeNull();
+      expect(typeof e.configKey === "string" || e.configKey === null).toBe(true);
     }
   });
 
@@ -66,7 +71,7 @@ describe("settingsForPlatform", () => {
 
   it("excludes mobile-only entries on desktop", () => {
     const desktop = settingsForPlatform(ALL, "desktop");
-    expect(desktop.some((e) => e.id === "serverUrl")).toBe(false); // mobile
+    expect(desktop.some((e) => e.id === "serverUrlMobile")).toBe(false); // mobile
     expect(desktop.some((e) => e.id === "chatAutoAllow")).toBe(false); // mobile
   });
 });
@@ -97,7 +102,7 @@ describe("searchSettings", () => {
 
   it("respects platform", () => {
     const hits = searchSettings(ALL, "server url", "desktop");
-    expect(hits).toEqual([]); // serverUrl is mobile-only
+    expect(hits).toEqual([]); // serverUrlMobile is mobile-only
   });
 });
 
@@ -129,7 +134,7 @@ describe("sectionIsModified", () => {
     // pluginsEnabled has configKey null — setting a value for it must not
     // mark the section modified.
     expect(
-      sectionIsModified(ALL, "plugins", "desktop", { pluginsEnabled: true }),
+      sectionIsModified(ALL, "extensions", "desktop", { pluginsEnabled: true }),
     ).toBe(false);
   });
 });
@@ -141,14 +146,14 @@ describe("resetAllPayload", () => {
     expect(payload.theme).toBe("system");
     expect(payload.groqApiKey).toBe("");
     expect(payload.autoRenameSessions).toBe(false);
-    expect(payload.shareAnalytics).toBe(true);
     expect(payload.allowAgentPush).toBe(false);
+    expect(payload.opencodePort).toBe(14096);
   });
 
   it("omits null-configKey entries", () => {
     const payload = resetAllPayload(ALL);
     expect(payload).not.toHaveProperty("pluginsEnabled");
-    expect(payload).not.toHaveProperty("serverUrl");
+    expect(payload).not.toHaveProperty("serverUrlMobile");
   });
 });
 

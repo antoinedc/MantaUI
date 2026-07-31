@@ -267,10 +267,17 @@ export function MobileSettings({ onClose }: Props) {
   };
 
   // Server URL is a mobile-only schema entry with configKey null (localStorage).
-  const serverUrlEntry = SETTINGS.find((e) => e.id === "serverUrl") as SettingEntry;
+  const serverUrlEntry = SETTINGS.find((e) => e.id === "serverUrlMobile") as SettingEntry;
 
   // Group schema entries by their section for the single-scroll layout.
-  const sections = SETTING_SECTIONS.filter((s) => settingsForSection(SETTINGS, s.id, PLATFORM).length > 0 || s.id === "connection");
+  // BET-420: the schema now has 8 sections; mobile skips Files (no mobile
+  // entries, no mobile custom content) and keeps the rest.
+  const hasMobileCustom = (id: SettingSectionId): boolean =>
+    id === "general" || id === "box" || id === "accounts" ||
+    id === "models" || id === "extensions";
+  const sections = SETTING_SECTIONS.filter(
+    (s) => settingsForSection(SETTINGS, s.id, PLATFORM).length > 0 || hasMobileCustom(s.id),
+  );
 
   return (
     <div className="mobile-screen">
@@ -331,8 +338,11 @@ export function MobileSettings({ onClose }: Props) {
 
             {/* Schema-driven simple fields, grouped by section. */}
             {sections.map((section) => {
-              const entries = settingsForSection(SETTINGS, section.id, PLATFORM);
-              if (entries.length === 0) return null;
+              // Skip custom entries (rendered via renderMobileCustom) and the
+              // serverUrl entry (rendered specially above).
+              const entries = settingsForSection(SETTINGS, section.id, PLATFORM)
+                .filter((e) => e.control !== "custom" && e.id !== "serverUrlMobile");
+              if (entries.length === 0 && !hasMobileCustom(section.id)) return null;
               return (
                 <section key={section.id} className="space-y-3 pt-1 border-t border-border">
                   <div className="flex items-center gap-2">
@@ -374,30 +384,40 @@ export function MobileSettings({ onClose }: Props) {
     </div>
   );
 
-  // Per-section custom content for mobile (default model, providers,
-  // subscriptions, launcher flags, push, skill registries).
+  // Per-section custom content for mobile. BET-420 split the old AI section
+  // into accounts (subs + endpoints), models (default model) and extensions
+  // (launcher flags + skill registries); push moved from general to box.
   function renderMobileCustom(sectionId: SettingSectionId): ReactNode {
-    if (sectionId === "ai") {
+    if (sectionId === "models") {
+      return (
+        <div className="space-y-1">
+          <label htmlFor="setting-defaultModel" className="block text-micro font-semibold uppercase text-text-muted">Default model</label>
+          <select
+            id="setting-defaultModel"
+            value={selectedModel ? `${selectedModel.providerID}::${selectedModel.modelID}` : ""}
+            onChange={(e) => commitModel(e.target.value)}
+            className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
+          >
+            <option value="">opencode default</option>
+            {models && models.map((m) => (
+              <option key={`${m.providerID}::${m.id}`} value={`${m.providerID}::${m.id}`}>{m.name} ({m.providerID})</option>
+            ))}
+          </select>
+          <div className="text-meta text-text-faint">Used for every new and cleared session. Can be overridden per-session in the chat composer.</div>
+        </div>
+      );
+    }
+    if (sectionId === "accounts") {
       return (
         <>
-          {/* Default model */}
-          <div className="space-y-1">
-            <label htmlFor="setting-defaultModel" className="block text-micro font-semibold uppercase text-text-muted">Default model</label>
-            <select
-              id="setting-defaultModel"
-              value={selectedModel ? `${selectedModel.providerID}::${selectedModel.modelID}` : ""}
-              onChange={(e) => commitModel(e.target.value)}
-              className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
-            >
-              <option value="">opencode default</option>
-              {models && models.map((m) => (
-                <option key={`${m.providerID}::${m.id}`} value={`${m.providerID}::${m.id}`}>{m.name} ({m.providerID})</option>
-              ))}
-            </select>
-            <div className="text-meta text-text-faint">Used for every new and cleared session. Can be overridden per-session in the chat composer.</div>
-          </div>
           <SubscriptionsCard />
           <ProvidersCard />
+        </>
+      );
+    }
+    if (sectionId === "extensions") {
+      return (
+        <>
           {availableLaunchers.some((l) => l.flags.length > 0) && (
             <div role="group" aria-labelledby="setting-mobile-launchers" className="space-y-2">
               <span id="setting-mobile-launchers" className="text-micro font-semibold uppercase text-text-muted">AI CLI launch options</span>
@@ -418,7 +438,7 @@ export function MobileSettings({ onClose }: Props) {
           {/* Skill registries */}
           <div className="space-y-2">
             <label htmlFor="setting-mobile-skillRegistries" className="text-micro font-semibold uppercase text-text-muted">Skill registries</label>
-            <div className="text-meta text-text-faint">Extra opencode skill registry URLs. The default manta registry is always included.</div>
+            <div className="text-meta text-text-faint">Extra opencode skill registry URLs. The default Manta registry is always included.</div>
             <div className="space-y-1">
               {registryUrls.map((url) => (
                 <div key={url} className="flex items-center gap-2 bg-bg-soft border border-border rounded px-2 py-2">
@@ -435,35 +455,31 @@ export function MobileSettings({ onClose }: Props) {
         </>
       );
     }
-    if (sectionId === "voice") {
-      // The Groq key input is rendered by the schema (PasswordField) — but
-      // the schema's password renderer below needs the mobile-styled markup.
-      return null;
+    if (sectionId === "box") {
+      // Push notifications — per-device subscription, stays mobile-only under
+      // Box (BET-420: no Notifications section; push is a box-level concern).
+      if (!isPushSupported()) return null;
+      return (
+        <div role="group" aria-labelledby="setting-mobile-notifications" className="space-y-2">
+          <span id="setting-mobile-notifications" className="text-micro font-semibold uppercase text-text-muted">Notifications</span>
+          <div className="text-meta text-text-faint">Push alerts when Claude needs a permission/question, finishes a turn, or hits an error.{pushPermission() === "default" && " iOS only delivers these to the app installed on your home screen."}</div>
+          <button onClick={togglePush} disabled={pushBusy} className={`w-full px-3 py-2 text-body rounded border ${pushOn ? "bg-accent-soft text-white border-accent" : "bg-bg-soft text-text-muted border-border"} ${pushBusy ? "opacity-60" : ""}`}>
+            {pushBusy ? "Working…" : pushOn ? "Notifications on — tap to disable" : "Enable notifications"}
+          </button>
+          {pushOn && (
+            <button onClick={resubscribe} disabled={pushBusy} className={`w-full px-3 py-2 text-meta rounded border border-border bg-bg-soft text-text-muted ${pushBusy ? "opacity-60" : ""}`}>Not getting notifications? Re-subscribe</button>
+          )}
+          {pushErr && <div role="alert" className="text-meta text-danger">{errorDisclosure(pushErr, pushErrRaw)}</div>}
+        </div>
+      );
     }
     if (sectionId === "general") {
       return (
-        <>
-          {/* Push notifications — per-device subscription, not server config. */}
-          {isPushSupported() && (
-            <div role="group" aria-labelledby="setting-mobile-notifications" className="space-y-2">
-              <span id="setting-mobile-notifications" className="text-micro font-semibold uppercase text-text-muted">Notifications</span>
-              <div className="text-meta text-text-faint">Push alerts when Claude needs a permission/question, finishes a turn, or hits an error.{pushPermission() === "default" && " iOS only delivers these to the app installed on your home screen."}</div>
-              <button onClick={togglePush} disabled={pushBusy} className={`w-full px-3 py-2 text-body rounded border ${pushOn ? "bg-accent-soft text-white border-accent" : "bg-bg-soft text-text-muted border-border"} ${pushBusy ? "opacity-60" : ""}`}>
-                {pushBusy ? "Working…" : pushOn ? "Notifications on — tap to disable" : "Enable notifications"}
-              </button>
-              {pushOn && (
-                <button onClick={resubscribe} disabled={pushBusy} className={`w-full px-3 py-2 text-meta rounded border border-border bg-bg-soft text-text-muted ${pushBusy ? "opacity-60" : ""}`}>Not getting notifications? Re-subscribe</button>
-              )}
-              {pushErr && <div role="alert" className="text-meta text-danger">{errorDisclosure(pushErr, pushErrRaw)}</div>}
-            </div>
-          )}
-          {/* Reset all settings — danger zone (BET-419 §B.3). */}
-          <div className="space-y-2 pt-1 border-t border-border">
-            <span className="text-micro font-semibold uppercase text-text-muted">Reset all settings</span>
-            <div className="text-meta text-text-faint">Restore every setting to its default. This does not remove your box pairing or projects.</div>
-            <button onClick={() => setConfirmReset(true)} className="w-full px-3 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
-          </div>
-        </>
+        <div className="space-y-2 pt-1 border-t border-border">
+          <span className="text-micro font-semibold uppercase text-text-muted">Reset all settings</span>
+          <div className="text-meta text-text-faint">Restore every setting to its default. This does not remove your box pairing or projects.</div>
+          <button onClick={() => setConfirmReset(true)} className="w-full px-3 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
+        </div>
       );
     }
     return null;
