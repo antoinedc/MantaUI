@@ -10,11 +10,12 @@
 // no mapping table. The variant label is title-cased for display only — the
 // raw id is sent back via onSelect.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ChevronDown, Sparkles } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
 import { formatModelContextSize } from "./chatUtils";
+import { useClickAway } from "./hooks/useClickAway";
 
 export function ModelPicker({
   modelLabel,
@@ -41,18 +42,13 @@ export function ModelPicker({
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Click-away to dismiss either dropdown. Using mousedown (not click) so we
-  // close before an inner button's onClick re-toggles.
-  useEffect(() => {
-    if (!modelOpen && !variantOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setModelOpen(false);
-        setVariantOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [modelOpen, variantOpen]);
+  // close before an inner button's onClick re-toggles. The hook closes both
+  // dropdowns on outside-click or Escape; the caller's toggle buttons are
+  // inside rootRef so they don't trigger the dismiss.
+  useClickAway(rootRef, modelOpen || variantOpen, () => {
+    setModelOpen(false);
+    setVariantOpen(false);
+  });
 
   // Group models by providerID so the list reads e.g. "anthropic" → 3 models.
   const groups = useMemo(() => {

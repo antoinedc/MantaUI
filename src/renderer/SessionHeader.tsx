@@ -10,7 +10,7 @@
 // result) and handlers (fork / compact / clear / delete) are passed in as
 // props by ChatPanel, which owns the session lifecycle.
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2 } from "lucide-react";
 import {
   ctxStageColor,
@@ -18,6 +18,7 @@ import {
   type ContextBreakdown,
   type StaleCacheResult,
 } from "./chatUtils";
+import { useClickAway } from "./hooks/useClickAway";
 
 // Cache-segment colors — same palette as ContextBar so the header pill and
 // the (retired) footer bar stay in sync visually.
@@ -121,6 +122,40 @@ export function SessionHeader({
   );
 }
 
+// ===== Segmented context bar =====
+//
+// Renders the fresh / cache-write / cache-read segments as proportional
+// inline slices of a track. Used twice in ContextPill (mini bar in the pill,
+// larger bar in the popover) — extracted to clear the self-clone.
+
+function SegmentedBar({
+  segments,
+  segColor,
+  className,
+}: {
+  segments: ContextBreakdown["segments"];
+  segColor: (kind: ContextBreakdown["segments"][number]["kind"]) => string;
+  className: string;
+}) {
+  return (
+    <span className={className} style={{ backgroundColor: "var(--card)" }}>
+      {segments.map((s, i) =>
+        s.pct > 0 ? (
+          <span
+            key={s.kind}
+            className="inline-block h-full align-top"
+            style={{
+              width: `${s.pct}%`,
+              backgroundColor: segColor(s.kind),
+              boxShadow: i > 0 ? "inset 1px 0 0 rgba(0,0,0,0.35)" : undefined,
+            }}
+          />
+        ) : null,
+      )}
+    </span>
+  );
+}
+
 // ===== Context pill + popover =====
 
 function ContextPill({
@@ -152,24 +187,7 @@ function ContextPill({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useClickAway(rootRef, open, () => setOpen(false));
 
   const segColor = (kind: ContextBreakdown["segments"][number]["kind"]) => {
     if (kind === "fresh") return fill;
@@ -192,26 +210,11 @@ function ContextPill({
     >
       {/* Mini segmented bar inside the pill — same segment order/colors as
           ContextBar but at pill scale (w-16 h-2). */}
-      <span
+      <SegmentedBar
+        segments={segments}
+        segColor={segColor}
         className="manta-ctx-track inline-block w-16 h-2 rounded-full overflow-hidden align-middle"
-        style={{
-          backgroundColor: "var(--card)",
-        }}
-      >
-        {segments.map((s, i) =>
-          s.pct > 0 ? (
-            <span
-              key={s.kind}
-              className="inline-block h-full align-top"
-              style={{
-                width: `${s.pct}%`,
-                backgroundColor: segColor(s.kind),
-                boxShadow: i > 0 ? "inset 1px 0 0 rgba(0,0,0,0.35)" : undefined,
-              }}
-            />
-          ) : null,
-        )}
-      </span>
+      />
       <span
         className="tabular-nums text-meta font-mono font-semibold"
         style={{ color: stale ? CACHE_WRITE_COLOR : fill }}
@@ -234,24 +237,11 @@ function ContextPill({
 
           {/* Segmented bar — larger version for the popover */}
           <div className="px-3 py-2">
-            <span
+            <SegmentedBar
+              segments={segments}
+              segColor={segColor}
               className="inline-block w-full h-3 rounded overflow-hidden"
-              style={{ backgroundColor: "var(--card)" }}
-            >
-              {segments.map((s, i) =>
-                s.pct > 0 ? (
-                  <span
-                    key={s.kind}
-                    className="inline-block h-full align-top"
-                    style={{
-                      width: `${s.pct}%`,
-                      backgroundColor: segColor(s.kind),
-                      boxShadow: i > 0 ? "inset 1px 0 0 rgba(0,0,0,0.35)" : undefined,
-                    }}
-                  />
-                ) : null,
-              )}
-            </span>
+            />
           </div>
 
           {/* Legend with per-segment counts */}
@@ -360,24 +350,7 @@ function SessionMenu({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useClickAway(rootRef, open, () => setOpen(false));
 
   const item = (
     icon: React.ReactNode,
