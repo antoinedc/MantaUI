@@ -30,13 +30,13 @@
 // state + per-event dispatch + JSX, nothing more.
 
 import { useCallback, useEffect, useState, useRef } from "react";
-import { Check, X, ChevronUp, ChevronDown } from "lucide-react";
 import {
   getMantaPreload,
   type InstallerEvent,
   type PreflightFailure,
 } from "./preloadAccess";
-import { currentStageInfo, type InstallStageId } from "../shared/installStages";
+import { currentStageInfo, INSTALL_STAGES, type InstallStageId } from "../shared/installStages";
+import { ProcessPanel } from "./ProcessPanel";
 import {
   CUSTOM_HOST_VALUE,
   resolveInstallTarget,
@@ -73,11 +73,11 @@ const CLAIM_RETRY_DELAY_MS = 3_000;
 const INITIAL_STAGE: InstallStageId = "preflight";
 const INITIAL_STAGE_INFO = currentStageInfo(INITIAL_STAGE);
 
-function formatElapsed(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
+// The installer's ProcessPanel stages — the ordered INSTALL_STAGES labels.
+// `currentStageInfo` is 1-based, so the panel's 0-based activeIndex is
+// `stageIndex - 1`. Using all six entries preserves the original "N of 6"
+// counter (the SSH installer always showed six steps).
+const INSTALL_STAGE_LABELS: string[] = INSTALL_STAGES.map((s) => s.label);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -134,11 +134,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   const [running, setRunning] = useState(false);
   const [activeHandle, setActiveHandle] = useState<string | null>(null);
   const [stage, setStage] = useState<InstallStageId>(INITIAL_STAGE);
-  const [stageLabel, setStageLabel] = useState(INITIAL_STAGE_INFO.label);
   const [stageIndex, setStageIndex] = useState(INITIAL_STAGE_INFO.index);
-  const [stageTotal, setStageTotal] = useState(INITIAL_STAGE_INFO.total);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [logOpen, setLogOpen] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState<
     | { ok: boolean; code: number | null; signal: NodeJS.Signals | null }
@@ -168,7 +165,6 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   const [passphraseInput, setPassphraseInput] = useState("");
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
-  const logRef = useRef<HTMLDivElement | null>(null);
 
   // ---------- Host list load (mount + manual refresh share this) ----------
   //
@@ -270,10 +266,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         setRunning(true);
         setActiveHandle(s.trustHandleId);
         setStage(INITIAL_STAGE);
-        setStageLabel(INITIAL_STAGE_INFO.label);
         setStageIndex(INITIAL_STAGE_INFO.index);
-        setStageTotal(INITIAL_STAGE_INFO.total);
-        setLogOpen(true);
         setFingerprintPrompt({
           handleId: s.trustHandleId,
           algo: s.pendingFingerprint.algo,
@@ -286,10 +279,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         setRunning(true);
         setActiveHandle(s.passphraseHandleId);
         setStage(INITIAL_STAGE);
-        setStageLabel(INITIAL_STAGE_INFO.label);
         setStageIndex(INITIAL_STAGE_INFO.index);
-        setStageTotal(INITIAL_STAGE_INFO.total);
-        setLogOpen(true);
         setPassphrasePrompt({
           handleId: s.passphraseHandleId,
           prompt: "Enter the passphrase for your SSH key:",
@@ -301,11 +291,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         const info = currentStageInfo(s.stage);
         setRunning(true);
         setStage(s.stage);
-        setStageLabel(info.label);
         setStageIndex(info.index);
-        setStageTotal(info.total);
         setLines(s.logTail);
-        setLogOpen(true);
       } else if (s.preflight && !s.preflight.ok) {
         setPreflightFailure({ failures: s.preflight.failures });
       }
@@ -335,9 +322,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         case "stage": {
           const info = currentStageInfo(evt.stage);
           setStage(evt.stage);
-          setStageLabel(info.label);
           setStageIndex(info.index);
-          setStageTotal(info.total);
           break;
         }
         case "preflight-failed":
@@ -375,8 +360,6 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           setPassphrasePrompt(null);
           setPassphraseInput("");
           if (evt.ok) {
-            // Collapse the log back to the single status line on success.
-            setLogOpen(false);
             // Auto-claim on success — the whole point of the flow. The
             // user typed a host, nothing else.
             void runClaim();
@@ -395,14 +378,6 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preload, activeHandle]);
-
-  // Auto-scroll the log pane on new lines while it's open — matches what a
-  // terminal user expects (Tail-style: stick to the bottom while streaming).
-  useEffect(() => {
-    if (logOpen && logRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight;
-    }
-  }, [lines, logOpen]);
 
   // Tick the elapsed-time display once a second while running.
   useEffect(() => {
@@ -457,11 +432,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     // filtering against a prior, now-dead handle.
     setActiveHandle(null);
     setStage(INITIAL_STAGE);
-    setStageLabel(INITIAL_STAGE_INFO.label);
     setStageIndex(INITIAL_STAGE_INFO.index);
-    setStageTotal(INITIAL_STAGE_INFO.total);
     setElapsedSeconds(0);
-    setLogOpen(true);
     // Mount the progress panel immediately on click — no gap before the
     // main process's response comes back.
     setRunning(true);
@@ -846,50 +818,21 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       )}
 
       {/* Status line + progress bar + live log — mounted on click, streams,
-          auto-scrolls, collapses to the single line on success. */}
+          auto-scrolls, collapses to the single line on success. The shared
+          ProcessPanel (BET-421 §A) renders the chrome; the fingerprint and
+          passphrase prompts pass as children so they render between the bar
+          and the log, exactly where they lived before the extraction. */}
       {showProgress && (
-        <section className="space-y-2">
-          <div className="flex items-center gap-2 text-body">
-            {done ? (
-              <span aria-hidden style={{ color: done.ok ? OK_GREEN : DANGER }} className="inline-flex items-center">
-                {done.ok ? <Check size={14} aria-hidden="true" /> : <X size={14} aria-hidden="true" />}
-              </span>
-            ) : (
-              <span
-                aria-hidden
-                className="inline-block w-3 h-3 rounded-full border-2 animate-spin"
-                style={{ borderColor: ACCENT, borderTopColor: "transparent" }}
-              />
-            )}
-            <span>
-              {fingerprintPrompt
-                ? "Waiting for host trust…"
-                : passphrasePrompt
-                ? "Waiting for SSH key passphrase…"
-                : stageLabel}
-            </span>
-            <span className="text-text-muted">
-              {stageIndex} of {stageTotal} · {formatElapsed(elapsedSeconds)}
-            </span>
-            <button
-              onClick={() => setLogOpen((o) => !o)}
-              className="ml-auto text-meta text-text-muted hover:text-text inline-flex items-center gap-1"
-            >
-              {logOpen ? <>Hide log <ChevronUp size={12} aria-hidden="true" /></> : <>Show log <ChevronDown size={12} aria-hidden="true" /></>}
-            </button>
-          </div>
-          <div
-            className="h-0.5 rounded-full overflow-hidden bg-bg-elev"
-            aria-hidden
-          >
-            <div
-              className="h-full"
-              style={{
-                width: `${(stageIndex / stageTotal) * 100}%`,
-                background: done && !done.ok ? DANGER : ACCENT_SOLID,
-              }}
-            />
-          </div>
+        <ProcessPanel
+          stages={INSTALL_STAGE_LABELS}
+          activeIndex={Math.max(0, stageIndex - 1)}
+          status={
+            done ? (done.ok ? "done" : "error") : installError ? "error" : "running"
+          }
+          elapsedSeconds={elapsedSeconds}
+          logLines={lines}
+          onCopyDiagnostics={copyDiagnostics}
+        >
           {/* BET-361: inline fingerprint prompt. The install is paused — the
               log has nothing new to show, so the card takes the place of
               attention until the user answers. */}
@@ -984,16 +927,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               </form>
             </div>
           )}
-          {logOpen && !fingerprintPrompt && !passphrasePrompt && (
-            <div
-              ref={logRef}
-              style={{ height: 172, overflowY: "auto" }}
-              className="rounded-md bg-bg-elev px-3 py-2 text-meta font-mono whitespace-pre-wrap"
-            >
-              {lines.join("\n")}
-            </div>
-          )}
-        </section>
+        </ProcessPanel>
       )}
 
       {/* Done / error / claim */}
