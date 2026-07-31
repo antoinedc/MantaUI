@@ -3106,8 +3106,8 @@ echo "FINAL_SKIP=$PRIVILEGED_SECTION_SKIP"
 // the install body end-to-end without root). They assert that:
 //   (a) When sudo -n tee to /etc/caddy/Caddyfile.d/manta.caddy fails,
 //       CADDY_E_SKIP=1 is set (no die).
-//   (b) When CADDY_E_SKIP=1, the port-check + systemctl reload sub-tasks
-//       are skipped.
+//   (b) When CADDY_E_SKIP=1, the systemctl reload sub-task is skipped
+//       (the port-check that used to run here was deleted in BET-442).
 //   (c) The install proceeds to the pair-code step (step 8) regardless.
 
 test("install.sh step 7.5.E: sudo -n tee fails → CADDY_E_SKIP=1 (no die, continue to step 8)", () => {
@@ -3200,49 +3200,40 @@ echo "STEP_8_REACHED=yes"
   assert.match(out, /STEP_8_REACHED=yes/);
 });
 
-test("install.sh step 7.5.E: CADDY_E_SKIP=1 skips the port-check + systemctl reload sub-tasks", () => {
-  // Once CADDY_E_SKIP=1 is set, step 7.5.E must NOT run the port-check
-  // loop (which uses `ss -tlnH`) or the sudo -n systemctl reload
-  // caddy call. We assert the guard's branch behavior inline.
+test("install.sh step 7.5.E: CADDY_E_SKIP=1 skips the systemctl reload sub-task", () => {
+  // Once CADDY_E_SKIP=1 is set, step 7.5.E must NOT run the sudo -n
+  // systemctl reload caddy call. The port-check that used to run here was
+  // deleted (BET-442) — only the reload remains, and it stays under the
+  // guard. We assert the guard's branch behavior inline.
   const out = runMain({
     preBody: `
-# Simulate the guard: when CADDY_E_SKIP=1, skip the sub-tasks.
+# Simulate the guard: when CADDY_E_SKIP=1, skip the sub-task.
 CADDY_E_SKIP=1
-PORT_CHECK_RAN=0
 RELOAD_RAN=0
 if [ "$CADDY_E_SKIP" = "0" ]; then
-  PORT_CHECK_RAN=1
   RELOAD_RAN=1
 else
-  PORT_CHECK_RAN=0
   RELOAD_RAN=0
 fi
-echo "PORT_CHECK_RAN=$PORT_CHECK_RAN"
 echo "RELOAD_RAN=$RELOAD_RAN"
 `,
   });
-  assert.match(out, /PORT_CHECK_RAN=0/);
   assert.match(out, /RELOAD_RAN=0/);
 });
 
-test("install.sh step 7.5.E: CADDY_E_SKIP=0 (no failure) runs the port-check + systemctl reload", () => {
+test("install.sh step 7.5.E: CADDY_E_SKIP=0 (no failure) runs the systemctl reload", () => {
   // Companion test: when the Caddyfile write succeeds (CADDY_E_SKIP=0),
-  // the port-check + systemctl reload sub-tasks DO run. Pins the
-  // happy-path contract.
+  // the systemctl reload sub-task DOES run. Pins the happy-path contract.
   const out = runMain({
     preBody: `
 CADDY_E_SKIP=0
-PORT_CHECK_RAN=0
 RELOAD_RAN=0
 if [ "$CADDY_E_SKIP" = "0" ]; then
-  PORT_CHECK_RAN=1
   RELOAD_RAN=1
 fi
-echo "PORT_CHECK_RAN=$PORT_CHECK_RAN"
 echo "RELOAD_RAN=$RELOAD_RAN"
 `,
   });
-  assert.match(out, /PORT_CHECK_RAN=1/);
   assert.match(out, /RELOAD_RAN=1/);
 });
 
