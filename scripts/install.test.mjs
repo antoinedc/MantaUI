@@ -5158,3 +5158,41 @@ test("install.sh writes service-read config files via install_root_file, never `
     "every `sudo -n install -m 0644` call must go through the install_root_file helper",
   );
 });
+
+// ----------------------------------------------------------------------------
+// install.sh — success prints must be conditional on success, and the
+// always-false port-conflict check is gone (BET-442)
+// ----------------------------------------------------------------------------
+// During an outage the installer printed `✓ caddy reloaded.` and
+// `✓ gateway registration complete.` even when the underlying command had
+// failed, and warned that :80/:443 were bound by a non-Caddy process — a
+// check that invoked `ss` without `-p` (so `grep -q caddy` could never match)
+// and therefore fired 100% of the time, falsely. Assertions are textual so a
+// regression in either success-print guard is caught here.
+
+test("install.sh prints `ok \"caddy reloaded.\"` only on success (preceded by `else`) (BET-442)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const matches = src.split("\n").filter((l) => /ok "caddy reloaded\."/.test(l));
+  assert.strictEqual(matches.length, 1, "`ok \"caddy reloaded.\"` must appear exactly once");
+  const line = matches[0];
+  const idx = src.indexOf(line);
+  const before = src.slice(0, idx).split("\n").filter((l) => l.trim() !== "").pop();
+  assert.match(before, /^[ \t]*else[ \t]*$/, "`ok \"caddy reloaded.\"` must sit in the `else` branch (only reached on success)");
+});
+
+test("install.sh prints `ok \"gateway registration complete.\"` only on success (no `|| warn \"merge-gateway failed`) (BET-442)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const matches = src.split("\n").filter((l) => /ok "gateway registration complete\."/.test(l));
+  assert.strictEqual(matches.length, 1, "`ok \"gateway registration complete.\"` must appear exactly once");
+  assert.doesNotMatch(src, /\|\| warn "merge-gateway failed/, "`ok \"gateway registration complete.\"` must not be printed via an `||` continuation after a merge failure");
+});
+
+test("install.sh no longer warns about a port bound by something other than Caddy (BET-442)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.doesNotMatch(src, /is bound by something other than Caddy/, "the always-false port-conflict warning must be gone");
+});
+
+test("install.sh no longer invokes `ss -tlnH` (BET-442)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.doesNotMatch(src, /ss -tlnH/, "the `ss` process-less call that made the port check always-false must be gone");
+});
