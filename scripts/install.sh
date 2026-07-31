@@ -181,6 +181,13 @@ resolve_arch() {
 #                          Dedup'd against the existing base (a Homebrew-
 #                          installed claude that also lives in /usr/local/bin
 #                          must not appear twice).
+#                          BET-421 §E: install.sh no longer installs the
+#                          claude CLI — the app does it lazily on first
+#                          Claude sign-in. KEEP this entry anyway: a later
+#                          lazy install (by the app) places the binary here,
+#                          and both supervisors must be able to find it.
+#                          Deleting it "because claude is gone from install"
+#                          would break the whole design.
 #   2. the directory `tmux` was actually resolved from when it lives
 #      somewhere else entirely (MacPorts, /usr/local/opt, a hand-built
 #      binary) — the prereq check already proved that copy exists.
@@ -294,7 +301,7 @@ print_provider_detection_summary() {
     # when the app is genuinely unreachable. The same caveat applies to
     # Codex/Kimi but those already had opencode-native OAuth, so only the
     # Claude-specific copy changes.
-    warn "Fallback (if the app is unavailable): connect providers from inside opencode (Claude: 'claude auth login'; Codex: '/auth' command)."
+    warn "Fallback (if the app is unavailable): connect providers from inside opencode (Codex: '/auth' command; Claude: install the claude CLI from https://claude.ai then run 'claude auth login')."
     return 0
   fi
 
@@ -349,7 +356,7 @@ print_provider_detection_summary() {
     # a fallback for boxes where the app is unreachable. Codex/Kimi
     # already had opencode-native OAuth, so the original copy just lost
     # its Claude-specific invocation.
-    warn "Fallback (if the app is unavailable): connect providers from inside opencode (Claude: 'claude auth login'; Codex: '/auth' command)."
+    warn "Fallback (if the app is unavailable): connect providers from inside opencode (Codex: '/auth' command; Claude: install the claude CLI from https://claude.ai then run 'claude auth login')."
   fi
 }
 
@@ -715,63 +722,14 @@ main() {
     ok "opencode installed ($("$OPENCODE_BIN" --version 2>/dev/null | head -n1 || echo "$OPENCODE_BIN"))."
   fi
 
-  # --- A2. claude CLI install (idempotent via official installer). ----------
-  # opencode's "anthropic" provider is a passthrough that reads
-  # ~/.claude/.credentials.json — a file only the `claude` CLI writes. Without
-  # the binary, Claude cannot work on a fresh box at all (BET-353). Same
-  # shape as the opencode install above: curl-to-file + bash </dev/null +
-  # PATH probe + non-fatal-on-failure (a box without Claude must still finish
-  # installing, still pair, and still be usable with Codex).
-  #
-  # The official installer places the binary in $HOME/.local/bin/claude —
-  # SAME dir we prepend to launchd_agent_path above so the supervisor-managed
-  # services can spawn it for credential refresh
-  # (src/server/opencode.mjs doRefresh / refreshClaudeCredentials). Reuses
-  # the opencode install's stdin dance because the SAME `curl | bash` pipe-
-  # truncation footgun applies (install.sh itself is run as `curl | bash`,
-  # so the child's stdin must be /dev/null AND the script must come from a
-  # file, not stdin).
-  #
-  # PLATFORM: macOS arm64 + Linux x64/arm64 — same matrix install.sh ships
-  # tarballs for (resolve_arch). The official installer honours that matrix
-  # directly.
-  if [ "$DRY_RUN" = "1" ]; then
-    if command -v claude >/dev/null 2>&1; then
-      dry_log "claude CLI already installed ($(command -v claude)) — would skip install step"
-    else
-      dry_log "would install claude CLI (official installer https://claude.ai/install.sh); idempotent on PATH probe"
-    fi
-  elif command -v claude >/dev/null 2>&1; then
-    ok "claude CLI already installed ($(command -v claude))."
-  else
-    log "Installing claude CLI (official installer)…"
-    _claude_installer="$WORK/claude-install.sh"
-    curl -fsSL https://claude.ai/install.sh -o "$_claude_installer" \
-      || { warn "claude installer download failed — skipping. Connect Codex/Kimi from the MantaUI app, or install manually: https://claude.ai"; rm -f "$_claude_installer"; }
-    if [ -f "$_claude_installer" ]; then
-      bash "$_claude_installer" </dev/null \
-        || warn "claude install failed — skipping. Connect Codex/Kimi from the MantaUI app, or install manually: https://claude.ai"
-      rm -f "$_claude_installer"
-      # Mirror the opencode install's PATH recovery: source .bashrc if the
-      # installer wrote to it, then probe the well-known install location
-      # as a safety net.
-      if [ -f "$HOME/.bashrc" ]; then
-        set +e
-        # shellcheck disable=SC1090
-        . "$HOME/.bashrc" 2>/dev/null || true
-        set -e
-      fi
-      if [ -x "$HOME/.local/bin/claude" ]; then
-        export PATH="$HOME/.local/bin:$PATH"
-      fi
-      CLAUDE_BIN="$(command -v claude || true)"
-      if [ -n "$CLAUDE_BIN" ]; then
-        ok "claude CLI installed ($("$CLAUDE_BIN" --version 2>/dev/null | head -n1 || echo "$CLAUDE_BIN"))."
-      else
-        warn "claude installer ran but the binary is not on PATH — non-fatal: Claude auth will be unavailable until you install it manually (https://claude.ai). Connect Codex/Kimi from the MantaUI app in the meantime."
-      fi
-    fi
-  fi
+  # --- A2. claude CLI install — REMOVED (BET-421 §E). -----------------------
+  # The app now owns the Claude CLI: it installs the binary lazily, the
+  # first time the user picks Claude, via the official installer — no
+  # confirmation step, straight into sign-in. A box that never picks Claude
+  # never gets the binary, which is fine (Codex / Kimi / custom need no
+  # binary). Nothing here is a flag or opt-in; the whole block is deleted.
+  # The box is usable without claude — its own comment (below, at A2's old
+  # site) already anticipated that.
 
   # --- B. opencode config seeding — MERGE the plugin entry, never clobber. --
   # Target: ~/.config/opencode/opencode.jsonc. Required:
