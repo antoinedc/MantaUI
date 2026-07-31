@@ -11,16 +11,17 @@
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useRef, useState } from "react";
-import { Clock, Webhook, Key, Bot, X } from "lucide-react";
+import { Clock, Webhook, Key, Bot, ArrowLeft, Square, X } from "lucide-react";
 import type {
   DelegateApproval,
   DelegateApprovalTool,
+  DelegateJob,
   ScheduledJob,
   SecretMeta,
   SecretScope,
   WebhookMeta,
 } from "../shared/types";
-import { describeCron, describeNextRun } from "./chatUtils";
+import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
 import { MetaBadge } from "./chatShared";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
@@ -563,6 +564,68 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
         >
           Not now
         </button>
+      </div>
+    </div>
+  );
+});
+
+// ReadOnlyJobBar — replaces the composer for a background-job session (BET-418
+// §D). A job is read-only: no composer, no permission/question cards, no model
+// picker, no fork/compact/clear. The only live action is Stop (running jobs).
+// "Go to parent" navigates to the parent session's window. Once terminal, the
+// bar shows the outcome (branch + files changed) and Stop is hidden; the view
+// closes when the user navigates away (the window is removed on terminal, so
+// the sidebar no longer lists it).
+export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
+  job,
+  parentName,
+  onGoToParent,
+  onStop,
+}: {
+  job: DelegateJob;
+  parentName: string | null;
+  onGoToParent: () => void;
+  onStop: () => void;
+}) {
+  const terminal = job.status !== "running";
+  return (
+    <div className="shrink-0 px-4 py-2 border-t border-border bg-bg-elev text-meta">
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <Bot size={14} aria-hidden="true" />
+        </span>
+        <span className="text-text">Read-only — this is a background job.</span>
+        {parentName && (
+          <span className="text-text-faint">It reports to {parentName}.</span>
+        )}
+      </div>
+      {terminal ? (
+        <div className="text-text-faint">
+          {formatJobSummary(job)}
+          {job.status === "failed" || job.status === "stopped"
+            ? ` · ${job.error ?? job.status}`
+            : ""}
+        </div>
+      ) : (
+        <div className="text-text-faint">{job.activity || "running…"}</div>
+      )}
+      <div className="flex items-center gap-2 mt-1.5">
+        <button
+          onClick={onGoToParent}
+          className="px-2 py-1 rounded border border-border-strong text-text hover:bg-bg-soft inline-flex items-center gap-1"
+          title="Go to the parent session"
+        >
+          <ArrowLeft size={12} aria-hidden="true" /> Go to parent
+        </button>
+        {!terminal && (
+          <button
+            onClick={onStop}
+            className="px-2 py-1 rounded text-warn hover:bg-warn-bg border border-warn/30 inline-flex items-center gap-1"
+            title="Stop this job"
+          >
+            <Square size={12} aria-hidden="true" /> Stop
+          </button>
+        )}
       </div>
     </div>
   );

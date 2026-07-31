@@ -18,6 +18,7 @@ import { Clock, X } from "lucide-react";
 import type {
   DelegateApproval,
   DelegateApprovalTool,
+  DelegateJob,
   OpencodeModel,
   QuestionRequest,
 } from "../shared/types";
@@ -59,7 +60,7 @@ import {
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
-import { DelegateApprovalCard, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
+import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
 import { useTranscriptState } from "./hooks/useTranscriptState";
@@ -189,6 +190,30 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
     const t = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(t); };
   }, [sessionId, chatAutoAllowApproval]);
+
+  // BET-418 §D: detect whether THIS session is a background job's child. A
+  // job session is read-only (no composer, no cards, no model picker/fork/
+  // compact/clear); the composer is replaced by ReadOnlyJobBar. Poll the
+  // box-wide job list (no-arg delegateList) and match on childSessionID.
+  const [jobOwnership, setJobOwnership] = useState<DelegateJob | null>(null);
+  useEffect(() => {
+    setJobOwnership(null);
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const list = await window.api.delegateList();
+        const arr = Array.isArray(list) ? list : [];
+        const match = arr.find((j) => j.childSessionID === sessionId) ?? null;
+        if (!cancelled) setJobOwnership(match);
+      } catch { /* non-fatal */ }
+    };
+    void poll();
+    const t = setInterval(poll, 10_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [sessionId]);
+
+  const projects = useStore((s) => s.projects);
+  const setActive = useStore((s) => s.setActive);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Per-child debounce timers for refetching child transcripts when their
@@ -1951,7 +1976,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
       {/* BET-418 §A: pre-flight background-job approval. Shown in the parent's */}
       {/* panel when a `delegate` call declared tools and trust mode is OFF. */}
-      {pendingApproval && (
+      {/* Hidden for a job session (read-only view). */}
+      {!jobOwnership && pendingApproval && (
         <div className="shrink-0 px-4 pt-2 pb-2">
           <DelegateApprovalCard
             approval={pendingApproval}
@@ -1972,8 +1998,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {/* Scheduled-tasks management card. Toggled by the ⏰ toolbar button */}
       {/* (desktop) or the ⋯ sheet (mobile). Refetch-driven while open. */}
       {/* pb-2 gives the card breathing room above the composer border so it */}
-      {/* doesn't sit flush against the chat divider. */}
-      {showSchedules && (
+      {/* doesn't sit flush against the chat divider. Hidden for a job session. */}
+      {!jobOwnership && showSchedules && (
         <div className="shrink-0 px-4 pt-2 pb-2">
           <ScheduledTasksCard
             jobs={schedules}
@@ -1997,8 +2023,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
       {/* Secrets management card. Toggled by the 🔑 toolbar button (desktop) or */}
       {/* the ⋯ sheet (mobile). The value never appears here — list is metadata */}
-      {/* only; agents read secrets via the secret_* opencode tools. */}
-      {showSecrets && (
+      {/* only. Hidden for a job session (read-only view). */}
+      {!jobOwnership && showSecrets && (
         <div className="shrink-0 px-4 pt-2 pb-2">
           <SecretsCard
             secrets={secrets}
@@ -2039,7 +2065,8 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {/* Inbound-webhook management card. Toggled by the 🪝 toolbar button */}
       {/* (desktop) or the ⋯ sheet (mobile). List is metadata only (no signing */}
       {/* secret); creation is the AI's job via the `webhook` opencode tool. */}
-      {showWebhooks && (
+      {/* Hidden for a job session (read-only view). */}
+      {!jobOwnership && showWebhooks && (
         <div className="shrink-0 px-4 pt-2 pb-2">
           <WebhooksCard
             hooks={webhooks}
@@ -2127,6 +2154,36 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           one instance app-wide. */}
       {isActive && <ToastStack toasts={toasts} onDismiss={dismissToast} />}
 
+      {jobOwnership ? (
+        <ReadOnlyJobBar
+          job={jobOwnership}
+          parentName={(() => {
+            const pid = jobOwnership.parentSessionID;
+            for (const p of projects) {
+              const w = (p.windows || []).find((x) => x.opencodeSessionId === pid);
+              if (w) return w.name ?? p.tmuxSession;
+            }
+            return null;
+          })()}
+          onGoToParent={() => {
+            const pid = jobOwnership.parentSessionID;
+            for (const p of projects) {
+              const w = (p.windows || []).find((x) => x.opencodeSessionId === pid);
+              if (w) {
+                setActive(p.tmuxSession, w.index);
+                return;
+              }
+            }
+          }}
+          onStop={() => {
+            if (jobOwnership.status !== "running") return;
+            void window.api
+              .delegateStop(jobOwnership.id)
+              .then(() => setJobOwnership((j) => (j ? { ...j, status: "stopped" } : j)))
+              .catch(() => { /* best-effort */ });
+          }}
+        />
+      ) : (
       <Composer
         attachments={attachments}
         onRemoveAttachment={removeAttachment}
@@ -2199,6 +2256,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         }}
         onPaste={onPaste}
       />
+      )}
     </div>
   );
 }
