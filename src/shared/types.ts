@@ -171,6 +171,14 @@ export type AppConfig = {
   // 14 relocates the control. Rides the generic configGet/configUpdate path — no
   // dedicated IPC channel. Absent → "system".
   theme?: "system" | "light" | "dark";
+  // BET-414: sidebar pinned windows. Each entry is a stable window id of the
+  // form `<tmuxSession>/<windowIndex>` (see windowPinId in chatUtils.ts). The
+  // pinned section at the top of the rail renders these rows above the
+  // workspace groups; the same row is excluded from its workspace group so it
+  // isn't shown twice. Unlimited; stale ids (window killed) are pruned at
+  // render. Rides the generic configGet/configUpdate path — no dedicated IPC
+  // channel. Absent/empty = no pins.
+  pinnedWindows?: string[];
 };
 
 // ----- Live tmux state -----

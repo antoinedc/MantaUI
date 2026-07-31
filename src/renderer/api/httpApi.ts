@@ -312,7 +312,8 @@ type Kind =
   | "screenshot"
   | "agentFile"
   | "desktopNotify"
-  | "serverUpdateAvailable";
+  | "serverUpdateAvailable"
+  | "delegate.updated";
 
 const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   opencode: new Set(),
@@ -322,6 +323,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   agentFile: new Set(),
   desktopNotify: new Set(),
   serverUpdateAvailable: new Set(),
+  "delegate.updated": new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -905,6 +907,12 @@ export const httpApi: Api = {
     ),
   delegateStop: (id) => rpc(IPC.delegateStop, id),
   delegateDelete: (id) => rpc(IPC.delegateDelete, id),
+  // BET-414: the box publishes `delegate.updated` on the /events WS whenever a
+  // job's status/activity changes. The sidebar subscribes so new jobs nest
+  // under their parent within ~1s (vs. the 30s poll). The payload is the raw
+  // bus event ({id,status,activity?}); subscribers refetch delegateList().
+  onDelegateUpdated: (cb) =>
+    on<{ id: string; status: string; activity?: string }>("delegate.updated", cb),
 
   // -- APNs native-push registration (BET-181) --
   // iOS Capacitor app registers its APNs device token via the standard 6-site

@@ -13,11 +13,21 @@ import { applyTheme, type ThemePref } from "./theme";
 
 // Background-delegation jobs, keyed by the job's child opencode session id.
 // The renderer learns which sidebar windows are jobs (and their per-row
-// activity summary) from this slice. It is fed by a single app-level 10s poll
+// activity summary) from this slice. It is fed by a single app-level 30s poll
 // in App.tsx / MobileApp.tsx that calls window.api.delegateList() (no-arg =
-// all jobs) — exactly one poll, shared by desktop and mobile. The renderer
-// never computes the activity text; it renders the `activity` field verbatim.
-export type JobRow = { name: string; status: string; activity: string };
+// all jobs) — exactly one poll, shared by desktop and mobile — PLUS an
+// immediate refetch on every `delegate.updated` bus event (BET-414) so a new
+// job nests under its parent within ~1s instead of waiting for the poll. The
+// renderer never computes the activity text; it renders the `activity` field
+// verbatim. `parentSessionID`/`childSessionID` are carried so the sidebar can
+// nest a job's child window under its parent window (BET-414).
+export type JobRow = {
+  name: string;
+  status: string;
+  activity: string;
+  parentSessionID: string | null;
+  childSessionID: string | null;
+};
 
 // Cap on simultaneous in-flight requests for the startup opencode fan-outs
 // (`replayChatAttention`, `backfillLastMessageTimes`) — see BET-135.
@@ -173,6 +183,19 @@ type State = {
   // load (desktop refresh, mobile pairing, Settings save) keeps the DOM in
   // sync — not just the initial boot application in main.tsx.
   theme: ThemePref;
+  // BET-414: sidebar pinned window ids (`<tmuxSession>/<windowIndex>`). Mirror
+  // of AppConfig.pinnedWindows. The sidebar's pinned section renders these at
+  // the top of the rail; pinned windows are excluded from their workspace
+  // group. togglePin optimistic-updates + persists via configUpdate.
+  pinnedWindows: string[];
+  // BET-414: ⌘K palette recency. Most-recently-activated-first list of
+  // `<tmuxSession>/<windowIndex>` ids, updated on every setActive(). Drives
+  // the empty-query palette ordering ("recent sessions" per spec). In-memory
+  // only (not persisted) — session-level recency is sufficient for the
+  // palette; persistence would need a config schema change out of scope here.
+  // Windows never activated fall through to flatSessions order after the
+  // recent ones.
+  recentWindows: string[];
   projects: Project[];
   activeProjectName: string | null;
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
@@ -271,7 +294,7 @@ type State = {
   // Replace the jobs slice from an app-level poll (BET-381). Accepts the raw
   // DelegateJob[] from delegateList() and reduces it to the minimal
   // {name,status,activity} map keyed by childSessionID.
-  setJobs: (jobs: { childSessionID: string | null; name: string; status: string; activity: string | null }[]) => void;
+  setJobs: (jobs: { childSessionID: string | null; parentSessionID?: string | null; name: string; status: string; activity: string | null }[]) => void;
   // Chat-mode running state driven by opencode SSE (session.status /
   // session.idle / session.error). The PTY-pane poller can't see chat
   // windows' state — the holder runs `sleep infinity`, not claude — so
@@ -327,6 +350,9 @@ type State = {
   runBackgroundSync: () => Promise<void>;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   setAutoRenameSessions: (v: boolean) => Promise<void>;
+  // BET-414: toggle a window's pin. Optimistic set + configUpdate + reconcile.
+  // The id is `<tmuxSession>/<windowIndex>` (see windowPinId in chatUtils.ts).
+  togglePin: (pinId: string) => Promise<void>;
   setScreenshotToast: (t: ScreenshotToast | null) => void;
   setAgentFileToast: (t: AgentFileReady | null) => void;
   setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
@@ -367,6 +393,8 @@ export const useStore = create<State>((set, get) => ({
   voiceCommandModel: "",
   shareAnalytics: true,
   theme: "system",
+  pinnedWindows: [],
+  recentWindows: [],
   projects: [],
   activeProjectName: null,
   activeWindowByProject: {},
@@ -419,6 +447,10 @@ export const useStore = create<State>((set, get) => ({
         0;
       // Opening a window clears its "needs attention" flag.
       const status = clearAttention(prev.status, projectName, w);
+      // BET-414: bump this window to the front of the recency list (⌘K palette
+      // empty-query ordering). Dedupe + prepend; cap to avoid unbounded growth.
+      const pinId = `${projectName}/${w}`;
+      const recentWindows = [pinId, ...prev.recentWindows.filter((p) => p !== pinId)].slice(0, 64);
       return {
         activeProjectName: projectName,
         activeWindowByProject: {
@@ -426,6 +458,7 @@ export const useStore = create<State>((set, get) => ({
           [projectName]: w,
         },
         status,
+        recentWindows,
       };
     }),
 
@@ -504,6 +537,7 @@ export const useStore = create<State>((set, get) => ({
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       voiceCommandModel: c.voiceCommandModel ?? "",
       shareAnalytics: c.shareAnalytics ?? true,
+      pinnedWindows: Array.isArray(c.pinnedWindows) ? c.pinnedWindows : [],
       theme:
         c.theme === "light" || c.theme === "dark" || c.theme === "system"
           ? c.theme
@@ -540,6 +574,16 @@ export const useStore = create<State>((set, get) => ({
     set({ autoRenameSessions: v });
     const next = await window.api.configUpdate({ autoRenameSessions: v });
     set({ autoRenameSessions: next.autoRenameSessions ?? false });
+  },
+
+  togglePin: async (pinId) => {
+    const cur = get().pinnedWindows;
+    const next = cur.includes(pinId)
+      ? cur.filter((p) => p !== pinId)
+      : [...cur, pinId];
+    set({ pinnedWindows: next });
+    const saved = await window.api.configUpdate({ pinnedWindows: next });
+    set({ pinnedWindows: Array.isArray(saved.pinnedWindows) ? saved.pinnedWindows : [] });
   },
 
   setScreenshotToast: (t) => set({ screenshotToast: t }),
@@ -609,6 +653,8 @@ export const useStore = create<State>((set, get) => ({
           name: j.name,
           status: j.status,
           activity: j.activity ?? "",
+          parentSessionID: j.parentSessionID ?? null,
+          childSessionID: j.childSessionID,
         };
       }
       return { jobs: next };

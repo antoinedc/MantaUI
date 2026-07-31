@@ -194,9 +194,11 @@ export function MobileApp() {
     void useStore.getState().runBackgroundSync();
   }, [chatSessionKey]);
 
-  // Background-delegation jobs (BET-381): identical app-level 10s poll as
-  // App.tsx — feeds the store's `jobs` slice that drives the mobile session
-  // list's per-row activity secondary line. ONE poll, shared shape.
+  // Background-delegation jobs (BET-381): identical app-level poll as App.tsx
+  // — feeds the store's `jobs` slice that drives the mobile session list's
+  // per-row activity secondary line. ONE poll, shared shape. BET-414: the
+  // poll is now a 30s FALLBACK; the box's `delegate.updated` bus event
+  // triggers an immediate refetch so new jobs appear within ~1s.
   useEffect(() => {
     if (!window.api.delegateList) return;
     const tick = () => {
@@ -210,8 +212,15 @@ export function MobileApp() {
         });
     };
     tick();
-    const poll = setInterval(tick, 10_000);
-    return () => clearInterval(poll);
+    const poll = setInterval(tick, 30_000);
+    let off: (() => void) | null = null;
+    if (window.api.onDelegateUpdated) {
+      off = window.api.onDelegateUpdated(() => tick());
+    }
+    return () => {
+      clearInterval(poll);
+      if (off) off();
+    };
   }, []);
 
   // Sidebar status for chat-mode windows (mirror of the desktop App.tsx

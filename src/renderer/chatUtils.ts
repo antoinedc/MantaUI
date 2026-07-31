@@ -4,7 +4,7 @@
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { SubscriptionStatus } from "../shared/types";
+import type { Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
@@ -2535,4 +2535,176 @@ export function formatJobSummary(job: {
   const filesLabel = `${files} file${files === 1 ? "" : "s"} changed`;
   if (!job.worktree || !job.branch) return filesLabel;
   return `${job.branch} · ${filesLabel}`;
+}
+
+// ===== Sidebar redesign (BET-414) =====
+//
+// Pure helpers for the redesigned sidebar: window pin ids, ⌘K fuzzy match,
+// and background-job nesting. All pure + tested — the Sidebar component
+// composes them; no React/state in here.
+
+// Stable id for a window used as the `pinnedWindows` entry. `<tmuxSession>/
+// <windowIndex>`. windowIndex is stable for a tmux window's lifetime; the
+// pair uniquely identifies a row. Stale ids (window killed) are pruned at
+// render by resolving against the live projects tree.
+export function windowPinId(tmuxSession: string, windowIndex: number): string {
+  return `${tmuxSession}/${windowIndex}`;
+}
+
+export function parsePinId(id: string): {
+  tmuxSession: string;
+  windowIndex: number;
+} | null {
+  const slash = id.lastIndexOf("/");
+  if (slash <= 0 || slash >= id.length - 1) return null;
+  const idx = Number(id.slice(slash + 1));
+  if (!Number.isInteger(idx) || idx < 0) return null;
+  return { tmuxSession: id.slice(0, slash), windowIndex: idx };
+}
+
+// Resolve a pin id to the live (project, window) it refers to, or null when
+// the window no longer exists (killed remotely). Used both to render the
+// pinned section and to prune stale pins.
+export function resolvePin(
+  projects: Project[],
+  pinId: string,
+): { project: Project; window: TmuxWindow } | null {
+  const parsed = parsePinId(pinId);
+  if (!parsed) return null;
+  const proj = projects.find((p) => p.tmuxSession === parsed.tmuxSession);
+  if (!proj) return null;
+  const win = proj.windows.find((w) => w.index === parsed.windowIndex);
+  return win ? { project: proj, window: win } : null;
+}
+
+// ⌘K palette fuzzy match. Subsequence match (case-insensitive) across the
+// session (window) name and workspace (project) name. Returns a score > 0
+// when the query matches, 0 when it doesn't. Tighter/earlier matches score
+// higher so the palette can sort. Empty query matches everything at score 1
+// (the palette shows the full flatSessions order in that case).
+export function fuzzySessionScore(
+  query: string,
+  sessionName: string,
+  workspaceName: string,
+): number {
+  if (!query) return 1;
+  const q = query.toLowerCase();
+  const hay = `${sessionName} ${workspaceName}`.toLowerCase();
+  // Contiguous substring match beats subsequence.
+  if (hay.includes(q)) {
+    // Earlier match → higher score.
+    return 1000 - hay.indexOf(q);
+  }
+  // Subsequence match: walk the query chars through the haystack in order.
+  let qi = 0;
+  let gapBonus = 0;
+  let lastIdx = -1;
+  for (let hi = 0; hi < hay.length && qi < q.length; hi++) {
+    if (hay[hi] === q[qi]) {
+      // Reward consecutive matches (small gaps) to rank tighter matches higher.
+      gapBonus += lastIdx >= 0 && hi === lastIdx + 1 ? 10 : 0;
+      lastIdx = hi;
+      qi++;
+    }
+  }
+  if (qi < q.length) return 0;
+  return 100 + gapBonus;
+}
+
+// Background-job nesting for one project. A job's child window (the window
+// whose opencodeSessionId === job.childSessionID) renders as an indented
+// CHILD row under its parent window (the window whose opencodeSessionId ===
+// job.parentSessionID). Only RUNNING jobs nest; terminal jobs are filtered
+// out EXCEPT when the user is currently viewing the child window (so the
+// view isn't yanked mid-read). A running job whose parent window no longer
+// exists is an "orphan" — it stays a top-level row in its project rather
+// than being dropped.
+//
+// Returns:
+//   hidden      — child window indices that must be REMOVED from the
+//                 project's top-level window list (they render nested).
+//   children    — parent window index → ordered child window indices to
+//                 render indented under that parent row.
+//   orphans     — child window indices to render at top level (parent gone).
+export type JobNestingResult = {
+  hidden: Set<number>;
+  children: Map<number, number[]>;
+  orphans: number[];
+};
+
+export function computeJobNesting(
+  project: Project,
+  jobs: Record<
+    string,
+    {
+      status: string;
+      parentSessionID: string | null;
+      childSessionID: string | null;
+    }
+  >,
+  activeWindowIndex: number | undefined,
+): JobNestingResult {
+  const hidden = new Set<number>();
+  const children = new Map<number, number[]>();
+  const orphans: number[] = [];
+
+  // Index windows by opencodeSessionId for parent/child resolution.
+  const byOpencodeId = new Map<string, TmuxWindow>();
+  for (const w of project.windows) {
+    if (w.opencodeSessionId) byOpencodeId.set(w.opencodeSessionId, w);
+  }
+
+  for (const job of Object.values(jobs)) {
+    if (!job.childSessionID) continue;
+    const childWin = byOpencodeId.get(job.childSessionID);
+    if (!childWin) continue; // job's window isn't in this project
+    const isRunning = job.status === "running";
+    const isViewed = activeWindowIndex === childWin.index;
+    if (!isRunning && !isViewed) continue; // terminal + not viewed → hidden from rail entirely
+
+    const parentWin = job.parentSessionID
+      ? byOpencodeId.get(job.parentSessionID)
+      : undefined;
+    if (!parentWin) {
+      // Parent window gone → render the child at workspace (top) level.
+      orphans.push(childWin.index);
+      continue;
+    }
+    hidden.add(childWin.index);
+    const arr = children.get(parentWin.index) ?? [];
+    arr.push(childWin.index);
+    children.set(parentWin.index, arr);
+  }
+
+  // Sort children by window index for stable render order.
+  for (const arr of children.values()) arr.sort((a, b) => a - b);
+  orphans.sort((a, b) => a - b);
+  return { hidden, children, orphans };
+}
+
+// Convenience: is a given window a job child that should be nested (i.e.
+// hidden from the top-level list)? Combines isJobRow with the running/viewed
+// gate so the Sidebar's top-level filter stays a single expression.
+export function isNestedJobChild(
+  jobs: Record<
+    string,
+    { status: string; parentSessionID: string | null; childSessionID: string | null }
+  >,
+  opencodeSessionId: string | null | undefined,
+  project: Project,
+  activeWindowIndex: number | undefined,
+): boolean {
+  if (!opencodeSessionId) return false;
+  const job = jobs[opencodeSessionId];
+  if (!job) return false;
+  if (job.status === "running") {
+    // Only nested if the parent window still exists in this project.
+    return job.parentSessionID
+      ? project.windows.some((w) => w.opencodeSessionId === job.parentSessionID)
+      : false;
+  }
+  // Terminal job: nested only while the user is viewing it.
+  return activeWindowIndex !== undefined && project.windows.some(
+    (w) => w.opencodeSessionId === opencodeSessionId && w.index === activeWindowIndex,
+  );
 }
