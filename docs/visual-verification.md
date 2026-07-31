@@ -131,17 +131,36 @@ script import them.
 - **No retries** on the visual project. A retry on a deterministic gate only
   converts a real regression into an intermittent one.
 
-## Known issue: the marketing-shot drift gate is advisory (BET-444)
+## The marketing-shot drift gate (BET-341 / BET-444)
 
-`scripts/shots.mjs` now shares this harness's browser (`LAUNCH_OPTIONS`), so it
-runs again — Chrome 148 had started refusing every loopback navigation on the
-runner with `ERR_ACCESS_DENIED`, which took the script down and, because its
-drift gate sits in the REQUIRED `typecheck-test` job, blocked **every open PR**.
+`scripts/shots.mjs` captures the `website/shot-*.webp` marketing assets from the
+demo-mode build, exactly like the visual gate's baselines. Its drift gate lives
+in the REQUIRED `typecheck-test` job, so it must be both runnable **and**
+byte-deterministic — a flaky or dead capture would block every open PR.
 
-It is not yet a gate again: two consecutive captures of an unchanged UI are not
-byte-identical under the pinned Chromium, so the diff would fail spuriously.
-The step is `continue-on-error: true` until BET-444 restores determinism.
+It broke on 2026-07-31, twice, and is now fixed:
 
-The visual gate in this document is unaffected — it was built on the pinned
-browser from the start, and its captures ARE reproducible (verified by
-back-to-back runs).
+- **Chrome 148 killed the capture outright.** `shots.mjs` pinned
+  `/usr/bin/google-chrome`, which began refusing every loopback navigation on
+  the runner with `ERR_ACCESS_DENIED`. The script exits 1 on a failed capture,
+  so the required job went red and **every open PR** blocked on a step unrelated
+  to its changes. Fixed by routing `shots.mjs` through the shared
+  `LAUNCH_OPTIONS` from `scripts/visual/harness.mjs` — Playwright's bundled
+  Chromium, pinned by `package-lock.json` — the same one-browser recipe the
+  visual gate always used. A baseline is a hash of a specific renderer; pinning
+  the browser via the lockfile is what stops a browser release from
+  invalidating every committed image with no commit.
+- **Captures were not byte-deterministic under the new browser.** Once the
+  pinned Chromium ran, two consecutive captures of an unchanged UI differed in
+  bytes, so the diff could not be a gate. This went away with the pinned browser
+  too: running `npm run shots` twice in a row against an unchanged tree now
+  leaves `git diff --exit-code website/` clean (the workflow's two-run step
+  asserts exactly this and fails loudly if a determinism regression ever
+  returns). The offending assets — the xterm-like terminal shot and the
+  composite that consumes it — were the ones most sensitive to the renderer
+  difference; the pinned browser produces stable output for all of them.
+
+The drift-gate step now runs `npm run shots` twice, then diffs against the
+committed set, and **blocks** on any difference (no more
+`continue-on-error: true`). A determinism regression fails loudly as itself
+instead of as a mystery diff on someone's unrelated PR.

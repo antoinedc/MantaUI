@@ -114,24 +114,26 @@ jobs:
       #    when the PR was merged, so re-running here would just measure
       #    main against itself. PR is the only event where a stale set can
       #    slip in.
-      # TEMPORARILY ADVISORY (BET-444). Two problems, neither caused by the
-      # PRs this gate blocks:
-      #   1. Chrome 148 refuses every loopback navigation on the runner
-      #      (ERR_ACCESS_DENIED), so the capture could not run AT ALL — this
-      #      step failed on the REQUIRED job and blocked every open PR.
-      #   2. Moved to Playwright's pinned Chromium (which runs), but two
-      #      consecutive captures of the same UI are not byte-identical, so
-      #      the diff cannot be a gate until that is fixed.
-      # Left running + visible so the drift signal is not lost, but it no
-      # longer blocks. BET-444 restores it to blocking.
+      #
+      #    This is BLOCKING again (BET-444). It was temporarily advisory
+      #    because Chrome 148 refused every loopback navigation (the captures
+      #    could not run at all) and then, after moving to Playwright's pinned
+      #    Chromium, two consecutive captures of the same UI were not
+      #    byte-identical. Both are fixed: shots.mjs now uses the shared
+      #    LAUNCH_OPTIONS (bundled Chromium pinned by package-lock.json), and
+      #    the two-run below asserts determinism. The first `npm run shots`
+      #    rebuilds + captures; the second proves run-to-run byte-identity; the
+      #    final git diff guards both against the committed set. A determinism
+      #    regression fails HERE (as itself), not as a mystery diff on some
+      #    unrelated PR.
       - name: Drift gate — regenerate website/shot-*.webp and diff against the committed set
         if: github.event_name == 'pull_request'
-        continue-on-error: true
         run: |
           npm run shots
-          if ! git diff --exit-code --quiet website/shot-*.webp; then
-            echo "::error file=website/shot-*.webp::drift detected — committed shots do not match what the live renderer paints today."
-            echo "::error::Run 'npm run shots' locally and commit the regenerated files."
+          npm run shots
+          if ! git diff --exit-code --quiet website/; then
+            echo "::error file=website/shot-*.webp::drift detected — two consecutive runs differ from the committed set. Either the renderer changed or the capture is not byte-deterministic."
+            echo "::error::If the renderer intentionally changed, run 'npm run shots' locally and commit the regenerated files. If not, the capture pipeline is non-deterministic — investigate before merging."
             exit 1
           fi
 
