@@ -17,6 +17,7 @@ import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { installHttpTransport, setWindowApi } from "./transportInstall";
 import { pickDemoLayout } from "./demoLayout";
 import { applyTheme } from "./theme";
+import { pinDemoClock } from "./clock";
 
 // Demo mode (BET-302): `?demo` in the URL swaps the real httpApi for a
 // fixture-backed transport and skips pairing / config / credential logic
@@ -63,6 +64,25 @@ async function bootDemo(): Promise<void> {
   // the fixture + transportInstall.setWindowApi(demoApi) install.
   const { demoApi } = await import("./api/demoApi");
   setWindowApi(demoApi);
+  // Pin the renderer's clock to the fixture's own anchor. Every timestamp in
+  // the demo fixture is expressed relative to DEMO_T0, so with a live
+  // `Date.now()` every elapsed-time label renders the distance from the
+  // fixture's anchor to TODAY — the mobile session list read "990d", and it
+  // grew by one every day.
+  //
+  // That made both capture pipelines time-dependent: the marketing shots and
+  // the visual baselines encode those labels, so a committed baseline expired
+  // at the next day boundary and the (required, blocking) drift gate then
+  // failed on every open PR for a reason unrelated to any of them. It cost a
+  // day of debugging as "non-deterministic capture" before the labels were
+  // spotted — the captures are perfectly deterministic, the clock isn't.
+  //
+  // `videoRenderNow` is the existing seam for exactly this (src/renderer/
+  // clock.ts, added for the hero video, which had the same problem per-frame).
+  // Real transports leave it null and `nowMs()` falls back to `Date.now()`.
+  // It also just makes the demo read correctly: "14m", not "990d".
+  const { DEMO_T0 } = await import("./api/demoFixture");
+  pinDemoClock(DEMO_T0);
   // Shell override: `?demo&desktop` / `?demo&mobile` force a layout
   // independent of preload presence. Without an override we fall back to
   // isMobile (the production transport-selection flag). The override is
