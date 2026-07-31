@@ -64,6 +64,13 @@ html, body, #root {
      correct spacing and cannot opt out. */
   --block-gap: var(--sp-3);
   --turn-gap: var(--sp-6);
+
+  /* Elevation shadows (BET-415). --shadow-sm is the resting lift for
+     contained surfaces (composer input, popovers, menus); --shadow-md is
+     reserved for floating panels that overlap content. Theme-aware so the
+     lift reads on both canvases without re-tuning per surface. */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.18), 0 1px 3px rgb(0 0 0 / 0.12);
+  --shadow-md: 0 4px 12px rgb(0 0 0 / 0.22), 0 2px 4px rgb(0 0 0 / 0.14);
 }
 
 /* Token substrate (BET-407). Colour literals moved out of tailwind.config.js
@@ -193,6 +200,9 @@ html, body, #root {
   --tx1-rgb: 26 24 21;
   --accent-rgb: 46 107 255;
   --accent-soft-rgb: 31 85 214;
+
+  --shadow-sm: 0 1px 2px rgb(26 24 21 / 0.06), 0 1px 3px rgb(26 24 21 / 0.05);
+  --shadow-md: 0 4px 12px rgb(26 24 21 / 0.10), 0 2px 4px rgb(26 24 21 / 0.05);
 }
 
 /* Trailing spacer inside any header row that reaches the top-right of the

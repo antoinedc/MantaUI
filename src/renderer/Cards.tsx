@@ -7,9 +7,15 @@
 //   - CompactionCard: live compaction progress.
 //   - PermissionCard: tool-approval prompt (once / always / reject).
 //   - QuestionCard: the Question tool's multi-choice + free-text form.
+//
+// BET-415 redesign: PermissionCard and QuestionCard get a 30px icon badge
+// instead of a whole-card coloured outline, plain-language titles, a
+// button-ladder (primary filled / secondary outlined / reject right-tinted),
+// and question options become checkboxes (multi-select aware). Recommended
+// answers render as a pill and preselect only for single-select.
 
 import { useState } from "react";
-import { Shield, HelpCircle, X } from "lucide-react";
+import { Shield, HelpCircle, X, Check } from "lucide-react";
 import type { PermissionRequest, QuestionRequest } from "../shared/types";
 import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
 
@@ -59,10 +65,6 @@ export function RetryCard({
 }
 
 // ===== Compaction card =====
-//
-// Rendered while session.next.compaction.* events stream in. "running" shows
-// the live-built summary fragment; "done" shows the first line of the final
-// summary for a beat before the parent clears state.
 
 export function CompactionCard({
   state,
@@ -106,15 +108,34 @@ export function CompactionCard({
 
 // ===== Permission card =====
 //
-// Rendered when opencode has paused a tool waiting for user approval. We
-// surface enough info to make a sensible call without digging into the
-// transcript: category (e.g. "external_directory", "bash"), the filepath or
-// command if available in metadata, and the "always" patterns scope.
-//
-// Three options match the API's three reply enum values:
-//   - "once"    — allow this single execution
-//   - "always"  — allow this AND save the patterns for future auto-approval
-//   - "reject"  — deny; the tool errors out
+// BET-415 redesign:
+//   - 30px icon badge (Shield on --warn-bg) replaces the whole-card orange
+//     outline.
+//   - Plain-language title ("Run a shell command?") above a one-line
+//     description; the literal command in its own --inset well below.
+//   - Button ladder: primary filled (Always), secondary outlined (Allow once),
+//     Reject pushed right and tinted only on hover.
+
+// Map opencode permission categories to plain-language titles.
+function permissionTitle(perm: PermissionRequest): string {
+  const cat = perm.permission;
+  // Common categories: "bash", "external_directory", "web_fetch", "edit",
+  // "write", etc. Map the well-known ones to friendly phrasing.
+  if (cat === "bash") return "Run a shell command?";
+  if (cat === "edit" || cat === "write") return "Edit a file?";
+  if (cat === "external_directory") return "Access a directory outside the workspace?";
+  if (cat === "web_fetch") return "Fetch a web resource?";
+  return "Allow this action?";
+}
+
+function permissionDescription(perm: PermissionRequest): string {
+  const meta = perm.metadata ?? {};
+  const filepath = typeof meta.filepath === "string" ? meta.filepath : undefined;
+  const command = typeof meta.command === "string" ? meta.command : undefined;
+  if (filepath) return filepath;
+  if (command) return command;
+  return perm.permission;
+}
 
 export function PermissionCard({
   perm,
@@ -129,44 +150,55 @@ export function PermissionCard({
   const detail = filepath ?? command ?? "";
   const alwaysScope =
     perm.always && perm.always.length > 0 ? perm.always.join(", ") : null;
+  const title = permissionTitle(perm);
+  const desc = permissionDescription(perm);
 
   return (
-    <div
-      className="rounded-md border bg-bg-elev px-4 py-3 text-meta"
-      style={{ borderColor: "rgb(var(--warn-rgb) / 0.33)" }}
-    >
-      <div className="flex items-center gap-2 mb-3">
-        <span style={{ color: "var(--warn)" }} className="inline-flex items-center">
+    <div className="manta-perm-card rounded-xl border border-border bg-bg-elev px-4 py-3 text-meta">
+      <div className="flex items-start gap-3">
+        {/* 30px icon badge — Shield on --warn-bg */}
+        <span
+          className="manta-perm-badge inline-flex items-center justify-center w-[30px] h-[30px] rounded-lg shrink-0"
+          style={{ backgroundColor: "var(--warn-bg)", color: "var(--warn)" }}
+        >
           <Shield size={16} aria-hidden="true" />
         </span>
-        <span className="text-text">
-          {perm.fromJobName ? `${perm.fromJobName} · ` : ""}Permission needed
-        </span>
-        <span className="text-text-faint">· {perm.permission}</span>
+        <div className="min-w-0 flex-1">
+          {/* Plain-language title + one-line description */}
+          <div className="text-text font-medium mb-0.5">
+            {perm.fromJobName ? `${perm.fromJobName} · ` : ""}{title}
+          </div>
+          <div className="text-text-muted mb-0.5">{desc}</div>
+          {/* Literal command in its own --inset well */}
+          {detail && (
+            <div className="rounded-md bg-inset px-2 py-1 mt-1.5 mb-1 font-mono text-text break-all">
+              {detail}
+            </div>
+          )}
+        </div>
       </div>
-      {detail && (
-        <div className="text-text-muted break-all mb-4 font-mono">{detail}</div>
-      )}
-      <div className="flex flex-wrap gap-2">
-        <button
-          onClick={() => onReply("once")}
-          className="px-2 py-0.5 rounded border border-border-strong text-text hover:bg-bg-soft"
-        >
-          Allow once
-        </button>
-        {alwaysScope && (
+      {/* Button ladder: primary filled (Always), secondary outlined (Allow
+          once), Reject pushed right + tinted only on hover. */}
+      <div className="flex items-center gap-2 mt-3">
+        {alwaysScope ? (
           <button
             onClick={() => onReply("always")}
-            className="px-2 py-0.5 rounded text-bg"
+            className="px-2.5 py-1 rounded text-bg text-meta font-medium"
             style={{ backgroundColor: "var(--warn)" }}
             title={`Always allow ${alwaysScope}`}
           >
-            Always allow {alwaysScope}
+            Always allow
           </button>
-        )}
+        ) : null}
+        <button
+          onClick={() => onReply("once")}
+          className="px-2.5 py-1 rounded border border-border-strong text-text hover:bg-bg-soft text-meta"
+        >
+          Allow once
+        </button>
         <button
           onClick={() => onReply("reject")}
-          className="px-2 py-0.5 rounded text-danger hover:bg-danger-bg border border-danger/30"
+          className="ml-auto px-2.5 py-1 rounded text-danger hover:bg-danger-bg text-meta"
         >
           Reject
         </button>
@@ -177,10 +209,26 @@ export function PermissionCard({
 
 // ===== Question card =====
 //
-// Rendered when Claude invokes the Question tool mid-task. Each QuestionRequest
-// may contain multiple QuestionInfo entries; we render one block per question.
-// The user selects option(s) and hits Submit — or clicks × to reject the whole
-// request (Claude receives an error and may handle it gracefully).
+// BET-415 redesign:
+//   - 30px icon badge (HelpCircle on --accent-bg) replaces the whole-card
+//     accent outline.
+//   - Question options become CHECKBOXES (multi-select aware).
+//   - Recommended answers: strip the "(Recommended)" suffix, render a pill,
+//     preselect ONLY for single-select.
+//   - Multiple questions → numbered sections + "N of M answered" count + one
+//     Submit.
+//   - Keep the always-visible free-text field and buildQuestionAnswers /
+//     canSubmitQuestion helpers.
+
+// The convention for a recommended option is a "(Recommended)" suffix on the
+// label. We strip it for display and flag the option as recommended.
+const RECOMMENDED_RE = /\s*\(Recommended\)\s*$/i;
+
+function parseRecommended(label: string): { text: string; recommended: boolean } {
+  const m = label.match(RECOMMENDED_RE);
+  if (m) return { text: label.slice(0, m.index).trim(), recommended: true };
+  return { text: label, recommended: false };
+}
 
 export function QuestionCard({
   request,
@@ -191,23 +239,41 @@ export function QuestionCard({
   onReply: (answers: string[][]) => void;
   onReject: () => void;
 }) {
-  // One Set<string> per question tracks selected option labels.
+  // Pre-parse options once: strip "(Recommended)" and track which are
+  // recommended so we can preselect (single-select only) and badge them.
+  // The ORIGINAL label is kept as `origLabel` (the wire key opencode
+  // matches on); `label` is the display text.
+  const parsedQuestions = request.questions.map((info) => ({
+    info,
+    options: info.options.map((opt) => {
+      const { text, recommended } = parseRecommended(opt.label);
+      return { ...opt, displayLabel: text, origLabel: opt.label, recommended };
+    }),
+  }));
+
+  // The `selected` sets key on the ORIGINAL label so buildQuestionAnswers
+  // sends back exactly what opencode expects.
   const [selected, setSelected] = useState<Set<string>[]>(() =>
-    request.questions.map(() => new Set<string>()),
+    parsedQuestions.map((q) => {
+      const multiple = q.info.multiple ?? false;
+      if (multiple) return new Set<string>(); // never preselect multi-select
+      // Single-select: preselect the first recommended option, if any.
+      const rec = q.options.find((o) => o.recommended);
+      return rec ? new Set([rec.origLabel]) : new Set<string>();
+    }),
   );
-  // One custom text value per question (only used when info.custom is true).
   const [customValues, setCustomValues] = useState<string[]>(() =>
     request.questions.map(() => ""),
   );
 
-  function toggleOption(qIdx: number, label: string, multiple: boolean) {
+  function toggleOption(qIdx: number, origLabel: string, multiple: boolean) {
     setSelected((prev) => {
       const next = prev.map((s) => new Set(s));
       if (multiple) {
-        if (next[qIdx].has(label)) next[qIdx].delete(label);
-        else next[qIdx].add(label);
+        if (next[qIdx].has(origLabel)) next[qIdx].delete(origLabel);
+        else next[qIdx].add(origLabel);
       } else {
-        next[qIdx] = new Set([label]);
+        next[qIdx] = new Set([origLabel]);
       }
       return next;
     });
@@ -217,24 +283,36 @@ export function QuestionCard({
     onReply(buildQuestionAnswers(selected, customValues));
   }
 
-  // Submit is enabled once every question has either a selection OR typed text.
   const canSubmit = canSubmitQuestion(selected, customValues);
+  const answeredCount = selected.filter(
+    (s, i) => s.size > 0 || (customValues[i] ?? "").trim().length > 0,
+  ).length;
+  const totalQuestions = request.questions.length;
+  const isMulti = totalQuestions > 1;
 
   return (
-    <div
-      className="rounded-md border bg-bg-elev px-4 py-3 text-meta"
-      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
-    >
-      <div className="flex items-center gap-2 mb-3">
-        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+    <div className="manta-question-card rounded-xl border border-border bg-bg-elev px-4 py-3 text-meta">
+      <div className="flex items-start gap-3 mb-3">
+        {/* 30px icon badge — HelpCircle on --accent-bg */}
+        <span
+          className="manta-question-badge inline-flex items-center justify-center w-[30px] h-[30px] rounded-lg shrink-0"
+          style={{ backgroundColor: "var(--accent-bg)", color: "var(--accent)" }}
+        >
           <HelpCircle size={16} aria-hidden="true" />
         </span>
-        <span className="text-text font-medium">
-          {request.fromJobName ? `${request.fromJobName} · ` : ""}Question
-        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-text font-medium">
+            {request.fromJobName ? `${request.fromJobName} · ` : ""}Question
+          </div>
+          {isMulti && (
+            <div className="text-text-faint">
+              {answeredCount} of {totalQuestions} answered
+            </div>
+          )}
+        </div>
         <button
           onClick={onReject}
-          className="ml-auto text-text-faint hover:text-text leading-none inline-flex items-center"
+          className="text-text-faint hover:text-text leading-none inline-flex items-center"
           title="Reject / dismiss"
           aria-label="Reject question"
         >
@@ -243,38 +321,71 @@ export function QuestionCard({
       </div>
 
       <div className="space-y-3">
-        {request.questions.map((info, qIdx) => (
+        {parsedQuestions.map(({ info, options }, qIdx) => (
           <div key={qIdx}>
-            {/* Header as a short label, question as the full body */}
-            <div className="text-text-muted mb-0.5 font-medium">{info.header}</div>
+            {/* Numbered section header when multiple questions */}
+            {isMulti && (
+              <div className="text-text-faint text-label mb-0.5">
+                {qIdx + 1}. {info.header}
+              </div>
+            )}
+            {!isMulti && (
+              <div className="text-text-muted mb-0.5 font-medium">{info.header}</div>
+            )}
             <div className="text-text mb-1.5 leading-snug">{info.question}</div>
 
-            {/* Option buttons */}
-            <div className="mt-0.5 flex flex-wrap gap-1.5">
-              {info.options.map((opt) => {
-                const isSelected = selected[qIdx].has(opt.label);
+            {/* Checkbox options — multi-select aware */}
+            <div className="mt-0.5 flex flex-col gap-1">
+              {options.map((opt) => {
+                const isSelected = selected[qIdx].has(opt.origLabel);
+                const multiple = info.multiple ?? false;
                 return (
-                  <button
-                    key={opt.label}
-                    onClick={() => toggleOption(qIdx, opt.label, info.multiple ?? false)}
+                  <label
+                    key={opt.origLabel}
+                    className={
+                      "flex items-start gap-2 rounded-md px-2 py-1 cursor-pointer border text-meta transition-colors " +
+                      (isSelected
+                        ? "border-accent bg-accent-bg"
+                        : "border-border hover:bg-bg-soft")
+                    }
                     title={opt.description}
-                    className={[
-                      "px-2 py-0.5 rounded border text-meta transition-colors",
-                      isSelected
-                        ? "text-on-accent border-transparent"
-                        : "text-text border-border-strong hover:bg-bg-soft",
-                    ].join(" ")}
-                    style={isSelected ? { backgroundColor: "var(--accent-solid)" } : undefined}
                   >
-                    {opt.label}
-                  </button>
+                    <span
+                      className={
+                        "inline-flex items-center justify-center w-4 h-4 rounded border shrink-0 mt-px " +
+                        (isSelected
+                          ? "bg-accent-solid border-transparent text-on-accent"
+                          : "border-border-strong")
+                      }
+                      style={isSelected ? { backgroundColor: "var(--accent-solid)" } : undefined}
+                    >
+                      {isSelected && <Check size={12} aria-hidden="true" />}
+                    </span>
+                    <span className="text-text min-w-0">{opt.displayLabel}</span>
+                    {opt.recommended && (
+                      <span
+                        className="ml-auto shrink-0 px-1.5 rounded-sm text-label"
+                        style={{
+                          backgroundColor: "var(--accent-bg)",
+                          color: "var(--accent)",
+                        }}
+                      >
+                        Recommended
+                      </span>
+                    )}
+                    <input
+                      type={multiple ? "checkbox" : "radio"}
+                      name={`q-${qIdx}`}
+                      checked={isSelected}
+                      onChange={() => toggleOption(qIdx, opt.origLabel, multiple)}
+                      className="sr-only"
+                    />
+                  </label>
                 );
               })}
             </div>
 
-            {/* Free-text input — always available so the user can type a
-                custom reply for any question, even when opencode didn't flag
-                it as custom. Combined with any selected option(s) on submit. */}
+            {/* Free-text input — always available */}
             <input
               type="text"
               placeholder="Or type your own answer…"
@@ -288,10 +399,6 @@ export function QuestionCard({
                 });
               }}
               onKeyDown={(e) => {
-                // Enter submits when the whole request is answerable (matches
-                // the composer's submit-on-Enter muscle memory). Shift+Enter
-                // is left alone for anyone who wants a literal newline-free
-                // multi-field flow.
                 if (e.key === "Enter" && !e.shiftKey && canSubmit) {
                   e.preventDefault();
                   handleSubmit();
@@ -303,19 +410,20 @@ export function QuestionCard({
         ))}
       </div>
 
-      <hr className="mx-2 border-border" />
+      <hr className="mx-2 border-border my-3" />
 
-      <div className="mt-4 flex justify-end gap-2">
+      {/* Button ladder: Cancel (outlined) left, Submit (primary filled) right */}
+      <div className="flex justify-end gap-2">
         <button
           onClick={onReject}
-          className="px-2 py-0.5 rounded text-text-faint hover:text-text border border-border"
+          className="px-2.5 py-1 rounded border border-border text-text-faint hover:text-text text-meta"
         >
           Cancel
         </button>
         <button
           onClick={handleSubmit}
           disabled={!canSubmit}
-          className="px-2 py-0.5 rounded text-on-accent disabled:opacity-40"
+          className="px-2.5 py-1 rounded text-on-accent text-meta font-medium disabled:opacity-40"
           style={{ backgroundColor: "var(--accent-solid)" }}
         >
           Submit
