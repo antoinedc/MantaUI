@@ -8,6 +8,37 @@
 
 const ACCENT_SOLID = "var(--accent-solid)";
 
+// ── Brand mark ───────────────────────────────────────────────────────────────
+//
+// BET-421 §F: first-run used a PNG on desktop and an inline SVG on mobile.
+// One mark for both. The two-arc manta shape is the same path the mobile
+// SetupScreen already drew; rendering it with `currentColor` lets the
+// caller pick accent/white without a second asset.
+
+export function MantaMark({ className = "w-9 h-9" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      aria-hidden="true"
+    >
+      <path
+        d="M3 17c3-6 6-9 9-9s6 3 9 9"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M7 17c2-3.5 3.4-5 5-5s3 1.5 5 5"
+        strokeWidth="2"
+        strokeLinecap="round"
+        opacity=".6"
+      />
+    </svg>
+  );
+}
+
 // ── Icons ────────────────────────────────────────────────────────────────────
 
 export function ArrowRight({ className = "w-4 h-4" }: { className?: string }) {

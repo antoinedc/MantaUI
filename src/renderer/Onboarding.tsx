@@ -1,28 +1,26 @@
-// Onboarding.tsx — full-screen M6.6 onboarding shell (BET-356).
+// Onboarding.tsx — full-screen M6.6 onboarding shell (BET-356, BET-421).
 //
 // Owns the full-screen container (no sidebar / header / footer), the progress
 // rail (numbered dots + connecting lines), fade+slide step transitions, and
 // the terminal success screen.
 //
-// The user-visible flow collapses from four steps (Pair → Providers → Model
-// → Project, BET-49) to two (Connect → Connect a provider, BET-356). Model
-// is global config (edited in Settings), and the first project is auto-
-// created on pair success — no dedicated onboarding step for either.
+// The user-visible flow is two steps (Connect → Connect a provider). Model is
+// global config (edited in Settings); no dedicated onboarding step for it.
 //
 // Onboarding's responsibilities beyond the step machine:
 //
-//   1. Verify by working (BET-356 §4). After both steps complete (or after
-//      step 1 alone, when step 2 auto-skipped because a provider was
-//      already connected), `finalizeOnboarding` auto-creates the welcome
-//      project + chat window, sends a probe prompt, and waits for a real
-//      assistant response. An install that exits zero but cannot answer
-//      is a failure the user sees immediately, not later.
+//   1. Verify by working (BET-421 §B). After both steps complete (or after
+//      step 1 alone, when step 2 auto-skipped because a provider was already
+//      connected), `verifyOnboarding` spins up an EPHEMERAL opencode session
+//      (no project, no sidebar entry), sends one probe prompt, waits for a
+//      real assistant reply, and deletes the session. Three named stages
+//      drive a ProcessPanel; on failure the user sees which stage failed +
+//      Try again / Back to the provider step / Copy diagnostics. No "continue
+//      anyway" — a working model is mandatory.
 //
-//   2. Failure and resumption (BET-356 §5). Every failure shows a plain-
-//      language cause + one action. The shell re-derives the resume point
-//      from config so a quit-mid-flow reopens at the first incomplete
-//      step (the underlying `resolveInitialStep` already has this
-//      property; the shell just re-uses it on every mount).
+//   2. Failure and resumption. Every failure shows a plain-language cause +
+//      one way forward. The shell re-derives the resume point from config so
+//      a quit-mid-flow reopens at the first incomplete step.
 //
 // Per-step bodies:
 //   - Step 1 (Connect)          → PairStep.tsx (SSH picker primary, manual
@@ -34,7 +32,7 @@
 // Those components own their own footers; the shell hides its generic
 // footer and lets each step drive advancement (`onPaired` / `onContinue`).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ONBOARDING_STEPS,
   STEP_LABELS,
@@ -47,17 +45,21 @@ import { useStore } from "./store";
 import { PairStep } from "./PairStep";
 import { ProvidersStep } from "./ProvidersStep";
 import {
-  finalizeOnboarding,
+  verifyOnboarding,
   hasConnectedProvider,
+  pickVerifyLabels,
+  verifyStageLabels,
   type VerifyApi,
-  type VerifyStore,
+  type VerifyProgress,
+  type VerifyStageIndex,
 } from "./onboardingVerify";
 import { installHttpTransport } from "./transportInstall";
-import { ArrowRight, CheckIcon } from "./onboardingUi";
-import mantaMark from "./assets/manta-mark-128.png";
+import { ArrowRight, CheckIcon, MantaMark } from "./onboardingUi";
+import { ProcessPanel } from "./ProcessPanel";
 
 const ACCENT = "var(--accent)"; // the app's accent token (borders/tints)
 const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409: darker in light for AA)
+const DANGER = "var(--danger)";
 
 // Progress rail — one dot + connector per step. Reads every numbered step as
 // completed on the success screen.
@@ -117,39 +119,34 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
 }
 
 // Props:
-//   onDone — called when onboarding completes (success screen "Open manta") OR
-//            is skipped. The parent (App.tsx) re-reads config and drops back
-//            to the normal shell WITHOUT an app restart.
+//   onDone — called when onboarding completes (success screen "Open manta").
 export function Onboarding({ onDone }: { onDone: () => void }) {
   // Derive the resume point once from the current config so a quit-mid-flow
-  // reopens at the first incomplete step. Read straight from the store's
-  // config snapshot (App gates on `loaded`, so config is present by mount).
-  //
-  // Deep-link pairing (BET-240): if a manta://pair?... URL is pending in the
-  // store, force step 1 regardless of the resume point — re-pairing to a new
-  // box is a legitimate flow that resolveInitialStep would otherwise skip.
+  // reopens at the first incomplete step. Deep-link pairing forces step 1.
   const [pos, setPos] = useState<OnboardingPosition>(() =>
     useStore.getState().pendingPairLink
       ? 1
       : resolveInitialStep(useStore.getState().configSnapshot()),
   );
 
-  // Verification state — the orchestrator runs after a successful pair +
-  // (optional) provider step, before the success screen. The user sees an
-  // inline "Verifying your box…" panel while it polls; success replaces it
-  // with the "You're all set!" screen.
-  const [verifying, setVerifying] = useState(false);
-  const [verifyError, setVerifyError] = useState<string | null>(null);
+  // Verification state (BET-421 §B). The ProcessPanel is driven by
+  // `verifyProgress`; a failure populates `verifyError` with the stage +
+  // message so the failure card can render the three actions.
+  const [verifyProgress, setVerifyProgress] = useState<VerifyProgress | null>(null);
+  const [verifyError, setVerifyError] = useState<{
+    failedStage: VerifyStageIndex;
+    message: string;
+    labels: [string, string, string];
+  } | null>(null);
+  const [verifyElapsed, setVerifyElapsed] = useState(0);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
 
   // Pre-flight for everything that runs AFTER a successful pair: refresh
   // the store from main's config + seed localStorage / swap window.api to
   // httpApi. The SSH claim path persists credentials via main's commit()
-  // but does NOT seed localStorage or swap window.api to httpApi (only
-  // the manual path's claimBox does). Without this pre-flight, the
-  // window.api.opencode* / .tmuxNewSession / .opencodeProviderAuth calls
-  // in finalize + hasConnectedProvider fail — the preload has no such
-  // surface. The manual path's claimBox already did the install; this
-  // re-run is idempotent (localStorage entries + window.api swap).
+  // but does NOT seed localStorage or swap window.api to httpApi. Without
+  // this pre-flight, the window.api.opencode* / .opencodeProviderAuth calls
+  // in verify + hasConnectedProvider fail.
   const refreshAndInstallTransport = useCallback(async () => {
     await useStore.getState().refresh();
     const cfg = useStore.getState().configSnapshot();
@@ -166,103 +163,132 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     }
   }, []);
 
-  // The ONE place that manages verifying/verifyError. Every async onboarding
-  // phase goes through it — a phase that throws surfaces inline and the user
-  // stays put, never a silent stall.
-  const runPhase = useCallback(async (fn: () => Promise<void>) => {
-    setVerifying(true);
-    setVerifyError(null);
-    try {
-      await fn();
-    } catch (e) {
-      setVerifyError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setVerifying(false);
-    }
-  }, []);
-
-  // The post-pair orchestrator body WITHOUT state management — runPhase owns
-  // that. Auto-creates the welcome project + chat window, sends a probe
-  // prompt, waits for a real assistant response. On success the shell
-  // advances to "success". Kept separate from runPhase so onPaired can run
-  // it inline without nesting two runPhase calls (which would clear
-  // verifying early).
-  //
-  // Two entry points route here through runPhase:
-  //   - onPaired (step 1): skips to step 2 if no provider is connected,
-  //     otherwise runs doFinalize. The "skip if no provider" branch is the
-  //     dual of ProvidersStep's mount-time auto-skip, so either side
-  //     arriving at finalizeOnboarding means ≥1 provider is connected.
-  //   - onProviderContinue (step 2): always runs doFinalize.
-  const doFinalize = useCallback(async () => {
+  // The post-pair verify. Runs an ephemeral opencode session through three
+  // named stages; on success the shell advances to "success", on failure
+  // the failure card renders with Try again / Back to the provider step /
+  // Copy diagnostics.
+  const runVerify = useCallback(async () => {
     await refreshAndInstallTransport();
-    await finalizeOnboarding({
+    // Resolve the connected provider label + the configured default model
+    // so the stage labels name them. If the status probe fails or nothing
+    // is connected, fall back to generic labels — the verify still runs.
+    let providerLabel = "your provider";
+    let modelLabel: string | undefined;
+    try {
+      const status = await (window.api as unknown as VerifyApi).opencodeProviderAuth({
+        action: "status",
+      });
+      const cfg = useStore.getState().configSnapshot();
+      const labels = pickVerifyLabels(status, cfg.defaultModel ?? null);
+      if (labels) {
+        providerLabel = labels.providerLabel;
+        modelLabel = labels.modelLabel;
+      }
+    } catch {
+      /* best-effort — verify with generic labels */
+    }
+    const stages = verifyStageLabels(providerLabel, modelLabel);
+    setVerifyError(null);
+    setVerifyElapsed(0);
+    setVerifyProgress({ stage: 0, status: "running" });
+    const outcome = await verifyOnboarding({
       api: window.api as unknown as VerifyApi,
-      store: useStore.getState() as unknown as VerifyStore,
+      providerLabel,
+      modelLabel,
+      onProgress: (p) => setVerifyProgress(p),
     });
-    setPos("success");
+    if (outcome.ok) {
+      setVerifyProgress(null);
+      setPos("success");
+      return;
+    }
+    setVerifyProgress({ stage: outcome.failedStage, status: "error" });
+    setVerifyError({
+      failedStage: outcome.failedStage,
+      message: outcome.message,
+      labels: stages,
+    });
   }, [refreshAndInstallTransport]);
 
-  // Step 1 → step 2 (provider needed) OR step 1 → doFinalize (provider
+  // Step 1 → step 2 (provider needed) OR step 1 → runVerify (provider
   // already connected). Detecting the latter before stepping forward keeps
   // the user from blinking through an empty step-2 frame.
-  //
-  // refreshAndInstallTransport FIRST so the hasConnectedProvider probe
-  // (and the upcoming finalize) actually reach the box. The whole body runs
-  // inside runPhase so a rejection surfaces inline instead of stalling.
-  const onPaired = useCallback(
-    () =>
-      runPhase(async () => {
-        await refreshAndInstallTransport();
-        const connected = await hasConnectedProvider(
-          window.api as unknown as VerifyApi,
-        );
-        if (connected) {
-          await doFinalize();
-        } else {
-          setPos(2);
-        }
-      }),
-    [runPhase, refreshAndInstallTransport, doFinalize],
-  );
+  const onPaired = useCallback(async () => {
+    await refreshAndInstallTransport();
+    const connected = await hasConnectedProvider(window.api as unknown as VerifyApi);
+    if (connected) {
+      await runVerify();
+    } else {
+      setPos(2);
+    }
+  }, [refreshAndInstallTransport, runVerify]);
 
-  // Step 2 → finalize (provider connect just landed → run the verify).
-  const onProviderContinue = useCallback(() => runPhase(doFinalize), [
-    runPhase,
-    doFinalize,
-  ]);
+  // Step 2 → verify (provider connect just landed → run the verify).
+  const onProviderContinue = useCallback(() => {
+    void runVerify();
+  }, [runVerify]);
 
   const goBack = () => setPos((p) => prevPosition(p));
 
-  // Skip: persist onboardingSkipped so the flow doesn't re-trigger on every
-  // launch of an otherwise-empty config, then hand control back to the shell.
-  // Reserved for future Settings-driven "Skip setup" re-runs (BET-382 §A.3);
-  // today the renderer's `Skip setup` button is gone, so the only caller is
-  // a future Settings affordance that hasn't landed yet. `void skip;` keeps
-  // the function referenced for TS while we wait.
-  const skip = async () => {
-    await useStore.getState().skipOnboarding();
-    onDone();
-  };
-  void skip;
+  // BET-421 §C: skip / onboardingSkipped are deliberately NOT wired. A
+  // model is mandatory; there is no skip button on any platform.
 
-  // Deep-link pairing (BET-240): a link that arrives WHILE onboarding is
-  // already open (e.g. user clicked the link from Terminal after the app
-  // was running) must also jump to step 1.
+  // Deep-link pairing: a link that arrives WHILE onboarding is already open
+  // must also jump to step 1.
   const pendingPairLink = useStore((s) => s.pendingPairLink);
   useEffect(() => {
     if (pendingPairLink) setPos(1);
   }, [pendingPairLink]);
 
+  // BET-421 §F: move focus to the new step's heading on advance. The
+  // refocus-on-error pattern already exists in these files; this is the
+  // same idea applied when advancing. The step components own their own
+  // <h2>; we focus the first heading inside the step body so a screen
+  // reader / keyboard user lands on the new step's title.
+  useEffect(() => {
+    if (verifyProgress) return; // verify overlay owns focus while running
+    const h2 = bodyRef.current?.querySelector("h2");
+    if (h2 instanceof HTMLHeadingElement) {
+      h2.setAttribute("tabindex", "-1");
+      h2.focus();
+    }
+  }, [pos, verifyProgress]);
+
+  // Tick the verify elapsed-time display once a second while running.
+  useEffect(() => {
+    if (!verifyProgress || verifyProgress.status !== "running") return;
+    const t = setInterval(() => setVerifyElapsed((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [verifyProgress]);
+
   const isSuccess = pos === "success";
+  const isVerifying = verifyProgress !== null && !verifyError;
+
+  const copyVerifyDiagnostics = useCallback(async () => {
+    if (!verifyError) return;
+    const stageLabel = verifyError.labels[verifyError.failedStage] ?? "verification";
+    const text = [
+      "Manta onboarding verification failed",
+      `Stage: ${verifyError.failedStage + 1} of ${verifyError.labels.length} — ${stageLabel}`,
+      `Elapsed: ${verifyElapsed}s`,
+      `Error: ${verifyError.message}`,
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be unavailable; the text is also shown inline */
+    }
+  }, [verifyError, verifyElapsed]);
 
   return (
     <div className="fixed inset-0 z-50 bg-bg text-text flex items-center justify-center overflow-y-auto">
       <div className="w-full max-w-[720px] px-6 py-8">
-        {/* Header: logo + progress rail (hidden on the success screen). */}
+        {/* Header: brand mark + progress rail (hidden on the success screen). */}
         <div className="text-center mb-10">
           <div className="inline-flex items-center gap-3 mb-8">
-            <img src={mantaMark} alt="" className="w-9 h-9 object-contain" />
+            {/* BET-421 §F: one brand mark for desktop and mobile — the
+                inline MantaMark SVG (current page text color), not a PNG. */}
+            <MantaMark className="w-9 h-9 text-accent" />
             <span className="text-title font-semibold tracking-tight">Manta</span>
           </div>
           {!isSuccess && <ProgressRail current={pos} />}
@@ -270,43 +296,79 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
         {/* Step body. `key` on the wrapper restarts the fade+slide animation on
             every position change. */}
-        <div className="relative overflow-hidden">
+        <div className="relative overflow-hidden" ref={bodyRef}>
           <div key={String(pos)} className="onboarding-step-enter">
             {isSuccess ? (
               <SuccessPanel onOpen={onDone} />
             ) : pos === 1 ? (
-              <PairStep onPaired={onPaired} />
+              <PairStep onPaired={() => void onPaired()} />
             ) : pos === 2 ? (
-              <ProvidersStep
-                onBack={goBack}
-                onContinue={onProviderContinue}
-              />
+              <ProvidersStep onBack={goBack} onContinue={onProviderContinue} />
             ) : null}
           </div>
         </div>
 
-        {/* Verification overlay — sits below the step body so it doesn't
-            obscure the active step's controls. Only visible mid-finalize. */}
-        {verifying && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="mt-6 rounded-md border border-border bg-bg-soft px-4 py-3 text-body text-text-muted flex items-center gap-3"
-          >
-            <span
-              aria-hidden
-              className="inline-block w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin"
+        {/* Verification panel (BET-421 §B). Sits below the step body so it
+            doesn't obscure the active step's controls. Mounted mid-verify
+            and on failure; cleared on success. */}
+        {verifyProgress && verifyError && (
+          <div className="mt-6 space-y-4">
+            <ProcessPanel
+              stages={verifyError.labels}
+              activeIndex={verifyError.failedStage}
+              status="error"
+              elapsedSeconds={verifyElapsed}
+              logLines={[]}
+              onCopyDiagnostics={copyVerifyDiagnostics}
             />
-            Verifying your box…
+            <div
+              role="alert"
+              className="rounded-md border px-4 py-3 text-body"
+              style={{ borderColor: DANGER, color: DANGER }}
+            >
+              {verifyError.message}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void runVerify()}
+                className="px-4 py-2 rounded-md text-body font-medium"
+                style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
+              >
+                Try again
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setVerifyProgress(null);
+                  setVerifyError(null);
+                  setPos(2);
+                }}
+                className="px-4 py-2 rounded-md text-body font-medium"
+                style={{ border: `1px solid ${ACCENT}`, color: ACCENT }}
+              >
+                Back to the provider step
+              </button>
+              <button
+                type="button"
+                onClick={() => void copyVerifyDiagnostics()}
+                className="px-4 py-2 rounded-md text-body font-medium"
+                style={{ border: `1px solid ${DANGER}`, color: DANGER }}
+              >
+                Copy diagnostics
+              </button>
+            </div>
           </div>
         )}
-        {verifyError && (
-          <div
-            role="alert"
-            className="mt-6 rounded-md border px-4 py-3 text-body"
-            style={{ borderColor: "var(--danger)", color: "var(--danger)" }}
-          >
-            {verifyError}
+        {isVerifying && verifyProgress && (
+          <div className="mt-6">
+            <ProcessPanel
+              stages={verifyStageLabels("your provider")}
+              activeIndex={verifyProgress.stage}
+              status={verifyProgress.status}
+              elapsedSeconds={verifyElapsed}
+              logLines={[]}
+            />
           </div>
         )}
       </div>
@@ -328,8 +390,8 @@ function SuccessPanel({ onOpen }: { onOpen: () => void }) {
       </div>
       <h2 className="text-display font-semibold mb-2">You're all set!</h2>
       <p className="text-body text-text-muted leading-relaxed max-w-sm mx-auto mb-8">
-        Your box is paired, a provider is connected, and your first project is
-        ready. Start chatting with your AI assistant.
+        Your box is paired and a provider is connected. Start chatting with
+        your AI assistant.
       </p>
       <button
         onClick={onOpen}

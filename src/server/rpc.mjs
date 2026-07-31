@@ -563,6 +563,30 @@ export function buildHandlers({
       return tmux.listProjects();
     },
 
+    // BET-421: bare session lifecycle for the onboarding verifier. create
+    // makes a fresh opencode session in `directory` (no tmux window, no
+    // project) — mirrors the throwaway session generateSessionTitle uses.
+    // deleteRaw drops it by id alone (no tmux window to kill). Together
+    // they let the verifier probe the box and leave nothing behind.
+    "opencode:create-ephemeral-session": async ({ directory, title }) => {
+      try {
+        const sess = await oc.createSession({ directory, title });
+        return { ok: true, sessionId: sess.id };
+      } catch (e) {
+        return { ok: false, error: e?.message ? String(e.message) : String(e) };
+      }
+    },
+    "opencode:delete-session-raw": async ({ sessionId }) => {
+      try {
+        await oc.deleteSessionRaw(sessionId);
+        return { ok: true };
+      } catch {
+        // Best-effort — a session that failed to create, or one already
+        // reaped, must not fail the verify flow's cleanup.
+        return { ok: true };
+      }
+    },
+
     // opencode:generate-title
     // Auto-rename: throwaway-session title generation. Mirror of desktop
     // IPC.opencodeGenerateTitle. Returns the RAW model reply (caller sanitizes).
