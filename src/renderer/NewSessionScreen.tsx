@@ -22,6 +22,7 @@ import {
   Folder as FolderIcon,
   GitBranch,
   Loader2,
+  Mic,
   Paperclip,
 } from "lucide-react";
 import { useStore } from "./store";
@@ -380,7 +381,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         {/* Heading — the only element centred on the screen; the chip row and
             the controls row below are both left-aligned to the composer. */}
         <div className="text-center space-y-1">
-          <h1 className="text-h1 font-semibold text-text">What's up next?</h1>
+          <h1 className="text-display font-semibold text-text">What's up next?</h1>
           <p className="text-body text-text-muted">
             Start a session on any folder your box can see.
           </p>
@@ -521,7 +522,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             <Paperclip size={17} aria-hidden="true" />
           </button>
 
-          {voiceEnabled && (
+          {voiceEnabled ? (
             <MicButton
               phase={voicePhase}
               mode={voiceMode}
@@ -529,6 +530,19 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
               onStop={voiceRecorder.stop}
               onCancel={voiceRecorder.cancel}
             />
+          ) : (
+            /* Dictate — no voice configured on this box yet (no Groq key).
+               Rendered disabled to match the attach button, so the controls
+               row agrees with the mockup whether or not voice is set up. */
+            <button
+              type="button"
+              disabled
+              aria-label="Dictate"
+              title="Dictation needs a Groq API key in Settings"
+              className="shrink-0 w-9 h-9 rounded-lg border border-transparent inline-grid place-items-center text-text-faint disabled:cursor-not-allowed"
+            >
+              <Mic size={17} aria-hidden="true" />
+            </button>
           )}
         </div>
 

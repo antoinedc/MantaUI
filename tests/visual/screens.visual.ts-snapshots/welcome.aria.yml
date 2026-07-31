@@ -9,3 +9,4 @@
 - button "Auto"
 - button "High" [disabled]
 - button "Attach a file" [disabled]
+- button "Dictate" [disabled]
