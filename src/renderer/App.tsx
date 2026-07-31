@@ -19,6 +19,7 @@ import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { MOD_KEY } from "./platform";
 import { UpdateBar } from "./UpdateBar";
 import { ReconnectingBanner } from "./ReconnectingBanner";
+import { pickBanner, type BannerState } from "./bannerPriority";
 import { parsePairPayload } from "./mobile/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
 import type { AvailableLauncher } from "../shared/types";
@@ -35,8 +36,6 @@ const PAIR_PARSE_SCHEME = channelConfig(__MANTA_CHANNEL__).urlScheme;
 export function App() {
   const {
     loaded,
-    serverUrl,
-    boxId,
     projects,
     activeProjectName,
     activeWindowByProject,
@@ -47,7 +46,6 @@ export function App() {
     finishOnboarding,
     configSnapshot,
     updatePrompt,
-    setUpdatePrompt,
     updateError,
     setUpdateError,
     serverUpdatePrompt,
@@ -724,44 +722,83 @@ export function App() {
     );
   }
 
+  // ===== Banner collapse (BET-416 §E) =====
+  //
+  // At most ONE full-width bar is visible, chosen by severity
+  // (reconnecting > incompatible > version skew > update failed > server
+  // update). "Update available" (a downloaded desktop auto-update) is NOT a
+  // bar — it is demoted to a small --accent dot on the Settings entry in the
+  // sidebar footer (see Sidebar.tsx, reads `updatePrompt` from the store);
+  // the bar is reserved for states that actually block you. The "behind"
+  // compatibility variant folds into `server-update` (it is an upgrade prompt
+  // with the same self-update action, not a blocking incompatibility).
+  const reconnecting = connectionState.state !== "connected" && connectionState.state !== "idle";
+  const incompatible = showCompatibilityCard && compatibilityVariant === "incompatible";
+  const versionSkew = chooseUpdateSkewVariant(clientVersion, serverMinClient) === "outdated";
+  const updateFailed = !!updateError;
+  const serverUpdate = !!serverUpdatePrompt || (showCompatibilityCard && compatibilityVariant === "behind");
+  const bannerState: BannerState = { reconnecting, incompatible, versionSkew, updateFailed, serverUpdate };
+  const activeBanner = pickBanner(bannerState);
+
   return (
     <div className="h-full w-full flex bg-bg text-text">
       <Sidebar ref={sidebarRef} onOpenSettings={() => setSettingsOpen(true)} />
       <main className="flex-1 flex flex-col min-w-0">
-        {/* Auto-update prompt bar (BET-225 stage 3: shared UpdateBar).
-            Shown when main has downloaded a new version and is waiting for
-            the user to restart. Positioned at the top of the main area so
-            it's visible regardless of which panel is active. Dismissed by
-            the × button (clears store state). The UpdateBar component is
-            the shared banner used for all three update prompts — desktop
-            auto-update, server update, and the version-skew guard (below). */}
-        {!showOnboarding && updatePrompt && (
+        {/* At most ONE full-width bar (BET-416 §E). `activeBanner` is the
+            single highest-severity condition across reconnecting / incompatible
+            / version-skew / update-failed / server-update. "Update available"
+            (a downloaded desktop auto-update) is no longer a bar — it is a
+            small --accent dot on the Settings entry in the sidebar footer; the
+            bar is reserved for states that actually block you. A downloaded
+            update's install action is still reachable via the version-skew
+            bar's button (it picks autoUpdateInstall when an update is ready). */}
+        {!showOnboarding && activeBanner === "reconnecting" && (
+          <ReconnectingBanner
+            state={connectionState}
+            onRetryNow={() => window.api.connectionRetryNow()}
+          />
+        )}
+        {!showOnboarding && activeBanner === "incompatible" && (
           <UpdateBar
             text={
               <>
-                Update available:{" "}
+                This box (v
                 <span className="font-medium text-text">
-                  {updatePrompt.releaseName || updatePrompt.version}
+                  {serverVersion ?? "?"}
                 </span>
+                ) is not supported by this app (v
+                <span className="font-medium text-text">
+                  {clientVersion ?? "?"}
+                </span>
+                ).
               </>
             }
-            actionLabel="Restart to update"
+            actionLabel="Learn more"
             onAction={() => {
-              void window.api.autoUpdateInstall();
+              void window.api.openExternal("https://mantaui.com/install");
             }}
-            onDismiss={() => setUpdatePrompt(null)}
+            onDismiss={dismiss}
           />
         )}
-        {/* Terminal auto-update failure. An update exists but this install
-            cannot take it (checksum/signature mismatch, or the bundle can't
-            be replaced), so the only way forward is a manual download —
-            hence the action opens the downloads page rather than retrying an
-            install that is guaranteed to fail again. Dismissible: the user
-            may not want to deal with it right now, and it re-arms on the
-            next failed check. */}
-        {!showOnboarding && updateError && (
+        {!showOnboarding && activeBanner === "version-skew" && (
           <UpdateBar
-            text={updateError.message}
+            text={
+              <>This app is out of date and may not work correctly — please update.</>
+            }
+            actionLabel="Update"
+            onAction={() => {
+              if (updatePrompt) {
+                void window.api.autoUpdateInstall();
+              } else {
+                void window.api.autoUpdateDownload();
+              }
+            }}
+            dismissible={false}
+          />
+        )}
+        {!showOnboarding && activeBanner === "update-failed" && (
+          <UpdateBar
+            text={updateError!.message}
             actionLabel="Download"
             onAction={() => {
               void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg");
@@ -769,13 +806,7 @@ export function App() {
             onDismiss={() => setUpdateError(null)}
           />
         )}
-        {/* Server-update prompt (BET-225 stage 3 Part A): shown when the
-            box's server-update poller sees a newer manifest version. Same
-            UpdateBar component as the desktop auto-update above; the action
-            button fires `serverUpdateApply` which runs scripts/self-update.sh
-            on the box (git fetch + reset --hard origin/main + npm ci
-            --omit=dev + systemctl --user restart manta-server). */}
-        {!showOnboarding && serverUpdatePrompt && (
+        {!showOnboarding && activeBanner === "server-update" && serverUpdatePrompt && (
           <UpdateBar
             text={
               <>
@@ -792,110 +823,27 @@ export function App() {
             onDismiss={() => setServerUpdatePrompt(null)}
           />
         )}
-        {/* Version-skew guard (BET-225 stage 3 Part C). NON-dismissible —
-            the client version is older than the server's `minClient` (a
-            breaking RPC change shipped in a newer server), so the user
-            MUST update before the app can talk to the box safely. The
-            button picks the right desktop action based on whether an
-            update has already been downloaded (`updatePrompt !== null` →
-            autoUpdateInstall; else → autoUpdateDownload). On mobile the
-            action is informational (App Store) — mobile skips this branch
-            because there's no autoUpdate plumbing. */}
         {!showOnboarding &&
-          chooseUpdateSkewVariant(clientVersion, serverMinClient) === "outdated" && (
+          activeBanner === "server-update" &&
+          !serverUpdatePrompt &&
+          showCompatibilityCard &&
+          compatibilityVariant === "behind" && (
             <UpdateBar
               text={
                 <>
-                  This app is out of date and may not work correctly —
-                  please update.
+                  Box needs an upgrade:{" "}
+                  <span className="font-medium text-text">
+                    {serverVersion ?? "?"}
+                  </span>
                 </>
               }
-              actionLabel="Update"
+              actionLabel="Upgrade box"
               onAction={() => {
-                if (updatePrompt) {
-                  void window.api.autoUpdateInstall();
-                } else {
-                  void window.api.autoUpdateDownload();
-                }
-              }}
-              dismissible={false}
-            />
-          )}
-        {/* Desktop↔box compatibility card (BET-357 §3 / BET-366). The
-            desktop and the box ship separately and will drift. This card
-            is the user's only signal that the box needs an upgrade, and
-            it stays dismissible because the "behind" path has a clear
-            one-click action and the "incompatible" path is informational
-            (no in-app action bridges a wire-contract change). The
-            variant comes from the pure `isCompatible` helper over the
-            desktop's own version (clientVersion, from
-            `getClientVersion`) and the box's reported version
-            (serverVersion, from `getServerVersion`). Both sources are
-            already in flight for the skew banner above — this card
-            reuses the same fetch, no second round-trip.
-
-            "match"/"unknown" → render nothing (mid-bootstrap never
-            flashes the card).
-
-            "behind" → "Box needs upgrade: <boxVersion>" with an
-            "Upgrade box" button that fires the existing
-            `server:update-apply` RPC — the same self-update path the
-            server-update-available prompt above uses. Do NOT write a
-            second update mechanism; this is wired into the existing
-            one intentionally.
-
-            "incompatible" → "This box (vX.Y.Z) is not supported by
-            this app (vA.B.C)." with a "Learn more" button that opens
-            the install docs — the user must upgrade one half manually
-            (different major = different RPC contract). */}
-        {!showOnboarding && showCompatibilityCard && (
-            <UpdateBar
-              text={
-                compatibilityVariant === "behind" ? (
-                  <>
-                    Box needs an upgrade:{" "}
-                    <span className="font-medium text-text">
-                      {serverVersion ?? "?"}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    This box (v
-                    <span className="font-medium text-text">
-                      {serverVersion ?? "?"}
-                    </span>
-                    ) is not supported by this app (v
-                    <span className="font-medium text-text">
-                      {clientVersion ?? "?"}
-                    </span>
-                    ).
-                  </>
-                )
-              }
-              actionLabel={
-                compatibilityVariant === "behind" ? "Upgrade box" : "Learn more"
-              }
-              onAction={() => {
-                if (compatibilityVariant === "behind") {
-                  void window.api.serverUpdateApply();
-                } else {
-                  void window.api.openExternal("https://mantaui.com/install");
-                }
+                void window.api.serverUpdateApply();
               }}
               onDismiss={dismiss}
             />
           )}
-        {/* Reconnecting banner (BET-365 / BET-357 §1): full-width bar above
-            the titlebar that surfaces the events-WebSocket reconnect state.
-            Replaces the prior tiny titlebar pill with attempt count, the
-            next-backoff delay, and a "Retry now" button that calls
-            window.api.connectionRetryNow(). Hidden when connected/idle. */}
-        {!showOnboarding && (
-          <ReconnectingBanner
-            state={connectionState}
-            onRetryNow={() => window.api.connectionRetryNow()}
-          />
-        )}
         <div className="titlebar-drag h-12 border-b border-border flex items-center px-4 gap-2 min-w-0">
           <div className="text-meta text-text-muted flex items-center gap-2 min-w-0">
             {activeProjectName && (
@@ -971,10 +919,14 @@ export function App() {
         </div>
         <div className="flex-1 relative">
           {projects.length === 0 ? (
+            // Zero-project state (BET-416 §F). An unpaired config always
+            // routes to onboarding, so this branch is only reached when the
+            // box IS paired but has no projects yet — the dead "Open Settings
+            // to connect to your box." fallback was deleted (unreachable).
+            // The new-session composer (BET-417) will become this zero state;
+            // until it lands, the ⌘N hint holds the slot.
             <div className="h-full flex items-center justify-center text-text-faint text-body">
-              {serverUrl || boxId
-                ? `Create a project (${MOD_KEY}N) to start.`
-                : "Open Settings to connect to your box."}
+              {`Create a project (${MOD_KEY}N) to start.`}
             </div>
           ) : (
             <>

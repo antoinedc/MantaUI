@@ -1,35 +1,37 @@
 // ===== Composer =====
 //
 // Extracted from ChatPanel.tsx (BET-63). The bottom composer cluster: the
-// pending-attachment chip strip, the @-mention / command typeahead popup, and
-// the input row itself (textarea + footer with model picker, context bar,
-// voice mic, and the ⏰/🔑/🪝 toolbar). Purely presentational — it owns no
-// state; ChatPanel passes the input value, the attachment/typeahead data, and
-// every callback (submit / abort / voice / typeahead nav / history) in.
+// @-mention / command typeahead popup and the input row itself (textarea +
+// footer with model picker, context bar, voice mic, and the ⏰/🔑/🪝 toolbar).
+// Purely presentational — it owns no state; ChatPanel passes the input value,
+// the attachment/typeahead data, and every callback (submit / abort / voice /
+// typeahead nav / history) in.
 //
 // The presentational leaves (AttachmentStrip, TypeaheadPopup, InputArea) were
 // already extracted in M0.5; this component is the container-shaped wrapper
 // that assembles them into "the composer" — the named unit the decomposition
-// plan calls for — so ChatPanel's render body no longer inlines the three of
-// them plus their gating conditions.
+// plan calls for — so ChatPanel's render body no longer inlines them plus
+// their gating conditions.
+//
+// Attachment chips render INSIDE the InputArea box (BET-416 §B), so they are
+// threaded straight through via InputAreaProps; Composer no longer renders an
+// AttachmentStrip sibling above the box. The TypeaheadPopup still floats
+// ABOVE the box (it anchors to the box's top edge).
 //
 // The InputArea prop surface is large (~40 fields) and its type is declared
 // inline in InputArea.tsx, so rather than duplicate it we accept exactly
 // `InputAreaProps` (derived from the component's own parameter type) for that
-// slice and add the attachment/typeahead fields alongside. This keeps the
-// contract in one place — change InputArea's props and Composer follows.
+// slice and add the typeahead fields alongside. This keeps the contract in
+// one place — change InputArea's props and Composer follows.
 
-import { AttachmentStrip, InputArea, TypeaheadPopup } from "./InputArea";
-import type { Attachment, TypeaheadRow, TypeaheadState } from "./chatShared";
+import { InputArea, TypeaheadPopup } from "./InputArea";
+import type { TypeaheadRow, TypeaheadState } from "./chatShared";
 
 // The InputArea props, sourced from the component itself so there's a single
 // source of truth for that surface.
 type InputAreaProps = Parameters<typeof InputArea>[0];
 
 export type ComposerProps = InputAreaProps & {
-  // Attachment chips strip — rendered only when something pending.
-  attachments: Attachment[];
-  onRemoveAttachment: (id: string) => void;
   // Typeahead popup state + the resolved rows to render.
   typeahead: TypeaheadState | null;
   typeaheadRows: TypeaheadRow[];
@@ -42,8 +44,6 @@ export type ComposerProps = InputAreaProps & {
 };
 
 export function Composer({
-  attachments,
-  onRemoveAttachment,
   typeahead,
   typeaheadRows,
   onTypeaheadSelect,
@@ -52,14 +52,10 @@ export function Composer({
 }: ComposerProps) {
   return (
     <>
-      {/* Attachment chips strip — only when something pending. */}
-      {attachments.length > 0 && (
-        <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
-      )}
-
       {/* Typeahead popup — shown the moment typeahead state is set, even */}
       {/* if the result list is still loading. Empty rows render a small */}
-      {/* "Searching…" placeholder so the user sees instant feedback. */}
+      {/* "Searching…" placeholder so the user sees instant feedback. Floats */}
+      {/* above the composer box (anchors to its top edge, BET-416 §C). */}
       {typeahead && (
         <TypeaheadPopup
           rows={typeaheadRows}

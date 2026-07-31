@@ -27,13 +27,15 @@ import {
 } from "./chatUtils";
 import {
   type ModelSelection,
+  type Attachment,
 } from "./chatShared";
 import { ModelPicker } from "./ModelPicker";
-import { MicButton, SessionToolbar } from "./ComposerParts";
-// Re-exported so existing `import { AttachmentStrip, TypeaheadPopup } from
-// "./InputArea"` call sites (ChatPanel) keep working after these leaf
-// components moved to ./ComposerParts.
-export { AttachmentStrip, TypeaheadPopup } from "./ComposerParts";
+import { AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
+// Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
+// sites (Composer) keep working after the leaf component moved to ./ComposerParts.
+export { TypeaheadPopup } from "./ComposerParts";
+// AttachmentStrip is no longer re-exported — it is now rendered INSIDE the
+// composer box (BET-416 §B), so Composer no longer imports it.
 
 // Measure the caret's VISUAL row within a textarea, accounting for soft wrap.
 // Render a hidden mirror <div> that copies the textarea's box + text styling,
@@ -99,6 +101,8 @@ export function InputArea({
   abort,
   running,
   refreshing,
+  attachments,
+  onRemoveAttachment,
   modelLabel,
   chatAutoAllow,
   setChatAutoAllow,
@@ -142,6 +146,11 @@ export function InputArea({
   // Drives a subtle ambient tint on the composer border so the user knows a
   // refetch is in flight without a separate loading bar.
   refreshing: boolean;
+  // Pending attachment chips render INSIDE the composer box, above the text
+  // line (BET-416 §B) — they are part of the message being composed, unlike
+  // context chips (folder / branch) which sit ABOVE the box in the header.
+  attachments: Attachment[];
+  onRemoveAttachment: (id: string) => void;
   modelLabel: string | null;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
@@ -206,20 +215,30 @@ export function InputArea({
         />
       )}
       {/* Real input shell (BET-415): a bordered card with focus-within state
-          replaces the old hairline-dividers-around-a-naked-textarea. The
-          voice-active pulse is now a ring on this border; the background
-          refetch shows as an ambient accent tint. Horizontal padding is
-          --sp-4 (16px) per the BET-423 spacing ruling. */}
+          replaces the old hairline-dividers-around-a-naked-textarea. Voice
+          recording is now signalled by THIS border — a fourth treatment
+          alongside resting / focus / error (BET-416 §A): border-colour pulses
+          to --danger, border only, never the fill, solid under reduced-motion.
+          A background refetch still shows as an ambient accent border. Horizontal
+          padding is --sp-4 (16px) per the BET-423 spacing ruling. */}
       <div
         className={
-          "manta-composer-input-row mx-4 mb-2 rounded-xl border bg-card flex items-start gap-2 px-4 py-3 " +
+          "manta-composer-input-row mx-4 mb-2 rounded-xl border bg-card flex flex-col gap-2 px-4 py-3 " +
           (voiceActive
-            ? "border-danger animate-pulse shadow-[0_0_6px_rgb(var(--danger-rgb)/0.6)]"
+            ? "manta-recording"
             : refreshing
               ? "border-accent"
               : "border-border-strong")
         }
       >
+        {/* Attachment chips live INSIDE the box, above the text line (BET-416
+            §B). They are part of the message being composed, so they share
+            the box; context chips (folder / branch) sit ABOVE the box in the
+            SessionHeader because they describe the session. */}
+        {attachments.length > 0 && (
+          <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
+        )}
+        <div className="flex items-start gap-2">
         <textarea
           ref={inputRef}
           value={input}
@@ -307,6 +326,7 @@ export function InputArea({
             onCancel={cancelVoice}
           />
         )}
+        </div>
       </div>
       {/* Meta footer — model ▸ effort split on the left, resource toolbar +
           transient status on the right. Branch + context pill moved to the

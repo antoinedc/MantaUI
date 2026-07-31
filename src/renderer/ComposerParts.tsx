@@ -65,9 +65,12 @@ export function SessionToolbar({
 
 // ===== Attachment chips =====
 //
-// Strip of chips above the input. Each chip carries filename + status. Click
-// the × to remove. Uploading shows a small spinner; error tints red with the
-// remote error in the tooltip.
+// Chip row for pending uploads. Per BET-416 §B attachment chips live INSIDE
+// the composer box, above the text line (they are part of the message being
+// composed) — so this component renders ONLY the chip row and carries no
+// outer padding; the bordered input box that contains it owns the padding +
+// the gap to the textarea. Context chips (folder / branch) sit ABOVE the box
+// in the SessionHeader instead, because they describe the session.
 
 export function AttachmentStrip({
   attachments,
@@ -76,10 +79,8 @@ export function AttachmentStrip({
   attachments: Attachment[];
   onRemove: (id: string) => void;
 }) {
-  // pt-2 above + pb-2 below leaves a clear gap between the chip row and the
-  // input area's top border.
   return (
-    <div className="shrink-0 px-4 pt-2 pb-2 flex flex-wrap gap-1 text-label">
+    <div className="flex flex-wrap gap-1 text-label">
       {attachments.map((a) => {
         const color =
           a.status === "error"
@@ -116,9 +117,10 @@ export function AttachmentStrip({
 
 // ===== Typeahead popup =====
 //
-// Anchored above the input area; rows for command/agent/file results. Keyboard
-// nav is handled by InputArea (Up/Down/Enter/Tab/Esc) — this component is
-// purely visual + mouse selection.
+// Anchored above the composer box's top edge. Card elevation (--card bg,
+// --border, --shadow-md), 12px radius, max-height with scroll. Keyboard
+// up/down/Enter/Tab/Esc nav is handled by InputArea — this component is
+// purely visual + mouse selection. The selected row uses --accent-bg.
 
 export function TypeaheadPopup({
   rows,
@@ -134,7 +136,10 @@ export function TypeaheadPopup({
   emptyHint: string;
 }) {
   return (
-    <div className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded border border-border bg-bg-elev shadow-lg text-meta font-mono">
+    <div
+      className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded-xl border border-border bg-card text-meta font-mono"
+      style={{ boxShadow: "var(--shadow-md)" }}
+    >
       {rows.length === 0 && (
         <div className="px-2 py-1 text-text-faint italic">{emptyHint}</div>
       )}
@@ -165,7 +170,7 @@ export function TypeaheadPopup({
             onMouseEnter={() => onHover(idx)}
             className={
               "w-full text-left px-2 py-1 flex items-center gap-2 " +
-              (active ? "bg-bg-soft text-text" : "text-text-muted hover:bg-bg-soft")
+              (active ? "bg-accent-bg text-text" : "text-text-muted hover:bg-bg-soft")
             }
           >
             <span className="truncate flex-1">{row.primary}</span>
@@ -320,6 +325,12 @@ export function MicButton({
     );
   }
 
+  // Active colour follows the MODE the hook owns (BET-416 §C): dictate →
+  // --danger, command → --accent. Idle is --tx3 (text-faint). The hook is the
+  // single source of truth for mode — do NOT add a second mode ref here (that
+  // was PR #4's W2 bug).
+  const activeColor = mode === "command" ? "text-accent" : "text-danger";
+
   return (
     <button
       type="button"
@@ -339,9 +350,9 @@ export function MicButton({
       className={
         "select-none pt-px shrink-0 leading-none bg-transparent " +
         (busy
-          ? "text-accent cursor-progress"
+          ? `${activeColor} cursor-progress`
           : recording
-            ? "text-danger animate-pulse"
+            ? `${activeColor} animate-pulse`
             : phase === "error"
               ? "text-danger hover:text-danger"
               : "text-text-faint hover:text-text-muted")

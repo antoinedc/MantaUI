@@ -70,6 +70,9 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     worktreePerSession,
     worktreeCleanOnClose,
   } = useStore();
+  // Downloaded desktop auto-update (BET-416 §E): signalled as a dot on the
+  // Settings entry, not a full-width bar.
+  const updateAvailable = useStore((s) => s.updatePrompt != null);
 
   const showError = (e: unknown) => {
     const msg = e instanceof Error ? e.message : String(e);
@@ -1098,9 +1101,22 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       <div className="mt-auto p-2 border-t border-border">
         <button
           onClick={onOpenSettings}
-          className="w-full text-left px-2 py-1 text-meta text-text-muted hover:text-text"
+          className="w-full text-left px-2 py-1 text-meta text-text-muted hover:text-text flex items-center gap-2"
         >
-          Settings…
+          {/* Update-available dot (BET-416 §E): "Update available" is no
+              longer a full-width bar; a downloaded desktop auto-update is
+              signalled by a small --accent dot on the Settings entry, with
+              the details in Settings → General → About. The bar is reserved
+              for blocking states only. */}
+          {updateAvailable && (
+            <span
+              className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+              style={{ backgroundColor: "var(--accent)" }}
+              title="An update is ready to install — see Settings → General → About"
+              aria-label="Update available"
+            />
+          )}
+          <span className="flex-1">Settings…</span>
         </button>
       </div>
 

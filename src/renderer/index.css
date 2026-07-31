@@ -281,6 +281,23 @@ html, body, #root {
   .manta-loading-divider { animation: none; background-position: 50% 0; }
 }
 
+/* Recording indicator (BET-416 §A). Voice recording is signalled by the
+   composer box's own border — a fourth border treatment alongside resting /
+   focus / error. The pulse animates ONLY the border colour, never the fill,
+   so the input never flashes. Slow (2s) so it reads as "active" not "alarm".
+   Under reduced-motion the border holds solid --danger. */
+@keyframes manta-recording-pulse {
+  0%, 100% { border-color: var(--danger); }
+  50%      { border-color: rgb(var(--danger-rgb) / 0.45); }
+}
+.manta-recording {
+  border-color: var(--danger);
+  animation: manta-recording-pulse 2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-recording { animation: none; border-color: var(--danger); }
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
