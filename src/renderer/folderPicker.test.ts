@@ -7,6 +7,7 @@ import {
   worktreeBadge,
   hasWorktreeFanOut,
   gitStateLabel,
+  worktreeName,
 } from "./folderPicker";
 import type { WorktreeInfo } from "../shared/types";
 
@@ -152,5 +153,21 @@ describe("gitStateLabel", () => {
   it("returns empty when branch is missing", () => {
     expect(gitStateLabel([wt("/repo", "")])).toBe("");
     expect(gitStateLabel([{ path: "/repo", head: "x", branch: null, bare: false, detached: false }])).toBe("");
+  });
+});
+
+describe("worktreeName", () => {
+  it("returns the path basename", () => {
+    expect(worktreeName(wt("/home/dev/leasebot", "main"))).toBe("leasebot");
+    expect(worktreeName(wt("/home/dev/leasebot-wt", "feature/foo"))).toBe("leasebot-wt");
+  });
+
+  it("falls back to branch when path has no basename", () => {
+    expect(worktreeName(wt("", "feature"))).toBe("feature");
+  });
+
+  it("falls back to 'wt' when both are empty", () => {
+    expect(worktreeName(wt("", ""))).toBe("wt");
+    expect(worktreeName({ path: "", head: "x", branch: null, bare: false, detached: false })).toBe("wt");
   });
 });

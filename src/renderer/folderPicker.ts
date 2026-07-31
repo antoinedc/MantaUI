@@ -120,3 +120,12 @@ export function gitStateLabel(worktrees: WorktreeInfo[] | null): string {
   if (!main?.branch) return "";
   return `⎇ ${main.branch}`;
 }
+
+// Window name for a worktree: dir basename. Mirrors the old Sidebar
+// worktreeName() that was deleted with the inline forms (BET-417 §C).
+// The fan-out path (one session, one window per worktree) uses this to
+// name each tmux window after the worktree's directory basename, not the
+// branch — so "leasebot" not "main" shows in the sidebar.
+export function worktreeName(w: WorktreeInfo): string {
+  return w.path.split("/").filter(Boolean).pop() || w.branch || "wt";
+}

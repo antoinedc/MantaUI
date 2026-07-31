@@ -31,7 +31,12 @@ import {
 type Props = {
   // The initial path the picker opens at. Usually "~" or the project's cwd.
   initialPath: string;
+  // Called when the user picks a single folder (no fan-out).
   onSelect: (path: string) => void;
+  // Called when the user picks "One per worktree" — the parent creates one
+  // session with one window per worktree, each named worktreeName(w).
+  // When omitted, the fan-out question is not offered (mobile can opt out).
+  onFanOut?: (cwd: string, worktrees: WorktreeInfo[]) => void;
   onCancel: () => void;
 };
 
@@ -51,7 +56,7 @@ type FanOut =
   | null
   | { worktrees: WorktreeInfo[]; cwd: string };
 
-export function FolderPickerModal({ initialPath, onSelect, onCancel }: Props) {
+export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }: Props) {
   const [path, setPath] = useState(initialPath);
   const [suggestion, setSuggestion] = useState<string | null>(null);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -248,12 +253,14 @@ export function FolderPickerModal({ initialPath, onSelect, onCancel }: Props) {
               >
                 Just this folder
               </button>
-              <button
-                onClick={() => onSelect(fanOut.cwd)}
-                className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded hover:opacity-90"
-              >
-                One per worktree
-              </button>
+              {onFanOut && (
+                <button
+                  onClick={() => onFanOut(fanOut.cwd, fanOut.worktrees)}
+                  className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded hover:opacity-90"
+                >
+                  One per worktree
+                </button>
+              )}
               <button
                 onClick={() => setFanOut(null)}
                 className="text-meta px-3 py-2 text-text-faint hover:text-text"
@@ -355,28 +362,42 @@ export function FolderPickerModal({ initialPath, onSelect, onCancel }: Props) {
               {!loading && !error && rows.length === 0 && (
                 <div className="px-3 py-4 text-meta text-text-faint">No subfolders</div>
               )}
-              {!loading && !error && rows.map((r) => {
-                const wtCount = worktreeCounts[r.full];
-                const badge = worktreeBadge(wtCount ?? null);
-                return (
+              {!loading && !error && (
+                <>
+                  {/* `..` row — spec §B3 says ".. first". Goes up one level,
+                      same as the breadcrumbs / up-arrow. */}
                   <button
-                    key={r.full}
-                    onClick={() => descend(r.full)}
-                    className={
-                      "w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded " +
-                      (r.dimmed ? "text-text-faint opacity-70" : "text-text-muted") +
-                      " hover:bg-bg-soft"
-                    }
-                    title={r.full}
+                    onClick={goUp}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded text-text-muted hover:bg-bg-soft"
+                    title={parentPath(path)}
                   >
-                    <FolderIcon size={14} className="shrink-0" aria-hidden="true" />
-                    <span className="flex-1 min-w-0 truncate font-mono">{r.name}</span>
-                    {badge && (
-                      <span className="text-label text-accent-tx shrink-0">{badge}</span>
-                    )}
+                    <ArrowUp size={14} className="shrink-0" aria-hidden="true" />
+                    <span className="flex-1 min-w-0 truncate font-mono">..</span>
                   </button>
-                );
-              })}
+                  {rows.map((r) => {
+                    const wtCount = worktreeCounts[r.full];
+                    const badge = worktreeBadge(wtCount ?? null);
+                    return (
+                      <button
+                        key={r.full}
+                        onClick={() => descend(r.full)}
+                        className={
+                          "w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded " +
+                          (r.dimmed ? "text-text-quiet" : "text-text-muted") +
+                          " hover:bg-bg-soft"
+                        }
+                        title={r.full}
+                      >
+                        <FolderIcon size={14} className="shrink-0" aria-hidden="true" />
+                        <span className="flex-1 min-w-0 truncate font-mono">{r.name}</span>
+                        {badge && (
+                          <span className="text-label text-accent-tx shrink-0">{badge}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </>
+              )}
             </div>
 
             {/* Footer */}

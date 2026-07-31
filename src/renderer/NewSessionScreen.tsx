@@ -21,6 +21,7 @@ import { useStore } from "./store";
 import { ModelPicker } from "./ModelPicker";
 import { MicButton } from "./ComposerParts";
 import { FolderPickerModal } from "./FolderPickerModal";
+import { worktreeName } from "./folderPicker";
 import { useVoiceRecorder, type VoiceResult } from "./voice";
 import type { VoiceMode, VoicePhase } from "./voice";
 import type { OpencodeModel, WorktreeInfo } from "../shared/types";
@@ -66,6 +67,15 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
   const [wantWorktree, setWantWorktree] = useState(worktreePerSession);
   const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
   const [isGitRepo, setIsGitRepo] = useState(false);
+  // BET-417 §A: "Ticking worktree makes the branch field editable." When
+  // wantWorktree is true, this is the editable branch name passed to
+  // gitAddWorktree (which deriveWorktree turns into the new branch). Defaults
+  // to a derived name; the user can type over it.
+  const [worktreeBranch, setWorktreeBranch] = useState("worktree");
+  // BET-417 §B: fan-out from the folder picker. When set, the picker returned
+  // multiple worktrees and the user chose "One per worktree" — we create one
+  // session with one window per worktree (worktreeName(w) as window name).
+  const [fanOutWorktrees, setFanOutWorktrees] = useState<WorktreeInfo[] | null>(null);
 
   // Composer state.
   const [input, setInput] = useState("");
@@ -193,7 +203,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         windowName = "default";
 
         if (wantWorktree && isGitRepo) {
-          const wt = await window.api.gitAddWorktree({ cwd, name: windowName });
+          const wt = await window.api.gitAddWorktree({ cwd, name: worktreeBranch });
           worktreePath = wt.path;
         }
 
@@ -206,9 +216,9 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         });
       } else {
         sessionName = projectName!;
-        windowName = "session";
+        windowName = worktreeBranch || "session";
         if (wantWorktree && isGitRepo) {
-          const wt = await window.api.gitAddWorktree({ cwd, name: windowName });
+          const wt = await window.api.gitAddWorktree({ cwd, name: worktreeBranch });
           worktreePath = wt.path;
         }
         await window.api.tmuxNewWindow({
@@ -242,6 +252,75 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
           text,
           modelOverride ?? undefined,
         );
+      }
+      onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSending(false);
+    }
+  };
+
+  // ---- fan-out submit: one session, one window per worktree ----
+  // Relocates the old Sidebar createProject("all") logic that was deleted
+  // with the inline forms (BET-417 §B4). Each window is named worktreeName(w)
+  // (path basename, not branch) — so "leasebot" not "main" shows in the
+  // sidebar. The first prompt goes to the first window.
+  const submitFanOut = async (baseCwd: string, wts: WorktreeInfo[]) => {
+    if (sending) return;
+    const text = input.trim();
+    setSending(true);
+    setError(null);
+    try {
+      const sessionName = (() => {
+        const base = deriveProjectName(baseCwd);
+        const taken = new Set(existingProjects.map((p) => p.tmuxSession));
+        if (!taken.has(base)) return base;
+        let i = 2;
+        while (taken.has(`${base}-${i}`)) i++;
+        return `${base}-${i}`;
+      })();
+
+      const [first, ...rest] = wts;
+      await window.api.tmuxNewSession({
+        name: sessionName,
+        cwd: first.path,
+        windowName: worktreeName(first),
+        chatMode: true,
+      });
+      for (const w of rest) {
+        try {
+          await window.api.tmuxNewWindow({
+            sessionName,
+            windowName: worktreeName(w),
+            cwd: w.path,
+            chatMode: true,
+          });
+        } catch (e) {
+          // Surface but don't abort — partial fan-out beats undoing halfway.
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }
+
+      await refresh();
+      const proj = useStore.getState().projects.find(
+        (p) => p.tmuxSession === sessionName,
+      );
+      const win = proj?.windows.find((w) => w.name === worktreeName(first));
+      if (win?.opencodeSessionId) {
+        setActive(sessionName, win.index);
+        try {
+          await window.api.tmuxSelectWindow({
+            sessionName,
+            windowIndex: win.index,
+          });
+        } catch { /* non-fatal */ }
+        if (text) {
+          await window.api.opencodePrompt(
+            win.opencodeSessionId,
+            text,
+            modelOverride ?? undefined,
+          );
+        }
       }
       onDone();
     } catch (e) {
@@ -292,7 +371,23 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
           </button>
 
           <div className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-border bg-card text-meta">
-            {branchName ? (
+            {wantWorktree && isGitRepo ? (
+              // BET-417 §A: "Ticking worktree makes the branch field
+              // editable." The typed value is passed as `name` to
+              // gitAddWorktree, which deriveWorktree turns into the new
+              // branch name.
+              <span className="inline-flex items-center gap-1">
+                <GitBranch size={14} className="shrink-0 text-text-muted" aria-hidden="true" />
+                <input
+                  value={worktreeBranch}
+                  onChange={(e) => setWorktreeBranch(e.target.value)}
+                  spellCheck={false}
+                  className="w-[100px] bg-transparent border-0 outline-none text-text font-mono focus:border-b focus:border-accent"
+                  placeholder="branch-name"
+                  aria-label="Worktree branch name"
+                />
+              </span>
+            ) : branchName ? (
               <span className="inline-flex items-center gap-1 text-text-muted">
                 <GitBranch size={14} className="shrink-0" aria-hidden="true" />
                 <span className="truncate max-w-[120px]">{branchName}</span>
@@ -397,8 +492,49 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             setCwd(path);
             setPickerOpen(false);
           }}
+          onFanOut={(baseCwd, wts) => {
+            setFanOutWorktrees(wts);
+            setCwd(baseCwd);
+            setPickerOpen(false);
+          }}
           onCancel={() => setPickerOpen(false)}
         />
+      )}
+
+      {fanOutWorktrees && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-[480px] max-w-[92vw] bg-bg-elev border border-border rounded-xl shadow-xl p-4 space-y-3">
+            <div className="text-body font-semibold text-text">Fan-out confirmed</div>
+            <div className="text-meta text-text-muted">
+              Creating one session with {fanOutWorktrees.length} windows (one per
+              worktree). The first window gets your prompt.
+            </div>
+            <ul className="text-label text-text-faint space-y-px max-h-40 overflow-y-auto">
+              {fanOutWorktrees.map((w) => (
+                <li key={w.path} className="truncate">
+                  <span className="text-text-muted">{worktreeName(w)}</span>
+                  {" "}<span className="text-text-faint">— {w.path}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex gap-2">
+              <button
+                onClick={() => void submitFanOut(cwd, fanOutWorktrees)}
+                disabled={sending}
+                className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
+              >
+                {sending ? "Creating…" : "Create"}
+              </button>
+              <button
+                onClick={() => setFanOutWorktrees(null)}
+                disabled={sending}
+                className="text-meta px-3 py-2 text-text-faint hover:text-text"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

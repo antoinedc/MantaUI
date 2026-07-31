@@ -403,6 +403,13 @@ export function MobileCreateSheet({ mode, onClose, onCreated }: Props) {
             setCwd(path);
             setFolderPickerOpen(false);
           }}
+          onFanOut={(baseCwd, wts) => {
+            // Fan-out from the picker: set cwd + detectedWorktrees so the
+            // existing MobileCreateSheet fan-out UI takes over.
+            setCwd(baseCwd);
+            setDetectedWorktrees(wts);
+            setFolderPickerOpen(false);
+          }}
           onCancel={() => setFolderPickerOpen(false)}
         />
       )}
