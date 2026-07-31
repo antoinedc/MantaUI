@@ -117,6 +117,20 @@ ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# Install a staged temp file as a root-owned, world-readable config file.
+#
+# ALWAYS use this instead of `mv` or `tee` for files a system service must
+# read. `mv` preserves the SOURCE file's mode + owner, and mktemp(1) creates
+# 0600 files owned by the invoking user — that is exactly what made
+# /etc/caddy/Caddyfile unreadable to the `caddy` service user and silently
+# broke TLS on every re-install. install(1) sets the destination mode and
+# owner explicitly, so the result never depends on the temp file.
+#
+#   $1 = staged source path   $2 = destination path
+install_root_file() {
+  sudo -n install -m 0644 -o root -g root "$1" "$2"
+}
+
 # Parse one key out of a key=value manifest body. Echoes the value, empty if
 # absent. Values may contain `=` (cut -d= -f2- preserves them). A repeated key
 # is reduced to the FIRST occurrence (head -n1) — the manifest writer emits
@@ -1377,7 +1391,7 @@ main() {
         printf 'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu %s main\n' "$_caddy_codename"
         printf 'deb-src [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu %s main\n' "$_caddy_codename"
       } > "$_caddy_list_tmp"
-      sudo -n install -m 0644 "$_caddy_list_tmp" /etc/apt/sources.list.d/caddy-stable.list \
+      install_root_file "$_caddy_list_tmp" /etc/apt/sources.list.d/caddy-stable.list \
         || { rm -f "$_caddy_list_tmp"; die "failed to add Caddy apt repo"; }
       rm -f "$_caddy_list_tmp"
       sudo -n apt-get update \
@@ -1513,7 +1527,7 @@ main() {
             warn "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err)"
             warn "  the rest of the install will proceed; re-run to write the Caddy vhost."
             CADDY_E_SKIP=1
-          elif ! sudo -n install -m 0644 "$_caddy_snippet_tmp" "$CADDY_DIR_D/manta.caddy" 2>/tmp/manta-caddy-tee.err; then
+          elif ! install_root_file "$_caddy_snippet_tmp" "$CADDY_DIR_D/manta.caddy" 2>/tmp/manta-caddy-tee.err; then
             warn "failed to write $CADDY_DIR_D/manta.caddy (sudo install failed — see /tmp/manta-caddy-tee.err)"
             warn "  the rest of the install will proceed; re-run after fixing sudo to write the Caddy vhost."
             CADDY_E_SKIP=1
@@ -1542,12 +1556,12 @@ main() {
               awk '/^# >>> manta >>>$/{skip=1; print; next} /^# <<< manta <<<$/{skip=0; print "REPLACE_HERE"; next} skip{next} {print}' "$CADDYFILE" \
                 | awk -v snippet="$SNIPPET" '/REPLACE_HERE/{print snippet; next} {print}' \
                 > "$tmp"
-              if ! sudo -n mv "$tmp" "$CADDYFILE" 2>/tmp/manta-caddy-mv.err; then
-                warn "could not update $CADDYFILE (sudo mv failed — see /tmp/manta-caddy-mv.err)"
+              if ! install_root_file "$tmp" "$CADDYFILE" 2>/tmp/manta-caddy-mv.err; then
+                warn "could not update $CADDYFILE (sudo install failed — see /tmp/manta-caddy-mv.err)"
                 warn "  the rest of the install will proceed; re-run after fixing sudo to write the Caddy vhost."
                 CADDY_E_SKIP=1
-                rm -f "$tmp" 2>/dev/null || true
               fi
+              rm -f "$tmp" 2>/dev/null || true
             else
               if ! sudo -n bash -c "printf '\n%s\n' \"\$1\" >> \"\$2\"" -- "$SNIPPET" "$CADDYFILE" 2>/tmp/manta-caddy-append.err; then
                 warn "could not append to $CADDYFILE (sudo bash failed — see /tmp/manta-caddy-append.err)"

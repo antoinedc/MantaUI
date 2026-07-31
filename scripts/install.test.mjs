@@ -5119,3 +5119,42 @@ test("self-update.sh does NOT restart opencode — that would kill in-flight age
     "self-update.sh must not execute an opencode restart (only print it as advice)",
   );
 });
+
+test("install.sh writes service-read config files via install_root_file, never `sudo -n mv` (BET-440)", () => {
+  // BET-440 outage: the marker-replace branch staged the new Caddyfile in a
+  // mktemp file then moved it into place with `sudo -n mv`. mktemp(1) makes
+  // 0600 files owned by the invoking user, and mv preserves the source file's
+  // mode + owner — so /etc/caddy/Caddyfile became unreadable to the `caddy`
+  // service user and the box's TLS silently died on every re-install. This
+  // asserts the fix: a single install_root_file helper (install(1) sets the
+  // destination mode + owner explicitly), no stray `sudo -n mv`, and no caller
+  // that bypasses the helper to write a config file.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+
+  // 1. install_root_file is defined exactly once.
+  const defs = (src.match(/^[ \t]*install_root_file\(\)[ \t]*\{/gm) || []).length;
+  assert.strictEqual(defs, 1, "install_root_file() must be defined exactly once");
+
+  // 2. Its body pins the destination mode + owner root:root.
+  const open = src.indexOf("install_root_file() {");
+  const close = src.indexOf("\n}", open);
+  assert.ok(open !== -1 && close !== -1, "could not locate install_root_file() body");
+  const helperBody = src.slice(open, close);
+  assert.match(
+    helperBody,
+    /install -m 0644 -o root -g root/,
+    "install_root_file body must set 0644 + root:root explicitly",
+  );
+
+  // 3. No `sudo -n mv` remains anywhere — the exact construct that caused the outage.
+  assert.doesNotMatch(src, /sudo -n mv/, "install.sh must not contain `sudo -n mv`");
+
+  // 4. Every `sudo -n install -m 0644 <src> <dst>` lives inside the helper.
+  const totalInstallCalls = (src.match(/sudo -n install -m 0644 /g) || []).length;
+  const helperInstallCalls = (helperBody.match(/sudo -n install -m 0644 /g) || []).length;
+  assert.strictEqual(
+    totalInstallCalls,
+    helperInstallCalls,
+    "every `sudo -n install -m 0644` call must go through the install_root_file helper",
+  );
+});
