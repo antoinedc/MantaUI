@@ -273,10 +273,10 @@ export function ModelsCard() {
   return (
     <div className="space-y-3 pt-2 border-t border-border">
       <div>
-        <label className="block text-xs uppercase tracking-wider text-text-muted mb-1">
+        <label className="block text-micro font-semibold uppercase text-text-muted mb-1">
           Models
         </label>
-        <div className="text-xs text-text-faint">
+        <div className="text-meta text-text-faint">
           <b className="text-text-muted">Default</b> = the model new &amp; cleared sessions start on (exactly one; must be Main-available).{" "}
           <b className="text-text-muted">Main</b> = selectable as the chat main agent (off hides it from the composer's model picker).{" "}
           <b className="text-text-muted">Sub</b> = dispatchable as a subagent.
@@ -290,55 +290,55 @@ export function ModelsCard() {
           savedDefault ? "" : "text-text-faint italic"
         }`}
       >
-        <span className="text-[10px] uppercase tracking-wider text-text-faint">Default</span>
+        <span className="text-micro font-semibold uppercase text-text-faint">Default</span>
         {savedDefault ? (() => {
           const m = models?.find(
             (x) => x.providerID === savedDefault.providerID && x.id === savedDefault.modelID,
           );
           return (
-            <span className="text-[13px] text-text font-semibold inline-flex items-center gap-2">
+            <span className="text-label text-text font-semibold inline-flex items-center gap-2">
               {m?.name ?? savedDefault.modelID}
               <span className="text-text-faint font-normal">{savedDefault.providerID}</span>
             </span>
           );
         })() : (
-          <span className="text-[13px]">No default set — opencode default (server decides)</span>
+          <span className="text-label">No default set — opencode default (server decides)</span>
         )}
       </div>
 
-      {globalError && <div className="text-xs text-danger">{globalError}</div>}
-      {loading && <div className="text-xs text-text-faint">Loading models…</div>}
+      {globalError && <div className="text-meta text-danger">{globalError}</div>}
+      {loading && <div className="text-meta text-text-faint">Loading models…</div>}
 
       <input
         type="text"
         placeholder="Search models by name, provider, capability…"
         value={searchQuery}
         onChange={(e) => setSearchQuery(e.target.value)}
-        className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
       />
 
       <div className="border border-border rounded overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full text-body">
           <thead>
             <tr className="border-b border-border">
-              <th className="text-left text-[10px] uppercase tracking-wider text-text-faint font-semibold px-3 py-2">
+              <th className="text-left text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2">
                 Model
               </th>
-              <th className="text-center text-[10px] uppercase tracking-wider text-text-faint font-semibold px-3 py-2 w-[80px]">
+              <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
                 Default
-                <span className="block text-[9px] normal-case tracking-normal text-text-faint font-normal mt-0.5">
+                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-0.5">
                   main
                 </span>
               </th>
-              <th className="text-center text-[10px] uppercase tracking-wider text-text-faint font-semibold px-3 py-2 w-[80px]">
+              <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
                 Main
-                <span className="block text-[9px] normal-case tracking-normal text-text-faint font-normal mt-0.5">
+                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-0.5">
                   agent
                 </span>
               </th>
-              <th className="text-center text-[10px] uppercase tracking-wider text-text-faint font-semibold px-3 py-2 w-[80px]">
+              <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
                 Sub
-                <span className="block text-[9px] normal-case tracking-normal text-text-faint font-normal mt-0.5">
+                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-0.5">
                   agent
                 </span>
               </th>
@@ -347,7 +347,7 @@ export function ModelsCard() {
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={4} className="px-3 py-4 text-center text-xs text-text-faint">
+                <td colSpan={4} className="px-3 py-4 text-center text-meta text-text-faint">
                   No models found
                 </td>
               </tr>
@@ -367,17 +367,17 @@ export function ModelsCard() {
                 <tr key={key} className="border-b border-border/40 hover:bg-bg-soft/40">
                   <td className="px-3 py-2 align-middle">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm text-text font-medium">{m.name}</span>
-                      <span className="text-[10px] text-text-faint">{m.providerID}</span>
-                      {ctxSize && <span className="text-[10px] text-text-faint">{ctxSize}</span>}
+                      <span className="text-body text-text font-medium">{m.name}</span>
+                      <span className="text-meta text-text-faint">{m.providerID}</span>
+                      {ctxSize && <span className="text-meta text-text-faint">{ctxSize}</span>}
                       {info && (
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${TIER_CLASS[info.tier]}`}>
+                        <span className={`px-1.5 py-0.5 rounded text-meta ${TIER_CLASS[info.tier]}`}>
                           {info.tier}
                         </span>
                       )}
                     </div>
                     {info && (
-                      <div className="text-[11px] text-text-faint mt-1 max-w-[440px]">
+                      <div className="text-label text-text-faint mt-1 max-w-[440px]">
                         {info.blurb}
                       </div>
                     )}
@@ -426,13 +426,13 @@ export function ModelsCard() {
         {!restartConfirmOpen ? (
           <button
             onClick={() => { setRestartConfirmOpen(true); setRestartResult(null); }}
-            className="px-3 py-1.5 text-xs bg-bg-soft border border-border rounded text-text-muted hover:text-text"
+            className="px-3 py-1.5 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text"
           >
             ⟳ Restart opencode
           </button>
         ) : (
           <div className="space-y-2">
-            <div className="text-xs text-warn">
+            <div className="text-meta text-warn">
               Restarting opencode applies subagent changes but STOPS all
               running opencode sessions — any in-progress turns will be
               interrupted. Continue?
@@ -441,14 +441,14 @@ export function ModelsCard() {
               <button
                 onClick={() => void doRestart()}
                 disabled={restarting}
-                className="px-3 py-1 text-xs bg-danger-bg border border-danger rounded text-danger hover:text-danger disabled:opacity-40"
+                className="px-3 py-1 text-meta bg-danger-bg border border-danger rounded text-danger hover:text-danger disabled:opacity-40"
               >
                 {restarting ? "Restarting…" : "Restart"}
               </button>
               <button
                 onClick={() => setRestartConfirmOpen(false)}
                 disabled={restarting}
-                className="px-2 py-1 text-xs text-text-faint hover:text-text disabled:opacity-40"
+                className="px-2 py-1 text-meta text-text-faint hover:text-text disabled:opacity-40"
               >
                 Cancel
               </button>
@@ -456,11 +456,11 @@ export function ModelsCard() {
           </div>
         )}
         {restartResult && (
-          <div className={`text-xs ${restartResult.ok ? "text-ok" : "text-danger"}`}>
+          <div className={`text-meta ${restartResult.ok ? "text-ok" : "text-danger"}`}>
             {restartResult.message}
           </div>
         )}
-        <div className="text-[10px] text-text-faint">
+        <div className="text-meta text-text-faint">
           Restart applies config to opencode's own service (systemctl --user
           restart opencode-serve) — separate from manta-server itself.
         </div>

@@ -383,7 +383,7 @@ export function InputArea({
           placeholder={running ? "Queue a message…  (⏎ to queue · Esc to stop)" : "Try something…  (@ files · / commands · tab insert · ⏎ send)"}
           rows={1}
           spellCheck={false}
-          className="flex-1 resize-none bg-transparent text-text text-[13px] focus:outline-none placeholder:text-text-faint font-mono"
+          className="flex-1 resize-none bg-transparent text-text text-code focus:outline-none placeholder:text-text-faint font-mono"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
       </div>
@@ -406,7 +406,7 @@ export function InputArea({
             // desktop rule. mobile.css uses it to give the branch chip its
             // own line in the stacked mobile footer (see mobile.css).
             <span
-              className="manta-composer-branch text-text-faint shrink-0 truncate max-w-[160px] inline-flex items-center gap-1"
+              className="manta-composer-branch text-text-faint font-mono shrink-0 truncate max-w-[160px] inline-flex items-center gap-1"
               title={`Current branch: ${branch}`}
             >
               <GitBranch size={14} aria-hidden="true" className="shrink-0" />
@@ -461,7 +461,7 @@ export function InputArea({
           {/* Transient status only — recording / interrupt feedback. The static */}
           {/* keyboard-hint (shift+⏎ newline · ⏎ send) was removed to declutter. */}
           {(voiceActive || running) && (
-            <span className="text-[10px] text-text-faint">
+            <span className="text-meta text-text-faint">
               {voiceActive
                 ? voiceProcessing
                   ? "transcribing… · esc cancels"
@@ -473,7 +473,7 @@ export function InputArea({
       </div>
       {/* Trust toggle — its own line, more visible when ON. Below the footer */}
       {/* so it doesn't crowd the model/hints row. */}
-      <div className="manta-composer-trust px-4 pb-3 flex items-center text-[10px]">
+      <div className="manta-composer-trust px-4 pb-3 flex items-center text-meta">
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={

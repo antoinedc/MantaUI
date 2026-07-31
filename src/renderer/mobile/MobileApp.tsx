@@ -681,7 +681,7 @@ export function MobileApp() {
     return (
       <div className="mobile">
         <div className="h-full flex flex-col items-center justify-center gap-4 px-8 text-center">
-          <div className="text-text-muted text-sm">{bootError}</div>
+          <div className="text-text-muted text-body">{bootError}</div>
           <button
             className="mobile-tap px-5 rounded-lg bg-accent-soft text-white"
             onClick={doRefresh}

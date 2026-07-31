@@ -537,12 +537,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       <div className="titlebar-drag h-12 shrink-0" />
       <div className="px-3 pb-2 flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+          <h2 className="text-meta font-semibold uppercase tracking-wider text-text-muted">
             Workspace
           </h2>
           {backgroundSyncing && (
             <span
-              className="flex items-center gap-1.5 text-[11px] text-text-faint"
+              className="flex items-center gap-1.5 text-label text-text-faint"
               title="Syncing session state…"
             >
               <span
@@ -574,7 +574,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               else if (e.key === "Escape") resetNewProjectForm();
             }}
             disabled={!!detectedWorktrees || creating}
-            className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded focus:outline-none focus:border-accent disabled:opacity-60"
+            className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded focus:outline-none focus:border-accent disabled:opacity-60"
           />
           {/* Wrapper holds the background + border so the input can be
               transparent — that lets the ghost-text overlay show through
@@ -587,7 +587,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             {cwdSuggestion && cwdSuggestion.startsWith(newProjectCwd) && (
               <div
                 aria-hidden
-                className="absolute inset-0 px-2 py-1 text-xs flex items-center pointer-events-none whitespace-pre overflow-hidden font-mono"
+                className="absolute inset-0 px-2 py-1 text-meta flex items-center pointer-events-none whitespace-pre overflow-hidden font-mono"
               >
                 <span className="invisible">{newProjectCwd}</span>
                 <span className="text-text-faint">
@@ -625,15 +625,15 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               disabled={!!detectedWorktrees || creating}
               spellCheck={false}
               autoComplete="off"
-              className="relative w-full bg-transparent border-0 px-2 py-1 text-xs rounded focus:outline-none font-mono"
+              className="relative w-full bg-transparent border-0 px-2 py-1 text-meta rounded focus:outline-none font-mono"
             />
           </div>
           {detectedWorktrees ? (
             <div className="space-y-2">
-              <div className="text-xs text-text-muted">
+              <div className="text-meta text-text-muted">
                 Detected {detectedWorktrees.length} git worktrees. Open a session for each?
               </div>
-              <ul className="text-[11px] text-text-faint space-y-0.5 max-h-32 overflow-y-auto">
+              <ul className="text-label text-text-faint space-y-0.5 max-h-32 overflow-y-auto">
                 {detectedWorktrees.map((w) => (
                   <li key={w.path} className="truncate">
                     <span className="text-text-muted">{worktreeName(w)}</span>
@@ -645,21 +645,21 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 <button
                   onClick={() => createProject("all")}
                   disabled={creating}
-                  className="text-xs px-2 py-1 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
+                  className="text-meta px-2 py-1 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
                 >
                   Yes, one per worktree
                 </button>
                 <button
                   onClick={() => createProject("single")}
                   disabled={creating}
-                  className="text-xs px-2 py-1 border border-border text-text-muted hover:text-text rounded disabled:opacity-50"
+                  className="text-meta px-2 py-1 border border-border text-text-muted hover:text-text rounded disabled:opacity-50"
                 >
                   Just main
                 </button>
                 <button
                   onClick={resetNewProjectForm}
                   disabled={creating}
-                  className="text-xs px-2 py-1 text-text-muted hover:text-text"
+                  className="text-meta px-2 py-1 text-text-muted hover:text-text"
                 >
                   Cancel
                 </button>
@@ -671,14 +671,14 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 <button
                   onClick={() => createProject("auto")}
                   disabled={creating}
-                  className="text-xs px-2 py-1 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
+                  className="text-meta px-2 py-1 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
                 >
                   {creating ? "Checking…" : "Create"}
                 </button>
                 <button
                   onClick={resetNewProjectForm}
                   disabled={creating}
-                  className="text-xs px-2 py-1 text-text-muted hover:text-text"
+                  className="text-meta px-2 py-1 text-text-muted hover:text-text"
                 >
                   Cancel
                 </button>
@@ -690,7 +690,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
       <div className="flex-1 overflow-y-auto px-2 pb-2">
         {projects.length === 0 && !newProjectOpen && (
-          <div className="px-2 py-3 text-xs text-text-faint">
+          <div className="px-2 py-3 text-meta text-text-faint">
             No projects yet. Click + or press {MOD_KEY}N.
           </div>
         )}
@@ -702,7 +702,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           return (
             <div key={p.tmuxSession} className="mb-4">
               <div
-                className="group flex items-center gap-1 px-1 py-1 rounded text-xs uppercase tracking-wider text-text-muted hover:text-text cursor-pointer select-none"
+                className="group flex items-center gap-1 px-1 py-1 rounded text-micro font-semibold uppercase text-text-muted hover:text-text cursor-pointer select-none"
                 onClick={() => toggleCollapse(p.tmuxSession)}
               >
                 <span className="w-3 flex items-center justify-center text-text-quiet">
@@ -771,7 +771,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                     return (
                       <div key={w.index}>
                         <div
-                          className={`group flex items-center gap-1 pl-2 pr-2 py-1 min-h-8 rounded text-xs cursor-pointer transition ${
+                          className={`group flex items-center gap-1 pl-2 pr-2 py-1 min-h-8 rounded text-meta cursor-pointer transition ${
                             isActive
                               ? "bg-bg-soft text-text"
                               : "text-text-muted hover:bg-bg-soft hover:text-text"
@@ -809,7 +809,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                               {isJobRow(jobs, w.opencodeSessionId) &&
                                 jobs[w.opencodeSessionId as string]?.activity && (
                                   <span
-                                    className="text-text-faint text-[10px] truncate leading-tight"
+                                    className="text-text-faint text-meta truncate leading-tight"
                                     title={jobs[w.opencodeSessionId as string]!.activity}
                                   >
                                     {jobs[w.opencodeSessionId as string]!.activity}
@@ -836,7 +836,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                                     },
                               );
                             }}
-                            className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger text-xs leading-none inline-flex items-center"
+                            className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger text-meta leading-none inline-flex items-center"
                             title="Close session"
                             aria-label="Close session"
                           >
@@ -876,7 +876,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                           if (e.key === "Enter") createSession();
                           else if (e.key === "Escape") setNewSessionFor(null);
                         }}
-                        className="w-full bg-bg-soft border border-border px-2 py-0.5 text-xs rounded focus:outline-none focus:border-accent"
+                        className="w-full bg-bg-soft border border-border px-2 py-0.5 text-meta rounded focus:outline-none focus:border-accent"
                       />
                       {/* BET-246: per-session worktree override. Disabled
                           (visibly muted) when the project cwd isn't inside
@@ -884,7 +884,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                           choice. Reuses the same checkbox markup as the
                           Settings toggles. */}
                       <label
-                        className={`flex items-center gap-2 text-xs ${
+                        className={`flex items-center gap-2 text-meta ${
                           newSessionIsGitRepo ? "cursor-pointer" : "cursor-not-allowed opacity-50"
                         }`}
                         title={newSessionIsGitRepo ? undefined : "not a git repository"}
@@ -901,13 +901,13 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                       <div className="flex gap-2">
                         <button
                           onClick={createSession}
-                          className="text-xs px-2 py-0.5 bg-accent-solid text-on-accent rounded hover:opacity-90"
+                          className="text-meta px-2 py-0.5 bg-accent-solid text-on-accent rounded hover:opacity-90"
                         >
                           Create
                         </button>
                         <button
                           onClick={() => setNewSessionFor(null)}
-                          className="text-xs px-2 py-0.5 text-text-muted hover:text-text"
+                          className="text-meta px-2 py-0.5 text-text-muted hover:text-text"
                         >
                           Cancel
                         </button>
@@ -918,7 +918,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   {p.windows.length === 0 && newSessionFor !== p.tmuxSession && (
                     <button
                       onClick={() => startNewSession(p.tmuxSession)}
-                      className="block w-full text-left px-2 py-0.5 text-xs text-text-faint hover:text-text"
+                      className="block w-full text-left px-2 py-0.5 text-meta text-text-faint hover:text-text"
                     >
                       + new session
                     </button>
@@ -933,7 +933,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       <div className="mt-auto p-2 border-t border-border">
         <button
           onClick={onOpenSettings}
-          className="w-full text-left px-2 py-1 text-xs text-text-muted hover:text-text"
+          className="w-full text-left px-2 py-1 text-meta text-text-muted hover:text-text"
         >
           Settings…
         </button>
@@ -1009,7 +1009,7 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
           const hoverOnly =
             cls === "stale" ? " opacity-0 group-hover:opacity-100" : "";
           return (
-            <span className={`text-[10px] tabular-nums ${color}${hoverOnly}`}>
+            <span className={`text-meta font-mono tabular-nums ${color}${hoverOnly}`}>
               {formatAge(now - status.lastMessageAt!)}
             </span>
           );
@@ -1029,7 +1029,7 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
           : "Waiting on permission — click to approve or deny";
       return (
         <span
-          className="flex items-center gap-0.5 text-[10px] text-danger leading-none"
+          className="flex items-center gap-0.5 text-meta text-danger leading-none"
           title={tooltip}
         >
           <span className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />
@@ -1055,7 +1055,7 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
   if (status.running) {
     return (
       <span
-        className="flex items-center gap-1 text-[10px] text-accent leading-none"
+        className="flex items-center gap-1 text-meta text-accent leading-none"
         title={
           status.subagents > 0
             ? `Running · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
@@ -1064,7 +1064,7 @@ function StatusIndicator({ status }: { status: WindowStatusUI | undefined }) {
       >
         <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
         {status.subagents > 0 && (
-          <span className="tabular-nums">·{status.subagents}</span>
+          <span className="font-mono tabular-nums">·{status.subagents}</span>
         )}
       </span>
     );
@@ -1100,7 +1100,7 @@ function RenameInput({
         else if (e.key === "Escape") onCancel();
       }}
       onBlur={onCommit}
-      className={`flex-1 bg-bg border border-accent px-1 py-0 text-xs rounded focus:outline-none ${
+      className={`flex-1 bg-bg border border-accent px-1 py-0 text-meta rounded focus:outline-none ${
         size === "project" ? "font-semibold normal-case tracking-normal" : ""
       }`}
     />
@@ -1118,14 +1118,14 @@ function ConfirmDelete({
 }) {
   return (
     <div className="ml-2 mt-1 mb-1 px-2 py-1.5 rounded bg-bg-soft border border-border space-y-1.5">
-      <div className="text-xs text-text-muted">Close {label}?</div>
+      <div className="text-meta text-text-muted">Close {label}?</div>
       <div className="flex flex-wrap gap-1">
         <button
           onClick={(e) => {
             e.stopPropagation();
             onKill();
           }}
-          className="text-xs px-2 py-0.5 rounded bg-danger-bg text-danger hover:bg-danger-bg"
+          className="text-meta px-2 py-0.5 rounded bg-danger-bg text-danger hover:bg-danger-bg"
           title="kill the tmux session/window on the remote"
         >
           Kill on server
@@ -1135,7 +1135,7 @@ function ConfirmDelete({
             e.stopPropagation();
             onCancel();
           }}
-          className="text-xs px-2 py-0.5 text-text-faint hover:text-text"
+          className="text-meta px-2 py-0.5 text-text-faint hover:text-text"
         >
           Cancel
         </button>
@@ -1161,7 +1161,7 @@ function ConfirmWorktreeDirty({
 }) {
   return (
     <div className="ml-2 mt-1 mb-1 px-2 py-1.5 rounded bg-bg-soft border border-border space-y-1.5">
-      <div className="text-xs text-text-muted">
+      <div className="text-meta text-text-muted">
         <code className="break-all">{worktreePath}</code> has uncommitted
         changes. Removing the worktree will permanently delete that work.
         Remove anyway?
@@ -1172,7 +1172,7 @@ function ConfirmWorktreeDirty({
             e.stopPropagation();
             onRemove();
           }}
-          className="text-xs px-2 py-0.5 rounded bg-danger-bg text-danger hover:bg-danger-bg"
+          className="text-meta px-2 py-0.5 rounded bg-danger-bg text-danger hover:bg-danger-bg"
           title="git worktree remove --force (discards uncommitted changes)"
         >
           Remove
@@ -1182,7 +1182,7 @@ function ConfirmWorktreeDirty({
             e.stopPropagation();
             onKeep();
           }}
-          className="text-xs px-2 py-0.5 text-text-faint hover:text-text"
+          className="text-meta px-2 py-0.5 text-text-faint hover:text-text"
           title="leave the worktree + branch on disk; just close the session"
         >
           Keep worktree

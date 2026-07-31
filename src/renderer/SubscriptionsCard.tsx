@@ -85,27 +85,27 @@ export function SubscriptionsCard() {
 
   return (
     <div className="space-y-2 pt-2 border-t border-border">
-      <label className="block text-xs uppercase tracking-wider text-text-muted">
+      <label className="block text-micro font-semibold uppercase text-text-muted">
         Subscriptions
       </label>
-      <div className="text-xs text-text-faint space-y-1">
+      <div className="text-meta text-text-faint space-y-1">
         <div>
           Sign in with a subscription you already pay for. MantaUI never sees
           your password or your key after it is saved.
         </div>
       </div>
 
-      {error && <div className="text-xs text-danger break-words">{error}</div>}
+      {error && <div className="text-meta text-danger break-words">{error}</div>}
 
       {(statuses ?? []).map((s) => (
         <div key={s.id} className="border border-border rounded p-2 space-y-1.5">
           <div className="flex items-center gap-2">
             <div className="flex-1 min-w-0">
-              <div className="text-sm text-text truncate">
+              <div className="text-body text-text truncate">
                 <span className="font-medium">{s.label}</span>
                 <span className="text-text-faint"> · {s.plan}</span>
               </div>
-              <div className="text-[10px] text-text-faint flex items-center gap-1.5">
+              <div className="text-meta text-text-faint flex items-center gap-1.5">
                 <span
                   aria-hidden
                   className={`inline-block w-1.5 h-1.5 rounded-full ${
@@ -121,14 +121,14 @@ export function SubscriptionsCard() {
                   <button
                     onClick={() => void disconnect(s.id)}
                     disabled={busy !== null}
-                    className="px-2 py-1 text-xs bg-danger-bg border border-danger rounded text-danger hover:text-danger disabled:opacity-40"
+                    className="px-2 py-1 text-meta bg-danger-bg border border-danger rounded text-danger hover:text-danger disabled:opacity-40"
                   >
                     {busy === s.id ? "…" : "Disconnect"}
                   </button>
                   <button
                     onClick={() => setDisconnectConfirmId(null)}
                     disabled={busy !== null}
-                    className="px-2 py-1 text-xs text-text-faint hover:text-text disabled:opacity-40"
+                    className="px-2 py-1 text-meta text-text-faint hover:text-text disabled:opacity-40"
                   >
                     Cancel
                   </button>
@@ -137,7 +137,7 @@ export function SubscriptionsCard() {
                 <button
                   onClick={() => setDisconnectConfirmId(s.id)}
                   disabled={busy !== null || connectingId !== null}
-                  className="px-2 py-1 text-xs bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                  className="px-2 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
                 >
                   Disconnect
                 </button>
@@ -149,7 +149,7 @@ export function SubscriptionsCard() {
                   setConnectingId(s.id);
                 }}
                 disabled={busy !== null || connectingId !== null}
-                className="px-2 py-1 text-xs bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                className="px-2 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
               >
                 Connect
               </button>

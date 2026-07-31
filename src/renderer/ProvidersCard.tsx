@@ -130,34 +130,34 @@ export function ProvidersCard() {
 
   return (
     <div className="space-y-2 pt-2 border-t border-border">
-      <label className="block text-xs uppercase tracking-wider text-text-muted">
+      <label className="block text-micro font-semibold uppercase text-text-muted">
         Providers
       </label>
-      <div className="text-xs text-text-faint">
+      <div className="text-meta text-text-faint">
         OpenAI-compatible endpoints opencode can serve. Refresh to discover models,
         then enable the ones you want in the model picker.
       </div>
 
-      {globalError && <div className="text-xs text-danger">{globalError}</div>}
+      {globalError && <div className="text-meta text-danger">{globalError}</div>}
 
       {(endpoints ?? []).map((ep) => (
         <div key={ep.id} className="border border-border rounded p-2 space-y-1">
           <div className="flex items-center gap-2">
             <div className="flex-1 min-w-0">
-              <div className="text-sm text-text truncate">{ep.name}</div>
-              <code className="text-[10px] text-text-faint truncate block">{ep.baseURL}</code>
+              <div className="text-body text-text truncate">{ep.name}</div>
+              <code className="text-meta text-text-faint truncate block">{ep.baseURL}</code>
             </div>
             <button
               onClick={() => refresh(ep)}
               disabled={busy === ep.id}
-              className="px-2 py-1 text-xs bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+              className="px-2 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
             >
               {busy === ep.id ? "…" : "Refresh"}
             </button>
             <button
               onClick={() => removeEndpoint(ep)}
               disabled={busy === ep.id}
-              className="text-xs text-text-faint hover:text-text px-1 inline-flex items-center"
+              className="text-meta text-text-faint hover:text-text px-1 inline-flex items-center"
               title="Remove endpoint"
               aria-label="Remove endpoint"
             >
@@ -165,10 +165,10 @@ export function ProvidersCard() {
             </button>
           </div>
           {discoverError[ep.id] && (
-            <div className="text-[10px] text-danger">{discoverError[ep.id]}</div>
+            <div className="text-meta text-danger">{discoverError[ep.id]}</div>
           )}
           {(discovered[ep.id] ?? ep.enabledModels.map((id) => ({ id }))).map((m) => (
-            <label key={m.id} className="flex items-center gap-2 text-xs cursor-pointer">
+            <label key={m.id} className="flex items-center gap-2 text-meta cursor-pointer">
               <input
                 type="checkbox"
                 checked={ep.enabledModels.includes(m.id)}
@@ -182,30 +182,30 @@ export function ProvidersCard() {
       ))}
 
       <div className="border border-dashed border-border rounded p-2 space-y-1">
-        <div className="text-[10px] uppercase tracking-wider text-text-faint">Add endpoint</div>
-        <input className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded"
+        <div className="text-micro font-semibold uppercase text-text-faint">Add endpoint</div>
+        <input className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded"
           placeholder="id (e.g. voska)" value={draft.id}
           onChange={(e) => setDraft((d) => ({ ...d, id: e.target.value }))} />
-        <input className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded"
+        <input className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded"
           placeholder="name (e.g. VoskaAI)" value={draft.name}
           onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} />
-        <input className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded"
+        <input className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded"
           placeholder="baseURL (https://api.voska.org/v1)" value={draft.baseURL}
           onChange={(e) => setDraft((d) => ({ ...d, baseURL: e.target.value }))} />
-        <input type="password" className="w-full bg-bg-soft border border-border px-2 py-1 text-xs rounded"
+        <input type="password" className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded"
           placeholder="API key" value={draft.apiKey}
           onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))} />
         <button
           onClick={addEndpoint}
           disabled={!draft.id.trim() || !draft.baseURL.trim() || busy !== null}
-          className="px-3 py-1 text-xs bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+          className="px-3 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
         >
           Add
         </button>
       </div>
 
       {restartNeeded && (
-        <div className="flex items-center gap-2 text-xs bg-bg-soft border border-border rounded p-2">
+        <div className="flex items-center gap-2 text-meta bg-bg-soft border border-border rounded p-2">
           <span className="flex-1 text-text-muted">
             Restart opencode now to apply? (interrupts active sessions)
           </span>

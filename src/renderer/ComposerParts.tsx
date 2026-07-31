@@ -30,7 +30,7 @@ export function SessionToolbar({
   onJobs: () => void;
 }) {
   return (
-    <span className="manta-session-toolbar flex items-center gap-1 text-[10px]">
+    <span className="manta-session-toolbar flex items-center gap-1 text-meta">
       <button
         onClick={onSchedules}
         className="px-1.5 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
@@ -79,7 +79,7 @@ export function AttachmentStrip({
   // pt-2 above + pb-2 below leaves a clear gap between the chip row and the
   // input area's top border.
   return (
-    <div className="shrink-0 px-4 pt-2 pb-2 flex flex-wrap gap-1 text-[11px]">
+    <div className="shrink-0 px-4 pt-2 pb-2 flex flex-wrap gap-1 text-label">
       {attachments.map((a) => {
         const color =
           a.status === "error"
@@ -134,7 +134,7 @@ export function TypeaheadPopup({
   emptyHint: string;
 }) {
   return (
-    <div className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded border border-border bg-bg-elev shadow-lg text-[12px]">
+    <div className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded border border-border bg-bg-elev shadow-lg text-meta font-mono">
       {rows.length === 0 && (
         <div className="px-2 py-1 text-text-faint italic">{emptyHint}</div>
       )}
@@ -151,7 +151,7 @@ export function TypeaheadPopup({
             >
               <span className="truncate flex-1">{row.primary}</span>
               {row.secondary && (
-                <span className="text-danger/70 truncate max-w-[50%] text-[11px]">
+                <span className="text-danger/70 truncate max-w-[50%] text-label">
                   {row.secondary}
                 </span>
               )}
@@ -170,7 +170,7 @@ export function TypeaheadPopup({
           >
             <span className="truncate flex-1">{row.primary}</span>
             {row.secondary && (
-              <span className="text-text-faint truncate max-w-[50%] text-[11px]">
+              <span className="text-text-faint truncate max-w-[50%] text-label">
                 {row.secondary}
               </span>
             )}

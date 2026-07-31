@@ -1685,9 +1685,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
   if (error) {
     return (
       <div className="h-full w-full flex items-center justify-center bg-bg text-text-muted p-6 font-mono">
-        <div className="max-w-md text-sm">
+        <div className="max-w-md text-body">
           <div className="font-semibold text-text mb-2">Couldn't load session</div>
-          <pre className="whitespace-pre-wrap break-words text-xs text-text-faint">{error}</pre>
+          <pre className="whitespace-pre-wrap break-words text-meta text-text-faint">{error}</pre>
         </div>
       </div>
     );
@@ -1695,7 +1695,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
   if (!messages) {
     return (
-      <div className="h-full w-full flex flex-col items-center justify-center gap-3 bg-bg text-text-faint text-sm font-mono">
+      <div className="h-full w-full flex flex-col items-center justify-center gap-3 bg-bg text-text-faint text-body font-mono">
         <div
           className="h-5 w-5 rounded-full border-2 border-text-faint border-t-transparent animate-spin"
           aria-hidden
@@ -1726,7 +1726,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             backgroundColor: "var(--accent-bg)",
           }}
         >
-          <span className="text-sm text-text" style={{ color: "var(--accent)" }}>
+          <span className="text-body text-text" style={{ color: "var(--accent)" }}>
             Drop to attach
           </span>
         </div>
@@ -1936,7 +1936,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
           {messageQueue.length > 0 && (
             <div className="shrink-0 px-4 pb-2 flex flex-col gap-0.5">
               {messageQueue.map((msg, i) => (
-                <div key={i} className="text-[13px] text-text-faint font-mono flex items-baseline gap-1">
+                <div key={i} className="text-code text-text-faint font-mono flex items-baseline gap-1">
                   <span className="select-none shrink-0">⏎ </span>
                   <span className="italic flex-1 truncate">{msg}</span>
                   <button
@@ -1960,7 +1960,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {/* that dispatches `manta-open-subscriptions` — a no-op until the */}
       {/* Settings → AI → Subscriptions card lands (BET-314). */}
       {sendError && (
-        <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-[12px] text-danger bg-danger-bg border border-danger/30 rounded break-words flex items-start gap-2">
+        <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded break-words flex items-start gap-2">
           <span className="flex-1">⚠ {sendError}</span>
           {authReconnect && (
             <button
@@ -1986,7 +1986,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {/* image or a new Screenshot file on the Desktop. Only the active panel */}
       {/* renders it — it lives in global store state, one instance app-wide. */}
       {isActive && screenshotToast && (
-        <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-[12px] text-text-muted flex items-center gap-2">
+        <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-meta text-text-muted flex items-center gap-2">
           <span className="flex-1 truncate">
             {screenshotToast.source === "file" && screenshotToast.path
               ? `Screenshot: ${screenshotToast.path.split("/").pop()}`
@@ -2014,7 +2014,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {/* otherwise it's a Save/dismiss prompt. Single global instance, active */}
       {/* panel only — mirrors the screenshot toast above. */}
       {isActive && agentFileToast && (
-        <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-[12px] text-text-muted flex items-center gap-2">
+        <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-meta text-text-muted flex items-center gap-2">
           <span className="flex-1 truncate">
             <span className="text-text">↓ {agentFileToast.name}</span>
             {formatBytes(agentFileToast.size) && (
@@ -2055,7 +2055,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
       {/* Ephemeral system notice (e.g. /help output). Dismissed by clicking ×. */}
       {systemNotice && (
-        <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-[12px] text-text-muted flex items-start gap-2">
+        <div className="shrink-0 mx-4 mb-1 rounded border border-border bg-bg-elev px-3 py-2 text-meta text-text-muted flex items-start gap-2">
           <pre className="flex-1 whitespace-pre-wrap font-mono">{systemNotice}</pre>
           <button
             onClick={() => setSystemNotice(null)}

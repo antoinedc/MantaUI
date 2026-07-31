@@ -23,7 +23,7 @@ export function TtlToggle({ ttl, setTtl, compact = false }: Props) {
       <button
         type="button"
         onClick={() => setTtl("5m")}
-        className={`flex-1 ${pad} py-2 text-sm rounded border ${
+        className={`flex-1 ${pad} py-2 text-body rounded border ${
           ttl === "5m" ? selected : unselected
         }`}
       >
@@ -32,7 +32,7 @@ export function TtlToggle({ ttl, setTtl, compact = false }: Props) {
       <button
         type="button"
         onClick={() => setTtl("1h")}
-        className={`flex-1 ${pad} py-2 text-sm rounded border ${
+        className={`flex-1 ${pad} py-2 text-body rounded border ${
           ttl === "1h" ? selected : unselected
         }`}
       >

@@ -877,7 +877,7 @@ export function App() {
           />
         )}
         <div className="titlebar-drag h-12 border-b border-border flex items-center px-4 gap-2 min-w-0">
-          <div className="text-xs text-text-muted flex items-center gap-2 min-w-0">
+          <div className="text-meta text-text-muted flex items-center gap-2 min-w-0">
             {activeProjectName && (
               <span className="text-text-faint shrink-0">
                 {activeProjectName}
@@ -929,7 +929,7 @@ export function App() {
           {activeChatSessionId && (
             <div className="ml-auto" style={{ WebkitAppRegion: "no-drag" } as CSSProperties}>
               <select
-                className="text-xs bg-bg-elev border border-border rounded px-1 py-0.5 text-text cursor-pointer hover:border-border-strong focus:outline-none focus:border-accent"
+                className="text-meta bg-bg-elev border border-border rounded px-1 py-0.5 text-text cursor-pointer hover:border-border-strong focus:outline-none focus:border-accent"
                 style={{ colorScheme: "dark" }}
                 value={mode}
                 onChange={(e) => setMode(e.target.value as SessionMode)}
@@ -951,7 +951,7 @@ export function App() {
         </div>
         <div className="flex-1 relative">
           {projects.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-text-faint text-sm">
+            <div className="h-full flex items-center justify-center text-text-faint text-body">
               {serverUrl || boxId
                 ? `Create a project (${MOD_KEY}N) to start.`
                 : "Open Settings to connect to your box."}

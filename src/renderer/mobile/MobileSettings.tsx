@@ -242,9 +242,9 @@ export function MobileSettings({ onClose }: Props) {
         >
           ‹
         </button>
-        <div className="flex-1 text-text font-bold text-base">Settings</div>
+        <div className="flex-1 text-text font-bold text-title">Settings</div>
         <button
-          className="mobile-tap text-accent text-sm font-semibold px-2"
+          className="mobile-tap text-accent text-body font-semibold px-2"
           onClick={save}
           disabled={saving}
         >
@@ -255,7 +255,7 @@ export function MobileSettings({ onClose }: Props) {
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-5">
         {/* Server URL — the most important field for a fresh install. */}
         <section className="space-y-2">
-          <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+          <label className="block text-micro font-semibold uppercase text-text-muted">
             Server URL
           </label>
           <input
@@ -266,9 +266,9 @@ export function MobileSettings({ onClose }: Props) {
             autoComplete="off"
             autoCapitalize="off"
             inputMode="url"
-            className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+            className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
           />
-          <div className="text-xs text-text-faint">
+          <div className="text-meta text-text-faint">
             Leave blank to use the page's own origin (default). Override only
             if your Manta server is on a different host (e.g.{" "}
             <code className="text-text-muted">https://manta.example.com</code>).
@@ -277,7 +277,7 @@ export function MobileSettings({ onClose }: Props) {
           {/* Server version (BET-180) — display only. Lets a user confirm
               the renderer is talking to the box version they think (no
               skew enforcement yet). */}
-          <div className="text-xs text-text-faint">
+          <div className="text-meta text-text-faint">
             Server v{serverVersion ?? "?"}
           </div>
         </section>
@@ -285,7 +285,7 @@ export function MobileSettings({ onClose }: Props) {
         {/* Trust mode — high-impact toggle, keep it near the top. */}
         <section className="space-y-2">
           <label className="flex items-center justify-between gap-3">
-            <span className="block text-[11px] uppercase tracking-wider text-text-muted">
+            <span className="block text-micro font-semibold uppercase text-text-muted">
               Auto-allow tool permissions
             </span>
             <input
@@ -295,7 +295,7 @@ export function MobileSettings({ onClose }: Props) {
               className="w-5 h-5 accent-accent"
             />
           </label>
-          <div className="text-xs text-text-faint">
+          <div className="text-meta text-text-faint">
             Auto-reply "always" to every permission request — equivalent to
             opencode's <code className="text-text-muted">--dangerously-skip-permissions</code>.
             Question tool requests still require an explicit answer.
@@ -305,7 +305,7 @@ export function MobileSettings({ onClose }: Props) {
         {/* Auto-rename sessions. */}
         <section className="space-y-2 pt-1 border-t border-border">
           <label className="flex items-center justify-between gap-3">
-            <span className="block text-[11px] uppercase tracking-wider text-text-muted">
+            <span className="block text-micro font-semibold uppercase text-text-muted">
               Auto-rename sessions
             </span>
             <input
@@ -315,7 +315,7 @@ export function MobileSettings({ onClose }: Props) {
               className="w-5 h-5 accent-accent"
             />
           </label>
-          <div className="text-xs text-text-faint">
+          <div className="text-meta text-text-faint">
             Every few turns, ask the model for a 1-2 word title and rename the
             chat window to match the current work. Overwrites the window name,
             including names you set by hand.
@@ -324,7 +324,7 @@ export function MobileSettings({ onClose }: Props) {
 
         {/* Default model. */}
         <section className="space-y-2 pt-1 border-t border-border">
-          <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+          <label className="block text-micro font-semibold uppercase text-text-muted">
             Default model
           </label>
           <select
@@ -341,7 +341,7 @@ export function MobileSettings({ onClose }: Props) {
                 setSelectedModel({ providerID, modelID });
               }
             }}
-            className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+            className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
           >
             <option value="">opencode default</option>
             {models &&
@@ -354,7 +354,7 @@ export function MobileSettings({ onClose }: Props) {
                 </option>
               ))}
           </select>
-          <div className="text-xs text-text-faint">
+          <div className="text-meta text-text-faint">
             Used for every new and cleared session. Can be overridden
             per-session in the chat composer.
           </div>
@@ -368,10 +368,10 @@ export function MobileSettings({ onClose }: Props) {
             shown; an empty list renders nothing. */}
         {availableLaunchers.some((l) => l.flags.length > 0) && (
           <section className="space-y-3 pt-1 border-t border-border">
-            <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+            <label className="block text-micro font-semibold uppercase text-text-muted">
               AI CLI launch options
             </label>
-            <div className="text-xs text-text-faint">
+            <div className="text-meta text-text-faint">
               Flags used when launching an AI CLI (e.g. Claude Code) directly in a
               session's terminal. Only CLIs detected on this box are shown.
             </div>
@@ -379,13 +379,13 @@ export function MobileSettings({ onClose }: Props) {
               .filter((l) => l.flags.length > 0)
               .map((l) => (
                 <div key={l.id} className="space-y-2">
-                  <div className="text-sm font-medium text-text">{l.label}</div>
+                  <div className="text-body font-medium text-text">{l.label}</div>
                   {l.flags.map((f) => (
                     <label
                       key={f.key}
                       className="flex items-center justify-between gap-3"
                     >
-                      <span className="text-sm text-text">{f.label}</span>
+                      <span className="text-body text-text">{f.label}</span>
                       <input
                         type="checkbox"
                         checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]}
@@ -401,11 +401,11 @@ export function MobileSettings({ onClose }: Props) {
 
         {/* Cache TTL — two buttons, not a select, to match desktop affordance. */}
         <section className="space-y-2 pt-1 border-t border-border">
-          <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+          <label className="block text-micro font-semibold uppercase text-text-muted">
             Prompt cache TTL
           </label>
           <TtlToggle ttl={ttl} setTtl={setTtl} compact />
-          <div className="text-xs text-text-faint">
+          <div className="text-meta text-text-faint">
             Must match opencode's <code className="text-text-muted">cache_control.ttl</code> —
             manta only uses this to predict when a chat has gone stale (drives
             the "/clear to save Nk tokens" pill).
@@ -414,10 +414,10 @@ export function MobileSettings({ onClose }: Props) {
 
         {/* Voice / Groq STT. Empty key disables the mic button. */}
         <section className="space-y-2 pt-1 border-t border-border">
-          <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+          <label className="block text-micro font-semibold uppercase text-text-muted">
             Voice (Groq)
           </label>
-          <div className="text-xs text-text-faint">
+          <div className="text-meta text-text-faint">
             Adds a push-to-talk mic to the composer. Tap = dictate. Long-press
             (≥500ms) = command mode (say "clear", "compact", "use opus",
             "answer two", …). Get a key at{" "}
@@ -439,10 +439,10 @@ export function MobileSettings({ onClose }: Props) {
             autoComplete="off"
             spellCheck={false}
             autoCapitalize="off"
-            className="w-full bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent font-mono"
+            className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
           />
           <div className="space-y-1">
-            <label className="block text-[10px] uppercase tracking-wider text-text-faint">
+            <label className="block text-micro font-semibold uppercase text-text-faint">
               Transcription model
             </label>
             <input
@@ -451,11 +451,11 @@ export function MobileSettings({ onClose }: Props) {
               onChange={(e) => setVoiceTrModel(e.target.value)}
               spellCheck={false}
               autoCapitalize="off"
-              className="w-full bg-bg-soft border border-border px-2 py-1.5 text-xs rounded focus:outline-none focus:border-accent font-mono"
+              className="w-full bg-bg-soft border border-border px-2 py-1.5 text-meta rounded focus:outline-none focus:border-accent font-mono"
             />
           </div>
           <div className="space-y-1">
-            <label className="block text-[10px] uppercase tracking-wider text-text-faint">
+            <label className="block text-micro font-semibold uppercase text-text-faint">
               Command classifier model
             </label>
             <input
@@ -464,7 +464,7 @@ export function MobileSettings({ onClose }: Props) {
               onChange={(e) => setVoiceCmdModel(e.target.value)}
               spellCheck={false}
               autoCapitalize="off"
-              className="w-full bg-bg-soft border border-border px-2 py-1.5 text-xs rounded focus:outline-none focus:border-accent font-mono"
+              className="w-full bg-bg-soft border border-border px-2 py-1.5 text-meta rounded focus:outline-none focus:border-accent font-mono"
             />
           </div>
         </section>
@@ -473,10 +473,10 @@ export function MobileSettings({ onClose }: Props) {
             it toggles immediately (outside the Save flow). */}
         {isPushSupported() && (
           <section className="space-y-2 pt-1 border-t border-border">
-            <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+            <label className="block text-micro font-semibold uppercase text-text-muted">
               Notifications
             </label>
-            <div className="text-xs text-text-faint">
+            <div className="text-meta text-text-faint">
               Push alerts when Claude needs a permission/question, finishes a
               turn (only when you're not watching it), or hits an error.
               {pushPermission() === "default" &&
@@ -485,7 +485,7 @@ export function MobileSettings({ onClose }: Props) {
             <button
               onClick={togglePush}
               disabled={pushBusy}
-              className={`w-full px-3 py-2 text-sm rounded border ${
+              className={`w-full px-3 py-2 text-body rounded border ${
                 pushOn
                   ? "bg-accent-soft text-white border-accent"
                   : "bg-bg-soft text-text-muted border-border"
@@ -501,23 +501,23 @@ export function MobileSettings({ onClose }: Props) {
               <button
                 onClick={resubscribe}
                 disabled={pushBusy}
-                className={`w-full px-3 py-1.5 text-xs rounded border border-border bg-bg-soft text-text-muted ${
+                className={`w-full px-3 py-1.5 text-meta rounded border border-border bg-bg-soft text-text-muted ${
                   pushBusy ? "opacity-60" : ""
                 }`}
               >
                 Not getting notifications? Re-subscribe
               </button>
             )}
-            {pushErr && <div className="text-xs text-danger">{pushErr}</div>}
+            {pushErr && <div className="text-meta text-danger">{pushErr}</div>}
           </section>
         )}
 
         {/* Skill registries — add/remove with row buttons. */}
         <section className="space-y-2 pt-1 border-t border-border">
-          <label className="block text-[11px] uppercase tracking-wider text-text-muted">
+          <label className="block text-micro font-semibold uppercase text-text-muted">
             Skill registries
           </label>
-          <div className="text-xs text-text-faint">
+          <div className="text-meta text-text-faint">
             Extra opencode skill registry URLs. The default manta registry is
             always included.
           </div>
@@ -527,7 +527,7 @@ export function MobileSettings({ onClose }: Props) {
                 key={url}
                 className="flex items-center gap-2 bg-bg-soft border border-border rounded px-2 py-1.5"
               >
-                <code className="flex-1 min-w-0 text-xs text-text-muted truncate">
+                <code className="flex-1 min-w-0 text-meta text-text-muted truncate">
                   {url}
                 </code>
                 <button
@@ -550,12 +550,12 @@ export function MobileSettings({ onClose }: Props) {
               autoComplete="off"
               autoCapitalize="off"
               inputMode="url"
-              className="flex-1 min-w-0 bg-bg-soft border border-border px-3 py-2 text-sm rounded focus:outline-none focus:border-accent"
+              className="flex-1 min-w-0 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
             />
             <button
               onClick={addRegistryUrl}
               disabled={!newRegistryUrl.trim()}
-              className="px-3 py-2 text-sm bg-accent-solid text-on-accent rounded disabled:opacity-40"
+              className="px-3 py-2 text-body bg-accent-solid text-on-accent rounded disabled:opacity-40"
             >
               Add
             </button>
@@ -563,7 +563,7 @@ export function MobileSettings({ onClose }: Props) {
         </section>
 
         {savedToast && (
-          <div className="text-center text-xs text-ok">Saved</div>
+          <div className="text-center text-meta text-ok">Saved</div>
         )}
       </div>
     </div>

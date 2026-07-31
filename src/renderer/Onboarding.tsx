@@ -78,7 +78,7 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
                 />
               )}
               <div
-                className="w-8 h-8 rounded-full flex items-center justify-center text-[13px] font-semibold transition-all shrink-0"
+                className="w-8 h-8 rounded-full flex items-center justify-center text-label font-semibold transition-all shrink-0"
                 style={
                   state === "inactive"
                     ? { background: "var(--card)", color: "var(--tx4)", border: "1.5px solid var(--border)" }
@@ -104,7 +104,7 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
           return (
             <div
               key={step}
-              className="text-xs text-center min-w-[60px]"
+              className="text-meta text-center min-w-[60px]"
               style={{ color: isActive ? "var(--tx2)" : "var(--tx4)", fontWeight: isActive ? 500 : 400 }}
             >
               {STEP_LABELS[step]}
@@ -291,7 +291,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           <div
             role="status"
             aria-live="polite"
-            className="mt-6 rounded-md border border-border bg-bg-soft px-4 py-3 text-sm text-text-muted flex items-center gap-3"
+            className="mt-6 rounded-md border border-border bg-bg-soft px-4 py-3 text-body text-text-muted flex items-center gap-3"
           >
             <span
               aria-hidden
@@ -303,7 +303,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         {verifyError && (
           <div
             role="alert"
-            className="mt-6 rounded-md border px-4 py-3 text-sm"
+            className="mt-6 rounded-md border px-4 py-3 text-body"
             style={{ borderColor: "var(--danger)", color: "var(--danger)" }}
           >
             {verifyError}
@@ -327,13 +327,13 @@ function SuccessPanel({ onOpen }: { onOpen: () => void }) {
         <CheckIcon className="w-7 h-7 text-ok" />
       </div>
       <h2 className="text-2xl font-semibold mb-2">You're all set!</h2>
-      <p className="text-sm text-text-muted leading-relaxed max-w-sm mx-auto mb-7">
+      <p className="text-body text-text-muted leading-relaxed max-w-sm mx-auto mb-7">
         Your box is paired, a provider is connected, and your first project is
         ready. Start chatting with your AI assistant.
       </p>
       <button
         onClick={onOpen}
-        className="inline-flex items-center gap-2 px-6 py-2.5 rounded-md text-sm font-medium text-on-accent"
+        className="inline-flex items-center gap-2 px-6 py-2.5 rounded-md text-body font-medium text-on-accent"
         style={{ background: ACCENT_SOLID }}
       >
         Open Manta

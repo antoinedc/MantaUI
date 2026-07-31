@@ -79,7 +79,7 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
       <h2 className="text-2xl font-semibold tracking-tight text-text mb-1.5">
         Connect your box
       </h2>
-      <p className="text-sm text-text-muted leading-relaxed mb-8 max-w-md">
+      <p className="text-body text-text-muted leading-relaxed mb-8 max-w-md">
         Pick the machine you want to run Manta on. It installs itself over SSH
         and pairs with this app — no terminal needed.
       </p>
@@ -93,7 +93,7 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
       <button
         type="button"
         onClick={() => setDisclosureOpen((v) => !v)}
-        className="text-xs text-text-faint hover:text-text-muted underline underline-offset-4 decoration-border-strong transition-colors mt-6"
+        className="text-meta text-text-faint hover:text-text-muted underline underline-offset-4 decoration-border-strong transition-colors mt-6"
       >
         {disclosureOpen ? "Hide" : "Pair to an existing box"}
       </button>
@@ -191,7 +191,7 @@ function ManualPairForm({
         <div className="flex flex-col gap-1.5">
           <label
             htmlFor="pair-host"
-            className="text-[11px] font-medium text-text-muted"
+            className="text-label font-medium text-text-muted"
           >
             Host
           </label>
@@ -210,14 +210,14 @@ function ManualPairForm({
             }}
             aria-invalid={serverUrlInvalid}
             aria-describedby={serverUrlInvalid ? "pair-host-err" : undefined}
-            className="w-full rounded-md bg-bg border px-3 py-2 text-sm text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
+            className="w-full rounded-md bg-bg border px-3 py-2 text-body font-mono text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
             style={{ borderColor: serverUrlInvalid ? DANGER : undefined }}
           />
           {serverUrlInvalid && (
             <div
               id="pair-host-err"
               role="alert"
-              className="text-xs"
+              className="text-meta"
               style={{ color: DANGER }}
             >
               {SERVER_URL_ERROR}
@@ -229,7 +229,7 @@ function ManualPairForm({
         <div className="flex flex-col gap-1.5">
           <label
             htmlFor="pair-box-id"
-            className="text-[11px] font-medium text-text-muted"
+            className="text-label font-medium text-text-muted"
           >
             Box ID
           </label>
@@ -247,7 +247,7 @@ function ManualPairForm({
               setError(null);
             }}
             aria-invalid={boxIdLooksBad}
-            className="w-full rounded-md bg-bg border px-3 py-2 text-sm text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
+            className="w-full rounded-md bg-bg border px-3 py-2 text-body font-mono text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
             style={{ borderColor: boxIdLooksBad ? DANGER : undefined }}
           />
         </div>
@@ -258,7 +258,7 @@ function ManualPairForm({
         <div className="flex flex-col gap-1.5">
           <label
             htmlFor="pair-code"
-            className="text-[11px] font-medium text-text-muted"
+            className="text-label font-medium text-text-muted"
           >
             Code
           </label>
@@ -284,7 +284,7 @@ function ManualPairForm({
       </div>
 
       {error && (
-        <div role="alert" className="text-sm" style={{ color: DANGER }}>
+        <div role="alert" className="text-body" style={{ color: DANGER }}>
           {error}
         </div>
       )}
@@ -293,9 +293,9 @@ function ManualPairForm({
           removed in BET-382; `skip` / skipOnboarding remain reachable from
           Settings for users who need to re-run onboarding. */}
       <div className="flex items-center justify-between gap-3 pt-1">
-        <p className="text-xs text-text-faint">
+        <p className="text-meta text-text-faint">
           Run{" "}
-          <code className="rounded bg-bg px-1.5 py-0.5 text-[11px] text-text-muted">
+          <code className="rounded bg-bg px-1.5 py-0.5 text-label font-mono text-text-muted">
             manta pair
           </code>{" "}
           on the box to get a code.
@@ -303,7 +303,7 @@ function ManualPairForm({
         <button
           type="submit"
           disabled={!connectEnabled}
-          className="inline-flex items-center gap-2 px-5 py-2 rounded-md text-sm font-medium text-on-accent transition-opacity disabled:opacity-40"
+          className="inline-flex items-center gap-2 px-5 py-2 rounded-md text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
           style={{ background: ACCENT_SOLID }}
         >
           {submitting ? "Connecting…" : "Connect"}

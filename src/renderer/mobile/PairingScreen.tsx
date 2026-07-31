@@ -58,7 +58,7 @@ export function PairingScreen({ onPaired }: Props) {
       <div className="h-full flex flex-col items-center justify-center gap-6 px-8 text-center">
         <div className="flex flex-col gap-2">
           <div className="text-text text-lg font-medium">Connect to your server</div>
-          <div className="text-text-muted text-sm">
+          <div className="text-text-muted text-body">
             Enter the pairing code shown by <code>manta pair</code> on your box.
           </div>
         </div>
@@ -83,7 +83,7 @@ export function PairingScreen({ onPaired }: Props) {
           />
 
           {state.error && (
-            <div role="alert" className="text-danger text-sm">
+            <div role="alert" className="text-danger text-body">
               {state.error}
             </div>
           )}
