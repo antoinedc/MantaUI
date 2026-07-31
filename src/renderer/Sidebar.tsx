@@ -24,6 +24,14 @@ import { MOD_KEY } from "./platform";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
 
+// Shared confirm-delete union (BET-414: extracted to kill the jscpd clone that
+// appeared in WindowRow + JobChildRow prop types).
+type ConfirmDeleteFor =
+  | { kind: "session"; project: string; index: number; name: string }
+  | { kind: "project"; project: string }
+  | { kind: "worktree-dirty"; project: string; index: number; name: string; worktreePath: string }
+  | null;
+
 function loadCollapsed(): Set<string> {
   try {
     const raw = localStorage.getItem(COLLAPSE_KEY);
@@ -57,6 +65,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     refresh,
     backgroundSyncing,
     pinnedWindows,
+    recentWindows,
     togglePin,
     worktreePerSession,
     worktreeCleanOnClose,
@@ -85,12 +94,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const [newSessionWorktree, setNewSessionWorktree] = useState(false);
   const [newSessionIsGitRepo, setNewSessionIsGitRepo] = useState(false);
 
-  const [confirmDeleteFor, setConfirmDeleteFor] = useState<
-    | { kind: "session"; project: string; index: number; name: string }
-    | { kind: "project"; project: string }
-    | { kind: "worktree-dirty"; project: string; index: number; name: string; worktreePath: string }
-    | null
-  >(null);
+  const [confirmDeleteFor, setConfirmDeleteFor] = useState<ConfirmDeleteFor>(null);
 
   const [renameTarget, setRenameTarget] = useState<
     { kind: "project"; old: string } | { kind: "window"; project: string; index: number; old: string } | null
@@ -606,19 +610,34 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     }
   };
 
-  // ---- ⌘K palette candidates (reuse flatSessions for ordering) ----
+  // ---- ⌘K palette candidates ----
+  // Reuses flatSessions(projects) for the base list — no second flattener.
+  // Empty query: sorted by recency (recentWindows, most-recently-activated
+  // first), falling back to flatSessions order for never-activated windows.
+  // Non-empty query: fuzzy match + score sort.
   const paletteCandidates = useMemo(() => flatSessions(projects), [projects]);
   const paletteResults = useMemo(() => {
     const q = paletteQuery.trim();
-    const scored = paletteCandidates
+    if (!q) {
+      // Recency ordering: recentWindows is most-recent-first pinId list.
+      const recencyRank = new Map<string, number>();
+      recentWindows.forEach((id, i) => recencyRank.set(id, i));
+      return paletteCandidates
+        .map((c) => ({
+          ...c,
+          score: 1,
+          recency: recencyRank.get(`${c.project.tmuxSession}/${c.window.index}`) ?? Infinity,
+        }))
+        .sort((a, b) => a.recency - b.recency);
+    }
+    return paletteCandidates
       .map((c) => ({
         ...c,
         score: fuzzySessionScore(q, c.window.name, c.project.tmuxSession),
       }))
       .filter((c) => c.score > 0)
       .sort((a, b) => b.score - a.score);
-    return scored;
-  }, [paletteCandidates, paletteQuery]);
+  }, [paletteCandidates, paletteQuery, recentWindows]);
 
   useEffect(() => {
     if (paletteSel >= paletteResults.length) setPaletteSel(0);
@@ -1156,7 +1175,7 @@ function Timer({ status }: { status: WindowStatusUI | undefined }) {
   const showAge =
     status?.lastMessageAt != null && !status.running && !status.attention;
   if (!showAge) {
-    return <span className="w-7 shrink-0" aria-hidden />;
+    return <span className="min-w-[20px] shrink-0" aria-hidden />;
   }
   const now = nowMs();
   const ttl = selectCacheTtlMs(cacheTtl);
@@ -1164,7 +1183,7 @@ function Timer({ status }: { status: WindowStatusUI | undefined }) {
   const visible = cls !== "stale";
   return (
     <span
-      className="w-7 shrink-0 text-right font-mono tabular-nums text-meta"
+      className="min-w-[20px] shrink-0 text-right font-mono tabular-nums text-meta"
       style={{ color: "var(--tx4)", visibility: visible ? "visible" : "hidden" }}
     >
       {formatAge(now - status.lastMessageAt!)}
@@ -1243,12 +1262,8 @@ function WindowRow({
   commitRename: () => void;
   cancelRename: () => void;
   title: string;
-  confirmDeleteFor:
-    | { kind: "session"; project: string; index: number; name: string }
-    | { kind: "project"; project: string }
-    | { kind: "worktree-dirty"; project: string; index: number; name: string; worktreePath: string }
-    | null;
-  setConfirmDeleteFor: (v: typeof confirmDeleteFor) => void;
+  confirmDeleteFor: ConfirmDeleteFor;
+  setConfirmDeleteFor: (v: ConfirmDeleteFor) => void;
   onKillWindow: () => void;
   onKillWorktreeDirty: (wtPath: string, force: boolean) => void;
 }) {
@@ -1276,6 +1291,11 @@ function WindowRow({
             : "text-text-muted hover:bg-bg-soft hover:text-text"
         }`}
         onClick={onActivate}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose();
+        }}
         title={title}
       >
         <StatusDot status={status} />
@@ -1299,25 +1319,10 @@ function WindowRow({
           </span>
         )}
         <PinSlot pinned={pinned} onToggle={onTogglePin} />
-        {/* Trailing slot: timer at rest, close (X) on hover. Same 28px slot —
-            hover swaps content without shifting the pin or the row width. */}
-        <span className="relative w-7 shrink-0 flex items-center justify-end">
-          <span className="opacity-100 group-hover:opacity-0 transition-opacity">
-            <Timer status={status} />
-          </span>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onClose();
-            }}
-            className="absolute right-0 opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center transition-opacity"
-            title="Close session"
-            aria-label="Close session"
-            tabIndex={-1}
-          >
-            <X size={13} aria-hidden="true" />
-          </button>
-        </span>
+        {/* Timer is the ONLY trailing element. min-width 20px per spec;
+            visibility:hidden preserves the slot so hover-reveal shifts
+            nothing. Close lives on the context menu (right-click). */}
+        <Timer status={status} />
       </div>
       {showConfirm && (
         <ConfirmDelete
@@ -1361,12 +1366,8 @@ function JobChildRow({
   onActivate: () => void;
   onClose: () => void;
   title: string;
-  confirmDeleteFor:
-    | { kind: "session"; project: string; index: number; name: string }
-    | { kind: "project"; project: string }
-    | { kind: "worktree-dirty"; project: string; index: number; name: string; worktreePath: string }
-    | null;
-  setConfirmDeleteFor: (v: typeof confirmDeleteFor) => void;
+  confirmDeleteFor: ConfirmDeleteFor;
+  setConfirmDeleteFor: (v: ConfirmDeleteFor) => void;
   onKillWindow: () => void;
 }) {
   const showConfirm =
@@ -1386,27 +1387,17 @@ function JobChildRow({
             : "text-text-muted hover:bg-bg-soft hover:text-text"
         }`}
         onClick={onActivate}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose();
+        }}
         title={title}
       >
         <StatusDot status={status} />
         <span className="flex-1 min-w-0 truncate">{w.name}</span>
-        <span className="relative w-7 shrink-0 flex items-center justify-end">
-          <span className="opacity-100 group-hover:opacity-0 transition-opacity">
-            <Timer status={status} />
-          </span>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onClose();
-            }}
-            className="absolute right-0 opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center transition-opacity"
-            title="Close session"
-            aria-label="Close session"
-            tabIndex={-1}
-          >
-            <X size={13} aria-hidden="true" />
-          </button>
-        </span>
+        {/* Timer is the only trailing element. Close via context menu. */}
+        <Timer status={status} />
       </div>
       {showConfirm && (
         <ConfirmDelete

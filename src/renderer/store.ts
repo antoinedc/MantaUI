@@ -188,6 +188,14 @@ type State = {
   // the top of the rail; pinned windows are excluded from their workspace
   // group. togglePin optimistic-updates + persists via configUpdate.
   pinnedWindows: string[];
+  // BET-414: ⌘K palette recency. Most-recently-activated-first list of
+  // `<tmuxSession>/<windowIndex>` ids, updated on every setActive(). Drives
+  // the empty-query palette ordering ("recent sessions" per spec). In-memory
+  // only (not persisted) — session-level recency is sufficient for the
+  // palette; persistence would need a config schema change out of scope here.
+  // Windows never activated fall through to flatSessions order after the
+  // recent ones.
+  recentWindows: string[];
   projects: Project[];
   activeProjectName: string | null;
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
@@ -386,6 +394,7 @@ export const useStore = create<State>((set, get) => ({
   shareAnalytics: true,
   theme: "system",
   pinnedWindows: [],
+  recentWindows: [],
   projects: [],
   activeProjectName: null,
   activeWindowByProject: {},
@@ -438,6 +447,10 @@ export const useStore = create<State>((set, get) => ({
         0;
       // Opening a window clears its "needs attention" flag.
       const status = clearAttention(prev.status, projectName, w);
+      // BET-414: bump this window to the front of the recency list (⌘K palette
+      // empty-query ordering). Dedupe + prepend; cap to avoid unbounded growth.
+      const pinId = `${projectName}/${w}`;
+      const recentWindows = [pinId, ...prev.recentWindows.filter((p) => p !== pinId)].slice(0, 64);
       return {
         activeProjectName: projectName,
         activeWindowByProject: {
@@ -445,6 +458,7 @@ export const useStore = create<State>((set, get) => ({
           [projectName]: w,
         },
         status,
+        recentWindows,
       };
     }),
 
