@@ -98,6 +98,11 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
   const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
     configDefaultModel ?? null,
   );
+  // Whether the user has explicitly picked a model this session. Until they
+  // do, the pill reads "Auto" (the server default is in effect) even though
+  // `modelOverride` is seeded from the configured default — presentational
+  // only, does not change what model is applied to the new session.
+  const [modelTouched, setModelTouched] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -448,7 +453,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             "manta-composer-input-row rounded-xl border bg-card flex items-start gap-2 px-4 py-3 " +
             (voiceRecording
               ? "manta-recording"
-              : "border-border-strong")
+              : "border-border")
           }
         >
           <textarea
@@ -474,7 +479,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
                   ? "Start a session"
                   : "Describe a task to start"
             }
-            className="mt-0.5 shrink-0 w-9 h-9 rounded-lg border border-border bg-panel text-text-muted inline-grid place-items-center hover:text-text hover:border-border-strong disabled:opacity-50"
+            className="shrink-0 w-9 h-9 rounded-lg border border-border bg-panel text-text-muted inline-grid place-items-center hover:text-text hover:border-border-strong disabled:opacity-50"
           >
             {sending ? (
               <Loader2 size={16} className="animate-spin" aria-hidden="true" />
@@ -494,8 +499,11 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             defaultModel={serverDefault}
             deactivatedMainModels={deactivatedMainModels}
             onOpen={() => {}}
-            onSelect={(m) => setModelOverride(m)}
-            defaultLabel="Auto"
+            onSelect={(m) => {
+              setModelTouched(true);
+              setModelOverride(m);
+            }}
+            labelOverride={modelTouched ? null : "Auto"}
           />
 
           {/* Attach — no implementation on this screen yet (welcome is

@@ -26,6 +26,7 @@ export function ModelPicker({
   onOpen,
   onSelect,
   defaultLabel = null,
+  labelOverride = null,
 }: {
   modelLabel: string | null;
   models: OpencodeModel[] | null;
@@ -37,11 +38,15 @@ export function ModelPicker({
   deactivatedMainModels?: string[];
   onOpen: () => void;
   onSelect: (m: ModelSelection | null) => void;
-  // When set and NO per-session override is active (the server default is in
-  // effect), the model button reads this short label (e.g. "Auto") instead of
-  // the resolved friendly model name. Used by the welcome screen; a no-op for
-  // callers that don't pass it.
+  // Welcome-screen helpers for the model button label.
+  //   - `defaultLabel` (e.g. "Auto"): shown when NO per-session override is
+  //     active (the server default is in effect).
+  //   - `labelOverride`: shown unconditionally, highest precedence — lets a
+  //     caller display "Auto" until the user first picks a model, even when
+  //     the override is seeded from the configured default.
+  // Both are no-ops for callers that don't pass them (ChatPanel).
   defaultLabel?: string | null;
+  labelOverride?: string | null;
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [variantOpen, setVariantOpen] = useState(false);
@@ -96,11 +101,13 @@ export function ModelPicker({
   // Friendly display name for the model button. Falls back through the same
   // precedence as the old label: override → default → last-used → stub.
   // `defaultLabel` (e.g. "Auto", the welcome-screen convention) replaces the
-  // resolved name when the server default is active and no override is set.
+  // resolved name when the server default is active and no override is set;
+  // `labelOverride` wins unconditionally (highest precedence).
   const modelDisplayName =
-    modelOverride == null && defaultLabel
+    labelOverride ??
+    (modelOverride == null && defaultLabel
       ? defaultLabel
-      : activeModel?.name ?? modelLabel ?? "opencode";
+      : activeModel?.name ?? modelLabel ?? "opencode");
 
   return (
     <div
