@@ -48,6 +48,7 @@ export function SessionHeader({
   staleCache,
   modelName,
   hasSession,
+  readOnly,
   onFork,
   onCompact,
   onClear,
@@ -61,6 +62,10 @@ export function SessionHeader({
   // When false (no owning tmux window) the session menu is hidden — fork /
   // clear / delete all need a tmux window to target.
   hasSession: boolean;
+  // BET-418 §D: when true the session is a read-only background-job view —
+  // the Fork/Compact/Clear/Delete menu is hidden (Stop, in ReadOnlyJobBar, is
+  // the only live action). Branch + context pill still render as info.
+  readOnly?: boolean;
   onFork: () => void;
   onCompact: () => void;
   onClear: () => void;
@@ -108,8 +113,10 @@ export function SessionHeader({
 
         {/* Session menu — Fork / Compact / Clear / Delete. No badge on the
             button (per BET-415 Do-NOT #2). Hidden when there is no owning
-            tmux window. */}
-        {hasSession && (
+            tmux window, and when the view is read-only (BET-418 §D: a
+            background-job session — Stop in ReadOnlyJobBar is the only live
+            action). */}
+        {hasSession && !readOnly && (
           <SessionMenu
             onFork={onFork}
             onCompact={onCompact}

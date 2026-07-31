@@ -765,6 +765,7 @@ function approvalEngineHarness(initialJobs = []) {
   let jobs = initialJobs.map((j) => ({ ...j }));
   const published = [];
   const newWindowCalls = [];
+  const createSessionCalls = [];
   const parentWin = { index: 1, name: "parent", opencodeSessionId: "ses_p", paneCurrentPath: "/proj" };
   const childWin = { index: 2, name: "run-the-tests", opencodeSessionId: "ses_child", paneCurrentPath: "/proj" };
   const deps = {
@@ -782,11 +783,16 @@ function approvalEngineHarness(initialJobs = []) {
       newWindowCalls.push(input);
       return [{ tmuxSession: input.sessionName, windows: [parentWin, { ...childWin, name: input.windowName }] }];
     },
-    oc: { createSession: async (input) => ({ id: "ses_child", directory: input?.directory }) },
+    oc: {
+      createSession: async (input) => {
+        createSessionCalls.push(input);
+        return { id: "ses_child", directory: input?.directory };
+      },
+    },
     now: () => 1_700_000_000_000,
   };
   const engine = createDelegateEngine(deps);
-  return { engine, published, get jobs() { return jobs; }, newWindowCalls };
+  return { engine, published, get jobs() { return jobs; }, newWindowCalls, createSessionCalls };
 }
 
 test("startJobWithApproval auto-approves (no card) when trust mode is on", async () => {
@@ -841,4 +847,55 @@ test("startJobWithApproval starts the job on approve and forwards the ruleset", 
   assert.deepEqual(perm[perm.length - 1], { permission: "*", pattern: "**", action: "deny" });
   assert.equal(perm[0].permission, "bash");
   assert.equal(perm[0].pattern, "pytest * -x");
+});
+
+// ----------------------------------------------------------------------------
+// §A4 deeper test — a job whose ruleset omits bash FAILS its first command,
+// not stalls. Simulates the deny→fail path through the mocked oc layer:
+//   1. start a job with tools that omit bash (ruleset has no bash-allow).
+//   2. assert the catch-all deny reached oc.createSession (opencode WILL deny
+//      an unmatched bash tool, never resolve it to `ask`).
+//   3. simulate the denial as opencode would surface it — a session.error
+//      event for the child session — and assert observeEvent completes the
+//      job as `failed` immediately (no hang, no 30-min timeout).
+// This bridges the gap the reviewer flagged: it observes the OUTCOME (job
+// fails fast), not just the ruleset SHAPE.
+// ----------------------------------------------------------------------------
+
+test("§A4: a job omitting bash receives the catch-all deny at the session-creation boundary and fails fast on a denied command", async () => {
+  const h = approvalEngineHarness([]);
+  const res = await h.engine.startJobWithApproval({
+    prompt: "edit the docs",
+    parentSessionID: "ses_p",
+    parentDirectory: "/proj",
+    tools: [{ permission: "write", pattern: "**/*.md" }], // NO bash-allow
+    trustMode: true, // skip the card; we are testing the ruleset, not approval
+  });
+  assert.equal(res.ok, true);
+
+  // 1. The ruleset reached the session-creation boundary (newWindow forwards
+  //    it to maybeCreateChatSession → oc.createSession in production). The
+  //    harness intercepts at newWindow, so assert there.
+  assert.equal(h.newWindowCalls.length, 1);
+  const perm = h.newWindowCalls[0].permission;
+  assert.ok(Array.isArray(perm), "the permission ruleset was forwarded to session creation");
+  const bashAllow = perm.find((r) => r.permission === "bash" && r.action === "allow");
+  assert.equal(bashAllow, undefined, "no bash-allow rule — bash hits the catch-all deny");
+  assert.deepEqual(perm[perm.length - 1], { permission: "*", pattern: "**", action: "deny" });
+
+  // 2. Simulate opencode denying the job's first bash command. opencode
+  //    surfaces a tool denial as a session.error (the job's turn aborts); the
+  //    engine's observeEvent must transition the job to `failed` immediately.
+  const before = h.jobs[0].status;
+  assert.equal(before, "running");
+  await h.engine.observeEvent({
+    type: "session.error",
+    properties: {
+      sessionID: "ses_child",
+      error: { name: "PermissionDeniedError", message: "bash denied by ruleset" },
+    },
+  });
+  const after = h.jobs[0];
+  assert.equal(after.status, "failed", "job fails fast — does NOT stall for the 30-min timeout");
+  assert.match(after.error ?? "", /denied|bash/i, "failure reason reflects the denial");
 });

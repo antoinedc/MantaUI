@@ -1913,6 +1913,7 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
             : null
         }
         hasSession={!!tmuxSession && windowIndex != null}
+        readOnly={!!jobOwnership}
         onFork={() => void forkSession()}
         onCompact={() => void compactSession()}
         onClear={() => void clearSession()}
@@ -1927,7 +1928,10 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         showThinking={showThinking}
         running={running}
         activeTodos={activeTodos}
-        questions={questions}
+        // BET-418 §D: a job session is read-only — never show its (anyway
+        // impossible) question cards. Defensive: a job's pre-flight ruleset
+        // means it never generates asks.
+        questions={jobOwnership ? [] : questions}
         turnInfo={turnInfo}
         finishByMessageId={finishByMessageId}
         userCommandInfo={userCommandInfo}
@@ -1937,7 +1941,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
 
       {/* Pending permission cards. Shown above the running indicator/input */}
       {/* so they're hard to miss — tool execution pauses until reply. */}
-      {permissions.length > 0 && (
+      {/* Hidden for a job session (BET-418 §D: a job's pre-flight ruleset */}
+      {/* means it never generates asks, but gate defensively anyway). */}
+      {!jobOwnership && permissions.length > 0 && (
         <div className="shrink-0 px-4 pt-2 space-y-2">
           {permissions.map((p) => (
             <PermissionCard
