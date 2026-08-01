@@ -151,10 +151,17 @@ user gestures — a click a person could make — not for reaching into internal
    merged with `--delete-branch`. The picture is the evidence for the *record*,
    which outlives the branch by definition — a review trail that 404s six weeks
    later cannot be re-read when someone asks why a baseline looks like that.
-   Drag the PNG into the GitHub comment box (it rewrites to a
-   `github.com/user-attachments/…` URL, hosted independently of any ref), or
-   link a permalink pinned to the merge commit SHA. Either survives; a branch
-   path does not.
+    Drag the PNG into the GitHub comment box (it rewrites to a
+    `github.com/user-attachments/…` URL, hosted independently of any ref), or
+    link a permalink pinned to the merge commit SHA. Either survives; a branch
+    path does not.
+6. **If the control you are changing renders data-driven content — a list, a
+   menu, a set of options — state in the PR which fixture state it was
+   specified against, and whether that state is representative.** A control
+   that renders a variable number of items looks fixed-size when the fixture
+   supplies zero or one, and the mockup, the structure snapshot and the pixel
+   baseline will all agree with the fixture. This is how the AI-CLI launcher
+   options were specified away in BET-459 and had to be restored in BET-467.
 
 Steps 4 and 5 apply **whenever a baseline moves**, not only when the issue is a
 design issue. A refactor that shifts a pixel is exactly the case where nobody
