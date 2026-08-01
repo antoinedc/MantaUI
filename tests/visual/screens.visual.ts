@@ -18,8 +18,8 @@
  *      wrong arrangement.
  *
  *   2. PIXELS (toHaveScreenshot) — the full-page render against a committed
- *      baseline. This catches unintended drift: a spacing token retune, a
- *      stray border, a colour change nobody meant. It compares the app to
+ *      baseline, OR (when the row declares a `region`) that region's element
+ *      against its own small baseline. Either way it compares the app to
  *      ITS OWN approved past, never to a design mockup — mockups render in a
  *      different context and diffing against them produces noise, not signal.
  *      Design conformance is a separate, judgement-based step; see
@@ -89,16 +89,28 @@ for (const screen of SCREENS) {
         // 1. Structure — text snapshot, readable in a PR diff. Rooted at
         // `snapshot` when the screen declares one: `ready` gates BOOT, which
         // for an action-driven screen is a different element from the one
-        // being captured (see screens.mjs).
-        await expect(page.locator(screen.snapshot ?? screen.ready)).toMatchAriaSnapshot({
+        // being captured (see screens.mjs). Precedence is
+        // `snapshot ?? region ?? ready` — a region row without `snapshot` is
+        // rooted at its region, because the component being cropped IS the
+        // structure contract under review.
+        await expect(page.locator(screen.snapshot ?? screen.region ?? screen.ready)).toMatchAriaSnapshot({
           name: `${screen.id}.aria.yml`,
         });
 
-        // 2. Pixels — against this screen's own approved baseline.
-        await expect(page).toHaveScreenshot(`${screen.id}.png`, {
-          fullPage: true,
-          animations: "disabled",
-        });
+        // 2. Pixels — a region row compares the declared element against its
+        // own small baseline (only that component's drift re-records it);
+        // every other row compares the full page against its approved
+        // baseline. Both are against the app's own past, never a mockup.
+        if (screen.region) {
+          await expect(page.locator(screen.region)).toHaveScreenshot(`${screen.id}.png`, {
+            animations: "disabled",
+          });
+        } else {
+          await expect(page).toHaveScreenshot(`${screen.id}.png`, {
+            fullPage: true,
+            animations: "disabled",
+          });
+        }
       } finally {
         await context.close();
       }

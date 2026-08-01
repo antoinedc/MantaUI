@@ -36,6 +36,29 @@
  *             filed yet" — the screen still gets a structure snapshot and a
  *             pixel baseline, but conformance review will report it as
  *             unspecified. Prefer filing the mockup.
+ *
+ *   region    Optional CSS selector for the element to capture instead of the
+ *             full page. When set, the pixel assertion captures page.locator(
+ *             region) rather than the full-page render, so a component can own
+ *             a small baseline that only changes when that component changes —
+ *             the header, the composer, a settings card — without re-recording
+ *             a whole screen every time. A region row is a SEPARATE row whose
+ *             url/ready/final/actions it inherits from its screen; the screen's
+ *             own full-page row stays and remains the composition gate. The
+ *             region crops the REAL page — it never renders the component in
+ *             isolation, because an isolated render can be perfect while the
+ *             page it lives on is broken.
+ *   mockupRegion Optional CSS selector inside the mockup HTML, used by
+ *             compare.mjs to find the matching region in the design. Defaults
+ *             to `region`. It exists because the mockup is a different DOM and
+ *             the selector usually differs (e.g. app `nav[role="tablist"]` vs
+ *             mockup `.snav`).
+ *
+ *   Structure-root precedence: `snapshot ?? region ?? ready`. Explicit
+ *   `snapshot` wins (a dialog opened by actions), then `region` when the row
+ *   is a region crop (the component IS the structure contract the reviewer
+ *   compares), then `ready`. The comparator and the release gate only ever
+ *   cite this one annotation, so the precedence is the spec.
  */
 
 /** @typedef {{
@@ -45,6 +68,8 @@
  *   ready: string,
  *   final?: string,
  *   snapshot?: string,
+ *   region?: string,
+ *   mockupRegion?: string,
  *   actions?: (page: any) => Promise<void>,
  *   viewport: { width: number, height: number },
  *   mockup: string | null,
@@ -97,6 +122,40 @@ export const SCREENS = [
     // below. Without this the structure snapshot would be the sidebar row's
     // text node rather than the dialog.
     snapshot: '[role="dialog"][aria-labelledby="settings-title"]',
+    actions: async (page) => {
+      await page.getByText("Settings…", { exact: false }).first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/settings/mockup.html",
+  },
+  {
+    // REGION ROWS — a component that owns its own small baseline. These are
+    // SEPARATE rows (not fields on the `settings` row above) so they do not
+    // disturb the existing full-page baseline. They reuse the screen's
+    // url/ready/final/actions and only change what gets cropped.
+    id: "settings-rail",
+    title: "Settings — section rail (region)",
+    url: "/app/index.html?demo&desktop",
+    ready: "text=Refactor auth middleware",
+    final: '[role="dialog"][aria-labelledby="settings-title"]',
+    // No `snapshot`: the rail itself is the structure contract (`snapshot ??
+    // region ?? ready` resolves to `region`).
+    region: 'nav[role="tablist"][aria-label="Settings sections"]',
+    mockupRegion: ".snav",
+    actions: async (page) => {
+      await page.getByText("Settings…", { exact: false }).first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/settings/mockup.html",
+  },
+  {
+    id: "settings-general",
+    title: "Settings — first section (General) card (region)",
+    url: "/app/index.html?demo&desktop",
+    ready: "text=Refactor auth middleware",
+    final: '[role="dialog"][aria-labelledby="settings-title"]',
+    region: '[role="tabpanel"]',
+    mockupRegion: '[data-panel="general"]',
     actions: async (page) => {
       await page.getByText("Settings…", { exact: false }).first().click();
     },
