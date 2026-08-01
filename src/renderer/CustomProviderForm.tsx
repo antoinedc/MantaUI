@@ -25,6 +25,7 @@ import {
   slugifyProviderId,
   customProviderDraftError,
 } from "./chatUtils";
+import { Field } from "./Field";
 
 const ACCENT_SOLID = "var(--accent-solid)";
 const DANGER = "var(--danger)";
@@ -332,29 +333,26 @@ function CustomInput(props: {
   onReset?: () => void;
 }) {
   return (
-    <label className="flex flex-col gap-1">
-      {props.label && (
-        <span className="text-label text-text-muted">{props.label}</span>
-      )}
-      <input
-        type={props.type ?? "text"}
-        autoComplete="off"
-        spellCheck={false}
-        placeholder={props.placeholder}
-        value={props.value}
-        disabled={props.disabled}
-        onChange={(e) => props.onChange(e.target.value)}
-        className="w-full rounded bg-bg border border-border px-3 py-2 text-body text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
-      />
-      {props.onReset && (
-        <button
-          type="button"
-          onClick={props.onReset}
-          className="text-micro text-text-faint underline decoration-dotted hover:text-text self-start"
-        >
-          Edit details
-        </button>
-      )}
-    </label>
+    <Field
+      label={props.label}
+      ariaLabel={props.placeholder}
+      placeholder={props.placeholder}
+      value={props.value}
+      type={props.type ?? "text"}
+      mono={false}
+      disabled={props.disabled}
+      onChange={(e) => props.onChange(e.target.value)}
+      footer={
+        props.onReset ? (
+          <button
+            type="button"
+            onClick={props.onReset}
+            className="text-micro text-text-faint underline decoration-dotted hover:text-text self-start"
+          >
+            Edit details
+          </button>
+        ) : undefined
+      }
+    />
   );
 }

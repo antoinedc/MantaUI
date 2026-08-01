@@ -103,12 +103,20 @@ function offendingLines(content: string, re: RegExp): string[] {
   return out;
 }
 
-// Genuine gaps this cell surfaces (reported as findings — the epic delivered
-// call-site adopters within a single file, and SessionRow carries spec-.srow
-// metrics). Only these are skipped, with justifications below; every OTHER
-// primitive asserts its rule ACTIVELY, so a regression (a deleted import, a
-// pasted raw literal) fails loudly instead of silently passing.
-const UNDER_ADOPTED: Set<string> = new Set(["IconButton", "Field", "MenuItem", "SessionRow"]);
+// Bet-546 landed the second adopting files for IconButton (NewSessionScreen,
+// BET-538), Field (CustomProviderForm) and MenuItem (the mobile SessionScreen ⋯
+// sheet), so all three now assert the two-adopter rule ACTIVELY.
+//
+// SINGLE_SURFACE is a FORMAL, owner-approved exemption from the two-adopter
+// rule (BET-546, option (a) confirmed by the owner 2026-08-01) — not a pending
+// finding. SessionRow is a density-scoped primitive (C2): its metrics resolve
+// only under a [data-density] ancestor, and the sole density-scoped session-row
+// surface in the renderer is the desktop rail (Sidebar.tsx). The only other
+// session list (mobile/SessionListScreen) is chrome-incompatible (56px two-line
+// rows, no [data-density] scope), so adopting the primitive there is a redesign,
+// not a no-visual-change migration. Its 2nd adopter is deferred to the BET-527
+// mobile-consolidation follow-up.
+const SINGLE_SURFACE: Set<string> = new Set(["SessionRow"]);
 
 // Spec-authorized off-grid px values, per primitive, that rule 1c consults
 // instead of skipping the primitive (BET-547). SessionRow's .srow chrome is
@@ -124,12 +132,8 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
 };
 
 const SKIP_REASON: Record<string, string> = {
-  IconButton:
-    "1 adopting file (SessionHeader.tsx) today — BET-532 migrated two call sites IN that one file. A second file (NewSessionScreen) is already tracked in BET-538; un-skip when it lands.",
-  Field:
-    "1 adopting file (Settings.tsx) today — BET-533 migrated four call sites, all in Settings. Reaching 2 needs a Field call site migrated from another file (BET-533 named CustomProviderForm.tsx / ConnectProvider.tsx as future adopters).",
-  MenuItem:
-    "1 adopting file (SessionHeader.tsx) today — the three variants are all in the one session menu. Reaching 2 needs a second role=menu surface that adopts MenuItem.",
+  SessionRow:
+    "single-density-surface primitive: 1 adopting file (Sidebar.tsx) — the only [data-density]-scoped session-row surface. The second session list (mobile/SessionListScreen) uses incompatible card chrome (56px two-line rows, no [data-density] ancestor), so adopting the primitive there is a redesign, not a no-visual-change migration. Owner-approved formal exemption from the two-adopter rule (BET-546); 2nd adopter deferred to the BET-527 follow-up.",
 };
 
 describe("M527 primitive rules", () => {
@@ -152,10 +156,9 @@ describe("M527 primitive rules", () => {
   describe("1b — two-adopter rule (standing decision 2)", () => {
     for (const p of PRIMITIVES) {
       const label = `${p} has at least two adopting files`;
-      if (UNDER_ADOPTED.has(p)) {
-        // Under-adopted at baseline — an epic finding, NOT fixed in this cell
-        // ("If a primitive has fewer than two, report it"). Un-skip when a
-        // second adopting file lands.
+      if (SINGLE_SURFACE.has(p)) {
+        // Owner-approved formal exemption from the two-adopter rule as a
+        // single-density-surface primitive (BET-546) — see SINGLE_SURFACE.
         it.skip(label, () => {
           void SKIP_REASON[p];
         });

@@ -397,7 +397,8 @@ body,
 .mobile-sheet button:active {
   background: var(--card);
 }
-.mobile-sheet button.danger {
+.mobile-sheet button.danger,
+.mobile-sheet button.text-danger {
   color: var(--danger);
 }
 

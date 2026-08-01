@@ -3,6 +3,7 @@ import { MoreHorizontal } from "lucide-react";
 import { useStore, resolveSessionOwner } from "../store";
 import { ChatPanel } from "../ChatPanel";
 import { Terminal } from "../Terminal";
+import { MenuItem } from "../MenuItem";
 import { KeyboardBar } from "./KeyboardBar";
 import {
   type SessionMode,
@@ -391,12 +392,12 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                 </div>
               </div>
             ) : (
-              <>
-                <button onClick={startRename}>Rename</button>
+              <div role="menu">
+                <MenuItem onSelect={startRename}>Rename</MenuItem>
                 {sid && (
                   <>
-                    <button
-                      onClick={() => {
+                    <MenuItem
+                      onSelect={() => {
                         // iOS only opens the picker from a user gesture — the click
                         // on the hidden input must happen synchronously in this
                         // tap handler (BET-260).
@@ -405,11 +406,11 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                       }}
                     >
                       Attach photo or file…
-                    </button>
-                    <button onClick={forkSession}>Fork session</button>
-                    <button onClick={compactSession}>Compact context</button>
-                    <button
-                      onClick={() => {
+                    </MenuItem>
+                    <MenuItem onSelect={forkSession}>Fork session</MenuItem>
+                    <MenuItem onSelect={compactSession}>Compact context</MenuItem>
+                    <MenuItem
+                      onSelect={() => {
                         // Open the ScheduledTasksCard inside ChatPanel via the
                         // window CustomEvent bridge (the sheet is outside it).
                         window.dispatchEvent(
@@ -423,9 +424,9 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                       {scheduleCount > 0
                         ? `Scheduled tasks · ${scheduleCount}`
                         : "Scheduled tasks"}
-                    </button>
-                    <button
-                      onClick={() => {
+                    </MenuItem>
+                    <MenuItem
+                      onSelect={() => {
                         // Open the SecretsCard inside ChatPanel via the window
                         // CustomEvent bridge (mirror of manta-open-schedules).
                         window.dispatchEvent(
@@ -437,9 +438,9 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                       }}
                     >
                       Secrets
-                    </button>
-                    <button
-                      onClick={() => {
+                    </MenuItem>
+                    <MenuItem
+                      onSelect={() => {
                         // Open the WebhooksCard inside ChatPanel via the window
                         // CustomEvent bridge (mirror of manta-open-schedules).
                         window.dispatchEvent(
@@ -451,19 +452,19 @@ export function SessionScreen({ projectName, windowIndex, onBack }: Props) {
                       }}
                     >
                       Webhooks
-                    </button>
-                    <button className="danger" onClick={deleteSession}>
+                    </MenuItem>
+                    <MenuItem variant="danger" onSelect={deleteSession}>
                       Delete session
-                    </button>
+                    </MenuItem>
                   </>
                 )}
                 {!sid && (
-                  <button className="danger" onClick={killWindow}>
+                  <MenuItem variant="danger" onSelect={killWindow}>
                     Kill window
-                  </button>
+                  </MenuItem>
                 )}
-                <button onClick={closeSheet}>Cancel</button>
-              </>
+                <MenuItem onSelect={closeSheet}>Cancel</MenuItem>
+              </div>
             )}
           </div>
         </div>
