@@ -91,6 +91,7 @@ import {
   isNestedJobChild,
   globCovers,
   isApprovalCoveredByAlways,
+  shortModelName,
 } from "./chatUtils";
 
 // ===== formatTokens =====
@@ -4014,5 +4015,26 @@ describe("isApprovalCoveredByAlways", () => {
       { id: "p1", sessionID: "ses", permission: "bash" },
     ];
     expect(isApprovalCoveredByAlways(approval, perms)).toBe(false);
+  });
+});
+
+// ===== shortModelName (BET-460) =====
+
+describe("shortModelName", () => {
+  it("strips a known leading vendor brand from the display name", () => {
+    expect(shortModelName("Claude Opus 4.7")).toBe("Opus 4.7");
+    expect(shortModelName("Claude Sonnet 4.6")).toBe("Sonnet 4.6");
+    expect(shortModelName("Gemini 2.5 Pro")).toBe("2.5 Pro");
+  });
+
+  it("passes an unknown / brandless name through unchanged", () => {
+    expect(shortModelName("GPT-4o")).toBe("GPT-4o");
+    expect(shortModelName("DeepSeek R1")).toBe("R1");
+  });
+
+  it("handles blank and null input", () => {
+    expect(shortModelName(null)).toBeNull();
+    expect(shortModelName(undefined)).toBeNull();
+    expect(shortModelName("   ")).toBeNull();
   });
 });

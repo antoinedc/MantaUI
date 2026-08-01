@@ -14,6 +14,13 @@ import { ALT_KEY } from "./platform";
 // SessionToolbar — footer affordances. fork / compact / delete moved out of the
 // footer (they live in the header ⋯ menu); only the ⏰ schedules toggle remains
 // here so its live count is always visible next to the composer.
+//
+// BET-460: the three resource buttons render ICON-ONLY (clock / key / hook) at
+// 16px @ 2px stroke. Their accessible names come from `aria-label`, NOT visible
+// text, so `button "schedules"` / `"secrets"` / `"webhooks"` stay nameable for
+// screen-readers (the session.aria.yml snapshot enforces this). Schedules keeps
+// its pending-count badge (aria-hidden so it joins the visual, not the name);
+// secrets and webhooks are not time-sensitive and get no badge.
 export function SessionToolbar({
   scheduleCount,
   onSchedules,
@@ -26,27 +33,35 @@ export function SessionToolbar({
   onWebhooks: () => void;
 }) {
   return (
-    <span className="manta-session-toolbar flex items-center gap-1 text-meta">
+    <span className="manta-session-toolbar flex items-center gap-2 text-meta">
       <button
         onClick={onSchedules}
         className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="View / cancel scheduled tasks"
+        aria-label="schedules"
       >
-        <Clock size={14} aria-hidden="true" />schedules{scheduleCount > 0 ? ` (${scheduleCount})` : ""}
+        <Clock size={16} strokeWidth={2} aria-hidden="true" />
+        {scheduleCount > 0 && (
+          <span className="text-text-muted text-label tabular-nums" aria-hidden="true">
+            {scheduleCount}
+          </span>
+        )}
       </button>
       <button
         onClick={onSecrets}
-        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
+        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center"
         title="Manage secrets the agent can use (values never enter the chat)"
+        aria-label="secrets"
       >
-        <Key size={14} aria-hidden="true" />secrets
+        <Key size={16} strokeWidth={2} aria-hidden="true" />
       </button>
       <button
         onClick={onWebhooks}
-        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
+        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center"
         title="View / revoke inbound webhooks (external events that wake this session)"
+        aria-label="webhooks"
       >
-        <Webhook size={14} aria-hidden="true" />webhooks
+        <Webhook size={16} strokeWidth={2} aria-hidden="true" />
       </button>
     </span>
   );

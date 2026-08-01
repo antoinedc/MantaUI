@@ -2864,3 +2864,37 @@ export function isApprovalCoveredByAlways(
     return false;
   });
 }
+
+// Compact model display name for the composer model pill (BET-460). The
+// friendly name opencode returns is often "<brand> <family> <version>"
+// (e.g. "Claude Opus 4.7"); the design shows the family + version only
+// ("Opus 4.7"), leaving the effort pill (`High`) beside it as the only
+// accent element. Stripping a leading known vendor brand token is safe:
+// an unknown prefix falls through unchanged, so no name is ever mangled.
+const MODEL_BRAND_PREFIXES = new Set([
+  "Claude",
+  "Gemini",
+  "DeepSeek",
+  "Grok",
+  "Mistral",
+  "Llama",
+  "Qwen",
+  "Command",
+  "Gemma",
+  "Phi",
+  "Gpt",
+]);
+export function shortModelName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  const space = trimmed.indexOf(" ");
+  if (space > 0) {
+    const first = trimmed.slice(0, space);
+    if (MODEL_BRAND_PREFIXES.has(first)) {
+      const rest = trimmed.slice(space + 1).trim();
+      if (rest) return rest;
+    }
+  }
+  return trimmed;
+}
