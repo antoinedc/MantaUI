@@ -62,6 +62,54 @@
      lift reads on both canvases without re-tuning per surface. */
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.18), 0 1px 3px rgb(0 0 0 / 0.12);
   --shadow-md: 0 4px 12px rgb(0 0 0 / 0.22), 0 2px 4px rgb(0 0 0 / 0.14);
+  /* --shadow-lg is the third step: a surface floating over the whole window
+     (a modal, the folder picker), not merely over content. */
+  --shadow-lg: 0 20px 56px rgb(0 0 0 / 0.45), 0 4px 12px rgb(0 0 0 / 0.30);
+
+  /* Corner radii (BET-451). A named scale, for the same reason spacing is one:
+     a design that says `border-radius: 14px` forces an implementer to choose
+     between the mockup and the "no off-grid value" rule, and they will guess.
+     This is the scale the MantaUI 2.0 spec locks; --r-full is the pill form.
+     Tailwind's rounded-* utilities stay valid in component code — these exist
+     so a MOCKUP can name a radius without hardcoding a pixel, and so
+     hand-written CSS has one source. */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-full: 999px;
+
+  /* Reading measure + leading (BET-451). The transcript is what a user spends
+     nearly all their time reading, so it is capped rather than left to run the
+     window's full width: Bringhurst's 45-75 characters is the long-standing
+     optimum, and the transcript runs ~150 characters at 2000px today. Leading
+     is split because prose and chrome want different values — WCAG 1.4.12
+     requires content to survive 1.5, so 1.5 is a floor, not a target. */
+  --measure: 72ch;
+  --prose-lh: 1.55;
+  --ui-lh: 1.45;
+
+  /* Session-row metrics (BET-451). The sidebar row is a fixed four-slot shape
+     ([dot] [name] [pin] [timer]); pinning these means the row cannot change
+     height or padding per variant, which is what stops the rail jittering when
+     a hover affordance appears. */
+  --row-h: 32px;
+  --row-px: 10px;
+  --row-py: 6px;
+
+  /* One easing curve for every transition, so motion reads as one system. */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* Type stacks (BET-451). These MIRROR tailwind.config.js `fontFamily` — the
+     app's components get them through font-sans / font-mono utilities, and
+     these exist so hand-written CSS and mockups resolve the same stack instead
+     of retyping it. Both faces are bundled (@fontsource-variable) rather than
+     assumed present: the renderer's CSP declares no font origin, so an
+     unbundled face is silently substituted per-OS. Change one, change both —
+     it is one decision living in two files. */
+  --font-sans: "Inter Variable", Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 }
 
 /* Token substrate (BET-407). Colour literals moved out of tailwind.config.js
@@ -194,4 +242,5 @@
 
   --shadow-sm: 0 1px 2px rgb(26 24 21 / 0.06), 0 1px 3px rgb(26 24 21 / 0.05);
   --shadow-md: 0 4px 12px rgb(26 24 21 / 0.10), 0 2px 4px rgb(26 24 21 / 0.05);
+  --shadow-lg: 0 20px 56px rgb(26 24 21 / 0.16), 0 4px 12px rgb(26 24 21 / 0.08);
 }

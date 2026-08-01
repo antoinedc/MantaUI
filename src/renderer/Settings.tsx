@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type KeyboardEvent } from "react";
-import { X, Search } from "lucide-react";
+import {
+  X,
+  Search,
+  Settings as SettingsIcon,
+  Terminal,
+  KeyRound,
+  Sparkles,
+  GitBranch,
+  Folder,
+  Plug,
+  Mic,
+} from "lucide-react";
 import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
@@ -126,9 +137,8 @@ function SegmentedField({ entry, value, onApply }: {
               aria-pressed={selected}
               onClick={() => onApply(opt.value)}
               className={`px-4 py-2 text-body capitalize transition-colors border-r border-border last:border-r-0 ${
-                selected ? "bg-accent-solid" : "text-text-muted hover:text-text hover:bg-bg-elev"
+                selected ? "bg-raised text-text font-semibold" : "text-text-muted hover:text-text hover:bg-bg-elev"
               }`}
-              style={selected ? { color: "var(--on-accent)" } : undefined}
             >
               {opt.label}
             </button>
@@ -204,6 +214,63 @@ function PasswordField({ entry, value, onCommit }: {
       />
       {entry.help && <div className="text-meta text-text-faint">{entry.help}</div>}
       {savedAt && <div role="status" className="text-meta text-ok">Saved</div>}
+    </div>
+  );
+}
+
+// 15px stroked icon per section, inheriting currentColor (BET-461 §1).
+const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
+  general: SettingsIcon,
+  box: Terminal,
+  accounts: KeyRound,
+  models: Sparkles,
+  sessions: GitBranch,
+  files: Folder,
+  extensions: Plug,
+  voice: Mic,
+};
+
+// Card groupings for the schema-driven sections. Each { title, entryIds }
+// becomes one --card surface with a micro-caps group heading, mirroring the
+// mockup's group labels. Sections with per-section custom content (general,
+// box, accounts, extensions) are rendered by renderCustom instead.
+const SECTION_GROUPS: Partial<Record<SettingSectionId, { title: string; entryIds: string[] }[]>> = {
+  models: [{ title: "Requests", entryIds: ["cacheTtl"] }],
+  sessions: [
+    { title: "Naming", entryIds: ["autoRenameSessions"] },
+    { title: "Git worktrees", entryIds: ["worktreePerSession", "worktreeCleanOnClose"] },
+  ],
+  files: [
+    { title: "Files the agent sends you", entryIds: ["allowAgentPush", "downloadsDir"] },
+    { title: "Files you send the agent", entryIds: ["uploadCleanupHours"] },
+  ],
+  voice: [
+    { title: "Speech to text (Groq)", entryIds: ["groqApiKey", "voiceTranscriptionModel", "voiceCommandModel"] },
+  ],
+};
+
+// A --card surface with a micro-caps group heading (BET-461 §4): --card bg,
+// --border edge, --r-lg radius, 12px vertical / 16px horizontal padding.
+function GroupCard({ title, danger = false, className, children }: {
+  title?: string;
+  danger?: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className={className}>
+      {title && (
+        <h5 className="mb-3 text-micro font-semibold uppercase tracking-wide text-text-faint">{title}</h5>
+      )}
+      <div
+        className={
+          danger
+            ? "rounded-xl border border-danger bg-danger-bg px-4 py-3 space-y-4"
+            : "rounded-xl border border-border bg-bg-soft px-4 py-3 space-y-4"
+        }
+      >
+        {children}
+      </div>
     </div>
   );
 }
@@ -516,24 +583,25 @@ export function Settings({ onClose }: { onClose: () => void }) {
     if (section === "general") {
       return (
         <>
-          <div className="border-t border-border pt-6">
-            <h3 className="text-title font-semibold mb-4">About</h3>
-            <div className="text-body text-text-faint">Manta v{clientVersion ?? "…"}</div>
-            {serverVersion && <div className="text-meta text-text-faint mt-1">Box server v{serverVersion}</div>}
-            {opencodeVersion && <div className="text-meta text-text-faint mt-1">Box opencode v{opencodeVersion}</div>}
-            <div className="text-meta text-text-faint mt-1">Desktop client for remote Claude Code sessions.</div>
+          <GroupCard title="About">
+            <div className="text-body text-text-muted">
+              Desktop <span className="font-medium text-text">{clientVersion ?? "…"}</span>
+              {serverVersion && (<><span className="text-text-faint"> · </span>server <span className="font-medium text-text">{serverVersion}</span></>)}
+              {opencodeVersion && (<><span className="text-text-faint"> · </span>opencode <span className="font-medium text-text">{opencodeVersion}</span></>)}
+            </div>
             {store.updatePrompt && (
-              <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
+              <div className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
                 <span className="flex-1 text-meta text-text">Update ready: <span className="font-medium">{store.updatePrompt.releaseName || store.updatePrompt.version}</span></span>
                 <button onClick={() => { void window.api.autoUpdateInstall(); }} className="shrink-0 rounded bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium">Restart to update</button>
               </div>
             )}
-          </div>
-          <div className="border-t border-border pt-6">
-            <h3 className="text-title font-semibold mb-4">Reset all settings</h3>
-            <div className="text-body text-text-faint mb-3">Restore every setting below to its default. This does not remove your box pairing or projects.</div>
-            <button onClick={() => setConfirmReset(true)} className="text-body px-4 py-2 rounded border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
-          </div>
+          </GroupCard>
+          <GroupCard title="Danger zone" danger>
+            <div className="flex items-start justify-between gap-4">
+              <div className="text-body text-text-faint">Restore every setting below to its default. This does not remove your box pairing or projects.</div>
+              <button onClick={() => setConfirmReset(true)} className="shrink-0 px-4 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
+            </div>
+          </GroupCard>
         </>
       );
     }
@@ -543,7 +611,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <>
           {/* Read-only status card — the URL lives here; changing it means
               re-pairing, so there is no editable Connection block (BET-420). */}
-          <div className="rounded-lg border border-border bg-bg-soft p-4 space-y-2">
+          <GroupCard>
             <div className="flex items-center gap-2">
               <span aria-hidden className={`inline-block w-2 h-2 rounded-full ${connected ? "bg-ok" : "bg-text-faint"}`} />
               <span className="text-body font-medium text-text">{connected ? "Connected" : "Not paired"}</span>
@@ -564,78 +632,75 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 </div>
               )}
             </dl>
-          </div>
+          </GroupCard>
 
-          <div>
-            <h3 className="text-title font-semibold mb-4">Pair phone</h3>
-            <div className="text-body text-text-faint mb-4">
-              Scan this QR with the Manta mobile app to connect it to your box. The code is one-time and valid for ~5 minutes. Generate a new code if the old one expires.
-            </div>
-            {!pairing ? (
-              <button onClick={mintPairingCode} disabled={pairingMinting} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">
-                {pairingMinting ? "Generating…" : "Generate pairing code"}
-              </button>
-            ) : pairing.ok ? (
-              <div className="space-y-4">
-                <div className="flex items-start gap-4">
-                  <div className="bg-white p-2 rounded border border-border shrink-0">
-                    <PairingQR boxId={pairing.boxId} pairingCode={pairing.pairingCode} />
-                  </div>
-                  <div className="flex-1 space-y-2">
-                    <div className="text-body"><span className="text-text-muted">Code:</span> <span className="font-mono text-text">{pairing.pairingCode}</span></div>
-                    <div className="text-body"><span className="text-text-muted">Box ID:</span> <span className="font-mono text-text break-all" title={pairing.boxId}>{pairing.boxId}</span></div>
-                    {pairingExpiry && <PairingCountdown expiry={pairingExpiry} />}
-                  </div>
-                </div>
-                <button onClick={mintPairingCode} disabled={pairingMinting} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">
-                  {pairingMinting ? "Generating…" : "Refresh code"}
+          <GroupCard title="Devices">
+            <div className="flex items-start justify-between gap-4">
+              <div className="text-body text-text-faint">Scan this QR with the Manta mobile app to connect it to your box. The code is one-time and valid for ~5 minutes.</div>
+              {!pairing ? (
+                <button onClick={mintPairingCode} disabled={pairingMinting} className="shrink-0 text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">
+                  {pairingMinting ? "Generating…" : "Generate pairing code"}
                 </button>
-              </div>
-            ) : (
-              <div className="text-body text-danger">{pairing.error}</div>
-            )}
-          </div>
-
-          <div className="border-t border-border pt-6">
+              ) : pairing.ok ? (
+                <div className="shrink-0 space-y-4">
+                  <div className="flex items-start gap-4">
+                    <div className="bg-white p-2 rounded border border-border shrink-0">
+                      <PairingQR boxId={pairing.boxId} pairingCode={pairing.pairingCode} />
+                    </div>
+                    <div className="flex-1 space-y-2">
+                      <div className="text-body"><span className="text-text-muted">Code:</span> <span className="font-mono text-text">{pairing.pairingCode}</span></div>
+                      <div className="text-body"><span className="text-text-muted">Box ID:</span> <span className="font-mono text-text break-all" title={pairing.boxId}>{pairing.boxId}</span></div>
+                      {pairingExpiry && <PairingCountdown expiry={pairingExpiry} />}
+                    </div>
+                  </div>
+                  <button onClick={mintPairingCode} disabled={pairingMinting} className="text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">
+                    {pairingMinting ? "Generating…" : "Refresh code"}
+                  </button>
+                </div>
+              ) : (
+                <div className="shrink-0 text-body text-danger">{pairing.error}</div>
+              )}
+            </div>
             <div className="flex items-center justify-between">
               <div className="text-body text-text-faint">Re-run the guided setup (pairing, providers, first project).</div>
-              <button onClick={() => { void useStore.getState().relaunchOnboarding(); onClose(); }} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text shrink-0">Run setup again</button>
+              <button onClick={() => { void useStore.getState().relaunchOnboarding(); onClose(); }} className="text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text shrink-0">Run setup again</button>
             </div>
-          </div>
+          </GroupCard>
 
           {/* Advanced — opencodePort, exposed in the UI for the first time
               (BET-420). Collapsed by default; it's an infrequently-touched
               knob. */}
-          <details className="border-t border-border pt-6">
-            <summary className="text-body text-text-muted cursor-pointer select-none">Advanced</summary>
-            <div className="mt-4 space-y-1">
-              <label htmlFor="setting-opencodePort" className="block text-micro font-semibold uppercase text-text-muted">opencode port</label>
-              <input
-                id="setting-opencodePort"
-                type="number"
-                min={1}
-                max={65535}
-                value={opencodePortDraft}
-                onChange={(e) => { setOpencodePortDraft(e.target.value); setOpencodePortSavedAt(null); }}
-                onBlur={commitOpencodePort}
-                spellCheck={false}
-                className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
-              />
-              <div className="text-meta text-text-faint">Local port forwarded to the box's opencode serve instance. Defaults to 14096 to avoid colliding with a local opencode on 4096.</div>
-              {opencodePortSavedAt && <div role="status" className="text-meta text-ok">Saved</div>}
-            </div>
-          </details>
+          <GroupCard title="Advanced">
+            <details>
+              <summary className="text-body text-text-muted cursor-pointer select-none">Advanced</summary>
+              <div className="mt-4 space-y-1">
+                <label htmlFor="setting-opencodePort" className="block text-micro font-semibold uppercase text-text-muted">opencode port</label>
+                <input
+                  id="setting-opencodePort"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={opencodePortDraft}
+                  onChange={(e) => { setOpencodePortDraft(e.target.value); setOpencodePortSavedAt(null); }}
+                  onBlur={commitOpencodePort}
+                  spellCheck={false}
+                  className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
+                />
+                <div className="text-meta text-text-faint">Local port forwarded to the box's opencode serve instance. Defaults to 14096 to avoid colliding with a local opencode on 4096.</div>
+                {opencodePortSavedAt && <div role="status" className="text-meta text-ok">Saved</div>}
+              </div>
+            </details>
+          </GroupCard>
 
-          <div className="border-t border-border pt-6">
-            <h3 className="text-title font-semibold mb-3">Danger zone</h3>
+          <GroupCard title="Danger zone" danger>
             <div className="flex items-center justify-between">
               <div className="text-body text-text-faint">Forget this box on the desktop. If the box is reachable, its current token is revoked too.</div>
-              <button onClick={() => setConfirmRemove(true)} disabled={removingBox} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-danger hover:border-danger disabled:opacity-40 disabled:cursor-not-allowed shrink-0">
+              <button onClick={() => setConfirmRemove(true)} disabled={removingBox} className="shrink-0 text-body px-4 py-2 rounded border border-danger text-danger hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed">
                 {removingBox ? "Removing…" : "Remove box"}
               </button>
             </div>
-            {removeResult && !removeResult.ok && <div role="alert" className="text-body text-warn mt-3">{removeResult.message}</div>}
-          </div>
+            {removeResult && !removeResult.ok && <div role="alert" className="text-body text-warn">{removeResult.message}</div>}
+          </GroupCard>
         </>
       );
     }
@@ -646,23 +711,36 @@ export function Settings({ onClose }: { onClose: () => void }) {
       // and in onboarding.
       return (
         <>
-          <SubscriptionsCard />
-          <div className="border-t border-border pt-6">
-            <h3 className="text-title font-semibold mb-1">Custom endpoints</h3>
-            <div className="text-body text-text-faint mb-3">OpenAI-compatible endpoints opencode can serve. Add one, refresh to discover models, then enable the ones you want in the model picker.</div>
+          <GroupCard title="Subscriptions">
+            <SubscriptionsCard />
+          </GroupCard>
+          <GroupCard title="Custom endpoints">
+            <div className="text-body text-text-faint">OpenAI-compatible endpoints opencode can serve. Add one, refresh to discover models, then enable the ones you want in the model picker.</div>
             <ProvidersCard onRestartNeeded={requestRestart} />
-          </div>
+          </GroupCard>
         </>
       );
     }
     if (section === "models") {
-      return <ModelsCard />;
+      return (
+        <GroupCard>
+          <ModelsCard />
+        </GroupCard>
+      );
     }
     if (section === "extensions") {
       return (
         <>
-          <div className="border-t border-border pt-6">
-            <h3 className="text-title font-semibold mb-4">Installed plugins</h3>
+          <GroupCard title="Plugins">
+            {pluginsToggleEntry && <div className="space-y-1">
+              <label htmlFor={fieldId(pluginsToggleEntry)} className="flex items-start gap-3 text-body cursor-pointer">
+                <input id={fieldId(pluginsToggleEntry)} type="checkbox" checked={pluginsOn} onChange={(e) => void togglePlugins(e.target.checked)} className="mt-px" />
+                <span>
+                  {pluginsToggleEntry.label}
+                  {pluginsToggleEntry.help && <span className="block text-meta text-text-faint mt-1">{pluginsToggleEntry.help}</span>}
+                </span>
+              </label>
+            </div>}
             {pluginsError ? (
               <div role="alert" className="text-body text-danger">{errorDisclosure("Couldn't load the plugins list.", pluginsError)}</div>
             ) : plugins === null ? (
@@ -684,14 +762,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 ))}
               </div>
             )}
-          </div>
-          <div className="border-t border-border pt-6">
-            <button onClick={() => { const preload = getMantaPreload(); if (preload?.revealInFolder) void preload.revealInFolder("~/.manta/plugins"); }} className="text-body px-4 py-2 rounded bg-bg-soft border border-border text-text-muted hover:text-text">Open plugins folder</button>
-          </div>
+            <button onClick={() => { const preload = getMantaPreload(); if (preload?.revealInFolder) void preload.revealInFolder("~/.manta/plugins"); }} className="text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text">Open plugins folder</button>
+          </GroupCard>
           {availableLaunchers.some((l) => l.flags.length > 0) && (
-            <div className="border-t border-border pt-6">
-              <h3 className="text-title font-semibold mb-1">AI CLI launch options</h3>
-              <div className="text-body text-text-faint mb-4">Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this box are shown.</div>
+            <GroupCard title="AI CLI launch options">
+              <div className="text-body text-text-faint">Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this box are shown.</div>
               <div className="space-y-4">
                 {availableLaunchers.filter((l) => l.flags.length > 0).map((l) => (
                   <div key={l.id} className="space-y-2">
@@ -705,11 +780,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   </div>
                 ))}
               </div>
-            </div>
+            </GroupCard>
           )}
-          <div className="border-t border-border pt-6">
-            <h3 className="text-title font-semibold mb-4">Skill registries</h3>
-            <div className="text-body text-text-faint mb-3">Extra skill registry URLs fetched by opencode on startup. The default Manta registry is always included.</div>
+          <GroupCard title="Skill registries">
+            <div className="text-body text-text-faint">Extra skill registry URLs fetched by opencode on startup. The default Manta registry is always included.</div>
             <div className="space-y-2">
               {registryUrls.map((url) => (
                 <div key={url} className="flex items-center gap-2">
@@ -718,11 +792,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 </div>
               ))}
             </div>
-            <div className="flex gap-2 mt-3">
+            <div className="flex gap-2">
               <input placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} className="flex-1 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
               <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-4 py-2 text-body bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">Add</button>
             </div>
-          </div>
+          </GroupCard>
         </>
       );
     }
@@ -735,6 +809,40 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const pluginsToggleEntry = SETTINGS.find((e) => e.id === "pluginsEnabled");
   const simpleEntriesExPlugins = simpleEntries.filter((e) => e.id !== "pluginsEnabled");
 
+  // Assemble the active section's panels as --card groups. Card-grouped
+  // schema sections come from SECTION_GROUPS; General's Theme + custom blocks
+  // and the fully custom sections (box/accounts/extensions) come from
+  // renderCustom.
+  const renderSection = (section: SettingSectionId): ReactNode => {
+    const grouped = SECTION_GROUPS[section] ?? [];
+    const byId = new Map(simpleEntriesExPlugins.map((e) => [e.id, e]));
+    const groupedBlocks = grouped.map((g) => (
+      <GroupCard key={g.title} title={g.title}>
+        {g.entryIds.map((id) => {
+          const entry = byId.get(id);
+          return entry ? <div key={id}>{renderField(entry)}</div> : null;
+        })}
+      </GroupCard>
+    ));
+
+    let custom: ReactNode = null;
+    if (section === "general") {
+      const theme = simpleEntriesExPlugins.find((e) => e.id === "theme");
+      custom = (
+        <>
+          {theme && <GroupCard title="Appearance"><div>{renderField(theme)}</div></GroupCard>}
+          {renderCustom("general")}
+        </>
+      );
+    } else {
+      custom = renderCustom(section);
+    }
+
+    return (
+      <>{groupedBlocks}{custom}</>
+    );
+  };
+
   return (
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-title" className="fixed inset-0 bg-bg z-50 flex">
       {/* Left sidebar navigation (tablist) */}
@@ -743,15 +851,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <div className="p-4 border-b border-border">
           <h2 id="settings-title" tabIndex={-1} className="text-title font-semibold">Settings</h2>
         </div>
-        <nav className="flex-1 py-2 overflow-y-auto" role="tablist" aria-label="Settings sections">
+        <nav className="flex-1 py-2 px-2 overflow-y-auto" role="tablist" aria-label="Settings sections">
           {SETTING_SECTIONS.map((tab, i) => {
             const modified = sectionIsModified(SETTINGS, tab.id, PLATFORM, values);
             const prev = i > 0 ? SETTING_SECTIONS[i - 1] : null;
             const showGroup = tab.group && (!prev || prev.group !== tab.group);
+            const Icon = SECTION_ICONS[tab.id];
             return (
               <div key={tab.id}>
                 {showGroup && (
-                  <div aria-hidden className="px-4 pt-3 pb-1 text-micro font-semibold uppercase tracking-wide text-text-quiet">── {tab.group} ──</div>
+                  <div aria-hidden className="px-3 pt-3 pb-1 text-micro font-semibold uppercase tracking-wide text-text-faint">{tab.group}</div>
                 )}
                 <button
                   ref={(el) => { railRefs.current[tab.id] = el; }}
@@ -761,14 +870,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   id={`tab-${tab.id}`}
                   onClick={() => setActiveTab(tab.id)}
                   onKeyDown={onRailKeyDown}
-                  className={`w-full text-left px-4 py-2 text-body transition-colors ${
-                    activeTab === tab.id ? "bg-accent/10 text-accent border-r-2 border-accent" : "text-text-muted hover:text-text hover:bg-bg-elev"
+                  className={`w-full flex items-center gap-2 text-left px-3 py-2 rounded-lg text-body transition-colors ${
+                    activeTab === tab.id ? "bg-raised text-text font-semibold" : "text-text-faint hover:text-text hover:bg-fill-hover"
                   }`}
                 >
-                  <span className="inline-flex items-center gap-2">
-                    {tab.label}
-                    {modified && <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-accent" title="Modified" />}
-                  </span>
+                  <Icon size={15} strokeWidth={2} aria-hidden="true" className="shrink-0" />
+                  <span className="flex-1 min-w-0 truncate">{tab.label}</span>
+                  {modified && <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-accent shrink-0" title="Modified" />}
                 </button>
               </div>
             );
@@ -819,19 +927,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             </div>
           ) : (
             <div role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`} className="max-w-2xl space-y-6">
-              {activeTab === "extensions" && pluginsToggleEntry ? (
-                <div className="space-y-1">
-                  <label htmlFor={fieldId(pluginsToggleEntry)} className="flex items-start gap-3 text-body cursor-pointer">
-                    <input id={fieldId(pluginsToggleEntry)} type="checkbox" checked={pluginsOn} onChange={(e) => void togglePlugins(e.target.checked)} className="mt-px" />
-                    <span>
-                      {pluginsToggleEntry.label}
-                      {pluginsToggleEntry.help && <span className="block text-meta text-text-faint mt-1">{pluginsToggleEntry.help}</span>}
-                    </span>
-                  </label>
-                </div>
-              ) : null}
-              {simpleEntriesExPlugins.map((entry) => <div key={entry.id}>{renderField(entry)}</div>)}
-              {renderCustom(activeTab)}
+              {renderSection(activeTab)}
             </div>
           )}
         </div>
@@ -852,7 +948,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setConfirmRemove(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
-              <button onClick={removeBox} className="px-4 py-2 text-body bg-danger text-white rounded hover:opacity-90">Remove</button>
+              <button onClick={removeBox} className="px-4 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Remove</button>
             </div>
           </div>
         </div>
@@ -866,7 +962,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setConfirmReset(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
-              <button onClick={resetAll} className="px-4 py-2 text-body bg-accent-solid text-on-accent rounded hover:opacity-90">Reset</button>
+              <button onClick={resetAll} className="px-4 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Reset</button>
             </div>
           </div>
         </div>

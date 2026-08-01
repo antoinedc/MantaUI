@@ -1961,14 +1961,20 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
       {/* Hidden for a job session (BET-418 §D: a job's pre-flight ruleset */}
       {/* means it never generates asks, but gate defensively anyway). */}
       {!jobOwnership && permissions.length > 0 && (
-        <div className="shrink-0 px-4 pt-2 space-y-2">
-          {permissions.map((p) => (
-            <PermissionCard
-              key={p.id}
-              perm={p}
-              onReply={(reply) => replyPermission(p.id, reply, p.sessionID)}
-            />
-          ))}
+        <div className="shrink-0 px-4 pt-2">
+          {/* BET-458: the permission card is a block in the conversation, not
+              an overlay — bound it to the same 72ch measure the transcript
+              column uses (see Transcript), so it edge-aligns with the prose
+              and the question cards instead of bleeding to the pane edge. */}
+          <div className="mx-auto w-full space-y-2" style={{ maxWidth: "72ch" }}>
+            {permissions.map((p) => (
+              <PermissionCard
+                key={p.id}
+                perm={p}
+                onReply={(reply) => replyPermission(p.id, reply, p.sessionID)}
+              />
+            ))}
+          </div>
         </div>
       )}
 
