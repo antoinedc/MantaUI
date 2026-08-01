@@ -115,6 +115,17 @@ user gestures — a click a person could make — not for reaching into internal
    This is the only step that can catch a baseline recorded from a broken
    render, and it is cheap: paste the PNG.
 
+   **Paste the image as an upload, never as a link into the PR branch.** A
+   `raw.githubusercontent.com/<owner>/<repo>/<pr-branch>/…png` URL resolves
+   while the PR is open and dies the moment it merges, because PRs here are
+   merged with `--delete-branch`. The picture is the evidence for the *record*,
+   which outlives the branch by definition — a review trail that 404s six weeks
+   later cannot be re-read when someone asks why a baseline looks like that.
+   Drag the PNG into the GitHub comment box (it rewrites to a
+   `github.com/user-attachments/…` URL, hosted independently of any ref), or
+   link a permalink pinned to the merge commit SHA. Either survives; a branch
+   path does not.
+
 Steps 4 and 5 apply **whenever a baseline moves**, not only when the issue is a
 design issue. A refactor that shifts a pixel is exactly the case where nobody
 thinks to look.
