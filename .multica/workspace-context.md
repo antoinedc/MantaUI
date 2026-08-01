@@ -139,9 +139,14 @@ curl -fsSL https://mantaui.com/install.sh | bash
 ```
 
 **Mode detection:**
-- If `boxId` + `boxToken` are set → direct mode (no SSH fields needed).
-- If `host` is set → SSH mode (legacy, for self-hosted users who don't want the Caddy + DNS path).
-- If neither → onboarding flow.
+- If `boxId` + `boxToken` are set → HTTP mode (normal operation).
+- If not → onboarding flow.
+
+**There is no SSH mode.** The SSH transport was deleted: no tunnels, no port
+forwards, no ControlMaster, no mosh, no scp. Legacy SSH fields (`host`, `user`,
+`identityFile`, `transport`) are migrated OUT of the config on load. Only two
+transport modes exist: `http` (paired) and `onboarding` (pre-pairing). Any issue
+text implying an SSH fallback is stale — say so rather than building to it.
 
 ### Step 3: Pick AI Providers (Full-Screen)
 
@@ -386,7 +391,39 @@ Saved to `/tmp/screenshots/settings/`:
 
 - **Workspace**: https://multica.ai/better-ui (ID: `264c89bb-4659-4570-af7b-5f8daaf87985`)
 - **Agent**: `manta-dev` (ID: `ab49c3e2-0239-43cb-81cf-32d3ee9102f2`) — OpenCode runtime
+- **Agent**: `macos` (ID: `e6d7e43d-263a-4688-bf91-bbc3b27b72ba`) — OpenCode runtime **on Antoine's Mac laptop**
 - **Skill**: `verify-build-manta` (ID: `ef855df1-92f6-4cff-906f-80f8ab53b48e`) — runs `npm run typecheck && npm test`
+
+## Mac-only work — route it to `macos`
+
+Every agent except `macos` runs on a Linux box. **Anything requiring Apple's
+toolchain is physically impossible for you**, no matter how the issue is worded:
+
+- building or compiling an Xcode project, a Swift package, or an iOS/macOS app
+- anything involving the iOS Simulator — booting, installing, launching,
+  screenshots, screen recordings, accessibility hierarchies
+- `xcodebuild`, `xcrun`, `simctl`, `swift build`, `pod`, or an Apple SDK
+- installing onto a physical iPhone
+
+When an issue needs one of these, **do not attempt it, do not simulate it, and
+do not report a result you did not obtain.** Hand off instead: comment saying
+exactly what you need built or captured and on which branch, then assign the
+issue to `macos`. It picks the work up, does the Apple-side step, commits the
+output, and hands back.
+
+**The git branch is the hand-off medium.** `macos` commits its artifacts —
+screenshots, logs, hierarchy dumps — to the working branch. You consume them
+from the branch after pulling. An artifact that exists only on the laptop does
+not exist. If the artifacts an issue tells you to read are missing from the
+branch, stop and say so; do not proceed on assumed contents.
+
+**The laptop sleeps.** Work assigned to `macos` may sit until the machine wakes.
+That is expected, not a failure — do not re-dispatch, and do not route around it
+by faking the Apple-side step.
+
+`macos` is deliberately narrow: it builds, captures, commits and reports. It
+does not sign, distribute, upload, touch the keychain or read credentials, and
+it will refuse and ask rather than exceed that scope. Do not ask it to.
 
 ## Hard Rules
 
@@ -394,5 +431,5 @@ Saved to `/tmp/screenshots/settings/`:
 2. **Never commit PATs or daemon tokens.** `~/.multica/config.json` lives outside the repo.
 3. **Skill descriptions in frontmatter must stay accurate.** The dispatcher uses them at task-dispatch time.
 4. **No production deploy from agents.** No `ssh root@…`, no `./scripts/deploy.sh`, no `docker` on prod.
-5. **Mobile changes need rebuild + commit** — `npm run build:mobile` then `git add mobile/www && git commit && git push`. Source edits alone do NOTHING on phone.
-6. **Auth on `src/server/` is job zero** — cannot ship commercial product without it.
+5. **NEVER commit `mobile/www/`.** It is a gitignored build artifact; CI builds and publishes it on merge to `main`. On a branch you edit the SOURCE (`src/renderer/`) only. Committing the bundle by hand is what used to make every two in-flight PRs conflict (BET-118). Note the consequence: source edits alone do NOTHING on a phone until CI republishes the bundle.
+6. **Auth on `src/server/` is shipped and enforced** (since 2026-07-02) — bearer token on every data route. Do not write code assuming an open server.
