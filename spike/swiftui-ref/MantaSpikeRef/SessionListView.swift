@@ -45,7 +45,7 @@ struct SessionGroupHeader: View {
             .font(.system(size: 15, weight: .semibold))
             .kerning(-0.225)
             .foregroundStyle(t.tx2)
-            .padding(.top, 22)
+            .padding(.top, 16)
             .padding(.bottom, 6)
             .padding(.leading, 12)
     }
