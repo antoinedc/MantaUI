@@ -96,6 +96,7 @@ export const SCREENS = [
     ready: '[data-screen="welcome"]',
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/welcome/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn"],
   },
   {
     id: "session",
@@ -115,6 +116,15 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/session/mockup.html",
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
   },
   {
     // REGION ROWS for the session view (BET-468). The header strip and the
@@ -137,6 +147,15 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/session/mockup.html",
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
   },
   {
     id: "session-composer",
@@ -152,6 +171,15 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/session/mockup.html",
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
   },
   {
     id: "settings",
@@ -171,6 +199,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     // REGION ROWS — a component that owns its own small baseline. These are
@@ -191,6 +220,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     id: "settings-general",
@@ -205,6 +235,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     // Extensions panel — the four settings sections (box/accounts/extensions)
@@ -228,6 +259,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     // The ⋯ session menu is the only entry point for AI-CLI launcher modes
@@ -250,6 +282,14 @@ export const SCREENS = [
     // registry's documented way to say "no design filed"; the row still gets
     // a structure snapshot and a pixel baseline.
     mockup: null,
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
   },
 ];
 
