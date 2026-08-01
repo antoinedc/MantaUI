@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>Mockup — Settings</title>
+
+<!--
+  THE SPEC for the settings screen. This file is the design contract, not a picture
+  of one. Read docs/visual-verification.md before editing.
+
+  PROVENANCE: lifted from the MantaUI 2.0 redesign spec (v2, decisions locked) —
+  its live mockup for this screen, markup and rules intact — so this file and
+  that document cannot drift apart. Do not "improve" the design here; raise it
+  against the spec instead.
+
+  Two rules make this a contract rather than decoration:
+
+  1. It loads the app's REAL token stylesheet below. Every colour, spacing step,
+     radius, shadow and type stack resolves to the same variable the app uses at
+     runtime — including the radius scale (--r-*), the measure and the row
+     metrics, which exist precisely so a design can NAME a value instead of
+     hardcoding a pixel the implementer then has to reconcile against the
+     "no off-grid value" rule.
+
+  2. It renders in the same browser, at the same viewport, as the implementation
+     capture — so `npm run visual:compare` yields a fair side-by-side rather than
+     a font-mismatch diff.
+
+  Placeholder content deliberately MATCHES the demo fixture this screen is
+  captured against, so the side-by-side compares layout and not words.
+
+
+  ============================ CONFORMANCE SCOPE ============================
+  Most of this screen's STRUCTURE already ships: the dialog semantics, the
+  eight sections in this order and grouping, the section rail, the search
+  field and the modified-dots are all present in the app today. The delta is
+  finish, not architecture.
+
+  Explicitly OUT of conformance scope — design completeness only, do NOT build
+  in a UI issue:
+
+    - the instant-apply Undo toast, and the save-model change behind it.
+    - any row tagged `new` (Theme control, Reset all settings) or
+      `config only` — those are features or unreachable config keys.
+    - the ⌘F shortcut binding for the search field.
+
+  Everything else is a restyle of something already rendered.
+  ===========================================================================
+
+  What this file is NOT: a component library. Nothing here is imported by the
+  app. The markup reads like the target DOM so the structure snapshot is
+  comparable, but it is throwaway HTML.
+-->
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+
+<style>
+  /* Only the mockup shell + the icon primitives. Everything carrying a colour,
+     a spacing step, a radius, a shadow or a type stack reads a token. */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--canvas);
+    color: var(--tx1);
+    font: 400 15px/var(--ui-lh) var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  code, kbd, pre, .mono { font-family: var(--font-mono); }
+  .ic {
+    width: 16px; height: 16px; stroke: currentColor; fill: none;
+    stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    flex-shrink: 0; display: block;
+  }
+  .ic.s  { width: 14px; height: 14px; }
+  .ic.xs { width: 12px; height: 12px; stroke-width: 2.2; }
+  .spec-notes {
+    max-width: 78ch; margin: var(--sp-8) auto; padding: 0 var(--sp-6);
+    color: var(--tx2); font-size: 14px; line-height: var(--prose-lh);
+  }
+  .spec-notes strong.h { color: var(--tx1); }
+
+  /* Row tags (from the spec's shared styles). `config only` = the config key
+     exists with no screen; `new` = does not exist yet. Part of the contract:
+     they tell an implementer a restyle from a build. */
+  .pill { display: inline-block; padding: 2px 8px; border-radius: var(--r-full);
+          font: 600 11px/1.5 var(--font-sans); }
+  .pill.bad  { background: var(--danger-bg); color: var(--danger); }
+  .pill.good { background: var(--ok-bg);     color: var(--ok); }
+  .pill.warn { background: var(--warn-bg);   color: var(--warn); }
+  .pill.info { background: var(--accent-bg); color: var(--accent-tx); }
+  .mono-inline { font-family: var(--font-mono); font-size: .9em;
+                 background: var(--fill); padding: 1px 5px;
+                 border-radius: var(--r-xs); color: var(--tx1); }
+
+
+.setwin{border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;box-shadow:var(--shadow-lg);
+  background:var(--canvas);display:grid;grid-template-columns:212px 1fr;height:640px;margin:var(--sp-4) 0;position:relative}
+@media(max-width:820px){.setwin{grid-template-columns:1fr;height:auto}.setwin .snav{display:none}}
+.snav{background:var(--panel);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;
+  padding:var(--sp-3) var(--sp-2);overflow-y:auto}
+.snav h3{font:600 15px/1 var(--font-sans);padding:0 var(--sp-2) var(--sp-3)}
+.snav .sfind{display:flex;align-items:center;gap:7px;height:30px;padding:0 9px;border-radius:var(--r-md);
+  background:var(--fill);color:var(--tx3);font:400 12.5px/1 var(--font-sans);margin-bottom:var(--sp-3)}
+.snav .cl{font:600 10px/1 var(--font-sans);letter-spacing:.09em;text-transform:uppercase;color:var(--tx4);
+  padding:0 9px;margin:var(--sp-4) 0 var(--sp-2)}
+.snav-i{display:flex;align-items:center;gap:var(--sp-2);padding:7px 9px;border-radius:var(--r-md);
+  font:500 13px/1 var(--font-sans);color:var(--tx3);cursor:pointer;margin-bottom:1px;border:0;background:transparent;width:100%;text-align:left}
+.snav-i:hover{background:var(--fill-hover);color:var(--tx1)}
+.snav-i.on{background:var(--raised);color:var(--tx1);font-weight:600}
+.snav-i .ic{width:15px;height:15px}
+.snav-i .mod{margin-left:auto;width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.setmain{display:flex;flex-direction:column;min-width:0}
+.sethead{height:46px;display:flex;align-items:center;padding:0 var(--sp-5);border-bottom:1px solid var(--border-subtle);gap:var(--sp-2);flex-shrink:0}
+.sethead h4{font:600 15px/1 var(--font-sans)}
+.setbody{flex:1;overflow-y:auto;padding:var(--sp-5);min-height:0}
+.setgrp{max-width:660px}
+.setgrp+.setgrp{margin-top:var(--sp-8)}
+.setgrp>h5{font:600 11px/1 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx3);margin:0 0 var(--sp-2)}
+.setrow{display:flex;align-items:flex-start;gap:var(--sp-5);padding:var(--sp-3) 0;border-bottom:1px solid var(--border-subtle)}
+.setrow:last-child{border-bottom:0}
+.setrow .lab{flex:1;min-width:0}
+.setrow .lab b{display:block;font:500 14px/1.4 var(--font-sans);color:var(--tx1)}
+.setrow .lab span.h{display:block;font:400 12.5px/1.5 var(--font-sans);color:var(--tx3);margin-top:3px}
+.setrow .ctl{flex-shrink:0;display:flex;align-items:center;gap:var(--sp-2);padding-top:2px}
+.sw{width:36px;height:20px;border-radius:var(--r-full);background:var(--fill-active);border:1px solid var(--border);
+  position:relative;cursor:pointer;transition:.15s var(--ease);flex-shrink:0}
+.sw i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--tx3);transition:.15s var(--ease)}
+.sw.on{background:var(--accent-solid);border-color:var(--accent-solid)}
+.sw.on i{left:18px;background:var(--on-accent)}
+.inp{height:32px;padding:0 10px;border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--canvas);
+  color:var(--tx1);font:400 12.5px/1 var(--font-mono);min-width:200px}
+.inp.sans{font-family:var(--font-sans);font-size:13px}
+.savedtick{font:500 11px/1 var(--font-sans);color:var(--ok);display:inline-flex;align-items:center;gap:4px}
+.savedtick .ic{width:12px;height:12px;stroke-width:3}
+.statcard{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4);border:1px solid var(--border);
+  border-radius:var(--r-lg);background:var(--panel);max-width:660px;margin-bottom:var(--sp-5)}
+.statcard .bl{width:34px;height:34px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--ok-bg);color:var(--ok);flex-shrink:0}
+.statcard .kv{font:500 12px/1.7 var(--font-mono);color:var(--tx3);min-width:0}
+.statcard .kv b{color:var(--tx1);font-weight:600}
+.undo{position:absolute;left:50%;bottom:var(--sp-5);transform:translateX(-50%);display:flex;align-items:center;
+  gap:var(--sp-3);padding:9px var(--sp-3) 9px var(--sp-4);border-radius:var(--r-full);background:var(--card);
+  border:1px solid var(--border);box-shadow:var(--shadow-md);font:500 12.5px/1 var(--font-sans);color:var(--tx2);white-space:nowrap;z-index:5}
+.undo button{border:0;background:transparent;color:var(--accent-tx);font:600 12.5px/1 var(--font-sans);cursor:pointer;padding:0 4px}
+.restartbar{display:flex;align-items:center;gap:var(--sp-3);padding:9px var(--sp-4);background:var(--warn-bg);
+  border-bottom:1px solid color-mix(in srgb,var(--warn) 30%,transparent);font:500 12.5px/1.4 var(--font-sans);color:var(--tx2);flex-shrink:0}
+.restartbar .ic{color:var(--warn);flex-shrink:0}
+.lrow{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) 0;border-bottom:1px solid var(--border-subtle)}
+.lrow:last-of-type{border-bottom:0}
+.lrow .av{width:28px;height:28px;border-radius:var(--r-sm);display:grid;place-items:center;background:var(--fill-active);
+  color:var(--tx2);font:600 11px/1 var(--font-sans);flex-shrink:0}
+.lrow .nm{font:500 13.5px/1.3 var(--font-sans);color:var(--tx1)}
+.lrow .nm em{display:block;font:400 12px/1.4 var(--font-sans);color:var(--tx3);font-style:normal;margin-top:2px}
+.dot-ok{width:7px;height:7px;border-radius:50%;background:var(--ok);flex-shrink:0}
+.dot-off{width:7px;height:7px;border-radius:50%;background:var(--tx4);flex-shrink:0}
+.mtable{width:100%;border-collapse:collapse;font-size:12.5px}
+.mtable th{text-align:left;font:600 10px/1 var(--font-sans);letter-spacing:.07em;text-transform:uppercase;
+  color:var(--tx4);padding:var(--sp-2);border-bottom:1px solid var(--border)}
+.mtable td{padding:9px var(--sp-2);border-bottom:1px solid var(--border-subtle);color:var(--tx2)}
+.mtable td:first-child{color:var(--tx1);font-weight:500}
+.mtable .ctx{font:500 10.5px/1 var(--font-mono);color:var(--tx4)}
+.radio{width:15px;height:15px;border-radius:50%;border:1.5px solid var(--border-strong);display:inline-grid;place-items:center}
+.radio.on{border-color:var(--accent-solid)}
+.radio.on::after{content:"";width:7px;height:7px;border-radius:50%;background:var(--accent-solid)}
+.segsm{display:inline-flex;border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;background:var(--card)}
+.segsm span{padding:6px 12px;font:500 12px/1 var(--font-sans);color:var(--tx3);cursor:pointer}
+.segsm span+span{border-left:1px solid var(--border)}
+.segsm span.on{background:var(--raised);color:var(--tx1);font-weight:600}
+.tagrow{display:flex;align-items:center;gap:var(--sp-2);padding:7px 10px;border:1px solid var(--border-subtle);
+  border-radius:var(--r-md);background:var(--panel);margin-bottom:var(--sp-2);font:400 12px/1 var(--font-mono);color:var(--tx2)}
+.danger-z{border:1px solid color-mix(in srgb,var(--danger) 35%,transparent);border-radius:var(--r-lg);
+  padding:var(--sp-3) var(--sp-4);background:var(--danger-bg);max-width:660px}
+.setpanel{display:none}.setpanel.on{display:block}
+.advrow{display:flex;align-items:center;gap:var(--sp-2);font:500 12.5px/1 var(--font-sans);color:var(--tx3);cursor:pointer;padding:var(--sp-3) 0}
+/* --- capture geometry (mockup-only; not part of the spec) --------------- */
+.setwin { height: 100vh; width: 100vw; border: 0; border-radius: 0; margin: 0; max-width: none; }
+
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+<symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/></symbol>
+<symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></symbol>
+<symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="m9 10-5 5 5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></symbol>
+<symbol id="i-hook" viewBox="0 0 24 24"><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></symbol>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></symbol>
+<symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></symbol>
+<symbol id="i-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
+</defs></svg>
+<div class="setwin" data-group="set" data-screen="settings">
+  <nav class="snav">
+    <h3>Settings</h3>
+    <div class="sfind"><svg class="ic s"><use href="#i-search"/></svg><span>Find a setting</span><kbd style="margin-left:auto;font:500 10px/1 var(--font-sans);color:var(--tx4)">⌘F</kbd></div>
+    <button class="snav-i on" data-tab="general"><svg class="ic"><use href="#i-settings"/></svg> General</button>
+    <div class="cl">Setup</div>
+    <button class="snav-i" data-tab="box"><svg class="ic"><use href="#i-terminal"/></svg> Box</button>
+    <button class="snav-i" data-tab="accounts"><svg class="ic"><use href="#i-key"/></svg> Accounts</button>
+    <button class="snav-i" data-tab="models"><svg class="ic"><use href="#i-spark"/></svg> Models <span class="mod" title="contains non-default values"></span></button>
+    <div class="cl">Agent</div>
+    <button class="snav-i" data-tab="sessions"><svg class="ic"><use href="#i-branch"/></svg> Sessions</button>
+    <button class="snav-i" data-tab="files"><svg class="ic"><use href="#i-folder"/></svg> Files</button>
+    <button class="snav-i" data-tab="ext"><svg class="ic"><use href="#i-hook"/></svg> Extensions</button>
+    <button class="snav-i" data-tab="voice"><svg class="ic"><use href="#i-mic"/></svg> Voice</button>
+  </nav>
+
+  <div class="setmain">
+    <div class="sethead"><h4 data-title>General</h4><span class="spacer"></span>
+      <button class="iconbtn" title="Close (Esc)"><svg class="ic"><use href="#i-x"/></svg></button></div>
+
+    <div class="setbody">
+      <!-- GENERAL -->
+      <div class="setpanel on" data-panel="general">
+        <div class="setgrp">
+          <h5>Appearance</h5>
+          <div class="setrow"><span class="lab"><b>Theme <span class="pill info">new</span></b>
+            <span class="h">Follows your operating system unless you choose one. Warm neutral in light, manta navy in dark. The terminal pane stays dark in both — the tools running inside it paint their own colours.</span></span>
+            <span class="ctl"><span class="segsm"><span class="on">System</span><span>Light</span><span>Dark</span></span></span></div>
+        </div>
+        <div class="setgrp">
+          <h5>About</h5>
+          <div class="setrow"><span class="lab"><b>Manta</b>
+            <span class="h">Desktop 1.4.0 · server v1.8.2 · opencode 0.14.3<br>Today this reads "Manta UI v0.0.1" — a hardcoded literal, not the real version.</span></span></div>
+        </div>
+        <div class="setgrp">
+          <h5>Danger zone</h5>
+          <div class="danger-z"><div style="display:flex;align-items:center;gap:var(--sp-4)">
+            <span style="flex:1"><b style="display:block;font:500 14px/1.4 var(--font-sans);color:var(--tx1)">Reset all settings <span class="pill info">new</span></b>
+              <span style="display:block;font:400 12.5px/1.5 var(--font-sans);color:var(--tx3);margin-top:3px">Restores every setting to its default. Does not touch your box, sessions, accounts or files.</span></span>
+            <button class="btn danger" style="border:1px solid color-mix(in srgb,var(--danger) 40%,transparent)">Reset</button>
+          </div></div>
+        </div>
+      </div>
+
+      <!-- BOX -->
+      <div class="setpanel" data-panel="box">
+        <div class="statcard">
+          <span class="bl"><svg class="ic"><use href="#i-check"/></svg></span>
+          <span class="kv"><b>Connected</b><br>https://0d5784a7.boxes.mantaui.com<br>box <b>0d5784a7a43451f4ad70dd3d9ee5cf72</b> · server v1.8.2</span>
+        </div>
+        <div class="setgrp">
+          <h5>Devices</h5>
+          <div class="setrow"><span class="lab"><b>Pair a phone</b><span class="h">Show a QR code to scan with the Manta mobile app. The code expires in 5 minutes.</span></span>
+            <span class="ctl"><button class="btn">Generate pairing code</button></span></div>
+          <div class="setrow"><span class="lab"><b>Re-run setup</b><span class="h">Walk through pairing and providers again.</span></span>
+            <span class="ctl"><button class="btn">Run setup</button></span></div>
+        </div>
+        <div class="setgrp">
+          <div class="advrow"><svg class="ic s"><use href="#i-chev-r"/></svg> Advanced</div>
+          <div class="setrow" style="border-top:1px solid var(--border-subtle)"><span class="lab"><b>opencode port <span class="pill warn">config only</span></b>
+            <span class="h">The port opencode listens on, on the box. Leave at 4096 unless you changed it there.</span></span>
+            <span class="ctl"><input class="inp" value="4096" style="min-width:76px"></span></div>
+        </div>
+        <div class="setgrp">
+          <h5>Danger zone</h5>
+          <div class="danger-z"><div style="display:flex;align-items:center;gap:var(--sp-4)">
+            <span style="flex:1"><b style="display:block;font:500 14px/1.4 var(--font-sans);color:var(--tx1)">Remove this box</b>
+              <span style="display:block;font:400 12.5px/1.5 var(--font-sans);color:var(--tx3);margin-top:3px">Forgets the box on this device and revokes its token if the box is reachable. Sessions on the box keep running.</span></span>
+            <button class="btn danger" style="border:1px solid color-mix(in srgb,var(--danger) 40%,transparent)">Remove box</button>
+          </div></div>
+        </div>
+      </div>
+
+      <!-- ACCOUNTS -->
+      <div class="setpanel" data-panel="accounts">
+        <div class="setgrp">
+          <h5>Subscriptions</h5>
+          <div class="lrow"><span class="av">C</span><span class="nm">Claude<em>Claude Pro / Max</em></span><span class="spacer"></span><span class="dot-ok"></span><span style="font:500 12px/1 var(--font-sans);color:var(--ok)">Connected</span><button class="btn sm">Disconnect</button></div>
+          <div class="lrow"><span class="av">O</span><span class="nm">Codex<em>ChatGPT Plus / Pro</em></span><span class="spacer"></span><span class="dot-off"></span><span style="font:500 12px/1 var(--font-sans);color:var(--tx4)">Not connected</span><button class="btn sm">Connect</button></div>
+          <div class="lrow"><span class="av">K</span><span class="nm">Kimi<em>Kimi For Coding</em></span><span class="spacer"></span><span class="dot-off"></span><span style="font:500 12px/1 var(--font-sans);color:var(--tx4)">Not connected</span><button class="btn sm">Connect</button></div>
+        </div>
+        <div class="setgrp">
+          <h5>Custom endpoints</h5>
+          <p style="font-size:12.5px;color:var(--tx3);margin-bottom:var(--sp-3)">Any OpenAI-compatible API. <span class="pill info">new</span> One form and one validator, shared with onboarding — today there are two, and only onboarding checks the URL scheme.</p>
+          <div class="lrow"><span class="av">V</span><span class="nm">VoskaAI<em>https://api.voska.ai/v1 · 6 models</em></span><span class="spacer"></span><button class="btn sm">Refresh</button><button class="iconbtn"><svg class="ic s"><use href="#i-x"/></svg></button></div>
+          <button class="btn" style="margin-top:var(--sp-3)"><svg class="ic"><use href="#i-plus"/></svg> Add endpoint</button>
+        </div>
+      </div>
+
+      <!-- MODELS -->
+      <div class="setpanel" data-panel="models">
+        <div class="setgrp">
+          <div class="sfind" style="margin:0 0 var(--sp-3);background:var(--fill)"><svg class="ic s"><use href="#i-search"/></svg><span>Search models</span></div>
+          <table class="mtable">
+            <tr><th style="width:46%">Model</th><th>Default</th><th>Main</th><th>Sub</th></tr>
+            <tr><td>Claude Opus 4.8 <span class="ctx">1000k</span></td><td><span class="radio on"></span></td><td><span class="sw on" style="width:32px;height:18px"><i style="left:16px;width:12px;height:12px"></i></span></td><td><span class="sw on" style="width:32px;height:18px"><i style="left:16px;width:12px;height:12px"></i></span></td></tr>
+            <tr><td>Claude Sonnet 4.6 <span class="ctx">200k</span></td><td><span class="radio"></span></td><td><span class="sw on" style="width:32px;height:18px"><i style="left:16px;width:12px;height:12px"></i></span></td><td><span class="sw on" style="width:32px;height:18px"><i style="left:16px;width:12px;height:12px"></i></span></td></tr>
+            <tr><td>Claude Haiku 4.5 <span class="ctx">200k</span></td><td><span class="radio"></span></td><td><span class="sw" style="width:32px;height:18px"><i style="width:12px;height:12px"></i></span></td><td><span class="sw on" style="width:32px;height:18px"><i style="left:16px;width:12px;height:12px"></i></span></td></tr>
+            <tr><td>GPT-5.2 <span class="ctx">400k</span></td><td><span class="radio"></span></td><td><span class="sw on" style="width:32px;height:18px"><i style="left:16px;width:12px;height:12px"></i></span></td><td><span class="sw" style="width:32px;height:18px"><i style="width:12px;height:12px"></i></span></td></tr>
+          </table>
+          <p style="font-size:12px;color:var(--tx3);margin-top:var(--sp-3)"><strong>Main</strong> = offered in the composer picker. <strong>Sub</strong> = registered as a named subagent the AI can dispatch to.</p>
+        </div>
+        <div class="setgrp">
+          <h5>Requests</h5>
+          <div class="setrow"><span class="lab"><b>Prompt cache lifetime</b><span class="h">Must match what opencode sends. Past this, the next message re-bills the cached prefix — Manta uses it to predict when clearing would save tokens.</span></span>
+            <span class="ctl"><span class="segsm"><span>5 minutes</span><span class="on">1 hour</span></span></span></div>
+        </div>
+      </div>
+
+      <!-- SESSIONS -->
+      <div class="setpanel" data-panel="sessions">
+        <div class="setgrp">
+          <h5>Naming</h5>
+          <div class="setrow"><span class="lab"><b>Name sessions from the conversation</b><span class="h">Replaces the default name once the first exchange makes the topic clear.</span></span><span class="ctl"><span class="sw on"><i></i></span></span></div>
+        </div>
+        <div class="setgrp">
+          <h5>Git worktrees</h5>
+          <div class="setrow"><span class="lab"><b>Create a worktree for new sessions</b><span class="h">Each session gets its own branch and working directory, so parallel sessions can't collide. Overridable per session.</span></span><span class="ctl"><span class="sw on"><i></i></span></span></div>
+          <div class="setrow"><span class="lab"><b>Remove the worktree when a session closes</b><span class="h">Skipped automatically if the worktree has uncommitted changes.</span></span><span class="ctl"><span class="sw"><i></i></span></span></div>
+        </div>
+      </div>
+
+      <!-- FILES -->
+      <div class="setpanel" data-panel="files">
+        <div class="setgrp">
+          <h5>Files the agent sends you</h5>
+          <div class="setrow"><span class="lab"><b>Save automatically</b><span class="h">Write to your downloads folder without asking. Off means each file raises a Save prompt.</span></span><span class="ctl"><span class="savedtick"><svg class="ic"><use href="#i-check"/></svg> Saved</span><span class="sw"><i></i></span></span></div>
+          <div class="setrow"><span class="lab"><b>Downloads folder</b><span class="h">Absolute path. Empty uses your system downloads folder.</span></span>
+            <span class="ctl"><input class="inp" value="~/Downloads" style="min-width:170px"><button class="btn sm">Browse</button></span></div>
+        </div>
+        <div class="setgrp">
+          <h5>Files you send the agent</h5>
+          <div class="setrow"><span class="lab"><b>Clean up uploads after <span class="pill warn">config only</span></b><span class="h">Dropped files live in <span class="mono-inline">~/.manta-uploads</span> on the box until swept.</span></span>
+            <span class="ctl"><span class="segsm"><span class="on">1 hour</span><span>6 hours</span><span>1 day</span><span>Never</span></span></span></div>
+        </div>
+      </div>
+
+      <!-- EXTENSIONS -->
+      <div class="setpanel" data-panel="ext">
+        <div class="setgrp">
+          <h5>Plugins</h5>
+          <div class="setrow"><span class="lab"><b>Run plugins on this machine</b><span class="h">Any YAML file in <span class="mono-inline">~/.manta/plugins</span> may run shell commands here. There's no per-plugin prompt — treat the folder like <span class="mono-inline">authorized_keys</span>.</span></span><span class="ctl"><span class="sw"><i></i></span></span></div>
+          <div class="tagrow" style="margin-top:var(--sp-3);opacity:.55"><svg class="ic s"><use href="#i-hook"/></svg> ios-leasebot <span class="spacer"></span><span style="color:var(--tx4)">4 steps · 25 min</span><span class="pill good">valid</span></div>
+          <div class="tagrow" style="opacity:.55"><svg class="ic s"><use href="#i-hook"/></svg> db-reset <span class="spacer"></span><span class="pill bad">parse error</span></div>
+          <button class="btn sm" style="margin-top:var(--sp-1)">Open plugins folder</button>
+        </div>
+        <div class="setgrp">
+          <h5>Skill registries</h5>
+          <div class="tagrow">https://antoinedc.github.io/manta-skills <span class="spacer"></span><span class="pill info">default</span></div>
+          <div class="tagrow">https://skills.internal.acme.dev <span class="spacer"></span><button class="iconbtn" style="width:20px;height:20px"><svg class="ic xs"><use href="#i-x"/></svg></button></div>
+          <button class="btn sm"><svg class="ic s"><use href="#i-plus"/></svg> Add registry</button>
+        </div>
+        <div class="setgrp">
+          <h5>CLI launch options</h5>
+          <div class="setrow"><span class="lab"><b>Claude Code — skip all permission prompts</b><span class="h">Applies only to terminal-mode windows running the Claude CLI, not to chat sessions.</span></span><span class="ctl"><span class="sw"><i></i></span></span></div>
+        </div>
+      </div>
+
+      <!-- VOICE -->
+      <div class="setpanel" data-panel="voice">
+        <div class="setgrp">
+          <h5>Speech to text (Groq)</h5>
+          <p style="font-size:12.5px;color:var(--tx3);margin-bottom:var(--sp-3)">Hold the mic to dictate; hold with ⌥ to speak a command. Leave the key blank to hide the mic entirely.</p>
+          <div class="setrow"><span class="lab"><b>API key</b><span class="h">Stored on this device. Only ever sent to Groq.</span></span>
+            <span class="ctl"><input class="inp" type="password" value="gsk_xxxxxxxxxxxxxxxx"></span></div>
+          <div class="setrow"><span class="lab"><b>Transcription model</b></span><span class="ctl"><input class="inp" value="whisper-large-v3-turbo"></span></div>
+          <div class="setrow"><span class="lab"><b>Command model</b><span class="h">Only used when a spoken command doesn't match a built-in rule.</span></span><span class="ctl"><input class="inp" value="llama-3.1-8b-instant"></span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="undo">Theme set to System <button>Undo</button></div>
+  </div>
+</div>
+<p class="spec-notes">
+  <strong class="h">Spec notes — the parts a screenshot cannot express.</strong>
+  <strong>One save model: instant apply with Undo.</strong> Every change applies immediately
+  and raises a toast carrying Undo. There is no Save button, no dirty state, no
+  confirm-on-close — there is nothing unsaved to lose. Credentials are the single exception:
+  an API key commits on blur, not per keystroke. This replaces three simultaneous save models
+  and three silent-discard exits (Close, ✕, Cancel), and it removes the bug where saving in
+  one card overwrites text still being typed in another.
+  <strong>Eight sections, grouped by the object being configured</strong> rather than by
+  where a setting happened to fit. General sits alone above two clusters: Setup (the machine
+  and its credentials — Box, Accounts, Models) and Agent (what it does and what it can reach
+  — Sessions, Files, Extensions, Voice).
+  <strong>It is a real dialog.</strong> <code>role="dialog"</code>, a focus trap, Esc to
+  close, focus restored to the opener, <code>role="tablist"</code> on the rail so arrow keys
+  move between sections, and every input associated with its label. None of that is true
+  today.
+  <strong>Alignment:</strong> the rail is fixed-width and left-aligned; each section is a
+  single column of cards, left-aligned within the pane — not centred, not full-bleed. Card
+  padding is 12px vertical / 16px horizontal; header → body 12px; body → button row 16px.
+  <strong>Emphasis: nothing on this screen is loud.</strong> The only accent-coloured
+  elements are the selected rail item and an active control. Destructive actions are confined
+  to a Danger zone card at the end of a section and are outlined, never filled.
+  <strong>What grows:</strong> the section pane scrolls; the rail never does.
+  <strong>The row tags are part of the spec:</strong> an untagged row exists today,
+  <em>config only</em> means the config key exists with no screen, and <em>new</em> means it
+  does not exist yet — so an implementer can tell a restyle from a build.
+</p>
+</body>
+</html>

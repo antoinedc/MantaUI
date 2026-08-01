@@ -86,8 +86,11 @@ for (const screen of SCREENS) {
           actions: screen.actions,
         });
 
-        // 1. Structure — text snapshot, readable in a PR diff.
-        await expect(page.locator(screen.ready)).toMatchAriaSnapshot({
+        // 1. Structure — text snapshot, readable in a PR diff. Rooted at
+        // `snapshot` when the screen declares one: `ready` gates BOOT, which
+        // for an action-driven screen is a different element from the one
+        // being captured (see screens.mjs).
+        await expect(page.locator(screen.snapshot ?? screen.ready)).toMatchAriaSnapshot({
           name: `${screen.id}.aria.yml`,
         });
 
