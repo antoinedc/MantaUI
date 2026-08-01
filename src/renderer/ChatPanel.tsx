@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Clock, X } from "lucide-react";
 import type {
+  AvailableLauncher,
   DelegateApproval,
   DelegateApprovalTool,
   DelegateJob,
@@ -134,6 +135,10 @@ type Props = {
   winName?: string | null;
   mode?: SessionMode;
   onModeChange?: (m: SessionMode) => void;
+  // BET-467: the box's AI-CLI launchers for the session; forwarded to the
+  // header's session menu so a launcher mode is reachable from the running UI
+  // (the header glyph only toggles Chat ↔ Terminal).
+  availableLaunchers?: AvailableLauncher[];
 };
 
 export function ChatPanel({
@@ -146,6 +151,7 @@ export function ChatPanel({
   winName = null,
   mode = "chat",
   onModeChange,
+  availableLaunchers = [],
 }: Props) {
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
@@ -1957,6 +1963,7 @@ export function ChatPanel({
         breadcrumb={projectName ? { project: projectName, window: winName } : null}
         mode={mode}
         onModeChange={onModeChange}
+        availableLaunchers={availableLaunchers}
       />
 
       <Transcript

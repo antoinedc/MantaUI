@@ -11,7 +11,7 @@
 // props by ChatPanel, which owns the session lifecycle.
 
 import { useRef, useState, type CSSProperties } from "react";
-import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal } from "lucide-react";
+import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
@@ -20,6 +20,7 @@ import {
 } from "./chatUtils";
 import { useClickAway } from "./hooks/useClickAway";
 import type { SessionMode } from "./chatShared";
+import type { AvailableLauncher } from "../shared/types";
 
 // Cache-segment colors — same palette as ContextBar so the header pill and
 // the (retired) footer bar stay in sync visually.
@@ -57,6 +58,7 @@ export function SessionHeader({
   breadcrumb,
   mode,
   onModeChange,
+  availableLaunchers,
 }: {
   branch: string | null;
   ctxBreakdown: ContextBreakdown;
@@ -82,6 +84,11 @@ export function SessionHeader({
   breadcrumb: { project: string; window: string | null } | null;
   mode?: SessionMode;
   onModeChange?: (m: SessionMode) => void;
+  // BET-467: the box's AI-CLI launchers surfaced as switchable modes in the
+  // session menu (the header glyph only toggles Chat ↔ Terminal). Empty /
+  // omitted → no launcher entries (desktop callers supply it; mobile owns
+  // mode via its own <select> and passes neither this nor onModeChange).
+  availableLaunchers?: AvailableLauncher[];
 }) {
   const { pct, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
@@ -170,13 +177,16 @@ export function SessionHeader({
           </button>
         )}
 
-        {/* Session menu — Fork / Compact / Clear / Delete. No badge on the
-            button (per BET-415 Do-NOT #2). Hidden when there is no owning
-            tmux window, and when the view is read-only (BET-418 §D: a
-            background-job session — Stop in ReadOnlyJobBar is the only live
-            action). */}
+        {/* Session menu — mode (Chat / Terminal / AI-CLI launchers) + Fork /
+            Compact / Clear / Delete. No badge on the button (per BET-415
+            Do-NOT #2). Hidden when there is no owning tmux window, and when
+            the view is read-only (BET-418 §D: a background-job session — Stop
+            in ReadOnlyJobBar is the only live action). */}
         {hasSession && !readOnly && (
           <SessionMenu
+            mode={mode}
+            onModeChange={onModeChange}
+            availableLaunchers={availableLaunchers}
             onFork={onFork}
             onCompact={onCompact}
             onClear={onClear}
@@ -402,13 +412,25 @@ function LegendRow({
 }
 
 // ===== Session menu (MoreHorizontal) =====
+//
+// Mode switching (Chat / Terminal / one entry per AI-CLI launcher) + the
+// session destruction/compact actions. The mode section is the menu's
+// functional replacement for the header `<select>` BET-459 removed (BET-467):
+// the header glyph only toggles Chat ↔ Terminal, so this is the entry point
+// for entering a launcher (`tui:<id>`) mode from the running UI.
 
 function SessionMenu({
+  mode,
+  onModeChange,
+  availableLaunchers,
   onFork,
   onCompact,
   onClear,
   onDelete,
 }: {
+  mode?: SessionMode;
+  onModeChange?: (m: SessionMode) => void;
+  availableLaunchers?: AvailableLauncher[];
   onFork: () => void;
   onCompact: () => void;
   onClear: () => void;
@@ -440,6 +462,42 @@ function SessionMenu({
     </button>
   );
 
+  // The menu closes after any action; a mode change just re-points mode
+  // (a no-op when already in that mode, so re-clicking the current row is a
+  // harmless close).
+  const switchMode = (m: SessionMode) => {
+    if (onModeChange) onModeChange(m);
+  };
+
+  const isActive = (m: SessionMode) => mode === m;
+
+  const modeItem = (
+    icon: React.ReactNode,
+    label: string,
+    m: SessionMode,
+  ) => {
+    const active = isActive(m);
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(false);
+          switchMode(m);
+        }}
+        className={
+          "w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-bg-soft text-meta " +
+          (active ? "text-accent" : "text-text")
+        }
+      >
+        {icon}
+        <span className="flex-1">{label}</span>
+        {active && <span className="text-text-faint" aria-hidden="true">✓</span>}
+      </button>
+    );
+  };
+
+  const hasMode = !!onModeChange;
+
   return (
     <div ref={rootRef} className="manta-session-menu relative shrink-0">
       <button
@@ -458,6 +516,31 @@ function SessionMenu({
           role="menu"
           className="manta-session-menu-dropdown absolute right-0 top-full mt-1 z-30 min-w-[180px] rounded-lg border border-border bg-bg-elev shadow-md py-1"
         >
+          {hasMode && (
+            <>
+              <div className="px-3 pt-1 pb-0.5 text-label text-text-faint select-none" role="presentation">
+                Mode
+              </div>
+              {modeItem(<MessageSquare size={14} aria-hidden="true" />, "Chat", "chat")}
+              {modeItem(<Terminal size={14} aria-hidden="true" />, "Terminal", "terminal")}
+              {availableLaunchers && availableLaunchers.length > 0 && (
+                <>
+                  <div className="px-3 pt-2 pb-0.5 text-label text-text-faint select-none" role="presentation">
+                    AI-CLI
+                  </div>
+                  {availableLaunchers.map((l) =>
+                    modeItem(
+                      <Bot size={14} aria-hidden="true" />,
+                      l.label,
+                      `tui:${l.id}` as SessionMode,
+                    ),
+                  )}
+                </>
+              )}
+              <div className="my-1 border-t border-border" />
+            </>
+          )}
+
           {item(
             <GitFork size={14} aria-hidden="true" />,
             "Fork session",

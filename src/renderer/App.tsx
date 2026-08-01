@@ -1006,6 +1006,7 @@ export function App() {
                       winName={ownerWinName}
                       mode={mode}
                       onModeChange={setMode}
+                      availableLaunchers={availableLaunchers}
                     />
                   </div>
                 );
