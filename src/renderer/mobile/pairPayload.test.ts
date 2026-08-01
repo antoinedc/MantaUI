@@ -32,6 +32,28 @@ describe("parsePairPayload", () => {
       ).toEqual({ boxId: BOX, code: "847291" });
     });
 
+    it("parses an optional &verify= four-char code (BET-514 two-sided confirm)", () => {
+      expect(
+        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=K7Q2`),
+      ).toEqual({ boxId: BOX, code: "847291", verify: "K7Q2" });
+      // Normalizes whitespace + case ("k7 q2" → "K7Q2").
+      expect(
+        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=k7%20q2`),
+      ).toEqual({ boxId: BOX, code: "847291", verify: "K7Q2" });
+    });
+
+    it("refuses a present-but-malformed verify (BET-514, never drops to legacy)", () => {
+      expect(
+        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=`),
+      ).toBeNull();
+      expect(
+        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=K7`),
+      ).toBeNull();
+      expect(
+        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=K7Q2Z`),
+      ).toBeNull();
+    });
+
     it("accepts manta://pair regardless of where the engine puts the authority (BET-240 regression)", () => {
       // `manta:` is a NON-SPECIAL scheme, so new URL() parses the "pair"
       // segment into DIFFERENT fields per engine:
@@ -344,6 +366,48 @@ describe("buildPairPayload", () => {
     expect(without).not.toContain("server=");
     const empty = buildPairPayload({ boxId: BOX, code: "847291", serverUrl: "" });
     expect(empty).not.toContain("server=");
+  });
+
+  // BET-514: the four-char two-sided-confirm code round-trips through the
+  // wire so a CLI / web-paired device claims WITH it → DISTINCT Stage-2
+  // device. Appended only when present and well-formed; a malformed verify
+  // is a hard error, never a silent drop.
+  it("appends &verify=<code> when present (BET-514)", () => {
+    expect(
+      buildPairPayload({ boxId: BOX, code: "847291", verify: "K7Q2" }),
+    ).toBe(`manta://pair?box=${encodeURIComponent(BOX)}&code=847291&verify=K7Q2`);
+  });
+
+  it("normalizes whitespace/case before appending &verify (BET-514)", () => {
+    expect(
+      buildPairPayload({ boxId: BOX, code: "847291", verify: "k7 q2" }),
+    ).toBe(`manta://pair?box=${encodeURIComponent(BOX)}&code=847291&verify=K7Q2`);
+  });
+
+  it("appends both &verify and &server in a stable order (BET-514)", () => {
+    expect(
+      buildPairPayload({
+        boxId: BOX,
+        code: "847291",
+        verify: "K7Q2",
+        serverUrl: "http://100.64.1.5:8787",
+      }),
+    ).toBe(
+      `manta://pair?box=${encodeURIComponent(BOX)}&code=847291&verify=K7Q2&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
+    );
+  });
+
+  it("omits &verify when absent/empty (legacy back-compat)", () => {
+    expect(buildPairPayload({ boxId: BOX, code: "847291" })).not.toContain("verify=");
+    expect(
+      buildPairPayload({ boxId: BOX, code: "847291", verify: "" }),
+    ).not.toContain("verify=");
+  });
+
+  it("throws on a malformed verify (never silently drops it, BET-514)", () => {
+    expect(() =>
+      buildPairPayload({ boxId: BOX, code: "847291", verify: "K7Q" }),
+    ).toThrow();
   });
 
   // BET-373: per-channel emission. The builder picks up the caller's

@@ -126,6 +126,23 @@ describe("buildSetupClaimInput", () => {
       buildSetupClaimInput({ boxId: VALID_BOX, code: "123456" }),
     ).toEqual({ serverUrl: boxDirectUrl(VALID_BOX), code: "123456" });
   });
+
+  // BET-514: forward the optional four-char two-sided-confirm code so the box
+  // provisions a DISTINCT Stage-2 joiner device (never the primary token).
+  it("forwards a present verify code verbatim", () => {
+    expect(
+      buildSetupClaimInput({ boxId: VALID_BOX, code: "123456", verify: "K7Q2" }),
+    ).toEqual({ serverUrl: boxDirectUrl(VALID_BOX), code: "123456", verify: "K7Q2" });
+  });
+
+  it("omits verify when absent/empty (legacy claim body)", () => {
+    expect(
+      buildSetupClaimInput({ boxId: VALID_BOX, code: "123456" }),
+    ).toEqual({ serverUrl: boxDirectUrl(VALID_BOX), code: "123456" });
+    expect(
+      buildSetupClaimInput({ boxId: VALID_BOX, code: "123456", verify: "" }),
+    ).toEqual({ serverUrl: boxDirectUrl(VALID_BOX), code: "123456" });
+  });
 });
 
 describe("resolveSetupServerUrl", () => {
@@ -273,6 +290,26 @@ describe("prefillFromPairLink (BET-335 deep-link prefill)", () => {
     // refused.
     const link = `manta://pair?box=${VALID_BOX}&code=123456&server=${encodeURIComponent("https://attacker.example.com")}`;
     expect(prefillFromPairLink(link)).toBeNull();
+  });
+
+  // BET-514: a deep-link that carries the four-char two-sided-confirm code
+  // prefills `verify` so the desktop manual Connect forwards it and claims a
+  // DISTINCT Stage-2 device instead of the shared primary token. A malformed
+  // verify (present but not a 4-char code) refuses the whole payload.
+  it("prefills a valid &verify= code from a pair link (BET-514)", () => {
+    expect(
+      prefillFromPairLink(`${validLink}&verify=K7Q2`),
+    ).toEqual({ boxId: VALID_BOX, code: "123456", verify: "K7Q2" });
+    // Normalizes case + whitespace on the four-char code ("k7 q2" → "K7Q2").
+    expect(
+      prefillFromPairLink(`manta://pair?box=${VALID_BOX}&code=123456&verify=k7%20q2`),
+    ).toEqual({ boxId: VALID_BOX, code: "123456", verify: "K7Q2" });
+  });
+
+  it("returns null for a pair link carrying a malformed verify (BET-514)", () => {
+    expect(prefillFromPairLink(`${validLink}&verify=`)).toBeNull();
+    expect(prefillFromPairLink(`${validLink}&verify=K7`)).toBeNull();
+    expect(prefillFromPairLink(`${validLink}&verify=K7Q2X`)).toBeNull();
   });
 
   // BET-373 (review cycle 1): PairStep.tsx reads `pendingPairLink` from the
