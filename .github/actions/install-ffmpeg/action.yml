@@ -1,0 +1,11 @@
+name: Install ffmpeg
+description: |
+  Installs ffmpeg via apt. `npm run shots` extracts website/hero-poster.webp
+  from hero.mp4 (scripts/shots.mjs); ubuntu-24.04 images no longer ship it.
+  Single source for both workflows that drive the shots capture.
+runs:
+  using: composite
+  steps:
+    - name: Install ffmpeg (hero-poster extraction)
+      shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
