@@ -1,0 +1,61 @@
+Attributes: Application, 0x10565f840, pid: 56410, label: 'MantaSpikeRef'
+Element subtree:
+ →Application, 0x10565f840, pid: 56410, label: 'MantaSpikeRef'
+    Window (Main), 0x10565f980, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x10565fac0, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x10565fc00, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0x10565fd40, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0x10565fe80, {{0.0, 0.0}, {402.0, 874.0}}
+              Other, 0x115008000, {{0.0, 0.0}, {402.0, 874.0}}
+                NavigationBar, 0x115008140, {{0.0, 62.0}, {402.0, 106.0}}, identifier: 'Sessions'
+                  StaticText, 0x115008280, {{16.0, 119.7}, {143.3, 40.7}}, label: 'Sessions'
+                Other, 0x1150083c0, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x115008500, {{0.0, 0.0}, {402.0, 874.0}}
+                    Other, 0x115008640, {{0.0, 0.0}, {402.0, 874.0}}
+                      Other, 0x115008780, {{0.0, 0.0}, {402.0, 874.0}}
+                        ScrollView, 0x1150088c0, {{0.0, 0.0}, {402.0, 874.0}}
+                          Other, 0x115008a00, {{0.0, 0.0}, {402.0, 874.0}}
+                            Other, 0x115008b40, {{0.0, 0.0}, {402.0, 170.8}}
+                          Other, 0x115008c80, {{0.0, 0.0}, {402.0, 874.0}}
+                          Other, 0x115008dc0, {{0.0, 168.0}, {402.0, 522.0}}
+                            Other, 0x115008f00, {{12.0, 190.0}, {378.0, 476.3}}
+                              StaticText, 0x115009040, {{24.0, 190.0}, {40.0, 18.0}}, label: 'Alpha'
+                              Button, 0x115009180, {{12.0, 214.0}, {378.0, 62.0}}, label: 'API Gateway, running - opus 4.8, 1m'
+                                StaticText, 0x1150092c0, {{40.0, 227.5}, {89.7, 18.7}}, label: 'API Gateway'
+                                StaticText, 0x115009400, {{40.0, 248.2}, {107.0, 14.3}}, label: 'running - opus 4.8'
+                                StaticText, 0x115009540, {{360.7, 238.3}, {17.3, 13.3}}, label: '1m'
+                              Button, 0x115009680, {{24.0, 299.7}, {354.0, 18.7}}, label: 'Database, 3h 12m'
+                                StaticText, 0x1150097c0, {{40.0, 299.7}, {67.3, 18.7}}, label: 'Database'
+                                StaticText, 0x115009900, {{336.7, 302.3}, {41.3, 13.3}}, label: '3h 12m'
+                              StaticText, 0x115009a40, {{24.0, 364.0}, {32.0, 18.0}}, label: 'Beta'
+                              Button, 0x115009b80, {{24.0, 401.5}, {354.0, 35.0}}, label: 'Mobile Client, needs you, 24m'
+                                StaticText, 0x115009cc0, {{40.0, 401.5}, {92.7, 18.7}}, label: 'Mobile Client'
+                                StaticText, 0x115009e00, {{40.0, 422.2}, {59.7, 14.3}}, label: 'needs you'
+                                StaticText, 0x115009f40, {{353.7, 412.3}, {24.3, 13.3}}, label: '24m'
+                              Button, 0x11500a080, {{24.0, 473.7}, {354.0, 18.7}}, label: 'Docs, 1d'
+                                StaticText, 0x11500a1c0, {{40.0, 473.7}, {36.3, 18.7}}, label: 'Docs'
+                                StaticText, 0x11500a300, {{363.7, 476.3}, {14.3, 13.3}}, label: '1d'
+                              StaticText, 0x11500a440, {{24.0, 538.0}, {53.7, 18.0}}, label: 'Gamma'
+                              Button, 0x11500a580, {{24.0, 583.7}, {354.0, 18.7}}, label: 'Infra, 2h 40m'
+                                StaticText, 0x11500a6c0, {{40.0, 583.7}, {32.7, 18.7}}, label: 'Infra'
+                                StaticText, 0x11500a800, {{336.7, 586.3}, {41.3, 13.3}}, label: '2h 40m'
+                              Button, 0x11500a940, {{24.0, 647.7}, {354.0, 18.7}}, label: 'Analytics, 5h 03m'
+                                StaticText, 0x11500aa80, {{40.0, 647.7}, {65.3, 18.7}}, label: 'Analytics'
+                                StaticText, 0x11500abc0, {{336.7, 650.3}, {41.3, 13.3}}, label: '5h 03m'
+                          Other, 0x11500ad00, {{369.0, 116.0}, {30.0, 696.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                            Other, 0x11500ae40, {{396.0, 269.0}, {3.0, 540.0}}
+                          Other, 0x11500af80, {{369.0, 116.0}, {30.0, 696.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                            Other, 0x11500b0c0, {{396.0, 269.0}, {3.0, 540.0}}
+                        Image, 0x11500b200, {{34.3, 790.3}, {19.3, 19.3}}, identifier: 'magnifyingglass', label: 'Search'
+                        StaticText, 0x11500b340, {{66.0, 790.3}, {50.7, 19.3}}, label: 'Search'
+                        Image, 0x11500b480, {{341.7, 791.7}, {16.7, 16.7}}, identifier: 'plus', label: 'Add'
+                Other, 0x11500b5c0, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x11500b700, {{0.0, 0.0}, {402.0, 874.0}}
+Path to element:
+ →Application, 0x10565f840, pid: 56410, label: 'MantaSpikeRef'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaspikeref'
+  Output: {
+    Application, 0x11500b840, pid: 56410, label: 'MantaSpikeRef'
+  }
+
