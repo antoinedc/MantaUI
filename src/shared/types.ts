@@ -1066,10 +1066,19 @@ export type OpenFileResult =
 // `code` is the 6-digit pairing code (either flow). The typed OUTCOME lives in
 // src/shared/claim.mjs (ClaimOutcome) — imported by preload/main directly so
 // types.ts stays dependency-free.
+//
+// `verify` (BET-514) is the optional four-character two-sided-confirm code
+// (BET-493 §5.3 / AuthPairResult.verify). When present, the claim POSTs it
+// alongside the code and the box provisions a DISTINCT Stage-2 joiner device
+// (never the shared primary box_token). Absent → the legacy first-pair path
+// (resume the primary token). The desktop manual Connect, the deep-link /
+// QR claim, and the mobile pairing screen all forward it when the four-char
+// code is available (from a `&verify=` pair link or typed by hand).
 export type AuthClaimInput = {
   serverUrl: string;
   boxId?: string;
   code: string;
+  verify?: string;
 };
 
 // Result of GET /auth/pair — a one-time pairing code the desktop renders as a

@@ -132,7 +132,7 @@ describe("networkFailure", () => {
 
 describe("pairingReducer", () => {
   it("edit normalizes the code and clears a prior error", () => {
-    const errored: PairingState = { code: "12", status: "error", error: "nope" };
+    const errored: PairingState = { code: "12", status: "error", error: "nope", verify: "" };
     const next = pairingReducer(errored, { type: "edit", raw: "9 8-7654321" });
     expect(next.code).toBe("987654");
     expect(next.error).toBeNull();
@@ -140,37 +140,37 @@ describe("pairingReducer", () => {
   });
 
   it("edit is ignored while a request is in flight (input locked)", () => {
-    const submitting: PairingState = { code: "123456", status: "submitting", error: null };
+    const submitting: PairingState = { code: "123456", status: "submitting", error: null, verify: "" };
     const next = pairingReducer(submitting, { type: "edit", raw: "000000" });
     expect(next).toBe(submitting); // same reference — no-op
   });
 
   it("submit from a valid idle state enters submitting and clears error", () => {
-    const ready: PairingState = { code: "123456", status: "idle", error: null };
+    const ready: PairingState = { code: "123456", status: "idle", error: null, verify: "" };
     const next = pairingReducer(ready, { type: "submit" });
     expect(next.status).toBe("submitting");
     expect(next.error).toBeNull();
   });
 
   it("submit is a no-op when the code isn't 6 digits", () => {
-    const partial: PairingState = { code: "123", status: "idle", error: null };
+    const partial: PairingState = { code: "123", status: "idle", error: null, verify: "" };
     expect(pairingReducer(partial, { type: "submit" })).toBe(partial);
   });
 
   it("submit is a no-op while already submitting (no double-fire)", () => {
-    const inflight: PairingState = { code: "123456", status: "submitting", error: null };
+    const inflight: PairingState = { code: "123456", status: "submitting", error: null, verify: "" };
     expect(pairingReducer(inflight, { type: "submit" })).toBe(inflight);
   });
 
   it("success returns to idle with no error", () => {
-    const inflight: PairingState = { code: "123456", status: "submitting", error: null };
+    const inflight: PairingState = { code: "123456", status: "submitting", error: null, verify: "" };
     const next = pairingReducer(inflight, { type: "success" });
     expect(next.status).toBe("idle");
     expect(next.error).toBeNull();
   });
 
   it("fail moves to error, surfaces the message, and preserves the code", () => {
-    const inflight: PairingState = { code: "123456", status: "submitting", error: null };
+    const inflight: PairingState = { code: "123456", status: "submitting", error: null, verify: "" };
     const result = classifyClaimResult(403, null);
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -192,7 +192,7 @@ describe("pairingReducer", () => {
   });
 
   it("retry path: wrong code → error → correct → submit again", () => {
-    let s: PairingState = { code: "111111", status: "submitting", error: null };
+    let s: PairingState = { code: "111111", status: "submitting", error: null, verify: "" };
     const wrong = classifyClaimResult(403, null);
     if (wrong.ok) throw new Error("unreachable");
     s = pairingReducer(s, { type: "fail", result: wrong });
@@ -207,9 +207,53 @@ describe("pairingReducer", () => {
 
 describe("canSubmit", () => {
   it("true only with a 6-digit code and not submitting", () => {
-    expect(canSubmit({ code: "123456", status: "idle", error: null })).toBe(true);
-    expect(canSubmit({ code: "123456", status: "error", error: "x" })).toBe(true);
-    expect(canSubmit({ code: "123456", status: "submitting", error: null })).toBe(false);
-    expect(canSubmit({ code: "12345", status: "idle", error: null })).toBe(false);
+    expect(canSubmit({ code: "123456", status: "idle", error: null, verify: "" })).toBe(true);
+    expect(canSubmit({ code: "123456", status: "error", error: "x", verify: "" })).toBe(true);
+    expect(canSubmit({ code: "123456", status: "submitting", error: null, verify: "" })).toBe(false);
+    expect(canSubmit({ code: "12345", status: "idle", error: null, verify: "" })).toBe(false);
+  });
+
+  // BET-514: verify is optional — a valid 6-digit code with a partially-typed
+  // four-char verify still enables Connect (the server treats verify as
+  // additive; blank or partial forwards nothing / forward as-is).
+  it("enables submit on a 6-digit code regardless of verify state (BET-514)", () => {
+    expect(canSubmit({ code: "123456", status: "idle", error: null, verify: "K7" })).toBe(true);
+    expect(canSubmit({ code: "123456", status: "idle", error: null, verify: "K7Q2" })).toBe(true);
+  });
+});
+
+describe("pairingReducer verify handling (BET-514, two-sided confirm)", () => {
+  it("editVerify normalizes + clamps the four-char code to ≤4", () => {
+    const s = pairingReducer(initialPairingState, {
+      type: "editVerify",
+      raw: "k7 q2abc",
+    });
+    expect(s.verify).toBe("K7Q2");
+  });
+
+  it("editVerify preserves the code and clears a prior error", () => {
+    const failing = pairingReducer(
+      { ...initialPairingState, error: "oops" },
+      { type: "editVerify", raw: "K7Q2" },
+    );
+    expect(failing.verify).toBe("K7Q2");
+    expect(failing.error).toBeNull();
+  });
+
+  it("editVerify is ignored in-flight (input locked)", () => {
+    const submitting = pairingReducer(
+      { ...initialPairingState, status: "submitting" },
+      { type: "editVerify", raw: "K7Q2" },
+    );
+    expect(submitting.verify).toBe("");
+  });
+
+  it("fail preserves the typed verify for correction", () => {
+    const failing = pairingReducer(
+      { ...initialPairingState, verify: "K7Q2" },
+      { type: "fail", result: { ok: false, kind: "wrong_code", message: "nope" } },
+    );
+    expect(failing.verify).toBe("K7Q2");
+    expect(failing.code).toBe("");
   });
 });

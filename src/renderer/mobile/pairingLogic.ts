@@ -30,6 +30,7 @@ export {
   networkFailure,
 } from "../../shared/claim.mjs";
 import { isSubmittableCode, normalizeCode } from "../../shared/claim.mjs";
+import { normalizeVerifyCode } from "./pairPayload";
 import type { ClaimFailureKind, ClaimOutcome } from "../../shared/claim.mjs";
 
 // Historical alias: the mobile client + tests refer to the classified outcome
@@ -49,6 +50,14 @@ export type PairingStatus = "idle" | "submitting" | "error";
 export interface PairingState {
   /** Current contents of the code input (already normalized to ≤6 digits). */
   code: string;
+  /**
+   * Optional four-character two-sided-confirm code (§5.3, BET-514), already
+   * normalized (uppercase, whitespace-stripped, clamped to 4 chars). When
+   * non-empty it is forwarded on the claim so the box provisions a DISTINCT
+   * Stage-2 joiner device rather than the shared primary box_token. Empty →
+   * legacy first-pair path. Not required to enable Connect — it is additive.
+   */
+  verify: string;
   status: PairingStatus;
   /** Inline error message shown under the input, or null when none. */
   error: string | null;
@@ -56,28 +65,32 @@ export interface PairingState {
 
 export type PairingAction =
   | { type: "edit"; raw: string }
+  | { type: "editVerify"; raw: string }
   | { type: "submit" }
   | { type: "success" }
   | { type: "fail"; result: Extract<ClaimResult, { ok: false }> };
 
 export const initialPairingState: PairingState = {
   code: "",
+  verify: "",
   status: "idle",
   error: null,
 };
 
 /**
  * Reduce a pairing action. Rules:
- *   • edit    — while submitting, input is locked (ignored); otherwise update
- *               the (normalized) code and clear any prior error so the user
- *               isn't scolded mid-correction.
- *   • submit  — only starts a request from idle/error AND with a submittable
- *               (6-digit) code; otherwise a no-op. Enters "submitting", clears
- *               the error.
- *   • success — request resolved with a valid token; return to idle, no error.
- *               (The caller persists the token + drops the screen.)
- *   • fail    — request failed; back to "error" with the classified message,
- *               code preserved so the user can fix it.
+ *   • edit       — while submitting, input is locked (ignored); otherwise
+ *                  update the (normalized) code and clear any prior error so
+ *                  the user isn't scolded mid-correction.
+ *   • editVerify — same guard; update the (normalized, ≤4-char) verify field
+ *                  and clear the error.
+ *   • submit     — only starts a request from idle/error AND with a
+ *                  submittable (6-digit) code; otherwise a no-op. Enters
+ *                  "submitting", clears the error.
+ *   • success    — request resolved with a valid token; return to idle, no
+ *                  error. (The caller persists the token + drops the screen.)
+ *   • fail       — request failed; back to "error" with the classified
+ *                  message, fields preserved so the user can fix them.
  */
 export function pairingReducer(
   state: PairingState,
@@ -87,6 +100,14 @@ export function pairingReducer(
     case "edit": {
       if (state.status === "submitting") return state; // locked in-flight
       return { ...state, code: normalizeCode(action.raw), error: null };
+    }
+    case "editVerify": {
+      if (state.status === "submitting") return state; // locked in-flight
+      return {
+        ...state,
+        verify: normalizeVerifyCode(action.raw).slice(0, 4),
+        error: null,
+      };
     }
     case "submit": {
       if (state.status === "submitting") return state;

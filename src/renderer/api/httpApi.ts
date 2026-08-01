@@ -175,8 +175,11 @@ export function clearClientToken(): void {
  * Pure classification lives in pairingLogic.classifyClaimResult; this function
  * owns only the fetch + the transport-level error → networkFailure() mapping.
  */
-export async function submitPairingCode(code: string): Promise<ClaimResult> {
-  return claimAgainst(serverBase(), code);
+export async function submitPairingCode(
+  code: string,
+  verify?: string,
+): Promise<ClaimResult> {
+  return claimAgainst(serverBase(), code, verify);
 }
 
 /**
@@ -210,14 +213,23 @@ async function fetchWithTimeout(
   }
 }
 
-async function claimAgainst(base: string, code: string): Promise<ClaimResult> {
+async function claimAgainst(
+  base: string,
+  code: string,
+  verify?: string,
+): Promise<ClaimResult> {
   const url = `${base.replace(/\/+$/, "")}/auth/claim`;
   let res: Response;
   try {
     res = await fetchWithTimeout(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pairing_code: code }),
+      // BET-514: when the caller supplied the four-char two-sided-confirm
+      // code (`verify`, §5.3), forward it so the box provisions a DISTINCT
+      // Stage-2 joiner device. Absent → the legacy claim body, unchanged.
+      body: JSON.stringify(
+        verify && verify !== "" ? { pairing_code: code, verify } : { pairing_code: code },
+      ),
     });
   } catch {
     // fetch rejects (offline / DNS / TLS / bad URL / timeout) — no HTTP
@@ -615,7 +627,7 @@ export const httpApi: Api = {
   // same `https://<boxId>.boxes.mantaui.com` string. Mirrors the direct
   // pairing path in src/main/auth.ts (same endpoint, same request body shape,
   // same classifyClaimResult).
-  authClaim: (input) => claimAgainst(input.serverUrl, input.code),
+  authClaim: (input) => claimAgainst(input.serverUrl, input.code, input.verify),
 
   // Mobile pairing code mint (BET-161): POST /rpc/auth:pair. Both desktop and
   // mobile go through the same /rpc channel — GET /auth/pair is loopback-only
