@@ -14,6 +14,9 @@ import {
   resolveBoxChannel,
   renderPairQr,
   readPairAsset,
+  parsePairFragment,
+  buildClaimRequest,
+  classifyClaimFailure,
 } from "./pairPage.mjs";
 import { CHANNELS, CHANNEL_IDS } from "../shared/channel.mjs";
 
@@ -380,4 +383,104 @@ test("readPairAsset returns pair-logo.png bytes (PNG magic)", () => {
   const expected = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   assert.ok(buf.subarray(0, 8).equals(expected));
   assert.ok(buf.length > 100, "logo PNG should be non-trivial");
+});
+
+// ---------------------------------------------------------------------------
+// BET-489 — manual six-digit entry on the /pair page
+// ---------------------------------------------------------------------------
+
+// parsePairFragment — the code is read ONLY from the URL fragment.
+test("parsePairFragment reads code+box from the URL fragment only (BET-489)", () => {
+  assert.deepEqual(
+    parsePairFragment("#code=847291&box=0123456789abcdef0123456789abcdef"),
+    { code: "847291", box: "0123456789abcdef0123456789abcdef" },
+  );
+});
+
+test("parsePairFragment trims + lowercases box and tolerates a leading '#'", () => {
+  assert.deepEqual(parsePairFragment("code=847291&box=ABCD"), { code: "847291", box: "abcd" });
+  assert.deepEqual(parsePairFragment(""), { code: "", box: "" });
+  assert.deepEqual(parsePairFragment(null), { code: "", box: "" });
+  assert.deepEqual(parsePairFragment("#box=x"), { code: "", box: "x" });
+});
+
+// The manual-entry mailbox: the fragment's code is handed to the EXISTING
+// /auth/claim path, which resolves the box from the code (the box ID is gone
+// in manual entry — §5.2.9). This pins that the claim reuses that endpoint.
+test("manual-entry mailbox: fragment code claims against /auth/claim (BET-489)", () => {
+  const fragment = "#code=847291&box=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const { code } = parsePairFragment(fragment);
+  assert.equal(code, "847291");
+  const req = buildClaimRequest(code);
+  assert.equal(req.url, "/auth/claim", "must reuse the existing claim path");
+  assert.equal(req.method, "POST");
+  assert.deepEqual(JSON.parse(req.body), { code: "847291" });
+});
+
+// Fragment-only: the code must never be placed in a path/query the server
+// could log. The claim request URL carries NO query string, and the page's JS
+// sources the code only from `location.hash`, never reconstructs a URL with
+// it in the query.
+test("the page never puts the code in a path/query the server could log (fragment only) (BET-489)", () => {
+  const req = buildClaimRequest("847291");
+  assert.ok(!req.url.includes("?"), "claim URL must carry no query string");
+  assert.ok(!req.url.includes("code="), "code must never appear in the URL");
+  assert.ok(!req.body.includes("?code="), "code stays in the POST body, not a query");
+
+  const html = readPairAsset("pair.html").toString("utf-8");
+  // The code is sourced only from the fragment.
+  assert.match(html, /location\.hash/);
+  // No path/query construction that would surface the code to a proxy log.
+  assert.ok(!html.includes("/auth/claim?"), "no code-carrying claim URL query");
+  assert.ok(!html.includes("code="), "no literal 'code=' in a query position");
+});
+
+// classifyClaimFailure — maps a claim outcome to a §5.4 {cause,action} state.
+test("classifyClaimFailure: server rejection / network failure map to expired / unreachable (BET-489)", () => {
+  assert.equal(classifyClaimFailure({ status: 200 }), "ok");
+  assert.equal(classifyClaimFailure({ status: 400 }), "expired");
+  assert.equal(classifyClaimFailure({ status: 403 }), "expired");
+  assert.equal(classifyClaimFailure({ status: 500 }), "expired");
+  assert.equal(classifyClaimFailure({ thrown: true }), "unreachable");
+  assert.equal(classifyClaimFailure({ status: 0 }), "unreachable");
+  assert.equal(classifyClaimFailure({ status: NaN }), "unreachable");
+  assert.equal(classifyClaimFailure({}), "unreachable");
+});
+
+// Failure-state copy renders per §5.4 — the verbatim {cause, action} pairs.
+test("pair.html renders the §5.4 failure-state copy verbatim (BET-489)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  // Expired
+  assert.match(html, /That code expired/);
+  assert.match(html, /Codes last five minutes/);
+  assert.match(html, /Nothing was linked and nothing changed/);
+  assert.match(html, /Your desktop already has a new one/);
+  assert.match(html, /Scan again/);
+  assert.match(html, /Enter a code instead/);
+  // Unreachable
+  assert.match(html, /Can't reach your box/);
+  assert.match(html, /Nothing was linked\./);
+  assert.match(html, /It may be asleep/);
+  assert.match(html, /Check it's powered on and the server is running/);
+  assert.match(html, /Or this network blocks it/);
+  assert.match(html, /Try cellular instead of Wi-Fi/);
+  assert.match(html, /Try again/);
+  assert.match(html, /Copy diagnostics/);
+  // Manual + not-installed fallback
+  assert.match(html, /Enter the code/);
+  assert.match(html, /Read the six digits off your desktop/);
+  assert.match(html, /Get the app to finish/);
+  assert.match(html, /Prefer to type it\?/);
+  assert.match(html, /Get Manta/);
+});
+
+// No box_token or secret embedded anywhere in the served page.
+test("pair.html embeds no box_token or secret (BET-489)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  assert.ok(!/box_token/i.test(html), "must not embed the bearer token key");
+  assert.ok(!/Authorization/i.test(html), "must not embed the auth header");
+  assert.ok(!/\bbearer\b/i.test(html), "must not embed the bearer scheme");
+  assert.ok(!/secret/i.test(html), "must not embed any secret string");
+  // No 32-hex literal (a box_token / box_id shape) in the static page.
+  assert.ok(!/[0-9a-f]{32}/i.test(html), "must not embed a 32-hex token literal");
 });

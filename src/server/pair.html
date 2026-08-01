@@ -11,7 +11,7 @@
   --blue-400:#5A88FF;--blue-500:#2E6BFF;
   --cyan-400:#49D7F5;
   --slate-50:#F8FAFC;--slate-200:#CBD3E1;--slate-300:#A7B1C4;--slate-400:#7E889D;
-  --green-500:#22C79A;--amber-400:#F5BE5C;
+  --green-500:#22C79A;--amber-400:#F5BE5C;--red-400:#F87171;--red-600:#DC2626;
   --surface-app:var(--navy-950);--surface-panel:var(--navy-850);--surface-card:var(--navy-800);--surface-inset:#070B17;
   --border-subtle:#FFFFFF14;--border-default:var(--navy-700);--border-strong:var(--navy-600);
   --text-primary:var(--slate-50);--text-secondary:var(--slate-200);--text-muted:var(--slate-300);
@@ -27,76 +27,86 @@ body{background:var(--surface-app);color:var(--text-secondary);font-family:var(-
 .glow{position:fixed;top:-240px;left:50%;transform:translateX(-50%);width:820px;height:500px;pointer-events:none;
   background:radial-gradient(ellipse at center,rgba(46,107,255,.22),rgba(73,215,245,.07) 40%,transparent 70%);filter:blur(12px)}
 header{border-bottom:1px solid var(--border-subtle);background:rgba(11,16,32,.72);backdrop-filter:blur(12px)}
-.hwrap{max-width:660px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:11px}
+.hwrap{max-width:560px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:11px}
 .mark{width:28px;height:28px;object-fit:contain;display:block}
 .brand{font-weight:700;color:var(--text-primary);font-size:14.5px}
 .boxchip{margin-left:auto;display:flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-muted)}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--green-500);box-shadow:0 0 8px rgba(34,199,154,.8)}
-main{flex:1;width:100%;max-width:660px;margin:0 auto;padding:40px 24px 60px;position:relative}
-.stepper{display:flex;align-items:center;justify-content:center;margin-bottom:36px}
-.step-tab{display:flex;align-items:center;gap:9px;background:none;border:0;cursor:pointer;padding:6px 4px;font-family:var(--font-sans)}
-.step-num{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;
-  font-family:var(--font-mono);color:var(--slate-300);background:var(--fill-subtle);border:1px solid var(--border-strong);transition:all .15s var(--ease-out)}
-.step-name{font-size:13px;font-weight:600;color:var(--slate-400);transition:color .15s var(--ease-out)}
-.step-tab[aria-current="true"] .step-num{background:var(--blue-500);border-color:var(--blue-400);color:#fff;box-shadow:0 0 14px rgba(46,107,255,.45)}
-.step-tab[aria-current="true"] .step-name{color:var(--text-primary)}
-.step-tab.done .step-num{background:rgba(34,199,154,.15);border-color:rgba(34,199,154,.5);color:var(--green-500)}
-.step-tab:hover .step-name{color:var(--text-secondary)}
-.step-line{width:44px;height:1px;background:var(--border-strong);margin:0 8px;flex-shrink:0}
-@media(max-width:540px){.step-name{display:none}.step-line{width:28px}}
-.panel{background:var(--surface-card);border:1px solid var(--border-default);border-radius:18px;padding:40px 42px 34px;text-align:center;
+main{flex:1;width:100%;max-width:560px;margin:0 auto;padding:40px 24px 60px;position:relative}
+.panel{background:var(--surface-card);border:1px solid var(--border-default);border-radius:18px;padding:38px 40px 30px;text-align:center;
   box-shadow:0 18px 48px rgba(3,6,15,.5)}
-@media(max-width:540px){.panel{padding:30px 20px 26px}}
+@media(max-width:520px){.panel{padding:30px 20px 26px}}
+.view{display:none}
+.view.active{display:block;animation:fadein .18s var(--ease-out)}
+@keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .picon{width:52px;height:52px;margin:0 auto 16px;border-radius:14px;background:var(--fill-subtle);border:1px solid var(--border-default);
   display:grid;place-items:center;color:var(--cyan-400)}
 .picon svg{width:24px;height:24px}
+.picon.ok{color:var(--green-500);border-color:rgba(34,199,154,.45)}
+.picon.warn{color:var(--amber-400);border-color:rgba(245,190,92,.4)}
+.picon.danger{color:var(--red-400);border-color:rgba(248,113,113,.4)}
 h1{font-size:22px;font-weight:750;color:var(--text-primary);letter-spacing:-.015em;line-height:1.25}
-h1 .opt{font-size:13px;font-weight:600;color:var(--slate-300)}
-.lead{margin:10px auto 0;color:var(--text-muted);font-size:14.5px;max-width:420px}
+.lead{margin:10px auto 0;color:var(--text-muted);font-size:14.5px;max-width:400px}
 .lead b{color:var(--text-primary);font-weight:600}
-.action{margin-top:26px}
+.action{margin-top:24px}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;height:48px;padding:0 30px;border-radius:11px;
-  font-size:15px;font-weight:650;text-decoration:none;border:1px solid transparent;cursor:pointer;transition:all .12s var(--ease-out);font-family:var(--font-sans)}
+  font-size:15px;font-weight:650;text-decoration:none;border:1px solid transparent;cursor:pointer;
+  transition:all .12s var(--ease-out);font-family:var(--font-sans);background:none;color:var(--text-primary)}
 .btn-primary{background:var(--blue-500);color:#fff}
 .btn-primary:hover{background:var(--blue-400);box-shadow:0 0 0 1px rgba(46,107,255,.5),0 0 22px rgba(46,107,255,.35)}
+.btn-ghost{border:1px solid var(--border-strong);color:var(--text-secondary)}
+.btn-ghost:hover{border-color:var(--navy-600);color:var(--text-primary)}
+.btn-row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
 .hint{margin-top:13px;font-size:13px;color:var(--slate-300)}
 .hint b{color:var(--text-secondary)}
 .skiplink{margin-top:22px;font-size:13.5px}
-.skiplink a{color:var(--text-muted);text-decoration:none;border-bottom:1px dotted var(--border-strong)}
+.skiplink a{color:var(--text-muted);text-decoration:none;border-bottom:1px dotted var(--border-strong);cursor:pointer}
 .skiplink a:hover{color:var(--cyan-400);border-color:var(--cyan-400)}
-details{margin-top:24px;text-align:left;background:var(--surface-panel);border:1px solid var(--border-subtle);border-radius:10px}
-summary{cursor:pointer;padding:11px 16px;font-size:13.5px;color:var(--text-muted);list-style:none;display:flex;align-items:center;gap:8px}
-summary:hover{color:var(--text-secondary)}
-summary::-webkit-details-marker{display:none}
-summary::before{content:"\25B8";font-size:11px;transition:transform .15s}
-details[open] summary::before{transform:rotate(90deg)}
-.dbody{padding:2px 16px 18px;font-size:13.5px;color:var(--text-muted)}
-.dbody p{margin-bottom:10px}
-.dbody a.deeplink{color:var(--cyan-400);font-family:var(--font-mono);font-size:12.5px;word-break:break-all;text-decoration:underline;text-underline-offset:3px}
-.kv{display:flex;flex-direction:column;gap:12px;margin-top:14px}
-.kv .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--slate-300);font-weight:700}
-.kv .v{font-family:var(--font-mono);font-size:13.5px;color:var(--text-primary);margin-top:3px;white-space:nowrap}
-.qrframe{display:inline-block;background:#F8FAFC;border-radius:14px;padding:12px;box-shadow:0 0 0 1px var(--border-default)}
-.qrframe img{display:block;width:172px;height:172px;image-rendering:pixelated}
-.storebadge{display:inline-flex;align-items:center;gap:10px;background:#000;border:1px solid #2a2f3e;border-radius:10px;
-  padding:8px 18px;text-decoration:none;margin-bottom:20px}
-.storebadge svg{width:22px;height:26px;fill:#fff}
-.storebadge .st{text-align:left;line-height:1.15}
-.storebadge .st small{display:block;font-size:9.5px;color:#cfd4de;letter-spacing:.02em}
-.storebadge .st span{font-size:15.5px;font-weight:600;color:#fff;letter-spacing:-.01em}
-.codestrip{margin-top:34px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:13px;color:var(--text-muted);text-align:center}
-.codestrip .code{font-family:var(--font-mono);font-weight:700;color:var(--text-primary);letter-spacing:.14em;font-size:14px}
-.codestrip .sep{color:var(--border-strong)}
-.codestrip .missing{display:none;color:var(--amber-400)}
-.codestrip .missing code{font-family:var(--font-mono);background:var(--fill-subtle);border:1px solid var(--border-subtle);border-radius:5px;padding:1px 6px;font-size:12px;color:var(--slate-200)}
-body.nocode .codestrip .live{display:none}
-body.nocode .codestrip .missing{display:inline}
-body.nocode #openlink{pointer-events:none;opacity:.45}
-body.nocode .qrframe{display:none}
+/* --- fallback card ("Prefer to type it?") --- */
+.fallbackcard{margin-top:20px;background:var(--surface-panel);border:1px solid var(--border-subtle);border-radius:12px;text-align:left;overflow:hidden}
+.fallbackcard summary{cursor:pointer;padding:15px 18px;font-size:14px;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:9px;font-weight:600}
+.fallbackcard summary:hover{color:var(--text-primary)}
+.fallbackcard summary::-webkit-details-marker{display:none}
+.fallbackcard summary::before{content:"\002B";font-size:15px;color:var(--cyan-400);transition:transform .15s}
+.fallbackcard[open] summary::before{transform:rotate(45deg)}
+.fcallback{padding:0 18px 20px;font-size:13.5px;color:var(--text-muted)}
+.fcallback .codepill{font-family:var(--font-mono);font-weight:700;color:var(--text-primary);letter-spacing:.2em;font-size:20px;background:var(--fill-subtle);
+  border:1px solid var(--border-subtle);border-radius:10px;padding:10px 16px;display:inline-block;margin:10px auto 6px}
+/* --- OTP entry --- */
+.otp-wrap{display:flex;gap:10px;justify-content:center;margin:24px auto 0;max-width:340px}
+.otp-cell{width:52px;height:60px;text-align:center;font-family:var(--font-mono);font-size:24px;font-weight:700;color:var(--text-primary);
+  background:var(--surface-inset);border:1px solid var(--border-strong);border-radius:12px;outline:none;transition:border-color .12s,box-shadow .12s}
+.otp-cell:focus{border-color:var(--blue-400);box-shadow:0 0 0 3px rgba(46,107,255,.25)}
+.otp-cell.filled{border-color:var(--navy-600)}
+@media(max-width:520px){.otp-cell{width:46px;height:56px;font-size:22px}}
+.otp-auto{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+/* --- "My box isn't reachable" reveal --- */
+.altlink{margin-top:20px;font-size:13px}
+.altlink a{color:var(--text-muted);text-decoration:none;border-bottom:1px dotted var(--border-strong);cursor:pointer}
+.altlink a:hover{color:var(--cyan-400);border-color:var(--cyan-400)}
+.servertail{display:none;margin-top:16px;text-align:left}
+.servertail.open{display:block}
+.servertail label{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--slate-300);font-weight:700}
+.servertail input{width:100%;margin-top:6px;background:var(--surface-inset);border:1px solid var(--border-strong);border-radius:9px;
+  color:var(--text-primary);font-family:var(--font-mono);font-size:13px;padding:10px 12px;outline:none}
+.servertail input:focus{border-color:var(--blue-400)}
+/* --- resolved box card ("Box found") --- */
+.boxcard{margin-top:22px;background:var(--surface-panel);border:1px solid rgba(34,199,154,.35);border-radius:14px;padding:18px 20px;text-align:left;display:flex;align-items:center;gap:14px}
+.boxcard .bc-dot{flex-shrink:0;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:var(--green-500);
+  background:rgba(34,199,154,.12);border:1px solid rgba(34,199,154,.4)}
+.boxcard .bc-dot svg{width:17px;height:17px}
+.boxcard .bc-meta{min-width:0}
+.boxcard .bc-title{font-size:13px;color:var(--text-muted);font-weight:600}
+.boxcard .bc-host{font-family:var(--font-mono);font-size:14px;color:var(--text-primary);word-break:break-all;margin-top:1px}
+/* --- {cause, action} failure rows --- */
+.causecard{margin-top:22px;background:var(--surface-panel);border:1px solid var(--border-subtle);border-radius:14px;padding:4px 18px;text-align:left}
+.causecard.danger{border-color:rgba(248,113,113,.3)}
+.cause-row{display:flex;gap:12px;padding:14px 0}
+.cause-row+.cause-row{border-top:1px solid var(--border-subtle)}
+.cause-row svg{flex-shrink:0;width:18px;height:18px;color:var(--text-muted);margin-top:2px}
+.cause-row .cr-t{font-size:14px;color:var(--text-primary);font-weight:600}
+.cause-row .cr-s{font-size:13.5px;color:var(--text-muted);margin-top:1px}
 footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28px}
-.stepview{display:none}
-.stepview.active{display:block;animation:fadein .18s var(--ease-out)}
-@keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 </style>
 </head>
 <body>
@@ -104,126 +114,335 @@ footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28
 <header><div class="hwrap">
   <img class="mark" src="/pair/logo.png" alt="Manta">
   <div class="brand">MantaUI</div>
-  <div class="boxchip"><span class="dot"></span> <span id="boxchip-id">box</span> · online</div>
+  <div class="boxchip"><span class="dot"></span> <span id="boxchip-id">box</span></div>
 </div></header>
 
 <main>
-  <nav class="stepper" aria-label="Setup steps">
-    <button class="step-tab" id="tab-1" aria-current="true" onclick="go(1)"><span class="step-num">1</span><span class="step-name">Get the app</span></button>
-    <div class="step-line"></div>
-    <button class="step-tab" id="tab-2" aria-current="false" onclick="go(2)"><span class="step-num">2</span><span class="step-name">Connect</span></button>
-    <div class="step-line"></div>
-    <button class="step-tab" id="tab-3" aria-current="false" onclick="go(3)"><span class="step-num">3</span><span class="step-name">Mobile app</span></button>
-  </nav>
 
-  <section class="stepview active" id="step-1">
+  <!-- Not installed (web fallback page) — §5.3 -->
+  <section class="view" id="view-landing">
     <div class="panel">
-      <div class="picon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      <div class="picon ok">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
       </div>
-      <h1>Get the Manta app</h1>
-      <p class="lead">Download it, drag it to Applications, and open it.<br>First launch: <b>right-click → Open</b>.</p>
-      <div class="action"><a class="btn btn-primary" href="https://mantaui.com/downloads/Manta-latest.dmg" onclick="go(2)">Download for macOS</a></div>
-      <p class="hint">Apple silicon · ~90 MB</p>
-      <p class="skiplink"><a href="#" onclick="go(2);return false">Already have Manta installed? Skip</a></p>
-    </div>
-  </section>
-
-  <section class="stepview" id="step-2">
-    <div class="panel">
-      <div class="picon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+      <h1>Get the app to finish</h1>
+      <p class="lead">Your box is waiting. Install Manta, then scan the code on your desktop again.</p>
+      <div class="action">
+        <a class="btn btn-primary" href="https://mantaui.com" target="_blank" rel="noopener">Get Manta</a>
       </div>
-      <h1>Connect it to your box</h1>
-      <p class="lead">One click — Manta opens and asks you to confirm the pairing.</p>
-      <div class="action"><a class="btn btn-primary" id="openlink" href="#" onclick="go(3)">Open in Manta</a></div>
-      <p class="hint">Manta opens with box <b><span id="confirm-short">…</span></b> filled in — click Connect.</p>
-      <details>
-        <summary>Nothing happened?</summary>
-        <div class="dbody">
-          <p>Make sure Manta is installed and running, then click this link:</p>
-          <p><a class="deeplink" id="deeplink" href="#">…</a></p>
-          <p style="margin-top:12px">Or enter these on Manta's Connect screen (Server URL goes under "Advanced"):</p>
-          <div class="kv">
-            <div><div class="k">Box ID</div><div class="v" id="kv-box">—</div></div>
-            <div><div class="k">Pairing code</div><div class="v" id="kv-code">—</div></div>
-            <div><div class="k">Server URL</div><div class="v" id="kv-server">—</div></div>
+      <details class="fallbackcard">
+        <summary>Prefer to type it?</summary>
+        <div class="fcallback">
+          <p>Enter the code instead — no app needed.</p>
+          <div class="codepill" id="landing-code">— — — — — —</div>
+          <p class="hint" id="landing-ttl">Codes are one-time and valid about five minutes.</p>
+          <div class="action" style="margin-top:14px">
+            <button class="btn btn-primary" type="button" onclick="show('manual')">Enter the code</button>
           </div>
         </div>
       </details>
     </div>
   </section>
 
-  <section class="stepview" id="step-3">
+  <!-- Manual entry — §5.3 -->
+  <section class="view" id="view-manual">
     <div class="panel">
       <div class="picon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
       </div>
-      <h1>Install the mobile app <span class="opt">(optional)</span></h1>
-      <p class="lead">Get Manta for iPhone, then point your camera at the code — it opens already paired.</p>
+      <h1>Enter the code</h1>
+      <p class="lead">Read the six digits off your desktop, or run <span class="mono" style="background:var(--fill-subtle);border:1px solid var(--border-subtle);border-radius:5px;padding:0 6px">manta pair</span> on the box.</p>
+      <div class="otp-wrap" id="otp" role="group" aria-label="Six digit pairing code">
+        <input class="otp-auto" id="otp-auto" inputmode="numeric" autocomplete="one-time-code" autofocus>
+        <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 1">
+        <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 2">
+        <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 3">
+        <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 4">
+        <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 5">
+        <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 6">
+      </div>
       <div class="action">
-        <a class="storebadge" href="https://mantaui.com" aria-label="Download on the App Store">
-          <svg viewBox="0 0 384 512"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
-          <span class="st"><small>Download on the</small><span>App Store</span></span>
-        </a>
-        <div><div class="qrframe"><img id="qr" src="" alt="Pairing QR"></div></div>
+        <button class="btn btn-primary" id="btn-continue" type="button" disabled onclick="submitCode()">Continue</button>
+      </div>
+      <p class="hint" id="manual-ttl">Codes are one-time and valid about five minutes.</p>
+      <div class="altlink"><a id="tail-link" href="javascript:void(0)">My box isn't reachable from the internet</a></div>
+      <div class="servertail" id="tail">
+        <label for="server-url">Server URL</label>
+        <input id="server-url" type="url" placeholder="https://your-box.ts.net" autocomplete="url">
       </div>
     </div>
   </section>
 
-  <div class="codestrip">
-    <span class="live">Pairing code&nbsp;<span class="code" id="code-value">—</span></span>
-    <span class="sep live">·</span>
-    <span class="live">one-time, valid ~5 minutes from minting</span>
-    <span class="missing">No active pairing code — run <code>manta pair</code> on your box (or ask your agent), then open the freshly printed link.</span>
-  </div>
+  <!-- Linking (progress) — §5.3 -->
+  <section class="view" id="view-checking">
+    <div class="panel">
+      <div class="picon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
+      </div>
+      <h1>Linking</h1>
+      <p class="lead">A couple of seconds.</p>
+      <p class="hint" id="checking-msg">Reaching your box…</p>
+    </div>
+  </section>
+
+  <!-- Resolved-box card — §5.3 -->
+  <section class="view" id="view-found">
+    <div class="panel">
+      <div class="picon ok">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      </div>
+      <h1>Code accepted</h1>
+      <div class="boxcard">
+        <div class="bc-dot">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="bc-meta">
+          <div class="bc-title">Box found</div>
+          <div class="bc-host" id="found-host">…</div>
+        </div>
+      </div>
+      <div class="action">
+        <button class="btn btn-primary" type="button" onclick="goFinish()">Continue</button>
+      </div>
+      <p class="hint">Nothing was linked yet — install Manta on this phone to finish.</p>
+    </div>
+  </section>
+
+  <!-- Failure: Expired — §5.4 -->
+  <section class="view" id="view-expired">
+    <div class="panel">
+      <div class="picon warn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      </div>
+      <h1>That code expired</h1>
+      <p class="lead">Codes last five minutes. <b>Nothing was linked and nothing changed.</b></p>
+      <div class="causecard">
+        <div class="cause-row">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <div>
+            <div class="cr-t">Your desktop already has a new one</div>
+            <div class="cr-s">It refreshes on its own. Scan it again.</div>
+          </div>
+        </div>
+      </div>
+      <div class="action btn-row">
+        <button class="btn btn-ghost" type="button" onclick="goScanAgain()">Scan again</button>
+        <button class="btn btn-primary" type="button" onclick="show('manual')">Enter a code instead</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Failure: Unreachable — §5.4 -->
+  <section class="view" id="view-unreachable">
+    <div class="panel">
+      <div class="picon danger">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      </div>
+      <h1>Can't reach your box</h1>
+      <p class="lead">The code is valid but nothing answered. <b>Nothing was linked.</b></p>
+      <div class="causecard">
+        <div class="cause-row">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="2" y1="20" x2="22" y2="20"/></svg>
+          <div>
+            <div class="cr-t">It may be asleep</div>
+            <div class="cr-s">Check it's powered on and the server is running.</div>
+          </div>
+        </div>
+        <div class="cause-row">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+          <div>
+            <div class="cr-t">Or this network blocks it</div>
+            <div class="cr-s">Try cellular instead of Wi-Fi.</div>
+          </div>
+        </div>
+      </div>
+      <div class="action btn-row">
+        <button class="btn btn-primary" type="button" onclick="retryClaim()">Try again</button>
+        <button class="btn btn-ghost" type="button" onclick="copyDiagnostics()">Copy diagnostics</button>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <footer>Served by your box · the pairing code never leaves your machines</footer>
 
 <script>
-function go(n){
-  for(var i=1;i<=3;i++){
-    document.getElementById("step-"+i).classList.toggle("active", i===n);
-    var t=document.getElementById("tab-"+i);
-    t.setAttribute("aria-current", i===n ? "true":"false");
-    t.classList.toggle("done", i<n);
+var cells, code, claimOrigin;
+
+function $(id){ return document.getElementById(id); }
+
+function show(id){
+  var sections=["landing","manual","checking","found","expired","unreachable"];
+  for(var i=0;i<sections.length;i++){
+    var s=$("view-"+sections[i]);
+    if(s) s.classList.toggle("active", sections[i]===id);
+  }
+  if(id==="manual" && cells) setTimeout(function(){ var t=digtarget(); if(t) t.focus(); },30);
+}
+
+function parseFragment(){
+  var q=new URLSearchParams((location.hash||"").replace(/^#/,""));
+  return { code:(q.get("code")||"").trim(), box:(q.get("box")||"").trim().toLowerCase() };
+}
+
+function claimEndpointFor(origin){
+  var o=(origin||"").trim();
+  return (o? o.replace(/\/+$/,"") : location.origin)+"/auth/claim";
+}
+
+function resolveHost(){
+  var o=(claimOrigin||"").trim();
+  try{ return o? new URL(o).host : location.host; }catch(e){ return location.host; }
+}
+
+// --- OTP ---
+function gather(){
+  var s="";
+  for(var i=0;i<cells.length;i++) s+=cells[i].value||"";
+  return s;
+}
+function setCells(str){
+  for(var i=0;i<cells.length;i++){
+    cells[i].value=(str&&str[i])?str[i]:"";
+    cells[i].classList.toggle("filled", !!cells[i].value);
   }
 }
-(function init(){
-  var HEX32=/^[0-9a-f]{32}$/, CODE=/^\d{6}$/;
-  var q=new URLSearchParams(location.hash.replace(/^#/,""));
-  var code=(q.get("code")||"").trim();
-  if(!CODE.test(code)) code="";
-  var box=(q.get("box")||"").trim().toLowerCase();
-  if(!HEX32.test(box)){
-    var label=location.hostname.split(".")[0].toLowerCase();
-    box=HEX32.test(label)?label:"";
+function focusCell(i){
+  if(i>=0&&i<cells.length) cells[i].focus();
+}
+function onCellInput(el,i){
+  el.value=el.value.replace(/[^0-9]/g,"");
+  el.classList.toggle("filled", !!el.value);
+  if(el.value) focusCell(i+1);
+  var s=gather();
+  $("btn-continue").disabled = !/^\d{6}$/.test(s);
+  if(/^\d{6}$/.test(s)) submitCode();
+}
+function onCellKey(e,i){
+  if(e.key==="Backspace" && !cells[i].value && i>0){ focusCell(i-1); }
+  if(e.key==="ArrowLeft"){ e.preventDefault(); focusCell(i-1); }
+  if(e.key==="ArrowRight"){ e.preventDefault(); focusCell(i+1); }
+}
+function onCellPaste(e){
+  e.preventDefault();
+  var t=(e.clipboardData||window.clipboardData).getData("text")||"";
+  var digits=t.replace(/[^0-9]/g,"");
+  if(digits.length>6) digits=digits.slice(0,6);
+  if(/^\d{6}$/.test(digits)) setCells(digits);
+  else if(digits.length) setCells(digits);
+  var first=digtarget();
+  if(first) first.focus();
+}
+function digtarget(){
+  for(var i=0;i<cells.length;i++) if(!cells[i].value) return cells[i];
+  return cells[5];
+}
+
+// --- claim ---
+function submitCode(){
+  var s=gather();
+  if(!/^\d{6}$/.test(s)) return;
+  doClaim(s);
+}
+
+function doClaim(code){
+  show("checking");
+  var origin=$("server-url")? $("server-url").value : "";
+  claimOrigin=origin;
+  var res, body, threw=false;
+  fetch(claimEndpointFor(origin), {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({ code: code })
+  }).then(function(r){
+    res=r;
+    return r.text();
+  }).then(function(txt){
+    try{ body=JSON.parse(txt); }catch(e){ body=null; }
+    presentClaimResult(res, body);
+  }).catch(function(){
+    threw=true;
+    presentClaimResult(null, null);
+  });
+}
+
+function presentClaimResult(res, body){
+  if(res && res.ok && body && body.box_id){
+    $("found-host").textContent=resolveHost();
+    show("found");
+    return;
   }
-  var short=box?box.slice(0,8)+"…"+box.slice(-4):"unknown";
-  document.getElementById("boxchip-id").textContent="box "+short;
-  document.getElementById("confirm-short").textContent=short;
-  document.getElementById("kv-box").textContent=box||"—";
-  document.getElementById("kv-code").textContent=code||"—";
-  document.getElementById("kv-server").textContent=location.origin;
-  // BET-336 (Tailscale pair link): on a non-public origin (Tailscale IP,
-  // private hostname), append the page's own origin as `server=` so the
-  // deep link + QR point at a listener the scanning device can actually
-  // reach. On the public boxes.mantaui.com path, location.origin is a
-  // public address which the renderer refuses — appending it there would
-  // make every public link unparseable.
-  var isPublic=/\.boxes\.mantaui\.com$/.test(location.hostname);
-  var srv=isPublic?"":"&server="+encodeURIComponent(location.origin);
-  if(box&&code){
-    var link="manta://pair?box="+box+"&code="+code+srv;
-    document.getElementById("openlink").setAttribute("href",link);
-    var dl=document.getElementById("deeplink");
-    dl.setAttribute("href",link);
-    dl.textContent=link;
-    document.getElementById("qr").src="/pair/qr.png?box="+box+"&code="+code+srv;
-    document.getElementById("code-value").textContent=code.slice(0,3)+" "+code.slice(3);
-  }else{
-    document.body.classList.add("nocode");
+  // The page only ever receives a server rejection or a network failure.
+  // §5.4 "codes don't match" needs the human to compare against what the
+  // DESKTOP shows — a box-served page cannot know that (renderer-side
+  // no-op), so an unknown rejection is shown as "expired", never with the
+  // desktop-comparator copy.
+  show(res ? "expired" : "unreachable");
+}
+
+function retryClaim(){ submitCode(); }
+
+// --- misc ---
+function goScanAgain(){
+  // A code that yields a link back to this page. "Scan again" returns to the
+  // landing fallback so the user can refresh for a fresh code.
+  show("landing");
+}
+function goFinish(){ show("landing"); }
+
+function copyDiagnostics(){
+  var blob="MantaUI pair diagnostics\nhost: "+resolveHost()+"\ncode: "+gather()+
+    "\nsource: "+location.href+"\nuserAgent: "+navigator.userAgent;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(blob).then(function(){ $("view-unreachable").querySelector(".btn-row .btn-ghost").textContent="Copied"; });
+  }
+}
+
+(function init(){
+  cells=Array.prototype.slice.call(document.querySelectorAll(".otp-cell"));
+  cells.forEach(function(c,i){
+    c.addEventListener("input",function(){ onCellInput(c,i); });
+    c.addEventListener("keydown",function(e){ onCellKey(e,i); });
+    c.addEventListener("paste",onCellPaste);
+    c.addEventListener("focus",function(){ c.select(); });
+  });
+
+  // Keep the optional autofill field wired so OS "one-time-code" autofill
+  // can drop a 6-digit code straight into the cells (WCAG 3.3.8: paste must
+  // not be blocked).
+  var auto=$("otp-auto");
+  if(auto){
+    auto.addEventListener("input",function(){
+      var d=(this.value||"").replace(/[^0-9]/g,"");
+      if(/^\d{6}$/.test(d)) setCells(d);
+    });
+  }
+
+  // Reveal the tailnet escape hatch only when asked (§5.3 manual link).
+  var link=$("tail-link");
+  if(link) link.addEventListener("click",function(e){
+    e.preventDefault();
+    var t=$("tail"); t.classList.toggle("open");
+  });
+
+  // Box chip: on the box's own public hostname the label is the host.
+  var f=parseFragment();
+  var host=(location.hostname||"").split(".")[0];
+  $("boxchip-id").textContent=("box "+host);
+
+  if(f.code && /^\d{6}$/.test(f.code)){
+    // Arrived with a code in the URL fragment — prefill and go straight to
+    // the resolved-box card.
+    var q=new URLSearchParams((location.hash||"").replace(/^#/,""));
+    if(q.get("box")){ /* box id also carried; unused by manual flow */ }
+    $("btn-continue").disabled=false;
+    show("manual");
+    setCells(f.code);
+    $("landing-code").textContent=(f.code.slice(0,3)+" "+f.code.slice(3));
+    doClaim(f.code);
+  } else {
+    show("landing");
   }
 })();
 </script>
