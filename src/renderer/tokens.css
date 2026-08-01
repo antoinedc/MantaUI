@@ -90,14 +90,6 @@
   --prose-lh: 1.55;
   --ui-lh: 1.45;
 
-  /* Session-row metrics (BET-451). The sidebar row is a fixed four-slot shape
-     ([dot] [name] [pin] [timer]); pinning these means the row cannot change
-     height or padding per variant, which is what stops the rail jittering when
-     a hover affordance appears. */
-  --row-h: 32px;
-  --row-px: 10px;
-  --row-py: 6px;
-
   /* One easing curve for every transition, so motion reads as one system. */
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 
@@ -110,6 +102,28 @@
      it is one decision living in two files. */
   --font-sans: "Inter Variable", Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Density scope (BET-544). Session-row metrics live on [data-density], NOT
+   :root (spec C2, docs/components.md). The sidebar rail renders inside a
+   density ancestor (Sidebar.tsx), so a row primitive consuming a --row-* token
+   must state that it requires a density ancestor. A component rendered outside
+   this scope gets none of these — the row collapses to an unpadded baseline.
+
+   `comfortable` is the app default and matches the prior :root values exactly
+   (no visual change to the rail). `compact` is the reduced variant the spec
+   defines (row-h 26px); it is not yet selected anywhere — the scope exists so
+   a future density setting can flip it. */
+[data-density="comfortable"] {
+  --row-h: 32px;
+  --row-px: 10px;
+  --row-py: 6px;
+}
+
+[data-density="compact"] {
+  --row-h: 26px;
+  --row-px: 8px;
+  --row-py: 4px;
 }
 
 /* Token substrate (BET-407). Colour literals moved out of tailwind.config.js
