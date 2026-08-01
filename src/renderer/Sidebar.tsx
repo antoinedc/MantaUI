@@ -21,6 +21,7 @@ import {
   windowPinId,
 } from "./chatUtils";
 import { MOD_KEY } from "./platform";
+import { SessionRow, type SessionStatus } from "./SessionRow";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
 
@@ -739,72 +740,53 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
 // ---- BET-414 row primitives ----
 
-// One 7px status dot carrying every state. No trailing glyphs/counts — the
-// subagent count is folded into the dot's title tooltip only.
-function StatusDot({ status }: { status: WindowStatusUI | undefined }) {
-  if (!status) return <span className="w-[10px] h-[7px] shrink-0" aria-hidden />;
+// Map a window's live status to the SessionRow dot variant + tooltip. The dot
+// is the row's status signal, and the variant is REQUIRED (BET-536 C4 applies
+// to the dot) — an undefined status still resolves to the bare `--tx4` dot,
+// matching the rail's at-rest "Idle" state rather than disappearing.
+function dotFor(status: WindowStatusUI | undefined): { variant: SessionStatus; title?: string } {
+  if (!status) return { variant: "default", title: "Idle" };
   const kind = status.attentionKind ?? "idle";
   const isBlocking =
     status.attention && (kind === "question" || kind === "permission");
   if (isBlocking) {
-    const tooltip =
-      kind === "question"
-        ? "Waiting on a question — click to answer"
-        : "Waiting on permission — click to approve or deny";
-    return (
-      <span className="w-[10px] flex items-center justify-center shrink-0" title={tooltip}>
-        <span className="w-[7px] h-[7px] rounded-full bg-danger animate-pulse" />
-      </span>
-    );
+    return {
+      variant: "att",
+      title:
+        kind === "question"
+          ? "Waiting on a question — click to answer"
+          : "Waiting on permission — click to approve or deny",
+    };
   }
   if (status.attention && !status.running) {
-    return (
-      <span className="w-[10px] flex items-center justify-center shrink-0" title="Finished — click to view">
-        <span className="w-[7px] h-[7px] rounded-full bg-warn" />
-      </span>
-    );
+    return { variant: "idle", title: "Finished — click to view" };
   }
   if (status.running) {
-    const tooltip =
-      status.subagents > 0
-        ? `Running · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
-        : "Running";
-    return (
-      <span className="w-[10px] flex items-center justify-center shrink-0" title={tooltip}>
-        <span className="w-[7px] h-[7px] rounded-full bg-accent animate-pulse" />
-      </span>
-    );
+    return {
+      variant: "run",
+      title:
+        status.subagents > 0
+          ? `Running · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
+          : "Running",
+    };
   }
-  return <span className="w-[10px] flex items-center justify-center shrink-0" title="Idle"><span className="w-[7px] h-[7px] rounded-full" style={{ backgroundColor: "var(--tx4)" }} /></span>;
+  return { variant: "default", title: "Idle" };
 }
 
-// Trailing timer slot. Mono, tabular figures, right-aligned, min-width 20px.
-// Visible under the staleness TTL; past it `visibility:hidden` (NOT display:none)
-// so the slot is preserved and revealing it on hover never shifts the pin.
-function Timer({ status }: { status: WindowStatusUI | undefined }) {
+// Age text + staleness for the SessionRow age slot. Fresh ages render
+// visible; a stale age is `visibility:hidden` at rest and SessionRow reveals
+// it on hover, so the reserved 20px slot never shifts the row. The slot chrome
+// (mono / tabular / right / min-width) lives in SessionRow — this hook only
+// produces the content.
+function useAge(status: WindowStatusUI | undefined): { text: string | undefined; stale: boolean } {
   const cacheTtl = useStore((s) => s.cacheTtl);
-  const showAge =
-    status?.lastMessageAt != null && !status.running && !status.attention;
-  if (!showAge) {
-    return <span className="min-w-[20px] shrink-0" aria-hidden />;
-  }
+  const last = status?.lastMessageAt;
+  const showAge = last != null && !status?.running && !status?.attention;
+  if (!showAge) return { text: undefined, stale: false };
   const now = nowMs();
   const ttl = selectCacheTtlMs(cacheTtl);
-  const cls = classifyCacheAge(status.lastMessageAt!, now, ttl);
-  const stale = cls === "stale";
-  // Stale timers: `invisible` at rest, `group-hover:visible` so the row's
-  // hover reveals it. Tailwind classes (NOT inline style) — inline
-  // `visibility:hidden` would beat the `group-hover:visible` class and the
-  // timer would never reveal (Verify §2). Fresh timers render `visible`.
-  const visibilityClass = stale ? "invisible group-hover:visible" : "visible";
-  return (
-    <span
-      className={`min-w-[20px] shrink-0 text-right font-mono tabular-nums text-meta ${visibilityClass}`}
-      style={{ color: "var(--tx4)" }}
-    >
-      {formatAge(now - status.lastMessageAt!)}
-    </span>
-  );
+  const stale = classifyCacheAge(last, now, ttl) === "stale";
+  return { text: formatAge(now - last), stale };
 }
 
 // Permanently 18px pin slot. Empty at rest; on row hover reveals an outline
@@ -895,51 +877,47 @@ function WindowRow({
     confirmDeleteFor?.kind === "worktree-dirty" &&
     confirmDeleteFor.project === project.tmuxSession &&
     confirmDeleteFor.index === w.index;
+  const dot = dotFor(status);
+  const age = useAge(status);
   return (
     <div>
-      <div
-        role="treeitem"
-        aria-selected={isActive}
+      <SessionRow
+        status={dot.variant}
+        statusTitle={dot.title}
+        selected={isActive}
+        name={
+          isRenaming ? (
+            <RenameInput
+              value={renameValue}
+              onChange={setRenameValue}
+              onCommit={commitRename}
+              onCancel={cancelRename}
+              size="window"
+            />
+          ) : (
+            <span
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                onRename();
+              }}
+            >
+              {w.name}
+            </span>
+          )
+        }
+        age={age.text}
+        ageStale={age.stale}
+        trailing={<PinSlot pinned={pinned} onToggle={onTogglePin} />}
+        title={title}
         tabIndex={focused ? 0 : -1}
-        className={`group flex items-center gap-2 px-2 py-2 min-h-8 rounded text-meta cursor-pointer transition outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 ${
-          isActive
-            ? "bg-bg-soft text-text"
-            : "text-text-muted hover:bg-bg-soft hover:text-text"
-        }`}
+        ariaSelected={isActive}
         onClick={onActivate}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
           onClose();
         }}
-        title={title}
-      >
-        <StatusDot status={status} />
-        {isRenaming ? (
-          <RenameInput
-            value={renameValue}
-            onChange={setRenameValue}
-            onCommit={commitRename}
-            onCancel={cancelRename}
-            size="window"
-          />
-        ) : (
-          <span
-            className="flex-1 min-w-0 truncate"
-            onDoubleClick={(e) => {
-              e.stopPropagation();
-              onRename();
-            }}
-          >
-            {w.name}
-          </span>
-        )}
-        <PinSlot pinned={pinned} onToggle={onTogglePin} />
-        {/* Timer is the ONLY trailing element. min-width 20px per spec;
-            visibility:hidden preserves the slot so hover-reveal shifts
-            nothing. Close lives on the context menu (right-click). */}
-        <Timer status={status} />
-      </div>
+      />
       {showConfirm && (
         <ConfirmDelete
           label={`session "${w.name}"`}
@@ -990,31 +968,29 @@ function JobChildRow({
     confirmDeleteFor?.kind === "session" &&
     confirmDeleteFor.project === project.tmuxSession &&
     confirmDeleteFor.index === w.index;
+  const dot = dotFor(status);
+  const age = useAge(status);
   return (
     <div>
-      <div
-        role="treeitem"
-        aria-level={2}
-        aria-selected={isActive}
+      <SessionRow
+        status={dot.variant}
+        statusTitle={dot.title}
+        selected={isActive}
+        child
+        name={w.name}
+        age={age.text}
+        ageStale={age.stale}
+        title={title}
+        ariaLevel={2}
         tabIndex={focused ? 0 : -1}
-        className={`group flex items-center gap-2 pl-[26px] pr-2 py-2 min-h-8 rounded text-meta cursor-pointer transition outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 border-l border-border ml-3 ${
-          isActive
-            ? "bg-bg-soft text-text"
-            : "text-text-muted hover:bg-bg-soft hover:text-text"
-        }`}
+        ariaSelected={isActive}
         onClick={onActivate}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
           onClose();
         }}
-        title={title}
-      >
-        <StatusDot status={status} />
-        <span className="flex-1 min-w-0 truncate">{w.name}</span>
-        {/* Timer is the only trailing element. Close via context menu. */}
-        <Timer status={status} />
-      </div>
+      />
       {showConfirm && (
         <ConfirmDelete
           label={`session "${w.name}"`}
@@ -1189,7 +1165,7 @@ function CommandPalette({
                   i === sel ? "bg-bg-soft text-text" : "text-text-muted hover:bg-bg-soft"
                 }`}
               >
-                <StatusDot status={undefined} />
+                <span className="w-[10px] h-[7px] shrink-0" aria-hidden />
                 <span className="flex-1 min-w-0 truncate">{r.window.name}</span>
                 <span className="text-text-faint truncate">{r.project.tmuxSession}</span>
               </button>
