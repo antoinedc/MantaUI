@@ -1,18 +1,16 @@
 // ===== Status / interaction cards =====
 //
-// Extracted from ChatPanel.tsx (M0.5). Leaf cards rendered inline in the
-// transcript when the session needs the user's attention or is doing async
-// housekeeping:
+// Leaf cards rendered inline in the transcript when the session needs the
+// user's attention or is doing async housekeeping:
 //   - RetryCard: provider retry / rate-limit backoff notice.
 //   - CompactionCard: live compaction progress.
 //   - PermissionCard: tool-approval prompt (once / always / reject).
 //   - QuestionCard: the Question tool's multi-choice + free-text form.
 //
-// BET-415 redesign: PermissionCard and QuestionCard get a 30px icon badge
-// instead of a whole-card coloured outline, plain-language titles, a
-// button-ladder (primary filled / secondary outlined / reject right-tinted),
-// and question options become checkboxes (multi-select aware). Recommended
-// answers render as a pill and preselect only for single-select.
+// PermissionCard and QuestionCard are the same shape — a blocking ask with a
+// badge, a title, an optional body and an action row — so they render through
+// one shared AskCardShell below (BET-458). BET-415 gave them the 30px icon
+// badge, plain-language titles, checkbox question options and a button ladder.
 
 import { useState, type ReactNode } from "react";
 import { Shield, HelpCircle, Check } from "lucide-react";
@@ -21,12 +19,8 @@ import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
 
 // ===== Shared ask-card shell (BET-458) =====
 //
-// PermissionCard and QuestionCard are the same thing: a blocking ask inside
-// the transcript. They had diverged into two card implementations with
-// different widths, borders, headers and action rows. This one shell owns
-// the card surface (edge, radius, padding, the transcript measure it
-// inherits) plus the badge/title/sub/body/actions slots; the two cards below
-// can only differ in their slots, never in the shell.
+// One card surface (edge, radius, padding, the transcript measure it
+// inherits) plus badge/title/sub/body/actions slots for both ask cards.
 function AskCardShell({
   badge,
   badgeBg,
@@ -47,7 +41,6 @@ function AskCardShell({
   return (
     <div className="rounded-xl border border-border bg-bg-soft text-meta py-3 px-4">
       <div className="flex items-start gap-3">
-        {/* 30px icon badge — filled by the caller */}
         <span
           className="inline-flex items-center justify-center w-[30px] h-[30px] rounded-lg shrink-0"
           style={{ backgroundColor: badgeBg, color: badgeColor }}
@@ -59,32 +52,9 @@ function AskCardShell({
           {subtitle && <div className="text-text-muted mb-px">{subtitle}</div>}
         </div>
       </div>
-      {/* Full-width body slot — the code well (permission) or the question
-          form, sit at the card edge, aligned with the prose around them. */}
       {body && <div className="mt-3">{body}</div>}
       <div className="flex items-center gap-2 mt-4">{actions}</div>
     </div>
-  );
-}
-
-// An outlined secondary button — shared by the two cards' non-destructive row.
-function SecondaryButton({
-  onClick,
-  children,
-  title,
-}: {
-  onClick: () => void;
-  children: ReactNode;
-  title?: string;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      className="px-3 py-1 rounded-lg border border-border-strong text-text hover:bg-bg-soft text-meta"
-    >
-      {children}
-    </button>
   );
 }
 
@@ -177,15 +147,10 @@ export function CompactionCard({
 
 // ===== Permission card =====
 //
-// BET-415 redesign:
-//   - 30px icon badge (Shield on --warn-bg) replaces the whole-card orange
-//     outline.
-//   - Plain-language title ("Run a shell command?") above a one-line
-//     description; the literal command in its own --inset well below.
-//   - Button ladder (fixed in BET-458): Allow once is the FILLED accent
-//     primary; Always allow <tool> the outlined secondary; Reject text-tinted
-//     --danger only on hover, pushed to the far right.
-//   - Rendered through the shared AskCardShell (the deduped card surface).
+// Through AskCardShell with a Shield badge (--warn), a plain-language title,
+// and the literal command in a mono well. Button ladder: Allow once is the
+// filled accent primary, Always allow <tool> the outlined secondary, Reject
+// text-tinted --danger on hover and pushed to the far right.
 
 // Map opencode permission categories to plain-language titles.
 function permissionTitle(perm: PermissionRequest): string {
@@ -238,12 +203,13 @@ export function PermissionCard({
         Allow once
       </button>
       {alwaysScope ? (
-        <SecondaryButton
+        <button
           onClick={() => onReply("always")}
           title={`Always allow ${alwaysScope}`}
+          className="px-3 py-1 rounded-lg border border-border-strong text-text hover:bg-bg-soft text-meta"
         >
           Always allow <span className="text-text-faint">{alwaysScope}</span>
-        </SecondaryButton>
+        </button>
       ) : null}
       <button
         onClick={() => onReply("reject")}
@@ -276,19 +242,13 @@ export function PermissionCard({
 
 // ===== Question card =====
 //
-// BET-415 redesign:
-//   - 30px icon badge (HelpCircle on --accent-bg) replaces the whole-card
-//     accent outline.
-//   - Question options become CHECKBOXES (multi-select aware).
-//   - Recommended answers: strip the "(Recommended)" suffix, render a pill,
-//     preselect ONLY for single-select.
-//   - Multiple questions → numbered sections + "N of M answered" count + one
-//     Submit.
-//   - Keep the always-visible free-text field and buildQuestionAnswers /
-//     canSubmitQuestion helpers.
+// Through AskCardShell with a HelpCircle badge (--accent). Options are
+// checkboxes (multi-select aware); recommended answers strip the
+// "(Recommended)" suffix, badge as a pill and preselect only for
+// single-select. Multiple questions → numbered sections + "N of M answered"
+// + one Submit. One dismissal affordance: the trailing Dismiss text action.
 
-// The convention for a recommended option is a "(Recommended)" suffix on the
-// label. We strip it for display and flag the option as recommended.
+// The "<label> (Recommended)" suffix convention; stripped for display.
 const RECOMMENDED_RE = /\s*\(Recommended\)\s*$/i;
 
 function parseRecommended(label: string): { text: string; recommended: boolean } {
