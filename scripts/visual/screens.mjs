@@ -175,13 +175,21 @@ export const SCREENS = [
     ready: "text=Refactor auth middleware",
     final: '[role="tabpanel"][id="panel-extensions"]',
     region: '[role="tabpanel"][id="panel-extensions"]',
-    mockupRegion: '[data-panel="ext"]',
     actions: async (page) => {
       await page.getByText("Settings…", { exact: false }).first().click();
       await page.getByRole("tab", { name: "Extensions" }).click();
     },
     viewport: DESKTOP_VIEWPORT,
-    mockup: "docs/screens/settings/mockup.html",
+    // No design is filed for the OPEN Extensions tab: the mockup's `.ext`
+    // panel (docs/screens/settings/mockup.html line 345) is hidden until its
+    // tab is clicked, and compare.mjs has no mockup-actions to reveal it, so
+    // `[data-panel="ext"]` is never capturable. The app's card also differs
+    // from it anyway (app: "AI CLI launch options" between Plugins and Skill
+    // registries; mockup: "CLI launch options" after Skill registries) — a
+    // conformance gap to report, not a reason to keep `mockup: null` silent.
+    // `null` is the registry's documented "no design filed" value; the row
+    // still gets its structure + pixel baselines.
+    mockup: null,
   },
   {
     // The ⋯ session menu is the only entry point for AI-CLI launcher modes
