@@ -138,6 +138,15 @@ export const SCREENS = [
     // No mockup draws the banner; `null` is the registry's documented way to
     // say "no design filed" and the row still gets structure + pixels.
     mockup: null,
+    // Same session shell as the `session` row, rendered without the click
+    // action, so it closes the model/effort picker and session-menu triggers
+    // (but not the click-only ctx pill). From the coverage gate's failure
+    // output — BET-486 requires every non-opening row to declare this.
+    surfacesClosed: [
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
   },
   {
     // REGION ROWS for the session view (BET-468). The header strip and the
