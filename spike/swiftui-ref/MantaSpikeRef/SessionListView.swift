@@ -58,9 +58,6 @@ struct SessionRow: View {
     var body: some View {
         NavigationLink(value: session) {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(session.status.dotColor(t))
-                    .frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.name)
                         .font(.system(size: 15.5, weight: .medium))
