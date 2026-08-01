@@ -257,6 +257,15 @@ drift names the offending file, and **blocks** on any difference (no more
 `continue-on-error: true`). A determinism regression fails loudly as itself
 instead of as a mystery diff on someone's unrelated PR.
 
+> **The committed shots are CI's render, not yours.** Four of them (`shot-hero`,
+> `shot-approvals`, `shot-phone-session`, `shot-sync`) render differently on a
+> developer machine than on the runner — a GPU/fontconfig path difference that
+> BET-537 could not reconcile and that no flag fixed. CI is canonical because
+> these are published assets and the runner is the only environment reproducible
+> across people. **Running `npm run shots` locally will show a diff on those
+> four; do not commit it.** To change them deliberately, regenerate on CI and
+> commit the artifact's bytes (see BET-542).
+
 ## What the first run taught us (BET-443 → BET-447)
 
 BET-443 (the welcome screen) was the deliberate first run of this process: one
