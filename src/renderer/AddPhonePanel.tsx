@@ -81,7 +81,11 @@ export function AddPhonePanel() {
         <div className="space-y-4">
           <div className="flex items-start gap-4">
             <div className="bg-white p-2 rounded border border-border shrink-0">
-              <PairingQR boxId={pairing.boxId} pairingCode={pairing.pairingCode} />
+              <PairingQR
+                boxId={pairing.boxId}
+                pairingCode={pairing.pairingCode}
+                verify={pairing.verify}
+              />
             </div>
             <div className="flex-1 space-y-2">
               <div className="text-body">
