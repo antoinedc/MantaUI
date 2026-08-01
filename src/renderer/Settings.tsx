@@ -21,6 +21,7 @@ import { resolveLauncherFlags } from "./chatShared";
 import { applyTheme, type ThemePref } from "./theme";
 import { TtlToggle } from "./TtlToggle";
 import { Card } from "./Card";
+import { Field } from "./Field";
 import { useSettingsToasts, useApplySetting, ToastStack } from "./settingsApply";
 import { errorDisclosure } from "./settingsError";
 import {
@@ -167,32 +168,28 @@ function SettingField({ entry, value, onCommit, credential }: {
   // but an in-progress edit is never stomped).
   useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
   return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
-      <input
-        id={id}
-        type={credential ? "password" : "text"}
-        placeholder={entry.placeholder}
-        value={draft}
-        onChange={(e) => {
-          setDraft(e.target.value);
-          if (credential) setSavedAt(null);
-        }}
-        onFocus={() => { focused.current = true; }}
-        onBlur={() => {
-          focused.current = false;
-          if (draft !== value) {
-            onCommit(draft);
-            if (credential) setSavedAt(Date.now());
-          }
-        }}
-        autoComplete={credential ? "off" : undefined}
-        spellCheck={false}
-        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
-      />
-      {entry.help && <div className="text-meta text-text-faint">{entry.help}</div>}
-      {credential && savedAt && <div role="status" className="text-meta text-ok">Saved</div>}
-    </div>
+    <Field
+      id={id}
+      label={entry.label}
+      type={credential ? "password" : "text"}
+      placeholder={entry.placeholder}
+      value={draft}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        if (credential) setSavedAt(null);
+      }}
+      onFocus={() => { focused.current = true; }}
+      onBlur={() => {
+        focused.current = false;
+        if (draft !== value) {
+          onCommit(draft);
+          if (credential) setSavedAt(Date.now());
+        }
+      }}
+      autoComplete={credential ? "off" : undefined}
+      help={entry.help}
+      footer={credential && savedAt ? <div role="status" className="text-meta text-ok">Saved</div> : undefined}
+    />
   );
 }
 
@@ -706,7 +703,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
               ))}
             </div>
             <div className="flex gap-2">
-              <input placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} className="flex-1 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
+              <div className="flex-1">
+                <Field placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} />
+              </div>
               <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-4 py-2 text-body bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">Add</button>
             </div>
           </GroupCard>
@@ -818,9 +817,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-w-0">
         <div className="flex items-center gap-3 p-4 border-b border-border">
-          <div className="flex-1 relative">
-            <Search size={14} aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 text-text-faint" />
-            <input ref={searchRef} type="text" placeholder="Find a setting…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search settings" className="w-full max-w-sm bg-bg-soft border border-border pl-8 pr-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
+          <div className="flex-1">
+            <div className="max-w-sm">
+              <Field placeholder="Find a setting…" value={query} onChange={(e) => setQuery(e.target.value)} ariaLabel="Search settings" mono={false} leading={<Search size={14} aria-hidden="true" />} inputRef={searchRef} />
+            </div>
           </div>
           <button onClick={onClose} className="text-text-muted hover:text-text text-body px-3 py-2 rounded hover:bg-bg-elev transition-colors inline-flex items-center" aria-label="Close settings"><X size={16} aria-hidden="true" /></button>
           <div className="titlebar-inset-right" />
