@@ -1,0 +1,8 @@
+- textbox "Try something… (@ files · / commands · tab insert · ⏎ send)":
+  - /placeholder: Try something…  (@ files · / commands · tab insert · ⏎ send)
+- button "Opus 4.7"
+- button "High" [disabled]
+- button "schedules"
+- button "secrets"
+- button "webhooks"
+- button "Permissions on — click to bypass"
