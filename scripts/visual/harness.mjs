@@ -242,4 +242,3 @@ export async function preparePage(page, { url, readySelector, finalSelector, act
     () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
   );
 }
-
