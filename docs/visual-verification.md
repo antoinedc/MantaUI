@@ -68,6 +68,11 @@ single element:
 - **`mockupRegion`** (CSS selector) — the matching element inside the mockup,
   used by `compare.mjs`. Defaults to `region`; it usually differs because the
   mockup is a different DOM (e.g. app `nav[role="tablist"]` vs mockup `.snav`).
+- **`mockupActions`** (async fn, optional) — actions run on the mockup page
+  before `compare.mjs` captures it, for when the target element is not visible
+  in the mockup's default state (e.g. clicking a section-rail tab to reveal a
+  hidden panel). Only `compare.mjs` honours it; the app-run `actions` still
+  drive the visual test project.
 
 A region row is a **separate row** in the registry that reuses its screen's
 `url`, `ready`, `final` and `actions` and only changes what gets cropped. The
