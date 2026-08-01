@@ -125,7 +125,8 @@ export function SessionHeader({
       {/* Branch chip — session state, lives in the header not the composer. */}
       {branch && (
         <span
-          className="manta-session-branch text-text-faint font-mono shrink-0 truncate max-w-[200px] inline-flex items-center gap-1 rounded-full border border-border bg-fill px-2"
+          className="manta-session-branch text-text-faint font-mono shrink-0 truncate max-w-[200px] inline-flex items-center gap-1 rounded-full border border-border px-2"
+          style={{ backgroundColor: "var(--fill)" }}
           title={`Current branch: ${branch}`}
         >
           <GitBranch size={14} aria-hidden="true" className="shrink-0" />
@@ -169,7 +170,7 @@ export function SessionHeader({
           <button
             type="button"
             onClick={() => onModeChange(targetMode)}
-            className="manta-session-mode-toggle text-text-faint hover:text-text hover:bg-fill rounded-md p-1.5 inline-flex items-center"
+            className="manta-session-mode-toggle text-text-faint hover:text-text hover:bg-fill rounded-md p-1 inline-flex items-center"
             title={`Switch to ${modeLabel}`}
             aria-label={modeLabel}
           >
@@ -278,10 +279,9 @@ function ContextPill({
       onClick={() => setOpen((v) => !v)}
       className={
         "manta-ctx-pill inline-flex items-center gap-2 rounded-full px-2 py-px text-meta transition-colors border border-border hover:border-border-strong " +
-        (stale
-          ? "bg-warn-bg hover:bg-warn-bg"
-          : "bg-fill hover:bg-fill-active")
+        (stale ? "bg-warn-bg hover:bg-warn-bg" : "")
       }
+      style={stale ? undefined : { backgroundColor: "var(--fill)" }}
       aria-haspopup="dialog"
       aria-expanded={open}
       title={stale ? "Context stale — click for details" : "Context usage — click for details"}
@@ -505,7 +505,7 @@ function SessionMenu({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="manta-session-menu-trigger text-text-faint hover:text-text rounded-md p-1.5 inline-flex items-center"
+        className="manta-session-menu-trigger text-text-faint hover:text-text rounded-md p-1 inline-flex items-center"
         title="Session actions"
         aria-label="Session actions"
         aria-haspopup="menu"
