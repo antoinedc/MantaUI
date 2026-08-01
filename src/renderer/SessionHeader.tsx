@@ -23,6 +23,7 @@ import type { SessionMode } from "./chatShared";
 import type { AvailableLauncher } from "../shared/types";
 import { IconButton } from "./IconButton";
 import { Pill } from "./Pill";
+import { Dropdown, MenuItem } from "./MenuItem";
 
 // Cache-segment colors — same palette as ContextBar so the header pill and
 // the (retired) footer bar stay in sync visually.
@@ -446,25 +447,21 @@ function SessionMenu({
   useClickAway(rootRef, open, () => setOpen(false));
 
   const item = (
-    icon: React.ReactNode,
+    icon: React.ReactElement,
     label: string,
     onClick: () => void,
     danger = false,
   ) => (
-    <button
-      type="button"
-      onClick={() => {
+    <MenuItem
+      icon={icon}
+      variant={danger ? "danger" : "normal"}
+      onSelect={() => {
         setOpen(false);
         onClick();
       }}
-      className={
-        "w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-bg-soft text-meta " +
-        (danger ? "text-danger hover:bg-danger-bg" : "text-text")
-      }
     >
-      {icon}
       {label}
-    </button>
+    </MenuItem>
   );
 
   // The menu closes after any action; a mode change just re-points mode
@@ -477,27 +474,29 @@ function SessionMenu({
   const isActive = (m: SessionMode) => mode === m;
 
   const modeItem = (
-    icon: React.ReactNode,
+    icon: React.ReactElement,
     label: string,
     m: SessionMode,
   ) => {
     const active = isActive(m);
     return (
-      <button
-        type="button"
-        onClick={() => {
+      <MenuItem
+        icon={icon}
+        variant={active ? "active" : "normal"}
+        trailing={
+          active ? (
+            <span className="text-text-faint" aria-hidden="true">
+              ✓
+            </span>
+          ) : undefined
+        }
+        onSelect={() => {
           setOpen(false);
           switchMode(m);
         }}
-        className={
-          "w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-bg-soft text-meta " +
-          (active ? "text-accent" : "text-text")
-        }
       >
-        {icon}
-        <span className="flex-1">{label}</span>
-        {active && <span className="text-text-faint" aria-hidden="true">✓</span>}
-      </button>
+        {label}
+      </MenuItem>
     );
   };
 
@@ -514,10 +513,7 @@ function SessionMenu({
         ariaExpanded={open}
       />
       {open && (
-        <div
-          role="menu"
-          className="manta-session-menu-dropdown absolute right-0 top-full mt-1 z-30 min-w-[180px] rounded-lg border border-border bg-bg-elev shadow-md py-1"
-        >
+        <Dropdown hook="manta-session-menu-dropdown">
           {hasMode && (
             <>
               <div className="px-3 pt-1 pb-0.5 text-label text-text-faint select-none" role="presentation">
@@ -565,7 +561,7 @@ function SessionMenu({
             onDelete,
             true,
           )}
-        </div>
+        </Dropdown>
       )}
     </div>
   );
