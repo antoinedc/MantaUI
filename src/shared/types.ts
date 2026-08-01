@@ -1075,10 +1075,12 @@ export type AuthClaimInput = {
 // Result of GET /auth/pair — a one-time pairing code the desktop renders as a
 // QR for mobile scanning. `expiresAt` is an ISO-8601 timestamp (server-side
 // clock); the desktop computes the remaining seconds for the UI countdown.
+// `verify` is the four-character two-sided-confirm code (§5.3) shown on the
+// desktop ("K7 Q2"); the joiner echoes it in /auth/claim to carry the confirm.
 // `error` is non-null only on failure (network, 403 from a non-loopback
 // address, 429 rate limit, 5xx).
 export type AuthPairResult =
-  | { ok: true; pairingCode: string; boxId: string; expiresAt: string }
+  | { ok: true; pairingCode: string; boxId: string; expiresAt: string; verify: string }
   | { ok: false; error: string };
 
 // One row of the plugin registry (BET-189 / BET-190). The Mac executor

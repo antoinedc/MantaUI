@@ -21,6 +21,8 @@ import {
   queryTokenAllowedForPath,
   authorizationForRequest,
   QUERY_TOKEN_PATHS,
+  genVerifyCode,
+  normalizeVerifyCode,
 } from "./auth.mjs";
 import { createDeviceRegistry } from "./devices.mjs";
 
@@ -684,4 +686,127 @@ test("REGRESSION: loopback + proxy forwarding headers is NOT local (cloudflared)
     isLocalDirectRequest({ ...base, headers: { "x-forwarded-for": "" } }),
     true,
   );
+});
+
+// ----------------------------------------------------------------------------
+// BET-493 — two-sided four-character confirm (Desktop "Add a phone" panel)
+// ----------------------------------------------------------------------------
+//
+// The joiner's confirm claim provisions a DISTINCT device in the Stage-2
+// registry (never the desktop's own token); a refresh on expiry / auto-rotate
+// invalidates the prior code; nothing already-paired is disturbed.
+
+test("genVerifyCode produces 4 unambiguous uppercase letters + digits", () => {
+  const v = genVerifyCode();
+  assert.equal(typeof v, "string");
+  assert.equal(v.length, 4);
+  assert.match(v, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/);
+});
+
+test("normalizeVerifyCode strips whitespace + folds case", () => {
+  assert.equal(normalizeVerifyCode("K7 Q2"), "K7Q2");
+  assert.equal(normalizeVerifyCode("k7 q2"), "K7Q2");
+  assert.equal(normalizeVerifyCode("K7Q2"), "K7Q2");
+  assert.equal(normalizeVerifyCode("  k7  q2  "), "K7Q2");
+  assert.equal(normalizeVerifyCode(null), "");
+  assert.equal(normalizeVerifyCode(""), "");
+});
+
+test("pair mints a verification code alongside the pairing code", () => {
+  const eng = engine({ auth: AUTH });
+  const p = eng.pair();
+  assert.equal(p.ok, true);
+  assert.equal(typeof p.verify, "string");
+  assert.equal(p.verify.length, 4);
+});
+
+test("BET-493: two-factor confirm claim provisions a DISTINCT device, never the desktop's token", () => {
+  const devices = createDeviceRegistry({ load: () => null, save: async () => {}, now: () => 0 });
+  const eng = engine({ auth: AUTH, devices });
+  const before = new Set(devices.serialize().devices.map((d) => d.device_id));
+
+  const p = eng.pair();
+  const c = eng.claim({ pairing_code: p.pairing_code, verify: p.verify });
+  assert.equal(c.ok, true);
+  // distinct token, not the desktop's shared box_token
+  assert.equal(c.box_token !== AUTH.box_token, true);
+  assert.equal(isValidToken(c.box_token), true);
+  // a NEW device_id was provisioned (not a resumed one)
+  assert.equal(before.has(c.device_id), false);
+  // the joiner's credential is live and distinct
+  assert.equal(devices.authorize(c.box_token) != null, true);
+  assert.notEqual(c.device_id, devices.primary().device_id);
+});
+
+test("BET-493: a claim WITHOUT the confirm resumes the PRIMARY (back-compat)", () => {
+  const eng = engine({ auth: AUTH });
+  const p = eng.pair();
+  const c = eng.claim({ pairing_code: p.pairing_code });
+  assert.equal(c.ok, true);
+  // legacy path returns the desktop's own shared token, unchanged
+  assert.equal(c.box_token, AUTH.box_token);
+});
+
+test("BET-493: a wrong verify → 403 WITHOUT consuming the code (retryable)", () => {
+  const eng = engine({ auth: AUTH });
+  const p = eng.pair();
+  const wrong = p.verify === "K7Q2" ? "AB12" : "K7Q2";
+  const r = eng.claim({ pairing_code: p.pairing_code, verify: wrong });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 403);
+  assert.equal(r.error, "verification failed");
+  // the one-time code is NOT burned — a corrected retry succeeds
+  const ok = eng.claim({ pairing_code: p.pairing_code, verify: p.verify });
+  assert.equal(ok.ok, true);
+});
+
+test("BET-493: whitespace/case-normalized verify still matches (human comparator)", () => {
+  const eng = engine({ auth: AUTH });
+  const p = eng.pair();
+  const spaced = `${p.verify.slice(0, 2)} ${p.verify.slice(2)}`;
+  const c = eng.claim({ pairing_code: p.pairing_code, verify: spaced.toLowerCase() });
+  assert.equal(c.ok, true);
+});
+
+test("BET-493: minting a replacement code supersedes a still-valid prior code (panel auto-rotate)", () => {
+  const eng = engine({ auth: AUTH });
+  const first = eng.pair();
+  const second = eng.pair(); // panel re-mint before the first timed out
+  // the prior code is dead even though it hadn't expired
+  const old = eng.claim({ pairing_code: first.pairing_code, verify: first.verify });
+  assert.equal(old.ok, false);
+  const ok = eng.claim({ pairing_code: second.pairing_code, verify: second.verify });
+  assert.equal(ok.ok, true);
+});
+
+test("BET-493: a refresh on expiry invalidates the prior code", () => {
+  let t = 0;
+  const eng = engine({ auth: AUTH, ttlMs: 100, now: () => t });
+  const first = eng.pair();
+  t = 200; // past TTL — first code has expired
+  const expired = eng.claim({ pairing_code: first.pairing_code, verify: first.verify });
+  assert.equal(expired.ok, false);
+  const second = eng.pair(); // panel refresh while open
+  assert.notEqual(second.pairing_code, first.pairing_code);
+  const ok = eng.claim({ pairing_code: second.pairing_code, verify: second.verify });
+  assert.equal(ok.ok, true);
+});
+
+test("BET-493: confirm claim leaves the primary (desktop) and existing devices undisturbed", () => {
+  const devices = createDeviceRegistry({ load: () => null, save: async () => {}, now: () => 0 });
+  const eng = engine({ auth: AUTH, devices });
+  assert.equal(devices.authorize(AUTH.box_token) != null, true); // desktop works pre-join
+  const p = eng.pair();
+  const c = eng.claim({ pairing_code: p.pairing_code, verify: p.verify });
+  assert.equal(c.ok, true);
+  // the desktop's own token still authorizes after the joiner joined
+  assert.equal(devices.authorize(AUTH.box_token) != null, true);
+  assert.equal(
+    eng.authorize({ method: "GET", path: "/api/projects", authorization: `Bearer ${AUTH.box_token}` }).ok,
+    true,
+  );
+  // listDevices shows both the primary and the joiner (public metadata)
+  const list = eng.listDevices();
+  assert.equal(list.some((d) => d.primary), true);
+  assert.equal(list.some((d) => d.device_id === c.device_id), true);
 });
