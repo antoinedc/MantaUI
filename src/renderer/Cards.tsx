@@ -17,6 +17,7 @@ import { Shield, HelpCircle, Check } from "lucide-react";
 import type { PermissionRequest, QuestionRequest } from "../shared/types";
 import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
 import { Card } from "./Card";
+import { Pill } from "./Pill";
 
 // ===== Shared ask-card shell (BET-458) =====
 //
@@ -385,14 +386,13 @@ export function QuestionCard({
                         </span>
                         <span className="text-text min-w-0">{opt.displayLabel}</span>
                         {opt.recommended && (
-                          <span
-                            className="ml-auto shrink-0 px-2 rounded-sm text-label"
-                            style={{
-                              backgroundColor: "var(--accent-bg)",
-                              color: "var(--accent)",
-                            }}
-                          >
-                            Recommended
+                          // The accent "Recommended" standing tag — a Pill.
+                          // `ml-auto shrink-0` is the flex-row placement (a
+                          // site concern, wrapped here); Pill owns the chrome.
+                          <span className="ml-auto shrink-0">
+                            <Pill tone="accent" size="label">
+                              Recommended
+                            </Pill>
                           </span>
                         )}
                         <input
