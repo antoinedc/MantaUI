@@ -12,11 +12,10 @@
 // also sets the matching foreground (`hover:text-text`); the resting state
 // sets `--tx3`.
 //
-// The hover fill uses the scoped arbitrary value `hover:bg-[var(--fill-hover)]`
-// rather than a `fill-*` colour utility: `fill` is not a registered Tailwind
-// colour, so `bg-fill` / `bg-fill-hover` compile to nothing (the dead classes
-// already present across the app prove it). Adding a global colour here would
-// suddenly activate those other sites, so the primitive stays scoped.
+// The hover fill uses the `fill-hover` colour utility (`hover:bg-fill-hover`,
+// registered by BET-539 → `--fill-hover`). No arbitrary value needed — the
+// fill scale is a real Tailwind colour now, shared with the other hover-fill
+// sites in the app.
 //
 // Adopters migrated in BET-532: the SessionHeader mode toggle + the
 // session-menu trigger (identical chrome). `aria-haspopup` / `aria-expanded`
@@ -27,7 +26,7 @@ import type { ReactElement } from "react";
 import { cloneElement } from "react";
 
 const CHROME =
-  "inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-[var(--fill-hover)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+  "inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
 
 export function IconButton({
   label,

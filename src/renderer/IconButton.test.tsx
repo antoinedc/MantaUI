@@ -6,7 +6,7 @@
 // As with Card, the primitive's "tokens" are class names that map through
 // tailwind.config.js to the design tokens (rounded → --r-xs 4px, p-1 → 4px
 // hit-area padding, text-text-faint → --tx3, hover:text-text → --tx1, the
-// arbitrary hover:bg-[var(--fill-hover)] → --fill-hover, outline-accent →
+// arbitrary hover:bg-fill-hover → --fill-hover, outline-accent →
 // --accent). jsdom loads no stylesheet, so the contract is asserted on the
 // exact class strings — a retune of IconButton's chrome fails here
 // immediately. The two SessionHeader adopters are migrated below through the
@@ -21,7 +21,7 @@ import { SessionHeader } from "./SessionHeader";
 // The exact chrome string IconButton owns (no className escape hatch means
 // every call site renders exactly this).
 const CHROME =
-  "inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-[var(--fill-hover)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+  "inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
 
 function buttonEl(h: Harness): HTMLButtonElement {
   const el = h.container.querySelector("button") as HTMLButtonElement;
@@ -51,7 +51,7 @@ describe("IconButton", () => {
     expect(el.className).toContain("p-1");
     expect(el.className).toContain("text-text-faint");
     expect(el.className).toContain("hover:text-text");
-    expect(el.className).toContain("hover:bg-[var(--fill-hover)]");
+    expect(el.className).toContain("hover:bg-fill-hover");
     expect(el.className).toContain("outline-accent");
   });
 
