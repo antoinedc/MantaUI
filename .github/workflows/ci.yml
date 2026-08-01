@@ -198,22 +198,36 @@ jobs:
       - name: Drift gate — regenerate website/shot-*.webp and diff against the committed set
         if: github.event_name == 'pull_request'
         run: |
-          npm run shots
-          npm run shots
-          # Scope is the SHOT ARTIFACTS this gate owns (website/shot-*.webp +
-          # hero-poster.webp). NOT the whole website/ dir — the npm test step
-          # regenerates website/sitemap.xml from git history, so including it
-          # here makes the gate measure the sitemap's lastmod against a stale
-          # committed copy and fail on an unrelated file (BET-444).
-          echo "::group::Post-capture shot diff against the committed set"
-          git status --porcelain -- website/shot-*.webp website/hero-poster.webp || true
-          git diff --name-status -- website/shot-*.webp website/hero-poster.webp || true
-          git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
-          echo "::endgroup::"
-          if ! git diff --exit-code --quiet -- website/shot-*.webp website/hero-poster.webp; then
-            echo "::error file=website/shot-*.webp::drift detected — two consecutive runs differ from the committed set. Either the renderer changed or the capture is not byte-deterministic."
-            echo "::error::If the renderer intentionally changed, run 'npm run shots' locally and commit the regenerated files. If not, the capture pipeline is non-deterministic — investigate before merging."
-            exit 1
+          # A PR that touches none of the capture inputs cannot make the shots
+          # stale, and on a PR that can't affect them a red result would only
+          # inherit someone else's staleness. So run the gate only when the PR
+          # changes a file that feeds the capture — same mechanism as the
+          # conditional dependency audit in this job (diff against the merge
+          # base, gate on what the PR actually touched). The five paths are
+          # complete and specified by BET-518: the renderer paints the shots,
+          # website/ holds them, the two scripts capture them, and the lockfile
+          # pins the browser that renders them.
+          if git diff --name-only "$(git merge-base origin/main HEAD)" HEAD -- \
+               src/renderer/ website/ scripts/shots.mjs scripts/visual/harness.mjs package-lock.json | grep -q .; then
+            npm run shots
+            npm run shots
+            # Scope is the SHOT ARTIFACTS this gate owns (website/shot-*.webp +
+            # hero-poster.webp). NOT the whole website/ dir — the npm test step
+            # regenerates website/sitemap.xml from git history, so including it
+            # here makes the gate measure the sitemap's lastmod against a stale
+            # committed copy and fail on an unrelated file (BET-444).
+            echo "::group::Post-capture shot diff against the committed set"
+            git status --porcelain -- website/shot-*.webp website/hero-poster.webp || true
+            git diff --name-status -- website/shot-*.webp website/hero-poster.webp || true
+            git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
+            echo "::endgroup::"
+            if ! git diff --exit-code --quiet -- website/shot-*.webp website/hero-poster.webp; then
+              echo "::error file=website/shot-*.webp::drift detected — two consecutive runs differ from the committed set. Either the renderer changed or the capture is not byte-deterministic."
+              echo "::error::If the renderer intentionally changed, run 'npm run shots' locally and commit the regenerated files. If not, the capture pipeline is non-deterministic — investigate before merging."
+              exit 1
+            fi
+          else
+            echo "PR touches neither the renderer, website/, the shot-capture scripts, nor the lockfile — the shots this gate owns cannot have gone stale from it. Skipping (main coverage is the shots job in dep-audit-nightly.yml)."
           fi
 
       # ── Visual gate — every screen in scripts/visual/screens.mjs is checked
