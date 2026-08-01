@@ -758,6 +758,7 @@ const handleRequest = async (req, res) => {
           pairing_code: result.pairing_code,
           box_id: result.box_id,
           expiresAt: result.expiresAt,
+          verify: result.verify,
         });
         return;
       }
@@ -772,7 +773,11 @@ const handleRequest = async (req, res) => {
         // primary box_token exactly as before (back-compat).
         const device_id = body?.device_id ?? body?.deviceId ?? null;
         const name = body?.name ?? null;
-        const result = authEngine.claim({ pairing_code, device_id, name });
+        // Two-factor confirm (BET-493): the joiner echoes the four verification
+        // characters shown on the desktop panel. Its PRESENCE switches the
+        // claim onto the distinct-joiner-device path (see authEngine.claim).
+        const verify = body?.verify ?? body?.verify_code ?? null;
+        const result = authEngine.claim({ pairing_code, verify, device_id, name });
         if (!result.ok) {
           respondJson(res, result.status ?? 400, { error: result.error });
           return;
