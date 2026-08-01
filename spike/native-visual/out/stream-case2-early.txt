@@ -1,0 +1,60 @@
+    t =     5.75s Requesting snapshot of accessibility hierarchy for app with pid 17552
+    t =     5.89s Requesting snapshot of accessibility hierarchy for app with pid 17552
+Attributes: Application, 0x11486e1c0, pid: 17552, label: 'MantaSpikeRef'
+Element subtree:
+ →Application, 0x11486e1c0, pid: 17552, label: 'MantaSpikeRef'
+    Window (Main), 0x11486e300, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x11486e440, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x11486e580, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0x11486e6c0, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0x11486e800, {{0.0, 0.0}, {402.0, 874.0}}
+              Other, 0x11486e940, {{0.0, 0.0}, {402.0, 874.0}}
+                NavigationBar, 0x11486ea80, {{0.0, 62.0}, {402.0, 54.0}}, identifier: '_TtGC7SwiftUI32NavigationStackHosting'
+                  Other, 0x11486ebc0, {{20.0, 66.0}, {38.0, 36.0}}, identifier: 'chevron.left', label: 'Back'
+                    Other, 0x11486ed00, {{20.0, 66.0}, {38.0, 36.0}}
+                      Button, 0x11486ee40, {{20.0, 65.0}, {38.0, 38.0}}, identifier: 'chevron.left', label: 'Back'
+                  Other, 0x11486ef80, {{151.7, 68.0}, {98.7, 32.0}}
+                    Other, 0x11486f0c0, {{151.7, 68.0}, {98.7, 32.0}}
+                      StaticText, 0x11486f200, {{158.0, 68.2}, {86.0, 17.3}}, label: 'API Gateway'
+                      StaticText, 0x11486f340, {{151.7, 86.5}, {98.7, 13.3}}, label: 'running - 2m - 8%'
+                  Other, 0x11486cf00, {{344.0, 66.0}, {38.0, 36.0}}, identifier: 'ellipsis', label: 'More'
+                    Other, 0x11486d040, {{344.0, 66.0}, {38.0, 36.0}}
+                      Button, 0x11486d180, {{344.0, 65.0}, {38.0, 38.0}}, identifier: 'ellipsis', label: 'More'
+                Other, 0x11486d2c0, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x11486d400, {{0.0, 0.0}, {402.0, 874.0}}
+                    Other, 0x11486d540, {{0.0, 0.0}, {402.0, 874.0}}
+                      Other, 0x11486d680, {{0.0, 0.0}, {402.0, 874.0}}
+                        ScrollView, 0x11486d7c0, {{0.0, 0.0}, {402.0, 874.0}}
+                          Other, 0x11486d900, {{0.0, 0.0}, {402.0, 874.0}}
+                            Other, 0x11486da40, {{0.0, 0.0}, {402.0, 170.8}}
+                          Other, 0x11486db80, {{0.0, 0.0}, {402.0, 874.0}}
+                          Other, 0x11486dcc0, {{0.0, 116.0}, {402.0, 1696.0}}
+                            Other, 0x11486de00, {{16.0, 178.0}, {370.0, 1538.0}}
+                              StaticText, 0x11486df40, {{16.0, 178.0}, {365.3, 72.0}}, label: 'I've finished the refactor of the request routing layer. The new auth middleware is now wired in front of the project list endpoint.'
+                              Image, 0x11486e080, {{30.3, 275.3}, {10.3, 10.3}}, identifier: 'checkmark', label: 'Selected', Selected
+                              StaticText, 0x11486f480, {{50.0, 273.0}, {85.0, 15.0}}, label: 'apply_patch'
+                              StaticText, 0x11486f5c0, {{16.0, 311.0}, {354.0, 72.0}}, label: 'Let me start a fresh migration to move the sessions table onto the new index. This is the biggest remaining piece before the deploy.'
+                              Image, 0x11486f700, {{30.0, 407.7}, {12.0, 12.0}}, identifier: 'circle', label: 'circle'
+                              StaticText, 0x11486f840, {{51.0, 406.0}, {31.0, 15.0}}, label: 'bash'
+                              StaticText, 0x11486f980, {{41.0, 455.0}, {289.7, 43.3}}, label: 'Shut the migration down and restore from the last backup before we go further.'
+                              StaticText, 0x11486fac0, {{16.0, 531.3}, {362.0, 72.0}}, label: 'Rolling the migration back now. I'm restoring the sessions table from the snapshot taken at 09:14 and will confirm the index is back to the previous shape.'
+                              StaticText, 0x11486fc00, {{106.0, 626.3}, {224.7, 43.3}}, label: 'Good. Keep me posted once the restore completes.'
+                              StaticText, 0x11486fd40, {{16.0, 702.7}, {370.0, 1013.3}}, label: 'Restore complete. The sessions table is back on the previous index and all queries are running against it again.012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789'
+                          Other, 0x11486fe80, {{369.0, 116.0}, {30.0, 696.0}}, label: 'Vertical scroll bar, 3 pages', value: 0 %
+                            Other, 0x10567fe80, {{396.0, 119.0}, {3.0, 336.3}}
+                          Other, 0x10567f0c0, {{369.0, 116.0}, {30.0, 696.0}}, label: 'Vertical scroll bar, 3 pages', value: 0 %
+                            Other, 0x10567f200, {{396.0, 119.0}, {3.0, 336.3}}
+                        Image, 0x10567f340, {{31.7, 789.0}, {20.0, 22.3}}, identifier: 'paperclip', label: 'Attachments'
+                        StaticText, 0x10567f480, {{63.3, 790.3}, {65.3, 19.3}}, label: 'Message'
+                        Image, 0x10567f5c0, {{305.0, 789.7}, {14.0, 21.0}}, identifier: 'mic', label: 'Microphone'
+                        Image, 0x10567f700, {{341.0, 789.7}, {20.7, 20.7}}, identifier: 'paperplane', label: 'Send'
+                Other, 0x10567f840, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x10567f980, {{0.0, 0.0}, {402.0, 874.0}}
+Path to element:
+ →Application, 0x11486e1c0, pid: 17552, label: 'MantaSpikeRef'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaspikeref'
+  Output: {
+    Application, 0x10567fac0, pid: 17552, label: 'MantaSpikeRef'
+  }
+

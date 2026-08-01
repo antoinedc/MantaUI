@@ -33,6 +33,85 @@ SIMCCTL_DESTINATION="platform=iOS Simulator,id=$DEVICE_UDID"
 
 mkdir -p "$OUT_DIR"
 
+# -- streaming measurement mode (BET-481) -------------------------------------
+# The reference chat transcript grows over time (a fixed 40-char string every
+# 100ms for 60 ticks). This mode drives a UI test that holds the screen while
+# the stream runs and, at three phases (early/mid/late), both dumps the visible
+# accessibility text and raises a SHOT marker. We screenshot at each marker so
+# the PNG and the text describe the same moment — the text is the auditable
+# measurement, the PNG the visual record.
+#
+# STREAM_CASE=1 -> user at the bottom (does not scroll)
+# STREAM_CASE=2 -> user scrolled up to earlier messages
+capture_stream_case() {
+  local CASE="$1"
+  local PREFIX="stream-case$CASE"
+  local TEST="testStreamCase$CASE"
+  local LOG="$OUT_DIR/.$PREFIX-xctest.log"
+
+  # A resumed app would not re-fire onAppear, so streaming would not restart.
+  # Terminate first; the UI test launches the app itself with -chatRoot.
+  xcrun simctl terminate "$DEVICE_UDID" "$BUNDLE_ID" 2>/dev/null || true
+
+  echo "== stream case $CASE: run $TEST, screenshot at early/mid/late =="
+  rm -f "$LOG"
+  set +e
+  xcodebuild \
+    -project "$APP_PROJECT" \
+    -scheme MantaSpikeRef \
+    -destination "$SIMCCTL_DESTINATION" \
+    -derivedDataPath "$DERV_DATA" \
+    -only-testing:MantaSpikeRefUITests/HierarchyDumpUITests/$TEST \
+    test > "$LOG" 2>&1 &
+  local XCB_PID=$!
+  set -e
+
+  local phase marker seen i
+  for phase in early mid late; do
+    marker="SHOT-CASE$CASE-$(echo "$phase" | tr '[:lower:]' '[:upper:]')"
+    seen=""
+    for i in $(seq 1 900); do
+      if grep -q "$marker" "$LOG" 2>/dev/null; then seen=1; break; fi
+      if ! kill -0 "$XCB_PID" 2>/dev/null; then break; fi
+      sleep 0.1
+    done
+    if [ -z "$seen" ]; then
+      echo "FAIL: marker $marker never appeared in test output"
+      wait "$XCB_PID" 2>/dev/null || true
+      tail -40 "$LOG"
+      exit 1
+    fi
+    xcrun simctl io "$DEVICE_UDID" screenshot "$OUT_DIR/$PREFIX-$phase.png" >/dev/null 2>&1
+    echo "captured $PREFIX-$phase.png"
+  done
+
+  local RC=0
+  wait "$XCB_PID" || RC=$?
+  if [ "$RC" != "0" ]; then
+    echo "FAIL: $TEST returned rc=$RC"
+    grep -E "Test Case|error:|failed" "$LOG" | tail -30
+    rm -f "$LOG"
+    exit 1
+  fi
+
+  # Extract the auditable visible-text dumps (VISIBLE-* blocks) per phase.
+  for phase in early mid late; do
+    awk "/VISIBLE-case$CASE-$phase-BEGIN/{f=1;next} /VISIBLE-case$CASE-$phase-END/{f=0} f" "$LOG" \
+      > "$OUT_DIR/$PREFIX-$phase.txt" 2>/dev/null
+  done
+  rm -f "$LOG"
+  ls -la "$OUT_DIR"/$PREFIX-*.png
+  echo "PASS (stream case $CASE)"
+}
+
+# Dispatch: if STREAM_CASE is set, run the streaming capture and stop here.
+# Everything before this point (boot, status bar, animation reduction) is
+# shared with the settled session-list capture below.
+if [ -n "${STREAM_CASE:-}" ]; then
+  capture_stream_case "$STREAM_CASE"
+  exit 0
+fi
+
 echo "== boot pinned simulator: $DEVICE_NAME ($DEVICE_UDID) =="
 # simctl list prints header + runtime header before the device line, so `sed -n
 # '2p'` grabbed "-- iOS 26.5 --" and never saw "Booted" — on a real machine a

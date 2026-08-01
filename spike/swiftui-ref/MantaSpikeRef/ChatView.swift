@@ -12,15 +12,31 @@ struct ChatView: View {
     @Environment(\.dismiss) private var dismiss
     private var t: Tokens { Tokens.scheme(colorScheme) }
 
+    // Streaming measurement (BET-481). The transcript grows the way a real
+    // model response does: a fixed 40-char string appended every 100ms for a
+    // fixed 60 ticks, auto-started when the chat screen appears. Nothing else
+    // about the screen changes.
+    @State private var streamText: String? = nil
+    @State private var streamTicks = 0
+    @State private var streamTimer: Timer? = nil
+
+    private static let streamChunk = "0123456789012345678901234567890123456789"
+    private static let streamTicksTotal = 60
+    private static let streamInterval: TimeInterval = 0.1
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(session.messages) { message in
+                ForEach(Array(session.messages.enumerated()), id: \.element.id) { index, message in
                     switch message.parts {
                     case .user(let text):
                         UserBubble(text: text, t: t)
                     case .assistant(let text):
-                        AssistantText(text: text, t: t)
+                        if index == session.messages.count - 1, let streamText {
+                            AssistantText(text: streamText, t: t)
+                        } else {
+                            AssistantText(text: text, t: t)
+                        }
                     case .tool(let name, let running):
                         ToolRow(name: name, running: running, t: t)
                     }
@@ -32,6 +48,8 @@ struct ChatView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .defaultScrollAnchor(.bottom)
+        .onAppear(perform: startStreaming)
+        .onDisappear { streamTimer?.invalidate() }
         .background(t.canvas.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.automatic, for: .navigationBar)
@@ -52,6 +70,25 @@ struct ChatView: View {
         .overlay(alignment: .bottom) {
             FloatingComposer(t: t)
         }
+    }
+
+    private func startStreaming() {
+        guard streamText == nil else { return }
+        if case .assistant(let seed) = session.messages.last?.parts {
+            streamText = seed
+        } else {
+            streamText = ""
+        }
+        let timer = Timer(timeInterval: Self.streamInterval, repeats: true) { timer in
+            if self.streamTicks >= Self.streamTicksTotal {
+                timer.invalidate()
+            } else {
+                self.streamTicks += 1
+                self.streamText?.append(Self.streamChunk)
+            }
+        }
+        streamTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 }
 
