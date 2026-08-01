@@ -169,17 +169,17 @@ jobs:
       #    because Chrome 148 refused every loopback navigation (the captures
       #    could not run at all) and then, after moving to Playwright's pinned
       #    Chromium, two consecutive captures of the same UI were not
-#    byte-identical. Both are fixed: shots.mjs now uses the shared
-#    LAUNCH_OPTIONS (bundled Chromium pinned by package-lock.json). The gate
-#    captures twice and compares the two runs for byte-identity: the first
-#    `npm run shots` rebuilds + captures into the working tree, and a copy of
-#    its output is stashed in $RUNNER_TEMP; the second runs again into the same
-#    paths. If the two runs differ, the step fails as CAPTURE IS
-#    NON-DETERMINISTIC — the committed set is not the problem. Only when the two
-#    runs are byte-identical does the step diff the result against the committed
-#    set, failing as COMMITTED SHOTS ARE STALE with the remedy to run
-#    `npm run shots` and commit. A determinism regression fails HERE (as
-#    itself), not as a mystery diff on some unrelated PR.
+      #    byte-identical. Both are fixed: shots.mjs now uses the shared
+      #    LAUNCH_OPTIONS (bundled Chromium pinned by package-lock.json). The gate
+      #    captures twice and compares the two runs for byte-identity: the first
+      #    `npm run shots` rebuilds + captures into the working tree, and a copy of
+      #    its output is stashed in $RUNNER_TEMP; the second runs again into the same
+      #    paths. If the two runs differ, the step fails as CAPTURE IS
+      #    NON-DETERMINISTIC — the committed set is not the problem. Only when the two
+      #    runs are byte-identical does the step diff the result against the committed
+      #    set, failing as COMMITTED SHOTS ARE STALE with the remedy to run
+      #    `npm run shots` and commit. A determinism regression fails HERE (as
+      #    itself), not as a mystery diff on some unrelated PR.
       #
       #    The pinned Chromium must be present BEFORE the drift gate captures.
       #    After the 2026-07-31 Chrome-148 failure the gate ran cold against
