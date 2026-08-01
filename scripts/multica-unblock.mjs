@@ -46,8 +46,7 @@
  * housekeeping and must never break a deploy pipeline.
  */
 
-const DEFAULT_WORKSPACE = "264c89bb-4659-4570-af7b-5f8daaf87985";
-const DEFAULT_API_BASE = "https://api.multica.ai";
+import { api, DEFAULT_WORKSPACE, DEFAULT_API_BASE } from "./lib/multicaApi.mjs";
 
 /** Statuses that mean a blocker is finished and no longer blocking. */
 export const TERMINAL_STATUSES = new Set(["done", "cancelled", "canceled"]);
@@ -115,48 +114,38 @@ export function decideUnblock(issue, statusByKey) {
  * IO below this line. Everything above is pure and unit-tested.
  * ------------------------------------------------------------------ */
 
-/** @param {string} path @param {object} opts */
-async function api(base, token, path, opts = {}) {
-  const res = await fetch(`${base}/api${path}`, {
-    ...opts,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      ...(opts.headers ?? {}),
-    },
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} on ${path}: ${(await res.text()).slice(0, 200)}`);
-  }
-  return res.json();
-}
-
-async function main() {
-  const dryRun = process.argv.includes("--dry-run");
-  const verbose = process.argv.includes("--verbose");
-  const token = process.env.MULTICA_TOKEN;
-  const ws = process.env.MULTICA_WORKSPACE_ID || DEFAULT_WORKSPACE;
-  const base = process.env.MULTICA_API_BASE || DEFAULT_API_BASE;
-
+export async function run({
+  token,
+  workspace = DEFAULT_WORKSPACE,
+  base = DEFAULT_API_BASE,
+  dryRun = false,
+  verbose = false,
+  fetchImpl = fetch,
+} = {}) {
   if (!token) {
     console.error("MULTICA_TOKEN is not set — nothing to do.");
-    process.exit(1);
+    return 1;
   }
 
-  const listed = await api(base, token, `/issues?workspace_id=${ws}&status=blocked&limit=200`);
+  const listed = await api(
+    base,
+    token,
+    `/issues?workspace_id=${workspace}&status=blocked&limit=200`,
+    {},
+    fetchImpl,
+  );
   const blocked = listed.issues ?? [];
   if (blocked.length === 0) {
     console.log("No blocked issues. Nothing to reconcile.");
-    return;
+    return 0;
   }
 
-  // Resolve every referenced blocker once.
+  // Resolve every referenced blocker once. Unresolvable = READ, warn + continue.
   const statusByKey = new Map();
   const needed = new Set(blocked.flatMap((i) => parseBlockerKeys(i?.metadata?.waiting_on)));
   for (const key of needed) {
     try {
-      const issue = await api(base, token, `/issues/${key}?workspace_id=${ws}`);
+      const issue = await api(base, token, `/issues/${key}?workspace_id=${workspace}`, {}, fetchImpl);
       statusByKey.set(key, issue?.status ?? null);
     } catch (e) {
       // Unresolvable → treated as still blocking. Never unblock on an error.
@@ -166,6 +155,7 @@ async function main() {
   }
 
   let unblocked = 0;
+  let writeFailed = false;
   for (const issue of blocked) {
     const { unblock, reason } = decideUnblock(issue, statusByKey);
     const id = issue.identifier;
@@ -179,20 +169,37 @@ async function main() {
       continue;
     }
     try {
-      await api(base, token, `/issues/${id}?workspace_id=${ws}`, {
-        method: "PUT",
-        body: JSON.stringify({ status: "todo" }),
-      });
+      await api(
+        base,
+        token,
+        `/issues/${id}?workspace_id=${workspace}`,
+        { method: "PUT", body: JSON.stringify({ status: "todo" }) },
+        fetchImpl,
+      );
       console.log(`  → ${id} unblocked (${reason})`);
       unblocked++;
     } catch (e) {
-      console.log(`  ! ${id} update failed, leaving blocked: ${e.message}`);
+      // Fail the job on a failed WRITE; keep sweeping the rest of the batch.
+      console.error(`Failed to set ${id} todo (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
+      writeFailed = true;
     }
   }
 
   console.log(
     `${dryRun ? "[dry-run] " : ""}${unblocked} of ${blocked.length} blocked issue(s) ${dryRun ? "would be" : ""} unblocked.`,
   );
+  return writeFailed ? 1 : 0;
+}
+
+async function main() {
+  const code = await run({
+    token: process.env.MULTICA_TOKEN,
+    workspace: process.env.MULTICA_WORKSPACE_ID,
+    base: process.env.MULTICA_API_BASE,
+    dryRun: process.argv.includes("--dry-run"),
+    verbose: process.argv.includes("--verbose"),
+  });
+  if (code) process.exit(code);
 }
 
 // Only run when invoked directly, so the pure exports stay importable in tests.

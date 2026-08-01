@@ -57,9 +57,8 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { api, DEFAULT_WORKSPACE, DEFAULT_API_BASE } from "./lib/multicaApi.mjs";
 
-export const DEFAULT_WORKSPACE = "264c89bb-4659-4570-af7b-5f8daaf87985";
-export const DEFAULT_API_BASE = "https://api.multica.ai";
 export const DEFAULT_ISSUE_PREFIX = "BET";
 
 /**
@@ -229,30 +228,8 @@ async function probeBaseBranch({ owner, repo, baseRef, token, apiBase }) {
   return { baseBranchExists, baseMerged };
 }
 
-async function setIssueDone({ key, workspace, apiBase, token }) {
-  const resp = await fetch(`${apiBase}/api/issues/${key}?workspace_id=${workspace}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ status: "done" }),
-  });
-  if (resp.ok) log(`Set ${key} to done.`);
-  else warn(`failed to set ${key} done (HTTP ${resp.status}): ${await resp.text()}`);
-}
-
-async function commentOnIssue({ key, workspace, apiBase, token, content }) {
-  // Two API quirks, both verified live (2026-07-27): workspace_id must be on
-  // the QUERY STRING (a body-only workspace 400s), and the field is `content`,
-  // not `body`.
-  const resp = await fetch(`${apiBase}/api/issues/${key}/comments?workspace_id=${workspace}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ workspace_id: workspace, content }),
-  });
-  if (resp.ok) log(`Posted comment to ${key}.`);
-  else warn(`Multica comment failed (HTTP ${resp.status}): ${await resp.text()}`);
-}
-
 async function commentOnPr({ owner, repo, number, token, apiBase, content }) {
+  // GitHub, not Multica — kept local (warn-and-continue, different headers).
   const resp = await fetch(`${apiBase}/repos/${owner}/${repo}/issues/${number}/comments`, {
     method: "POST",
     headers: {
@@ -266,34 +243,27 @@ async function commentOnPr({ owner, repo, number, token, apiBase, content }) {
   else warn(`GitHub comment failed (HTTP ${resp.status}): ${await resp.text()}`);
 }
 
-async function main() {
-  const dryRun = process.argv.includes("--dry-run");
-  const eventPath = process.env.GITHUB_EVENT_PATH;
-  if (!eventPath) {
-    console.error("GITHUB_EVENT_PATH is not set — nothing to react to.");
-    process.exit(1);
-  }
-
-  const event = JSON.parse(await readFile(eventPath, "utf8"));
+export async function run({
+  event,
+  dryRun = false,
+  ghToken = "",
+  multicaToken = "",
+  workspace = DEFAULT_WORKSPACE,
+  multicaApi: apiBase = DEFAULT_API_BASE,
+  ghApi = "https://api.github.com",
+  fetchImpl = fetch,
+} = {}) {
   const pr = event?.pull_request;
-  if (!pr) {
-    console.error("payload has no pull_request — wrong trigger?");
-    process.exit(1);
-  }
+  if (!pr) throw new Error("payload has no pull_request — wrong trigger?");
 
   const owner = event.repository?.owner?.login;
   const repo = event.repository?.name;
   const defaultBranch = event.repository?.default_branch || "main";
-  const ghApi = process.env.GITHUB_API_URL || "https://api.github.com";
-  const ghToken = process.env.GITHUB_TOKEN || "";
-  const multicaToken = process.env.MULTICA_TOKEN || "";
-  const workspace = process.env.MULTICA_WORKSPACE_ID || DEFAULT_WORKSPACE;
-  const multicaApi = process.env.MULTICA_API_BASE || DEFAULT_API_BASE;
 
   const key = extractIssueKey({ title: pr.title, headRef: pr.head?.ref });
   if (!key) {
     log("No issue key in PR title or branch — nothing to do.");
-    return;
+    return 0;
   }
 
   const baseRef = pr.base?.ref ?? "";
@@ -314,20 +284,47 @@ async function main() {
     warn("MULTICA_TOKEN is not set — skipping every Multica call.");
   }
 
+  let writeFailed = false;
+
   if (kind === "merged") {
-    if (dryRun || !multicaToken) return;
-    await setIssueDone({ key, workspace, apiBase: multicaApi, token: multicaToken });
-    return;
+    if (dryRun || !multicaToken) return 0;
+    try {
+      await api(
+        apiBase,
+        multicaToken,
+        `/issues/${key}?workspace_id=${workspace}`,
+        { method: "PUT", body: JSON.stringify({ status: "done" }) },
+        fetchImpl,
+      );
+      log(`Set ${key} to done.`);
+    } catch (e) {
+      // The exact bug BET-504 exists to surface: a silent status-write failure.
+      console.error(`Failed to set ${key} done (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
+      writeFailed = true;
+    }
+    return writeFailed ? 1 : 0;
   }
 
   const content = buildComment({ kind, key, reason, headRef: pr.head?.ref ?? "", defaultBranch });
   if (dryRun) {
     log("--- comment (dry run) ---");
     log(content);
-    return;
+    return 0;
   }
   if (multicaToken) {
-    await commentOnIssue({ key, workspace, apiBase: multicaApi, token: multicaToken, content });
+    try {
+      await api(
+        apiBase,
+        multicaToken,
+        `/issues/${key}/comments?workspace_id=${workspace}`,
+        { method: "POST", body: JSON.stringify({ workspace_id: workspace, content }) },
+        fetchImpl,
+      );
+      log(`Posted comment to ${key}.`);
+    } catch (e) {
+      console.error(`Failed to comment on ${key} (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
+      writeFailed = true;
+    }
   }
   if (ghToken) {
     await commentOnPr({
@@ -339,6 +336,28 @@ async function main() {
       content,
     });
   }
+  return writeFailed ? 1 : 0;
+}
+
+async function main() {
+  const dryRun = process.argv.includes("--dry-run");
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+  if (!eventPath) {
+    console.error("GITHUB_EVENT_PATH is not set — nothing to react to.");
+    process.exit(1);
+  }
+
+  const event = JSON.parse(await readFile(eventPath, "utf8"));
+  const code = await run({
+    event,
+    dryRun,
+    ghToken: process.env.GITHUB_TOKEN || "",
+    multicaToken: process.env.MULTICA_TOKEN || "",
+    workspace: process.env.MULTICA_WORKSPACE_ID,
+    multicaApi: process.env.MULTICA_API_BASE,
+    ghApi: process.env.GITHUB_API_URL,
+  });
+  if (code) process.exit(code);
 }
 
 // Only run when invoked directly, so the pure exports stay importable in tests.
