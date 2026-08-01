@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mockup — Session list (native SwiftUI reference)</title>
+
+<!--
+  THE SPEC for the native session-list screen. Same role as
+  docs/screens/welcome/mockup.html, but this fixture is the cross-renderer
+  contract for the SwiftUI reference app: it is measured by
+  spike/native-visual/measure.mjs against the iOS accessibility capture
+  (spike/native-visual/out/session-list-hierarchy.txt). Read
+  spike/native-visual/FINDINGS.md before editing.
+
+  Two rules make it a contract rather than a picture:
+
+  1. It loads the app's REAL token stylesheet below. Every colour here is the
+     same variable the app resolves at runtime. A fixture that hardcodes
+     #2E6BFF is a picture — it keeps looking right after the token is retuned
+     and the app has moved on.
+
+  2. Its screen values (font sizes, weights, spacings, paddings, heights,
+     radii) are TRANSCRIBED MECHANICALLY from the Swift reference file
+     spike/swiftui-ref/MantaSpikeRef/SessionListView.swift. No design is done
+     here, nothing is rounded, nothing is "fixed". If a Swift value looks odd
+     it is transcribed anyway and flagged in FINDINGS.md. The value set is
+     deliberately shared-origin with the implementation so that the only
+     differences PoC 04 injects are defects, not transcription drift.
+
+  What this file is NOT: it is not the iOS app and it does not try to be pixel-
+  identical to a SwiftUI render. No screen value in the Swift file is omitted
+  or approximated; where the SYSTEM (not the Swift code) supplies a value it is
+  marked CONTEXT below and excluded from measurement.
+
+  Coordinate contract: measure.mjs compares DOM bounding-box px (at a 402x874
+  viewport, deviceScaleFactor 1) against accessibility-frame points. The AX
+  capture's origin is the top-left of the simulator window INCLUDING the iOS
+  status region, so the mockup reproduces that origin by reserving fixed window
+  -chrome bands that CONTEXT below — the top inset and the home-indicator inset
+  are iOS-system values read from the AX capture (nav bar at y=62, bottom safe
+  inset 34), NOT screen values from the Swift file. Screen values live only in
+  the measured .list content.
+-->
+
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+
+<style>
+  /* Mockup shell — coordinate contract only. Every VISUAL value comes from the
+     Swift transcription (the measured .list and .searchbar) or from tokens. */
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--canvas);
+    color: var(--tx1);
+    font-family: "Inter Variable", Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .appscreen {
+    position: relative;
+    width: 402px;
+    height: 874px;
+    overflow: hidden;
+    background: var(--canvas);
+  }
+
+  /* --- Window chrome (CONTEXT only; NOT part of this screen's spec) ------
+     The top region is the iOS status + large-title nav band of the AX capture
+     (status inset 62 + nav band to y=168). The bottom inset (34) is the home
+     indicator safe area. These establish the coordinate origin for position
+     comparison; no screen value is transcribed from them. */
+  .top-chrome {
+    height: 168px;
+    box-sizing: border-box;
+    padding: 62px 16px 0;
+    background: var(--canvas);
+  }
+  .top-chrome .nav-title {
+    margin: 0;
+    font-size: 34px;          /* CONTEXT: iOS large-title metrics, not in Swift */
+    line-height: 1.2;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--tx1);
+  }
+  .bottom-safe { position: absolute; left: 0; right: 0; bottom: 0; height: 34px; }
+
+  /* --- THE SCREEN — SessionListView. Transcribed from SessionListView.swift ---
+     Every number below is a Swift literal: LazyVStack .padding(.horizontal,12),
+     group-header 15/semibold + kerning -0.225 + padding 22/6/12, row minHeight
+     62 + padding 0/12 + radius 20 + fill(mostRecent) + bottom 2, name 15.5/medium
+     + kerning -0.155, subtitle 12/medium, timer 11/medium + tabular-nums, VStack
+     spacing 2, HStack spacing 8, dot 8x8. */
+
+  .list { padding: 0 12px; }
+
+  .group-header {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;              /* .semibold */
+    letter-spacing: -0.225px;      /* .kerning(-0.225) */
+    color: var(--tx2);
+    padding: 22px 0 6px 12px;      /* .padding(top:22, bottom:6, leading:12) */
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;                      /* HStack(spacing: 8) */
+    min-height: 62px;              /* .frame(minHeight: 62) */
+    padding: 0 12px;               /* .padding(.horizontal, 12) */
+    margin-bottom: 2px;            /* .padding(.bottom, 2) */
+    border-radius: 20px;           /* RoundedRectangle(cornerRadius: 20) */
+    background: transparent;
+    text-decoration: none;
+    box-sizing: border-box;
+  }
+  .row[data-recent="true"] { background: var(--fill); } /* mostRecent ? t.fill : clear */
+
+  .dot {
+    width: 8px; height: 8px;       /* Circle.frame(width:8, height:8) */
+    flex: none;
+    border-radius: 50%;
+  }
+  /* SessionStatus.dotColor(t): running→accent, needsAttention→warn, idle→tx4 */
+  .dot[data-status="running"] { background: var(--accent); }
+  .dot[data-status="needsAttention"] { background: var(--warn); }
+  .dot[data-status="idle"] { background: var(--tx4); }
+
+  .row-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;                      /* VStack(alignment:.leading, spacing:2) */
+    min-width: 0;
+    flex: 1;
+  }
+  .row-name {
+    font-size: 15.5px;             /* .font(.system(size:15.5, weight:.medium)) */
+    font-weight: 500;              /* .medium */
+    letter-spacing: -0.155px;      /* .kerning(-0.155) */
+    color: var(--tx1);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;       /* .lineLimit(1).truncationMode(.tail) */
+  }
+  .row-subtitle {
+    font-size: 12px;               /* .font(.system(size:12, weight:.medium)) */
+    font-weight: 500;
+    color: var(--tx4);
+  }
+  .row-spacer { flex: 1 1 auto; min-width: 8px; } /* Spacer(minLength: 8) */
+  .row-timer {
+    flex: none;
+    font-size: 11px;               /* .font(.system(size:11, weight:.medium)) */
+    font-weight: 500;
+    font-variant-numeric: tabular-nums; /* .monospacedDigit() */
+    color: var(--tx4);
+  }
+
+  /* --- FloatingSearchBar — transcribed from FloatingSearchBar.swift ---------
+     .glassEffect(.regular) is an iOS Liquid-Glass system material with no
+     token equivalent; the capsule surface below is var(--card) as the nearest
+     token, and the glass material itself is noted in FINDINGS.md. */
+  .searchbar {
+    position: absolute;
+    left: 14px; right: 14px;       /* .padding(.horizontal, 14) */
+    bottom: 46px;                  /* bottom-safe(34) + .padding(.bottom,12) */
+    height: 56px;                  /* .frame(height: 56) */
+    display: flex;
+    align-items: center;
+    gap: 10px;                     /* HStack(spacing: 10) */
+    padding: 0 18px;               /* .padding(.horizontal, 18) */
+    border-radius: 28px;           /* Capsule() */
+    background: var(--card);
+    box-shadow: var(--shadow-md);
+    box-sizing: border-box;
+  }
+  .search-icon {
+    width: 20px; height: 20px;     /* Image .font(.system(size:20)) */
+    flex: none;
+    color: var(--tx3);
+  }
+  .search-text {
+    flex: none;
+    font-size: 16px;               /* Text.font(.system(size:16)) */
+    color: var(--tx3);
+  }
+  .search-plus {
+    width: 40px; height: 40px;     /* Circle.frame(width:40, height:40) */
+    flex: none;
+    margin-left: auto;             /* Spacer() */
+    border-radius: 50%;
+    background: var(--accentSolid);/* t.accentSolid */
+    color: var(--on-accent);       /* t.onAccent */
+    display: grid;
+    place-items: center;
+    font-size: 20px;               /* plus icon .font(.system(size:20, weight:.medium)) */
+    font-weight: 500;
+  }
+</style>
+</head>
+<body>
+
+<div class="appscreen" data-screen="session-list-mockup">
+
+  <!-- CONTEXT: iOS status + large-title nav band (system-provided, not spec). -->
+  <div class="top-chrome">
+    <h1 class="nav-title" data-context="ios-large-title">Sessions</h1>
+  </div>
+
+  <!-- THE SCREEN: the measured session list (spec source). -->
+  <main class="list">
+
+    <section class="group">
+      <h2 class="group-header" data-role="group-header" data-label="Alpha">Alpha</h2>
+      <a class="row" data-role="row" data-label="API Gateway" data-recent="true">
+        <span class="dot" data-role="row-dot" data-label="API Gateway" data-status="running"></span>
+        <span class="row-body">
+          <span class="row-name" data-role="row-name" data-label="API Gateway">API Gateway</span>
+          <span class="row-subtitle" data-role="row-subtitle" data-label="API Gateway">running - opus 4.8</span>
+        </span>
+        <span class="row-spacer"></span>
+        <span class="row-timer" data-role="row-timer" data-label="API Gateway">1m</span>
+      </a>
+      <a class="row" data-role="row" data-label="Database">
+        <span class="dot" data-role="row-dot" data-label="Database" data-status="idle"></span>
+        <span class="row-body">
+          <span class="row-name" data-role="row-name" data-label="Database">Database</span>
+        </span>
+        <span class="row-spacer"></span>
+        <span class="row-timer" data-role="row-timer" data-label="Database">3h 12m</span>
+      </a>
+    </section>
+
+    <section class="group">
+      <h2 class="group-header" data-role="group-header" data-label="Beta">Beta</h2>
+      <a class="row" data-role="row" data-label="Mobile Client">
+        <span class="dot" data-role="row-dot" data-label="Mobile Client" data-status="needsAttention"></span>
+        <span class="row-body">
+          <span class="row-name" data-role="row-name" data-label="Mobile Client">Mobile Client</span>
+          <span class="row-subtitle" data-role="row-subtitle" data-label="Mobile Client">needs you</span>
+        </span>
+        <span class="row-spacer"></span>
+        <span class="row-timer" data-role="row-timer" data-label="Mobile Client">24m</span>
+      </a>
+      <a class="row" data-role="row" data-label="Docs">
+        <span class="dot" data-role="row-dot" data-label="Docs" data-status="idle"></span>
+        <span class="row-body">
+          <span class="row-name" data-role="row-name" data-label="Docs">Docs</span>
+        </span>
+        <span class="row-spacer"></span>
+        <span class="row-timer" data-role="row-timer" data-label="Docs">1d</span>
+      </a>
+    </section>
+
+    <section class="group">
+      <h2 class="group-header" data-role="group-header" data-label="Gamma">Gamma</h2>
+      <a class="row" data-role="row" data-label="Infra">
+        <span class="dot" data-role="row-dot" data-label="Infra" data-status="idle"></span>
+        <span class="row-body">
+          <span class="row-name" data-role="row-name" data-label="Infra">Infra</span>
+        </span>
+        <span class="row-spacer"></span>
+        <span class="row-timer" data-role="row-timer" data-label="Infra">2h 40m</span>
+      </a>
+      <a class="row" data-role="row" data-label="Analytics">
+        <span class="dot" data-role="row-dot" data-label="Analytics" data-status="idle"></span>
+        <span class="row-body">
+          <span class="row-name" data-role="row-name" data-label="Analytics">Analytics</span>
+        </span>
+        <span class="row-spacer"></span>
+        <span class="row-timer" data-role="row-timer" data-label="Analytics">5h 03m</span>
+      </a>
+    </section>
+
+  </main>
+
+  <!-- THE SCREEN: floating search bar (FloatingSearchBar). -->
+  <div class="searchbar" data-role="searchbar">
+    <svg class="search-icon" data-role="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+    <span class="search-text" data-role="search-text" data-label="Search">Search</span>
+    <span class="search-plus" data-role="search-plus" aria-label="Add plus">+</span>
+  </div>
+
+  <!-- CONTEXT: home-indicator safe area. -->
+  <div class="bottom-safe"></div>
+
+</div>
+
+</body>
+</html>
