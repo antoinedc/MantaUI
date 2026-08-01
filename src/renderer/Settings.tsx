@@ -231,7 +231,7 @@ const SECTION_GROUPS: Partial<Record<SettingSectionId, { title: string; entryIds
 // (--card bg, --border edge, --r-lg radius, 12px v / 16px h padding) lives on
 // the Card primitive; GroupCard keeps only its group title + the space-y gap
 // between its entries (BET-531).
-export function GroupCard({ title, danger = false, children }: {
+function GroupCard({ title, danger = false, children }: {
   title?: string;
   danger?: boolean;
   children: ReactNode;

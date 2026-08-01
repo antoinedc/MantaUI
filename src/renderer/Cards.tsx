@@ -26,7 +26,7 @@ import { Card } from "./Card";
 // Card owns the chrome uniformly and the GroupCard adopters don't use the
 // meta size — keeping it here preserves each ask card's inherited 12px text
 // with no visual change (BET-531).
-export function AskCardShell({
+function AskCardShell({
   badge,
   badgeBg,
   badgeColor,
