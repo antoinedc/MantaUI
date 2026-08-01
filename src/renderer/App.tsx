@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { Terminal as TerminalIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
@@ -713,12 +714,6 @@ export function App() {
   const activeWinName = activeProject?.windows.find(
     (w) => w.index === activeWindowByProject[activeProjectName!],
   )?.name ?? null;
-  // CWD for the active (project, window). tmux's `paneCurrentPath` is always
-  // absolute and follows shell-side `cd`s, so prefer it; fall back to the
-  // project's configured `defaultCwd` for chat-mode holder panes that haven't
-  // emitted a path yet.
-  const activeCwdRaw = activeWin?.paneCurrentPath || activeProject?.defaultCwd || "";
-  const activeCwd = activeCwdRaw;
 
   // Full-screen onboarding replaces the entire shell (no sidebar/header/footer).
   // finishOnboarding clears the force flag + re-reads config → normal shell,
@@ -754,6 +749,11 @@ export function App() {
   const serverUpdate = !!serverUpdatePrompt || (showCompatibilityCard && compatibilityVariant === "behind");
   const bannerState: BannerState = { reconnecting, incompatible, versionSkew, updateFailed, serverUpdate };
   const activeBanner = pickBanner(bannerState);
+  // BET-459: when a chat session is the visible pane, the SessionHeader owns
+  // the single top-of-pane row (breadcrumb + mode toggle) — the app titlebar
+  // is hidden so the two don't stack. Non-chat panes (terminal / AI-TUI /
+  // new-session) keep the titlebar's drag region + breadcrumb + toggle.
+  const isChatPaneActive = activeChatSessionId != null && mode === "chat";
 
   return (
     // data-screen is the visual harness's handle on the app shell (see
@@ -868,6 +868,7 @@ export function App() {
               onDismiss={dismiss}
             />
           )}
+        {!isChatPaneActive && (
         <div className="titlebar-drag h-12 border-b border-border flex items-center px-4 gap-2 min-w-0">
           <div className="text-meta text-text-muted flex items-center gap-2 min-w-0">
             {activeProjectName && (
@@ -893,54 +894,32 @@ export function App() {
                   · {describeConnection(connectionState)}
                 </span>
               )}
-            {/* Active cwd — last segment in the chain so it can shrink and */}
-            {/* truncate when the title bar is narrow. `direction:rtl` keeps */}
-            {/* the *tail* of the path visible (the meaningful subdir name) */}
-            {/* when truncation hits, instead of cutting it off mid-name. */}
-            {/* The `·` separator lives OUTSIDE the rtl span so it renders */}
-            {/* before the path (rtl would otherwise flip it to the right */}
-            {/* side, leaving an orphan dot trailing the cwd). */}
-            {activeCwd && (
-              <>
-                <span className="text-text-quiet shrink-0">·</span>
-                <span
-                  className="text-text-faint min-w-0 truncate"
-                  style={{ direction: "rtl", textAlign: "left" }}
-                  title={activeCwdRaw}
-                >
-                  <bdi style={{ direction: "ltr" }}>{activeCwd}</bdi>
-                </span>
-              </>
-            )}
           </div>
 
-          {/* Session-mode dropdown (BET-138): Chat / Terminal / one entry per
-              available AI CLI launcher. Only shown for an active chat session
-              — every manta-created window carries one. WebkitAppRegion opts out
-              of the titlebar's Electron drag region so the select is clickable. */}
+          {/* Session-mode toggle (BET-459): a terminal glyph that swaps
+              Terminal ↔ Chat — the icon-button presentation of the old
+              <select>, keeping its accessible name. WebkitAppRegion opts out
+              of the titlebar's Electron drag region so the button is
+              clickable. Only shown for an active chat session (the non-chat
+              pane header). */}
           {activeChatSessionId && (
-            <div className="ml-auto" style={{ WebkitAppRegion: "no-drag" } as CSSProperties}>
-              <select
-                className="text-meta bg-bg-elev border border-border rounded px-1 py-px text-text cursor-pointer hover:border-border-strong focus:outline-none focus:border-accent"
-                style={{ colorScheme: "dark" }}
-                value={mode}
-                onChange={(e) => setMode(e.target.value as SessionMode)}
-              >
-                <option value="chat">Chat</option>
-                <option value="terminal">Terminal</option>
-                {availableLaunchers.map((l) => (
-                  <option key={l.id} value={`tui:${l.id}`}>
-                    {l.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <button
+              type="button"
+              onClick={() => setMode(mode === "terminal" ? "chat" : "terminal")}
+              className="text-text-faint hover:text-text hover:bg-fill rounded p-1 inline-flex items-center ml-auto"
+              style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+              title={`Switch to ${mode === "terminal" ? "Chat" : "Terminal"}`}
+              aria-label={mode === "terminal" ? "Chat" : "Terminal"}
+            >
+              <TerminalIcon size={16} aria-hidden="true" />
+            </button>
           )}
           {/* Trailing spacer — Windows paints min/max/close over the top-right
-              of the window; this keeps the mode dropdown from sliding under
+              of the window; this keeps the mode button from sliding under
               them. Zero-width everywhere else. */}
           <div className="titlebar-inset-right" />
         </div>
+      )}
         <div className="flex-1 relative">
           {projects.length === 0 && !loaded ? (
             // Config hasn't arrived yet. `loaded` is false on the FIRST paint
@@ -1006,6 +985,11 @@ export function App() {
                 // gracefully no-op then.
                 const owner = resolveSessionOwner(projects, sid);
                 const isActiveChat = sid === activeChatSessionId && mode === "chat";
+                const ownerWinName = owner
+                  ? (projects
+                      .find((p) => p.tmuxSession === owner.tmuxSession)
+                      ?.windows.find((w) => w.index === owner.windowIndex)?.name ?? null)
+                  : null;
                 return (
                   <div
                     key={`chat:${sid}`}
@@ -1018,6 +1002,10 @@ export function App() {
                       windowIndex={owner?.windowIndex ?? null}
                       cwd={owner?.cwd ?? ""}
                       isActive={isActiveChat}
+                      projectName={owner?.tmuxSession ?? null}
+                      winName={ownerWinName}
+                      mode={mode}
+                      onModeChange={setMode}
                     />
                   </div>
                 );

@@ -366,13 +366,17 @@ const SHOTS = [
     // to the DOM renderer, which has no canvas).
     finalSelector: ".xterm .xterm-screen",
     beforeScreenshot: async (page) => {
-      // Switch into a chat-mode window first so the mode `<select>` is
-      // rendered, then flip it to "Terminal" — bare-terminal windows
-      // (opencodeSessionId=null) have no mode toggle in the header.
+      // Switch into a chat-mode window first so the session header's mode
+      // toggle is rendered, then activate it to flip the session to
+      // "Terminal" — bare-terminal windows (opencodeSessionId=null) have no
+      // mode toggle in the header. BET-459 replaced the mode `<select>` with
+      // a terminal icon button; its accessible name is the target mode
+      // ("Terminal" from chat), so clicking the button named "Terminal" does
+      // what the old selectOption("terminal") did.
       await clickDesktopSession(page, "Deploy new billing service");
-      const modeSelect = page.locator("select").first();
-      await modeSelect.waitFor({ state: "visible", timeout: 15_000 });
-      await modeSelect.selectOption("terminal");
+      const modeToggle = page.getByRole("button", { name: "Terminal" });
+      await modeToggle.waitFor({ state: "visible", timeout: 15_000 });
+      await modeToggle.click();
     },
   },
   {
