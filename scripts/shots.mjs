@@ -633,3 +633,6 @@ async function main() {
 main().catch((e) => {
   fail(e.stack || e.message);
 });
+
+// TEMP-REPRO-BET-537: comment-only change to force the drift gate to run for a
+// one-off diagnosis run. Does not change capture behavior. Will be discarded.
