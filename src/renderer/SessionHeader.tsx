@@ -447,7 +447,7 @@ function SessionMenu({
   useClickAway(rootRef, open, () => setOpen(false));
 
   const item = (
-    icon: React.ReactNode,
+    icon: React.ReactElement,
     label: string,
     onClick: () => void,
     danger = false,
@@ -474,7 +474,7 @@ function SessionMenu({
   const isActive = (m: SessionMode) => mode === m;
 
   const modeItem = (
-    icon: React.ReactNode,
+    icon: React.ReactElement,
     label: string,
     m: SessionMode,
   ) => {
