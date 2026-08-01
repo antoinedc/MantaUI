@@ -14,6 +14,7 @@ import {
   saveDevicesRaw,
   isValidDeviceToken,
   DEVICES_STORE_PATH,
+  DEVICE_IDLE_TTL_MS,
 } from "./devices.mjs";
 import { createAuthEngine } from "./auth.mjs";
 
@@ -61,6 +62,150 @@ function doClaim(eng, overrides = {}) {
 
 const gate = (eng, tok) =>
   eng.authorize({ method: "GET", path: "/api/projects", authorization: `Bearer ${tok}` });
+
+// A settable monotonic clock for idle-expiry tests, plus a registry + engine
+// wired with a small idleTtlMs so we don't advance 90 simulated days per case.
+function makeClockEngine({ idleTtlMs = 1000, start = 1000 } = {}) {
+  let t = start;
+  const clock = {
+    now: () => t,
+    advance: (ms) => {
+      t += ms;
+    },
+  };
+  let state = { devices: [] };
+  const devices = createDeviceRegistry({
+    load: () => ({ devices: state.devices }),
+    save: (s) => {
+      state.devices = s.devices;
+      return Promise.resolve(true);
+    },
+    now: clock.now,
+    idleTtlMs,
+  });
+  const eng = createAuthEngine({
+    auth: AUTH,
+    saveAuth: async () => {},
+    deleteAuth: async () => {},
+    devices,
+    now: clock.now,
+    idleTtlMs,
+  });
+  return { eng, devices, clock };
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3 — device token idle expiry (90 days, §6.4)
+// ---------------------------------------------------------------------------
+
+test("idle expiry: a device idle past the threshold is revoked on its NEXT request", () => {
+  const { eng, devices, clock } = makeClockEngine();
+  const a = doClaim(eng, { device_id: "devA" });
+  // admitted once, so last_seen = now
+  assert.equal(gate(eng, a.box_token).ok, true);
+  const lastSeenA = devices.getDevice(a.device_id).last_seen;
+
+  // goes idle WITHOUT further use for more than the window
+  clock.advance(1001); // idleTtlMs=1000 → idle = 1001 > 1000
+  assert.equal(gate(eng, a.box_token).ok, false); // revoked on its next request
+  // and it stays revoked — it can never "come back" (last_seen not bumped)
+  assert.equal(gate(eng, a.box_token).ok, false);
+  // the revocation is durable-flagged for the gate to force-persist
+  assert.equal(devices.needPersist(), true);
+  assert.ok(lastSeenA > 0);
+});
+
+test("idle expiry: a device idle AT the boundary (not past it) is accepted — not spuriously expired", () => {
+  const { eng, clock } = makeClockEngine();
+  const a = doClaim(eng, { device_id: "devA" });
+  assert.equal(gate(eng, a.box_token).ok, true); // admission, last_seen = now
+  clock.advance(999); // idle = 999 < 1000
+  assert.equal(gate(eng, a.box_token).ok, true);
+});
+
+test("idle expiry: an ACTIVE device (recent auth) is never expired", () => {
+  const { eng, clock } = makeClockEngine();
+  const a = doClaim(eng, { device_id: "devA" });
+  // use it at a pace just inside the window, forever
+  for (let i = 0; i < 5; i++) {
+    clock.advance(999);
+    assert.equal(gate(eng, a.box_token).ok, true, `iteration ${i} must stay live`);
+  }
+  assert.equal(gate(eng, a.box_token).ok, true);
+});
+
+test("idle expiry: the PRIMARY (shared box_token) device is NEVER expired, even idle past the threshold", () => {
+  const { eng, clock } = makeClockEngine();
+  // primary is the shared box_token holder (desktop + manta-native tools)
+  clock.advance(10 ** 7); // way past 90 days of simulated idle
+  assert.equal(gate(eng, PRIMARY_TOKEN).ok, true);
+});
+
+test("idle expiry: other devices are unaffected when one expires", () => {
+  const { eng, clock } = makeClockEngine();
+  const a = doClaim(eng, { device_id: "devA" });
+  const b = doClaim(eng, { device_id: "devB" });
+  const c = doClaim(eng, { device_id: "devC" });
+  // keep B and C fresh, let A go idle
+  for (let i = 0; i < 3; i++) {
+    clock.advance(999);
+    assert.equal(gate(eng, b.box_token).ok, true);
+    assert.equal(gate(eng, c.box_token).ok, true);
+  }
+  clock.advance(2); // A now idle past threshold
+  assert.equal(gate(eng, a.box_token).ok, false); // only A dies
+  assert.equal(gate(eng, b.box_token).ok, true);
+  assert.equal(gate(eng, c.box_token).ok, true);
+  assert.equal(gate(eng, PRIMARY_TOKEN).ok, true);
+  // revoked A drops out of the linked-device list; B/C/primary remain
+  const ids = eng.listDevices().map((d) => d.device_id);
+  assert.equal(ids.includes(a.device_id), false);
+  assert.equal(ids.includes(b.device_id), true);
+  assert.equal(ids.includes(c.device_id), true);
+});
+
+test("idle expiry: IN-FLIGHT behaviour — admitted requests complete (never torn down mid-flight); the next request once the idle window has elapsed 401s cleanly without refreshing", () => {
+  const { eng, clock } = makeClockEngine({ idleTtlMs: 1000 });
+  const a = doClaim(eng, { device_id: "devA" });
+  // (a) an admitted request RUNS to completion — expiry is evaluated exactly
+  //     once, at admission, and never re-checked mid-request.
+  assert.equal(gate(eng, a.box_token).ok, true);
+  // (b) the device is then abandoned (a lost phone): a full idle window elapses
+  //     with no use, so the NEXT request is rejected cleanly — 401.
+  clock.advance(1001); // idle from last use = 1001 > 1000
+  const r = eng.authorize({ method: "GET", path: "/api/projects", authorization: `Bearer ${a.box_token}` });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 401);
+  // (c) the rejected request did NOT refresh the device — it stays revoked.
+  assert.equal(gate(eng, a.box_token).ok, false);
+});
+
+test("idle expiry: the 90-day SWEEP marks every long-idle device revoked in one pass", () => {
+  const { devices, clock, eng } = makeClockEngine();
+  const a = doClaim(eng, { device_id: "devA" });
+  const b = doClaim(eng, { device_id: "devB" });
+  assert.equal(gate(eng, a.box_token).ok, true);
+  assert.equal(gate(eng, b.box_token).ok, true);
+  // sweep while both fresh → nothing expires, nothing revoked
+  assert.deepEqual(devices.sweepIdleExpired(), []);
+  // let both go idle, then sweep
+  clock.advance(10 ** 5);
+  const swept = devices.sweepIdleExpired().map((d) => d.device_id);
+  assert.deepEqual(swept.sort(), [a.device_id, b.device_id].sort());
+  // both tokens are now dead on their next request
+  assert.equal(gate(eng, a.box_token).ok, false);
+  assert.equal(gate(eng, b.box_token).ok, false);
+  // primary survives the sweep (exempt)
+  assert.equal(gate(eng, PRIMARY_TOKEN).ok, true);
+  // a fresh use re-provisions a NEW device (a revoked device is never resurrected)
+  const again = doClaim(eng, { device_id: "devA" });
+  assert.notEqual(again.device_id, a.device_id);
+  assert.equal(gate(eng, again.box_token).ok, true);
+});
+
+test("DEVICE_IDLE_TTL_MS is 90 days", () => {
+  assert.equal(DEVICE_IDLE_TTL_MS, 90 * 24 * 60 * 60 * 1000);
+});
 
 // ---------------------------------------------------------------------------
 // Pure registry
