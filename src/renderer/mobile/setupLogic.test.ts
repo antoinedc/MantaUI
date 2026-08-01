@@ -306,8 +306,14 @@ describe("prefillFromPairLink (BET-335 deep-link prefill)", () => {
     ).toEqual({ boxId: VALID_BOX, code: "123456", verify: "K7Q2" });
   });
 
+  it("treats an empty &verify= as absent (legacy path, BET-514)", () => {
+    expect(prefillFromPairLink(`${validLink}&verify=`)).toEqual({
+      boxId: VALID_BOX,
+      code: "123456",
+    });
+  });
+
   it("returns null for a pair link carrying a malformed verify (BET-514)", () => {
-    expect(prefillFromPairLink(`${validLink}&verify=`)).toBeNull();
     expect(prefillFromPairLink(`${validLink}&verify=K7`)).toBeNull();
     expect(prefillFromPairLink(`${validLink}&verify=K7Q2X`)).toBeNull();
   });

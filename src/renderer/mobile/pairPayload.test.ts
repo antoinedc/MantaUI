@@ -42,10 +42,13 @@ describe("parsePairPayload", () => {
       ).toEqual({ boxId: BOX, code: "847291", verify: "K7Q2" });
     });
 
-    it("refuses a present-but-malformed verify (BET-514, never drops to legacy)", () => {
+    it("treats an empty &verify= as absent (legacy path, BET-514)", () => {
       expect(
         parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=`),
-      ).toBeNull();
+      ).toEqual({ boxId: BOX, code: "847291" });
+    });
+
+    it("refuses a present-but-malformed verify (BET-514, never drops to legacy)", () => {
       expect(
         parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=K7`),
       ).toBeNull();
