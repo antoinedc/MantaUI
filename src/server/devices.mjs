@@ -32,6 +32,12 @@ import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 export const DEVICES_STORE_PATH = statePath("devices.json");
 
+// Device token idle expiry (§6.4 of the pairing rework): a joined device whose
+// `last_seen` is older than this is treated as abandoned and its token is
+// revoked (dead on its next request). Home Assistant's default of 90 days.
+// Exported so auth.mjs can default its engine and inject in tests.
+export const DEVICE_IDLE_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+
 // Device ids / tokens are 32 lowercase hex chars (128 bits) — the same shape
 // as box_id / box_token. Strict so a value can never smuggle a path-traversal
 // or header-injection payload.
@@ -74,16 +80,30 @@ export async function saveDevicesRaw(state, path = DEVICES_STORE_PATH) {
  *   { devices: [ { device_id, token, name, last_seen, created_at, revoked, primary } ] }
  *
  * @param {object} deps
- *   load   — () => parsed store or null (default: read `DEVICES_STORE_PATH`)
- *   save   — (serializedState) => Promise  (default: write 0600)
- *   now    — () => epoch ms (injectable clock for tests)
+ *   load      — () => parsed store or null (default: read `DEVICES_STORE_PATH`)
+ *   save      — (serializedState) => Promise  (default: write 0600)
+ *   now       — () => epoch ms (injectable clock for tests)
+ *   idleTtlMs — idle-expiry threshold (default: 90 days). A non-primary device
+ *               whose `last_seen` is older than this is revoked (token dead).
+ *               The PRIMARY (shared box_token) device is deliberately EXEMPT:
+ *               it is the box's enduring identity held by the desktop + the
+ *               manta-native AI tools (which re-read ~/.manta/auth.json per
+ *               call), so an idle-expiry policy must never spuriously lock the
+ *               whole box out. §6.4's 90-day idle expiry targets abandoned
+ *               *joined* devices (a lost phone), not the box's own identity.
  */
 export function createDeviceRegistry({
   load = () => loadDevicesRaw(),
   save = async (state) => saveDevicesRaw(state),
   now = () => Date.now(),
+  idleTtlMs = DEVICE_IDLE_TTL_MS,
 } = {}) {
   let devices = [];
+  // Set when an idle-expiry path mutates a device (revokes it). The request
+  // gate in auth.mjs reads it to force-persist a revocation that would
+  // otherwise not be flushed (authorize() only persists on success). Cleared
+  // when persist() succeeds.
+  let dirty = false;
   const parsed = load();
   if (parsed && Array.isArray(parsed.devices)) {
     devices = parsed.devices.filter(
@@ -101,7 +121,27 @@ export function createDeviceRegistry({
   const findPrimary = () => devices.find((d) => d.primary);
 
   function persist() {
-    return save({ devices });
+    return save({ devices }).then(
+      () => {
+        dirty = false;
+      },
+      (e) => {
+        throw e;
+      },
+    );
+  }
+
+  // Has an idle-expiry path marked a device revoked since the last persisted
+  // write? The request gate consults this on a rejected authorize to persist a
+  // revocation that the success-only throttle would otherwise skip.
+  function needPersist() {
+    return dirty;
+  }
+
+  // True when a device is subject to idle expiry (everyone except the PRIMARY
+  // shared box_token holder — see the constructor doc).
+  function expirable(d) {
+    return !d.primary;
   }
 
   // Seed (or re-sync) the primary device — the shared box_token holder that
@@ -130,11 +170,45 @@ export function createDeviceRegistry({
   // Resolve a presented bearer token to a live (non-revoked) device — primary
   // OR any additionally-claimed device. Returns the device (last_seen bumped)
   // or null. This is the /authorize gate's sole credential check.
+  //
+  // IDLE EXPIRY (deterministic in-flight behaviour): expiry is evaluated ONCE,
+  // at request admission. If the presenting device is a non-primary whose
+  // `last_seen` is already older than idleTtlMs, it is marked revoked and the
+  // request is rejected (401) — it does NOT bump last_seen, so it can never
+  // "come back". A request that ADMITTED before the window elapsed bumped
+  // last_seen to `now` on admission, so it runs to completion and is not
+  // re-checked mid-flight; its fresh last_seen also keeps it from expiring for
+  // another full window. That is the single answer to the §6.4 "token in
+  // flight at the boundary" question: an admitted request completes, and the
+  // next request after an idle window is cleanly rejected.
   function authorize(token) {
     const dev = liveByToken(token);
     if (!dev) return null;
+    if (expirable(dev) && now() - dev.last_seen > idleTtlMs) {
+      dev.revoked = true;
+      dirty = true;
+      return null;
+    }
     dev.last_seen = now();
     return dev;
+  }
+
+  // The "90-day sweep" leg: mark every non-primary device idle past the
+  // threshold as revoked in one pass. Returns the revoked devices (tests assert
+  // this). Enforcement itself is already handled per-request by `authorize`;
+  // this exists so a background sweep (or the desktop list) can force the
+  // bookkeeping to reflect expiration without waiting for an ill-fated request.
+  function sweepIdleExpired() {
+    const t = now();
+    const expired = [];
+    for (const d of devices) {
+      if (!d.revoked && expirable(d) && t - d.last_seen > idleTtlMs) {
+        d.revoked = true;
+        dirty = true;
+        expired.push(d);
+      }
+    }
+    return expired;
   }
 
   // Provision or resume a per-device entry:
@@ -229,6 +303,8 @@ export function createDeviceRegistry({
   return {
     seedPrimary,
     authorize,
+    sweepIdleExpired,
+    needPersist,
     claim,
     getDevice,
     revokeDevice,

@@ -35,7 +35,7 @@ import { unlink } from "node:fs/promises";
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
-import { createDeviceRegistry, DEVICES_STORE_PATH, saveDevicesRaw } from "./devices.mjs";
+import { createDeviceRegistry, DEVICES_STORE_PATH, DEVICE_IDLE_TTL_MS, saveDevicesRaw } from "./devices.mjs";
 
 const STORE_PATH = statePath("auth.json");
 
@@ -383,6 +383,8 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
  *   enforce     — gate on (default true)
  *   ttlMs       — pairing-code TTL (default 5 minutes)
  *   now         — injectable clock for tests
+ *   idleTtlMs   — device token idle-expiry threshold (§6.4, default 90 days).
+ *                 Passed through to the device registry; see devices.mjs.
  *   saveAuth    — injectable writer (default saveAuth) for the post-revoke
  *                 regenerate step
  *   deleteAuth  — injectable unlink (default deleteAuth) for the post-revoke
@@ -405,6 +407,7 @@ export function createAuthEngine({
   enforce = true,
   ttlMs = PAIRING_TTL_MS,
   now = () => Date.now(),
+  idleTtlMs = DEVICE_IDLE_TTL_MS,
   saveAuth: saveAuthFn = saveAuth,
   deleteAuth: deleteAuthFn = deleteAuth,
   devices: devicesFn,
@@ -417,7 +420,7 @@ export function createAuthEngine({
   // Per-device credential registry. Default targets ~/.manta/devices.json;
   // the shared box_token is seeded as the `primary` device so existing paired
   // devices (desktop + manta-native AI tools) keep working unchanged.
-  const devices = devicesFn ?? createDeviceRegistry({ now });
+  const devices = devicesFn ?? createDeviceRegistry({ now, idleTtlMs });
   // Seed/resync the primary (shared box_token) device — idempotent: if a
   // primary already exists (upgrade path) this just re-syncs its token; on a
   // fresh registry it creates one. This is what keeps the existing desktop +
@@ -451,6 +454,13 @@ export function createAuthEngine({
       // bumped in memory, flushed at most once per DEVICE_PERSIST_MS.
       maybePersistDevices();
       return { ok: true };
+    }
+    if (devices.needPersist && devices.needPersist()) {
+      // authorize() rejected BECAUSE it just revoked an idle-expired device.
+      // That revocation must be durable even though authorize only flushes on
+      // success — force it (fire-and-forget; a lost write just means the next
+      // request re-detects + re-revokes from the durable stale last_seen).
+      maybePersistDevices(true);
     }
     return { ok: false, status: 401, error: "unauthorized" };
   }
