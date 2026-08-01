@@ -523,13 +523,42 @@ Constraints to carry into that issue:
   Slots: `[status dot] [name + optional subtitle] [timer]`.
   - dot 8×8: running → `accent`, needs-you → `warn`, idle → `tx4`
   - name 15.5px/500, tracking −0.01em, `tx1`, one line, ellipsis
-  - subtitle 12px/500 `tx4`, only when present ("running · opus 4.8", "needs you")
+  - subtitle 12px/500 `tx4`, only when present ("running · opus 4.8", "needs you").
+    **When one or more subagents are running it reads `N subagents` and nothing
+    else** — no "running", no model name. See §7.1a.
   - timer 11px/500 mono `tx4`, tabular figures
 - **No divider lines.** The most recently active row gets background `fill`;
   selection is carried by elevation and fill, not by a rule.
 - Large title "Sessions" that collapses into the glass header on scroll.
 - Floating glass capsule at the bottom: search placeholder + a filled accent
   circular "+" button.
+
+### 7.1a Subagents in the list — mobile diverges from desktop, deliberately
+
+**The desktop treatment does not port and must not be copied.** BET-414
+removed the visible `·N` count from the sidebar row on purpose — *"no trailing
+glyphs/counts, the subagent count is folded into the dot's title tooltip
+only"*. That is a **hover** affordance. A phone has no hover, so faithful
+parity would render nothing at all, on the client where the user is least able
+to open the session and look.
+
+So the count goes in the **subtitle**, which already exists in the row's three
+slots and already carries the "what is happening" line:
+
+| Row state | Subtitle |
+|---|---|
+| Subagents running | **`3 subagents`** — nothing else |
+| Running, no subagents | `running · opus 4.8` |
+| Blocked on the user | `needs you` |
+| Idle | *(absent)* |
+
+The subagent case **replaces** the subtitle rather than extending it. "Three
+agents are working" is the more urgent fact than which model is doing it, and a
+row that says `running · 3 subagents · opus 4.8` at 12px on a 390px screen is a
+sentence, not a glance.
+
+Rejected: a count badge in the timer slot. It preserves the model name, but it
+consumes the elapsed timer exactly when the session is most active — backwards.
 
 ### 7.2 Actions — final
 
@@ -591,13 +620,40 @@ it carries everything rather than a subset.
 - **Session status lives in the header subtitle** — which is exactly where
   BET-406 phase 7 is moving it on desktop. The two clients converge.
 - **Transcript is full-bleed** to both edges and behind both bars.
-- **User message**: right-aligned, background `accentSolid`, text `onAccent`,
-  15px/1.5, padding 11/15, max-width 82%, margin-bottom 22, asymmetric radii
-  22/22/6/22.
-- **Assistant text**: full width, `tx1`, 15px/1.6, margin-bottom 12.
-- **Tool row**: background `fill`, radius 12, padding 11/13, mono 12.5px `tx2`,
-  leading 12px icon — Check in `ok` when complete, spinner in `accentTx` while
-  running.
+- **No role captions.** Neither turn is labelled "You" or "Claude". The
+  treatments below distinguish them; a caption above each turn costs ~44px per
+  exchange and tells the reader what the styling already says.
+- **User message**: a **full-bleed band** — runs edge to edge (negative margin
+  past the transcript's own padding), background `fill`, a 2px `accent` left
+  edge, radius 0 on the leading side and `--r-md` on the trailing side,
+  15px/1.5 weight 500 `tx1`, padding `--sp-3`.
+  **REVERSED 2026-08-01.** This section previously specified a right-aligned
+  `accentSolid` bubble at 82% width with asymmetric radii 22/22/6/22 — an
+  iMessage treatment. It was overturned by the owner after seeing both against a
+  real coding transcript: a chat bubble suits short conversational turns, and a
+  prompt in a coding session is frequently several lines. The band separates the
+  turn by spanning the full measure instead of by floating to one side, which
+  also removes the need for the caption above it.
+- **Assistant text**: full width, `tx1`, 15px/`--prose-lh`, margin-bottom
+  `--sp-3`.
+- **Machinery collapses; prose does not.** This is the rule the transcript is
+  built on, and it is what separates this design from the official Claude app.
+  That app is spacious because it assumes **prose**. A coding session is mostly
+  **machinery** — tool calls, output, diffs — so cramping the text is the wrong
+  lever. Prose gets full readability and the machinery compresses instead.
+- **Step row** (replaces the old "tool row"): one line per tool call inside a
+  grouped container — `[status dot] [verb] [target, mono, ellipsised] [duration]`,
+  13px, background `panel`, hairline `border-subtle` between rows, radius
+  `--r-md`. The verb is 600 weight `tx2` ("Ran", "Read", "Edit"); the target is
+  12px mono `tx4`.
+  - **Output is collapsed by default.** Tapping a row reveals it inline on
+    `inset` in 12px mono. This is the single largest scroll saving in the design
+    and the one deliberate information trade: output is one tap away rather than
+    on screen.
+  - **Consecutive steps roll up.** Three or more in a row collapse to a single
+    summary line — `▸ 4 steps · read 3 files, 1 search` — expandable. A
+    twenty-tool turn becomes a thin band rather than three screens of scrolling.
+
 - **Composer is a floating glass capsule**, not a docked strip: left 14, right
   14, bottom 12, height 56, radius 28. Paperclip, placeholder "Message", mic,
   and a 40×40 filled accent circle with Send. The transcript keeps its full
@@ -606,6 +662,44 @@ it carries everything rather than a subset.
   flicks away, dims the screen behind proportionally, grabber functional.
   Contents: Attach photo or file · Scheduled tasks (with live count) · Secrets ·
   Fork session · Open terminal · Delete session (destructive).
+
+### 8a. Subagents — a drill-in screen, not an inline expansion
+
+Subagents are absent from this document before now, and they are not a small
+case: a fan-out is a routine shape of work, and desktop already renders child
+transcripts, a running count and recursive nesting.
+
+**A subagent is not a tool call, and must not be styled as one.** A tool call is
+one action with one output. A subagent is **a session** — it streams, owns its
+own steps and tokens, and can still be running after the parent has moved on.
+Concurrency is the part a step row cannot express: three at once is normal, and
+three spinners competing for attention is not acceptable.
+
+**Row treatment** (inside the same grouped container as step rows, so a turn
+reads as one sequence): `[agent glyph] [name] [live status] [chevron]`. The
+glyph is a 16px `accent-soft` tile, the name is 600 weight `tx1` — a task name,
+never a command — and the status is a live duration while running. The chevron
+means "there is more here", not "expand this output".
+
+**Tapping pushes a screen.** The child gets its own header (task name, and
+`subagent · running 1m12s` or `subagent · done` as the subtitle) and its own
+transcript, rendered with exactly the same rules as the parent. Back returns.
+
+Why a push rather than an inline expansion or a sheet:
+
+- **No nested scrolling.** A transcript inside a transcript is two scroll
+  contexts on a touch surface, which is the interaction touch handles worst.
+- **The shell is already a drill-down** (session list → session). This is a
+  third level of an existing pattern, not a new one.
+- **Nesting is free.** A sub-subagent is another push. Inline nesting is
+  unreadable past one level at 390px, and a second stacked sheet is not a thing.
+- A sheet suits a short, dismissible task; a child transcript is neither.
+
+The parent's own scroll position is untouched by the visit, and a child that is
+still running keeps streaming while it is open.
+
+**The child screen is read-only in v1.** Sending a prompt into a subagent
+session is a capability decision, not a layout one, and is out of scope here.
 
 **Native alerts and action sheets replace `window.confirm`.** The webview
 stamps "app.mantaui.com says:" on every dialog and there is no way to remove it
