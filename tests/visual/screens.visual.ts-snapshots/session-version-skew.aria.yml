@@ -10,22 +10,19 @@
     - treeitem "Add CSV export Pin" [selected]:
       - text: ""
       - button "Pin"
-    - treeitem /Refactor auth middleware Pin [\d,.]+[bkmBKM]+/:
+    - treeitem /Refactor auth middleware [\d,.]+[bkmBKM]+ Pin/:
       - text: ""
       - button "Pin"
-      - text: ""
-    - treeitem /Investigate \d+[hmsp]+ in \/api\/v1\/orders Pin [\d,.]+[bkmBKM]+/:
+    - treeitem /Investigate \d+[hmsp]+ in \/api\/v1\/orders [\d,.]+[bkmBKM]+ Pin/:
       - text: ""
       - button "Pin"
-      - text: ""
     - treeitem "marketing + Close project" [expanded]:
       - text: ""
       - button "+"
       - button "Close project"
-    - treeitem "Landing page copy Pin now":
+    - treeitem "Landing page copy now Pin":
       - text: ""
       - button "Pin"
-      - text: ""
     - treeitem "Build pipeline Pin":
       - text: ""
       - button "Pin"
